@@ -1,0 +1,26 @@
+app = "edgecoder-portal"
+primary_region = "ord"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[processes]
+  app = "node dist/portal/server.js"
+
+[env]
+  NODE_ENV = "production"
+  PORTAL_PUBLIC_URL = "https://edgecoder-portal.fly.dev"
+  CONTROL_PLANE_URL = "https://edgecoder-control-plane.fly.dev"
+
+[http_service]
+  internal_port = 4310
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  memory = "1024mb"
+  cpu_kind = "shared"
+  cpus = 1

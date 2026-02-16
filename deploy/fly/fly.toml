@@ -1,0 +1,28 @@
+app = "edgecoder-coordinator"
+primary_region = "ord"
+
+[processes]
+  app = "node dist/swarm/coordinator.js"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  NETWORK_MODE = "public_mesh"
+  LOCAL_MODEL_PROVIDER = "edgecoder-local"
+  OLLAMA_AUTO_INSTALL = "false"
+  OLLAMA_MODEL = "qwen2.5-coder:latest"
+
+[http_service]
+  internal_port = 4301
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  memory = "2048mb"
+  cpu_kind = "shared"
+  cpus = 2

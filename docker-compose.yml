@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=edgecoder
+      - POSTGRES_PASSWORD=edgecoder
+      - POSTGRES_DB=edgecoder
+    ports:
+      - "5432:5432"
+    volumes:
+      - edgecoder-postgres:/var/lib/postgresql/data
+
+  inference:
+    build: .
+    command: ["node", "dist/inference/service.js"]
+    ports:
+      - "4302:4302"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4302/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  coordinator:
+    build: .
+    command: ["node", "dist/swarm/coordinator.js"]
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - LOCAL_MODEL_PROVIDER=edgecoder-local
+      - OLLAMA_AUTO_INSTALL=false
+      - OLLAMA_MODEL=qwen2.5-coder:latest
+    ports:
+      - "4301:4301"
+    depends_on:
+      inference:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  control-plane:
+    build: .
+    command: ["node", "dist/control-plane/server.js"]
+    environment:
+      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - COORDINATOR_URL=http://coordinator:4301
+    ports:
+      - "4303:4303"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  cloud-review:
+    build: .
+    command: ["node", "dist/handshake/mock-server.js"]
+    ports:
+      - "4305:4305"
+
+  ide-provider:
+    build: .
+    command: ["node", "dist/apps/ide/provider-server.js"]
+    ports:
+      - "4304:4304"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  worker-1:
+    build: .
+    command: ["node", "dist/swarm/worker-runner.js"]
+    environment:
+      - COORDINATOR_URL=http://coordinator:4301
+      - AGENT_ID=worker-1
+      - AGENT_OS=macos
+      - AGENT_MODE=swarm-only
+      - LOCAL_MODEL_PROVIDER=edgecoder-local
+      - OLLAMA_AUTO_INSTALL=false
+      - OLLAMA_MODEL=qwen2.5-coder:latest
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+volumes:
+  edgecoder-postgres:

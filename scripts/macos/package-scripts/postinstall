@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SERVICE_LABEL="io.edgecoder.runtime"
+PLIST_SRC="/opt/edgecoder/install/io.edgecoder.runtime.plist"
+PLIST_DST="/Library/LaunchDaemons/${SERVICE_LABEL}.plist"
+ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
+ENV_FILE="/etc/edgecoder/edgecoder.env"
+LOG_DIR="/var/log/edgecoder"
+
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+
+if [[ ! -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]]; then
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+
+if [[ -f "$PLIST_SRC" ]]; then
+  cp "$PLIST_SRC" "$PLIST_DST"
+  chown root:wheel "$PLIST_DST"
+  chmod 644 "$PLIST_DST"
+fi
+
+/bin/launchctl bootout system "$PLIST_DST" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap system "$PLIST_DST"
+/bin/launchctl enable "system/${SERVICE_LABEL}"
+/bin/launchctl kickstart -k "system/${SERVICE_LABEL}"
+
+exit 0

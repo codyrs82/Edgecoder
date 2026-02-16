@@ -1,0 +1,26 @@
+app = "edgecoder-control-plane"
+primary_region = "ord"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[processes]
+  app = "node dist/control-plane/server.js"
+
+[env]
+  NODE_ENV = "production"
+  COORDINATOR_URL = "https://edgecoder-coordinator.fly.dev"
+  ALLOWED_UI_IPS = ""
+
+[http_service]
+  internal_port = 4303
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  memory = "1024mb"
+  cpu_kind = "shared"
+  cpus = 1
