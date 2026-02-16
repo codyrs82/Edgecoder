@@ -104,7 +104,11 @@ Portal UI pages and actions:
 - `POST /auth/login` / `POST /auth/logout`
 - `GET /auth/oauth/:provider/start` for `google`, `apple`, `microsoft`
 - `GET /auth/verify-email` and `POST /auth/resend-verification`
+- `POST /auth/passkey/register/options` + `POST /auth/passkey/register/verify`
+- `POST /auth/passkey/login/options` + `POST /auth/passkey/login/verify`
 - `POST /nodes/enroll` and `GET /dashboard/summary`
+- `GET /ios/dashboard` - iOS/mobile aggregate view (contribution, wallet snapshot, network summary)
+- `GET /wallet/onboarding` + `POST /wallet/onboarding/acknowledge`
 
 Useful checks:
 
@@ -112,6 +116,7 @@ Useful checks:
 - `GET /health` on inference
 - `GET /ui` on control plane
 - `GET /models` on IDE provider
+- `GET /network/summary` on control plane
 
 ## Docker stack
 
@@ -152,6 +157,15 @@ Security-related environment controls:
 - `PORTAL_DATABASE_URL`
 - `RESEND_API_KEY`
 - `RESEND_FROM_EMAIL`
+
+Portal passkey and wallet bootstrap env:
+
+- `PASSKEY_RP_ID` (default `localhost`)
+- `PASSKEY_RP_NAME` (default `EdgeCoder Portal`)
+- `PASSKEY_ORIGIN` (default `PORTAL_PUBLIC_URL`)
+- `PASSKEY_CHALLENGE_TTL_MS` (default `300000`)
+- `WALLET_DEFAULT_NETWORK` (`bitcoin`, `testnet`, `signet`; default `signet`)
+- `WALLET_SECRET_PEPPER` (server-side secret used to derive wallet secret refs)
 
 ## Operational references
 

@@ -2,7 +2,14 @@ import Fastify from "fastify";
 import { randomUUID, createHash, randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
+} from "@simplewebauthn/server";
 import { PortalStore } from "./store.js";
+import { generateMnemonic } from "bip39";
 
 const app = Fastify({ logger: true });
 const store = PortalStore.fromEnv();
@@ -15,6 +22,12 @@ const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const CONTROL_PLANE_ADMIN_TOKEN = process.env.CONTROL_PLANE_ADMIN_TOKEN ?? "";
 const SESSION_TTL_MS = Number(process.env.PORTAL_SESSION_TTL_MS ?? `${1000 * 60 * 60 * 24 * 7}`);
 const EMAIL_VERIFY_TTL_MS = Number(process.env.PORTAL_EMAIL_VERIFY_TTL_MS ?? `${1000 * 60 * 60 * 24}`);
+const PASSKEY_CHALLENGE_TTL_MS = Number(process.env.PASSKEY_CHALLENGE_TTL_MS ?? "300000");
+const PASSKEY_RP_ID = process.env.PASSKEY_RP_ID ?? "localhost";
+const PASSKEY_RP_NAME = process.env.PASSKEY_RP_NAME ?? "EdgeCoder Portal";
+const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? PORTAL_PUBLIC_URL;
+const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") as "bitcoin" | "testnet" | "signet";
+const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "edgecoder-dev-pepper";
 
 type ProviderName = "google" | "apple" | "microsoft";
 
@@ -117,6 +130,30 @@ function decodeJwtPayload<T extends Record<string, unknown>>(token: string): T |
   }
 }
 
+function base64UrlFromBuffer(value: Uint8Array<ArrayBufferLike> | Buffer): string {
+  return Buffer.from(value as any).toString("base64url");
+}
+
+function bufferFromBase64Url(value: string): Buffer {
+  return Buffer.from(value, "base64url");
+}
+
+function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
+  const buffer = Buffer.from(value, "base64url");
+  return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
+}
+
+function deriveWalletSecretRef(seedPhrase: string, accountId: string): string {
+  const digest = createHash("sha256")
+    .update(seedPhrase)
+    .update(":")
+    .update(accountId)
+    .update(":")
+    .update(WALLET_SECRET_PEPPER)
+    .digest("hex");
+  return `seed-sha256:${digest}`;
+}
+
 async function sendVerificationEmail(email: string, verifyToken: string): Promise<void> {
   if (!RESEND_API_KEY || !RESEND_FROM_EMAIL) {
     app.log.warn("RESEND_API_KEY/RESEND_FROM_EMAIL not set; skipping email verification send.");
@@ -203,13 +240,95 @@ async function ensureCreditAccountForUser(user: { userId: string; email: string 
   }).catch(() => undefined);
 }
 
+async function ensureStarterWalletForUser(user: { userId: string; email: string }): Promise<{
+  created: boolean;
+  accountId: string;
+  network: "bitcoin" | "testnet" | "signet";
+  seedPhrase?: string;
+  guidance?: { title: string; steps: string[] };
+}> {
+  const accountId = `acct-${user.userId}`;
+  const existing = await store?.getWalletOnboardingByUserId(user.userId);
+  if (existing) {
+    return { created: false, accountId: existing.accountId, network: existing.network as any };
+  }
+
+  const seedPhrase = generateMnemonic(128);
+  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId);
+  await store?.createWalletOnboarding({
+    userId: user.userId,
+    accountId,
+    network: WALLET_DEFAULT_NETWORK,
+    seedPhraseHash: sha256Hex(seedPhrase),
+    encryptedPrivateKeyRef
+  });
+
+  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+    await request(`${CONTROL_PLANE_URL}/economy/wallets/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}`
+      },
+      body: JSON.stringify({
+        accountId,
+        walletType: "lightning",
+        network: WALLET_DEFAULT_NETWORK,
+        encryptedSecretRef: encryptedPrivateKeyRef
+      })
+    }).catch(() => undefined);
+  }
+
+  return {
+    created: true,
+    accountId,
+    network: WALLET_DEFAULT_NETWORK,
+    seedPhrase,
+    guidance: {
+      title: "Protect your recovery seed and private key",
+      steps: [
+        "Write the seed phrase on paper and store it offline in two separate secure locations.",
+        "Never screenshot or send the seed phrase over email, chat, or cloud notes.",
+        "Enable device passcode/biometric lock and keep iOS updated.",
+        "Treat the private key as high-risk secret material; export only with explicit intent.",
+        "Confirm backup by re-entering the seed phrase in-app before moving funds."
+      ]
+    }
+  };
+}
+
+async function createSessionForUser(userId: string, reply: any): Promise<void> {
+  const sessionToken = randomUUID();
+  await store?.createSession({
+    sessionId: randomUUID(),
+    userId,
+    tokenHash: sha256Hex(sessionToken),
+    expiresAtMs: Date.now() + SESSION_TTL_MS
+  });
+  reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+}
+
+async function loadIosNetworkSummary(): Promise<unknown> {
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) return null;
+  try {
+    const res = await request(`${CONTROL_PLANE_URL}/network/summary`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    return await res.body.json();
+  } catch {
+    return null;
+  }
+}
+
 async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
   if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
     return { credits: null, creditHistory: [], wallets: [], paymentIntents: [] };
   }
   const accountId = `acct-${userId}`;
   try {
-    const [creditRes, historyRes, walletRes] = await Promise.all([
+    const [creditRes, historyRes, walletRes, quoteRes] = await Promise.all([
       request(`${CONTROL_PLANE_URL}/credits/${accountId}/balance`, {
         method: "GET",
         headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
@@ -221,6 +340,10 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
       request(`${CONTROL_PLANE_URL}/wallets/${accountId}`, {
         method: "GET",
         headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+      }),
+      request(`${CONTROL_PLANE_URL}/economy/credits/${accountId}/quote`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
       })
     ]);
     const credits = creditRes.statusCode >= 200 && creditRes.statusCode < 300 ? await creditRes.body.json() : null;
@@ -230,14 +353,16 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
     const walletPayload = walletRes.statusCode >= 200 && walletRes.statusCode < 300
       ? ((await walletRes.body.json()) as { wallets?: unknown[]; paymentIntents?: unknown[] })
       : { wallets: [], paymentIntents: [] };
+    const quote = quoteRes.statusCode >= 200 && quoteRes.statusCode < 300 ? await quoteRes.body.json() : null;
     return {
       credits,
+      quote,
       creditHistory: historyPayload.history ?? [],
       wallets: walletPayload.wallets ?? [],
       paymentIntents: walletPayload.paymentIntents ?? []
     };
   } catch {
-    return { credits: null, creditHistory: [], wallets: [], paymentIntents: [] };
+    return { credits: null, quote: null, creditHistory: [], wallets: [], paymentIntents: [] };
   }
 }
 
@@ -272,8 +397,14 @@ app.post("/auth/signup", async (req, reply) => {
     expiresAtMs: Date.now() + EMAIL_VERIFY_TTL_MS
   });
   await sendVerificationEmail(user.email, verifyToken);
-
-  return reply.send({ ok: true, userId: user.userId, emailVerification: "sent" });
+  await ensureCreditAccountForUser(user);
+  const walletOnboarding = await ensureStarterWalletForUser(user);
+  return reply.send({
+    ok: true,
+    userId: user.userId,
+    emailVerification: "sent",
+    walletOnboarding
+  });
 });
 
 app.post("/auth/login", async (req, reply) => {
@@ -284,14 +415,7 @@ app.post("/auth/login", async (req, reply) => {
     return reply.code(401).send({ error: "invalid_credentials" });
   }
 
-  const sessionToken = randomUUID();
-  await store.createSession({
-    sessionId: randomUUID(),
-    userId: user.userId,
-    tokenHash: sha256Hex(sessionToken),
-    expiresAtMs: Date.now() + SESSION_TTL_MS
-  });
-  reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+  await createSessionForUser(user.userId, reply);
   return reply.send({ ok: true, user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified } });
 });
 
@@ -430,6 +554,8 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
       emailVerified,
       displayName: undefined
     });
+    await ensureCreditAccountForUser(user);
+    await ensureStarterWalletForUser(user);
   } else if (emailVerified && !user.emailVerified) {
     await store.markUserEmailVerified(user.userId);
     user = await store.getUserById(user.userId);
@@ -443,15 +569,202 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   });
   if (user.emailVerified) await ensureCreditAccountForUser(user);
 
-  const sessionToken = randomUUID();
-  await store.createSession({
-    sessionId: randomUUID(),
-    userId: user.userId,
-    tokenHash: sha256Hex(sessionToken),
-    expiresAtMs: Date.now() + SESSION_TTL_MS
-  });
-  reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+  await createSessionForUser(user.userId, reply);
   return reply.redirect("/portal");
+});
+
+app.post("/auth/passkey/register/options", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const existing = await store.listPasskeysByUserId(user.userId);
+  const webauthnUserId = createHash("sha256").update(user.userId).digest().subarray(0, 16);
+  const options = await generateRegistrationOptions({
+    rpName: PASSKEY_RP_NAME,
+    rpID: PASSKEY_RP_ID,
+    userName: user.email,
+    userID: webauthnUserId,
+    attestationType: "none",
+    timeout: 60000,
+    authenticatorSelection: {
+      residentKey: "preferred",
+      userVerification: "preferred"
+    },
+    excludeCredentials: existing.map((item) => ({
+      id: item.credentialId,
+      transports: item.transports as any
+    }))
+  });
+  const challengeId = randomUUID();
+  await store.createPasskeyChallenge({
+    challengeId,
+    userId: user.userId,
+    email: user.email,
+    challenge: options.challenge,
+    flowType: "registration",
+    expiresAtMs: Date.now() + PASSKEY_CHALLENGE_TTL_MS
+  });
+  return reply.send({ challengeId, options });
+});
+
+app.post("/auth/passkey/register/verify", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const body = z
+    .object({
+      challengeId: z.string().min(10),
+      response: z.unknown()
+    })
+    .parse(req.body);
+  const challenge = await store.consumePasskeyChallenge(body.challengeId);
+  if (!challenge || challenge.flowType !== "registration" || challenge.userId !== user.userId) {
+    return reply.code(400).send({ error: "passkey_challenge_invalid" });
+  }
+  const verification = await verifyRegistrationResponse({
+    response: body.response as any,
+    expectedChallenge: challenge.challenge,
+    expectedOrigin: PASSKEY_ORIGIN,
+    expectedRPID: PASSKEY_RP_ID,
+    requireUserVerification: false
+  }).catch(() => null);
+  if (!verification?.verified || !verification.registrationInfo) {
+    return reply.code(400).send({ error: "passkey_registration_failed" });
+  }
+  const reg = verification.registrationInfo;
+  const webauthnUserId = base64UrlFromBuffer(createHash("sha256").update(user.userId).digest().subarray(0, 16));
+  await store.upsertPasskeyCredential({
+    credentialId: reg.credential.id,
+    userId: user.userId,
+    webauthnUserId,
+    publicKeyB64Url: base64UrlFromBuffer(reg.credential.publicKey),
+    counter: Number(reg.credential.counter ?? 0),
+    deviceType: reg.credentialDeviceType,
+    backedUp: reg.credentialBackedUp === true,
+    transports: reg.credential.transports as string[] | undefined
+  });
+  return reply.send({ ok: true });
+});
+
+app.post("/auth/passkey/login/options", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const body = z.object({ email: z.string().email() }).parse(req.body);
+  const user = await store.getUserByEmail(normalizeEmail(body.email));
+  if (!user) return reply.code(404).send({ error: "user_not_found" });
+  const credentials = await store.listPasskeysByUserId(user.userId);
+  if (credentials.length === 0) return reply.code(404).send({ error: "passkey_not_registered" });
+  const options = await generateAuthenticationOptions({
+    rpID: PASSKEY_RP_ID,
+    timeout: 60000,
+    userVerification: "preferred",
+    allowCredentials: credentials.map((item) => ({
+      id: item.credentialId,
+      transports: item.transports as any
+    }))
+  });
+  const challengeId = randomUUID();
+  await store.createPasskeyChallenge({
+    challengeId,
+    userId: user.userId,
+    email: user.email,
+    challenge: options.challenge,
+    flowType: "authentication",
+    expiresAtMs: Date.now() + PASSKEY_CHALLENGE_TTL_MS
+  });
+  return reply.send({ challengeId, options });
+});
+
+app.post("/auth/passkey/login/verify", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const body = z
+    .object({
+      challengeId: z.string().min(10),
+      credentialId: z.string().min(10),
+      response: z.unknown()
+    })
+    .parse(req.body);
+  const challenge = await store.consumePasskeyChallenge(body.challengeId);
+  if (!challenge || challenge.flowType !== "authentication") {
+    return reply.code(400).send({ error: "passkey_challenge_invalid" });
+  }
+  const credential = await store.findPasskeyByCredentialId(body.credentialId);
+  if (!credential) return reply.code(404).send({ error: "passkey_credential_not_found" });
+  const verification = await verifyAuthenticationResponse({
+    response: body.response as any,
+    expectedChallenge: challenge.challenge,
+    expectedOrigin: PASSKEY_ORIGIN,
+    expectedRPID: PASSKEY_RP_ID,
+    requireUserVerification: false,
+    credential: {
+      id: credential.credentialId,
+      publicKey: uint8ArrayFromBase64Url(credential.publicKeyB64Url),
+      counter: Number(credential.counter),
+      transports: credential.transports as any
+    }
+  }).catch(() => null);
+  if (!verification?.verified) return reply.code(401).send({ error: "passkey_login_failed" });
+  await store.updatePasskeyCounter(credential.credentialId, Number(verification.authenticationInfo.newCounter ?? credential.counter));
+  await createSessionForUser(credential.userId, reply);
+  const user = await store.getUserById(credential.userId);
+  return reply.send({ ok: true, user: user ? { userId: user.userId, email: user.email, emailVerified: user.emailVerified } : null });
+});
+
+app.get("/wallet/onboarding", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const onboarding = await store.getWalletOnboardingByUserId(user.userId);
+  if (!onboarding) return reply.code(404).send({ error: "wallet_onboarding_not_found" });
+  return reply.send({
+    accountId: onboarding.accountId,
+    network: onboarding.network,
+    createdAtMs: onboarding.createdAtMs,
+    acknowledgedAtMs: onboarding.acknowledgedAtMs
+  });
+});
+
+app.post("/wallet/onboarding/acknowledge", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  await store.acknowledgeWalletOnboarding(user.userId);
+  return reply.send({ ok: true });
+});
+
+app.get("/ios/dashboard", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const [nodes, walletSnapshot, networkSummary] = await Promise.all([
+    store.listNodesByOwner(user.userId),
+    loadWalletSnapshotForUser(user.userId),
+    loadIosNetworkSummary()
+  ]);
+  const history = (walletSnapshot as any)?.creditHistory ?? [];
+  const earned = history
+    .filter((tx: any) => tx?.reason === "compute_contribution" && tx?.type === "earn")
+    .reduce((sum: number, tx: any) => sum + Number(tx.credits ?? 0), 0);
+  const contributedTasks = new Set(
+    history
+      .filter((tx: any) => tx?.reason === "compute_contribution" && tx?.relatedTaskId)
+      .map((tx: any) => String(tx.relatedTaskId))
+  );
+  return reply.send({
+    user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified },
+    contribution: {
+      earnedCredits: Number(earned.toFixed(3)),
+      contributedTaskCount: contributedTasks.size
+    },
+    nodes: nodes.map((n) => ({
+      nodeId: n.nodeId,
+      nodeKind: n.nodeKind,
+      active: n.active,
+      nodeApproved: n.nodeApproved,
+      lastSeenMs: n.lastSeenMs
+    })),
+    walletSnapshot,
+    networkSummary
+  });
 });
 
 app.get("/me", async (req, reply) => {
@@ -580,6 +893,10 @@ app.get("/portal", async (_req, reply) => {
             <button class="primary" id="loginBtn">Log in</button>
             <button id="resendBtn">Resend verification email</button>
           </div>
+          <div class="row" style="margin-top:10px;">
+            <button id="passkeyLoginBtn">Log in with Passkey</button>
+            <button id="passkeyEnrollBtn">Enroll passkey (after login)</button>
+          </div>
           <h3 style="margin-top:16px;">Single Sign-On</h3>
           <div class="row">
             <a href="/auth/oauth/google/start"><button>Continue with Google</button></a>
@@ -600,6 +917,15 @@ app.get("/portal", async (_req, reply) => {
               <button id="refreshBtn">Refresh</button>
               <button id="logoutBtn">Log out</button>
             </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Wallet Security Checklist</h3>
+          <p class="muted">Your seed phrase is shown only once at signup. Confirm you have safely backed it up offline.</p>
+          <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
+          <div class="row" style="margin-top:8px;">
+            <button id="walletAckBtn">I backed up my seed phrase</button>
           </div>
         </div>
 
@@ -636,6 +962,7 @@ app.get("/portal", async (_req, reply) => {
           <div class="card">
             <h3>Credits</h3>
             <div id="creditsValue" style="font-size:22px;font-weight:700;">-</div>
+            <div id="creditsSatsValue" class="muted">Estimated sats: n/a</div>
             <p class="muted">Account ID: <code id="accountIdLabel"></code></p>
             <table>
               <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
@@ -677,6 +1004,22 @@ app.get("/portal", async (_req, reply) => {
           return new Date(ms).toISOString();
         }
 
+        function b64urlToArrayBuffer(base64url) {
+          const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+          const binary = atob(padded);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          return bytes.buffer;
+        }
+
+        function arrayBufferToB64url(buffer) {
+          const bytes = new Uint8Array(buffer);
+          let binary = "";
+          for (const b of bytes) binary += String.fromCharCode(b);
+          return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+        }
+
         async function api(path, options = {}) {
           const res = await fetch(path, {
             credentials: "include",
@@ -714,6 +1057,11 @@ app.get("/portal", async (_req, reply) => {
           const credits = walletSnapshot.credits;
           document.getElementById("creditsValue").textContent =
             credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
+          const quote = walletSnapshot.quote;
+          document.getElementById("creditsSatsValue").textContent =
+            quote && typeof quote.estimatedSats !== "undefined"
+              ? "Estimated sats: " + String(quote.estimatedSats) + " @ " + String(quote.satsPerCredit) + " sats/credit"
+              : "Estimated sats: n/a";
 
           const creditHistoryRows = (walletSnapshot.creditHistory || []).map((tx) =>
             "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + tx.type + "</td><td>" + tx.credits + "</td><td>" + tx.reason + "</td></tr>"
@@ -731,6 +1079,17 @@ app.get("/portal", async (_req, reply) => {
             "</td><td>" + fmtTime(p.createdAtMs) + "</td></tr>"
           );
           renderRows("paymentIntentsBody", intentRows, 5, "No payment intents.");
+
+          try {
+            const onboarding = await api("/wallet/onboarding", { method: "GET", headers: {} });
+            const status = onboarding.acknowledgedAtMs
+              ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
+              : "Backup not yet confirmed. Please secure your seed phrase offline.";
+            document.getElementById("walletOnboardingMeta").textContent =
+              "Network: " + onboarding.network + " | Account: " + onboarding.accountId + " | " + status;
+          } catch {
+            document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
+          }
         }
 
         async function bootstrap() {
@@ -745,7 +1104,7 @@ app.get("/portal", async (_req, reply) => {
 
         document.getElementById("signupBtn").addEventListener("click", async () => {
           try {
-            await api("/auth/signup", {
+            const signup = await api("/auth/signup", {
               method: "POST",
               body: JSON.stringify({
                 email: document.getElementById("signupEmail").value,
@@ -753,7 +1112,16 @@ app.get("/portal", async (_req, reply) => {
                 displayName: document.getElementById("signupDisplayName").value || undefined
               })
             });
-            showToast("Signup complete. Check your email for verification.");
+            const onboarding = signup.walletOnboarding;
+            if (onboarding && onboarding.seedPhrase) {
+              showToast(
+                "Signup complete. Save this seed phrase now: " + onboarding.seedPhrase + " | " +
+                (onboarding.guidance && onboarding.guidance.steps ? onboarding.guidance.steps.join(" ") : ""),
+                false
+              );
+            } else {
+              showToast("Signup complete. Check your email for verification.");
+            }
           } catch (err) {
             showToast("Signup failed: " + String(err.message || err), true);
           }
@@ -784,6 +1152,90 @@ app.get("/portal", async (_req, reply) => {
             showToast("If the account exists, a verification email was sent.");
           } catch (err) {
             showToast("Resend failed: " + String(err.message || err), true);
+          }
+        });
+
+        document.getElementById("walletAckBtn").addEventListener("click", async () => {
+          try {
+            await api("/wallet/onboarding/acknowledge", { method: "POST", body: JSON.stringify({}) });
+            await loadDashboard();
+            showToast("Seed backup acknowledgement saved.");
+          } catch (err) {
+            showToast("Could not save acknowledgement: " + String(err.message || err), true);
+          }
+        });
+
+        document.getElementById("passkeyEnrollBtn").addEventListener("click", async () => {
+          if (!window.PublicKeyCredential) {
+            showToast("Passkeys are not supported in this browser.", true);
+            return;
+          }
+          try {
+            const { challengeId, options } = await api("/auth/passkey/register/options", { method: "POST", body: JSON.stringify({}) });
+            options.challenge = b64urlToArrayBuffer(options.challenge);
+            options.user.id = b64urlToArrayBuffer(options.user.id);
+            options.excludeCredentials = (options.excludeCredentials || []).map((c) => ({ ...c, id: b64urlToArrayBuffer(c.id) }));
+            const credential = await navigator.credentials.create({ publicKey: options });
+            const response = credential.response;
+            await api("/auth/passkey/register/verify", {
+              method: "POST",
+              body: JSON.stringify({
+                challengeId,
+                response: {
+                  id: credential.id,
+                  rawId: arrayBufferToB64url(credential.rawId),
+                  type: credential.type,
+                  response: {
+                    clientDataJSON: arrayBufferToB64url(response.clientDataJSON),
+                    attestationObject: arrayBufferToB64url(response.attestationObject),
+                    transports: response.getTransports ? response.getTransports() : []
+                  }
+                }
+              })
+            });
+            showToast("Passkey enrolled successfully.");
+          } catch (err) {
+            showToast("Passkey enrollment failed: " + String(err.message || err), true);
+          }
+        });
+
+        document.getElementById("passkeyLoginBtn").addEventListener("click", async () => {
+          if (!window.PublicKeyCredential) {
+            showToast("Passkeys are not supported in this browser.", true);
+            return;
+          }
+          try {
+            const email = document.getElementById("loginEmail").value;
+            const { challengeId, options } = await api("/auth/passkey/login/options", {
+              method: "POST",
+              body: JSON.stringify({ email })
+            });
+            options.challenge = b64urlToArrayBuffer(options.challenge);
+            options.allowCredentials = (options.allowCredentials || []).map((c) => ({ ...c, id: b64urlToArrayBuffer(c.id) }));
+            const assertion = await navigator.credentials.get({ publicKey: options });
+            const response = assertion.response;
+            await api("/auth/passkey/login/verify", {
+              method: "POST",
+              body: JSON.stringify({
+                challengeId,
+                credentialId: assertion.id,
+                response: {
+                  id: assertion.id,
+                  rawId: arrayBufferToB64url(assertion.rawId),
+                  type: assertion.type,
+                  response: {
+                    clientDataJSON: arrayBufferToB64url(response.clientDataJSON),
+                    authenticatorData: arrayBufferToB64url(response.authenticatorData),
+                    signature: arrayBufferToB64url(response.signature),
+                    userHandle: response.userHandle ? arrayBufferToB64url(response.userHandle) : null
+                  }
+                }
+              })
+            });
+            await loadDashboard();
+            showToast("Logged in with passkey.");
+          } catch (err) {
+            showToast("Passkey login failed: " + String(err.message || err), true);
           }
         });
 

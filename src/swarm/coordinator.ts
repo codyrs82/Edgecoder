@@ -668,6 +668,54 @@ app.post("/result", async (req, reply) => {
 });
 
 app.get("/status", async () => queue.status());
+app.get("/health/runtime", async () => {
+  const status = queue.status();
+  const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  let ollamaReachable = false;
+  let ollamaVersion: string | null = null;
+  let ollamaModelCount = 0;
+  let ollamaError: string | null = null;
+
+  try {
+    const versionRes = await request(`${ollamaHost}/api/version`, { method: "GET" });
+    if (versionRes.statusCode >= 200 && versionRes.statusCode < 300) {
+      const payload = (await versionRes.body.json()) as { version?: string };
+      ollamaReachable = true;
+      ollamaVersion = payload.version ?? null;
+    }
+  } catch (error) {
+    ollamaError = String(error);
+  }
+
+  try {
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
+    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      const payload = (await tagsRes.body.json()) as { models?: Array<{ name?: string }> };
+      ollamaReachable = true;
+      ollamaModelCount = payload.models?.length ?? 0;
+    }
+  } catch (error) {
+    if (!ollamaError) ollamaError = String(error);
+  }
+
+  return {
+    ok: true,
+    coordinator: {
+      provider: coordinatorProvider,
+      queued: status.queued,
+      agents: status.agents,
+      results: status.results
+    },
+    ollama: {
+      expectedProvider: PROVIDER,
+      host: ollamaHost,
+      reachable: ollamaReachable,
+      version: ollamaVersion,
+      modelCount: ollamaModelCount,
+      error: ollamaError
+    }
+  };
+});
 app.get("/features", async () => ({
   public_mesh: networkMode === "public_mesh",
   enterprise_overlay: networkMode === "enterprise_overlay"

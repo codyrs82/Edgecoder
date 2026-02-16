@@ -89,6 +89,7 @@ Core APIs:
 - `POST /economy/payments/webhook` - provider callback ingestion for settlement.
 - `GET /economy/credits/:accountId/quote` - estimate BTC sats value of earned credits using current CPU price epoch.
 - `POST /economy/treasury/policies` / `GET /economy/treasury` - federated multisig custody policy and signed key events.
+- `GET /network/summary` - control-plane aggregate of current capacity, jobs, and pricing.
 
 Persisted tables:
 
@@ -153,7 +154,11 @@ When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`:
 
 - Portal app runs on its own server and Postgres: `PORTAL_DATABASE_URL`.
 - Users can sign up with email/password or SSO (`Apple`, `Google`, `Microsoft 365`).
+- Passkeys are supported for portal and iOS login (`/auth/passkey/*` endpoints).
 - Email verification is required (Resend integration with `RESEND_API_KEY`, `RESEND_FROM_EMAIL`).
+- First-time signup bootstraps a starter wallet onboarding record and returns seed-protection guidance.
+- Seed backup acknowledgement endpoints: `GET /wallet/onboarding`, `POST /wallet/onboarding/acknowledge`.
+- iOS/mobile summary endpoint: `GET /ios/dashboard`.
 - Unverified accounts with enrolled agents/coordinators remain dormant and cannot register.
 - Even after email verification, nodes require coordinator approval to become active.
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.

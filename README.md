@@ -87,14 +87,17 @@ User portal UI includes:
 
 - signup/login with email/password
 - SSO buttons for Apple, Google, and Microsoft 365
+- passkey enrollment and passkey login support
 - email verification status and resend action
 - enrolled node management and token issuance
 - credits, wallet details, and payment intent views
+- first-run wallet seed backup acknowledgement flow
 
 ### Economy and wallet APIs
 
 - Dynamic price epoch view: `GET /economy/price/current` (control plane)
 - Credit-to-sats conversion quote: `GET /economy/credits/:accountId/quote`
+- Network status summary (capacity/jobs/pricing): `GET /network/summary` (control plane admin API)
 - Publish price proposal from approved coordinator: `POST /economy/price/propose`
 - Run weighted-median market consensus across peers: `POST /economy/price/consensus`
 - Register wallet identity for an account: `POST /economy/wallets/register`
@@ -102,6 +105,12 @@ User portal UI includes:
 - Confirm settlement and mint credits: `POST /economy/payments/intents/:intentId/confirm`
 - Poll pending intents for settlement and expiry: `POST /economy/payments/reconcile`
 - Manage custody policy: `POST /economy/treasury/policies`, `GET /economy/treasury`
+
+Portal auth and iOS additions:
+
+- Passkey registration: `POST /auth/passkey/register/options`, `POST /auth/passkey/register/verify`
+- Passkey login: `POST /auth/passkey/login/options`, `POST /auth/passkey/login/verify`
+- iOS dashboard aggregate (contribution + network): `GET /ios/dashboard`
 
 Key env vars:
 

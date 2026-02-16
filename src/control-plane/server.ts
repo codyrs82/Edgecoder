@@ -235,12 +235,54 @@ app.post("/network/mode", async (req, reply) => {
   return reply.send({ ok: true, networkMode });
 });
 
+app.get("/network/summary", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  try {
+    const [capacityRes, statusRes, priceRes] = await Promise.all([
+      request(`${coordinatorUrl}/capacity`, { method: "GET" }),
+      request(`${coordinatorUrl}/status`, { method: "GET" }),
+      request(`${coordinatorUrl}/economy/price/current`, {
+        method: "GET",
+        headers: coordinatorMeshHeaders()
+      })
+    ]);
+    const capacity = capacityRes.statusCode >= 200 && capacityRes.statusCode < 300
+      ? await capacityRes.body.json()
+      : null;
+    const status = statusRes.statusCode >= 200 && statusRes.statusCode < 300
+      ? await statusRes.body.json()
+      : null;
+    const pricing = priceRes.statusCode >= 200 && priceRes.statusCode < 300
+      ? await priceRes.body.json()
+      : null;
+    return reply.send({
+      generatedAt: Date.now(),
+      networkMode,
+      capacity,
+      status,
+      pricing
+    });
+  } catch {
+    return reply.code(502).send({ error: "coordinator_unreachable" });
+  }
+});
+
 app.get("/mesh/peers", async (_req, reply) => {
   if (!authorizeAdmin(_req as any, reply)) return;
   try {
     const res = await request(`${coordinatorUrl}/mesh/peers`, { method: "GET" });
     const json = (await res.body.json()) as unknown;
     return reply.send(json);
+  } catch {
+    return reply.code(502).send({ error: "coordinator_unreachable" });
+  }
+});
+
+app.get("/health/runtime", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  try {
+    const res = await request(`${coordinatorUrl}/health/runtime`, { method: "GET" });
+    return reply.code(res.statusCode).send(await res.body.json());
   } catch {
     return reply.code(502).send({ error: "coordinator_unreachable" });
   }
