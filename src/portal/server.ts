@@ -23,13 +23,47 @@ const CONTROL_PLANE_ADMIN_TOKEN = process.env.CONTROL_PLANE_ADMIN_TOKEN ?? "";
 const SESSION_TTL_MS = Number(process.env.PORTAL_SESSION_TTL_MS ?? `${1000 * 60 * 60 * 24 * 7}`);
 const EMAIL_VERIFY_TTL_MS = Number(process.env.PORTAL_EMAIL_VERIFY_TTL_MS ?? `${1000 * 60 * 60 * 24}`);
 const PASSKEY_CHALLENGE_TTL_MS = Number(process.env.PASSKEY_CHALLENGE_TTL_MS ?? "300000");
-const PASSKEY_RP_ID = process.env.PASSKEY_RP_ID ?? "localhost";
+const WALLET_SEND_MFA_TTL_MS = Number(process.env.WALLET_SEND_MFA_TTL_MS ?? "600000");
+const OAUTH_MICROSOFT_PROMPT = process.env.OAUTH_MICROSOFT_PROMPT ?? "select_account";
+const DEFAULT_PORTAL_HOST = (() => {
+  try {
+    return new URL(PORTAL_PUBLIC_URL).hostname || "localhost";
+  } catch {
+    return "localhost";
+  }
+})();
+const PASSKEY_RP_ID = process.env.PASSKEY_RP_ID ?? DEFAULT_PORTAL_HOST;
 const PASSKEY_RP_NAME = process.env.PASSKEY_RP_NAME ?? "EdgeCoder Portal";
-const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? PORTAL_PUBLIC_URL;
+const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? (() => {
+  try {
+    return new URL(PORTAL_PUBLIC_URL).origin;
+  } catch {
+    return PORTAL_PUBLIC_URL;
+  }
+})();
 const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") as "bitcoin" | "testnet" | "signet";
-const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "edgecoder-dev-pepper";
+const NODE_ENV = process.env.NODE_ENV ?? "development";
+const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "";
+const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
+  (process.env.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "cody@edgecoder.io")
+    .split(",")
+    .map((value) => normalizeEmail(value))
+    .filter(Boolean)
+);
+const SYSTEM_ADMIN_EMAILS = new Set(
+  (process.env.SYSTEM_ADMIN_EMAILS ?? "cody@edgecoder.io")
+    .split(",")
+    .map((value) => normalizeEmail(value))
+    .filter(Boolean)
+);
+const COORDINATOR_ADMIN_EMAILS = new Set(
+  (process.env.COORDINATOR_ADMIN_EMAILS ?? "")
+    .split(",")
+    .map((value) => normalizeEmail(value))
+    .filter(Boolean)
+);
 
-type ProviderName = "google" | "apple" | "microsoft";
+type ProviderName = "google" | "microsoft";
 
 type OauthProviderConfig = {
   clientId: string;
@@ -49,13 +83,6 @@ const oauthProviders: Record<ProviderName, OauthProviderConfig> = {
     userinfoUrl: process.env.OAUTH_GOOGLE_USERINFO_URL ?? "https://openidconnect.googleapis.com/v1/userinfo",
     scopes: "openid email profile"
   },
-  apple: {
-    clientId: process.env.OAUTH_APPLE_CLIENT_ID ?? "",
-    clientSecret: process.env.OAUTH_APPLE_CLIENT_SECRET ?? "",
-    authorizeUrl: process.env.OAUTH_APPLE_AUTHORIZE_URL ?? "https://appleid.apple.com/auth/authorize",
-    tokenUrl: process.env.OAUTH_APPLE_TOKEN_URL ?? "https://appleid.apple.com/auth/token",
-    scopes: "name email"
-  },
   microsoft: {
     clientId: process.env.OAUTH_MICROSOFT_CLIENT_ID ?? "",
     clientSecret: process.env.OAUTH_MICROSOFT_CLIENT_SECRET ?? "",
@@ -69,6 +96,38 @@ const oauthProviders: Record<ProviderName, OauthProviderConfig> = {
     scopes: "openid email profile"
   }
 };
+
+function validatePortalSecurityConfig(): void {
+  if (!Number.isFinite(PASSKEY_CHALLENGE_TTL_MS) || PASSKEY_CHALLENGE_TTL_MS <= 0) {
+    throw new Error("PASSKEY_CHALLENGE_TTL_MS must be a positive number.");
+  }
+
+  // No default pepper is allowed; wallet onboarding requires an explicit secret.
+  if (!WALLET_SECRET_PEPPER) {
+    throw new Error("WALLET_SECRET_PEPPER is required for wallet onboarding.");
+  }
+
+  if (NODE_ENV !== "production") return;
+
+  const missing: string[] = [];
+  if (!PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
+  if (!CONTROL_PLANE_URL) missing.push("CONTROL_PLANE_URL");
+  if (!CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
+  if (!PASSKEY_RP_ID) missing.push("PASSKEY_RP_ID");
+  if (!PASSKEY_RP_NAME) missing.push("PASSKEY_RP_NAME");
+  if (!PASSKEY_ORIGIN) missing.push("PASSKEY_ORIGIN");
+  if (!PORTAL_PUBLIC_URL) missing.push("PORTAL_PUBLIC_URL");
+  if (missing.length > 0) {
+    throw new Error(`Missing required production environment variables: ${missing.join(", ")}`);
+  }
+
+  if (!/^https:\/\//i.test(PASSKEY_ORIGIN)) {
+    throw new Error("PASSKEY_ORIGIN must use https in production.");
+  }
+  if (!/^https:\/\//i.test(PORTAL_PUBLIC_URL)) {
+    throw new Error("PORTAL_PUBLIC_URL must use https in production.");
+  }
+}
 
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -130,6 +189,10 @@ function decodeJwtPayload<T extends Record<string, unknown>>(token: string): T |
   }
 }
 
+function claimIsTrue(value: unknown): boolean {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
 function base64UrlFromBuffer(value: Uint8Array<ArrayBufferLike> | Buffer): string {
   return Buffer.from(value as any).toString("base64url");
 }
@@ -141,6 +204,62 @@ function bufferFromBase64Url(value: string): Buffer {
 function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const buffer = Buffer.from(value, "base64url");
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
+}
+
+function normalizeBase64UrlString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function normalizePasskeyResponsePayload(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const response = source.response && typeof source.response === "object"
+    ? { ...(source.response as Record<string, unknown>) }
+    : {};
+  const normalized: Record<string, unknown> = { ...source };
+  const pick =
+    normalizeBase64UrlString(source.rawId) ??
+    normalizeBase64UrlString(source.credentialId) ??
+    normalizeBase64UrlString(source.id);
+  if (pick) {
+    normalized.id = pick;
+    normalized.rawId = pick;
+  }
+  if (response.clientDataJSON) {
+    response.clientDataJSON = normalizeBase64UrlString(response.clientDataJSON) ?? response.clientDataJSON;
+  }
+  if (response.attestationObject) {
+    response.attestationObject = normalizeBase64UrlString(response.attestationObject) ?? response.attestationObject;
+  }
+  if (response.authenticatorData) {
+    response.authenticatorData = normalizeBase64UrlString(response.authenticatorData) ?? response.authenticatorData;
+  }
+  if (response.signature) {
+    response.signature = normalizeBase64UrlString(response.signature) ?? response.signature;
+  }
+  if (response.userHandle) {
+    response.userHandle = normalizeBase64UrlString(response.userHandle) ?? response.userHandle;
+  }
+  normalized.response = response;
+  return normalized;
+}
+
+function deriveCredentialIdFromVerifyBody(body: {
+  credentialId?: string;
+  response: unknown;
+}): string | undefined {
+  const fromBody = normalizeBase64UrlString(body.credentialId);
+  if (fromBody) return fromBody;
+  if (!body.response || typeof body.response !== "object") return undefined;
+  const response = body.response as Record<string, unknown>;
+  return (
+    normalizeBase64UrlString(response.id) ??
+    normalizeBase64UrlString(response.rawId) ??
+    normalizeBase64UrlString(response.credentialId)
+  );
 }
 
 function deriveWalletSecretRef(seedPhrase: string, accountId: string): string {
@@ -183,6 +302,51 @@ async function sendVerificationEmail(email: string, verifyToken: string): Promis
   if (res.statusCode < 200 || res.statusCode >= 300) {
     const body = await res.body.text();
     throw new Error(`resend_email_failed:${res.statusCode}:${body}`);
+  }
+}
+
+function generateSixDigitCode(): string {
+  const value = randomBytes(4).readUInt32BE(0) % 1_000_000;
+  return String(value).padStart(6, "0");
+}
+
+async function sendWalletSendMfaCodeEmail(input: {
+  email: string;
+  code: string;
+  amountSats: number;
+  destination: string;
+}): Promise<void> {
+  if (!RESEND_API_KEY || !RESEND_FROM_EMAIL) {
+    throw new Error("email_mfa_not_configured");
+  }
+  const html = `
+    <p>EdgeCoder Wallet send verification</p>
+    <p>Your one-time send code is:</p>
+    <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
+    <p>Requested transfer:</p>
+    <ul>
+      <li>Amount (sats): ${input.amountSats}</li>
+      <li>Destination: ${input.destination}</li>
+    </ul>
+    <p>This code expires in ${Math.floor(WALLET_SEND_MFA_TTL_MS / 60000)} minutes.</p>
+    <p>If you did not request this, do not share the code and review account access immediately.</p>
+  `;
+  const res = await request("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${RESEND_API_KEY}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: input.email,
+      subject: "EdgeCoder wallet send verification code",
+      html
+    })
+  });
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    const body = await res.body.text();
+    throw new Error(`wallet_send_mfa_email_failed:${res.statusCode}:${body}`);
   }
 }
 
@@ -297,6 +461,59 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
   };
 }
 
+async function setupWalletSeedForUser(user: { userId: string; email: string }): Promise<{
+  accountId: string;
+  network: "bitcoin" | "testnet" | "signet";
+  seedPhrase: string;
+  guidance: { title: string; steps: string[] };
+}> {
+  const existing = await store?.getWalletOnboardingByUserId(user.userId);
+  const accountId = existing?.accountId ?? `acct-${user.userId}`;
+  const network = (existing?.network as "bitcoin" | "testnet" | "signet" | undefined) ?? WALLET_DEFAULT_NETWORK;
+  const seedPhrase = generateMnemonic(128);
+  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId);
+
+  await store?.upsertWalletOnboardingSeed({
+    userId: user.userId,
+    accountId,
+    network,
+    seedPhraseHash: sha256Hex(seedPhrase),
+    encryptedPrivateKeyRef
+  });
+
+  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+    await request(`${CONTROL_PLANE_URL}/economy/wallets/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}`
+      },
+      body: JSON.stringify({
+        accountId,
+        walletType: "lightning",
+        network,
+        encryptedSecretRef: encryptedPrivateKeyRef
+      })
+    }).catch(() => undefined);
+  }
+
+  return {
+    accountId,
+    network,
+    seedPhrase,
+    guidance: {
+      title: "Protect your recovery seed and private key",
+      steps: [
+        "Write the seed phrase on paper and store it offline in two separate secure locations.",
+        "Never screenshot or send the seed phrase over email, chat, or cloud notes.",
+        "Enable device passcode/biometric lock and keep iOS updated.",
+        "Treat the private key as high-risk secret material; export only with explicit intent.",
+        "Confirm backup by re-entering the seed phrase in-app before moving funds."
+      ]
+    }
+  };
+}
+
 async function createSessionForUser(userId: string, reply: any): Promise<void> {
   const sessionToken = randomUUID();
   await store?.createSession({
@@ -313,13 +530,69 @@ async function loadIosNetworkSummary(): Promise<unknown> {
   try {
     const res = await request(`${CONTROL_PLANE_URL}/network/summary`, {
       method: "GET",
-      headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+      headers: controlPlaneHeaders()
     });
     if (res.statusCode < 200 || res.statusCode >= 300) return null;
     return await res.body.json();
   } catch {
     return null;
   }
+}
+
+function controlPlaneHeaders(contentType = false): Record<string, string> {
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}`
+  };
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+  if (contentType) headers["content-type"] = "application/json";
+  return headers;
+}
+
+type PortalAccessContext = {
+  isSystemAdmin: boolean;
+  isCoordinatorAdmin: boolean;
+  ownsCoordinatorNode: boolean;
+  canViewCoordinatorOps: boolean;
+  canManageCoordinatorOps: boolean;
+};
+
+async function buildAccessContext(user: { userId: string; email: string }): Promise<PortalAccessContext> {
+  const normalizedEmail = normalizeEmail(user.email);
+  const isSystemAdmin = SYSTEM_ADMIN_EMAILS.has(normalizedEmail);
+  const isCoordinatorAdmin = isSystemAdmin || COORDINATOR_ADMIN_EMAILS.has(normalizedEmail);
+  const nodes = await store?.listNodesByOwner(user.userId);
+  const ownsCoordinatorNode = Boolean(nodes?.some((node) => node.nodeKind === "coordinator"));
+  const canViewCoordinatorOps =
+    isSystemAdmin ||
+    isCoordinatorAdmin ||
+    ownsCoordinatorNode ||
+    COORDINATOR_OPERATIONS_OWNER_EMAILS.has(normalizedEmail);
+  const canManageCoordinatorOps = isSystemAdmin || isCoordinatorAdmin;
+  return {
+    isSystemAdmin,
+    isCoordinatorAdmin,
+    ownsCoordinatorNode,
+    canViewCoordinatorOps,
+    canManageCoordinatorOps
+  };
+}
+
+async function requireCoordinatorOperationsUser(req: any, reply: any) {
+  if (!store) {
+    reply.code(503).send({ error: "portal_database_not_configured" });
+    return null;
+  }
+  const user = await getCurrentUser(req);
+  if (!user) {
+    reply.code(401).send({ error: "not_authenticated" });
+    return null;
+  }
+  const access = await buildAccessContext(user);
+  if (!access.canViewCoordinatorOps) {
+    reply.code(403).send({ error: "coordinator_operations_forbidden" });
+    return null;
+  }
+  return { user, access };
 }
 
 async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
@@ -331,19 +604,19 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
     const [creditRes, historyRes, walletRes, quoteRes] = await Promise.all([
       request(`${CONTROL_PLANE_URL}/credits/${accountId}/balance`, {
         method: "GET",
-        headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+        headers: controlPlaneHeaders()
       }),
       request(`${CONTROL_PLANE_URL}/credits/${accountId}/history`, {
         method: "GET",
-        headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+        headers: controlPlaneHeaders()
       }),
       request(`${CONTROL_PLANE_URL}/wallets/${accountId}`, {
         method: "GET",
-        headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+        headers: controlPlaneHeaders()
       }),
       request(`${CONTROL_PLANE_URL}/economy/credits/${accountId}/quote`, {
         method: "GET",
-        headers: { authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}` }
+        headers: controlPlaneHeaders()
       })
     ]);
     const credits = creditRes.statusCode >= 200 && creditRes.statusCode < 300 ? await creditRes.body.json() : null;
@@ -364,6 +637,354 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
   } catch {
     return { credits: null, quote: null, creditHistory: [], wallets: [], paymentIntents: [] };
   }
+}
+
+async function loadNetworkInsightsForUser(): Promise<{
+  issuance: { epoch: Record<string, unknown> | null; allocations: Array<Record<string, unknown>> };
+  modelMesh: { models: Array<Record<string, unknown>>; generatedAtMs?: number };
+}> {
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
+    return { issuance: { epoch: null, allocations: [] }, modelMesh: { models: [] } };
+  }
+  try {
+    const [issuanceRes, modelsRes] = await Promise.all([
+      request(`${CONTROL_PLANE_URL}/economy/issuance/current`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      }),
+      request(`${CONTROL_PLANE_URL}/agent-mesh/models/available`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      })
+    ]);
+    const issuancePayload =
+      issuanceRes.statusCode >= 200 && issuanceRes.statusCode < 300
+        ? ((await issuanceRes.body.json()) as { epoch?: Record<string, unknown> | null; allocations?: Array<Record<string, unknown>> })
+        : { epoch: null, allocations: [] };
+    const modelsPayload =
+      modelsRes.statusCode >= 200 && modelsRes.statusCode < 300
+        ? ((await modelsRes.body.json()) as { models?: Array<Record<string, unknown>>; generatedAtMs?: number })
+        : { models: [] };
+    return {
+      issuance: {
+        epoch: issuancePayload.epoch ?? null,
+        allocations: issuancePayload.allocations ?? []
+      },
+      modelMesh: {
+        models: modelsPayload.models ?? [],
+        generatedAtMs: modelsPayload.generatedAtMs
+      }
+    };
+  } catch {
+    return { issuance: { epoch: null, allocations: [] }, modelMesh: { models: [] } };
+  }
+}
+
+function marketingHomeHtml(): string {
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>EdgeCoder | Private AI Coding on Your Infrastructure</title>
+      <meta
+        name="description"
+        content="EdgeCoder is a privacy-first coding platform that runs on your machines, keeps sensitive code in your environment, and scales with trusted compute when needed."
+      />
+      <style>
+        :root {
+          --bg: #f4f7fc;
+          --surface: rgba(255, 255, 255, 0.96);
+          --surface-strong: rgba(248, 251, 255, 0.98);
+          --text: #0f172a;
+          --muted: #475569;
+          --brand: #2563eb;
+          --brand-2: #0ea5e9;
+          --ok: #22c55e;
+          --border: rgba(148, 163, 184, 0.28);
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        body {
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          color: var(--text);
+          background:
+            radial-gradient(1000px 500px at 0% -20%, rgba(37, 99, 235, 0.12), transparent 60%),
+            radial-gradient(900px 500px at 100% 0%, rgba(14, 165, 233, 0.1), transparent 60%),
+            var(--bg);
+        }
+        a { color: inherit; text-decoration: none; }
+        .shell {
+          width: min(1080px, calc(100% - 32px));
+          margin: 0 auto;
+          padding: 24px 0 60px;
+        }
+        .nav {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 24px;
+        }
+        .brand {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          font-weight: 700;
+          letter-spacing: -0.01em;
+        }
+        .mark {
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: linear-gradient(135deg, var(--brand), var(--brand-2));
+          box-shadow: 0 10px 28px rgba(34, 211, 238, 0.24);
+        }
+        .nav-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .btn {
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 9px 13px;
+          font-size: 14px;
+          background: rgba(255, 255, 255, 0.9);
+          transition: transform 0.08s ease, border-color 0.12s ease;
+        }
+        .btn:hover { transform: translateY(-1px); border-color: #cbd5e1; }
+        .btn.primary {
+          background: linear-gradient(135deg, #2563eb, #1d4ed8);
+          border-color: rgba(37, 99, 235, 0.72);
+          color: #fff;
+        }
+        .hero {
+          border: 1px solid var(--border);
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.95));
+          border-radius: 18px;
+          padding: 34px;
+          box-shadow: 0 12px 26px rgba(15, 23, 42, 0.08);
+        }
+        .eyebrow {
+          color: #1d4ed8;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          font-size: 11px;
+          font-weight: 700;
+          margin-bottom: 12px;
+        }
+        h1 {
+          margin: 0 0 10px;
+          line-height: 1.1;
+          font-size: clamp(32px, 6vw, 50px);
+          letter-spacing: -0.02em;
+        }
+        .lead {
+          margin: 0;
+          color: #334155;
+          max-width: 760px;
+          font-size: 18px;
+          line-height: 1.55;
+        }
+        .hero-cta {
+          margin-top: 18px;
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .stat-row {
+          margin-top: 20px;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(160px, 1fr));
+          gap: 10px;
+        }
+        .stat {
+          border: 1px solid var(--border);
+          background: rgba(255, 255, 255, 0.95);
+          border-radius: 12px;
+          padding: 12px;
+        }
+        .stat b { display: block; font-size: 20px; margin-bottom: 4px; }
+        .stat span { color: var(--muted); font-size: 13px; }
+        .section {
+          margin-top: 16px;
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          padding: 24px;
+          background: var(--surface);
+        }
+        .section h2 { margin: 0 0 8px; font-size: 24px; letter-spacing: -0.01em; }
+        .section p { margin: 0; color: #334155; line-height: 1.6; }
+        .grid {
+          margin-top: 14px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(240px, 1fr));
+          gap: 12px;
+        }
+        .card {
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 14px;
+          background: rgba(255, 255, 255, 0.94);
+        }
+        .card h3 { margin: 0 0 6px; font-size: 17px; }
+        .card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+        .steps {
+          margin: 12px 0 0;
+          padding-left: 18px;
+          color: #334155;
+          line-height: 1.65;
+        }
+        .steps b { color: #0f172a; }
+        .footer {
+          margin-top: 20px;
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          background: var(--surface-strong);
+          padding: 18px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .footer-note { color: var(--muted); font-size: 13px; }
+        .ok { color: var(--ok); font-weight: 600; }
+        @media (max-width: 900px) {
+          .hero { padding: 24px; }
+          .stat-row { grid-template-columns: 1fr; }
+          .grid { grid-template-columns: 1fr; }
+        }
+      </style>
+    </head>
+    <body>
+      <main class="shell">
+        <nav class="nav">
+          <div class="brand">
+            <span class="mark">E</span>
+            <span>EdgeCoder</span>
+          </div>
+          <div class="nav-actions">
+            <a class="btn" href="/portal">Portal</a>
+            <a class="btn primary" href="/portal">Get Started</a>
+          </div>
+        </nav>
+
+        <section class="hero">
+          <div class="eyebrow">Decentralized Global Shared Compute</div>
+          <h1>What is EdgeCoder?</h1>
+          <p class="lead">
+            EdgeCoder is a decentralized global shared compute network for AI coding workloads, using bitcoin as the incentive framework.
+            You can contribute idle compute and earn rewards, or purchase additional compute by providing bitcoin to the network.
+            Those funds are distributed to agents and coordinators based on verified effort actually expended.
+          </p>
+          <div class="hero-cta">
+            <a class="btn primary" href="/portal">Open EdgeCoder Portal</a>
+            <a class="btn" href="/portal">Explore Features</a>
+          </div>
+          <div class="stat-row">
+            <div class="stat"><b>Private + public crossover</b><span>Route sensitive workloads privately and overflow to approved public capacity.</span></div>
+            <div class="stat"><b>Bitcoin incentive framework</b><span>Compute buyers pay in bitcoin; contributors are rewarded from real network demand.</span></div>
+            <div class="stat"><b>Effort-based payouts</b><span>Agents and coordinators are rewarded according to verifiable compute effort.</span></div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>How the compute economy works</h2>
+          <p>
+            EdgeCoder matches demand to decentralized global supply, then prices and distributes rewards
+            using transparent network participation signals.
+          </p>
+          <ol class="steps">
+            <li><b>Offer compute:</b> operators contribute CPU/GPU capacity from idle machines.</li>
+            <li><b>Buy compute with bitcoin:</b> subscribers and agents provide bitcoin when they need additional workload capacity.</li>
+            <li><b>Reward actual effort:</b> payouts flow to agents/coordinators based on measurable work completed.</li>
+            <li><b>Govern safely:</b> policy, approvals, and auditable controls remain enforced across private and public paths.</li>
+          </ol>
+        </section>
+
+        <section class="section">
+          <h2>Rolling 24-hour token issuance (non-cumulative)</h2>
+          <p>
+            Token issuance is recalculated continuously from the last 24 hours of effective contribution and network load.
+            It is not a cumulative lifetime allowance. If capacity disappears, issuance share decays as that prior contribution
+            rolls out of the 24-hour window.
+          </p>
+          <ol class="steps">
+            <li><b>Daily-based, continuously recalculated:</b> every hour, the system refreshes allocation using the most recent rolling 24 hours.</li>
+            <li><b>Performance-weighted share:</b> higher available and reliable compute can earn a larger portion of daily issuance.</li>
+            <li><b>Automatic roll-off:</b> if a large GPU provider turns off, their share drops hour by hour as historical contribution expires.</li>
+            <li><b>Automatic reallocation:</b> active contributors still offering compute gain relative share as inactive capacity rolls off.</li>
+          </ol>
+        </section>
+
+        <section class="section">
+          <h2>Enterprise controls and trust</h2>
+          <div class="grid">
+            <article class="card">
+              <h3>Private policy boundaries</h3>
+              <p>Define what stays private, what can cross into public capacity, and which nodes are eligible.</p>
+            </article>
+            <article class="card">
+              <h3>Contributor incentive alignment</h3>
+              <p>Idle compute providers are rewarded from real workload demand, denominated via bitcoin-linked settlement flows.</p>
+            </article>
+            <article class="card">
+              <h3>Auditable issuance logic</h3>
+              <p>Rolling 24-hour allocation makes rewards responsive to current supply, reliability, and demand conditions.</p>
+            </article>
+            <article class="card">
+              <h3>Operational-grade access control</h3>
+              <p>Passkeys, approvals, and service-level governance support professional teams and managed network operations.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Agent types in the global compute mesh</h2>
+          <p>
+            EdgeCoder can coordinate many classes of agents as one decentralized execution fabric. The goal is to turn available
+            compute worldwide into a single AI CPU/GPU cluster that can serve real workload demand securely.
+            Agents can also run local models and make that model capacity available to other nodes in the mesh for truly decentralized inference.
+          </p>
+          <div class="grid">
+            <article class="card">
+              <h3>Mobile and edge devices</h3>
+              <p>iOS phones and Android devices can contribute idle cycles for lightweight and burstable inference workloads.</p>
+            </article>
+            <article class="card">
+              <h3>Vehicle compute systems</h3>
+              <p>Vehicle onboard compute can participate when policy, connectivity, and power constraints allow safe execution.</p>
+            </article>
+            <article class="card">
+              <h3>Servers and GPU clusters</h3>
+              <p>Dedicated servers and high-throughput GPU fleets provide the backbone capacity for heavier tasks and queue stability.</p>
+            </article>
+            <article class="card">
+              <h3>Datacenter-scale facilities</h3>
+              <p>Entire datacenter facilities can be enrolled as coordinated capacity domains with governance, approval, and audit controls.</p>
+            </article>
+            <article class="card">
+              <h3>Locally hosted model agents</h3>
+              <p>Any approved node can run local models and expose that model throughput to other network participants, reducing central dependency.</p>
+            </article>
+          </div>
+        </section>
+
+        <footer class="footer">
+          <div>
+            <div><strong>EdgeCoder</strong> <span class="ok">online</span></div>
+            <div class="footer-note">Private/public compute crossover with rolling 24-hour issuance and bitcoin-linked contributor rewards.</div>
+          </div>
+          <a class="btn primary" href="/portal">Launch Portal</a>
+        </footer>
+      </main>
+    </body>
+  </html>`;
 }
 
 app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
@@ -467,9 +1088,21 @@ app.post("/auth/resend-verification", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+app.get("/auth/oauth/apple/start", async (_req, reply) => {
+  return reply.code(404).send({ error: "oauth_provider_disabled" });
+});
+
+app.get("/auth/oauth/apple/callback", async (_req, reply) => {
+  return reply.code(404).send({ error: "oauth_provider_disabled" });
+});
+
+app.post("/auth/oauth/apple/callback", async (_req, reply) => {
+  return reply.code(404).send({ error: "oauth_provider_disabled" });
+});
+
 app.get("/auth/oauth/:provider/start", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const params = z.object({ provider: z.enum(["google", "apple", "microsoft"]) }).parse(req.params);
+  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
   const provider = oauthProviders[params.provider];
   if (!provider.clientId || !provider.clientSecret) {
     return reply.code(503).send({ error: `${params.provider}_oauth_not_configured` });
@@ -488,26 +1121,39 @@ app.get("/auth/oauth/:provider/start", async (req, reply) => {
   authorize.searchParams.set("response_type", "code");
   authorize.searchParams.set("scope", provider.scopes);
   authorize.searchParams.set("state", state);
-  if (params.provider === "apple") {
-    authorize.searchParams.set("response_mode", "form_post");
+  if (params.provider === "microsoft" && OAUTH_MICROSOFT_PROMPT) {
+    authorize.searchParams.set("prompt", OAUTH_MICROSOFT_PROMPT);
   }
   return reply.redirect(authorize.toString());
 });
 
 app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const params = z.object({ provider: z.enum(["google", "apple", "microsoft"]) }).parse(req.params);
+  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
   const query = z.object({ code: z.string(), state: z.string() }).parse(req.query);
-  const provider = oauthProviders[params.provider];
-  const state = await store.consumeOauthState(query.state);
-  if (!state || state.provider !== params.provider) return reply.code(400).send({ error: "oauth_state_invalid" });
+  return handleOauthCallback(params.provider, query.code, query.state, reply);
+});
+
+app.post("/auth/oauth/:provider/callback", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
+  const body = z.object({ code: z.string(), state: z.string() }).parse(req.body);
+  return handleOauthCallback(params.provider, body.code, body.state, reply);
+});
+
+async function handleOauthCallback(providerName: ProviderName, code: string, stateId: string, reply: any) {
+  const portalStore = store;
+  if (!portalStore) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const provider = oauthProviders[providerName];
+  const state = await portalStore.consumeOauthState(stateId);
+  if (!state || state.provider !== providerName) return reply.code(400).send({ error: "oauth_state_invalid" });
 
   const tokenRes = await request(provider.tokenUrl, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      code: query.code,
+      code,
       client_id: provider.clientId,
       client_secret: provider.clientSecret,
       redirect_uri: state.redirectUri
@@ -518,12 +1164,12 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   }
   const tokenPayload = (await tokenRes.body.json()) as { access_token?: string; id_token?: string };
   const claimsFromIdToken = tokenPayload.id_token
-    ? decodeJwtPayload<{ sub?: string; email?: string; email_verified?: boolean }>(tokenPayload.id_token)
+    ? decodeJwtPayload<{ sub?: string; email?: string; email_verified?: boolean | string | number }>(tokenPayload.id_token)
     : null;
 
   let subject = claimsFromIdToken?.sub;
   let email = claimsFromIdToken?.email;
-  let emailVerified = claimsFromIdToken?.email_verified === true;
+  let emailVerified = claimIsTrue(claimsFromIdToken?.email_verified);
 
   if (provider.userinfoUrl && tokenPayload.access_token) {
     const userRes = await request(provider.userinfoUrl, {
@@ -531,10 +1177,10 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
       headers: { authorization: `Bearer ${tokenPayload.access_token}` }
     });
     if (userRes.statusCode >= 200 && userRes.statusCode < 300) {
-      const userInfo = (await userRes.body.json()) as { sub?: string; email?: string; email_verified?: boolean };
+      const userInfo = (await userRes.body.json()) as { sub?: string; email?: string; email_verified?: boolean | string | number };
       subject = subject ?? userInfo.sub;
       email = email ?? userInfo.email;
-      emailVerified = emailVerified || userInfo.email_verified === true;
+      emailVerified = emailVerified || claimIsTrue(userInfo.email_verified);
     }
   }
 
@@ -542,13 +1188,13 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   if (!email) return reply.code(400).send({ error: "oauth_email_missing" });
 
   email = normalizeEmail(email);
-  const linked = await store.findOauthIdentity(params.provider, subject);
-  let user = linked ? await store.getUserById(linked.userId) : null;
+  const linked = await portalStore.findOauthIdentity(providerName, subject);
+  let user = linked ? await portalStore.getUserById(linked.userId) : null;
   if (!user) {
-    user = (await store.getUserByEmail(email)) ?? null;
+    user = (await portalStore.getUserByEmail(email)) ?? null;
   }
   if (!user) {
-    user = await store.createUser({
+    user = await portalStore.createUser({
       userId: randomUUID(),
       email,
       emailVerified,
@@ -557,12 +1203,12 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
     await ensureCreditAccountForUser(user);
     await ensureStarterWalletForUser(user);
   } else if (emailVerified && !user.emailVerified) {
-    await store.markUserEmailVerified(user.userId);
-    user = await store.getUserById(user.userId);
+    await portalStore.markUserEmailVerified(user.userId);
+    user = await portalStore.getUserById(user.userId);
   }
   if (!user) return reply.code(500).send({ error: "oauth_user_resolution_failed" });
-  await store.linkOauthIdentity({
-    provider: params.provider,
+  await portalStore.linkOauthIdentity({
+    provider: providerName,
     providerSubject: subject,
     userId: user.userId,
     emailSnapshot: email
@@ -570,8 +1216,8 @@ app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   if (user.emailVerified) await ensureCreditAccountForUser(user);
 
   await createSessionForUser(user.userId, reply);
-  return reply.redirect("/portal");
-});
+  return reply.redirect("/portal/dashboard");
+}
 
 app.post("/auth/passkey/register/options", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
@@ -621,8 +1267,9 @@ app.post("/auth/passkey/register/verify", async (req, reply) => {
   if (!challenge || challenge.flowType !== "registration" || challenge.userId !== user.userId) {
     return reply.code(400).send({ error: "passkey_challenge_invalid" });
   }
+  const normalizedResponse = normalizePasskeyResponsePayload(body.response);
   const verification = await verifyRegistrationResponse({
-    response: body.response as any,
+    response: normalizedResponse as any,
     expectedChallenge: challenge.challenge,
     expectedOrigin: PASSKEY_ORIGIN,
     expectedRPID: PASSKEY_RP_ID,
@@ -679,7 +1326,7 @@ app.post("/auth/passkey/login/verify", async (req, reply) => {
   const body = z
     .object({
       challengeId: z.string().min(10),
-      credentialId: z.string().min(10),
+      credentialId: z.string().min(10).optional(),
       response: z.unknown()
     })
     .parse(req.body);
@@ -687,10 +1334,13 @@ app.post("/auth/passkey/login/verify", async (req, reply) => {
   if (!challenge || challenge.flowType !== "authentication") {
     return reply.code(400).send({ error: "passkey_challenge_invalid" });
   }
-  const credential = await store.findPasskeyByCredentialId(body.credentialId);
+  const credentialId = deriveCredentialIdFromVerifyBody(body);
+  if (!credentialId) return reply.code(400).send({ error: "passkey_credential_id_missing" });
+  const credential = await store.findPasskeyByCredentialId(credentialId);
   if (!credential) return reply.code(404).send({ error: "passkey_credential_not_found" });
+  const normalizedResponse = normalizePasskeyResponsePayload(body.response);
   const verification = await verifyAuthenticationResponse({
-    response: body.response as any,
+    response: normalizedResponse as any,
     expectedChallenge: challenge.challenge,
     expectedOrigin: PASSKEY_ORIGIN,
     expectedRPID: PASSKEY_RP_ID,
@@ -723,12 +1373,165 @@ app.get("/wallet/onboarding", async (req, reply) => {
   });
 });
 
+app.post("/wallet/onboarding/setup-seed", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  await ensureCreditAccountForUser(user);
+  const setup = await setupWalletSeedForUser(user);
+  return reply.send({
+    ok: true,
+    accountId: setup.accountId,
+    network: setup.network,
+    seedPhrase: setup.seedPhrase,
+    guidance: setup.guidance
+  });
+});
+
 app.post("/wallet/onboarding/acknowledge", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
   await store.acknowledgeWalletOnboarding(user.userId);
   return reply.send({ ok: true });
+});
+
+app.get("/wallet/send/requests", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const requests = await store.listWalletSendRequestsByUser(user.userId, 25);
+  return reply.send({ requests });
+});
+
+app.post("/wallet/send/mfa/start", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const body = z
+    .object({
+      destination: z.string().min(10).max(220),
+      amountSats: z.number().int().positive().max(100_000_000),
+      note: z.string().max(280).optional()
+    })
+    .parse(req.body);
+
+  const walletOnboarding = await store.getWalletOnboardingByUserId(user.userId);
+  if (!walletOnboarding) return reply.code(409).send({ error: "wallet_onboarding_required" });
+  const passkeys = await store.listPasskeysByUserId(user.userId);
+  if (passkeys.length === 0) {
+    return reply.code(409).send({ error: "passkey_required_for_wallet_send" });
+  }
+  if (!RESEND_API_KEY || !RESEND_FROM_EMAIL) {
+    return reply.code(503).send({ error: "email_mfa_not_configured" });
+  }
+
+  const passkeyOptions = await generateAuthenticationOptions({
+    rpID: PASSKEY_RP_ID,
+    timeout: 60000,
+    userVerification: "required",
+    allowCredentials: passkeys.map((item) => ({
+      id: item.credentialId,
+      transports: item.transports as any
+    }))
+  });
+
+  const challengeId = randomUUID();
+  const code = generateSixDigitCode();
+  await store.createWalletSendMfaChallenge({
+    challengeId,
+    userId: user.userId,
+    accountId: walletOnboarding.accountId,
+    destination: body.destination.trim(),
+    amountSats: body.amountSats,
+    note: body.note?.trim() || undefined,
+    emailCodeHash: sha256Hex(`${challengeId}:${code}`),
+    passkeyChallenge: passkeyOptions.challenge,
+    expiresAtMs: Date.now() + WALLET_SEND_MFA_TTL_MS
+  });
+
+  await sendWalletSendMfaCodeEmail({
+    email: user.email,
+    code,
+    amountSats: body.amountSats,
+    destination: body.destination.trim()
+  });
+
+  return reply.send({
+    ok: true,
+    challengeId,
+    expiresAtMs: Date.now() + WALLET_SEND_MFA_TTL_MS,
+    passkeyOptions
+  });
+});
+
+app.post("/wallet/send/mfa/confirm", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const body = z
+    .object({
+      challengeId: z.string().min(10),
+      emailCode: z.string().min(6).max(8),
+      credentialId: z.string().min(10),
+      response: z.unknown()
+    })
+    .parse(req.body);
+
+  const challenge = await store.consumeWalletSendMfaChallenge(body.challengeId);
+  if (!challenge || challenge.userId !== user.userId) {
+    return reply.code(400).send({ error: "wallet_send_mfa_challenge_invalid" });
+  }
+  const expectedCodeHash = sha256Hex(`${challenge.challengeId}:${body.emailCode.trim()}`);
+  if (!secureCompare(challenge.emailCodeHash, expectedCodeHash)) {
+    return reply.code(401).send({ error: "wallet_send_email_code_invalid" });
+  }
+
+  const credential = await store.findPasskeyByCredentialId(body.credentialId);
+  if (!credential || credential.userId !== user.userId) {
+    return reply.code(404).send({ error: "passkey_credential_not_found" });
+  }
+  const verification = await verifyAuthenticationResponse({
+    response: body.response as any,
+    expectedChallenge: challenge.passkeyChallenge,
+    expectedOrigin: PASSKEY_ORIGIN,
+    expectedRPID: PASSKEY_RP_ID,
+    requireUserVerification: true,
+    credential: {
+      id: credential.credentialId,
+      publicKey: uint8ArrayFromBase64Url(credential.publicKeyB64Url),
+      counter: Number(credential.counter),
+      transports: credential.transports as any
+    }
+  }).catch(() => null);
+  if (!verification?.verified) {
+    return reply.code(401).send({ error: "wallet_send_passkey_verification_failed" });
+  }
+  await store.updatePasskeyCounter(credential.credentialId, Number(verification.authenticationInfo.newCounter ?? credential.counter));
+
+  const requestId = randomUUID();
+  await store.createWalletSendRequest({
+    requestId,
+    userId: user.userId,
+    accountId: challenge.accountId,
+    destination: challenge.destination,
+    amountSats: challenge.amountSats,
+    note: challenge.note,
+    status: "pending_manual_review",
+    mfaChallengeId: challenge.challengeId
+  });
+
+  return reply.send({
+    ok: true,
+    request: {
+      requestId,
+      accountId: challenge.accountId,
+      destination: challenge.destination,
+      amountSats: challenge.amountSats,
+      note: challenge.note,
+      status: "pending_manual_review"
+    }
+  });
 });
 
 app.get("/ios/dashboard", async (req, reply) => {
@@ -771,13 +1574,19 @@ app.get("/me", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const access = await buildAccessContext(user);
   const nodes = await store.listNodesByOwner(user.userId);
   return reply.send({
     user: {
       userId: user.userId,
       email: user.email,
       emailVerified: user.emailVerified,
-      displayName: user.displayName
+      uiTheme: user.uiTheme,
+      displayName: user.displayName,
+      roles: {
+        isSystemAdmin: access.isSystemAdmin,
+        isCoordinatorAdmin: access.isCoordinatorAdmin
+      }
     },
     nodes: nodes.map((n) => ({
       nodeId: n.nodeId,
@@ -787,6 +1596,15 @@ app.get("/me", async (req, reply) => {
       nodeApproved: n.nodeApproved
     }))
   });
+});
+
+app.post("/me/theme", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const body = z.object({ theme: z.enum(["midnight", "emerald", "light"]) }).parse(req.body);
+  await store.setUserTheme(user.userId, body.theme);
+  return reply.send({ ok: true, theme: body.theme });
 });
 
 app.post("/nodes/enroll", async (req, reply) => {
@@ -815,6 +1633,22 @@ app.post("/nodes/enroll", async (req, reply) => {
   });
 });
 
+app.delete("/nodes/:nodeId", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const params = z.object({ nodeId: z.string().min(3) }).parse(req.params);
+  const access = await buildAccessContext(user);
+  const existing = await store.getNodeEnrollment(params.nodeId);
+  if (!existing) return reply.code(404).send({ error: "node_not_found" });
+  if (!access.isSystemAdmin && existing.ownerUserId !== user.userId) {
+    return reply.code(403).send({ error: "node_delete_forbidden" });
+  }
+  const ok = await store.deleteNodeEnrollment(params.nodeId);
+  if (!ok) return reply.code(404).send({ error: "node_not_found" });
+  return reply.send({ ok: true, deletedNodeId: params.nodeId });
+});
+
 app.get("/nodes/me", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
@@ -829,7 +1663,7 @@ app.get("/dashboard/summary", async (req, reply) => {
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
   const [nodes, walletSnapshot] = await Promise.all([store.listNodesByOwner(user.userId), loadWalletSnapshotForUser(user.userId)]);
   return reply.send({
-    user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified },
+    user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified, uiTheme: user.uiTheme },
     nodes: nodes.map((n) => ({
       nodeId: n.nodeId,
       nodeKind: n.nodeKind,
@@ -842,9 +1676,150 @@ app.get("/dashboard/summary", async (req, reply) => {
   });
 });
 
-app.get("/", async (_req, reply) => reply.redirect("/portal"));
+app.get("/dashboard/network-insights", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const insights = await loadNetworkInsightsForUser();
+  return reply.send(insights);
+});
 
-app.get("/portal", async (_req, reply) => {
+app.get("/coordinator/ops/summary", async (req, reply) => {
+  const principal = await requireCoordinatorOperationsUser(req as any, reply);
+  if (!principal) return;
+  const { user, access } = principal;
+  try {
+    let status: Record<string, unknown> = {
+      agents: 0,
+      queued: 0,
+      results: 0
+    };
+    if (access.isSystemAdmin && CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+      const res = await request(`${CONTROL_PLANE_URL}/ops/summary`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      });
+      const payload = (await res.body.json()) as { status?: Record<string, unknown> };
+      if (res.statusCode >= 200 && res.statusCode < 300 && payload.status) {
+        status = payload.status;
+      }
+    } else {
+      const ownedNodes = (await store?.listNodesByOwner(user.userId)) ?? [];
+      status = {
+        agents: ownedNodes.filter((n) => n.nodeKind === "agent" && n.active).length,
+        queued: 0,
+        results: 0
+      };
+    }
+    const ownerUserId = access.isSystemAdmin ? undefined : user.userId;
+    const pendingNodes = (await store?.listPendingNodes({ limit: 250, ownerUserId })) ?? [];
+    const approvedNodes = store
+      ? await store.listApprovedNodes({
+          ownerUserId,
+          limit: 500
+        })
+      : [];
+    return reply.send({
+      status,
+      pendingNodes: pendingNodes.map((n) => ({
+        nodeId: n.nodeId,
+        nodeKind: n.nodeKind,
+        ownerEmail: n.ownerEmail,
+        emailVerified: n.emailVerified,
+        nodeApproved: n.nodeApproved,
+        active: n.active,
+        sourceIp: n.lastIp,
+        countryCode: n.lastCountryCode,
+        vpnDetected: n.lastVpnDetected ?? false,
+        lastSeenMs: n.lastSeenMs,
+        updatedAtMs: n.updatedAtMs
+      })),
+      approvedNodes: approvedNodes.map((n) => ({
+        nodeId: n.nodeId,
+        nodeKind: n.nodeKind,
+        ownerEmail: n.ownerEmail,
+        emailVerified: n.emailVerified,
+        nodeApproved: n.nodeApproved,
+        active: n.active,
+        sourceIp: n.lastIp,
+        countryCode: n.lastCountryCode,
+        vpnDetected: n.lastVpnDetected ?? false,
+        lastSeenMs: n.lastSeenMs,
+        updatedAtMs: n.updatedAtMs
+      })),
+      access: {
+        isSystemAdmin: access.isSystemAdmin,
+        isCoordinatorAdmin: access.isCoordinatorAdmin,
+        canManageApprovals: access.canManageCoordinatorOps
+      }
+    });
+  } catch {
+    return reply.code(502).send({ error: "control_plane_unreachable" });
+  }
+});
+
+app.post("/coordinator/ops/node-approval", async (req, reply) => {
+  const principal = await requireCoordinatorOperationsUser(req as any, reply);
+  if (!principal) return;
+  const { access } = principal;
+  if (!access.canManageCoordinatorOps) {
+    return reply.code(403).send({ error: "coordinator_operations_forbidden" });
+  }
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
+    return reply.code(503).send({ error: "control_plane_not_configured" });
+  }
+  const body = z
+    .object({
+      nodeId: z.string().min(3),
+      nodeKind: z.enum(["agent", "coordinator"]),
+      approved: z.boolean()
+    })
+    .parse(req.body);
+  const pathSegment = body.nodeKind === "agent" ? "agents" : "coordinators";
+  try {
+    const res = await request(`${CONTROL_PLANE_URL}/${pathSegment}/${body.nodeId}/approval`, {
+      method: "POST",
+      headers: controlPlaneHeaders(true),
+      body: JSON.stringify({ approved: body.approved })
+    });
+    return reply.code(res.statusCode).send(await res.body.json());
+  } catch {
+    return reply.code(502).send({ error: "control_plane_unreachable" });
+  }
+});
+
+app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
+  const principal = await requireCoordinatorOperationsUser(req as any, reply);
+  if (!principal) return;
+  const { access } = principal;
+  if (!access.canManageCoordinatorOps) {
+    return reply.code(403).send({ error: "coordinator_operations_forbidden" });
+  }
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
+    return reply.code(503).send({ error: "control_plane_not_configured" });
+  }
+  const body = z
+    .object({
+      provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
+      model: z.string().default("qwen2.5-coder:latest"),
+      autoInstall: z.boolean().default(true)
+    })
+    .parse(req.body);
+  try {
+    const res = await request(`${CONTROL_PLANE_URL}/ops/coordinator-ollama`, {
+      method: "POST",
+      headers: controlPlaneHeaders(true),
+      body: JSON.stringify(body)
+    });
+    return reply.code(res.statusCode).send(await res.body.json());
+  } catch {
+    return reply.code(502).send({ error: "control_plane_unreachable" });
+  }
+});
+
+app.get("/", async (_req, reply) => reply.type("text/html").send(marketingHomeHtml()));
+
+app.get("/portal-legacy", async (_req, reply) => {
   const html = `<!doctype html>
   <html>
     <head>
@@ -852,135 +1827,281 @@ app.get("/portal", async (_req, reply) => {
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>EdgeCoder Portal</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 20px; background: #f8fafc; color: #0f172a; }
-        h1, h2, h3 { margin: 8px 0; }
+        :root {
+          --bg: #070b18;
+          --bg-soft: #0f172a;
+          --card: rgba(15, 23, 42, 0.72);
+          --card-border: rgba(148, 163, 184, 0.25);
+          --text: #e2e8f0;
+          --muted: #94a3b8;
+          --brand: #7c3aed;
+          --brand-2: #22d3ee;
+          --ok: #22c55e;
+          --warn: #f59e0b;
+          --danger: #ef4444;
+        }
+        * { box-sizing: border-box; }
+        body {
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          margin: 0;
+          color: var(--text);
+          background:
+            radial-gradient(1200px 500px at -20% -20%, rgba(124, 58, 237, 0.35), transparent 60%),
+            radial-gradient(800px 400px at 110% 10%, rgba(34, 211, 238, 0.24), transparent 60%),
+            var(--bg);
+          min-height: 100vh;
+        }
+        .shell { max-width: 1180px; margin: 24px auto 48px; padding: 0 16px; }
+        h1, h2, h3 { margin: 8px 0; letter-spacing: -0.01em; }
         .hidden { display: none; }
-        .grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 12px; }
-        .card { background: #fff; border: 1px solid #dbe4ee; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+        .hero {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 14px;
+          margin-bottom: 16px;
+        }
+        .brand-mark {
+          width: 40px;
+          height: 40px;
+          border-radius: 12px;
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 18px;
+          box-shadow: 0 0 0 1px rgba(255,255,255,0.1) inset, 0 12px 24px rgba(14, 116, 144, 0.25);
+        }
+        .hero-left { display: flex; gap: 12px; align-items: center; }
+        .hero h1 { font-size: 26px; margin: 0; }
+        .muted { color: var(--muted); font-size: 13px; }
+        .pill-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .pill {
+          border: 1px solid var(--card-border);
+          border-radius: 999px;
+          padding: 5px 10px;
+          font-size: 12px;
+          color: #cbd5e1;
+          background: rgba(15, 23, 42, 0.45);
+          backdrop-filter: blur(8px);
+        }
+        .grid { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 14px; }
+        .card {
+          background: var(--card);
+          border: 1px solid var(--card-border);
+          border-radius: 14px;
+          padding: 16px;
+          margin-bottom: 12px;
+          backdrop-filter: blur(10px);
+          box-shadow: 0 10px 30px rgba(2, 6, 23, 0.45);
+        }
+        .card h2, .card h3 { margin-top: 0; }
         .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-        .muted { color: #64748b; font-size: 13px; }
-        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #334155; }
-        input, select { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
-        button { padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1; background: #f1f5f9; cursor: pointer; }
-        button.primary { background: #0f172a; color: white; border-color: #0f172a; }
+        .kpis { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
+        .kpi {
+          border: 1px solid var(--card-border);
+          border-radius: 10px;
+          padding: 10px;
+          background: rgba(2, 6, 23, 0.35);
+        }
+        .kpi .label { color: var(--muted); font-size: 12px; }
+        .kpi .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #cbd5e1; }
+        input, select {
+          width: 100%;
+          padding: 10px 11px;
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          border-radius: 10px;
+          background: rgba(2, 6, 23, 0.7);
+          color: var(--text);
+        }
+        input::placeholder { color: #64748b; }
+        button {
+          padding: 9px 12px;
+          border-radius: 10px;
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          background: rgba(15, 23, 42, 0.7);
+          color: var(--text);
+          cursor: pointer;
+          transition: transform .08s ease, border-color .12s ease, background .12s ease;
+        }
+        button:hover { border-color: #cbd5e1; transform: translateY(-1px); }
+        button.primary {
+          background: linear-gradient(140deg, var(--brand), #6d28d9);
+          border-color: rgba(167, 139, 250, 0.9);
+          color: white;
+        }
+        button.primary:hover { background: linear-gradient(140deg, #8b5cf6, #7c3aed); }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 6px; vertical-align: top; }
-        th { background: #f8fafc; color: #334155; }
-        code { background: #eef2ff; padding: 2px 4px; border-radius: 4px; }
-        .token-box { border: 1px dashed #94a3b8; border-radius: 8px; padding: 8px; background: #f8fafc; word-break: break-all; }
+        th, td {
+          border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+          text-align: left;
+          padding: 8px 6px;
+          vertical-align: top;
+        }
+        th { color: #cbd5e1; font-weight: 600; }
+        code {
+          background: rgba(59, 130, 246, 0.18);
+          border: 1px solid rgba(147, 197, 253, 0.35);
+          padding: 2px 5px;
+          border-radius: 6px;
+        }
+        .token-box {
+          border: 1px dashed rgba(125, 211, 252, 0.55);
+          border-radius: 10px;
+          padding: 10px;
+          background: rgba(6, 78, 59, 0.28);
+          word-break: break-all;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          line-height: 1.45;
+        }
+        #toast {
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          width: min(420px, calc(100vw - 32px));
+          z-index: 100;
+          margin: 0;
+        }
+        @media (max-width: 920px) {
+          .grid { grid-template-columns: 1fr; }
+          .hero { flex-direction: column; align-items: flex-start; }
+          .pill-row { justify-content: flex-start; }
+          .kpis { grid-template-columns: 1fr; }
+        }
       </style>
     </head>
     <body>
-      <h1>EdgeCoder User Portal</h1>
-      <p class="muted">Sign up with email/password or SSO, verify your email, enroll nodes, and track credits + wallet activity.</p>
-
-      <div id="authView" class="grid">
-        <div class="card">
-          <h2>Create account</h2>
-          <label>Email</label><input id="signupEmail" type="email" />
-          <label>Password</label><input id="signupPassword" type="password" />
-          <label>Display name (optional)</label><input id="signupDisplayName" type="text" />
-          <div class="row" style="margin-top:10px;">
-            <button class="primary" id="signupBtn">Sign up</button>
-          </div>
-          <p class="muted">Email verification is required before nodes can activate.</p>
-        </div>
-        <div class="card">
-          <h2>Log in</h2>
-          <label>Email</label><input id="loginEmail" type="email" />
-          <label>Password</label><input id="loginPassword" type="password" />
-          <div class="row" style="margin-top:10px;">
-            <button class="primary" id="loginBtn">Log in</button>
-            <button id="resendBtn">Resend verification email</button>
-          </div>
-          <div class="row" style="margin-top:10px;">
-            <button id="passkeyLoginBtn">Log in with Passkey</button>
-            <button id="passkeyEnrollBtn">Enroll passkey (after login)</button>
-          </div>
-          <h3 style="margin-top:16px;">Single Sign-On</h3>
-          <div class="row">
-            <a href="/auth/oauth/google/start"><button>Continue with Google</button></a>
-            <a href="/auth/oauth/microsoft/start"><button>Continue with Microsoft 365</button></a>
-            <a href="/auth/oauth/apple/start"><button>Continue with Apple</button></a>
-          </div>
-        </div>
-      </div>
-
-      <div id="dashboardView" class="hidden">
-        <div class="card">
-          <div class="row" style="justify-content:space-between;">
+      <div class="shell">
+        <div class="hero">
+          <div class="hero-left">
+            <div class="brand-mark">E</div>
             <div>
-              <h2>Account</h2>
-              <div id="accountMeta" class="muted"></div>
+              <h1>EdgeCoder Portal</h1>
+              <div class="muted">Manage identity, node activation, credits, and wallets in one place.</div>
             </div>
-            <div class="row">
-              <button id="refreshBtn">Refresh</button>
-              <button id="logoutBtn">Log out</button>
-            </div>
+          </div>
+          <div class="pill-row">
+            <span class="pill">Privacy-first</span>
+            <span class="pill">SSO + Passkeys</span>
+            <span class="pill">BTC/LN credits</span>
           </div>
         </div>
 
-        <div class="card">
-          <h3>Wallet Security Checklist</h3>
-          <p class="muted">Your seed phrase is shown only once at signup. Confirm you have safely backed it up offline.</p>
-          <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
-          <div class="row" style="margin-top:8px;">
-            <button id="walletAckBtn">I backed up my seed phrase</button>
-          </div>
-        </div>
-
-        <div class="grid">
+        <div id="authView" class="grid">
           <div class="card">
-            <h3>Enroll node</h3>
-            <label>Node ID</label><input id="nodeId" type="text" placeholder="mac-worker-001" />
-            <label>Node type</label>
-            <select id="nodeKind">
-              <option value="agent">Agent</option>
-              <option value="coordinator">Coordinator</option>
-            </select>
+            <h2>Get started</h2>
+            <p class="muted">Create your account to enroll agents and coordinators. Accounts remain dormant until email is verified.</p>
+            <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" />
+            <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" />
+            <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
             <div class="row" style="margin-top:10px;">
-              <button class="primary" id="enrollBtn">Generate node token</button>
-            </div>
-            <p class="muted">Install this token as <code>AGENT_REGISTRATION_TOKEN</code> or coordinator registration token.</p>
-            <div id="newTokenWrap" class="hidden">
-              <p class="muted">Registration token (save now; it will not be shown again):</p>
-              <div id="newToken" class="token-box"></div>
+              <button class="primary" id="signupBtn">Create account</button>
             </div>
           </div>
-
           <div class="card">
-            <h3>Activation status</h3>
-            <p class="muted">A node is active only when email is verified and coordinator admin approval is complete.</p>
-            <table>
-              <thead><tr><th>Node</th><th>Type</th><th>Email verified</th><th>Approved</th><th>Active</th><th>Last seen</th></tr></thead>
-              <tbody id="nodesBody"></tbody>
-            </table>
+            <h2>Sign in</h2>
+            <label>Email</label><input id="loginEmail" type="email" placeholder="you@company.com" />
+            <label>Password</label><input id="loginPassword" type="password" placeholder="Your password" />
+            <div class="row" style="margin-top:10px;">
+              <button class="primary" id="loginBtn">Log in</button>
+              <button id="resendBtn">Resend verification</button>
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <button id="passkeyLoginBtn">Log in with passkey</button>
+              <button id="passkeyEnrollBtn">Enroll passkey</button>
+            </div>
+            <h3 style="margin-top:16px;">Single sign-on</h3>
+            <div class="row">
+              <a href="/auth/oauth/google/start"><button>Google</button></a>
+              <a href="/auth/oauth/microsoft/start"><button>Microsoft 365</button></a>
+            </div>
           </div>
         </div>
 
-        <div class="grid">
+        <div id="dashboardView" class="hidden">
           <div class="card">
-            <h3>Credits</h3>
-            <div id="creditsValue" style="font-size:22px;font-weight:700;">-</div>
-            <div id="creditsSatsValue" class="muted">Estimated sats: n/a</div>
-            <p class="muted">Account ID: <code id="accountIdLabel"></code></p>
-            <table>
-              <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
-              <tbody id="creditHistoryBody"></tbody>
-            </table>
+            <div class="row" style="justify-content:space-between;">
+              <div>
+                <h2>Account Overview</h2>
+                <div id="accountMeta" class="muted"></div>
+              </div>
+              <div class="row">
+                <select id="themeSelect" style="min-width: 140px;">
+                  <option value="midnight">Midnight</option>
+                  <option value="emerald">Emerald</option>
+                  <option value="light">Light Pro</option>
+                </select>
+                <button id="refreshBtn">Refresh</button>
+                <button id="logoutBtn">Log out</button>
+              </div>
+            </div>
+            <div class="kpis">
+              <div class="kpi"><div class="label">Current credits</div><div class="value" id="creditsValue">-</div></div>
+              <div class="kpi"><div class="label">Estimated sats</div><div class="value" id="creditsSatsValue">n/a</div></div>
+              <div class="kpi"><div class="label">Account ID</div><div class="value" style="font-size:13px;font-family:ui-monospace,monospace;" id="accountIdLabel"></div></div>
+            </div>
           </div>
 
           <div class="card">
-            <h3>Wallets and BTC/LN intents</h3>
-            <table>
-              <thead><tr><th>Wallet type</th><th>Network</th><th>Payout</th><th>Node/Xpub</th></tr></thead>
-              <tbody id="walletsBody"></tbody>
-            </table>
-            <h3 style="margin-top:14px;">Payment intents</h3>
-            <table>
-              <thead><tr><th>Intent</th><th>Status</th><th>Sats</th><th>Credits</th><th>Created</th></tr></thead>
-              <tbody id="paymentIntentsBody"></tbody>
-            </table>
+            <h3>Wallet Security Checklist</h3>
+            <p class="muted">Your seed phrase is shown only once at signup. Confirm you have safely backed it up offline.</p>
+            <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
+            <div class="row" style="margin-top:8px;">
+              <button id="walletAckBtn">I backed up my seed phrase</button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="card">
+              <h3>Enroll node</h3>
+              <label>Node ID</label><input id="nodeId" type="text" placeholder="mac-worker-001" />
+              <label>Node type</label>
+              <select id="nodeKind">
+                <option value="agent">Agent</option>
+                <option value="coordinator">Coordinator</option>
+              </select>
+              <div class="row" style="margin-top:10px;">
+                <button class="primary" id="enrollBtn">Generate node token</button>
+              </div>
+              <p class="muted">Install this token as <code>AGENT_REGISTRATION_TOKEN</code> or coordinator registration token.</p>
+              <div id="newTokenWrap" class="hidden">
+                <p class="muted">Registration token (save now; it will not be shown again):</p>
+                <div id="newToken" class="token-box"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>Node activation</h3>
+              <p class="muted">A node is active only when email is verified and coordinator admin approval is complete.</p>
+              <table>
+                <thead><tr><th>Node</th><th>Type</th><th>Email verified</th><th>Approved</th><th>Active</th><th>Last seen</th></tr></thead>
+                <tbody id="nodesBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="card">
+              <h3>Credit ledger</h3>
+              <table>
+                <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
+                <tbody id="creditHistoryBody"></tbody>
+              </table>
+            </div>
+
+            <div class="card">
+              <h3>Wallets and BTC/LN intents</h3>
+              <table>
+                <thead><tr><th>Wallet type</th><th>Network</th><th>Payout</th><th>Node/Xpub</th></tr></thead>
+                <tbody id="walletsBody"></tbody>
+              </table>
+              <h3 style="margin-top:14px;">Payment intents</h3>
+              <table>
+                <thead><tr><th>Intent</th><th>Status</th><th>Sats</th><th>Credits</th><th>Created</th></tr></thead>
+                <tbody id="paymentIntentsBody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -991,6 +2112,44 @@ app.get("/portal", async (_req, reply) => {
         const authView = document.getElementById("authView");
         const dashboardView = document.getElementById("dashboardView");
         const toast = document.getElementById("toast");
+        const themeSelect = document.getElementById("themeSelect");
+        const themePalettes = {
+          midnight: {
+            "--bg": "#070b18",
+            "--card": "rgba(15, 23, 42, 0.72)",
+            "--card-border": "rgba(148, 163, 184, 0.25)",
+            "--text": "#e2e8f0",
+            "--muted": "#94a3b8",
+            "--brand": "#7c3aed",
+            "--brand-2": "#22d3ee"
+          },
+          emerald: {
+            "--bg": "#04140f",
+            "--card": "rgba(6, 32, 26, 0.75)",
+            "--card-border": "rgba(52, 211, 153, 0.28)",
+            "--text": "#ddfbf1",
+            "--muted": "#8ad7bd",
+            "--brand": "#10b981",
+            "--brand-2": "#22d3ee"
+          },
+          light: {
+            "--bg": "#f1f5f9",
+            "--card": "rgba(255, 255, 255, 0.92)",
+            "--card-border": "rgba(148, 163, 184, 0.35)",
+            "--text": "#0f172a",
+            "--muted": "#475569",
+            "--brand": "#4f46e5",
+            "--brand-2": "#0ea5e9"
+          }
+        };
+
+        function applyTheme(theme) {
+          const palette = themePalettes[theme] || themePalettes.midnight;
+          for (const [key, value] of Object.entries(palette)) {
+            document.documentElement.style.setProperty(key, value);
+          }
+          if (themeSelect) themeSelect.value = theme;
+        }
 
         function showToast(message, isError = false) {
           toast.textContent = message;
@@ -1017,7 +2176,7 @@ app.get("/portal", async (_req, reply) => {
           const bytes = new Uint8Array(buffer);
           let binary = "";
           for (const b of bytes) binary += String.fromCharCode(b);
-          return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+          return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
         }
 
         async function api(path, options = {}) {
@@ -1043,6 +2202,7 @@ app.get("/portal", async (_req, reply) => {
           dashboardView.classList.remove("hidden");
 
           const user = summary.user || {};
+          applyTheme(user.uiTheme || "midnight");
           document.getElementById("accountMeta").textContent =
             user.email + " | email verified: " + String(Boolean(user.emailVerified));
           document.getElementById("accountIdLabel").textContent = "acct-" + (user.userId || "unknown");
@@ -1145,11 +2305,15 @@ app.get("/portal", async (_req, reply) => {
 
         document.getElementById("resendBtn").addEventListener("click", async () => {
           try {
-            await api("/auth/resend-verification", {
+            const payload = await api("/auth/resend-verification", {
               method: "POST",
               body: JSON.stringify({ email: document.getElementById("loginEmail").value })
             });
-            showToast("If the account exists, a verification email was sent.");
+            if (payload && payload.alreadyVerified) {
+              showToast("This account is already verified. No email was sent.");
+            } else {
+              showToast("If the account exists, a verification email was sent.");
+            }
           } catch (err) {
             showToast("Resend failed: " + String(err.message || err), true);
           }
@@ -1250,6 +2414,20 @@ app.get("/portal", async (_req, reply) => {
           loadDashboard().catch((err) => showToast("Refresh failed: " + String(err.message || err), true));
         });
 
+        themeSelect.addEventListener("change", async () => {
+          const theme = themeSelect.value;
+          applyTheme(theme);
+          try {
+            await api("/me/theme", {
+              method: "POST",
+              body: JSON.stringify({ theme })
+            });
+            showToast("Theme updated.");
+          } catch (err) {
+            showToast("Could not save theme: " + String(err.message || err), true);
+          }
+        });
+
         document.getElementById("enrollBtn").addEventListener("click", async () => {
           try {
             const payload = await api("/nodes/enroll", {
@@ -1268,11 +2446,1607 @@ app.get("/portal", async (_req, reply) => {
           }
         });
 
+        applyTheme("midnight");
         bootstrap();
       </script>
     </body>
   </html>`;
   return reply.type("text/html").send(html);
+});
+
+function portalAuthedPageHtml(input: {
+  title: string;
+  activeTab: "dashboard" | "nodes" | "wallet" | "operations" | "settings";
+  heading: string;
+  subtitle: string;
+  content: string;
+  script: string;
+}): string {
+  const navLink = (
+    tab: "dashboard" | "nodes" | "wallet" | "operations" | "settings",
+    label: string,
+    href: string
+  ) => {
+    const activeClass = input.activeTab === tab ? "tab active" : "tab";
+    return `<a class="${activeClass}" href="${href}">${label}</a>`;
+  };
+
+  return `<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>${input.title}</title>
+      <style>
+        :root {
+          --bg: #f3f6fb;
+          --bg-soft: #e9eef7;
+          --card: rgba(255, 255, 255, 0.96);
+          --card-border: rgba(148, 163, 184, 0.28);
+          --text: #0f172a;
+          --muted: #475569;
+          --brand: #2563eb;
+          --brand-2: #0ea5e9;
+          --ok: #22c55e;
+          --danger: #ef4444;
+        }
+        * { box-sizing: border-box; }
+        body {
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          margin: 0;
+          color: var(--text);
+          background:
+            radial-gradient(1200px 600px at -10% -30%, rgba(37, 99, 235, 0.09), transparent 60%),
+            var(--bg);
+          min-height: 100vh;
+        }
+        .shell { max-width: 1360px; margin: 18px auto 26px; padding: 0 14px; }
+        .workspace {
+          display: grid;
+          grid-template-columns: 232px 1fr;
+          gap: 10px;
+        }
+        .sidebar {
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 255, 0.96));
+          border: 1px solid var(--card-border);
+          border-radius: 8px;
+          padding: 12px 8px;
+          min-height: calc(100vh - 32px);
+          position: sticky;
+          top: 10px;
+        }
+        .main { min-width: 0; }
+        .sidebar-brand { display: flex; align-items: center; gap: 8px; padding: 0 6px 8px; }
+        .sidebar-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+        .sidebar-subtitle { color: var(--muted); font-size: 11px; margin-top: 1px; }
+        .sidebar-section-label {
+          color: #64748b;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          margin: 10px 6px 6px;
+        }
+        .sidebar-foot {
+          margin: 10px 6px 0;
+          padding-top: 8px;
+          border-top: 1px solid rgba(148, 163, 184, 0.3);
+          font-size: 11px;
+        }
+        .topbar {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          align-items: center;
+          margin-bottom: 8px;
+          padding: 10px 12px;
+          border: 1px solid var(--card-border);
+          border-radius: 8px;
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.98));
+        }
+        .ticker-row {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(120px, 1fr));
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+        .ticker {
+          border: 1px solid var(--card-border);
+          border-radius: 6px;
+          padding: 7px;
+          background: #ffffff;
+        }
+        .ticker .label {
+          color: #9db0cf;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+        }
+        .ticker .value {
+          margin-top: 3px;
+          font-size: 14px;
+          font-weight: 700;
+          font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .brand { display: inline-flex; align-items: center; gap: 10px; }
+        .mark {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset, 0 8px 18px rgba(16, 97, 143, 0.22);
+          font-size: 12px;
+        }
+        .title { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
+        .muted { color: var(--muted); font-size: 11px; }
+        .nav-row { display: flex; flex-direction: column; gap: 4px; }
+        .tab {
+          border: 1px solid var(--card-border);
+          border-radius: 6px;
+          padding: 7px 8px;
+          font-size: 11px;
+          color: #334155;
+          background: rgba(241, 245, 249, 0.88);
+          text-decoration: none;
+        }
+        .tab.active {
+          border-color: rgba(37, 99, 235, 0.45);
+          background: rgba(37, 99, 235, 0.1);
+          color: #1d4ed8;
+          box-shadow: inset 2px 0 0 rgba(37, 99, 235, 0.7);
+        }
+        .card {
+          background: var(--card);
+          border: 1px solid var(--card-border);
+          border-radius: 8px;
+          padding: 11px;
+          margin-bottom: 8px;
+          backdrop-filter: blur(10px);
+          box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+        }
+        .content-stack { margin-top: 0; }
+        .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+        button {
+          padding: 6px 9px;
+          border-radius: 6px;
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          background: rgba(248, 250, 252, 0.95);
+          color: var(--text);
+          cursor: pointer;
+          font-size: 12px;
+        }
+        button.primary {
+          background: linear-gradient(140deg, #2563eb, #1d4ed8);
+          border-color: rgba(37, 99, 235, 0.75);
+          color: white;
+        }
+        input, select {
+          width: 100%;
+          padding: 7px 8px;
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          border-radius: 6px;
+          background: #ffffff;
+          color: var(--text);
+          font-size: 12px;
+        }
+        label {
+          display: block;
+          margin: 6px 0 3px;
+          font-size: 10px;
+          color: #64748b;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td {
+          border-bottom: 1px solid rgba(148, 163, 184, 0.26);
+          text-align: left;
+          padding: 6px 5px;
+          vertical-align: top;
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        th {
+          color: #475569;
+          font-weight: 600;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .grid2 { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 8px; }
+        .kpis { display: grid; grid-template-columns: repeat(3, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
+        .kpi { border: 1px solid var(--card-border); border-radius: 6px; padding: 7px; background: #ffffff; }
+        .kpi .label {
+          color: var(--muted);
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+        }
+        .kpi .value {
+          font-size: 15px;
+          font-weight: 700;
+          margin-top: 2px;
+          font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .status-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 7px;
+          border-radius: 999px;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          border: 1px solid rgba(116, 137, 173, 0.45);
+          background: #f8fafc;
+          color: #334155;
+        }
+        .status-badge.ok {
+          border-color: rgba(34, 197, 94, 0.6);
+          color: #86efac;
+          background: rgba(20, 83, 45, 0.35);
+        }
+        .status-badge.warn {
+          border-color: rgba(245, 158, 11, 0.62);
+          color: #fcd34d;
+          background: rgba(120, 53, 15, 0.32);
+        }
+        .status-badge.danger {
+          border-color: rgba(239, 68, 68, 0.62);
+          color: #fca5a5;
+          background: rgba(127, 29, 29, 0.32);
+        }
+        .table-controls {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          flex-wrap: wrap;
+          margin: 0 0 8px;
+        }
+        .table-controls input, .table-controls select {
+          width: auto;
+          min-width: 150px;
+        }
+        .token-box {
+          border: 1px dashed rgba(37, 99, 235, 0.42);
+          border-radius: 6px;
+          padding: 8px;
+          background: rgba(239, 246, 255, 0.8);
+          word-break: break-all;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 12px;
+        }
+        #toast {
+          position: fixed;
+          top: 12px;
+          right: 12px;
+          width: min(420px, calc(100vw - 32px));
+          z-index: 100;
+          margin: 0;
+        }
+        .hidden { display: none; }
+        @media (max-width: 920px) {
+          .workspace { grid-template-columns: 1fr; }
+          .sidebar {
+            min-height: auto;
+            position: static;
+          }
+          .nav-row { flex-direction: row; flex-wrap: wrap; }
+          .tab {
+            border-radius: 999px;
+            padding: 6px 10px;
+            text-transform: none;
+            letter-spacing: 0;
+          }
+          .grid2 { grid-template-columns: 1fr; }
+          .kpis { grid-template-columns: 1fr; }
+          .ticker-row { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="shell">
+        <div class="workspace">
+          <aside class="sidebar">
+            <div class="sidebar-brand">
+              <div class="mark">E</div>
+              <div>
+                <div class="sidebar-title">EdgeCoder Portal</div>
+                <div class="sidebar-subtitle">Ops Console</div>
+              </div>
+            </div>
+            <div class="sidebar-section-label">Navigation</div>
+            <div class="nav-row">
+              ${navLink("dashboard", "Dashboard", "/portal/dashboard")}
+              ${navLink("nodes", "Nodes", "/portal/nodes")}
+              ${navLink("wallet", "Wallet", "/portal/wallet")}
+              ${navLink("operations", "Coordinator Ops", "/portal/coordinator-ops")}
+              ${navLink("settings", "Settings", "/portal/settings")}
+            </div>
+            <div class="sidebar-foot muted">Auditable actions and secure operations</div>
+          </aside>
+          <main class="main">
+            <div class="topbar">
+              <div class="brand">
+                <div>
+                  <h1 class="title">${input.heading}</h1>
+                  <div class="muted">${input.subtitle}</div>
+                </div>
+              </div>
+              <div class="row">
+                <button id="switchUserBtn">Switch user</button>
+                <button id="logoutBtn">Sign out</button>
+              </div>
+            </div>
+            <div class="ticker-row">
+              <div class="ticker"><div class="label">Credits</div><div class="value" id="topTickerCredits">-</div></div>
+              <div class="ticker"><div class="label">Nodes</div><div class="value" id="topTickerNodes">-</div></div>
+              <div class="ticker"><div class="label">Pending Sends</div><div class="value" id="topTickerSends">-</div></div>
+              <div class="ticker"><div class="label">Wallet</div><div class="value" id="topTickerWallet">-</div></div>
+            </div>
+            <div class="content-stack">
+              ${input.content}
+            </div>
+          </main>
+        </div>
+      </div>
+      <div id="toast" class="card hidden"></div>
+      <script>
+        const toast = document.getElementById("toast");
+        const themePalettes = {
+          midnight: { "--bg": "#f3f6fb", "--card": "rgba(255, 255, 255, 0.96)", "--card-border": "rgba(148, 163, 184, 0.28)", "--text": "#0f172a", "--muted": "#475569", "--brand": "#2563eb", "--brand-2": "#0ea5e9" },
+          emerald: { "--bg": "#f0fdf8", "--card": "rgba(255, 255, 255, 0.96)", "--card-border": "rgba(110, 231, 183, 0.35)", "--text": "#0f172a", "--muted": "#3f6458", "--brand": "#059669", "--brand-2": "#14b8a6" },
+          light: { "--bg": "#edf2f7", "--card": "rgba(255, 255, 255, 0.95)", "--card-border": "rgba(148, 163, 184, 0.38)", "--text": "#0f172a", "--muted": "#475569", "--brand": "#2563eb", "--brand-2": "#0284c7" }
+        };
+        function applyTheme(theme) {
+          const palette = themePalettes[theme] || themePalettes.midnight;
+          for (const [key, value] of Object.entries(palette)) document.documentElement.style.setProperty(key, value);
+        }
+        function showToast(message, isError = false) {
+          toast.textContent = message;
+          toast.classList.remove("hidden");
+          toast.style.borderColor = isError ? "#ef4444" : "#22c55e";
+          setTimeout(() => toast.classList.add("hidden"), 5000);
+        }
+        async function api(path, options = {}) {
+          const res = await fetch(path, {
+            credentials: "include",
+            headers: { "content-type": "application/json", ...(options.headers || {}) },
+            ...options
+          });
+          let payload = null;
+          try { payload = await res.json(); } catch {}
+          if (!res.ok) throw new Error(payload && payload.error ? payload.error : String(res.status));
+          return payload;
+        }
+        async function requireAuth() {
+          try {
+            const me = await api("/me", { method: "GET", headers: {} });
+            applyTheme((me.user || {}).uiTheme || "midnight");
+            return me;
+          } catch {
+            window.location.href = "/portal";
+            throw new Error("not_authenticated");
+          }
+        }
+        function statusBadge(text, tone = "neutral") {
+          const toneClass = tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "danger" ? "danger" : "";
+          return "<span class='status-badge " + toneClass + "'>" + String(text) + "</span>";
+        }
+        function boolBadge(value, trueLabel = "YES", falseLabel = "NO") {
+          return value ? statusBadge(trueLabel, "ok") : statusBadge(falseLabel, "warn");
+        }
+        async function loadTopTicker() {
+          try {
+            await requireAuth();
+            const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
+            const credits = (summary.walletSnapshot || {}).credits;
+            const creditVal = credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
+            const nodeCount = String((summary.nodes || []).length);
+            const walletCount = String(((summary.walletSnapshot || {}).wallets || []).length);
+            const sendReq = await api("/wallet/send/requests", { method: "GET", headers: {} }).catch(() => ({ requests: [] }));
+            const pendingSends = ((sendReq.requests || []).filter((r) => String(r.status) === "pending_manual_review")).length;
+            document.getElementById("topTickerCredits").textContent = creditVal;
+            document.getElementById("topTickerNodes").textContent = nodeCount;
+            document.getElementById("topTickerWallet").textContent = walletCount;
+            document.getElementById("topTickerSends").textContent = String(pendingSends);
+          } catch {
+            // noop on pages that redirect unauthenticated users
+          }
+        }
+        document.getElementById("logoutBtn").addEventListener("click", async () => {
+          try {
+            await api("/auth/logout", { method: "POST", body: JSON.stringify({}) });
+          } finally {
+            window.location.href = "/";
+          }
+        });
+        document.getElementById("switchUserBtn").addEventListener("click", async () => {
+          try {
+            await api("/auth/logout", { method: "POST", body: JSON.stringify({}) });
+          } finally {
+            window.location.href = "/portal?switch=1";
+          }
+        });
+        loadTopTicker();
+      </script>
+      <script>
+        ${input.script}
+      </script>
+    </body>
+  </html>`;
+}
+
+app.get("/portal", async (_req, reply) => {
+  const html = `<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>EdgeCoder Portal | Sign in</title>
+      <style>
+        :root {
+          --bg: #f3f6fb;
+          --card: rgba(255, 255, 255, 0.96);
+          --card-border: rgba(148, 163, 184, 0.3);
+          --text: #0f172a;
+          --muted: #475569;
+          --brand: #2563eb;
+          --brand-2: #0ea5e9;
+        }
+        * { box-sizing: border-box; }
+        body {
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          margin: 0;
+          color: var(--text);
+          background:
+            radial-gradient(1200px 580px at -10% -30%, rgba(37, 99, 235, 0.08), transparent 60%),
+            var(--bg);
+          min-height: 100vh;
+        }
+        .shell { max-width: 980px; margin: 28px auto 42px; padding: 0 16px; }
+        .hero { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+        .brand { display: inline-flex; align-items: center; gap: 10px; }
+        .mark {
+          width: 36px;
+          height: 36px;
+          border-radius: 11px;
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .muted { color: var(--muted); font-size: 13px; }
+        .layout { display: grid; grid-template-columns: 1fr; gap: 12px; }
+        .auth-stack { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(260px, 1fr)); }
+        .card {
+          background: var(--card);
+          border: 1px solid var(--card-border);
+          border-radius: 12px;
+          padding: 16px;
+          backdrop-filter: blur(10px);
+          box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
+        }
+        .simple-intro { background: linear-gradient(180deg, #ffffff, #f8fbff); }
+        .simple-intro h2 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.02em; }
+        .simple-intro p { margin: 0; color: #334155; line-height: 1.6; max-width: 760px; }
+        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #cbd5e1; }
+        input {
+          width: 100%;
+          padding: 10px 11px;
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          border-radius: 10px;
+          background: #ffffff;
+          color: var(--text);
+        }
+        .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+        button {
+          padding: 9px 12px;
+          border-radius: 10px;
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          background: #f8fafc;
+          color: var(--text);
+          cursor: pointer;
+        }
+        button.primary {
+          background: linear-gradient(140deg, #2563eb, #1d4ed8);
+          border-color: rgba(37, 99, 235, 0.75);
+          color: white;
+        }
+        a { color: inherit; }
+        #toast {
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          width: min(420px, calc(100vw - 32px));
+          z-index: 100;
+          margin: 0;
+        }
+        .hidden { display: none; }
+        .session-banner {
+          border: 1px solid rgba(37, 99, 235, 0.34);
+          background: rgba(219, 234, 254, 0.8);
+        }
+        @media (max-width: 920px) {
+          .auth-stack { grid-template-columns: 1fr; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="shell">
+        <div class="hero">
+          <div class="brand">
+            <div class="mark">E</div>
+            <div>
+              <h1 style="margin:0;">EdgeCoder Portal</h1>
+              <div class="muted">Sign in to access dashboard, nodes, wallet, and settings pages.</div>
+            </div>
+          </div>
+          <a href="/">Back to edgecoder.io</a>
+        </div>
+        <div class="layout">
+          <div class="card simple-intro">
+            <h2>Simple, secure sign-in</h2>
+            <p>
+              Access your EdgeCoder workspace with enterprise authentication controls,
+              passkeys, and policy-driven operations in one place.
+            </p>
+          </div>
+          <div class="auth-stack">
+            <div class="card">
+            <h2 style="margin-top:0;">Get started</h2>
+            <p class="muted">Create your account to enroll nodes and manage compute access.</p>
+            <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" />
+            <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" />
+            <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
+            <div class="row">
+              <button class="primary" id="signupBtn">Create account</button>
+            </div>
+            </div>
+            <div class="card">
+            <h2 style="margin-top:0;">Sign in</h2>
+            <label>Email</label><input id="loginEmail" type="email" placeholder="you@company.com" />
+            <label>Password</label><input id="loginPassword" type="password" placeholder="Your password" />
+            <div class="row">
+              <button class="primary" id="loginBtn">Log in</button>
+              <button id="resendBtn">Resend verification</button>
+            </div>
+            <div class="row">
+              <button id="passkeyLoginBtn">Log in with passkey</button>
+            </div>
+            <h3>Single sign-on</h3>
+            <div class="row">
+              <a href="/auth/oauth/google/start"><button>Google</button></a>
+              <a href="/auth/oauth/microsoft/start"><button>Microsoft 365</button></a>
+            </div>
+            </div>
+          </div>
+        </div>
+        <div id="sessionBanner" class="card session-banner hidden">
+          <h3 style="margin-top:0;">Already signed in</h3>
+          <div id="sessionUserLine" class="muted">You already have an active session.</div>
+          <div class="row">
+            <button class="primary" id="continueSessionBtn">Continue to dashboard</button>
+            <button id="switchUserBtn">Switch user</button>
+          </div>
+        </div>
+      </div>
+      <div id="toast" class="card hidden"></div>
+      <script>
+        const toast = document.getElementById("toast");
+        const sessionBanner = document.getElementById("sessionBanner");
+        const sessionUserLine = document.getElementById("sessionUserLine");
+        const continueSessionBtn = document.getElementById("continueSessionBtn");
+        const switchUserBtn = document.getElementById("switchUserBtn");
+        function showToast(message, isError = false) {
+          toast.textContent = message;
+          toast.classList.remove("hidden");
+          toast.style.borderColor = isError ? "#ef4444" : "#22c55e";
+          setTimeout(() => toast.classList.add("hidden"), 5000);
+        }
+        function b64urlToArrayBuffer(base64url) {
+          const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+          const binary = atob(padded);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          return bytes.buffer;
+        }
+        function arrayBufferToB64url(buffer) {
+          const bytes = new Uint8Array(buffer);
+          let binary = "";
+          for (const b of bytes) binary += String.fromCharCode(b);
+          return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+        }
+        async function api(path, options = {}) {
+          const res = await fetch(path, {
+            credentials: "include",
+            headers: { "content-type": "application/json", ...(options.headers || {}) },
+            ...options
+          });
+          let payload = null;
+          try { payload = await res.json(); } catch {}
+          if (!res.ok) throw new Error(payload && payload.error ? payload.error : String(res.status));
+          return payload;
+        }
+        async function checkExistingSession() {
+          try {
+            const me = await api("/me", { method: "GET", headers: {} });
+            const user = me.user || {};
+            sessionUserLine.textContent = (user.email || "unknown") + " is currently signed in on this browser.";
+            sessionBanner.classList.remove("hidden");
+          } catch {
+            sessionBanner.classList.add("hidden");
+          }
+        }
+        document.getElementById("signupBtn").addEventListener("click", async () => {
+          try {
+            await api("/auth/signup", {
+              method: "POST",
+              body: JSON.stringify({
+                email: document.getElementById("signupEmail").value,
+                password: document.getElementById("signupPassword").value,
+                displayName: document.getElementById("signupDisplayName").value || undefined
+              })
+            });
+            showToast("Signup complete. Verify your email, then sign in.");
+          } catch (err) {
+            showToast("Signup failed: " + String(err.message || err), true);
+          }
+        });
+        document.getElementById("loginBtn").addEventListener("click", async () => {
+          try {
+            await api("/auth/login", {
+              method: "POST",
+              body: JSON.stringify({
+                email: document.getElementById("loginEmail").value,
+                password: document.getElementById("loginPassword").value
+              })
+            });
+            window.location.href = "/portal/dashboard";
+          } catch (err) {
+            showToast("Login failed: " + String(err.message || err), true);
+          }
+        });
+        document.getElementById("resendBtn").addEventListener("click", async () => {
+          try {
+            const payload = await api("/auth/resend-verification", {
+              method: "POST",
+              body: JSON.stringify({ email: document.getElementById("loginEmail").value })
+            });
+            if (payload && payload.alreadyVerified) {
+              showToast("This account is already verified. No email was sent.");
+            } else {
+              showToast("If the account exists, a verification email was sent.");
+            }
+          } catch (err) {
+            showToast("Resend failed: " + String(err.message || err), true);
+          }
+        });
+        document.getElementById("passkeyLoginBtn").addEventListener("click", async () => {
+          if (!window.PublicKeyCredential) {
+            showToast("Passkeys are not supported in this browser.", true);
+            return;
+          }
+          try {
+            const email = document.getElementById("loginEmail").value;
+            const authOptions = await api("/auth/passkey/login/options", {
+              method: "POST",
+              body: JSON.stringify({ email })
+            });
+            const challengeId = authOptions.challengeId;
+            const options = authOptions.options;
+            options.challenge = b64urlToArrayBuffer(options.challenge);
+            options.allowCredentials = (options.allowCredentials || []).map((c) => ({ ...c, id: b64urlToArrayBuffer(c.id) }));
+            const assertion = await navigator.credentials.get({ publicKey: options });
+            const response = assertion.response;
+            await api("/auth/passkey/login/verify", {
+              method: "POST",
+              body: JSON.stringify({
+                challengeId,
+                credentialId: assertion.id,
+                response: {
+                  id: assertion.id,
+                  rawId: arrayBufferToB64url(assertion.rawId),
+                  type: assertion.type,
+                  response: {
+                    clientDataJSON: arrayBufferToB64url(response.clientDataJSON),
+                    authenticatorData: arrayBufferToB64url(response.authenticatorData),
+                    signature: arrayBufferToB64url(response.signature),
+                    userHandle: response.userHandle ? arrayBufferToB64url(response.userHandle) : null
+                  }
+                }
+              })
+            });
+            window.location.href = "/portal/dashboard";
+          } catch (err) {
+            showToast("Passkey login failed: " + String(err.message || err), true);
+          }
+        });
+        continueSessionBtn.addEventListener("click", () => {
+          window.location.href = "/portal/dashboard";
+        });
+        switchUserBtn.addEventListener("click", async () => {
+          try {
+            await api("/auth/logout", { method: "POST", body: JSON.stringify({}) });
+            showToast("Signed out. You can now use a different account.");
+            sessionBanner.classList.add("hidden");
+          } catch (err) {
+            showToast("Could not switch user: " + String(err.message || err), true);
+          }
+        });
+        checkExistingSession();
+      </script>
+    </body>
+  </html>`;
+  return reply.type("text/html").send(html);
+});
+
+app.get("/portal/dashboard", async (_req, reply) => {
+  const content = `
+    <div class="card">
+      <h2 style="margin-top:0;">Account overview</h2>
+      <div id="accountMeta" class="muted">Loading account...</div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Current credits</div><div class="value" id="creditsValue">-</div></div>
+        <div class="kpi"><div class="label">Estimated sats</div><div class="value" id="creditsSatsValue">-</div></div>
+        <div class="kpi"><div class="label">Enrolled nodes</div><div class="value" id="nodeCountValue">-</div></div>
+      </div>
+    </div>
+    <div id="emailVerifyCard" class="card hidden" style="border-color: rgba(245, 158, 11, 0.55); background: rgba(120, 53, 15, 0.22);">
+      <h3 style="margin-top:0;">Email verification required</h3>
+      <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="primary" id="emailVerifyNowBtn">Send verification email</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Quick actions</h3>
+      <div class="row">
+        <a href="/portal/nodes"><button class="primary">Manage nodes</button></a>
+        <a href="/portal/coordinator-ops"><button>Coordinator operations</button></a>
+        <a href="/portal/wallet"><button>Open wallet</button></a>
+        <a href="/portal/settings"><button>Account settings</button></a>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Live issuance (rolling 24h)</h3>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Daily pool</div><div class="value" id="issuancePoolValue">-</div></div>
+        <div class="kpi"><div class="label">Load index</div><div class="value" id="issuanceLoadValue">-</div></div>
+        <div class="kpi"><div class="label">Contributors</div><div class="value" id="issuanceContribValue">-</div></div>
+      </div>
+      <table>
+        <thead><tr><th>Account</th><th>Share</th><th>Hourly tokens</th><th>Weighted contribution</th></tr></thead>
+        <tbody id="issuanceAllocBody"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Decentralized local model mesh</h3>
+      <div id="modelMeshMeta" class="muted">Loading model-serving agents...</div>
+      <table>
+        <thead><tr><th>Agent</th><th>Provider</th><th>Model catalog</th><th>Capacity</th></tr></thead>
+        <tbody id="modelMeshBody"></tbody>
+      </table>
+    </div>
+  `;
+  const script = `
+    function fmtFixed(v, digits) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(digits) : "n/a";
+    }
+    function renderRows(targetId, rowsHtml, colspan, emptyText) {
+      const body = document.getElementById(targetId);
+      body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
+    }
+    (async () => {
+      const me = await requireAuth();
+      const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
+      const insights = await api("/dashboard/network-insights", { method: "GET", headers: {} });
+      const user = me.user || {};
+      const emailVerified = Boolean(user.emailVerified);
+      document.getElementById("accountMeta").textContent =
+        (user.email || "unknown") + " | email verified: " + String(emailVerified);
+      const credits = (summary.walletSnapshot || {}).credits;
+      document.getElementById("creditsValue").textContent =
+        credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
+      const quote = (summary.walletSnapshot || {}).quote;
+      document.getElementById("creditsSatsValue").textContent =
+        quote && typeof quote.estimatedSats !== "undefined" ? String(quote.estimatedSats) : "n/a";
+      document.getElementById("nodeCountValue").textContent = String((summary.nodes || []).length);
+
+      const issuance = insights.issuance || {};
+      const epoch = issuance.epoch || null;
+      document.getElementById("issuancePoolValue").textContent = epoch ? fmtFixed(epoch.dailyPoolTokens, 3) : "n/a";
+      document.getElementById("issuanceLoadValue").textContent = epoch ? fmtFixed(epoch.loadIndex, 4) : "n/a";
+      document.getElementById("issuanceContribValue").textContent = epoch ? String(epoch.contributionCount || 0) : "0";
+      const allocRows = ((issuance.allocations || []).slice(0, 8)).map((row) =>
+        "<tr><td>" + String(row.accountId || "-") + "</td><td>" + fmtFixed((Number(row.allocationShare || 0) * 100), 2) + "%</td><td>" +
+        fmtFixed(row.issuedTokens, 6) + "</td><td>" + fmtFixed(row.weightedContribution, 4) + "</td></tr>"
+      );
+      renderRows("issuanceAllocBody", allocRows, 4, "No issuance allocations available yet.");
+
+      const modelMesh = insights.modelMesh || {};
+      const models = modelMesh.models || [];
+      document.getElementById("modelMeshMeta").textContent =
+        "Model-serving agents online: " + String(models.length) +
+        (modelMesh.generatedAtMs ? " | updated " + new Date(modelMesh.generatedAtMs).toISOString() : "");
+      const modelRows = models.slice(0, 12).map((m) =>
+        "<tr><td>" + String(m.agentId || "-") + "</td><td>" + String(m.provider || "-") + "</td><td>" +
+        String((m.modelCatalog || []).join(", ") || "-") + "</td><td>" + String(m.maxConcurrentTasks || 0) + "</td></tr>"
+      );
+      renderRows("modelMeshBody", modelRows, 4, "No model-serving agents advertising yet.");
+
+      const emailVerifyCard = document.getElementById("emailVerifyCard");
+      const emailVerifyNowBtn = document.getElementById("emailVerifyNowBtn");
+      if (!emailVerified) {
+        emailVerifyCard.classList.remove("hidden");
+        emailVerifyNowBtn.addEventListener("click", async () => {
+          try {
+            const payload = await api("/auth/resend-verification", {
+              method: "POST",
+              body: JSON.stringify({ email: user.email || "" })
+            });
+            if (payload && payload.alreadyVerified) {
+              showToast("Your email is already verified.");
+            } else {
+              showToast("Verification email sent. Check your inbox.");
+            }
+          } catch (err) {
+            showToast("Could not send verification email: " + String(err.message || err), true);
+          }
+        });
+      } else {
+        emailVerifyCard.classList.add("hidden");
+      }
+    })().catch((err) => {
+      showToast("Could not load dashboard: " + String(err.message || err), true);
+    });
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Dashboard",
+    activeTab: "dashboard",
+    heading: "Dashboard",
+    subtitle: "High-level account and network view.",
+    content,
+    script
+  }));
+});
+
+app.get("/portal/nodes", async (_req, reply) => {
+  const content = `
+    <div class="grid2">
+      <div class="card">
+        <h2 style="margin-top:0;">Enroll node</h2>
+        <label>Node ID</label><input id="nodeId" type="text" placeholder="mac-worker-001" />
+        <label>Node type</label>
+        <select id="nodeKind">
+          <option value="agent">Agent</option>
+          <option value="coordinator">Coordinator</option>
+        </select>
+        <div class="row">
+          <button class="primary" id="enrollBtn">Generate node token</button>
+        </div>
+        <p class="muted">Save this token now. It is shown only once.</p>
+        <div id="newTokenWrap" class="hidden">
+          <div id="newToken" class="token-box"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2 style="margin-top:0;">Node activation states</h2>
+        <p class="muted">Nodes become active after email verification and coordinator approval.</p>
+        <div class="table-controls">
+          <input id="nodesFilterInput" type="text" placeholder="Filter by node id or type" />
+          <select id="nodesStatusFilter">
+            <option value="all">All states</option>
+            <option value="active">Active only</option>
+            <option value="pending">Pending activation</option>
+          </select>
+          <select id="nodesSortOrder">
+            <option value="asc">Node A-Z</option>
+            <option value="desc">Node Z-A</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Node</th><th>Type</th><th>Email verified</th><th>Approved</th><th>Active</th><th>Last seen</th><th>Actions</th></tr></thead>
+          <tbody id="nodesBody"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  const script = `
+    let allNodes = [];
+    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
+    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
+    function renderNodes(nodes) {
+      const body = document.getElementById("nodesBody");
+      const rows = (nodes || []).map((n) =>
+        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + boolBadge(Boolean(n.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
+        boolBadge(Boolean(n.nodeApproved), "APPROVED", "PENDING") + "</td><td>" + (n.active ? statusBadge("ACTIVE", "ok") : statusBadge("DORMANT", "warn")) +
+        "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td><button class='deleteNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "'>Delete</button></td></tr>"
+      );
+      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='7'>No nodes enrolled.</td></tr>";
+    }
+    function applyNodeTableView() {
+      const text = (document.getElementById("nodesFilterInput").value || "").trim().toLowerCase();
+      const statusFilter = document.getElementById("nodesStatusFilter").value;
+      const sortOrder = document.getElementById("nodesSortOrder").value;
+      const filtered = (allNodes || []).filter((n) => {
+        const matchesText = !text || String(n.nodeId).toLowerCase().includes(text) || String(n.nodeKind).toLowerCase().includes(text);
+        const active = Boolean(n.active);
+        const matchesStatus = statusFilter === "all" || (statusFilter === "active" ? active : !active);
+        return matchesText && matchesStatus;
+      });
+      filtered.sort((a, b) => {
+        const aa = String(a.nodeId || "").toLowerCase();
+        const bb = String(b.nodeId || "").toLowerCase();
+        if (sortOrder === "desc") return bb.localeCompare(aa);
+        return aa.localeCompare(bb);
+      });
+      renderNodes(filtered);
+    }
+    async function loadNodes() {
+      await requireAuth();
+      const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
+      allNodes = summary.nodes || [];
+      applyNodeTableView();
+    }
+    document.getElementById("nodesFilterInput").addEventListener("input", applyNodeTableView);
+    document.getElementById("nodesStatusFilter").addEventListener("change", applyNodeTableView);
+    document.getElementById("nodesSortOrder").addEventListener("change", applyNodeTableView);
+    document.getElementById("nodesBody").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("deleteNodeBtn")) return;
+      const nodeIdRaw = target.getAttribute("data-node-id");
+      if (!nodeIdRaw) return;
+      const nodeId = decodeURIComponent(nodeIdRaw);
+      if (!window.confirm("Delete node '" + nodeId + "'? This removes enrollment from your portal account.")) return;
+      try {
+        await api("/nodes/" + encodeURIComponent(nodeId), { method: "DELETE", headers: {} });
+        showToast("Deleted node " + nodeId);
+        await loadNodes();
+      } catch (err) {
+        showToast("Delete failed: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("enrollBtn").addEventListener("click", async () => {
+      try {
+        await requireAuth();
+        const payload = await api("/nodes/enroll", {
+          method: "POST",
+          body: JSON.stringify({
+            nodeId: document.getElementById("nodeId").value,
+            nodeKind: document.getElementById("nodeKind").value
+          })
+        });
+        document.getElementById("newTokenWrap").classList.remove("hidden");
+        document.getElementById("newToken").textContent = payload.registrationToken;
+        await loadNodes();
+        showToast("Node enrollment token generated.");
+      } catch (err) {
+        showToast("Enroll failed: " + String(err.message || err), true);
+      }
+    });
+    loadNodes().catch((err) => showToast("Could not load nodes: " + String(err.message || err), true));
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Nodes",
+    activeTab: "nodes",
+    heading: "Nodes",
+    subtitle: "Enroll and monitor agent/coordinator nodes.",
+    content,
+    script
+  }));
+});
+
+app.get("/portal/coordinator-ops", async (_req, reply) => {
+  const content = `
+    <div class="card">
+      <h2 style="margin-top:0;">Coordinator Operations</h2>
+      <div id="opsAccountLine" class="muted">Loading operator session...</div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Connected agents</div><div class="value" id="opsAgentsValue">-</div></div>
+        <div class="kpi"><div class="label">Queue depth</div><div class="value" id="opsQueueValue">-</div></div>
+        <div class="kpi"><div class="label">Results</div><div class="value" id="opsResultsValue">-</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Coordinator enrollment requests</h3>
+      <div class="row">
+        <button class="primary" id="filterAllBtn">All pending</button>
+        <button id="filterCoordinatorBtn">Coordinator enrollment requests</button>
+        <button id="filterAgentBtn">Agent enrollment requests</button>
+      </div>
+      <table>
+        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Actions</th></tr></thead>
+        <tbody id="opsPendingBody"></tbody>
+      </table>
+      <div id="opsPendingNote" class="muted"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Approved nodes</h3>
+      <div class="row">
+        <button class="primary" id="approvedFilterAllBtn">All approved</button>
+        <button id="approvedFilterCoordinatorBtn">Coordinators</button>
+        <button id="approvedFilterAgentBtn">Agents</button>
+        <button id="approvedFilterActiveBtn">Active only</button>
+      </div>
+      <table>
+        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th></tr></thead>
+        <tbody id="opsApprovedBody"></tbody>
+      </table>
+      <div id="opsApprovedNote" class="muted"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Coordinator local model election</h3>
+      <div class="row">
+        <input id="opsModelInput" type="text" value="qwen2.5-coder:latest" style="max-width:320px;" />
+        <button class="primary" id="opsElectBtn">Elect Ollama on Coordinator</button>
+      </div>
+      <div id="opsElectNote" class="muted"></div>
+    </div>
+  `;
+  const script = `
+    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
+    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
+    function filterPending(nodes, mode) {
+      if (mode === "all") return nodes;
+      return (nodes || []).filter((n) => String(n.nodeKind) === mode);
+    }
+    function filterApproved(nodes, mode, activeOnly) {
+      let values = nodes || [];
+      if (mode !== "all") values = values.filter((n) => String(n.nodeKind) === mode);
+      if (activeOnly) values = values.filter((n) => n.active === true);
+      return values;
+    }
+    let pendingFilter = "all";
+    let approvedFilter = "all";
+    let approvedActiveOnly = false;
+    let cachedPending = [];
+    let cachedApproved = [];
+    let canManageApprovals = false;
+
+    function renderPending() {
+      const body = document.getElementById("opsPendingBody");
+      const rows = filterPending(cachedPending, pendingFilter).map((n) =>
+        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
+        String(Boolean(n.emailVerified)) + "</td><td>" + (n.sourceIp || "unknown") + "</td><td>" + (n.countryCode || "unknown") +
+        "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td>" +
+        (canManageApprovals
+          ? "<button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='true'>Approve</button> <button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='false'>Reject</button>"
+          : "<span class='muted'>Read-only</span>") +
+        "</td></tr>"
+      );
+      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='9'>No pending nodes for this filter.</td></tr>";
+      const counts = {
+        all: cachedPending.length,
+        coordinator: cachedPending.filter((n) => n.nodeKind === "coordinator").length,
+        agent: cachedPending.filter((n) => n.nodeKind === "agent").length
+      };
+      document.getElementById("opsPendingNote").textContent = "Filter: " + pendingFilter + " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent;
+      document.getElementById("filterAllBtn").className = pendingFilter === "all" ? "primary" : "";
+      document.getElementById("filterCoordinatorBtn").className = pendingFilter === "coordinator" ? "primary" : "";
+      document.getElementById("filterAgentBtn").className = pendingFilter === "agent" ? "primary" : "";
+    }
+
+    function renderApproved() {
+      const body = document.getElementById("opsApprovedBody");
+      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) =>
+        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
+        String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + (n.sourceIp || "unknown") +
+        "</td><td>" + (n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
+        fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>"
+      );
+      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='10'>No approved nodes for this filter.</td></tr>";
+      const counts = {
+        all: cachedApproved.length,
+        coordinator: cachedApproved.filter((n) => n.nodeKind === "coordinator").length,
+        agent: cachedApproved.filter((n) => n.nodeKind === "agent").length,
+        active: cachedApproved.filter((n) => n.active === true).length
+      };
+      document.getElementById("opsApprovedNote").textContent =
+        "Filter: " + approvedFilter + (approvedActiveOnly ? " + active-only" : "") +
+        " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent + " active=" + counts.active;
+      document.getElementById("approvedFilterAllBtn").className = approvedFilter === "all" ? "primary" : "";
+      document.getElementById("approvedFilterCoordinatorBtn").className = approvedFilter === "coordinator" ? "primary" : "";
+      document.getElementById("approvedFilterAgentBtn").className = approvedFilter === "agent" ? "primary" : "";
+      document.getElementById("approvedFilterActiveBtn").className = approvedActiveOnly ? "primary" : "";
+    }
+
+    async function refreshOps() {
+      const me = await requireAuth();
+      const user = me.user || {};
+      const data = await api("/coordinator/ops/summary", { method: "GET", headers: {} });
+      document.getElementById("opsAgentsValue").textContent = String((data.status && data.status.agents) || 0);
+      document.getElementById("opsQueueValue").textContent = String((data.status && data.status.queued) || 0);
+      document.getElementById("opsResultsValue").textContent = String((data.status && data.status.results) || 0);
+      cachedPending = data.pendingNodes || [];
+      cachedApproved = data.approvedNodes || [];
+      canManageApprovals = Boolean(data.access && data.access.canManageApprovals);
+      const scopeText = data.access && data.access.isSystemAdmin ? "global scope" : "owner scope";
+      document.getElementById("opsAccountLine").textContent =
+        (user.email || "unknown") + " | coordinator operations access | " + scopeText;
+      renderPending();
+      renderApproved();
+    }
+
+    document.getElementById("filterAllBtn").addEventListener("click", () => { pendingFilter = "all"; renderPending(); });
+    document.getElementById("filterCoordinatorBtn").addEventListener("click", () => { pendingFilter = "coordinator"; renderPending(); });
+    document.getElementById("filterAgentBtn").addEventListener("click", () => { pendingFilter = "agent"; renderPending(); });
+    document.getElementById("approvedFilterAllBtn").addEventListener("click", () => { approvedFilter = "all"; renderApproved(); });
+    document.getElementById("approvedFilterCoordinatorBtn").addEventListener("click", () => { approvedFilter = "coordinator"; renderApproved(); });
+    document.getElementById("approvedFilterAgentBtn").addEventListener("click", () => { approvedFilter = "agent"; renderApproved(); });
+    document.getElementById("approvedFilterActiveBtn").addEventListener("click", () => { approvedActiveOnly = !approvedActiveOnly; renderApproved(); });
+
+    document.getElementById("opsPendingBody").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("approveBtn")) return;
+      const coordinatorIdRaw = target.getAttribute("data-node-id");
+      const nodeKindRaw = target.getAttribute("data-node-kind");
+      if (!coordinatorIdRaw || !nodeKindRaw) return;
+      const nodeId = decodeURIComponent(coordinatorIdRaw);
+      const nodeKind = decodeURIComponent(nodeKindRaw);
+      const approved = target.getAttribute("data-approved") === "true";
+      try {
+        await api("/coordinator/ops/node-approval", {
+          method: "POST",
+          body: JSON.stringify({ nodeId, nodeKind, approved })
+        });
+        showToast("Updated " + nodeKind + " " + nodeId + " to " + (approved ? "approved" : "rejected"));
+        await refreshOps();
+      } catch (err) {
+        showToast("Approval failed: " + String(err.message || err), true);
+      }
+    });
+
+    document.getElementById("opsElectBtn").addEventListener("click", async () => {
+      const model = document.getElementById("opsModelInput").value || "qwen2.5-coder:latest";
+      const note = document.getElementById("opsElectNote");
+      note.textContent = "Submitting coordinator election...";
+      try {
+        const payload = await api("/coordinator/ops/coordinator-ollama", {
+          method: "POST",
+          body: JSON.stringify({ provider: "ollama-local", model, autoInstall: true })
+        });
+        note.textContent = "Election submitted: " + String(payload.rolloutId || "ok");
+      } catch (err) {
+        note.textContent = "Election failed: " + String(err.message || err);
+      }
+    });
+
+    refreshOps().catch((err) => {
+      showToast("Could not load coordinator operations: " + String(err.message || err), true);
+    });
+  `;
+  return reply.type("text/html").send(
+    portalAuthedPageHtml({
+      title: "EdgeCoder Portal | Coordinator Operations",
+      activeTab: "operations",
+      heading: "Coordinator Operations",
+      subtitle: "Authenticated operator controls for coordinator enrollment and runtime actions.",
+      content,
+      script
+    })
+  );
+});
+
+app.get("/portal/wallet", async (_req, reply) => {
+  const content = `
+    <div class="card">
+      <h2 style="margin-top:0;">Wallet security checklist</h2>
+      <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
+      <div class="row">
+        <button class="primary" id="setupSeedBtn">Set up recovery seed phrase</button>
+        <button id="walletAckBtn">I backed up my seed phrase</button>
+      </div>
+      <div id="seedPhraseWrap" class="hidden" style="margin-top:10px;">
+        <p class="muted">
+          Record this seed phrase now. It is shown only for this setup action and cannot be recovered later.
+        </p>
+        <div id="seedPhraseValue" class="token-box"></div>
+        <div id="seedGuidance" class="muted" style="margin-top:8px;"></div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h3 style="margin-top:0;">Deposit details</h3>
+        <div class="muted">Use these public wallet details to send BTC into EdgeCoder credits.</div>
+        <table>
+          <tbody>
+            <tr><th style="width:34%;">Account</th><td id="depositAccountValue">-</td></tr>
+            <tr><th>Network</th><td id="depositNetworkValue">-</td></tr>
+            <tr><th>Lightning node pubkey</th><td id="depositLnPubkeyValue">Not configured</td></tr>
+            <tr><th>XPUB</th><td id="depositXpubValue">Not configured</td></tr>
+            <tr><th>Payout/deposit address</th><td id="depositAddressValue">Not configured</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">Send bitcoin (MFA required)</h3>
+        <div class="muted">
+          Every send request requires email code + passkey verification. Requests are queued for secure processing.
+        </div>
+        <label>Destination address</label><input id="sendDestination" type="text" placeholder="bc1... or invoice reference" />
+        <label>Amount (sats)</label><input id="sendAmountSats" type="number" min="1" step="1" placeholder="10000" />
+        <label>Note (optional)</label><input id="sendNote" type="text" placeholder="Reason for transfer" />
+        <div class="row">
+          <button class="primary" id="startSendMfaBtn">Start secure send</button>
+        </div>
+        <div id="sendMfaWrap" class="hidden" style="margin-top:10px;">
+          <div class="muted">Step 2: Enter email code and approve passkey challenge.</div>
+          <label>Email code</label><input id="sendEmailCode" type="text" placeholder="6-digit code" />
+          <div class="row">
+            <button id="confirmSendMfaBtn">Confirm send request</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h3 style="margin-top:0;">Credit ledger</h3>
+        <table>
+          <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
+          <tbody id="creditHistoryBody"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">Wallets and payment intents</h3>
+        <table>
+          <thead><tr><th>Wallet type</th><th>Network</th><th>Payout</th><th>Node/Xpub</th></tr></thead>
+          <tbody id="walletsBody"></tbody>
+        </table>
+        <h3>Payment intents</h3>
+        <div class="table-controls">
+          <select id="intentStatusFilter">
+            <option value="all">All statuses</option>
+            <option value="created">Created</option>
+            <option value="settled">Settled</option>
+            <option value="expired">Expired</option>
+          </select>
+          <select id="intentSortOrder">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Intent</th><th>Status</th><th>Sats</th><th>Credits</th><th>Created</th></tr></thead>
+          <tbody id="paymentIntentsBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Send request history</h3>
+      <div class="table-controls">
+        <select id="sendRequestStatusFilter">
+          <option value="all">All statuses</option>
+          <option value="pending_manual_review">Pending review</option>
+          <option value="sent">Sent</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <select id="sendRequestSortOrder">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </div>
+      <table>
+        <thead><tr><th>Created</th><th>Destination</th><th>Sats</th><th>Status</th><th>Request ID</th></tr></thead>
+        <tbody id="sendRequestsBody"></tbody>
+      </table>
+    </div>
+  `;
+  const script = `
+    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
+    function b64urlToArrayBuffer(base64url) {
+      const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+    function arrayBufferToB64url(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (const b of bytes) binary += String.fromCharCode(b);
+      return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+    }
+    function renderRows(targetId, rowsHtml, colspan, emptyText) {
+      const el = document.getElementById(targetId);
+      el.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
+    }
+    function renderSeedGuidance(guidance) {
+      const target = document.getElementById("seedGuidance");
+      if (!guidance || !Array.isArray(guidance.steps) || guidance.steps.length === 0) {
+        target.textContent = "";
+        return;
+      }
+      target.innerHTML = "<strong>" + (guidance.title || "Seed phrase safety guidance") + "</strong><br/>" +
+        guidance.steps.map((step, idx) => (idx + 1) + ". " + step).join("<br/>");
+    }
+    let pendingSendMfa = null;
+    let allPaymentIntents = [];
+    let allSendRequests = [];
+    function renderDepositDetails(accountId, wallet) {
+      document.getElementById("depositAccountValue").textContent = accountId || "n/a";
+      document.getElementById("depositNetworkValue").textContent = wallet && wallet.network ? wallet.network : "n/a";
+      document.getElementById("depositLnPubkeyValue").textContent = wallet && wallet.lnNodePubkey ? wallet.lnNodePubkey : "Not configured";
+      document.getElementById("depositXpubValue").textContent = wallet && wallet.xpub ? wallet.xpub : "Not configured";
+      document.getElementById("depositAddressValue").textContent = wallet && wallet.payoutAddress ? wallet.payoutAddress : "Not configured";
+    }
+    function renderPaymentIntents(intents) {
+      const rows = (intents || []).map((p) => {
+        const tone = p.status === "settled" ? "ok" : p.status === "expired" ? "danger" : "warn";
+        return "<tr><td>" + p.intentId + "</td><td>" + statusBadge(p.status, tone) + "</td><td>" + p.amountSats + "</td><td>" + p.quotedCredits +
+          "</td><td>" + fmtTime(p.createdAtMs) + "</td></tr>";
+      });
+      renderRows("paymentIntentsBody", rows, 5, "No payment intents.");
+    }
+    function applyPaymentIntentView() {
+      const statusFilter = document.getElementById("intentStatusFilter").value;
+      const sortOrder = document.getElementById("intentSortOrder").value;
+      const filtered = (allPaymentIntents || []).filter((p) => statusFilter === "all" || String(p.status) === statusFilter);
+      filtered.sort((a, b) => sortOrder === "oldest" ? Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0) : Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+      renderPaymentIntents(filtered);
+    }
+    function renderSendRequests(requests) {
+      const rows = (requests || []).map((req) => {
+        const tone = req.status === "sent" ? "ok" : req.status === "rejected" ? "danger" : "warn";
+        return "<tr><td>" + fmtTime(req.createdAtMs) + "</td><td>" + req.destination + "</td><td>" + req.amountSats +
+          "</td><td>" + statusBadge(req.status, tone) + "</td><td>" + req.requestId + "</td></tr>";
+      });
+      renderRows("sendRequestsBody", rows, 5, "No send requests yet.");
+    }
+    function applySendRequestView() {
+      const statusFilter = document.getElementById("sendRequestStatusFilter").value;
+      const sortOrder = document.getElementById("sendRequestSortOrder").value;
+      const filtered = (allSendRequests || []).filter((r) => statusFilter === "all" || String(r.status) === statusFilter);
+      filtered.sort((a, b) => sortOrder === "oldest" ? Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0) : Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+      renderSendRequests(filtered);
+    }
+    async function loadSendRequests() {
+      const payload = await api("/wallet/send/requests", { method: "GET", headers: {} });
+      allSendRequests = payload.requests || [];
+      applySendRequestView();
+    }
+    async function loadWalletView() {
+      await requireAuth();
+      const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
+      const walletSnapshot = summary.walletSnapshot || {};
+      const accountId = (summary.user && summary.user.userId) ? ("acct-" + summary.user.userId) : "n/a";
+      const creditHistoryRows = (walletSnapshot.creditHistory || []).map((tx) =>
+        "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + tx.type + "</td><td>" + tx.credits + "</td><td>" + tx.reason + "</td></tr>"
+      );
+      renderRows("creditHistoryBody", creditHistoryRows, 4, "No credit transactions yet.");
+      const wallets = walletSnapshot.wallets || [];
+      const walletRows = wallets.map((w) =>
+        "<tr><td>" + (w.walletType || "") + "</td><td>" + (w.network || "") + "</td><td>" + (w.payoutAddress || "n/a") +
+        "</td><td>" + (w.lnNodePubkey || w.xpub || "n/a") + "</td></tr>"
+      );
+      renderRows("walletsBody", walletRows, 4, "No wallets linked.");
+      renderDepositDetails(accountId, wallets[0] || null);
+      allPaymentIntents = walletSnapshot.paymentIntents || [];
+      applyPaymentIntentView();
+      try {
+        const onboarding = await api("/wallet/onboarding", { method: "GET", headers: {} });
+        const status = onboarding.acknowledgedAtMs
+          ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
+          : "Backup not yet confirmed. Generate and record your seed phrase now.";
+        document.getElementById("walletOnboardingMeta").textContent =
+          "Network: " + onboarding.network + " | Account: " + onboarding.accountId + " | " + status;
+      } catch {
+        document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
+      }
+      await loadSendRequests();
+    }
+    document.getElementById("intentStatusFilter").addEventListener("change", applyPaymentIntentView);
+    document.getElementById("intentSortOrder").addEventListener("change", applyPaymentIntentView);
+    document.getElementById("sendRequestStatusFilter").addEventListener("change", applySendRequestView);
+    document.getElementById("sendRequestSortOrder").addEventListener("change", applySendRequestView);
+    document.getElementById("setupSeedBtn").addEventListener("click", async () => {
+      try {
+        await requireAuth();
+        const setup = await api("/wallet/onboarding/setup-seed", { method: "POST", body: JSON.stringify({}) });
+        document.getElementById("seedPhraseWrap").classList.remove("hidden");
+        document.getElementById("seedPhraseValue").textContent = setup.seedPhrase;
+        renderSeedGuidance(setup.guidance);
+        await loadWalletView();
+        showToast("New recovery seed phrase generated. Record it before leaving this page.");
+      } catch (err) {
+        showToast("Could not set up seed phrase: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("startSendMfaBtn").addEventListener("click", async () => {
+      try {
+        await requireAuth();
+        const destination = document.getElementById("sendDestination").value.trim();
+        const amountSats = Number(document.getElementById("sendAmountSats").value);
+        const note = document.getElementById("sendNote").value.trim();
+        if (!destination) throw new Error("destination_required");
+        if (!Number.isFinite(amountSats) || amountSats <= 0) throw new Error("amount_sats_invalid");
+        const start = await api("/wallet/send/mfa/start", {
+          method: "POST",
+          body: JSON.stringify({ destination, amountSats, note: note || undefined })
+        });
+        pendingSendMfa = start;
+        document.getElementById("sendMfaWrap").classList.remove("hidden");
+        showToast("Verification code sent to your email. Complete passkey confirmation.");
+      } catch (err) {
+        showToast("Could not start secure send: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("confirmSendMfaBtn").addEventListener("click", async () => {
+      if (!window.PublicKeyCredential) {
+        showToast("Passkeys are not supported in this browser.", true);
+        return;
+      }
+      if (!pendingSendMfa || !pendingSendMfa.passkeyOptions) {
+        showToast("Start secure send first.", true);
+        return;
+      }
+      try {
+        await requireAuth();
+        const emailCode = document.getElementById("sendEmailCode").value.trim();
+        if (!emailCode) throw new Error("email_code_required");
+        const options = pendingSendMfa.passkeyOptions;
+        options.challenge = b64urlToArrayBuffer(options.challenge);
+        options.allowCredentials = (options.allowCredentials || []).map((c) => ({ ...c, id: b64urlToArrayBuffer(c.id) }));
+        const assertion = await navigator.credentials.get({ publicKey: options });
+        const response = assertion.response;
+        await api("/wallet/send/mfa/confirm", {
+          method: "POST",
+          body: JSON.stringify({
+            challengeId: pendingSendMfa.challengeId,
+            emailCode,
+            credentialId: assertion.id,
+            response: {
+              id: assertion.id,
+              rawId: arrayBufferToB64url(assertion.rawId),
+              type: assertion.type,
+              response: {
+                clientDataJSON: arrayBufferToB64url(response.clientDataJSON),
+                authenticatorData: arrayBufferToB64url(response.authenticatorData),
+                signature: arrayBufferToB64url(response.signature),
+                userHandle: response.userHandle ? arrayBufferToB64url(response.userHandle) : null
+              }
+            }
+          })
+        });
+        pendingSendMfa = null;
+        document.getElementById("sendMfaWrap").classList.add("hidden");
+        document.getElementById("sendEmailCode").value = "";
+        showToast("Send request submitted. Status: pending manual review.");
+        await loadSendRequests();
+      } catch (err) {
+        showToast("Could not confirm secure send: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("walletAckBtn").addEventListener("click", async () => {
+      try {
+        await requireAuth();
+        await api("/wallet/onboarding/acknowledge", { method: "POST", body: JSON.stringify({}) });
+        await loadWalletView();
+        showToast("Seed backup acknowledgement saved.");
+      } catch (err) {
+        showToast("Could not save acknowledgement: " + String(err.message || err), true);
+      }
+    });
+    loadWalletView().catch((err) => showToast("Could not load wallet data: " + String(err.message || err), true));
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Wallet",
+    activeTab: "wallet",
+    heading: "Wallet & Credits",
+    subtitle: "Credits, payment intents, and wallet onboarding status.",
+    content,
+    script
+  }));
+});
+
+app.get("/portal/settings", async (_req, reply) => {
+  const content = `
+    <div class="grid2">
+      <div class="card">
+        <h2 style="margin-top:0;">Account settings</h2>
+        <div id="accountLine" class="muted">Loading account...</div>
+        <label>Theme</label>
+        <select id="themeSelect" style="max-width:220px;">
+          <option value="midnight">Midnight</option>
+          <option value="emerald">Emerald</option>
+          <option value="light">Light Pro</option>
+        </select>
+        <div class="row">
+          <button class="primary" id="saveThemeBtn">Save theme</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2 style="margin-top:0;">Passkey</h2>
+        <p class="muted">Enroll a passkey while logged in for passwordless sign-in.</p>
+        <div class="row">
+          <button id="passkeyEnrollBtn">Enroll passkey</button>
+        </div>
+      </div>
+    </div>
+  `;
+  const script = `
+    function b64urlToArrayBuffer(base64url) {
+      const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+    function arrayBufferToB64url(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (const b of bytes) binary += String.fromCharCode(b);
+      return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+    }
+    let currentUserTheme = "midnight";
+    async function bootstrapSettings() {
+      const me = await requireAuth();
+      const user = me.user || {};
+      currentUserTheme = user.uiTheme || "midnight";
+      document.getElementById("accountLine").textContent = (user.email || "unknown") + " | user ID: " + (user.userId || "n/a");
+      document.getElementById("themeSelect").value = currentUserTheme;
+    }
+    document.getElementById("saveThemeBtn").addEventListener("click", async () => {
+      try {
+        await requireAuth();
+        const theme = document.getElementById("themeSelect").value;
+        await api("/me/theme", { method: "POST", body: JSON.stringify({ theme }) });
+        applyTheme(theme);
+        showToast("Theme updated.");
+      } catch (err) {
+        showToast("Could not save theme: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("passkeyEnrollBtn").addEventListener("click", async () => {
+      if (!window.PublicKeyCredential) {
+        showToast("Passkeys are not supported in this browser.", true);
+        return;
+      }
+      try {
+        await requireAuth();
+        const payload = await api("/auth/passkey/register/options", { method: "POST", body: JSON.stringify({}) });
+        const challengeId = payload.challengeId;
+        const options = payload.options;
+        options.challenge = b64urlToArrayBuffer(options.challenge);
+        options.user.id = b64urlToArrayBuffer(options.user.id);
+        options.excludeCredentials = (options.excludeCredentials || []).map((c) => ({ ...c, id: b64urlToArrayBuffer(c.id) }));
+        const credential = await navigator.credentials.create({ publicKey: options });
+        const response = credential.response;
+        await api("/auth/passkey/register/verify", {
+          method: "POST",
+          body: JSON.stringify({
+            challengeId,
+            response: {
+              id: credential.id,
+              rawId: arrayBufferToB64url(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: arrayBufferToB64url(response.clientDataJSON),
+                attestationObject: arrayBufferToB64url(response.attestationObject),
+                transports: response.getTransports ? response.getTransports() : []
+              }
+            }
+          })
+        });
+        showToast("Passkey enrolled successfully.");
+      } catch (err) {
+        showToast("Passkey enrollment failed: " + String(err.message || err), true);
+      }
+    });
+    bootstrapSettings().catch((err) => showToast("Could not load settings: " + String(err.message || err), true));
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Settings",
+    activeTab: "settings",
+    heading: "Settings",
+    subtitle: "Account preferences and authentication options.",
+    content,
+    script
+  }));
 });
 
 app.post("/internal/nodes/validate", async (req, reply) => {
@@ -1362,9 +4136,37 @@ app.post("/internal/nodes/lookup", async (req, reply) => {
   });
 });
 
+app.get("/internal/nodes/pending", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  if (!requireInternalToken(req as any, reply)) return;
+  const query = z
+    .object({
+      nodeKind: z.enum(["agent", "coordinator"]).optional(),
+      limit: z.coerce.number().int().positive().max(500).default(200)
+    })
+    .parse(req.query);
+  const nodes = await store.listPendingNodes({ nodeKind: query.nodeKind, limit: query.limit });
+  return reply.send({
+    nodes: nodes.map((n) => ({
+      nodeId: n.nodeId,
+      nodeKind: n.nodeKind,
+      ownerEmail: n.ownerEmail,
+      emailVerified: n.emailVerified,
+      nodeApproved: n.nodeApproved,
+      active: n.active,
+      sourceIp: n.lastIp,
+      countryCode: n.lastCountryCode,
+      vpnDetected: n.lastVpnDetected ?? false,
+      lastSeenMs: n.lastSeenMs,
+      updatedAtMs: n.updatedAtMs
+    }))
+  });
+});
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
     .then(async () => {
+      validatePortalSecurityConfig();
       if (!store) throw new Error("PORTAL_DATABASE_URL is required for portal service.");
       await store.migrate();
     })

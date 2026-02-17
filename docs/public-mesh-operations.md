@@ -2,10 +2,20 @@
 
 This document explains public-node onboarding and enterprise overlay controls for EdgeCoder mesh deployments.
 
+## Current Live URLs
+
+- Portal: `https://portal.edgecoder.io/portal`
+- Coordinator operations dashboard: `https://portal.edgecoder.io/portal/coordinator-ops`
+- Coordinator API base: `https://coordinator.edgecoder.io` (mesh token required)
+
 ## First Coordinator Placement
 
-- Coordinator UI home: `control-plane` at `GET /ui`
+- Coordinator operations home: `portal` at `GET /portal/coordinator-ops`
 - First coordinator runtime: Fly.io app (`edgecoder-coordinator`)
+- Production URLs:
+  - Portal: `https://portal.edgecoder.io/portal`
+  - Coordinator operations: `https://portal.edgecoder.io/portal/coordinator-ops`
+  - Coordinator: `https://coordinator.edgecoder.io`
 - SQL backend for coordinator/control-plane state: Fly Postgres (PostgreSQL 16) via `DATABASE_URL`
 - Deployment defaults endpoint: `GET /deployment/plan`
 - Fly bootstrap guide: `docs/flyio-bootstrap.md`
@@ -27,8 +37,18 @@ This document explains public-node onboarding and enterprise overlay controls fo
   - `os` as any descriptive string (for example `macos`, `linux-arm64`, `windows`)
 - Register peer identities between coordinators with `POST /mesh/register-peer`.
 - Monitor peer reputation with `GET /mesh/reputation`.
+- For installer/runtime bootstrap, fetch coordinator candidates from `GET /network/coordinators` on control plane.
+- Full install runbook (self-hosted agents + extra coordinators): `docs/agent-and-coordinator-install.md`.
+- Linux managed service templates: `scripts/linux/systemd/`.
 
 ## Coordinator Mesh APIs
+
+All coordinator APIs are mesh-internal and require `x-mesh-token`.
+Public unauthenticated requests are rejected with `401 mesh_unauthorized`.
+
+Control-plane discovery API:
+
+- `GET /network/coordinators` (public) returns coordinator URLs collected from bootstrap + live mesh peers.
 
 - `GET /identity` - local coordinator mesh identity.
 - `GET /mesh/peers` - known coordinator peers.
@@ -46,6 +66,9 @@ This document explains public-node onboarding and enterprise overlay controls fo
 - `POST /agent-mesh/direct-work/accept` - receiving agent accepts peer direct work and notifies coordinator.
 - `POST /agent-mesh/direct-work/result` - receiving agent posts completion result to coordinator.
 - `GET /agent-mesh/direct-work/audit` - latest peer-direct offer/accept/result timeline.
+- `GET /agent-mesh/models/available` - discover model-capable agents currently advertising local providers.
+- `POST /agent-mesh/models/request` - route a model inference prompt to a target agent's local model.
+- `GET /agent-mesh/models/request/:offerId` - poll model request status/result.
 - `GET /orchestration/rollouts` - latest coordinator/agent model rollout audit records.
 
 Peer-direct workflow:
@@ -89,6 +112,13 @@ Core APIs:
 - `POST /economy/payments/webhook` - provider callback ingestion for settlement.
 - `GET /economy/credits/:accountId/quote` - estimate BTC sats value of earned credits using current CPU price epoch.
 - `POST /economy/treasury/policies` / `GET /economy/treasury` - federated multisig custody policy and signed key events.
+- `POST /economy/issuance/recalculate` - recompute rolling 24h issuance epoch immediately.
+- `GET /economy/issuance/current` - current issuance epoch and per-account allocations.
+- `GET /economy/issuance/history` - historical issuance epochs.
+- `GET /economy/issuance/rolling/:accountId` - rolling 24h contribution share for an account.
+- `GET /economy/issuance/quorum/:epochId` - quorum records for issuance proposal/vote/commit/checkpoint.
+- `POST /economy/issuance/anchor` / `GET /economy/issuance/anchors` - Bitcoin anchor lifecycle for finalized checkpoints.
+- `POST /economy/issuance/reconcile` - payout drift scan between settled intents and issuance payout records.
 - `GET /network/summary` - control-plane aggregate of current capacity, jobs, and pricing.
 
 Persisted tables:
@@ -120,31 +150,55 @@ Overlay mode should be paired with stricter identity controls, private peering a
 
 ## Ollama Install Flow for Coordinator and Agents
 
-When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`:
+When `LOCAL_MODEL_PROVIDER=ollama-local`:
 
-- Coordinator startup runs `ollama pull $OLLAMA_MODEL`.
+- Coordinator process starts local `ollama serve` bound to `127.0.0.1:11434`.
 - Worker startup runs `ollama pull $OLLAMA_MODEL` before polling tasks.
 - Optional remote host support via `OLLAMA_HOST`.
 - If `ollama` is not installed, startup exits with an explicit actionable error.
+- Fly production recommendation: keep `OLLAMA_AUTO_INSTALL=false` and pre-pull models during maintenance windows.
 - Central trigger in control-plane:
   - `POST /orchestration/install-model`
     - target `coordinator` or `agent` (with `agentId`).
 
+Model access boundary:
+
+- Coordinator does not expose Ollama endpoints publicly.
+- Model usage is mediated by authenticated agents and coordinator mesh APIs.
+- IDE workflows require a local authenticated agent (IDE does not call coordinator model endpoints directly).
+
 ## Admin and Mesh Security
 
 - UI access allowlist: `ALLOWED_UI_IPS`
-- UI dashboard data endpoint: `GET /ui/data` (same IP allowlist as `GET /ui`)
-- Coordinator model election from UI: `POST /ui/actions/coordinator-ollama` (requires UI IP allowlist + admin token header)
+- Control-plane legacy `/ui*` endpoints are retired and return redirect/410 responses.
+- Coordinator model election and approval actions are exposed through authenticated portal coordinator operations pages.
 - Admin API allowlist: `ALLOWED_ADMIN_IPS`
 - Admin API token: `ADMIN_API_TOKEN` (header: `Authorization: Bearer <token>`)
 - Mesh auth token: `MESH_AUTH_TOKEN` (header: `x-mesh-token`)
+- Inference auth token: `INFERENCE_AUTH_TOKEN` (header: `x-inference-token` for `/decompose`)
+- Coordinator -> inference target: `INFERENCE_URL`
+- Optional signed coordinator -> inference auth:
+  - `INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS`
+  - `INFERENCE_COORDINATOR_PEER_ID`
+  - `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM`
+  - or `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON`
+- Control-plane UI includes pending node approval actions for coordinators and agents.
 - Portal internal auth token: `PORTAL_SERVICE_TOKEN` (header: `x-portal-service-token`)
 - Portal service URL from coordinator/control-plane: `PORTAL_SERVICE_URL`
 - Non-UI admin endpoints require valid admin token when configured.
+- Runtime discovery defaults:
+  - Worker failover order: `registry -> cache -> bootstrap`
+  - Coordinator peer bootstrap order: `registry -> cache -> bootstrap`
 - Coordinator signing identity (for durable blacklist signatures across restarts):
   - `COORDINATOR_PEER_ID`
   - `COORDINATOR_PRIVATE_KEY_PEM`
   - `COORDINATOR_PUBLIC_KEY_PEM` (optional when private key is provided)
+- Coordinator discovery/join env:
+  - `CONTROL_PLANE_URL`
+  - `COORDINATOR_DISCOVERY_URL`
+  - `COORDINATOR_PUBLIC_URL`
+  - `COORDINATOR_BOOTSTRAP_URLS`
+  - `COORDINATOR_REGISTRATION_TOKEN`
 - Tunnel abuse limits:
   - `RELAY_RATE_LIMIT_PER_10S`
   - `TUNNEL_MAX_RELAYS_PER_MIN`
@@ -153,7 +207,7 @@ When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`:
 ## User Portal and Node Activation
 
 - Portal app runs on its own server and Postgres: `PORTAL_DATABASE_URL`.
-- Users can sign up with email/password or SSO (`Apple`, `Google`, `Microsoft 365`).
+- Users can sign up with email/password or SSO (`Google`, `Microsoft 365`).
 - Passkeys are supported for portal and iOS login (`/auth/passkey/*` endpoints).
 - Email verification is required (Resend integration with `RESEND_API_KEY`, `RESEND_FROM_EMAIL`).
 - First-time signup bootstraps a starter wallet onboarding record and returns seed-protection guidance.
@@ -163,6 +217,7 @@ When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`:
 - Even after email verification, nodes require coordinator approval to become active.
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.
 - Portal UI route: `GET /portal` (signup/login, OAuth starts, verification status, node enrollment, credits/wallet panels).
+- Portal users can select a persisted theme profile (`midnight`, `emerald`, `light`) from the dashboard.
 
 ## Abuse Blacklist Coordination
 

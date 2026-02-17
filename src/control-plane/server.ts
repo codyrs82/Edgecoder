@@ -14,6 +14,9 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN ?? "";
 const COORDINATOR_MESH_TOKEN = process.env.COORDINATOR_MESH_TOKEN ?? process.env.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
+const UI_RETIRE_REDIRECT_URL =
+  process.env.UI_RETIRE_REDIRECT_URL ??
+  (PORTAL_SERVICE_URL ? `${PORTAL_SERVICE_URL.replace(/\/$/, "")}/portal/coordinator-ops` : "/");
 
 function parseAllowedIps(raw: string | undefined): Set<string> {
   if (!raw) return new Set();
@@ -47,7 +50,16 @@ function extractAdminToken(headers: Record<string, unknown>): string | undefined
   return undefined;
 }
 
+function isPortalInternalRequest(headers: Record<string, unknown>): boolean {
+  if (!PORTAL_SERVICE_TOKEN) return false;
+  const token = headers["x-portal-service-token"];
+  return typeof token === "string" && token === PORTAL_SERVICE_TOKEN;
+}
+
 function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string }, reply: any): boolean {
+  if (isPortalInternalRequest(req.headers)) {
+    return true;
+  }
   const allowedIps = parseAllowedIps(process.env.ALLOWED_ADMIN_IPS);
   if (allowedIps.size > 0) {
     const ip = extractClientIp(req.headers, req.ip);
@@ -90,6 +102,78 @@ function portalHeaders(contentType = false): Record<string, string> {
   if (contentType) headers["content-type"] = "application/json";
   if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
   return headers;
+}
+
+function normalizeCoordinatorUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
+    const normalized = parsed.toString().replace(/\/$/, "");
+    return normalized.length > 0 ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+async function collectCoordinatorDiscovery(): Promise<{
+  coordinators: Array<{ peerId: string; coordinatorUrl: string; source: "bootstrap" | "mesh" }>;
+}> {
+  const discovered = new Map<string, { peerId: string; coordinatorUrl: string; source: "bootstrap" | "mesh" }>();
+  const bootstrap = normalizeCoordinatorUrl(coordinatorUrl);
+  if (bootstrap) {
+    discovered.set(bootstrap, {
+      peerId: "bootstrap",
+      coordinatorUrl: bootstrap,
+      source: "bootstrap"
+    });
+  }
+
+  try {
+    const [identityRes, peersRes] = await Promise.all([
+      request(`${coordinatorUrl}/identity`, {
+        method: "GET",
+        headers: coordinatorMeshHeaders()
+      }),
+      request(`${coordinatorUrl}/mesh/peers`, {
+        method: "GET",
+        headers: coordinatorMeshHeaders()
+      })
+    ]);
+
+    if (identityRes.statusCode >= 200 && identityRes.statusCode < 300) {
+      const identity = (await identityRes.body.json()) as { peerId?: string; coordinatorUrl?: string };
+      const url = normalizeCoordinatorUrl(identity.coordinatorUrl);
+      if (url) {
+        discovered.set(url, {
+          peerId: identity.peerId ?? "unknown",
+          coordinatorUrl: url,
+          source: "mesh"
+        });
+      }
+    }
+
+    if (peersRes.statusCode >= 200 && peersRes.statusCode < 300) {
+      const peers = (await peersRes.body.json()) as {
+        peers?: Array<{ peerId?: string; coordinatorUrl?: string }>;
+      };
+      for (const peer of peers.peers ?? []) {
+        const url = normalizeCoordinatorUrl(peer.coordinatorUrl);
+        if (!url) continue;
+        discovered.set(url, {
+          peerId: peer.peerId ?? "unknown",
+          coordinatorUrl: url,
+          source: "mesh"
+        });
+      }
+    }
+  } catch {
+    // Best-effort discovery; keep bootstrap fallback when mesh is unreachable.
+  }
+
+  return { coordinators: [...discovered.values()] };
 }
 
 async function lookupPortalNodes(nodeIds: string[]): Promise<
@@ -136,6 +220,49 @@ async function lookupPortalNodes(nodeIds: string[]): Promise<
     return map;
   }
   return map;
+}
+
+async function listPendingPortalNodes(limit = 200): Promise<
+  Array<{
+    nodeId: string;
+    nodeKind: "agent" | "coordinator";
+    ownerEmail: string;
+    emailVerified: boolean;
+    nodeApproved: boolean;
+    active: boolean;
+    sourceIp?: string;
+    countryCode?: string;
+    vpnDetected: boolean;
+    lastSeenMs?: number;
+    updatedAtMs?: number;
+  }>
+> {
+  if (!PORTAL_SERVICE_URL) return [];
+  try {
+    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/pending?limit=${Math.min(Math.max(limit, 1), 500)}`, {
+      method: "GET",
+      headers: portalHeaders()
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) return [];
+    const payload = (await res.body.json()) as {
+      nodes?: Array<{
+        nodeId: string;
+        nodeKind: "agent" | "coordinator";
+        ownerEmail: string;
+        emailVerified: boolean;
+        nodeApproved: boolean;
+        active: boolean;
+        sourceIp?: string;
+        countryCode?: string;
+        vpnDetected: boolean;
+        lastSeenMs?: number;
+        updatedAtMs?: number;
+      }>;
+    };
+    return payload.nodes ?? [];
+  } catch {
+    return [];
+  }
 }
 
 type AgentRecord = {
@@ -191,7 +318,10 @@ app.get("/agents", async (req, reply) => {
 app.get("/agents/catalog", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   try {
-    const capacityRes = await request(`${coordinatorUrl}/capacity`, { method: "GET" });
+    const capacityRes = await request(`${coordinatorUrl}/capacity`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
     const capacity = (await capacityRes.body.json()) as { agents?: Array<any> };
     const liveAgents = capacity.agents ?? [];
     const portalNodes = await lookupPortalNodes(liveAgents.map((agent) => String(agent.agentId)));
@@ -267,10 +397,22 @@ app.get("/network/summary", async (req, reply) => {
   }
 });
 
+app.get("/network/coordinators", async () => {
+  const discovery = await collectCoordinatorDiscovery();
+  return {
+    generatedAt: Date.now(),
+    count: discovery.coordinators.length,
+    coordinators: discovery.coordinators
+  };
+});
+
 app.get("/mesh/peers", async (_req, reply) => {
   if (!authorizeAdmin(_req as any, reply)) return;
   try {
-    const res = await request(`${coordinatorUrl}/mesh/peers`, { method: "GET" });
+    const res = await request(`${coordinatorUrl}/mesh/peers`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
     const json = (await res.body.json()) as unknown;
     return reply.send(json);
   } catch {
@@ -281,7 +423,10 @@ app.get("/mesh/peers", async (_req, reply) => {
 app.get("/health/runtime", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   try {
-    const res = await request(`${coordinatorUrl}/health/runtime`, { method: "GET" });
+    const res = await request(`${coordinatorUrl}/health/runtime`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
     return reply.code(res.statusCode).send(await res.body.json());
   } catch {
     return reply.code(502).send({ error: "coordinator_unreachable" });
@@ -319,6 +464,26 @@ app.get("/agent-mesh/direct-work/audit", async (req, reply) => {
   const query = z.object({ limit: z.coerce.number().int().positive().max(500).default(100) }).parse(req.query);
   try {
     const res = await request(`${coordinatorUrl}/agent-mesh/direct-work/audit?limit=${query.limit}`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
+    return reply.code(res.statusCode).send(await res.body.json());
+  } catch {
+    return reply.code(502).send({ error: "coordinator_unreachable" });
+  }
+});
+
+app.get("/agent-mesh/models/available", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  const query = z
+    .object({
+      provider: z.enum(["edgecoder-local", "ollama-local"]).optional()
+    })
+    .parse(req.query);
+  try {
+    const url = new URL(`${coordinatorUrl}/agent-mesh/models/available`);
+    if (query.provider) url.searchParams.set("provider", query.provider);
+    const res = await request(url.toString(), {
       method: "GET",
       headers: coordinatorMeshHeaders()
     });
@@ -543,6 +708,33 @@ app.get("/economy/price/current", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   try {
     const res = await request(`${coordinatorUrl}/economy/price/current`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
+    return reply.code(res.statusCode).send(await res.body.json());
+  } catch {
+    return reply.code(502).send({ error: "coordinator_unreachable" });
+  }
+});
+
+app.get("/economy/issuance/current", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  try {
+    const res = await request(`${coordinatorUrl}/economy/issuance/current`, {
+      method: "GET",
+      headers: coordinatorMeshHeaders()
+    });
+    return reply.code(res.statusCode).send(await res.body.json());
+  } catch {
+    return reply.code(502).send({ error: "coordinator_unreachable" });
+  }
+});
+
+app.get("/economy/issuance/history", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  const query = z.object({ limit: z.coerce.number().int().positive().max(200).default(24) }).parse(req.query);
+  try {
+    const res = await request(`${coordinatorUrl}/economy/issuance/history?limit=${query.limit}`, {
       method: "GET",
       headers: coordinatorMeshHeaders()
     });
@@ -795,8 +987,14 @@ app.post("/bootstrap/coordinator", async (_req, reply) => {
 });
 
 async function loadDashboardData() {
-  const capacityRes = await request(`${coordinatorUrl}/capacity`, { method: "GET" }).catch(() => null);
-  const statusRes = await request(`${coordinatorUrl}/status`, { method: "GET" }).catch(() => null);
+  const capacityRes = await request(`${coordinatorUrl}/capacity`, {
+    method: "GET",
+    headers: coordinatorMeshHeaders()
+  }).catch(() => null);
+  const statusRes = await request(`${coordinatorUrl}/status`, {
+    method: "GET",
+    headers: coordinatorMeshHeaders()
+  }).catch(() => null);
   const blacklistRes = await request(`${coordinatorUrl}/security/blacklist`, {
     method: "GET",
     headers: coordinatorMeshHeaders()
@@ -821,6 +1019,7 @@ async function loadDashboardData() {
     method: "GET",
     headers: coordinatorMeshHeaders()
   }).catch(() => null);
+  const pendingNodes = await listPendingPortalNodes(250);
 
   const capacity =
     capacityRes && capacityRes.statusCode >= 200 && capacityRes.statusCode < 300
@@ -882,23 +1081,34 @@ async function loadDashboardData() {
     pricing,
     blacklist,
     blacklistAudit,
-    directWork
+    directWork,
+    pendingNodes
   };
 }
 
 app.get("/ui/data", async (req, reply) => {
   if (!authorizeUi(req as any, reply)) return;
+  return reply.code(410).send({
+    error: "ui_retired_use_portal",
+    redirectTo: UI_RETIRE_REDIRECT_URL
+  });
+});
+
+app.get("/ops/summary", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
   return reply.send(await loadDashboardData());
 });
 
 app.post("/ui/actions/coordinator-ollama", async (req, reply) => {
   if (!authorizeUi(req as any, reply)) return;
-  if (ADMIN_API_TOKEN) {
-    const token = extractAdminToken((req as any).headers);
-    if (token !== ADMIN_API_TOKEN) {
-      return reply.code(401).send({ error: "admin_token_required" });
-    }
-  }
+  return reply.code(410).send({
+    error: "ui_retired_use_portal",
+    redirectTo: UI_RETIRE_REDIRECT_URL
+  });
+});
+
+app.post("/ops/coordinator-ollama", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
   const body = z
     .object({
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
@@ -914,7 +1124,7 @@ app.post("/ui/actions/coordinator-ollama", async (req, reply) => {
         provider: body.provider,
         model: body.model,
         autoInstall: body.autoInstall,
-        requestedBy: "ui"
+        requestedBy: "portal"
       })
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -923,205 +1133,17 @@ app.post("/ui/actions/coordinator-ollama", async (req, reply) => {
   }
 });
 
+app.post("/ui/actions/node-approval", async (req, reply) => {
+  if (!authorizeUi(req as any, reply)) return;
+  return reply.code(410).send({
+    error: "ui_retired_use_portal",
+    redirectTo: UI_RETIRE_REDIRECT_URL
+  });
+});
+
 app.get("/ui", async (_req, reply) => {
   if (!authorizeUi(_req as any, reply)) return;
-  const html = `<!doctype html>
-  <html>
-    <head>
-      <title>EdgeCoder Control Plane</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; color: #0b1220; background: #f8fafc; }
-        h1, h2, h3 { margin: 8px 0; }
-        .meta { color: #475569; font-size: 13px; margin-bottom: 12px; }
-        .cards { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 10px; margin: 14px 0; }
-        .card { background: #ffffff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 10px; }
-        .k { font-size: 12px; color: #64748b; }
-        .v { font-size: 20px; font-weight: 700; }
-        .section { margin-top: 18px; background: #ffffff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 6px; }
-        th { color: #334155; background: #f1f5f9; }
-        .status-pill { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 12px; }
-        .ok { background: #dcfce7; color: #166534; }
-        .warn { background: #fef3c7; color: #92400e; }
-      </style>
-    </head>
-    <body>
-      <h1>EdgeCoder Control Plane Dashboard</h1>
-      <div class="meta">
-        <div><strong>Coordinator UI Home:</strong> <span id="uiHome"></span></div>
-        <div><strong>Coordinator Runtime:</strong> <span id="runtime"></span></div>
-        <div><strong>SQL Backend:</strong> <span id="sqlBackend"></span></div>
-        <div><strong>Market Price:</strong> CPU <span id="cpuPrice">n/a</span> sats/cu | GPU <span id="gpuPrice">n/a</span> sats/cu</div>
-        <div><strong>Last refresh:</strong> <span id="lastRefresh"></span></div>
-      </div>
-      <div class="cards" id="cards"></div>
-
-      <div class="section">
-        <h2>Agents</h2>
-        <table>
-          <thead><tr><th>Agent</th><th>User Email</th><th>OS</th><th>Version</th><th>Mode</th><th>Client</th><th>Provider</th><th>Capacity</th><th>Peers</th><th>IP</th><th>VPN</th><th>Country</th><th>Approval</th></tr></thead>
-          <tbody id="agentsBody"></tbody>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>Coordinator Local Model Election</h2>
-        <div class="meta">
-          <strong>Current provider:</strong> <span id="coordProvider">unknown</span> |
-          <strong>Auto-install:</strong> <span id="coordAutoInstall">false</span>
-        </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <input id="adminTokenInput" type="password" placeholder="Admin token" style="padding:6px; min-width:240px;" />
-          <input id="modelInput" type="text" value="qwen2.5-coder:latest" style="padding:6px; min-width:240px;" />
-          <button id="electOllamaBtn" style="padding:6px 10px;">Elect Ollama on Coordinator</button>
-        </div>
-        <div class="meta" id="electResult" style="margin-top:8px;"></div>
-      </div>
-
-      <div class="section">
-        <h2>Blacklist</h2>
-        <div class="meta"><strong>Version:</strong> <span id="blVersion">0</span> | <strong>Chain head:</strong> <span id="blHead">BLACKLIST_GENESIS</span></div>
-        <table>
-          <thead><tr><th>Agent</th><th>Reason Code</th><th>Reason</th><th>Reporter</th><th>Evidence Sig</th><th>Timestamp</th><th>Expires</th></tr></thead>
-          <tbody id="blacklistBody"></tbody>
-        </table>
-      </div>
-
-      <div class="section">
-        <h3>Recent Blacklist Audit Events</h3>
-        <table>
-          <thead><tr><th>Event</th><th>Agent</th><th>Prev Hash</th><th>Event Hash</th><th>Timestamp</th></tr></thead>
-          <tbody id="blacklistAuditBody"></tbody>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>Peer Direct Work Timeline</h2>
-        <table>
-          <thead><tr><th>Offer</th><th>From</th><th>To</th><th>Lang</th><th>Status</th><th>Created</th><th>Completed</th></tr></thead>
-          <tbody id="directWorkBody"></tbody>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>Recent Model Rollouts</h2>
-        <table>
-          <thead><tr><th>Rollout</th><th>Target</th><th>Provider</th><th>Model</th><th>Status</th><th>Requested By</th><th>Updated</th></tr></thead>
-          <tbody id="rolloutsBody"></tbody>
-        </table>
-      </div>
-
-      <script>
-        const cardSpec = [
-          ["Total Capacity", "totalCapacity"],
-          ["Agents Connected", "agentsConnected"],
-          ["Swarm Enabled", "swarmEnabledCount"],
-          ["Local Ollama", "localOllamaCount"],
-          ["IDE Enabled", "ideEnabledCount"],
-          ["Active Tunnels", "activeTunnels"],
-          ["Direct Accepted", "peerDirectAccepted"],
-          ["Direct Completed", "peerDirectCompleted"],
-          ["Blacklisted Agents", "blacklistedAgents"],
-          ["Queue Depth", "queued"],
-          ["Completed Results", "results"]
-        ];
-
-        const safe = (v) => String(v ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        function fmt(ts) { return ts ? new Date(ts).toISOString() : "n/a"; }
-
-        function rowOrEmpty(rows, colspan, message) {
-          if (rows.length > 0) return rows.join("");
-          return '<tr><td colspan="' + colspan + '">' + message + '</td></tr>';
-        }
-
-        function render(data) {
-          document.getElementById("uiHome").textContent = data.deploymentPlan.coordinatorUiHome.service + data.deploymentPlan.coordinatorUiHome.route;
-          document.getElementById("runtime").textContent = data.deploymentPlan.firstCoordinatorRuntime.recommendation;
-          document.getElementById("sqlBackend").textContent = data.deploymentPlan.sqlBackend.engine + " " + data.deploymentPlan.sqlBackend.version;
-          document.getElementById("cpuPrice").textContent = String((data.pricing && data.pricing.cpu && data.pricing.cpu.pricePerComputeUnitSats) || "n/a");
-          document.getElementById("gpuPrice").textContent = String((data.pricing && data.pricing.gpu && data.pricing.gpu.pricePerComputeUnitSats) || "n/a");
-          document.getElementById("lastRefresh").textContent = new Date(data.generatedAt).toISOString();
-
-          const totals = data.capacity.totals || {};
-          const cards = cardSpec.map(([label, key]) => {
-            const value = key === "queued" ? (data.status.queued || 0) : key === "results" ? (data.status.results || 0) : (totals[key] || 0);
-            const cls = key === "blacklistedAgents" && value > 0 ? "warn" : "ok";
-            return '<div class="card"><div class="k">' + label + '</div><div class="v"><span class="status-pill ' + cls + '">' + safe(value) + '</span></div></div>';
-          }).join("");
-          document.getElementById("cards").innerHTML = cards;
-
-          const agentRows = (data.capacity.agents || []).map((a) =>
-            '<tr><td>' + safe(a.agentId) + '</td><td>' + safe(a.ownerEmail || "unknown") + '</td><td>' + safe(a.os) + '</td><td>' + safe(a.version) + '</td><td>' + safe(a.mode) + '</td><td>' + safe(a.clientType || "edgecoder-native") + '</td><td>' + safe(a.localModelProvider) + '</td><td>' + safe(a.maxConcurrentTasks) + '</td><td>' + safe((a.connectedPeers || []).length) + '</td><td>' + safe(a.sourceIp || "unknown") + '</td><td>' + safe(String(Boolean(a.vpnDetected))) + '</td><td>' + safe(a.countryCode || "unknown") + '</td><td>' + safe(a.nodeApproved === undefined ? "unknown" : (a.nodeApproved ? "approved" : "pending")) + '</td></tr>'
-          );
-          document.getElementById("agentsBody").innerHTML = rowOrEmpty(agentRows, 13, "No agents connected");
-
-          document.getElementById("coordProvider").textContent = String(data.coordinatorModel.provider || "unknown");
-          document.getElementById("coordAutoInstall").textContent = String(Boolean(data.coordinatorModel.ollamaAutoInstall));
-
-          document.getElementById("blVersion").textContent = String(data.blacklist.version || 0);
-          document.getElementById("blHead").textContent = String(data.blacklistAudit.chainHead || "BLACKLIST_GENESIS");
-          const blacklistRows = (data.blacklist.records || []).map((r) =>
-            '<tr><td>' + safe(r.agentId) + '</td><td>' + safe(r.reasonCode) + '</td><td>' + safe(r.reason) + '</td><td>' + safe(r.reporterId) + '</td><td>' + safe(r.evidenceSignatureVerified) + '</td><td>' + safe(fmt(r.timestampMs)) + '</td><td>' + safe(fmt(r.expiresAtMs)) + '</td></tr>'
-          );
-          document.getElementById("blacklistBody").innerHTML = rowOrEmpty(blacklistRows, 7, "No active blacklist records");
-
-          const auditRows = (data.blacklistAudit.events || []).slice(-10).reverse().map((e) =>
-            '<tr><td>' + safe(e.eventId) + '</td><td>' + safe(e.agentId) + '</td><td>' + safe((e.prevEventHash || "").slice(0,16) + "...") + '</td><td>' + safe((e.eventHash || "").slice(0,16) + "...") + '</td><td>' + safe(fmt(e.timestampMs)) + '</td></tr>'
-          );
-          document.getElementById("blacklistAuditBody").innerHTML = rowOrEmpty(auditRows, 5, "No audit events");
-
-          const directRows = (data.directWork.events || []).map((e) =>
-            '<tr><td>' + safe(e.offerId) + '</td><td>' + safe(e.fromAgentId) + '</td><td>' + safe(e.toAgentId) + '</td><td>' + safe(e.language) + '</td><td>' + safe(e.status) + '</td><td>' + safe(fmt(e.createdAtMs)) + '</td><td>' + safe(fmt(e.result && e.result.completedAtMs)) + '</td></tr>'
-          );
-          document.getElementById("directWorkBody").innerHTML = rowOrEmpty(directRows, 7, "No peer direct work events");
-
-          const rolloutRows = ((data.rollouts && data.rollouts.rollouts) || []).slice(0, 20).map((r) =>
-            '<tr><td>' + safe(r.rolloutId) + '</td><td>' + safe(r.targetType + ":" + r.targetId) + '</td><td>' + safe(r.provider) + '</td><td>' + safe(r.model) + '</td><td>' + safe(r.status) + '</td><td>' + safe(r.requestedBy) + '</td><td>' + safe(fmt(r.updatedAtMs)) + '</td></tr>'
-          );
-          document.getElementById("rolloutsBody").innerHTML = rowOrEmpty(rolloutRows, 7, "No rollout events");
-        }
-
-        async function refresh() {
-          const res = await fetch("/ui/data", { cache: "no-store" });
-          if (!res.ok) throw new Error("dashboard_data_unavailable");
-          render(await res.json());
-        }
-
-        async function electCoordinatorOllama() {
-          const token = document.getElementById("adminTokenInput").value || "";
-          const model = document.getElementById("modelInput").value || "qwen2.5-coder:latest";
-          const resultEl = document.getElementById("electResult");
-          resultEl.textContent = "Submitting election...";
-          const res = await fetch("/ui/actions/coordinator-ollama", {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-admin-token": token
-            },
-            body: JSON.stringify({
-              provider: "ollama-local",
-              model,
-              autoInstall: true
-            })
-          });
-          const payload = await res.json().catch(() => ({}));
-          resultEl.textContent = res.ok ? "Election submitted: " + (payload.rolloutId || "ok") : "Election failed: " + (payload.error || res.status);
-          await refresh().catch(() => undefined);
-        }
-
-        document.getElementById("electOllamaBtn").addEventListener("click", () => {
-          electCoordinatorOllama().catch((err) => {
-            document.getElementById("electResult").textContent = "Election failed: " + String(err);
-          });
-        });
-
-        refresh().catch((err) => { console.error(err); });
-        setInterval(() => { refresh().catch(() => undefined); }, 5000);
-      </script>
-    </body>
-  </html>`;
-  return reply.type("text/html").send(html);
+  return reply.redirect(UI_RETIRE_REDIRECT_URL);
 });
 
 app.post("/agents/upsert", async (req, reply) => {
