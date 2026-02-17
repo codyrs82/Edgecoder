@@ -2,10 +2,17 @@ import { Pool } from "pg";
 import {
   AccountMembership,
   AgentOwnership,
+  BitcoinAnchorRecord,
   BlacklistRecord,
   CoordinatorFeeEvent,
   CreditAccount,
+  ComputeContributionReport,
+  IssuanceAllocationRecord,
+  IssuanceEpochRecord,
+  IssuancePayoutEvent,
   KeyCustodyEvent,
+  QuorumLedgerRecord,
+  RollingContributionShare,
   PaymentIntent,
   PriceEpochRecord,
   OllamaRolloutRecord,
@@ -55,6 +62,46 @@ CREATE TABLE IF NOT EXISTS ledger_records (
   prev_hash TEXT NOT NULL,
   hash TEXT NOT NULL,
   signature TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stats_ledger_records (
+  id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  subtask_id TEXT,
+  actor_id TEXT NOT NULL,
+  sequence INT NOT NULL,
+  issued_at_ms BIGINT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  coordinator_id TEXT,
+  checkpoint_height BIGINT,
+  checkpoint_hash TEXT,
+  payload_json JSONB,
+  hash TEXT NOT NULL UNIQUE,
+  signature TEXT NOT NULL,
+  ingested_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS node_status_projection (
+  node_id TEXT PRIMARY KEY,
+  node_kind TEXT NOT NULL,
+  owner_email TEXT,
+  email_verified BOOLEAN,
+  node_approved BOOLEAN,
+  active BOOLEAN,
+  source_ip TEXT,
+  country_code TEXT,
+  vpn_detected BOOLEAN,
+  last_seen_ms BIGINT,
+  updated_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coordinator_earnings_projection (
+  account_id TEXT PRIMARY KEY,
+  owner_email TEXT,
+  total_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+  task_count BIGINT NOT NULL DEFAULT 0,
+  updated_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS credit_transactions (
@@ -206,6 +253,77 @@ CREATE TABLE IF NOT EXISTS key_custody_events (
   signature TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS compute_contribution_reports (
+  report_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  source_agent_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  resource_class TEXT NOT NULL,
+  cpu_seconds DOUBLE PRECISION NOT NULL,
+  gpu_seconds DOUBLE PRECISION NOT NULL,
+  quality_score DOUBLE PRECISION NOT NULL,
+  reliability_score DOUBLE PRECISION NOT NULL,
+  weighted_contribution DOUBLE PRECISION NOT NULL,
+  timestamp_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS issuance_epochs (
+  issuance_epoch_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  window_start_ms BIGINT NOT NULL,
+  window_end_ms BIGINT NOT NULL,
+  load_index DOUBLE PRECISION NOT NULL,
+  daily_pool_tokens DOUBLE PRECISION NOT NULL,
+  hourly_tokens DOUBLE PRECISION NOT NULL,
+  total_weighted_contribution DOUBLE PRECISION NOT NULL,
+  contribution_count INT NOT NULL,
+  finalized BOOLEAN NOT NULL,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS issuance_allocations (
+  allocation_id TEXT PRIMARY KEY,
+  issuance_epoch_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  weighted_contribution DOUBLE PRECISION NOT NULL,
+  allocation_share DOUBLE PRECISION NOT NULL,
+  issued_tokens DOUBLE PRECISION NOT NULL,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quorum_ledger_records (
+  record_id TEXT PRIMARY KEY,
+  record_type TEXT NOT NULL,
+  epoch_id TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  payload_json JSONB NOT NULL,
+  signature TEXT NOT NULL,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bitcoin_anchor_records (
+  anchor_id TEXT PRIMARY KEY,
+  epoch_id TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL,
+  anchor_network TEXT NOT NULL,
+  tx_ref TEXT NOT NULL,
+  status TEXT NOT NULL,
+  anchored_at_ms BIGINT,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS issuance_payout_events (
+  payout_event_id TEXT PRIMARY KEY,
+  issuance_epoch_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  payout_type TEXT NOT NULL,
+  tokens DOUBLE PRECISION NOT NULL,
+  source_intent_id TEXT,
+  created_at_ms BIGINT NOT NULL
+);
 `;
 
 export class PostgresStore {
@@ -300,6 +418,236 @@ export class PostgresStore {
     );
   }
 
+  async persistStatsLedgerRecord(record: QueueEventRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO stats_ledger_records (
+         id, event_type, task_id, subtask_id, actor_id, sequence, issued_at_ms, prev_hash,
+         coordinator_id, checkpoint_height, checkpoint_hash, payload_json, hash, signature, ingested_at_ms
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        record.id,
+        record.eventType,
+        record.taskId,
+        record.subtaskId ?? null,
+        record.actorId,
+        record.sequence,
+        record.issuedAtMs,
+        record.prevHash,
+        record.coordinatorId ?? null,
+        record.checkpointHeight ?? null,
+        record.checkpointHash ?? null,
+        record.payloadJson ? JSON.parse(record.payloadJson) : null,
+        record.hash,
+        record.signature,
+        Date.now()
+      ]
+    );
+  }
+
+  async listStatsLedgerRecords(limit = 1000): Promise<QueueEventRecord[]> {
+    const result = await this.pool.query(
+      `SELECT
+         id, event_type, task_id, subtask_id, actor_id, sequence, issued_at_ms, prev_hash,
+         coordinator_id, checkpoint_height, checkpoint_hash, payload_json, hash, signature
+       FROM stats_ledger_records
+       ORDER BY issued_at_ms ASC, id ASC
+       LIMIT $1`,
+      [Math.max(1, Math.min(5000, limit))]
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      eventType: row.event_type,
+      taskId: row.task_id,
+      subtaskId: row.subtask_id ?? undefined,
+      actorId: row.actor_id,
+      sequence: Number(row.sequence),
+      issuedAtMs: Number(row.issued_at_ms),
+      prevHash: row.prev_hash,
+      coordinatorId: row.coordinator_id ?? undefined,
+      checkpointHeight: row.checkpoint_height ? Number(row.checkpoint_height) : undefined,
+      checkpointHash: row.checkpoint_hash ?? undefined,
+      payloadJson: row.payload_json ? JSON.stringify(row.payload_json) : undefined,
+      hash: row.hash,
+      signature: row.signature
+    }));
+  }
+
+  async listStatsLedgerSince(sinceIssuedAtMs: number, limit = 1000): Promise<QueueEventRecord[]> {
+    const result = await this.pool.query(
+      `SELECT
+         id, event_type, task_id, subtask_id, actor_id, sequence, issued_at_ms, prev_hash,
+         coordinator_id, checkpoint_height, checkpoint_hash, payload_json, hash, signature
+       FROM stats_ledger_records
+       WHERE issued_at_ms > $1
+       ORDER BY issued_at_ms ASC, id ASC
+       LIMIT $2`,
+      [sinceIssuedAtMs, Math.max(1, Math.min(5000, limit))]
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      eventType: row.event_type,
+      taskId: row.task_id,
+      subtaskId: row.subtask_id ?? undefined,
+      actorId: row.actor_id,
+      sequence: Number(row.sequence),
+      issuedAtMs: Number(row.issued_at_ms),
+      prevHash: row.prev_hash,
+      coordinatorId: row.coordinator_id ?? undefined,
+      checkpointHeight: row.checkpoint_height ? Number(row.checkpoint_height) : undefined,
+      checkpointHash: row.checkpoint_hash ?? undefined,
+      payloadJson: row.payload_json ? JSON.stringify(row.payload_json) : undefined,
+      hash: row.hash,
+      signature: row.signature
+    }));
+  }
+
+  async latestStatsLedgerHead(): Promise<{
+    issuedAtMs: number;
+    hash: string;
+    count: number;
+  } | null> {
+    const latestResult = await this.pool.query(
+      `SELECT issued_at_ms, hash
+       FROM stats_ledger_records
+       ORDER BY issued_at_ms DESC, id DESC
+       LIMIT 1`
+    );
+    if (!latestResult.rows[0]) return null;
+    const countResult = await this.pool.query(`SELECT COUNT(*)::BIGINT AS count FROM stats_ledger_records`);
+    return {
+      issuedAtMs: Number(latestResult.rows[0].issued_at_ms),
+      hash: latestResult.rows[0].hash,
+      count: Number(countResult.rows[0]?.count ?? 0)
+    };
+  }
+
+  async upsertNodeStatusProjection(input: {
+    nodeId: string;
+    nodeKind: "agent" | "coordinator";
+    ownerEmail?: string;
+    emailVerified?: boolean;
+    nodeApproved?: boolean;
+    active?: boolean;
+    sourceIp?: string;
+    countryCode?: string;
+    vpnDetected?: boolean;
+    lastSeenMs?: number;
+    updatedAtMs: number;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO node_status_projection (
+        node_id, node_kind, owner_email, email_verified, node_approved, active, source_ip, country_code, vpn_detected, last_seen_ms, updated_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT (node_id) DO UPDATE SET
+        node_kind = EXCLUDED.node_kind,
+        owner_email = COALESCE(EXCLUDED.owner_email, node_status_projection.owner_email),
+        email_verified = COALESCE(EXCLUDED.email_verified, node_status_projection.email_verified),
+        node_approved = COALESCE(EXCLUDED.node_approved, node_status_projection.node_approved),
+        active = COALESCE(EXCLUDED.active, node_status_projection.active),
+        source_ip = COALESCE(EXCLUDED.source_ip, node_status_projection.source_ip),
+        country_code = COALESCE(EXCLUDED.country_code, node_status_projection.country_code),
+        vpn_detected = COALESCE(EXCLUDED.vpn_detected, node_status_projection.vpn_detected),
+        last_seen_ms = COALESCE(EXCLUDED.last_seen_ms, node_status_projection.last_seen_ms),
+        updated_at_ms = EXCLUDED.updated_at_ms`,
+      [
+        input.nodeId,
+        input.nodeKind,
+        input.ownerEmail ?? null,
+        input.emailVerified ?? null,
+        input.nodeApproved ?? null,
+        input.active ?? null,
+        input.sourceIp ?? null,
+        input.countryCode ?? null,
+        input.vpnDetected ?? null,
+        input.lastSeenMs ?? null,
+        input.updatedAtMs
+      ]
+    );
+  }
+
+  async listNodeStatusProjection(ownerEmail?: string): Promise<
+    Array<{
+      nodeId: string;
+      nodeKind: string;
+      ownerEmail?: string;
+      emailVerified?: boolean;
+      nodeApproved?: boolean;
+      active?: boolean;
+      sourceIp?: string;
+      countryCode?: string;
+      vpnDetected?: boolean;
+      lastSeenMs?: number;
+      updatedAtMs: number;
+    }>
+  > {
+    const where = ownerEmail ? "WHERE lower(owner_email) = lower($1)" : "";
+    const args = ownerEmail ? [ownerEmail] : [];
+    const result = await this.pool.query(
+      `SELECT
+         node_id, node_kind, owner_email, email_verified, node_approved, active,
+         source_ip, country_code, vpn_detected, last_seen_ms, updated_at_ms
+       FROM node_status_projection
+       ${where}
+       ORDER BY updated_at_ms DESC`,
+      args
+    );
+    return result.rows.map((row) => ({
+      nodeId: row.node_id,
+      nodeKind: row.node_kind,
+      ownerEmail: row.owner_email ?? undefined,
+      emailVerified: row.email_verified === null ? undefined : Boolean(row.email_verified),
+      nodeApproved: row.node_approved === null ? undefined : Boolean(row.node_approved),
+      active: row.active === null ? undefined : Boolean(row.active),
+      sourceIp: row.source_ip ?? undefined,
+      countryCode: row.country_code ?? undefined,
+      vpnDetected: row.vpn_detected === null ? undefined : Boolean(row.vpn_detected),
+      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
+      updatedAtMs: Number(row.updated_at_ms)
+    }));
+  }
+
+  async incrementCoordinatorEarningsProjection(input: {
+    accountId: string;
+    ownerEmail?: string;
+    credits: number;
+    taskCountDelta?: number;
+    updatedAtMs: number;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO coordinator_earnings_projection (
+        account_id, owner_email, total_credits, task_count, updated_at_ms
+      ) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (account_id) DO UPDATE SET
+        owner_email = COALESCE(EXCLUDED.owner_email, coordinator_earnings_projection.owner_email),
+        total_credits = coordinator_earnings_projection.total_credits + EXCLUDED.total_credits,
+        task_count = coordinator_earnings_projection.task_count + EXCLUDED.task_count,
+        updated_at_ms = EXCLUDED.updated_at_ms`,
+      [input.accountId, input.ownerEmail ?? null, input.credits, input.taskCountDelta ?? 0, input.updatedAtMs]
+    );
+  }
+
+  async listCoordinatorEarningsProjection(ownerEmail?: string): Promise<
+    Array<{ accountId: string; ownerEmail?: string; totalCredits: number; taskCount: number; updatedAtMs: number }>
+  > {
+    const where = ownerEmail ? "WHERE lower(owner_email) = lower($1)" : "";
+    const args = ownerEmail ? [ownerEmail] : [];
+    const result = await this.pool.query(
+      `SELECT account_id, owner_email, total_credits, task_count, updated_at_ms
+       FROM coordinator_earnings_projection
+       ${where}
+       ORDER BY total_credits DESC, updated_at_ms DESC`,
+      args
+    );
+    return result.rows.map((row) => ({
+      accountId: row.account_id,
+      ownerEmail: row.owner_email ?? undefined,
+      totalCredits: Number(row.total_credits),
+      taskCount: Number(row.task_count),
+      updatedAtMs: Number(row.updated_at_ms)
+    }));
+  }
+
   async persistCreditTransaction(tx: CreditTransaction): Promise<void> {
     await this.pool.query(
       `INSERT INTO credit_transactions (
@@ -354,6 +702,373 @@ export class PostgresStore {
       earned: Number(result.rows[0]?.earned ?? 0),
       spent: Number(result.rows[0]?.spent ?? 0)
     };
+  }
+
+  async persistComputeContributionReport(input: {
+    report: ComputeContributionReport;
+    accountId: string;
+    sourceAgentId: string;
+    reliabilityScore: number;
+    weightedContribution: number;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO compute_contribution_reports (
+        report_id, account_id, source_agent_id, task_id, resource_class, cpu_seconds, gpu_seconds,
+        quality_score, reliability_score, weighted_contribution, timestamp_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT (report_id) DO NOTHING`,
+      [
+        input.report.reportId,
+        input.accountId,
+        input.sourceAgentId,
+        input.report.taskId,
+        input.report.resourceClass,
+        input.report.cpuSeconds,
+        input.report.gpuSeconds,
+        input.report.qualityScore,
+        input.reliabilityScore,
+        input.weightedContribution,
+        input.report.timestampMs
+      ]
+    );
+  }
+
+  async rollingContributionShares(windowStartMs: number, windowEndMs: number): Promise<RollingContributionShare[]> {
+    const result = await this.pool.query(
+      `SELECT
+         account_id,
+         COALESCE(SUM(cpu_seconds), 0) AS cpu_seconds,
+         COALESCE(SUM(gpu_seconds), 0) AS gpu_seconds,
+         COALESCE(AVG(quality_score), 0) AS avg_quality_score,
+         COALESCE(AVG(reliability_score), 0) AS reliability_score,
+         COALESCE(SUM(weighted_contribution), 0) AS weighted_contribution
+       FROM compute_contribution_reports
+       WHERE timestamp_ms >= $1 AND timestamp_ms <= $2
+       GROUP BY account_id
+       ORDER BY weighted_contribution DESC`,
+      [windowStartMs, windowEndMs]
+    );
+    return result.rows.map((row) => ({
+      accountId: row.account_id,
+      cpuSeconds: Number(row.cpu_seconds),
+      gpuSeconds: Number(row.gpu_seconds),
+      avgQualityScore: Number(row.avg_quality_score),
+      reliabilityScore: Number(row.reliability_score),
+      weightedContribution: Number(row.weighted_contribution)
+    }));
+  }
+
+  async upsertIssuanceEpoch(record: IssuanceEpochRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO issuance_epochs (
+        issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+        hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT (issuance_epoch_id) DO UPDATE SET
+        load_index = EXCLUDED.load_index,
+        daily_pool_tokens = EXCLUDED.daily_pool_tokens,
+        hourly_tokens = EXCLUDED.hourly_tokens,
+        total_weighted_contribution = EXCLUDED.total_weighted_contribution,
+        contribution_count = EXCLUDED.contribution_count,
+        finalized = EXCLUDED.finalized`,
+      [
+        record.issuanceEpochId,
+        record.coordinatorId,
+        record.windowStartMs,
+        record.windowEndMs,
+        record.loadIndex,
+        record.dailyPoolTokens,
+        record.hourlyTokens,
+        record.totalWeightedContribution,
+        record.contributionCount,
+        record.finalized,
+        record.createdAtMs
+      ]
+    );
+  }
+
+  async replaceIssuanceAllocations(epochId: string, rows: IssuanceAllocationRecord[]): Promise<void> {
+    await this.pool.query(`DELETE FROM issuance_allocations WHERE issuance_epoch_id = $1`, [epochId]);
+    for (const row of rows) {
+      await this.pool.query(
+        `INSERT INTO issuance_allocations (
+          allocation_id, issuance_epoch_id, account_id, weighted_contribution, allocation_share, issued_tokens, created_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT (allocation_id) DO NOTHING`,
+        [
+          row.allocationId,
+          row.issuanceEpochId,
+          row.accountId,
+          row.weightedContribution,
+          row.allocationShare,
+          row.issuedTokens,
+          row.createdAtMs
+        ]
+      );
+    }
+  }
+
+  async latestIssuanceEpoch(finalizedOnly = false): Promise<IssuanceEpochRecord | null> {
+    const where = finalizedOnly ? "WHERE finalized = TRUE" : "";
+    const result = await this.pool.query(
+      `SELECT issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+              hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+       FROM issuance_epochs
+       ${where}
+       ORDER BY created_at_ms DESC
+       LIMIT 1`
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      issuanceEpochId: row.issuance_epoch_id,
+      coordinatorId: row.coordinator_id,
+      windowStartMs: Number(row.window_start_ms),
+      windowEndMs: Number(row.window_end_ms),
+      loadIndex: Number(row.load_index),
+      dailyPoolTokens: Number(row.daily_pool_tokens),
+      hourlyTokens: Number(row.hourly_tokens),
+      totalWeightedContribution: Number(row.total_weighted_contribution),
+      contributionCount: Number(row.contribution_count),
+      finalized: Boolean(row.finalized),
+      createdAtMs: Number(row.created_at_ms)
+    };
+  }
+
+  async getIssuanceEpoch(issuanceEpochId: string): Promise<IssuanceEpochRecord | null> {
+    const result = await this.pool.query(
+      `SELECT issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+              hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+       FROM issuance_epochs
+       WHERE issuance_epoch_id = $1
+       LIMIT 1`,
+      [issuanceEpochId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      issuanceEpochId: row.issuance_epoch_id,
+      coordinatorId: row.coordinator_id,
+      windowStartMs: Number(row.window_start_ms),
+      windowEndMs: Number(row.window_end_ms),
+      loadIndex: Number(row.load_index),
+      dailyPoolTokens: Number(row.daily_pool_tokens),
+      hourlyTokens: Number(row.hourly_tokens),
+      totalWeightedContribution: Number(row.total_weighted_contribution),
+      contributionCount: Number(row.contribution_count),
+      finalized: Boolean(row.finalized),
+      createdAtMs: Number(row.created_at_ms)
+    };
+  }
+
+  async listIssuanceEpochs(limit = 50): Promise<IssuanceEpochRecord[]> {
+    const result = await this.pool.query(
+      `SELECT issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+              hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+       FROM issuance_epochs
+       ORDER BY created_at_ms DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return result.rows.map((row) => ({
+      issuanceEpochId: row.issuance_epoch_id,
+      coordinatorId: row.coordinator_id,
+      windowStartMs: Number(row.window_start_ms),
+      windowEndMs: Number(row.window_end_ms),
+      loadIndex: Number(row.load_index),
+      dailyPoolTokens: Number(row.daily_pool_tokens),
+      hourlyTokens: Number(row.hourly_tokens),
+      totalWeightedContribution: Number(row.total_weighted_contribution),
+      contributionCount: Number(row.contribution_count),
+      finalized: Boolean(row.finalized),
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  async listIssuanceAllocations(epochId: string): Promise<IssuanceAllocationRecord[]> {
+    const result = await this.pool.query(
+      `SELECT allocation_id, issuance_epoch_id, account_id, weighted_contribution, allocation_share, issued_tokens, created_at_ms
+       FROM issuance_allocations
+       WHERE issuance_epoch_id = $1
+       ORDER BY issued_tokens DESC`,
+      [epochId]
+    );
+    return result.rows.map((row) => ({
+      allocationId: row.allocation_id,
+      issuanceEpochId: row.issuance_epoch_id,
+      accountId: row.account_id,
+      weightedContribution: Number(row.weighted_contribution),
+      allocationShare: Number(row.allocation_share),
+      issuedTokens: Number(row.issued_tokens),
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  async persistQuorumLedgerRecord(record: QuorumLedgerRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO quorum_ledger_records (
+        record_id, record_type, epoch_id, coordinator_id, prev_hash, hash, payload_json, signature, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (record_id) DO NOTHING`,
+      [
+        record.recordId,
+        record.recordType,
+        record.epochId,
+        record.coordinatorId,
+        record.prevHash,
+        record.hash,
+        record.payloadJson,
+        record.signature,
+        record.createdAtMs
+      ]
+    );
+  }
+
+  async listQuorumLedgerByEpoch(epochId: string): Promise<QuorumLedgerRecord[]> {
+    const result = await this.pool.query(
+      `SELECT record_id, record_type, epoch_id, coordinator_id, prev_hash, hash, payload_json, signature, created_at_ms
+       FROM quorum_ledger_records
+       WHERE epoch_id = $1
+       ORDER BY created_at_ms ASC`,
+      [epochId]
+    );
+    return result.rows.map((row) => ({
+      recordId: row.record_id,
+      recordType: row.record_type,
+      epochId: row.epoch_id,
+      coordinatorId: row.coordinator_id,
+      prevHash: row.prev_hash,
+      hash: row.hash,
+      payloadJson: JSON.stringify(row.payload_json),
+      signature: row.signature,
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  async latestQuorumLedgerRecord(): Promise<QuorumLedgerRecord | null> {
+    const result = await this.pool.query(
+      `SELECT record_id, record_type, epoch_id, coordinator_id, prev_hash, hash, payload_json, signature, created_at_ms
+       FROM quorum_ledger_records
+       ORDER BY created_at_ms DESC
+       LIMIT 1`
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      recordId: row.record_id,
+      recordType: row.record_type,
+      epochId: row.epoch_id,
+      coordinatorId: row.coordinator_id,
+      prevHash: row.prev_hash,
+      hash: row.hash,
+      payloadJson: JSON.stringify(row.payload_json),
+      signature: row.signature,
+      createdAtMs: Number(row.created_at_ms)
+    };
+  }
+
+  async upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO bitcoin_anchor_records (
+        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (anchor_id) DO UPDATE SET
+        tx_ref = EXCLUDED.tx_ref,
+        status = EXCLUDED.status,
+        anchored_at_ms = EXCLUDED.anchored_at_ms`,
+      [
+        record.anchorId,
+        record.epochId,
+        record.checkpointHash,
+        record.anchorNetwork,
+        record.txRef,
+        record.status,
+        record.anchoredAtMs ?? null,
+        record.createdAtMs
+      ]
+    );
+  }
+
+  async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+       FROM bitcoin_anchor_records
+       ORDER BY created_at_ms DESC
+       LIMIT 1`
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      anchorId: row.anchor_id,
+      epochId: row.epoch_id,
+      checkpointHash: row.checkpoint_hash,
+      anchorNetwork: row.anchor_network,
+      txRef: row.tx_ref,
+      status: row.status,
+      anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
+      createdAtMs: Number(row.created_at_ms)
+    };
+  }
+
+  async listAnchors(limit = 100): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+       FROM bitcoin_anchor_records
+       ORDER BY created_at_ms DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return result.rows.map((row) => ({
+      anchorId: row.anchor_id,
+      epochId: row.epoch_id,
+      checkpointHash: row.checkpoint_hash,
+      anchorNetwork: row.anchor_network,
+      txRef: row.tx_ref,
+      status: row.status,
+      anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  async persistIssuancePayoutEvent(event: IssuancePayoutEvent): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO issuance_payout_events (
+        payout_event_id, issuance_epoch_id, account_id, payout_type, tokens, source_intent_id, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT (payout_event_id) DO NOTHING`,
+      [
+        event.payoutEventId,
+        event.issuanceEpochId,
+        event.accountId,
+        event.payoutType,
+        event.tokens,
+        event.sourceIntentId ?? null,
+        event.createdAtMs
+      ]
+    );
+  }
+
+  async listIssuancePayoutEvents(epochId?: string, limit = 500): Promise<IssuancePayoutEvent[]> {
+    const where = epochId ? "WHERE issuance_epoch_id = $1" : "";
+    const args = epochId ? [epochId, limit] : [limit];
+    const limitPosition = epochId ? "$2" : "$1";
+    const result = await this.pool.query(
+      `SELECT payout_event_id, issuance_epoch_id, account_id, payout_type, tokens, source_intent_id, created_at_ms
+       FROM issuance_payout_events
+       ${where}
+       ORDER BY created_at_ms DESC
+       LIMIT ${limitPosition}`,
+      args
+    );
+    return result.rows.map((row) => ({
+      payoutEventId: row.payout_event_id,
+      issuanceEpochId: row.issuance_epoch_id,
+      accountId: row.account_id,
+      payoutType: row.payout_type,
+      tokens: Number(row.tokens),
+      sourceIntentId: row.source_intent_id ?? undefined,
+      createdAtMs: Number(row.created_at_ms)
+    }));
   }
 
   async upsertAgent(input: {

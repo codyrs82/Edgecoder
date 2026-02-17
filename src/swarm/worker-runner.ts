@@ -1,12 +1,22 @@
 import { request } from "undici";
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask } from "../common/types.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 
-const COORDINATOR = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
+const COORDINATOR_DISCOVERY_URL =
+  process.env.COORDINATOR_DISCOVERY_URL ??
+  (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
+const COORDINATOR_CACHE_FILE = resolve(
+  process.env.COORDINATOR_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-cache.json`
+);
 const AGENT_ID = process.env.AGENT_ID ?? "worker-1";
 const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
 const OS = (process.env.AGENT_OS ?? "macos") as "debian" | "ubuntu" | "windows" | "macos" | "ios";
@@ -16,7 +26,7 @@ const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
-const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
+let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
 const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
 const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
@@ -27,6 +37,7 @@ const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
 const lastOfferAtByPeer = new Map<string, number>();
 let peerWorkCursor = 0;
+let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
 type AgentPowerTelemetry = {
   onExternalPower?: boolean;
@@ -71,12 +82,71 @@ function allowPeerDirectWork(telemetry: AgentPowerTelemetry | undefined): boolea
 }
 
 function meshHeaders(): Record<string, string> {
-  if (!MESH_AUTH_TOKEN) return {};
-  return { "x-mesh-token": MESH_AUTH_TOKEN };
+  if (!meshAuthToken) return {};
+  return { "x-mesh-token": meshAuthToken };
+}
+
+function normalizeUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+async function readCachedCoordinatorUrl(): Promise<string | null> {
+  try {
+    const raw = await readFile(COORDINATOR_CACHE_FILE, "utf8");
+    const parsed = JSON.parse(raw) as { coordinatorUrl?: string };
+    return normalizeUrl(parsed.coordinatorUrl);
+  } catch {
+    return null;
+  }
+}
+
+async function cacheCoordinatorUrl(url: string): Promise<void> {
+  try {
+    await mkdir(dirname(COORDINATOR_CACHE_FILE), { recursive: true });
+    await writeFile(
+      COORDINATOR_CACHE_FILE,
+      JSON.stringify({ coordinatorUrl: url, updatedAtMs: Date.now() }, null, 2),
+      "utf8"
+    );
+  } catch {
+    // Cache writes are best-effort only.
+  }
+}
+
+async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
+  if (!COORDINATOR_DISCOVERY_URL) return null;
+  try {
+    const res = await request(COORDINATOR_DISCOVERY_URL, { method: "GET" });
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    const payload = (await res.body.json()) as {
+      coordinators?: Array<{ coordinatorUrl?: string }>;
+    };
+    const candidate = normalizeUrl(payload.coordinators?.[0]?.coordinatorUrl);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry" | "cache" | "bootstrap" }> {
+  const discovered = await discoverCoordinatorUrlFromRegistry();
+  if (discovered) return { url: discovered, source: "registry" };
+  const cached = await readCachedCoordinatorUrl();
+  if (cached) return { url: cached, source: "cache" };
+  return { url: COORDINATOR_BOOTSTRAP_URL, source: "bootstrap" };
 }
 
 async function post(path: string, body: unknown): Promise<any> {
-  const res = await request(`${COORDINATOR}${path}`, {
+  const res = await request(`${activeCoordinatorUrl}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...meshHeaders() },
     body: JSON.stringify(body)
@@ -85,6 +155,11 @@ async function post(path: string, body: unknown): Promise<any> {
 }
 
 async function loop(): Promise<void> {
+  const coordinatorSelection = await resolveCoordinatorUrl();
+  activeCoordinatorUrl = coordinatorSelection.url;
+  await cacheCoordinatorUrl(activeCoordinatorUrl);
+  console.log(`[agent:${AGENT_ID}] coordinator selected (${coordinatorSelection.source}): ${activeCoordinatorUrl}`);
+
   await ensureOllamaModelInstalled({
     enabled: PROVIDER === "ollama-local",
     autoInstall: OLLAMA_AUTO_INSTALL,
@@ -102,7 +177,7 @@ async function loop(): Promise<void> {
   while (true) {
     try {
       const powerTelemetry = readAgentPowerTelemetry();
-      await post("/register", {
+      const registerResponse = (await post("/register", {
         agentId: AGENT_ID,
         os: OS,
         version: "0.1.0",
@@ -112,7 +187,16 @@ async function loop(): Promise<void> {
         clientType: AGENT_CLIENT_TYPE,
         maxConcurrentTasks: MAX_CONCURRENT_TASKS,
         powerTelemetry
-      });
+      })) as {
+        accepted?: boolean;
+        meshToken?: string;
+      };
+      if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
+        if (meshAuthToken !== registerResponse.meshToken) {
+          meshAuthToken = registerResponse.meshToken;
+          console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+        }
+      }
 
       const hb = (await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry })) as {
       ok?: boolean;
@@ -130,7 +214,8 @@ async function loop(): Promise<void> {
         offerId: string;
         fromAgentId: string;
         toAgentId: string;
-        language: "python" | "javascript";
+        workType: "code_task" | "model_inference";
+        language?: "python" | "javascript";
         input: string;
       }>;
       blacklist?: { version: number; agents: string[] };
@@ -151,7 +236,7 @@ async function loop(): Promise<void> {
         peerTunnels.set(invite.fromAgentId, invite.token);
       }
 
-      const idlePeersResponse = await request(`${COORDINATOR}/agent-mesh/peers/${AGENT_ID}`, {
+      const idlePeersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
         method: "GET",
         headers: meshHeaders()
       });
@@ -161,7 +246,7 @@ async function loop(): Promise<void> {
           if (blacklistSet.has(peerId)) continue;
           if (peerId === AGENT_ID) continue;
           if (peerTunnels.has(peerId)) continue;
-          const connect = await request(`${COORDINATOR}/agent-mesh/connect`, {
+          const connect = await request(`${activeCoordinatorUrl}/agent-mesh/connect`, {
             method: "POST",
             headers: { "content-type": "application/json", ...meshHeaders() },
             body: JSON.stringify({ fromAgentId: AGENT_ID, toAgentId: peerId })
@@ -174,7 +259,7 @@ async function loop(): Promise<void> {
       }
 
       for (const token of peerTunnels.values()) {
-        const relayRes = await request(`${COORDINATOR}/agent-mesh/relay`, {
+        const relayRes = await request(`${activeCoordinatorUrl}/agent-mesh/relay`, {
           method: "POST",
           headers: { "content-type": "application/json", ...meshHeaders() },
           body: JSON.stringify({
@@ -242,7 +327,7 @@ async function loop(): Promise<void> {
           await new Promise((r) => setTimeout(r, 500));
           continue;
         }
-        const accepted = await request(`${COORDINATOR}/agent-mesh/direct-work/accept`, {
+        const accepted = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/accept`, {
           method: "POST",
           headers: { "content-type": "application/json", ...meshHeaders() },
           body: JSON.stringify({
@@ -251,22 +336,48 @@ async function loop(): Promise<void> {
           })
         });
         if (accepted.statusCode >= 200 && accepted.statusCode < 300) {
-          const peerSubtask: Subtask = {
-            id: `peer-${offer.offerId}`,
-            taskId: `peer-direct-${offer.offerId}`,
-            kind: "single_step",
-            language: offer.language,
-            input: offer.input,
-            timeoutMs: 4000,
-            snapshotRef: "peer-direct",
-            projectMeta: {
-              projectId: "peer-direct",
-              resourceClass: "cpu",
-              priority: 10
+          let peerResult: { ok: boolean; output: string; error?: string; durationMs: number };
+          if (offer.workType === "model_inference") {
+            const started = Date.now();
+            try {
+              const response = await providers.current().generate({ prompt: offer.input });
+              peerResult = {
+                ok: true,
+                output: response.text,
+                durationMs: Date.now() - started
+              };
+            } catch (error) {
+              peerResult = {
+                ok: false,
+                output: "",
+                error: String(error),
+                durationMs: Date.now() - started
+              };
             }
-          };
-          const peerResult = await worker.runSubtask(peerSubtask, AGENT_ID);
-          await request(`${COORDINATOR}/agent-mesh/direct-work/result`, {
+          } else {
+            const peerSubtask: Subtask = {
+              id: `peer-${offer.offerId}`,
+              taskId: `peer-direct-${offer.offerId}`,
+              kind: "single_step",
+              language: offer.language ?? "python",
+              input: offer.input,
+              timeoutMs: 4000,
+              snapshotRef: "peer-direct",
+              projectMeta: {
+                projectId: "peer-direct",
+                resourceClass: "cpu",
+                priority: 10
+              }
+            };
+            const result = await worker.runSubtask(peerSubtask, AGENT_ID);
+            peerResult = {
+              ok: result.ok,
+              output: result.output,
+              error: result.error,
+              durationMs: result.durationMs
+            };
+          }
+          await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/result`, {
             method: "POST",
             headers: { "content-type": "application/json", ...meshHeaders() },
             body: JSON.stringify({
@@ -285,7 +396,7 @@ async function loop(): Promise<void> {
 
     // While idle, offer direct work to nearby peers for spare compute utilization.
       if (canUsePeerDirect) {
-        const peersResponse = await request(`${COORDINATOR}/agent-mesh/peers/${AGENT_ID}`, {
+        const peersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
           method: "GET",
           headers: meshHeaders()
         });
@@ -300,12 +411,13 @@ async function loop(): Promise<void> {
             const workInput = PEER_DIRECT_WORK_ITEMS[peerWorkCursor % PEER_DIRECT_WORK_ITEMS.length].trim();
             peerWorkCursor += 1;
             if (!workInput) continue;
-            const offerRes = await request(`${COORDINATOR}/agent-mesh/direct-work/offer`, {
+            const offerRes = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/offer`, {
               method: "POST",
               headers: { "content-type": "application/json", ...meshHeaders() },
               body: JSON.stringify({
                 fromAgentId: AGENT_ID,
                 toAgentId: peerId,
+                workType: "code_task",
                 language: "python",
                 input: workInput
               })
@@ -320,6 +432,12 @@ async function loop(): Promise<void> {
       await new Promise((r) => setTimeout(r, idleDelayMs));
     } catch (error) {
       console.error(`[agent:${AGENT_ID}] loop error: ${String(error)}`);
+      const failover = await resolveCoordinatorUrl();
+      if (failover.url !== activeCoordinatorUrl) {
+        activeCoordinatorUrl = failover.url;
+        await cacheCoordinatorUrl(activeCoordinatorUrl);
+        console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${activeCoordinatorUrl}`);
+      }
       await new Promise((r) => setTimeout(r, 1500));
     }
   }

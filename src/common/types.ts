@@ -92,7 +92,11 @@ export type MeshMessageType =
   | "task_claim"
   | "result_announce"
   | "ordering_snapshot"
-  | "blacklist_update";
+  | "blacklist_update"
+  | "issuance_proposal"
+  | "issuance_vote"
+  | "issuance_commit"
+  | "issuance_checkpoint";
 
 export interface MeshMessage {
   id: string;
@@ -106,13 +110,27 @@ export interface MeshMessage {
 
 export interface QueueEventRecord {
   id: string;
-  eventType: "task_enqueue" | "task_claim" | "task_complete" | "task_requeue";
+  eventType:
+    | "task_enqueue"
+    | "task_claim"
+    | "task_complete"
+    | "task_requeue"
+    | "node_approval"
+    | "node_validation"
+    | "earnings_accrual"
+    | "stats_checkpoint_proposal"
+    | "stats_checkpoint_signature"
+    | "stats_checkpoint_commit";
   taskId: string;
   subtaskId?: string;
   actorId: string;
   sequence: number;
   issuedAtMs: number;
   prevHash: string;
+  coordinatorId?: string;
+  checkpointHeight?: number;
+  checkpointHash?: string;
+  payloadJson?: string;
   hash: string;
   signature: string;
 }
@@ -128,6 +146,7 @@ export interface OrderingProof {
 export interface ComputeContributionReport {
   reportId: string;
   agentId: string;
+  sourceAgentId?: string;
   taskId: string;
   resourceClass: ResourceClass;
   cpuSeconds: number;
@@ -225,6 +244,79 @@ export interface PriceEpochRecord {
   demandIndex: number;
   negotiatedWith: string[];
   signature: string;
+  createdAtMs: number;
+}
+
+export interface RollingContributionShare {
+  accountId: string;
+  cpuSeconds: number;
+  gpuSeconds: number;
+  avgQualityScore: number;
+  reliabilityScore: number;
+  weightedContribution: number;
+}
+
+export interface IssuanceEpochRecord {
+  issuanceEpochId: string;
+  coordinatorId: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  loadIndex: number;
+  dailyPoolTokens: number;
+  hourlyTokens: number;
+  totalWeightedContribution: number;
+  contributionCount: number;
+  finalized: boolean;
+  createdAtMs: number;
+}
+
+export interface IssuanceAllocationRecord {
+  allocationId: string;
+  issuanceEpochId: string;
+  accountId: string;
+  weightedContribution: number;
+  allocationShare: number;
+  issuedTokens: number;
+  createdAtMs: number;
+}
+
+export interface IssuancePayoutEvent {
+  payoutEventId: string;
+  issuanceEpochId: string;
+  accountId: string;
+  payoutType: "contributor" | "coordinator_service" | "reserve";
+  tokens: number;
+  sourceIntentId?: string;
+  createdAtMs: number;
+}
+
+export interface QuorumVoteRecord {
+  voterCoordinatorId: string;
+  vote: "approve" | "reject";
+  signature: string;
+  votedAtMs: number;
+}
+
+export interface QuorumLedgerRecord {
+  recordId: string;
+  recordType: "issuance_proposal" | "issuance_vote" | "issuance_commit" | "issuance_checkpoint";
+  epochId: string;
+  coordinatorId: string;
+  prevHash: string;
+  hash: string;
+  payloadJson: string;
+  signature: string;
+  createdAtMs: number;
+}
+
+export interface BitcoinAnchorRecord {
+  anchorId: string;
+  epochId: string;
+  checkpointHash: string;
+  anchorNetwork: BitcoinNetwork;
+  txRef: string;
+  status: "pending" | "anchored" | "failed";
+  anchoredAtMs?: number;
   createdAtMs: number;
 }
 

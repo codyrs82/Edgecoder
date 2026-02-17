@@ -13,11 +13,11 @@ export async function accrueCredits(
   if (pgStore) {
     const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
     const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const credits =
-      computeSeconds *
-      baseRatePerSecond(report.resourceClass) *
-      qualityMultiplier *
-      loadMultiplier(load);
+    const loadFactor = loadMultiplier(load);
+    const credits = computeSeconds * baseRatePerSecond(report.resourceClass) * qualityMultiplier * loadFactor;
+    const resourceWeight = report.resourceClass === "gpu" ? 2 : 1;
+    const reliabilityScore = report.success ? 1 : 0.75;
+    const weightedContribution = Number((computeSeconds * resourceWeight * qualityMultiplier * reliabilityScore).toFixed(6));
     const tx: CreditTransaction = {
       txId: randomUUID(),
       accountId: report.agentId,
@@ -28,6 +28,13 @@ export async function accrueCredits(
       timestampMs: Date.now()
     };
     await pgStore.persistCreditTransaction(tx);
+    await pgStore.persistComputeContributionReport({
+      report,
+      accountId: report.agentId,
+      sourceAgentId: report.sourceAgentId ?? report.agentId,
+      reliabilityScore,
+      weightedContribution
+    });
     return tx;
   }
   const tx = creditEngine.accrue(report, load);
