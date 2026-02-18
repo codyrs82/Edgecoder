@@ -333,12 +333,55 @@ final class SwarmRuntimeController: ObservableObject {
         do {
             let payload: [String: Any] = ["agentId": agentId]
             let response = try await postCoordinator(path: "/pull", payload: payload)
-            if response["subtask"] is [String: Any] {
-                coordinatorTasksObserved += 1
-                persistRuntimeSettings()
-            }
+            guard let subtask = response["subtask"] as? [String: Any],
+                  let taskId = subtask["taskId"] as? String,
+                  let subtaskId = subtask["id"] as? String,
+                  let prompt = subtask["prompt"] as? String else { return }
+
+            coordinatorTasksObserved += 1
+            persistRuntimeSettings()
+            appendEvent("Task claimed: \(subtaskId.prefix(8))… — running local inference.")
+
+            await executeSubtask(taskId: taskId, subtaskId: subtaskId, prompt: prompt)
         } catch {
             // Non-fatal telemetry path; ignore pull observation errors.
+        }
+    }
+
+    private func executeSubtask(taskId: String, subtaskId: String, prompt: String) async {
+        let startMs = Int(Date().timeIntervalSince1970 * 1000)
+
+        // Ensure model is ready
+        if modelManager.state != .ready {
+            await modelManager.installLightweightModel()
+        }
+
+        var output = ""
+        var ok = false
+
+        if modelManager.state == .ready {
+            await modelManager.runInference(prompt: prompt, maxTokens: 512)
+            output = modelManager.lastInferenceOutput
+            ok = !output.isEmpty && output != "[empty response]"
+        } else {
+            output = "Local model unavailable: \(modelManager.statusText)"
+        }
+
+        let durationMs = Int(Date().timeIntervalSince1970 * 1000) - startMs
+
+        do {
+            let resultPayload: [String: Any] = [
+                "agentId": agentId,
+                "taskId": taskId,
+                "subtaskId": subtaskId,
+                "ok": ok,
+                "output": output,
+                "durationMs": durationMs
+            ]
+            _ = try await postCoordinator(path: "/result", payload: resultPayload)
+            appendEvent("Task \(subtaskId.prefix(8))… complete (ok=\(ok), \(durationMs)ms).")
+        } catch {
+            appendEvent("Task result POST failed: \(error.localizedDescription)")
         }
     }
 
