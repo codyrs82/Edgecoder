@@ -3245,14 +3245,14 @@ app.get("/portal-legacy", async (_req, reply) => {
 
 function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "dashboard" | "nodes" | "wallet" | "operations" | "settings";
+  activeTab: "dashboard" | "nodes" | "wallet" | "operations" | "settings" | "download";
   heading: string;
   subtitle: string;
   content: string;
   script: string;
 }): string {
   const navLink = (
-    tab: "dashboard" | "nodes" | "wallet" | "operations" | "settings",
+    tab: "dashboard" | "nodes" | "wallet" | "operations" | "settings" | "download",
     label: string,
     href: string
   ) => {
@@ -3548,6 +3548,7 @@ function portalAuthedPageHtml(input: {
             <div class="nav-row">
               ${navLink("dashboard", "Dashboard", "/portal/dashboard")}
               ${navLink("nodes", "Nodes", "/portal/nodes")}
+              ${navLink("download", "Download", "/portal/download")}
               ${navLink("wallet", "Wallet", "/portal/wallet")}
               ${navLink("operations", "Coordinator Ops", "/portal/coordinator-ops")}
               ${navLink("settings", "Settings", "/portal/settings")}
@@ -5220,6 +5221,170 @@ app.get("/portal/settings", async (_req, reply) => {
     activeTab: "settings",
     heading: "Settings",
     subtitle: "Account preferences and authentication options.",
+    content,
+    script
+  }));
+});
+
+app.get("/portal/download", async (_req, reply) => {
+  const GH_RELEASE_BASE = "https://github.com/edgecoder-io/edgecoder/releases/latest/download";
+  const btnPrimary = "padding:6px 12px;border-radius:6px;background:linear-gradient(140deg,#2563eb,#1d4ed8);color:white;text-decoration:none;font-size:12px;border:1px solid rgba(37,99,235,0.75);display:inline-block;";
+  const btnSecondary = "padding:6px 12px;border-radius:6px;background:rgba(248,250,252,0.95);color:var(--text);text-decoration:none;font-size:12px;border:1px solid rgba(148,163,184,0.4);display:inline-block;";
+  const sectionLabel = "color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.12em;margin:10px 0 4px;";
+  const codeBlock = "border:1px dashed rgba(37,99,235,0.42);border-radius:6px;padding:7px 9px;background:rgba(239,246,255,0.8);word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;user-select:all;margin:0;";
+
+  const content = `
+    <!-- ── OS packages ───────────────────────────────────────────────── -->
+    <div class="grid2">
+
+      <!-- macOS -->
+      <div class="card">
+        <h2 style="margin-top:0;font-size:14px;">🍎&nbsp; macOS</h2>
+        <p class="muted" style="margin-top:4px;">One installer runs as an agent <em>or</em> coordinator — set <code>EDGE_RUNTIME_MODE</code> in the env file after install. Works on Apple Silicon and Intel.</p>
+        <div class="kpis" style="margin-top:6px;">
+          <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.pkg</div></div>
+          <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">arm64 + x86_64</div></div>
+          <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">LaunchDaemon</div></div>
+        </div>
+        <div class="row" style="margin-top:10px;gap:6px;">
+          <a href="${GH_RELEASE_BASE}/EdgeCoder-macos-installer.pkg" style="${btnPrimary}">⬇ Download .pkg</a>
+        </div>
+        <div style="margin-top:12px;">
+          <div style="${sectionLabel}">Install via curl</div>
+          <pre style="${codeBlock}">curl -fsSL ${PORTAL_PUBLIC_URL}/install/macos | sudo bash</pre>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="${sectionLabel}">After install — agent mode</div>
+          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
+# Set:  EDGE_RUNTIME_MODE=worker
+#       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">After install — coordinator mode</div>
+          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
+# Set:  EDGE_RUNTIME_MODE=coordinator
+#       COORDINATOR_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">View logs</div>
+          <pre style="${codeBlock}">tail -f /var/log/edgecoder/runtime.log</pre>
+        </div>
+      </div>
+
+      <!-- Linux -->
+      <div class="card">
+        <h2 style="margin-top:0;font-size:14px;">🐧&nbsp; Linux (Debian / Ubuntu)</h2>
+        <p class="muted" style="margin-top:4px;">One .deb package for agent or coordinator. Installs a systemd service that starts on boot. Requires Node.js 20+.</p>
+        <div class="kpis" style="margin-top:6px;">
+          <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.deb</div></div>
+          <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">amd64</div></div>
+          <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">systemd</div></div>
+        </div>
+        <div class="row" style="margin-top:10px;gap:6px;">
+          <a href="${GH_RELEASE_BASE}/EdgeCoder-linux-amd64.deb" style="${btnPrimary}">⬇ Download .deb</a>
+        </div>
+        <div style="margin-top:12px;">
+          <div style="${sectionLabel}">Install Node.js 20+ (if needed)</div>
+          <pre style="${codeBlock}">curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+sudo apt-get install -y nodejs</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">Install package</div>
+          <pre style="${codeBlock}">sudo dpkg -i EdgeCoder-linux-amd64.deb</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">After install — agent mode</div>
+          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
+# Set:  EDGE_RUNTIME_MODE=worker
+#       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+sudo systemctl restart edgecoder</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">After install — coordinator mode</div>
+          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
+# Set:  EDGE_RUNTIME_MODE=coordinator
+#       COORDINATOR_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+sudo systemctl restart edgecoder</pre>
+        </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">View logs</div>
+          <pre style="${codeBlock}">journalctl -u edgecoder -f</pre>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Docker ──────────────────────────────────────────────────────── -->
+    <div class="card" style="margin-top:0;">
+      <h2 style="margin-top:0;font-size:14px;">🐳&nbsp; Docker</h2>
+      <p class="muted" style="margin-top:4px;">Run EdgeCoder in a container. Set <code>EDGE_RUNTIME_MODE</code> to <code>worker</code> (agent) or <code>coordinator</code>.</p>
+      <div class="grid2" style="gap:8px;margin-top:6px;">
+        <div>
+          <div style="${sectionLabel}">Agent (worker)</div>
+          <pre style="${codeBlock}">docker run -d --restart unless-stopped \\
+  --name edgecoder-agent \\
+  -e EDGE_RUNTIME_MODE=worker \\
+  -e AGENT_ID=docker-worker-001 \\
+  -e AGENT_OS=linux \\
+  -e AGENT_REGISTRATION_TOKEN=&lt;token&gt; \\
+  -e COORDINATOR_URL=&lt;coordinator-url&gt; \\
+  ghcr.io/edgecoder-io/edgecoder:latest</pre>
+        </div>
+        <div>
+          <div style="${sectionLabel}">Coordinator</div>
+          <pre style="${codeBlock}">docker run -d --restart unless-stopped \\
+  --name edgecoder-coordinator \\
+  -p 4301:4301 \\
+  -e EDGE_RUNTIME_MODE=coordinator \\
+  -e COORDINATOR_REGISTRATION_TOKEN=&lt;token&gt; \\
+  -e DATABASE_URL=&lt;postgres-url&gt; \\
+  ghcr.io/edgecoder-io/edgecoder:latest</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Getting started ────────────────────────────────────────────── -->
+    <div class="card" style="margin-top:0;">
+      <h2 style="margin-top:0;font-size:14px;">Getting started</h2>
+      <ol style="padding-left:18px;font-size:12px;color:var(--muted);line-height:2;">
+        <li>Go to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> and generate a registration token — choose <strong>Agent</strong> or <strong>Coordinator</strong>.</li>
+        <li>Download the installer for your OS above and follow the install steps.</li>
+        <li>Edit <code>/etc/edgecoder/edgecoder.env</code> — set <code>EDGE_RUNTIME_MODE</code> and your registration token.</li>
+        <li>Restart the service (<code>launchctl kickstart</code> on macOS, <code>systemctl restart edgecoder</code> on Linux).</li>
+        <li>Return to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> to confirm the node appears, then approve it.</li>
+      </ol>
+    </div>
+
+    <!-- ── Config reference ───────────────────────────────────────────── -->
+    <div class="card" style="margin-top:0;">
+      <h2 style="margin-top:0;font-size:14px;">Configuration reference <span class="muted" style="font-weight:400;font-size:11px;">(/etc/edgecoder/edgecoder.env)</span></h2>
+      <table style="margin-top:4px;">
+        <thead><tr><th>Variable</th><th>Values / Example</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>EDGE_RUNTIME_MODE</code></td><td><code>worker</code> | <code>coordinator</code></td><td>Controls which service the daemon runs as.</td></tr>
+          <tr><td><code>AGENT_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=worker.</td></tr>
+          <tr><td><code>COORDINATOR_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=coordinator.</td></tr>
+          <tr><td><code>AGENT_ID</code></td><td><code>mac-worker-001</code></td><td>Unique identifier for this node in the swarm.</td></tr>
+          <tr><td><code>COORDINATOR_URL</code></td><td><code>http://&lt;host&gt;:4301</code></td><td>URL of the coordinator (agent mode).</td></tr>
+          <tr><td><code>MESH_AUTH_TOKEN</code></td><td><em>shared secret</em></td><td>Mesh authentication token for peer connections.</td></tr>
+          <tr><td><code>OLLAMA_MODEL</code></td><td><code>qwen2.5-coder:latest</code></td><td>Local model to use for inference.</td></tr>
+          <tr><td><code>OLLAMA_AUTO_INSTALL</code></td><td><code>true</code> | <code>false</code></td><td>Auto-pull the model on startup if not present.</td></tr>
+          <tr><td><code>MAX_CONCURRENT_TASKS</code></td><td><code>1</code></td><td>Parallel task limit per agent.</td></tr>
+          <tr><td><code>NODE_BIN</code></td><td><code>/usr/bin/node</code></td><td>Override Node.js binary path if needed.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+  const script = `
+    requireAuth().catch(() => {});
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Download",
+    activeTab: "download",
+    heading: "Download",
+    subtitle: "Install agents and coordinators on macOS, Linux, or Docker.",
     content,
     script
   }));

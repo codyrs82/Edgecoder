@@ -1,0 +1,24 @@
+[Unit]
+Description=Ollama LLM server (managed by EdgeCoder)
+Documentation=https://ollama.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The Ollama install.sh script creates an ollama user/group.
+# Remove User= and Group= if running in a rootless/container context.
+User=ollama
+Group=ollama
+ExecStart=/usr/local/bin/ollama serve
+Restart=always
+RestartSec=5s
+Environment="HOME=/usr/share/ollama"
+Environment="OLLAMA_HOST=127.0.0.1:11434"
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edgecoder-ollama
+
+[Install]
+WantedBy=multi-user.target

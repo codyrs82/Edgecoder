@@ -1,0 +1,25 @@
+[Unit]
+Description=EdgeCoder Runtime
+Documentation=https://edgecoder.io/docs
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/edgecoder/edgecoder.env
+ExecStart=/usr/lib/edgecoder/bin/edgecoder-runtime.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edgecoder
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/log/edgecoder /etc/edgecoder
+
+[Install]
+WantedBy=multi-user.target
