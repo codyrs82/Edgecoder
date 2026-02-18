@@ -5235,6 +5235,7 @@ app.get("/portal/settings", async (_req, reply) => {
 
 app.get("/portal/download", async (_req, reply) => {
   const GH_RELEASE_BASE = "https://github.com/edgecoder-io/edgecoder/releases/latest/download";
+  const GH_RELEASES_PAGE = "https://github.com/edgecoder-io/edgecoder/releases/latest";
   const btnPrimary = "padding:6px 12px;border-radius:6px;background:linear-gradient(140deg,#2563eb,#1d4ed8);color:white;text-decoration:none;font-size:12px;border:1px solid rgba(37,99,235,0.75);display:inline-block;";
   const btnSecondary = "padding:6px 12px;border-radius:6px;background:rgba(248,250,252,0.95);color:var(--text);text-decoration:none;font-size:12px;border:1px solid rgba(148,163,184,0.4);display:inline-block;";
   const sectionLabel = "color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.12em;margin:10px 0 4px;";
@@ -5247,24 +5248,24 @@ app.get("/portal/download", async (_req, reply) => {
       <!-- macOS -->
       <div class="card">
         <h2 style="margin-top:0;font-size:14px;">🍎&nbsp; macOS</h2>
-        <p class="muted" style="margin-top:4px;">One installer runs as an agent <em>or</em> coordinator — set <code>EDGE_RUNTIME_MODE</code> in the env file after install. Works on Apple Silicon and Intel.</p>
+        <p class="muted" style="margin-top:4px;">One installer runs as an agent <em>or</em> coordinator — set <code>EDGE_RUNTIME_MODE</code> in the env file after install. Works on Apple Silicon and Intel. Requires Node.js 20+.</p>
         <div class="kpis" style="margin-top:6px;">
           <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.pkg</div></div>
           <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">arm64 + x86_64</div></div>
+          <div class="kpi"><div class="label">Req</div><div class="value" style="font-size:11px;">Node.js 20+</div></div>
           <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">LaunchDaemon</div></div>
         </div>
         <div class="row" style="margin-top:10px;gap:6px;">
-          <a href="${GH_RELEASE_BASE}/EdgeCoder-macos-installer.pkg" style="${btnPrimary}">⬇ Download .pkg</a>
+          <a href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg" style="${btnPrimary}">⬇ Download .pkg</a>
+          <a href="${GH_RELEASES_PAGE}" style="${btnSecondary}" target="_blank">All releases ↗</a>
         </div>
         <div style="margin-top:12px;">
-          <div style="${sectionLabel}">Install via curl</div>
-          <pre style="${codeBlock}">curl -fsSL ${PORTAL_PUBLIC_URL}/install/macos | sudo bash</pre>
-        </div>
-        <div style="margin-top:10px;">
           <div style="${sectionLabel}">After install — agent mode</div>
           <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
 # Set:  EDGE_RUNTIME_MODE=worker
+#       AGENT_ID=my-mac-node-001
 #       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+#       COORDINATOR_URL=https://coordinator.edgecoder.io
 sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
         </div>
         <div style="margin-top:8px;">
@@ -5278,6 +5279,10 @@ sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
           <div style="${sectionLabel}">View logs</div>
           <pre style="${codeBlock}">tail -f /var/log/edgecoder/runtime.log</pre>
         </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">Check service status</div>
+          <pre style="${codeBlock}">sudo launchctl print system/io.edgecoder.runtime</pre>
+        </div>
       </div>
 
       <!-- Linux -->
@@ -5287,10 +5292,12 @@ sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
         <div class="kpis" style="margin-top:6px;">
           <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.deb</div></div>
           <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">amd64</div></div>
+          <div class="kpi"><div class="label">Req</div><div class="value" style="font-size:11px;">Node.js 20+</div></div>
           <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">systemd</div></div>
         </div>
         <div class="row" style="margin-top:10px;gap:6px;">
-          <a href="${GH_RELEASE_BASE}/EdgeCoder-linux-amd64.deb" style="${btnPrimary}">⬇ Download .deb</a>
+          <a href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-linux-amd64.deb" style="${btnPrimary}">⬇ Download .deb</a>
+          <a href="${GH_RELEASES_PAGE}" style="${btnSecondary}" target="_blank">All releases ↗</a>
         </div>
         <div style="margin-top:12px;">
           <div style="${sectionLabel}">Install Node.js 20+ (if needed)</div>
@@ -5299,13 +5306,15 @@ sudo apt-get install -y nodejs</pre>
         </div>
         <div style="margin-top:8px;">
           <div style="${sectionLabel}">Install package</div>
-          <pre style="${codeBlock}">sudo dpkg -i EdgeCoder-linux-amd64.deb</pre>
+          <pre style="${codeBlock}">sudo dpkg -i EdgeCoder-1.0.0-linux-amd64.deb</pre>
         </div>
         <div style="margin-top:8px;">
           <div style="${sectionLabel}">After install — agent mode</div>
           <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
 # Set:  EDGE_RUNTIME_MODE=worker
+#       AGENT_ID=my-linux-node-001
 #       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
+#       COORDINATOR_URL=https://coordinator.edgecoder.io
 sudo systemctl restart edgecoder</pre>
         </div>
         <div style="margin-top:8px;">
@@ -5319,14 +5328,51 @@ sudo systemctl restart edgecoder</pre>
           <div style="${sectionLabel}">View logs</div>
           <pre style="${codeBlock}">journalctl -u edgecoder -f</pre>
         </div>
+        <div style="margin-top:8px;">
+          <div style="${sectionLabel}">Check service status</div>
+          <pre style="${codeBlock}">systemctl status edgecoder</pre>
+        </div>
       </div>
 
+    </div>
+
+    <!-- ── iOS ──────────────────────────────────────────────────────────── -->
+    <div class="card" style="margin-top:0;">
+      <h2 style="margin-top:0;font-size:14px;">📱&nbsp; iOS (iPhone / iPad)</h2>
+      <p class="muted" style="margin-top:4px;">Run EdgeCoder on your iPhone or iPad to contribute on-device compute to the swarm. Supports three modes: <strong>Off</strong> (idle), <strong>On</strong> (internet swarm with rewards), and <strong>Bluetooth Local</strong> (serve compute to a nearby Mac without internet).</p>
+      <div class="kpis" style="margin-top:6px;">
+        <div class="kpi"><div class="label">Runtime</div><div class="value" style="font-size:11px;">llama.cpp / Core ML</div></div>
+        <div class="kpi"><div class="label">Background</div><div class="value" style="font-size:11px;">BGTask + BLE</div></div>
+        <div class="kpi"><div class="label">BT Local</div><div class="value" style="font-size:11px;">No internet needed</div></div>
+      </div>
+      <div class="grid2" style="gap:8px;margin-top:10px;">
+        <div>
+          <div style="${sectionLabel}">Setup</div>
+          <ol style="padding-left:16px;font-size:11px;color:var(--muted);line-height:1.9;margin:0;">
+            <li>Download <strong>EdgeCoder</strong> from the App Store (coming soon — TestFlight for now).</li>
+            <li>Sign in with your EdgeCoder account.</li>
+            <li>Go to <strong>Swarm</strong> tab → set your Coordinator URL.</li>
+            <li>Go to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a>, enroll the device, copy the registration token.</li>
+            <li>Paste the token in the Swarm tab → tap <strong>On</strong> to start contributing.</li>
+          </ol>
+        </div>
+        <div>
+          <div style="${sectionLabel}">Bluetooth Local mode</div>
+          <p style="font-size:11px;color:var(--muted);margin:0 0 6px;">Use your phone's compute for local IDE tasks on a nearby Mac — no internet or rewards.</p>
+          <ol style="padding-left:16px;font-size:11px;color:var(--muted);line-height:1.9;margin:0;">
+            <li>On Mac: set <code>EDGE_RUNTIME_MODE=worker</code> and <code>AGENT_MODE=ide-enabled</code>.</li>
+            <li>On iPhone: select <strong>Bluetooth Local</strong> mode in the Swarm tab.</li>
+            <li>iPhone advertises over BLE — Mac auto-discovers and routes inference requests.</li>
+            <li>If the Mac loses internet, it auto-switches to Bluetooth Local as fallback.</li>
+          </ol>
+        </div>
+      </div>
     </div>
 
     <!-- ── Docker ──────────────────────────────────────────────────────── -->
     <div class="card" style="margin-top:0;">
       <h2 style="margin-top:0;font-size:14px;">🐳&nbsp; Docker</h2>
-      <p class="muted" style="margin-top:4px;">Run EdgeCoder in a container. Set <code>EDGE_RUNTIME_MODE</code> to <code>worker</code> (agent) or <code>coordinator</code>.</p>
+      <p class="muted" style="margin-top:4px;">Run EdgeCoder in a container. Set <code>EDGE_RUNTIME_MODE</code> to <code>worker</code> (agent) or <code>coordinator</code>. The image includes Node.js 20.</p>
       <div class="grid2" style="gap:8px;margin-top:6px;">
         <div>
           <div style="${sectionLabel}">Agent (worker)</div>
@@ -5336,7 +5382,7 @@ sudo systemctl restart edgecoder</pre>
   -e AGENT_ID=docker-worker-001 \\
   -e AGENT_OS=linux \\
   -e AGENT_REGISTRATION_TOKEN=&lt;token&gt; \\
-  -e COORDINATOR_URL=&lt;coordinator-url&gt; \\
+  -e COORDINATOR_URL=https://coordinator.edgecoder.io \\
   ghcr.io/edgecoder-io/edgecoder:latest</pre>
         </div>
         <div>
@@ -5357,9 +5403,9 @@ sudo systemctl restart edgecoder</pre>
       <h2 style="margin-top:0;font-size:14px;">Getting started</h2>
       <ol style="padding-left:18px;font-size:12px;color:var(--muted);line-height:2;">
         <li>Go to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> and generate a registration token — choose <strong>Agent</strong> or <strong>Coordinator</strong>.</li>
-        <li>Download the installer for your OS above and follow the install steps.</li>
-        <li>Edit <code>/etc/edgecoder/edgecoder.env</code> — set <code>EDGE_RUNTIME_MODE</code> and your registration token.</li>
-        <li>Restart the service (<code>launchctl kickstart</code> on macOS, <code>systemctl restart edgecoder</code> on Linux).</li>
+        <li>Download the installer for your OS and follow the platform install steps above.</li>
+        <li><strong>macOS / Linux:</strong> edit <code>/etc/edgecoder/edgecoder.env</code> — set <code>EDGE_RUNTIME_MODE</code>, <code>AGENT_ID</code>, and your registration token.</li>
+        <li>Restart the service: <code>sudo launchctl kickstart -k system/io.edgecoder.runtime</code> (macOS) or <code>sudo systemctl restart edgecoder</code> (Linux).</li>
         <li>Return to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> to confirm the node appears, then approve it.</li>
       </ol>
     </div>
@@ -5370,16 +5416,20 @@ sudo systemctl restart edgecoder</pre>
       <table style="margin-top:4px;">
         <thead><tr><th>Variable</th><th>Values / Example</th><th>Description</th></tr></thead>
         <tbody>
-          <tr><td><code>EDGE_RUNTIME_MODE</code></td><td><code>worker</code> | <code>coordinator</code></td><td>Controls which service the daemon runs as.</td></tr>
-          <tr><td><code>AGENT_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=worker.</td></tr>
+          <tr><td><code>EDGE_RUNTIME_MODE</code></td><td><code>worker</code> | <code>coordinator</code> | <code>ide-provider</code></td><td>Controls which service the daemon runs as.</td></tr>
+          <tr><td><code>AGENT_ID</code></td><td><code>mac-worker-001</code></td><td>Unique identifier for this node in the swarm. Must match the enrolled node ID.</td></tr>
+          <tr><td><code>AGENT_OS</code></td><td><code>macos</code> | <code>ubuntu</code> | <code>debian</code> | <code>ios</code></td><td>OS label reported to coordinator for telemetry.</td></tr>
+          <tr><td><code>AGENT_MODE</code></td><td><code>swarm-only</code> | <code>ide-enabled</code></td><td>Whether this agent also serves IDE inference requests.</td></tr>
+          <tr><td><code>AGENT_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=worker. From node enrollment.</td></tr>
           <tr><td><code>COORDINATOR_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=coordinator.</td></tr>
-          <tr><td><code>AGENT_ID</code></td><td><code>mac-worker-001</code></td><td>Unique identifier for this node in the swarm.</td></tr>
-          <tr><td><code>COORDINATOR_URL</code></td><td><code>http://&lt;host&gt;:4301</code></td><td>URL of the coordinator (agent mode).</td></tr>
-          <tr><td><code>MESH_AUTH_TOKEN</code></td><td><em>shared secret</em></td><td>Mesh authentication token for peer connections.</td></tr>
-          <tr><td><code>OLLAMA_MODEL</code></td><td><code>qwen2.5-coder:latest</code></td><td>Local model to use for inference.</td></tr>
-          <tr><td><code>OLLAMA_AUTO_INSTALL</code></td><td><code>true</code> | <code>false</code></td><td>Auto-pull the model on startup if not present.</td></tr>
+          <tr><td><code>COORDINATOR_URL</code></td><td><code>https://coordinator.edgecoder.io</code></td><td>URL of the coordinator (agent mode). Default points to managed coordinator.</td></tr>
+          <tr><td><code>MESH_AUTH_TOKEN</code></td><td><em>shared secret</em></td><td>Mesh authentication token. Auto-provisioned on successful registration if left blank.</td></tr>
+          <tr><td><code>LOCAL_MODEL_PROVIDER</code></td><td><code>edgecoder-local</code> | <code>ollama-local</code></td><td>Inference backend. Use <code>ollama-local</code> when Ollama is installed.</td></tr>
+          <tr><td><code>OLLAMA_MODEL</code></td><td><code>qwen2.5-coder:latest</code></td><td>Model tag to use/pull when provider is ollama-local.</td></tr>
+          <tr><td><code>OLLAMA_AUTO_INSTALL</code></td><td><code>true</code> | <code>false</code></td><td>Auto-pull the Ollama model on startup if not present.</td></tr>
           <tr><td><code>MAX_CONCURRENT_TASKS</code></td><td><code>1</code></td><td>Parallel task limit per agent.</td></tr>
-          <tr><td><code>NODE_BIN</code></td><td><code>/usr/bin/node</code></td><td>Override Node.js binary path if needed.</td></tr>
+          <tr><td><code>PEER_OFFER_COOLDOWN_MS</code></td><td><code>20000</code></td><td>Cooldown between peer-direct offers while idle (ms).</td></tr>
+          <tr><td><code>NODE_BIN</code></td><td><code>/usr/local/bin/node</code></td><td>Override Node.js binary path if auto-detection fails.</td></tr>
         </tbody>
       </table>
     </div>

@@ -3,6 +3,7 @@ import SwiftUI
 struct SwarmView: View {
     @EnvironmentObject private var swarmRuntime: SwarmRuntimeController
     @StateObject private var modelManager = LocalModelManager.shared
+    @StateObject private var bt = BluetoothTransport.shared
     @State private var prompt = "Summarize my edge node contribution profile."
     @State private var enrollmentNodeId = ""
     @State private var enrollmentToken = ""
@@ -11,6 +12,41 @@ struct SwarmView: View {
     var body: some View {
         NavigationStack {
             Form {
+
+                // ─────────────────────────────────────────
+                // MARK: Compute offering (primary control)
+                // ─────────────────────────────────────────
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Compute Offering")
+                            .font(.headline)
+                        Text(computeModeDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+
+                    Picker("Mode", selection: $swarmRuntime.computeMode) {
+                        ForEach(ComputeMode.allCases) { mode in
+                            Label(mode.rawValue, systemImage: modeIcon(mode))
+                                .tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.vertical, 4)
+
+                    if swarmRuntime.computeMode == .bluetoothLocal {
+                        bluetoothStatusRow
+                    }
+
+                    if swarmRuntime.computeMode == .internet {
+                        internetStatusRow
+                    }
+                }
+
+                // ─────────────────────────────────────────
+                // MARK: Runtime info
+                // ─────────────────────────────────────────
                 Section("Runtime") {
                     TextField("Agent ID", text: $swarmRuntime.agentId)
                         .textInputAutocapitalization(.never)
@@ -24,6 +60,7 @@ struct SwarmView: View {
                     LabeledContent("Battery", value: "\(swarmRuntime.batteryPct)%")
                     LabeledContent("Low Power Mode", value: swarmRuntime.isLowPowerMode ? "on" : "off")
                     LabeledContent("External Power", value: swarmRuntime.isOnExternalPower ? "yes" : "no")
+                    LabeledContent("Network", value: swarmRuntime.isNetworkReachable ? "reachable" : "offline")
                     LabeledContent("Heartbeats sent", value: String(swarmRuntime.heartbeatCount))
                     LabeledContent("Tasks observed", value: String(swarmRuntime.coordinatorTasksObserved))
                     LabeledContent(
@@ -33,20 +70,15 @@ struct SwarmView: View {
 
                     Toggle("Run only when charging", isOn: $swarmRuntime.runOnlyWhileCharging)
 
-                    HStack {
-                        Button("Start") { Task { await swarmRuntime.start() } }
-                            .disabled(swarmRuntime.state == .running)
-                        Button("Pause") { swarmRuntime.pause() }
-                            .disabled(swarmRuntime.state != .running)
-                        Button("Stop", role: .destructive) { swarmRuntime.stop() }
-                            .disabled(swarmRuntime.state == .stopped)
-                    }
                     Button(swarmRuntime.isReregistering ? "Re-registering..." : "Re-register agent") {
                         Task { await swarmRuntime.reregisterAgent() }
                     }
                     .disabled(swarmRuntime.isReregistering)
                 }
 
+                // ─────────────────────────────────────────
+                // MARK: Local Model
+                // ─────────────────────────────────────────
                 Section("Local Model") {
                     TextField("Model", text: $modelManager.selectedModel)
                     LabeledContent("State", value: modelManager.state.rawValue)
@@ -66,6 +98,9 @@ struct SwarmView: View {
                     }
                 }
 
+                // ─────────────────────────────────────────
+                // MARK: Coordinator discovery
+                // ─────────────────────────────────────────
                 Section("Coordinator discovery") {
                     if swarmRuntime.discoveredCoordinators.isEmpty {
                         Text("No coordinators discovered.")
@@ -84,6 +119,9 @@ struct SwarmView: View {
                     }
                 }
 
+                // ─────────────────────────────────────────
+                // MARK: Node enrollment
+                // ─────────────────────────────────────────
                 Section("Node enrollment") {
                     TextField("Node ID", text: $enrollmentNodeId)
                         .textInputAutocapitalization(.never)
@@ -110,11 +148,17 @@ struct SwarmView: View {
                     }
                 }
 
+                // ─────────────────────────────────────────
+                // MARK: Status
+                // ─────────────────────────────────────────
                 Section("Status") {
                     Text(swarmRuntime.statusText)
                         .foregroundStyle(.secondary)
                 }
 
+                // ─────────────────────────────────────────
+                // MARK: Diagnostics
+                // ─────────────────────────────────────────
                 Section("Diagnostics") {
                     Toggle("Upload diagnostics to coordinator", isOn: $swarmRuntime.diagnosticsUploadEnabled)
                         .onChange(of: swarmRuntime.diagnosticsUploadEnabled) { _, _ in
@@ -143,6 +187,17 @@ struct SwarmView: View {
                         }
                     }
                 }
+
+                // Bluetooth event log (only when in BT Local mode)
+                if swarmRuntime.computeMode == .bluetoothLocal && !bt.btEvents.isEmpty {
+                    Section("Bluetooth Events") {
+                        ForEach(Array(bt.btEvents.prefix(8).enumerated()), id: \.offset) { _, event in
+                            Text(event)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
             .navigationTitle("Swarm")
             .task {
@@ -152,6 +207,70 @@ struct SwarmView: View {
             }
         }
     }
+
+    // MARK: - Sub-views
+
+    @ViewBuilder
+    private var bluetoothStatusRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: bt.isAdvertising ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                .foregroundStyle(bt.isAdvertising ? .blue : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(bt.isAdvertising ? "Advertising to nearby devices" : "BT not advertising")
+                    .font(.subheadline)
+                if bt.connectedCentralCount > 0 {
+                    Text("\(bt.connectedCentralCount) Mac(s) connected")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                } else {
+                    Text("Waiting for a Mac to connect…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+
+        Text("No internet or swarm rewards in this mode. Your phone's compute is available only to nearby EdgeCoder Mac nodes over Bluetooth.")
+            .font(.caption)
+            .foregroundStyle(.orange)
+    }
+
+    @ViewBuilder
+    private var internetStatusRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: swarmRuntime.isNetworkReachable ? "wifi" : "wifi.slash")
+                .foregroundStyle(swarmRuntime.isNetworkReachable ? .green : .orange)
+            Text(swarmRuntime.isNetworkReachable
+                 ? "Connected to internet swarm"
+                 : "Offline — will auto-switch to Bluetooth Local")
+                .font(.caption)
+                .foregroundStyle(swarmRuntime.isNetworkReachable ? .secondary : .orange)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var computeModeDescription: String {
+        switch swarmRuntime.computeMode {
+        case .off:
+            return "Not offering compute. The app runs in the background but does not participate in any tasks."
+        case .internet:
+            return "Offering compute to the EdgeCoder swarm over the internet. You earn rewards for completed tasks."
+        case .bluetoothLocal:
+            return "Offering compute to nearby Mac devices over Bluetooth — no internet required and no rewards."
+        }
+    }
+
+    private func modeIcon(_ mode: ComputeMode) -> String {
+        switch mode {
+        case .off:           return "stop.circle"
+        case .internet:      return "network"
+        case .bluetoothLocal: return "bluetooth"
+        }
+    }
+
+    // MARK: - Enrollment
 
     private func enrollNode() async {
         struct EnrollBody: Encodable {
