@@ -4415,13 +4415,19 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
         return "Idle";
       }
       const body = document.getElementById("opsApprovedBody");
-      const staleRolloutMs = 3 * 60 * 1000;
-      const staleAgentSeenMs = 2 * 60 * 1000;
+      // Stale thresholds: give slow model pulls (can take 5–15 min on mobile/
+      // slow links) enough time before showing "Stalled". The 5-min agent-seen
+      // window prevents false positives from normal heartbeat jitter.
+      const staleRolloutMs = 10 * 60 * 1000;
+      const staleAgentSeenMs = 5 * 60 * 1000;
       const nowMs = Date.now();
       const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
         const isPending = pendingSwitch && pendingSwitch.agentId === n.nodeId;
         const currentProvider = String(n.localModelProvider || "");
         const currentLabel = providerLabel(currentProvider);
+        // iOS agents manage Ollama through the native app; the coordinator
+        // cannot push model installs to them via the rollout mechanism.
+        const isIosNode = /^ios-|^iphone-/i.test(String(n.nodeId || ""));
         let actionCell = "<span class='muted'>-</span>";
         if (canManageApprovals && n.nodeKind === "agent") {
           const orch = n.orchestrationStatus || null;
@@ -4451,23 +4457,24 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
             ? "<div class='progress-bar' style='max-width:180px;height:6px;background:#1f2937;border-radius:4px;margin-top:6px;overflow:hidden'><div style='width:" + progressPct + "%;height:100%;background:#3b82f6;border-radius:4px'></div></div><div class='muted' style='font-size:0.85em;margin-top:2px'>" + progressPct + "%</div>"
             : "";
           const blockForInFlight = (isPending || rolloutInFlight) && !staleRollout;
-          const disableOllama = blockForInFlight || currentProvider === "ollama-local";
+          // iOS: Ollama is managed by the native app; only allow switching to edgecoder-local.
+          const disableOllama = isIosNode || blockForInFlight || currentProvider === "ollama-local";
           const disableEdgecoder = blockForInFlight || currentProvider === "edgecoder-local";
-          const ollamaBtnLabel = currentProvider === "ollama-local" ? "Active" : (blockForInFlight ? "Pending…" : "Use Ollama");
+          const ollamaBtnLabel = isIosNode ? "iOS only" : (currentProvider === "ollama-local" ? "Active" : (blockForInFlight ? "Pending…" : "Use Ollama"));
           const edgecoderBtnLabel = currentProvider === "edgecoder-local" ? "Active" : (blockForInFlight ? "Pending…" : "Use Edgecoder");
           const rolloutUpdated = rollout && rollout.updatedAtMs ? fmtTime(rollout.updatedAtMs) : "n/a";
           actionCell =
             "<div style='display:flex;flex-direction:column;gap:6px;min-width:260px'>" +
               "<div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>" +
                 "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;" + providerTone(currentProvider) + "'>Current: " + escapeHtml(currentLabel) + "</span>" +
-                "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;" + statusTone + "'>Status: " + escapeHtml(statusLabel) + "</span>" +
+                (isIosNode ? "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;background:#1e293b;color:#94a3b8;border:1px solid #334155'>iOS</span>" : "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;" + statusTone + "'>Status: " + escapeHtml(statusLabel) + "</span>") +
               "</div>" +
-              "<div class='muted' style='font-size:0.85em'>Rollout update: " + escapeHtml(rolloutUpdated) + "</div>" +
-              statusMessageLine +
-              staleHint +
+              (isIosNode
+                ? "<div class='muted' style='font-size:0.85em;margin-top:4px'>Ollama managed by iOS app. Use &ldquo;Use Edgecoder&rdquo; to switch off Ollama.</div>"
+                : "<div class='muted' style='font-size:0.85em'>Rollout update: " + escapeHtml(rolloutUpdated) + "</div>" + statusMessageLine + staleHint) +
               progressBar +
               "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-top:2px'>" +
-                "<button class='agentModelBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-provider='ollama-local'" + (disableOllama ? " disabled" : "") + ">" + escapeHtml(ollamaBtnLabel) + "</button>" +
+                "<button class='agentModelBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-provider='ollama-local'" + (disableOllama ? " disabled" : "") + " title='" + (isIosNode ? "Ollama is managed by the iOS app" : "") + "'>" + escapeHtml(ollamaBtnLabel) + "</button>" +
                 "<button class='agentModelBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-provider='edgecoder-local'" + (disableEdgecoder ? " disabled" : "") + ">" + escapeHtml(edgecoderBtnLabel) + "</button>" +
               "</div>" +
             "</div>";
