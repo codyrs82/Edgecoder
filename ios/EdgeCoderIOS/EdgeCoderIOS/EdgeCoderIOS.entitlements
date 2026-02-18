@@ -7,5 +7,12 @@
 		<string>webcredentials:edgecoder.io</string>
 		<string>webcredentials:portal.edgecoder.io</string>
 	</array>
+	<key>com.apple.developer.bluetooth-always-authorization</key>
+	<true/>
+	<key>com.apple.backgroundtasks.scheduler.registered-tasks</key>
+	<array>
+		<string>io.edgecoder.ios.runtime</string>
+		<string>io.edgecoder.ios.heartbeat</string>
+	</array>
 </dict>
 </plist>

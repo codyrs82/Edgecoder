@@ -1,5 +1,22 @@
 import Foundation
 import UIKit
+import Network
+
+// MARK: - Compute mode
+
+/// Three-way compute offering mode.
+/// - off:             No compute offered; runtime is idle.
+/// - internet:        Standard swarm participation via coordinator over the internet.
+/// - bluetoothLocal:  Serve compute to a nearby Mac/laptop over Bluetooth only.
+///                    No coordinator rewards are earned in this mode.
+enum ComputeMode: String, CaseIterable, Identifiable {
+    case off             = "Off"
+    case internet        = "On"
+    case bluetoothLocal  = "Bluetooth Local"
+    var id: String { rawValue }
+}
+
+// MARK: - Internal runtime state (distinct from ComputeMode)
 
 enum SwarmRuntimeState: String {
     case stopped
@@ -7,10 +24,21 @@ enum SwarmRuntimeState: String {
     case paused
 }
 
+// MARK: - SwarmRuntimeController
+
 @MainActor
 final class SwarmRuntimeController: ObservableObject {
     static let shared = SwarmRuntimeController()
 
+    // MARK: Published — compute mode (primary toggle)
+    @Published var computeMode: ComputeMode = .off {
+        didSet {
+            persistRuntimeSettings()
+            Task { await applyComputeMode() }
+        }
+    }
+
+    // MARK: Published — runtime internals
     @Published var state: SwarmRuntimeState = .stopped
     @Published var runOnlyWhileCharging = false
     @Published var diagnosticsUploadEnabled = false
@@ -28,20 +56,31 @@ final class SwarmRuntimeController: ObservableObject {
     @Published var runtimeEvents: [String] = []
     @Published var isReregistering = false
 
+    // MARK: Published — connectivity
+    @Published var isNetworkReachable = true
+
+    // MARK: Private
     private let api = APIClient.shared
     private let modelManager = LocalModelManager.shared
     private var runtimeTask: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "io.edgecoder.pathmonitor", qos: .background)
+
+    // MARK: - Defaults keys
 
     private enum DefaultsKey {
-        static let agentId = "edgecoder.agentId"
-        static let registrationToken = "edgecoder.registrationToken"
-        static let meshToken = "edgecoder.meshToken"
-        static let coordinatorURL = "edgecoder.coordinatorURL"
-        static let runOnlyWhileCharging = "edgecoder.runOnlyWhileCharging"
+        static let agentId                 = "edgecoder.agentId"
+        static let registrationToken       = "edgecoder.registrationToken"
+        static let meshToken               = "edgecoder.meshToken"
+        static let coordinatorURL          = "edgecoder.coordinatorURL"
+        static let runOnlyWhileCharging    = "edgecoder.runOnlyWhileCharging"
         static let diagnosticsUploadEnabled = "edgecoder.diagnosticsUploadEnabled"
-        static let heartbeatCount = "edgecoder.heartbeatCount"
+        static let heartbeatCount          = "edgecoder.heartbeatCount"
         static let coordinatorTasksObserved = "edgecoder.coordinatorTasksObserved"
+        static let computeMode             = "edgecoder.computeMode"
     }
+
+    // MARK: - Agent ID helper
 
     static func defaultIosAgentId() -> String {
         let deviceName = UIDevice.current.name
@@ -60,10 +99,12 @@ final class SwarmRuntimeController: ObservableObject {
         return base.isEmpty ? "ios-\(unique)" : "\(base)-\(unique)"
     }
 
+    // MARK: - Init
+
     init() {
+        // Restore agent ID
         if let value = UserDefaults.standard.string(forKey: DefaultsKey.agentId), !value.isEmpty {
             let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Migrate legacy/shared IDs to a device-specific iOS node ID.
             if normalized.caseInsensitiveCompare("CRS-NODE-001") == .orderedSame ||
                 normalized.uppercased().hasPrefix("CRS-NODE-") ||
                 normalized.lowercased().hasPrefix("iphone-") ||
@@ -75,19 +116,79 @@ final class SwarmRuntimeController: ObservableObject {
         } else {
             agentId = Self.defaultIosAgentId()
         }
+
         registrationToken = UserDefaults.standard.string(forKey: DefaultsKey.registrationToken) ?? ""
-        meshToken = UserDefaults.standard.string(forKey: DefaultsKey.meshToken) ?? ""
+        meshToken         = UserDefaults.standard.string(forKey: DefaultsKey.meshToken) ?? ""
         if let value = UserDefaults.standard.string(forKey: DefaultsKey.coordinatorURL), !value.isEmpty {
             selectedCoordinatorURL = value
         }
-        runOnlyWhileCharging = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
+        runOnlyWhileCharging     = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
-        heartbeatCount = UserDefaults.standard.integer(forKey: DefaultsKey.heartbeatCount)
+        heartbeatCount           = UserDefaults.standard.integer(forKey: DefaultsKey.heartbeatCount)
         coordinatorTasksObserved = UserDefaults.standard.integer(forKey: DefaultsKey.coordinatorTasksObserved)
+
+        // Restore compute mode
+        if let modeRaw = UserDefaults.standard.string(forKey: DefaultsKey.computeMode),
+           let mode = ComputeMode(rawValue: modeRaw) {
+            computeMode = mode
+        }
+
         persistRuntimeSettings()
+        startPathMonitor()
     }
 
-    /// Enroll this device with the portal. Call when user is authenticated and token is missing.
+    // MARK: - Network path monitor
+
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let reachable = path.status == .satisfied
+            Task { @MainActor in
+                let wasReachable = self.isNetworkReachable
+                self.isNetworkReachable = reachable
+
+                // Auto-switch: if internet mode loses connectivity, downgrade to BT local.
+                // If connectivity returns and we were in BT local due to auto-switch, stay put
+                // (user must manually switch back — we don't silently escalate rewards mode).
+                if !reachable && self.computeMode == .internet {
+                    self.appendEvent("Network lost — switching to Bluetooth Local mode automatically.")
+                    // Bypass the didSet to avoid a double applyComputeMode call
+                    self.computeMode = .bluetoothLocal
+                } else if reachable && !wasReachable && self.computeMode == .bluetoothLocal {
+                    // Notify the user that internet is back; they can manually switch if desired.
+                    self.appendEvent("Network restored. Switch to 'On' mode to rejoin the internet swarm.")
+                }
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+    }
+
+    // MARK: - Apply compute mode
+
+    private func applyComputeMode() async {
+        switch computeMode {
+        case .off:
+            stop()
+        case .internet:
+            if state != .running {
+                await start()
+            }
+        case .bluetoothLocal:
+            // Stop coordinator communication; BT transport takes over.
+            if state == .running {
+                runtimeTask?.cancel()
+                runtimeTask = nil
+                state = .paused
+            }
+            statusText = "Bluetooth Local mode: offering compute to nearby devices."
+            appendEvent(statusText)
+            // BluetoothTransport handles the actual compute serving.
+            await BluetoothTransport.shared.startPeripheral(agentId: agentId, modelManager: modelManager)
+        }
+    }
+
+    // MARK: - Enrollment
+
     func ensureEnrollment(force: Bool = false) async {
         let currentAgentId = agentId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !currentAgentId.isEmpty else { return }
@@ -108,9 +209,10 @@ final class SwarmRuntimeController: ObservableObject {
             appendEvent("Enrollment token refreshed for \(currentAgentId).")
         } catch {
             appendEvent("Enrollment refresh failed: \(error.localizedDescription)")
-            // Silent fail; user can manually enroll from Swarm tab
         }
     }
+
+    // MARK: - Coordinator discovery
 
     func discoverCoordinators() async {
         do {
@@ -130,11 +232,10 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
+    // MARK: - Start / Stop (internet mode)
+
     func start() async {
-        if state == .running {
-            statusText = "Swarm runtime is already running."
-            return
-        }
+        if state == .running { return }
         if runOnlyWhileCharging && !isOnExternalPower {
             statusText = "Runtime blocked: connect power to start."
             return
@@ -167,7 +268,11 @@ final class SwarmRuntimeController: ObservableObject {
         state = .stopped
         statusText = "Swarm runtime stopped."
         appendEvent(statusText)
+        // Also stop BT peripheral if it was running
+        Task { await BluetoothTransport.shared.stop() }
     }
+
+    // MARK: - Re-register
 
     func reregisterAgent() async {
         if isReregistering { return }
@@ -204,6 +309,8 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
+    // MARK: - Battery / Power
+
     var batteryPct: Int {
         UIDevice.current.isBatteryMonitoringEnabled = true
         return Int(max(0, UIDevice.current.batteryLevel) * 100)
@@ -215,23 +322,30 @@ final class SwarmRuntimeController: ObservableObject {
 
     var isOnExternalPower: Bool {
         UIDevice.current.isBatteryMonitoringEnabled = true
-        let state = UIDevice.current.batteryState
-        return state == .charging || state == .full
+        let s = UIDevice.current.batteryState
+        return s == .charging || s == .full
     }
 
+    // MARK: - Persistence
+
     func persistRuntimeSettings() {
-        UserDefaults.standard.set(agentId, forKey: DefaultsKey.agentId)
-        UserDefaults.standard.set(registrationToken, forKey: DefaultsKey.registrationToken)
-        UserDefaults.standard.set(meshToken, forKey: DefaultsKey.meshToken)
-        UserDefaults.standard.set(selectedCoordinatorURL, forKey: DefaultsKey.coordinatorURL)
-        UserDefaults.standard.set(runOnlyWhileCharging, forKey: DefaultsKey.runOnlyWhileCharging)
+        UserDefaults.standard.set(agentId,                 forKey: DefaultsKey.agentId)
+        UserDefaults.standard.set(registrationToken,       forKey: DefaultsKey.registrationToken)
+        UserDefaults.standard.set(meshToken,               forKey: DefaultsKey.meshToken)
+        UserDefaults.standard.set(selectedCoordinatorURL,  forKey: DefaultsKey.coordinatorURL)
+        UserDefaults.standard.set(runOnlyWhileCharging,    forKey: DefaultsKey.runOnlyWhileCharging)
         UserDefaults.standard.set(diagnosticsUploadEnabled, forKey: DefaultsKey.diagnosticsUploadEnabled)
-        UserDefaults.standard.set(heartbeatCount, forKey: DefaultsKey.heartbeatCount)
+        UserDefaults.standard.set(heartbeatCount,          forKey: DefaultsKey.heartbeatCount)
         UserDefaults.standard.set(coordinatorTasksObserved, forKey: DefaultsKey.coordinatorTasksObserved)
+        UserDefaults.standard.set(computeMode.rawValue,    forKey: DefaultsKey.computeMode)
     }
+
+    // MARK: - Runtime loop (internet mode)
 
     private func runtimeLoop() async {
         while !Task.isCancelled {
+            // Exit loop if mode changed away from internet
+            guard computeMode == .internet else { break }
             let registered = await registerAgent()
             if registered {
                 await sendHeartbeat()
@@ -241,6 +355,21 @@ final class SwarmRuntimeController: ObservableObject {
             }
         }
     }
+
+    // MARK: - Public heartbeat entry point (used by background tasks)
+
+    /// Safe to call from a BGTask: sends a heartbeat only if in internet mode and registered.
+    func sendHeartbeatIfNeeded() async {
+        guard computeMode == .internet else { return }
+        if meshToken.isEmpty {
+            _ = await registerAgent()
+        }
+        if !meshToken.isEmpty {
+            await sendHeartbeat()
+        }
+    }
+
+    // MARK: - Register
 
     private func registerAgent() async -> Bool {
         if !meshToken.isEmpty { return true }
@@ -281,8 +410,6 @@ final class SwarmRuntimeController: ObservableObject {
                (message.contains("node_not_enrolled") ||
                 message.contains("registration_token_invalid") ||
                 message.contains("node_not_activated")) {
-                // Enrollment/token drift can happen after node-id migration or stale local token.
-                // Re-enroll and retry loop shortly.
                 meshToken = ""
                 registrationToken = ""
                 persistRuntimeSettings()
@@ -299,7 +426,9 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    private func sendHeartbeat() async {
+    // MARK: - Heartbeat
+
+    internal func sendHeartbeat() async {
         let payload: [String: Any] = [
             "agentId": agentId,
             "powerTelemetry": currentPowerTelemetry()
@@ -312,7 +441,6 @@ final class SwarmRuntimeController: ObservableObject {
             statusText = "Heartbeat sent (\(Date().formatted(date: .omitted, time: .standard)))."
             appendEvent(statusText)
 
-            // Handle orchestration rollout pushed by coordinator (e.g. "Use Ollama" in portal)
             if let orch = hb["orchestration"] as? [String: Any],
                let pending = orch["pending"] as? Bool, pending {
                 await handleOrchestration(orch)
@@ -336,88 +464,80 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    /// Mirrors worker-runner.ts orchestration block: reports status updates to coordinator
-    /// as the model is installed/pulled, then ACKs completion.
+    // MARK: - Orchestration
+
     private func handleOrchestration(_ orch: [String: Any]) async {
-        let provider = orch["provider"] as? String ?? ""
-        let model = orch["model"] as? String ?? modelManager.selectedModel
-        let autoInstall = orch["autoInstall"] as? Bool ?? true
+        let provider    = orch["provider"]     as? String ?? ""
+        let model       = orch["model"]        as? String ?? modelManager.selectedModel
+        let autoInstall = orch["autoInstall"]  as? Bool   ?? true
 
         guard provider == "ollama-local" && autoInstall else { return }
 
         appendEvent("Orchestration: switching to \(provider) / \(model)…")
         await reportOrchestrationStatus(phase: "starting", message: "Preparing local model…")
 
-        do {
-            // Update model selection if coordinator specified one
-            if !model.isEmpty && model != modelManager.selectedModel {
-                modelManager.selectedModel = model
-            }
+        if !model.isEmpty && model != modelManager.selectedModel {
+            modelManager.selectedModel = model
+        }
 
-            // Install/load model, streaming status back to coordinator
-            if modelManager.state != .ready {
-                await reportOrchestrationStatus(phase: "installing_model", message: "Downloading model \(model)…")
-                await modelManager.installLightweightModel()
-            }
+        if modelManager.state != .ready {
+            await reportOrchestrationStatus(phase: "installing_model", message: "Downloading model \(model)…")
+            await modelManager.installLightweightModel()
+        }
 
-            if modelManager.state == .ready {
-                await reportOrchestrationStatus(phase: "done", message: "Model switch complete. \(model) ready.")
-                appendEvent("Orchestration complete: \(model) ready.")
-                _ = try? await postCoordinator(
-                    path: "/orchestration/agents/\(agentId)/ack",
-                    payload: ["ok": true]
-                )
-            } else {
-                let errMsg = "Model load failed: \(modelManager.statusText)"
-                await reportOrchestrationStatus(phase: "error", message: errMsg)
-                appendEvent("Orchestration error: \(errMsg)")
-                _ = try? await postCoordinator(
-                    path: "/orchestration/agents/\(agentId)/ack",
-                    payload: ["ok": false, "error": errMsg]
-                )
-            }
+        if modelManager.state == .ready {
+            await reportOrchestrationStatus(phase: "done", message: "Model switch complete. \(model) ready.")
+            appendEvent("Orchestration complete: \(model) ready.")
+            _ = try? await postCoordinator(
+                path: "/orchestration/agents/\(agentId)/ack",
+                payload: ["ok": true]
+            )
+        } else {
+            let errMsg = "Model load failed: \(modelManager.statusText)"
+            await reportOrchestrationStatus(phase: "error", message: errMsg)
+            appendEvent("Orchestration error: \(errMsg)")
+            _ = try? await postCoordinator(
+                path: "/orchestration/agents/\(agentId)/ack",
+                payload: ["ok": false, "error": errMsg]
+            )
         }
     }
 
-    /// POST a live status update to the coordinator's orchestration status endpoint.
-    /// Mirrors the reportStatus callback in worker-runner.ts.
     private func reportOrchestrationStatus(phase: String, message: String, progressPct: Int? = nil) async {
         var payload: [String: Any] = [
-            "phase": String(phase.prefix(64)),
+            "phase":   String(phase.prefix(64)),
             "message": String(message.prefix(512))
         ]
-        if let pct = progressPct {
-            payload["progressPct"] = pct
-        }
+        if let pct = progressPct { payload["progressPct"] = pct }
         _ = try? await postCoordinator(
             path: "/orchestration/agents/\(agentId)/status",
             payload: payload
         )
     }
 
+    // MARK: - Pull / task execution
+
     private func observeCoordinatorPull() async {
         do {
             let payload: [String: Any] = ["agentId": agentId]
             let response = try await postCoordinator(path: "/pull", payload: payload)
-            guard let subtask = response["subtask"] as? [String: Any],
-                  let taskId = subtask["taskId"] as? String,
-                  let subtaskId = subtask["id"] as? String,
-                  let prompt = subtask["prompt"] as? String else { return }
+            guard let subtask   = response["subtask"] as? [String: Any],
+                  let taskId    = subtask["taskId"]   as? String,
+                  let subtaskId = subtask["id"]       as? String,
+                  let prompt    = subtask["prompt"]   as? String else { return }
 
             coordinatorTasksObserved += 1
             persistRuntimeSettings()
             appendEvent("Task claimed: \(subtaskId.prefix(8))… — running local inference.")
-
             await executeSubtask(taskId: taskId, subtaskId: subtaskId, prompt: prompt)
         } catch {
-            // Non-fatal telemetry path; ignore pull observation errors.
+            // Non-fatal; ignore pull errors
         }
     }
 
     private func executeSubtask(taskId: String, subtaskId: String, prompt: String) async {
         let startMs = Int(Date().timeIntervalSince1970 * 1000)
 
-        // Ensure model is ready
         if modelManager.state != .ready {
             await modelManager.installLightweightModel()
         }
@@ -437,11 +557,11 @@ final class SwarmRuntimeController: ObservableObject {
 
         do {
             let resultPayload: [String: Any] = [
-                "agentId": agentId,
-                "taskId": taskId,
+                "agentId":   agentId,
+                "taskId":    taskId,
                 "subtaskId": subtaskId,
-                "ok": ok,
-                "output": output,
+                "ok":        ok,
+                "output":    output,
                 "durationMs": durationMs
             ]
             _ = try await postCoordinator(path: "/result", payload: resultPayload)
@@ -450,6 +570,8 @@ final class SwarmRuntimeController: ObservableObject {
             appendEvent("Task result POST failed: \(error.localizedDescription)")
         }
     }
+
+    // MARK: - Networking helpers
 
     private func postCoordinator(path: String, payload: [String: Any]) async throws -> [String: Any] {
         guard let url = URL(string: selectedCoordinatorURL + path) else {
@@ -481,16 +603,20 @@ final class SwarmRuntimeController: ObservableObject {
         return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
+    // MARK: - Telemetry helpers
+
     private func currentPowerTelemetry() -> [String: Any] {
         [
             "onExternalPower": isOnExternalPower,
             "batteryLevelPct": batteryPct,
-            "lowPowerMode": isLowPowerMode,
-            "updatedAtMs": Int(Date().timeIntervalSince1970 * 1000)
+            "lowPowerMode":    isLowPowerMode,
+            "updatedAtMs":     Int(Date().timeIntervalSince1970 * 1000)
         ]
     }
 
-    private func appendEvent(_ message: String) {
+    // MARK: - Event log
+
+    func appendEvent(_ message: String) {
         let now = Date()
         let line = "\(now.formatted(date: .omitted, time: .standard)) | \(message)"
         runtimeEvents.insert(line, at: 0)
@@ -506,19 +632,13 @@ final class SwarmRuntimeController: ObservableObject {
     }
 
     private func postDiagnosticsEvent(message: String, eventAtMs: Int) async {
-        guard diagnosticsUploadEnabled else { return }
-        guard !meshToken.isEmpty else { return }
+        guard diagnosticsUploadEnabled, !meshToken.isEmpty else { return }
         let payload: [String: Any] = [
-            "agentId": agentId,
-            "events": [
-                [
-                    "eventAtMs": eventAtMs,
-                    "message": message
-                ]
-            ],
-            "source": "edgecoder-ios",
+            "agentId":      agentId,
+            "events":       [["eventAtMs": eventAtMs, "message": message]],
+            "source":       "edgecoder-ios",
             "runtimeState": state.rawValue,
-            "modelState": modelManager.state.rawValue
+            "modelState":   modelManager.state.rawValue
         ]
         _ = try? await postCoordinator(path: "/agent/diagnostics", payload: payload)
     }

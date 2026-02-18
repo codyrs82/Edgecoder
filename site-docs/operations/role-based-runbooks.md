@@ -53,17 +53,40 @@ This page gives concrete responsibilities and recurring actions by role.
 
 ## Node Contributor Runbook
 
-## Initial setup
+## Initial setup — macOS
 
-1. Enroll node in portal.
-2. Start worker with registration token.
-3. Confirm node appears in pending/active lists.
+1. Download `EdgeCoder-{version}-macos-installer.pkg` from [portal Downloads](/portal/download) or [GitHub Releases](https://github.com/edgecoder-io/edgecoder/releases).
+2. Install: double-click the `.pkg` or `sudo installer -pkg EdgeCoder-*.pkg -target /`.
+3. Enroll node in portal → Nodes → copy registration token.
+4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.
+5. Restart: `sudo launchctl kickstart -k system/io.edgecoder.runtime`
+6. Confirm node appears in Nodes → approve it.
+
+## Initial setup — Linux (Debian/Ubuntu)
+
+1. Install Node.js 20+: `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs`
+2. Download and install `.deb`: `sudo dpkg -i EdgeCoder-{version}-linux-amd64.deb`
+3. Enroll node in portal → Nodes → copy registration token.
+4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.
+5. Restart: `sudo systemctl restart edgecoder`
+6. Confirm node appears in Nodes → approve it.
+
+## Initial setup — iOS
+
+1. Install EdgeCoder from App Store (or TestFlight for beta).
+2. Sign in with EdgeCoder account.
+3. Go to Swarm tab → set Coordinator URL.
+4. Enroll device in portal → Nodes → copy registration token.
+5. Paste token in Swarm tab → tap **On** to start contributing.
+6. Optionally tap **Bluetooth Local** to serve nearby Mac nodes without internet.
 
 ## Ongoing
 
-- Keep runtime updated.
+- Keep runtime updated (re-run installer for new releases; iOS auto-updates from App Store).
 - Monitor local resource usage and scheduling constraints.
-- Rotate credentials or tokens when required by policy.
+- Rotate `AGENT_REGISTRATION_TOKEN` when required by policy.
+- View logs: `tail -f /var/log/edgecoder/runtime.log` (macOS) or `journalctl -u edgecoder -f` (Linux).
+- Service status: `launchctl print system/io.edgecoder.runtime` (macOS) or `systemctl status edgecoder` (Linux).
 
 ## Application User Runbook
 

@@ -39,6 +39,11 @@ targets:
             CFBundleURLName: io.edgecoder.ios.oauth
             CFBundleURLSchemes:
               - edgecoder
+        UIBackgroundModes:
+          - fetch
+          - processing
+          - bluetooth-central
+          - bluetooth-peripheral
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
