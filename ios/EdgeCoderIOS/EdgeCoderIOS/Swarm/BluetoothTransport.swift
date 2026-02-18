@@ -1,5 +1,30 @@
 import Foundation
 import CoreBluetooth
+import UIKit
+
+// MARK: - IDE Task Model
+// Represents one inference request received from a Mac IDE over BLE.
+
+public struct IDETask: Identifiable {
+    public let id: String           // UUID matching the BLE request id
+    public let prompt: String
+    public let startedAt: Date
+    public var completedAt: Date?
+    public var output: String?
+    public var ok: Bool?
+    public var durationMs: Int?
+
+    public var status: IDETaskStatus {
+        if completedAt != nil {
+            return ok == true ? .success : .failed
+        }
+        return .running
+    }
+}
+
+public enum IDETaskStatus {
+    case running, success, failed
+}
 
 // MARK: - BLE service / characteristic UUIDs
 // These must match the Mac node worker's Bluetooth implementation.
@@ -36,6 +61,10 @@ final class BluetoothTransport: NSObject, ObservableObject {
     @Published var connectedCentralCount = 0
     @Published var btStatusText = "BT idle."
     @Published var btEvents: [String] = []
+
+    /// IDE tasks received over BLE — shown in the IDE tab.
+    /// Capped at 50 most recent. Most-recent first.
+    @Published var ideTasks: [IDETask] = []
 
     private var peripheralManager: CBPeripheralManager?
     private var requestCharacteristic: CBMutableCharacteristic?
@@ -137,6 +166,10 @@ final class BluetoothTransport: NSObject, ObservableObject {
         let maxTokens = json["maxTokens"] as? Int ?? 512
         appendBtEvent("BT: inference request \(requestId.prefix(8))…")
 
+        // Track the incoming task so the IDE view can show it immediately
+        let ideTask = IDETask(id: requestId, prompt: prompt, startedAt: Date())
+        addIDETask(ideTask)
+
         let task = Task { [weak self] in
             guard let self, let mm = self.modelManager else { return }
             let startMs = Int(Date().timeIntervalSince1970 * 1000)
@@ -157,10 +190,32 @@ final class BluetoothTransport: NSObject, ObservableObject {
             if let responseData = try? JSONSerialization.data(withJSONObject: response) {
                 await self.sendResponse(requestId: requestId, data: responseData)
             }
+            await self.completeIDETask(
+                id: requestId,
+                output: output,
+                ok: ok,
+                durationMs: durationMs
+            )
             await self.inFlightTasks.removeValue(forKey: requestId)
             await self.appendBtEvent("BT: request \(requestId.prefix(8))… complete (\(durationMs)ms).")
         }
         inFlightTasks[requestId] = task
+    }
+
+    // MARK: - IDE Task tracking helpers
+
+    private func addIDETask(_ task: IDETask) {
+        ideTasks.insert(task, at: 0)
+        if ideTasks.count > 50 { ideTasks = Array(ideTasks.prefix(50)) }
+    }
+
+    private func completeIDETask(id: String, output: String, ok: Bool, durationMs: Int) {
+        if let idx = ideTasks.firstIndex(where: { $0.id == id }) {
+            ideTasks[idx].completedAt = Date()
+            ideTasks[idx].output = output
+            ideTasks[idx].ok = ok
+            ideTasks[idx].durationMs = durationMs
+        }
     }
 
     private func sendResponse(requestId: String, data: Data) async {

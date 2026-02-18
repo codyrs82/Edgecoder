@@ -27,6 +27,7 @@
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
 		FE3020C5296B6D4400A4D780 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */; };
 		FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */; };
+		EC0D1DE0000000000000001A /* IDEView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC0D1DE0000000000000011A /* IDEView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -52,6 +53,7 @@
 		D29E66F7BB2B2DD53363564C /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		EA4F6442ACF49CA53C9306F8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F0218CF6CC8A55B4374CD459 /* EdgeCoderIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = EdgeCoderIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EC0D1DE0000000000000011A /* IDEView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IDEView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,6 +82,7 @@
 				72C65A6CF93352209D512BDB /* Dashboard */,
 				BFD567845246254C2BD775EA /* Settings */,
 				52DB63257A4399AEAEA84C73 /* Shared */,
+				EC0D1DE0000000000000021A /* IDE */,
 				228422E15E6E4FB35FE21ADC /* Swarm */,
 				289BCEBB5BA518C0F3486F58 /* Wallet */,
 			);
@@ -114,6 +117,14 @@
 				A6D48B6FF3BF3C392162B166 /* WalletView.swift */,
 			);
 			path = Wallet;
+			sourceTree = "<group>";
+		};
+		EC0D1DE0000000000000021A /* IDE */ = {
+			isa = PBXGroup;
+			children = (
+				EC0D1DE0000000000000011A /* IDEView.swift */,
+			);
+			path = IDE;
 			sourceTree = "<group>";
 		};
 		52DB63257A4399AEAEA84C73 /* Shared */ = {
@@ -260,6 +271,7 @@
 				DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */,
 				EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */,
 				B016C5F9FAFAD95844D7FF05 /* WalletView.swift in Sources */,
+				EC0D1DE0000000000000001A /* IDEView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

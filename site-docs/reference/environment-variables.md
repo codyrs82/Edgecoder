@@ -70,6 +70,23 @@ Consolidated reference for all environment controls. The primary config file on 
 | `HSM_PIN` | _(secret)_ | HSM user PIN. |
 | `KEY_ROTATION_DAYS` | `90` | Maximum days between key rotations. |
 
+## Bluetooth Local (BLE proxy — Mac IDE mode)
+
+Used by the IDE provider server (`EDGE_RUNTIME_MODE=ide-provider`) to bridge the Mac-side IntelligentRouter to a nearby iPhone over Bluetooth.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BT_PROXY_PORT` | `11435` | Port the Swift `edgecoder-ble-proxy` companion listens on. |
+| `BT_PROXY_HOST` | `127.0.0.1` | Host for the BLE proxy HTTP API. Always loopback in production. |
+| `BT_PROXY_URL` | `http://127.0.0.1:11435` | Full URL the IntelligentRouter calls for bluetooth-local inference. Overrides `BT_PROXY_HOST` + `BT_PROXY_PORT`. |
+| `BT_STATUS_URL` | _(auto-set)_ | Status endpoint checked by the router to decide if BT is available. Set automatically from `BT_PROXY_HOST:BT_PROXY_PORT`. |
+
+The `edgecoder-ble-proxy` binary must be installed first:
+```bash
+npm run build:ble-proxy
+# Installs to /opt/edgecoder/bin/edgecoder-ble-proxy
+```
+
 ## Task and performance tuning
 
 | Variable | Default | Description |
@@ -86,6 +103,23 @@ Consolidated reference for all environment controls. The primary config file on 
 | `IOS_LOW_POWER_MODE` | `true`/`false` — iOS Low Power Mode active |
 | `IOS_BATTERY_PULL_MIN_INTERVAL_MS` | Throttle between assignment attempts on battery |
 | `IOS_BATTERY_TASK_STOP_LEVEL_PCT` | Minimum battery level before stopping assignment |
+
+## Bitcoin anchoring
+
+| Variable | Default | Description |
+|---|---|---|
+| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Provider type: `anchor-proxy`, `bitcoind`, `blockstream`, `mock`. |
+| `BITCOIN_NETWORK` | `signet` | Must match across all coordinators in the mesh. |
+| `ANCHOR_PROXY_URL` | — | URL of the anchor proxy service (when provider is `anchor-proxy`). |
+| `ANCHOR_PROXY_TOKEN` | — | Bearer token for anchor proxy auth. |
+| `BITCOIND_RPC_URL` | — | Direct bitcoind RPC URL (when provider is `bitcoind`). |
+| `BITCOIND_RPC_USER` | — | RPC username. |
+| `BITCOIND_RPC_PASSWORD` | — | RPC password. |
+| `BITCOIND_WALLET_NAME` | — | Wallet name on the Bitcoin node. |
+| `ANCHOR_CONFIRMATION_POLL_MS` | `60000` | Poll interval for pending anchors (ms). |
+| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Block confirmations before promoting anchor status. |
+| `ANCHOR_PROXY_PORT` | `4310` | Listen port for the anchor proxy service. |
+| `MAX_BROADCASTS_PER_MINUTE` | `10` | Rate limit for OP_RETURN broadcasts (anchor proxy). |
 
 ## Wallet and economy
 
