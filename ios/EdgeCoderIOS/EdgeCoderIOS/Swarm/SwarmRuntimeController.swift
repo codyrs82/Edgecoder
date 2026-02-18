@@ -305,12 +305,19 @@ final class SwarmRuntimeController: ObservableObject {
             "powerTelemetry": currentPowerTelemetry()
         ]
         do {
-            _ = try await postCoordinator(path: "/heartbeat", payload: payload)
+            let hb = try await postCoordinator(path: "/heartbeat", payload: payload)
             heartbeatCount += 1
             lastHeartbeatAt = Date()
             persistRuntimeSettings()
             statusText = "Heartbeat sent (\(Date().formatted(date: .omitted, time: .standard)))."
             appendEvent(statusText)
+
+            // Handle orchestration rollout pushed by coordinator (e.g. "Use Ollama" in portal)
+            if let orch = hb["orchestration"] as? [String: Any],
+               let pending = orch["pending"] as? Bool, pending {
+                await handleOrchestration(orch)
+            }
+
             await observeCoordinatorPull()
         } catch is CancellationError {
             return
@@ -327,6 +334,65 @@ final class SwarmRuntimeController: ObservableObject {
             statusText = "Heartbeat failed: \(error.localizedDescription)"
             appendEvent(statusText)
         }
+    }
+
+    /// Mirrors worker-runner.ts orchestration block: reports status updates to coordinator
+    /// as the model is installed/pulled, then ACKs completion.
+    private func handleOrchestration(_ orch: [String: Any]) async {
+        let provider = orch["provider"] as? String ?? ""
+        let model = orch["model"] as? String ?? modelManager.selectedModel
+        let autoInstall = orch["autoInstall"] as? Bool ?? true
+
+        guard provider == "ollama-local" && autoInstall else { return }
+
+        appendEvent("Orchestration: switching to \(provider) / \(model)…")
+        await reportOrchestrationStatus(phase: "starting", message: "Preparing local model…")
+
+        do {
+            // Update model selection if coordinator specified one
+            if !model.isEmpty && model != modelManager.selectedModel {
+                modelManager.selectedModel = model
+            }
+
+            // Install/load model, streaming status back to coordinator
+            if modelManager.state != .ready {
+                await reportOrchestrationStatus(phase: "installing_model", message: "Downloading model \(model)…")
+                await modelManager.installLightweightModel()
+            }
+
+            if modelManager.state == .ready {
+                await reportOrchestrationStatus(phase: "done", message: "Model switch complete. \(model) ready.")
+                appendEvent("Orchestration complete: \(model) ready.")
+                _ = try? await postCoordinator(
+                    path: "/orchestration/agents/\(agentId)/ack",
+                    payload: ["ok": true]
+                )
+            } else {
+                let errMsg = "Model load failed: \(modelManager.statusText)"
+                await reportOrchestrationStatus(phase: "error", message: errMsg)
+                appendEvent("Orchestration error: \(errMsg)")
+                _ = try? await postCoordinator(
+                    path: "/orchestration/agents/\(agentId)/ack",
+                    payload: ["ok": false, "error": errMsg]
+                )
+            }
+        }
+    }
+
+    /// POST a live status update to the coordinator's orchestration status endpoint.
+    /// Mirrors the reportStatus callback in worker-runner.ts.
+    private func reportOrchestrationStatus(phase: String, message: String, progressPct: Int? = nil) async {
+        var payload: [String: Any] = [
+            "phase": String(phase.prefix(64)),
+            "message": String(message.prefix(512))
+        ]
+        if let pct = progressPct {
+            payload["progressPct"] = pct
+        }
+        _ = try? await postCoordinator(
+            path: "/orchestration/agents/\(agentId)/status",
+            payload: payload
+        )
     }
 
     private func observeCoordinatorPull() async {
