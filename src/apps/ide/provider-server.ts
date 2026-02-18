@@ -11,14 +11,21 @@
  *
  * Endpoints
  * ---------
- *  GET  /health          — liveness check
- *  GET  /models          — list available routes/providers
- *  GET  /status          — router internals (latency, concurrency, flags)
- *  GET  /bt-status       — BLE proxy: phone connection state, battery, model state
- *  POST /run             — run a task, auto-routed
- *  POST /run/local       — force local Ollama (bypasses router)
- *  POST /run/bluetooth   — force bluetooth-local (bypasses router)
- *  POST /run/swarm       — force swarm submission (bypasses router)
+ *  GET  /health                    — liveness check
+ *  GET  /models                   — list available routes/providers
+ *  GET  /status                   — router internals (latency, concurrency, flags)
+ *  GET  /bt-status                — BLE proxy: phone connection state, battery, model state
+ *  POST /run                      — run a task, auto-routed
+ *  POST /run/local                — force local Ollama (bypasses router)
+ *  POST /run/bluetooth            — force bluetooth-local (bypasses router)
+ *  POST /run/swarm                — force swarm submission (bypasses router)
+ *
+ * OpenAI-compatible layer (used by Cursor, Zed, JetBrains, Continue.dev, etc.)
+ * ---------------------------------------------------------------------------
+ *  GET  /v1/models                — model list in OpenAI format
+ *  POST /v1/chat/completions      — chat completions, streaming + non-streaming
+ *                                   Routes through IntelligentRouter automatically.
+ *                                   Set base URL to http://127.0.0.1:4304/v1 in your IDE.
  */
 
 import Fastify from "fastify";
@@ -219,6 +226,164 @@ app.post("/run/swarm", async (req, reply) => {
     ...(routed.swarmTaskId    ? { swarmTaskId:   routed.swarmTaskId }   : {}),
     ...(routed.creditsSpent !== undefined ? { creditsSpent: routed.creditsSpent } : {})
   });
+});
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible layer
+// Cursor, Zed, JetBrains, Continue.dev, and most IDEs speak this protocol.
+// Set your IDE's custom model base URL to: http://127.0.0.1:4304/v1
+// API key: any non-empty string (e.g. "edgecoder") — not validated locally.
+// ---------------------------------------------------------------------------
+
+const OPENAI_MODEL_ID = "edgecoder-auto";
+
+/**
+ * GET /v1/models
+ * Returns the model list in OpenAI format so IDEs can discover what's available.
+ * The three model IDs correspond to different routing modes.
+ */
+app.get("/v1/models", async () => ({
+  object: "list",
+  data: [
+    {
+      id: OPENAI_MODEL_ID,
+      object: "model",
+      created: Math.floor(Date.now() / 1000),
+      owned_by: "edgecoder",
+      description: "Auto-routes: bluetooth-local → ollama-local → swarm → stub"
+    },
+    {
+      id: "edgecoder-local",
+      object: "model",
+      created: Math.floor(Date.now() / 1000),
+      owned_by: "edgecoder",
+      description: "Force local Ollama only — never touches swarm"
+    },
+    {
+      id: "edgecoder-swarm",
+      object: "model",
+      created: Math.floor(Date.now() / 1000),
+      owned_by: "edgecoder",
+      description: "Force swarm network — costs credits, earns for fulfilling agent"
+    }
+  ]
+}));
+
+/**
+ * POST /v1/chat/completions
+ * OpenAI-compatible chat completions. Supports streaming (SSE) and non-streaming.
+ * The model field selects routing mode:
+ *   "edgecoder-auto"   → IntelligentRouter waterfall (recommended)
+ *   "edgecoder-local"  → force ollama-local
+ *   "edgecoder-swarm"  → force swarm
+ */
+app.post("/v1/chat/completions", async (req, reply) => {
+  const body = req.body as {
+    model?: string;
+    messages?: Array<{ role: string; content: string }>;
+    max_tokens?: number;
+    stream?: boolean;
+    temperature?: number;
+  };
+
+  const model = body.model ?? OPENAI_MODEL_ID;
+  const messages = body.messages ?? [];
+  const maxTokens = Math.min(body.max_tokens ?? 1024, 8192);
+  const stream = body.stream ?? false;
+
+  // Flatten messages → single prompt string the router understands
+  const prompt = messages
+    .map((m) => {
+      if (m.role === "system")    return `[System]: ${m.content}`;
+      if (m.role === "assistant") return `[Assistant]: ${m.content}`;
+      return m.content; // user
+    })
+    .join("\n\n");
+
+  // Route based on model ID
+  let responseText: string;
+  let route: string;
+  let latencyMs: number;
+
+  if (model === "edgecoder-local") {
+    const started = Date.now();
+    providers.use("ollama-local");
+    const agent = new InteractiveAgent(providers.current());
+    const output = await agent.run(prompt, "python");
+    responseText = output.generatedCode ?? output.plan ?? "";
+    route = "ollama-local";
+    latencyMs = Date.now() - started;
+  } else if (model === "edgecoder-swarm") {
+    const routed = await router.route(prompt, maxTokens);
+    responseText = routed.text;
+    route = routed.route;
+    latencyMs = routed.latencyMs;
+  } else {
+    // Default: IntelligentRouter auto-route waterfall
+    const routed = await router.route(prompt, maxTokens);
+    responseText = routed.text;
+    route = routed.route;
+    latencyMs = routed.latencyMs;
+  }
+
+  const id = `chatcmpl-ec-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+
+  // ── Streaming response (SSE) ──────────────────────────────────────────────
+  if (stream) {
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-EdgeCoder-Route": route,
+      "X-EdgeCoder-Latency-Ms": String(latencyMs)
+    });
+
+    // Single content delta — IDEs render it progressively
+    const chunk = JSON.stringify({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: "assistant", content: responseText }, finish_reason: null }]
+    });
+    reply.raw.write(`data: ${chunk}\n\n`);
+
+    // Finish sentinel
+    const finish = JSON.stringify({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+    });
+    reply.raw.write(`data: ${finish}\n\n`);
+    reply.raw.write("data: [DONE]\n\n");
+    reply.raw.end();
+    return reply;
+  }
+
+  // ── Non-streaming response ────────────────────────────────────────────────
+  return reply
+    .header("X-EdgeCoder-Route", route)
+    .header("X-EdgeCoder-Latency-Ms", String(latencyMs))
+    .send({
+      id,
+      object: "chat.completion",
+      created,
+      model,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: responseText },
+        finish_reason: "stop"
+      }],
+      usage: {
+        prompt_tokens: Math.ceil(prompt.length / 4),
+        completion_tokens: Math.ceil(responseText.length / 4),
+        total_tokens: Math.ceil((prompt.length + responseText.length) / 4)
+      },
+      edgecoder: { route, latencyMs } // extra metadata — safely ignored by IDEs
+    });
 });
 
 // ---------------------------------------------------------------------------

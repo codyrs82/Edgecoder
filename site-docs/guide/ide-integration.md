@@ -1,239 +1,211 @@
 # IDE Integration
 
-EdgeCoder connects your coding editor directly to the local agent runtime. Every request is routed intelligently through a four-tier waterfall: **Bluetooth-local → local Ollama → swarm network → offline stub** — always picking the fastest, cheapest path automatically.
+EdgeCoder runs as a local server on your Mac that speaks the **OpenAI API format** — the same protocol every major AI-powered IDE already knows how to talk to. You add it as a custom model in your IDE settings, exactly like you would add any other OpenAI-compatible provider.
+
+No plugin. No extension. Just a base URL.
 
 ## How it works
 
 ```
-Your Editor  ──► EdgeCoder Extension
-                        │
-                        ▼
-              Provider Server :4304
-                        │
-                        ▼
-              IntelligentRouter
-             ┌──────────┼────────────┐
-             ▼          ▼            ▼
-        BT-local    ollama-local   swarm
-        (free)      (free)        (credits)
+Your IDE  ──► POST /v1/chat/completions
+                      │
+                      ▼
+          EdgeCoder Provider Server :4304
+                      │
+                      ▼
+          IntelligentRouter waterfall
+         ┌────────────┼─────────────┐
+         ▼            ▼             ▼
+    BT-local     ollama-local    swarm
+    (free)       (free)         (credits)
 ```
 
-The **Provider Server** runs locally on your Mac alongside the agent. The **extension** talks to it over `localhost:4304`. The **IntelligentRouter** decides where each task actually runs:
+The provider server at `:4304` accepts standard OpenAI `chat/completions` requests and routes them through IntelligentRouter automatically:
 
-| Priority | Route | Cost | Condition |
+| Priority | Route | Cost | When |
 |---|---|---|---|
-| 1 | **Bluetooth-local** | Free | Nearby iPhone/Mac BT proxy responding on :11435 |
+| 1 | **Bluetooth-local** | Free | iPhone in BT Local mode + connected |
 | 2 | **Ollama-local** | Free | Local Ollama healthy, <2 concurrent, p95 <8s |
-| 3 | **Swarm** | Credits | Mesh token set; task queued to coordinator |
-| 4 | **Edgecoder-local** | Free | Always-on deterministic stub (safety net) |
+| 3 | **Swarm** | Credits | Mesh token set, local overloaded or slow |
+| 4 | **Edgecoder-local** | Free | Always-on stub safety net |
+
+## Available model IDs
+
+When adding EdgeCoder in your IDE, you can choose which routing mode to use by picking a model name:
+
+| Model ID | Behaviour |
+|---|---|
+| `edgecoder-auto` | IntelligentRouter picks the best route automatically **(recommended)** |
+| `edgecoder-local` | Force local Ollama only — never touches swarm |
+| `edgecoder-swarm` | Force swarm network — costs credits |
 
 ---
 
 ## Step 1 — Start the provider server
 
-Open a terminal in the project root and run:
+Open a terminal in the EdgeCoder project root:
 
 ```bash
 cd "/path/to/EdgeCoder"
 npm run dev:ide
 ```
 
-You should see Fastify log:
+Keep this running. You should see:
 
 ```
 {"level":"info","msg":"Server listening at http://127.0.0.1:4304"}
 ```
 
-Keep this terminal tab open while using the IDE.
-
-> **Auto-start (optional):** To start the provider server automatically when your Mac boots, add it to the existing `io.edgecoder.runtime` LaunchDaemon or create a new one pointing to `npm run dev:ide`.
-
 ---
 
-## Step 2 — Install the extension
-
-### VS Code
-
-1. Open VS Code
-2. Press `⌘⇧X` to open the Extensions panel
-3. Click the `···` menu (top-right of the panel) → **Install from VSIX…**
-4. Navigate to:
-   ```
-   extensions/vscode/edgecoder-0.1.0.vsix
-   ```
-5. Click **Install** — VS Code will reload
+## Step 2 — Add as a custom model in your IDE
 
 ### Cursor
 
-1. Open Cursor
-2. Press `⌘⇧X` to open the Extensions panel
-3. Click the `···` menu → **Install from VSIX…**
-4. Navigate to the same `.vsix` file above
-5. Click **Install**
+1. Open **Cursor Settings** (`⌘,`)
+2. Go to **Models**
+3. Under the **OpenAI** section, enable **"Override OpenAI Base URL"**
+4. Set the base URL to:
+   ```
+   http://127.0.0.1:4304/v1
+   ```
+5. Set the API key to any non-empty value (e.g. `edgecoder`) — not validated
+6. In the model name field, type `edgecoder-auto` and press Enter to add it
+7. Select `edgecoder-auto` as your active model
+
+> Cursor calls `POST /v1/chat/completions` — EdgeCoder handles it natively.
+
+---
+
+### Zed
+
+Add to `~/.config/zed/settings.json`:
+
+```json
+{
+  "language_models": {
+    "openai": {
+      "api_url": "http://127.0.0.1:4304/v1",
+      "available_models": [
+        {
+          "name": "edgecoder-auto",
+          "display_name": "EdgeCoder (auto-route)",
+          "max_tokens": 8192
+        },
+        {
+          "name": "edgecoder-local",
+          "display_name": "EdgeCoder (local only)",
+          "max_tokens": 8192
+        }
+      ],
+      "version": "1"
+    }
+  },
+  "agent": {
+    "default_model": {
+      "provider": "openai",
+      "model": "edgecoder-auto"
+    }
+  }
+}
+```
+
+Or use the UI: **Agent Panel** → settings icon → **Add Provider** → OpenAI-compatible → paste the URL.
+
+---
+
+### Continue.dev (VS Code / JetBrains plugin)
+
+Add to `~/.continue/config.json`:
+
+```json
+{
+  "models": [
+    {
+      "title": "EdgeCoder (auto-route)",
+      "provider": "openai",
+      "model": "edgecoder-auto",
+      "apiKey": "edgecoder",
+      "apiBase": "http://127.0.0.1:4304/v1"
+    },
+    {
+      "title": "EdgeCoder (local only)",
+      "provider": "openai",
+      "model": "edgecoder-local",
+      "apiKey": "edgecoder",
+      "apiBase": "http://127.0.0.1:4304/v1"
+    }
+  ]
+}
+```
+
+Or use the in-app config: click the model selector in the Continue sidebar → **Add Model** → **OpenAI-compatible** → fill in the URL and model name.
+
+---
+
+### JetBrains (IntelliJ, PyCharm, WebStorm, etc.)
+
+1. Go to **Settings → Tools → AI Assistant → Models & API keys**
+2. Click **Add Model**
+3. Select provider: **OpenAI compatible**
+4. Set the **API endpoint URL** to:
+   ```
+   http://127.0.0.1:4304/v1
+   ```
+5. Enter any API key (e.g. `edgecoder`)
+6. Enter model name: `edgecoder-auto`
+7. Click **Test Connection** → should return model info
+8. Click **Apply**
+
+---
 
 ### Windsurf (Codeium)
 
-Windsurf uses the VS Code extension API and accepts `.vsix` packages:
+Windsurf's primary AI is hosted. For custom models, use the **MCP (Model Context Protocol)** server support:
 
-1. Open Windsurf
-2. Open the Extensions panel (`⌘⇧X`)
-3. `···` → **Install from VSIX…** → select `edgecoder-0.1.0.vsix`
+1. Go to **Settings → Cascade → MCP Servers**
+2. Add an OpenAI-compatible MCP entry pointing to `http://127.0.0.1:4304/v1`
+
+Alternatively, install Continue.dev alongside Windsurf — it works in any VS Code fork.
+
+---
 
 ### Claude Code (Anthropic CLI)
 
-Claude Code is a terminal-based agent, not a VS Code-style editor, so it does not use `.vsix` extensions. Instead, connect it directly to the provider server via its MCP (Model Context Protocol) config or by pointing it at the local HTTP endpoint at `http://127.0.0.1:4304`.
+Claude Code is a terminal agent, not a visual editor, so it doesn't add custom models the same way. Instead, you can call the EdgeCoder provider directly from scripts or use it as a tool endpoint.
 
-> The EdgeCoder provider server exposes a standard REST API — any tool that can make HTTP POST requests can use it.
+For agentic workflows, the REST API at `:4304` is fully scriptable:
+
+```bash
+curl -s http://127.0.0.1:4304/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edgecoder-auto",
+    "messages": [{"role": "user", "content": "Write a Python function to debounce a callback"}]
+  }' | jq '.choices[0].message.content'
+```
 
 ---
 
-## Step 3 — Use it
+## Verifying the connection
 
-### Keyboard shortcut
+Test that the server is up and returning models:
 
-Press **`⌘⇧E`** (Mac) or **`Ctrl+Shift+E`** (Windows/Linux) while your cursor is anywhere in a code file. The task is the current selection, or the full file if nothing is selected.
+```bash
+# Health check
+curl http://127.0.0.1:4304/health
 
-### Right-click context menu
+# Model list (OpenAI format)
+curl http://127.0.0.1:4304/v1/models | jq '.data[].id'
 
-Select any text in a code file, then right-click to see:
-
-- **EdgeCoder: Run Task (auto-route)** — router picks the best backend
-- **EdgeCoder: Run on Local Ollama** — force local inference, never touches swarm
-- **EdgeCoder: Send to Swarm Network** — force swarm, earns credits for the fulfilling agent
-
-> The right-click options only appear **when text is selected**. Click and drag to select, or use `⌘A` to select all.
-
-### Command Palette
-
-Press `⌘⇧P` and type `EdgeCoder` to see all commands:
-
-| Command | What it does |
-|---|---|
-| EdgeCoder: Run Task (auto-route) | Smart-route selection to best backend |
-| EdgeCoder: Run on Local Ollama | Force local Ollama |
-| EdgeCoder: Send to Swarm Network | Force swarm submission |
-| EdgeCoder: Show Router Status | Show live routing stats in a notification |
-
----
-
-## Result panel
-
-After a request completes, a panel opens beside your editor showing:
-
-- **Route badge** — color-coded: 🟢 ollama-local, 🔵 bluetooth-local, 🟡 swarm, ⚪ stub
-- **Latency** and credits spent (swarm only)
-- **Plan** — what the agent decided to do
-- **Generated Code** — with an **Apply to Editor** button that inserts the code at your selection
-
----
-
-## Status bar
-
-The EdgeCoder status bar item appears in the bottom-right of your editor window. It shows:
-
-```
-⊕ EdgeCoder             ← idle, agent offline
-⊕ EdgeCoder (1/2) 📶 🌐  ← 1 of 2 slots used, BT + swarm enabled
-⊕ EdgeCoder (offline)   ← provider server not running
+# Quick inference test
+curl -s http://127.0.0.1:4304/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"edgecoder-auto","messages":[{"role":"user","content":"say hello"}]}' \
+  | jq '.choices[0].message.content, .edgecoder'
 ```
 
-Click it to open the **Show Router Status** panel.
-
----
-
-## Settings
-
-Open `Settings → Extensions → EdgeCoder` (or search `edgecoder` in settings):
-
-| Setting | Default | Description |
-|---|---|---|
-| `edgecoder.providerUrl` | `http://127.0.0.1:4304` | URL of the local provider server |
-| `edgecoder.defaultLanguage` | `python` | Fallback language when auto-detect fails |
-| `edgecoder.autoDetectLanguage` | `true` | Detect language from file extension automatically |
-| `edgecoder.showRouteInfo` | `true` | Show route badge in result panel |
-
----
-
-## Provider server endpoints
-
-The provider server at `:4304` exposes these endpoints directly — useful for scripting or building your own integrations:
-
-```
-GET  /health          → { ok: true, ts: <ms> }
-GET  /models          → list of available routes, bluetoothAvailable flag
-GET  /status          → live router internals (latency, concurrency, BT flag)
-GET  /bt-status       → BLE proxy: phone connection, battery, model state
-POST /run             → auto-routed task (supports provider override)
-POST /run/local       → force local Ollama
-POST /run/bluetooth   → force bluetooth-local (phone inference)
-POST /run/swarm       → force swarm submission
-```
-
-### GET /bt-status — response
-
-Returns the current state of the BLE proxy and connected iPhone:
-
-```json
-{
-  "available": true,
-  "connected": true,
-  "scanning": false,
-  "deviceName": "Cody's iPhone 15 Pro",
-  "batteryPct": 87,
-  "modelState": "ready",
-  "rssi": -61,
-  "lastSeenMs": 1709123456789
-}
-```
-
-If the BLE proxy binary is not installed: `{ "available": false, "reason": "..." }`.
-
-### POST /run — request body
-
-```json
-{
-  "task": "Write a function that debounces a callback",
-  "language": "javascript",
-  "provider": "bluetooth-local",
-  "maxTokens": 1024
-}
-```
-
-`provider` is optional — omit it to let `IntelligentRouter` choose automatically. Allowed values: `bluetooth-local`, `ollama-local`, `swarm`, `edgecoder-local`.
-
-### POST /run — response
-
-```json
-{
-  "plan": "Routed via: ollama-local",
-  "generatedCode": "function debounce(fn, delay) { ... }",
-  "runResult": { "stdout": "", "stderr": "", "exitCode": 0 },
-  "route": "ollama-local",
-  "latencyMs": 1240
-}
-```
-
-For bluetooth-local responses:
-
-```json
-{
-  "route": "bluetooth-local",
-  "latencyMs": 920,
-  "deviceName": "Cody's iPhone 15 Pro",
-  "generatedCode": "..."
-}
-```
-
-For swarm responses:
-
-```json
-{
-  "route": "swarm",
-  "latencyMs": 8300,
-  "creditsSpent": 2,
-  "swarmTaskId": "ide-1708123456789"
-}
-```
+The response includes an `edgecoder` field with `route` and `latencyMs` so you can see which backend handled the request.
 
 ---
 
@@ -241,103 +213,61 @@ For swarm responses:
 
 ### When does traffic go to swarm?
 
-The router spills to swarm when local Ollama is:
-- **Overloaded** — more than 2 concurrent requests in flight
-- **Too slow** — estimated p95 latency exceeds 8 seconds (measured as EMA × 1.8)
-- **Unhealthy** — `/api/tags` health check fails
-
-Swarm tasks cost credits from your agent account. The agent that fulfils the task earns those credits.
+The router spills to swarm when local Ollama is overloaded (>2 concurrent), too slow (p95 >8s), or unhealthy. Swarm tasks cost credits from your agent account; the fulfilling agent earns them.
 
 ### When does Bluetooth-local activate?
 
-The BLE proxy (`edgecoder-ble-proxy`) runs as a companion process launched by the provider server. It scans for a nearby iPhone advertising the EdgeCoder BLE service. When a phone is found and connected, the proxy's `/status` endpoint reports `connected: true` and the router's `isBluetoothAvailable()` check returns true.
+When your iPhone is running EdgeCoder with **Bluetooth Local** mode enabled and is connected to your Mac over BT. The inference runs on the phone's llama.cpp model — free, offline, no credits involved.
 
-**To enable Bluetooth-local:**
-1. Build and install the proxy: `npm run build:ble-proxy`
-2. Open the EdgeCoder iOS app → Swarm tab → set mode to **Bluetooth Local**
-3. Start or restart the provider server: `npm run dev:ide`
+### Forcing a specific route
 
-The proxy starts automatically and will appear in the logs:
-```
-[ble-proxy] Starting /opt/edgecoder/bin/edgecoder-ble-proxy on port 11435...
-[ble] Central powered on — scanning for EdgeCoder peripherals...
-[ble] Discovered: Cody's iPhone 15 Pro (RSSI=-61)
-[ble] Connected to Cody's iPhone 15 Pro
-```
+Pick the model ID:
 
-**Checking BLE status manually:**
-```bash
-curl http://127.0.0.1:4304/bt-status
-```
+| Want | Model ID |
+|---|---|
+| Always local | `edgecoder-local` |
+| Always swarm | `edgecoder-swarm` |
+| Smart routing | `edgecoder-auto` |
 
-**IDE task tracking on phone:**
-When your Mac IDE routes a task to Bluetooth-local, it appears live in the iOS app's **IDE** tab. You can see the prompt, generation progress, output, and timing — the phone's battery/model state is always visible in the status row.
+---
 
-### Forcing a route
+## VS Code / Cursor extension (optional)
 
-Use the right-click menu or call the endpoint directly:
-- Right-click → **Run on Local Ollama** → calls `POST /run/local`
-- Right-click → **Send to Swarm Network** → calls `POST /run/swarm`
-- Via API: `POST /run/bluetooth` → forces phone inference over BT
+A `.vsix` extension is also available if you want extra IDE features beyond the custom model:
+- A **right-click context menu** (Run Task / Run Local / Send to Swarm)
+- A **keyboard shortcut** (`⌘⇧E`) that sends selected text directly
+- A **result webview panel** with Apply to Editor
+- A **status bar item** showing live route and concurrency
+
+Install from: `extensions/vscode/edgecoder-0.1.0.vsix` via Extensions panel → `···` → Install from VSIX.
+
+The extension and the custom model work independently — you can use both, or just the custom model approach (simpler for most workflows).
 
 ---
 
 ## Troubleshooting
 
-### "EdgeCoder agent is not running"
+### IDE says "connection refused" or "API error"
 
-The extension couldn't reach `:4304`. Fix:
-
+The provider server isn't running. Start it:
 ```bash
-cd "/path/to/EdgeCoder"
-npm run dev:ide
+cd "/path/to/EdgeCoder" && npm run dev:ide
 ```
 
-### Extension not showing in right-click menu
+### IDE says "model not found"
 
-You must **select text first**. The context menu items only appear when `editorHasSelection` is true.
-
-### The `.vsix` file is not found
-
-Build it yourself from the extensions directory:
-
+Make sure you typed the model name exactly: `edgecoder-auto`, `edgecoder-local`, or `edgecoder-swarm`. Verify they appear:
 ```bash
-cd extensions/vscode
-npm install
-npm run compile
-npm run package
+curl http://127.0.0.1:4304/v1/models
 ```
 
-This produces `edgecoder-0.1.0.vsix` in the same directory.
+### Responses are slow
 
-### Language always shows as Python
-
-Open VS Code settings and either:
-- Set `edgecoder.defaultLanguage` to `javascript`
-- Or ensure `edgecoder.autoDetectLanguage` is `true` and open a `.js`/`.ts` file
-
-### Swarm tasks time out
-
-Swarm tasks poll up to 90 seconds. If the coordinator is unreachable or no agents are available, the router falls back to the edgecoder-local stub. Check `MESH_AUTH_TOKEN` and `COORDINATOR_URL` environment variables on the provider server.
-
----
-
-## Building the extension from source
-
+Check which route was used — look at the `X-EdgeCoder-Route` response header or the `edgecoder.route` field in the JSON. If it's hitting `swarm`, the local model may be overloaded or unhealthy. Verify Ollama is running:
 ```bash
-cd extensions/vscode
-
-# Install dev dependencies (TypeScript compiler + vsce)
-npm install
-
-# Compile TypeScript → out/extension.js
-npm run compile
-
-# Watch mode (auto-recompile on save)
-npm run watch
-
-# Package into .vsix
-npm run package
+curl http://127.0.0.1:11434/api/tags
 ```
 
-The compiled output goes to `out/extension.js`. The `.vsix` is a zip archive containing the compiled output and `package.json`.
+### Cursor keeps asking for an OpenAI API key
+
+Enter any non-empty string in the API key field — `edgecoder` works fine. The local server does not validate keys.
