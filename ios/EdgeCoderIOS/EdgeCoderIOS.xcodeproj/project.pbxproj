@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -15,6 +15,7 @@
 		7E423092ADCA6E6D683CC0BB /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC9A2FF9401D82989E5176F5 /* SessionStore.swift */; };
 		89088AFA12BF751F0F4B4831 /* LocalModelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2733B6A0674685579153C996 /* LocalModelManager.swift */; };
 		8D5E31F9D98473054447741F /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D29E66F7BB2B2DD53363564C /* RootTabView.swift */; };
+		A69559089EB93E913A667E3C /* llama in Frameworks */ = {isa = PBXBuildFile; productRef = A9CDAAD075583FFD4EC2AB86 /* llama */; };
 		B016C5F9FAFAD95844D7FF05 /* WalletView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6D48B6FF3BF3C392162B166 /* WalletView.swift */; };
 		B996DC26F09449F1DFB014C2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58F68F1BB89F29F23B394ED2 /* SettingsView.swift */; };
 		C3898FECA10395D8E89075FE /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A7CA4F071392F4801C6C60 /* AuthView.swift */; };
@@ -46,8 +47,19 @@
 		CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		D29E66F7BB2B2DD53363564C /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		EA4F6442ACF49CA53C9306F8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EdgeCoder.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F0218CF6CC8A55B4374CD459 /* EdgeCoderIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = EdgeCoderIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4CAFCFF58EA2C22F34309E73 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A69559089EB93E913A667E3C /* llama in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		10340914E0157A2F9D1782C8 /* EdgeCoderIOS */ = {
@@ -109,7 +121,7 @@
 		6EF5ED733923E89FC0D182C5 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */,
+				F0218CF6CC8A55B4374CD459 /* EdgeCoderIOS.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -157,6 +169,7 @@
 			buildPhases = (
 				689DB0CDC0DFCC6C19717F9C /* Sources */,
 				0A93C3FDC4A6FEAE9DC6D064 /* Resources */,
+				4CAFCFF58EA2C22F34309E73 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -164,9 +177,10 @@
 			);
 			name = EdgeCoderIOS;
 			packageProductDependencies = (
+				A9CDAAD075583FFD4EC2AB86 /* llama */,
 			);
 			productName = EdgeCoderIOS;
-			productReference = F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */;
+			productReference = F0218CF6CC8A55B4374CD459 /* EdgeCoderIOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -179,6 +193,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					E6544AD04051B8A7FAACDBBC = {
+						DevelopmentTeam = R68RHRM2H4;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -193,6 +208,10 @@
 			);
 			mainGroup = 98D6A24062EE37A9AD7ED574;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8E20E71C995BC9A3C1DDE665 /* XCRemoteSwiftPackageReference "llama.cpp" */,
+			);
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -246,7 +265,7 @@
 				CODE_SIGN_ENTITLEMENTS = EdgeCoderIOS/EdgeCoderIOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 63CL88WY7G;
+				DEVELOPMENT_TEAM = R68RHRM2H4;
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -266,7 +285,7 @@
 				CODE_SIGN_ENTITLEMENTS = EdgeCoderIOS/EdgeCoderIOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 63CL88WY7G;
+				DEVELOPMENT_TEAM = R68RHRM2H4;
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -423,6 +442,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		8E20E71C995BC9A3C1DDE665 /* XCRemoteSwiftPackageReference "llama.cpp" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ggml-org/llama.cpp";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A9CDAAD075583FFD4EC2AB86 /* llama */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8E20E71C995BC9A3C1DDE665 /* XCRemoteSwiftPackageReference "llama.cpp" */;
+			productName = llama;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1575F32DEB5E0FF9D050C7D1 /* Project object */;
 }
