@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+LOG_DIR="/var/log/edgecoder"
+ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
+ENV_FILE="/etc/edgecoder/edgecoder.env"
+SERVICE="edgecoder"
+
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+
+if [[ ! -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]]; then
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "Created $ENV_FILE from example. Edit it before the service will connect."
+fi
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running --quiet 2>/dev/null || true; then
+  systemctl daemon-reload
+  systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$SERVICE" >/dev/null 2>&1 || true
+fi
+
+echo ""
+echo "EdgeCoder installed successfully."
+echo "  Config: $ENV_FILE"
+echo "  Logs:   journalctl -u $SERVICE -f"
+echo "  Status: systemctl status $SERVICE"
+echo ""
+echo "Set EDGE_RUNTIME_MODE=worker (agent) or coordinator in $ENV_FILE,"
+echo "then set your AGENT_REGISTRATION_TOKEN or COORDINATOR_REGISTRATION_TOKEN"
+echo "and run: sudo systemctl restart $SERVICE"
+echo ""
+
+exit 0

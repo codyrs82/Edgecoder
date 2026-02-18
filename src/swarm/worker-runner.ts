@@ -214,7 +214,8 @@ async function loop(): Promise<void> {
     autoInstall: OLLAMA_AUTO_INSTALL,
     model: OLLAMA_MODEL,
     role: "agent",
-    host: OLLAMA_HOST
+    host: OLLAMA_HOST,
+    platform: OS
   });
 
   const providers = new ProviderRegistry();
@@ -341,7 +342,8 @@ async function loop(): Promise<void> {
               autoInstall: hb.orchestration.autoInstall,
               model: hb.orchestration.model ?? OLLAMA_MODEL,
               role: "agent",
-              host: OLLAMA_HOST
+              host: OLLAMA_HOST,
+              platform: OS
             },
             reportStatus
           );
