@@ -134,7 +134,37 @@ Responses larger than 512 bytes are chunked and sent sequentially with 10ms paus
 
 ### Mac-side integration
 
-The Mac worker-runner acts as a **CBCentralManager** — scans for peripherals advertising the EdgeCoder service UUID, subscribes to `responseChar` and `statusChar`, and writes inference requests to `requestChar`. When the Mac detects network loss (`NWPathMonitor`), it automatically switches to Bluetooth Local mode and routes all inference requests to the discovered phone peripheral.
+The Mac side uses `edgecoder-ble-proxy` — a Swift `CBCentralManager` companion binary that:
+
+1. Scans for peripherals advertising the EdgeCoder BLE service UUID.
+2. Connects, subscribes to `responseChar` and `statusChar`.
+3. Exposes a local HTTP server on `127.0.0.1:11435`:
+   - `GET /status` → BLE connection state, device name, battery, model state.
+   - `POST /api/generate` → `{ prompt, maxTokens }` → forwards over BLE, returns result.
+
+The IDE provider server (port 4304) starts this binary automatically and registers its status URL with `IntelligentRouter` so the routing waterfall (`bluetooth-local → ollama-local → swarm → edgecoder-local`) works transparently.
+
+**Building the proxy:**
+```bash
+npm run build:ble-proxy
+# Compiles src/bluetooth/swift-ble-proxy/ and installs to /opt/edgecoder/bin/
+```
+
+**Manual test:**
+```bash
+/opt/edgecoder/bin/edgecoder-ble-proxy --port 11435 &
+curl http://127.0.0.1:11435/status
+```
+
+### IDE task tracking (iOS app)
+
+When the phone is in **Bluetooth Local** mode and a Mac IDE submits a task, it appears in the **IDE** tab of the iOS app in real-time:
+
+- **Running** — spinner while inference runs on the phone
+- **Success** — green check, output viewable in detail sheet
+- **Failed** — red cross with error
+
+The IDE tab badge shows the count of in-progress tasks. Tapping any entry opens a full detail view with prompt, generated output, duration, and timestamp.
 
 ## Operator practices
 
@@ -142,9 +172,11 @@ The Mac worker-runner acts as a **CBCentralManager** — scans for peripherals a
 - Track assignment drop reasons to understand power-policy impact.
 - Use separate worker pools for mobile vs desktop if reliability goals diverge.
 - Bluetooth Local mode is unrewarded — communicate this clearly to users.
+- The `edgecoder-ble-proxy` binary requires Bluetooth access via System Settings → Privacy & Security → Bluetooth on the Mac.
 
 ## Cross-links
 
 - [Public Mesh Operations](/operations/public-mesh-operations)
 - [Role-based Runbooks](/operations/role-based-runbooks)
 - [Environment Variables](/reference/environment-variables)
+- [Deployment Topology](/operations/deployment-topology)
