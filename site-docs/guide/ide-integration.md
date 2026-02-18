@@ -160,12 +160,33 @@ The provider server at `:4304` exposes these endpoints directly — useful for s
 
 ```
 GET  /health          → { ok: true, ts: <ms> }
-GET  /models          → list of available routes and descriptions
-GET  /status          → live router internals (latency, concurrency, flags)
-POST /run             → auto-routed task
+GET  /models          → list of available routes, bluetoothAvailable flag
+GET  /status          → live router internals (latency, concurrency, BT flag)
+GET  /bt-status       → BLE proxy: phone connection, battery, model state
+POST /run             → auto-routed task (supports provider override)
 POST /run/local       → force local Ollama
+POST /run/bluetooth   → force bluetooth-local (phone inference)
 POST /run/swarm       → force swarm submission
 ```
+
+### GET /bt-status — response
+
+Returns the current state of the BLE proxy and connected iPhone:
+
+```json
+{
+  "available": true,
+  "connected": true,
+  "scanning": false,
+  "deviceName": "Cody's iPhone 15 Pro",
+  "batteryPct": 87,
+  "modelState": "ready",
+  "rssi": -61,
+  "lastSeenMs": 1709123456789
+}
+```
+
+If the BLE proxy binary is not installed: `{ "available": false, "reason": "..." }`.
 
 ### POST /run — request body
 
@@ -173,9 +194,12 @@ POST /run/swarm       → force swarm submission
 {
   "task": "Write a function that debounces a callback",
   "language": "javascript",
+  "provider": "bluetooth-local",
   "maxTokens": 1024
 }
 ```
+
+`provider` is optional — omit it to let `IntelligentRouter` choose automatically. Allowed values: `bluetooth-local`, `ollama-local`, `swarm`, `edgecoder-local`.
 
 ### POST /run — response
 
@@ -189,7 +213,18 @@ POST /run/swarm       → force swarm submission
 }
 ```
 
-For swarm responses, additional fields appear:
+For bluetooth-local responses:
+
+```json
+{
+  "route": "bluetooth-local",
+  "latencyMs": 920,
+  "deviceName": "Cody's iPhone 15 Pro",
+  "generatedCode": "..."
+}
+```
+
+For swarm responses:
 
 ```json
 {
@@ -215,15 +250,35 @@ Swarm tasks cost credits from your agent account. The agent that fulfils the tas
 
 ### When does Bluetooth-local activate?
 
-If `BT_STATUS_URL` is set (e.g. pointing at the Bluetooth transport status sidecar on the Mac) and the status endpoint reports a connected iPhone/Mac, the router sends the request over BT first. This is completely free and works offline.
+The BLE proxy (`edgecoder-ble-proxy`) runs as a companion process launched by the provider server. It scans for a nearby iPhone advertising the EdgeCoder BLE service. When a phone is found and connected, the proxy's `/status` endpoint reports `connected: true` and the router's `isBluetoothAvailable()` check returns true.
 
-The iOS app's Bluetooth Local mode (`bluetoothLocal` compute mode) makes the iPhone's llama.cpp model available to the Mac via BT proxy on port 11435.
+**To enable Bluetooth-local:**
+1. Build and install the proxy: `npm run build:ble-proxy`
+2. Open the EdgeCoder iOS app → Swarm tab → set mode to **Bluetooth Local**
+3. Start or restart the provider server: `npm run dev:ide`
+
+The proxy starts automatically and will appear in the logs:
+```
+[ble-proxy] Starting /opt/edgecoder/bin/edgecoder-ble-proxy on port 11435...
+[ble] Central powered on — scanning for EdgeCoder peripherals...
+[ble] Discovered: Cody's iPhone 15 Pro (RSSI=-61)
+[ble] Connected to Cody's iPhone 15 Pro
+```
+
+**Checking BLE status manually:**
+```bash
+curl http://127.0.0.1:4304/bt-status
+```
+
+**IDE task tracking on phone:**
+When your Mac IDE routes a task to Bluetooth-local, it appears live in the iOS app's **IDE** tab. You can see the prompt, generation progress, output, and timing — the phone's battery/model state is always visible in the status row.
 
 ### Forcing a route
 
 Use the right-click menu or call the endpoint directly:
 - Right-click → **Run on Local Ollama** → calls `POST /run/local`
 - Right-click → **Send to Swarm Network** → calls `POST /run/swarm`
+- Via API: `POST /run/bluetooth` → forces phone inference over BT
 
 ---
 
