@@ -45,6 +45,11 @@ import {
   smoothLoadIndex
 } from "../economy/issuance.js";
 import { createLightningProviderFromEnv } from "../economy/lightning.js";
+import {
+  createBitcoinAnchorProviderFromEnv,
+  encodeCheckpointForOpReturn,
+  type BitcoinAnchorProvider
+} from "../economy/bitcoin-rpc.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import { AgentPowerTelemetry, evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
@@ -219,6 +224,8 @@ const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; t
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
 const lightningProvider = createLightningProviderFromEnv();
+const bitcoinAnchorProvider = createBitcoinAnchorProviderFromEnv(BITCOIN_NETWORK);
+const ANCHOR_CONFIRMATION_POLL_MS = Number(process.env.ANCHOR_CONFIRMATION_POLL_MS ?? "60000");
 let treasuryPolicy: TreasuryPolicy | null = null;
 const keyCustodyEvents: KeyCustodyEvent[] = [];
 const settledTxRefs = new Set<string>();
@@ -794,17 +801,31 @@ async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord |
   if (!head) return null;
   const checkpointHash = head.hash;
   const existing = await pgStore.latestAnchorByCheckpoint(checkpointHash);
-  if (existing && existing.status === "anchored") return existing;
+  if (existing && (existing.status === "anchored" || existing.status === "pending")) return existing;
   const now = Date.now();
+  const opReturnData = encodeCheckpointForOpReturn(checkpointHash);
+  let txRef: string;
+  let status: BitcoinAnchorRecord["status"];
+  try {
+    const result = await bitcoinAnchorProvider.broadcastOpReturn(opReturnData);
+    txRef = result.txid;
+    status = "pending";
+    app.log.info({ txid: result.txid, checkpointHash, kind: "stats" }, "bitcoin_anchor_broadcast_ok");
+  } catch (error) {
+    app.log.warn({ error, checkpointHash, kind: "stats" }, "bitcoin_anchor_broadcast_failed");
+    txRef = `failed:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`;
+    status = "failed";
+  }
   const record: BitcoinAnchorRecord = {
-    anchorId: existing?.anchorId ?? randomUUID(),
+    anchorId: randomUUID(),
     epochId: `stats:${head.count}`,
     checkpointHash,
     anchorNetwork: BITCOIN_NETWORK,
-    txRef: existing?.txRef ?? `stats-anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: now,
-    createdAtMs: existing?.createdAtMs ?? now
+    txRef,
+    status,
+    anchoredAtMs: status === "pending" ? now : undefined,
+    createdAtMs: now,
+    confirmations: 0
   };
   await pgStore.upsertBitcoinAnchor(record);
   return record;
@@ -821,6 +842,8 @@ async function latestStatsFinality(): Promise<{
     network: string;
     status: string;
     confirmations: number;
+    blockHeight?: number;
+    blockHash?: string;
     anchoredAtMs?: number;
   };
 }> {
@@ -843,24 +866,55 @@ async function latestStatsFinality(): Promise<{
     };
   }
   const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.checkpointHash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
-  const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
+  const confirmations = anchor?.confirmations ?? 0;
+  const hardFinalized = anchor?.status === "anchored" && confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
   return {
     checkpointHash: latestCommit.checkpointHash,
     checkpointHeight: latestCommit.checkpointHeight,
     softFinalized: true,
     hardFinalized,
-    finalityState: hardFinalized ? "anchored_confirmed" : "anchored_pending",
+    finalityState: hardFinalized ? "anchored_confirmed" : anchor?.status === "pending" ? "anchored_pending" : "soft_finalized",
     anchor: anchor
       ? {
           txRef: anchor.txRef,
           network: anchor.anchorNetwork,
           status: anchor.status,
           confirmations,
+          blockHeight: anchor.blockHeight,
+          blockHash: anchor.blockHash,
           anchoredAtMs: anchor.anchoredAtMs
         }
       : undefined
   };
+}
+
+async function pollAnchorConfirmations(): Promise<void> {
+  if (!pgStore) return;
+  const pending = await pgStore.listPendingAnchors(50);
+  for (const anchor of pending) {
+    try {
+      const result = await bitcoinAnchorProvider.getConfirmations(anchor.txRef);
+      if (result.confirmations > anchor.confirmations || result.confirmed) {
+        const updated: BitcoinAnchorRecord = {
+          ...anchor,
+          confirmations: result.confirmations,
+          blockHeight: result.blockHeight,
+          blockHash: result.blockHash,
+          status: result.confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS ? "anchored" : "pending",
+          anchoredAtMs: result.confirmed ? (anchor.anchoredAtMs ?? Date.now()) : anchor.anchoredAtMs
+        };
+        await pgStore.upsertBitcoinAnchor(updated);
+        if (updated.status === "anchored") {
+          app.log.info(
+            { txRef: anchor.txRef, confirmations: result.confirmations, blockHeight: result.blockHeight },
+            "bitcoin_anchor_confirmed"
+          );
+        }
+      }
+    } catch (error) {
+      app.log.warn({ error, txRef: anchor.txRef }, "bitcoin_anchor_confirmation_poll_failed");
+    }
+  }
 }
 
 async function ingestStatsLedgerRecords(records: QueueEventRecord[]): Promise<{ ingested: number; skipped: number }> {
@@ -1108,7 +1162,12 @@ async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | 
   const epoch = await pgStore.latestIssuanceEpoch(true);
   if (!epoch) return null;
   const latestAnchor = await pgStore.latestAnchor();
-  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status === "anchored") return latestAnchor;
+  if (
+    latestAnchor?.epochId === epoch.issuanceEpochId &&
+    (latestAnchor.status === "anchored" || latestAnchor.status === "pending")
+  ) {
+    return latestAnchor;
+  }
   const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
   const checkpointHash = createHash("sha256")
     .update(JSON.stringify({ epoch, allocations }))
@@ -1118,15 +1177,30 @@ async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | 
     epochId: epoch.issuanceEpochId,
     payload: { checkpointHash, allocationCount: allocations.length }
   });
+  const now = Date.now();
+  const opReturnData = encodeCheckpointForOpReturn(checkpointHash);
+  let txRef: string;
+  let status: BitcoinAnchorRecord["status"];
+  try {
+    const result = await bitcoinAnchorProvider.broadcastOpReturn(opReturnData);
+    txRef = result.txid;
+    status = "pending";
+    app.log.info({ txid: result.txid, checkpointHash, epochId: epoch.issuanceEpochId }, "bitcoin_epoch_anchor_broadcast_ok");
+  } catch (error) {
+    app.log.warn({ error, checkpointHash, epochId: epoch.issuanceEpochId }, "bitcoin_epoch_anchor_broadcast_failed");
+    txRef = `failed:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`;
+    status = "failed";
+  }
   const anchor: BitcoinAnchorRecord = {
     anchorId: randomUUID(),
     epochId: epoch.issuanceEpochId,
     checkpointHash,
     anchorNetwork: BITCOIN_NETWORK,
-    txRef: `anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: Date.now(),
-    createdAtMs: Date.now()
+    txRef,
+    status,
+    anchoredAtMs: status === "pending" ? now : undefined,
+    createdAtMs: now,
+    confirmations: 0
   };
   await pgStore.upsertBitcoinAnchor(anchor);
   return anchor;
@@ -2481,18 +2555,44 @@ app.get("/stats/anchors/verify", async (req, reply) => {
     })
     .parse(req.query);
   const anchor = await pgStore?.latestAnchorByCheckpoint(query.checkpointHash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  // If we have a pending anchor, do a live confirmation check
+  let confirmations = anchor?.confirmations ?? 0;
+  let blockHeight = anchor?.blockHeight;
+  let blockHash = anchor?.blockHash;
+  let status = anchor?.status;
+  if (anchor && anchor.status === "pending") {
+    try {
+      const live = await bitcoinAnchorProvider.getConfirmations(anchor.txRef);
+      confirmations = live.confirmations;
+      blockHeight = live.blockHeight;
+      blockHash = live.blockHash;
+      if (live.confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS) {
+        status = "anchored";
+        await pgStore?.upsertBitcoinAnchor({
+          ...anchor,
+          confirmations: live.confirmations,
+          blockHeight: live.blockHeight,
+          blockHash: live.blockHash,
+          status: "anchored"
+        });
+      }
+    } catch {
+      // Fall back to stored confirmations
+    }
+  }
   return {
     ok: true,
     checkpointHash: query.checkpointHash,
-    verified: confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS,
+    verified: status === "anchored" && confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS,
     requiredConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS,
     anchor: anchor
       ? {
           txRef: anchor.txRef,
           network: anchor.anchorNetwork,
-          status: anchor.status,
+          status: status ?? anchor.status,
           confirmations,
+          blockHeight,
+          blockHash,
           anchoredAtMs: anchor.anchoredAtMs
         }
       : null
@@ -3216,7 +3316,35 @@ app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ agentId: z.string() }).parse(req.params);
   const body = z.object({ ok: z.boolean(), error: z.string().optional() }).parse(req.body);
-  const current = agentOrchestration.get(params.agentId);
+  let current = agentOrchestration.get(params.agentId);
+  if (!current && pgStore) {
+    // The coordinator may have restarted after the rollout was created and before
+    // the agent could ACK. Try to reconstruct from the DB so the ACK isn't lost.
+    try {
+      const allRollouts = await pgStore.listOllamaRollouts(500);
+      const match = allRollouts
+        .filter((r) => r.targetId === params.agentId && r.targetType === "agent" &&
+          (r.status === "requested" || r.status === "in_progress"))
+        .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
+      if (match) {
+        current = {
+          rolloutId: match.rolloutId,
+          provider: match.provider,
+          model: match.model,
+          autoInstall: match.autoInstall,
+          pending: true,
+          requestedAtMs: match.requestedAtMs
+        };
+        agentOrchestration.set(params.agentId, current);
+        app.log.info(
+          { agentId: params.agentId, rolloutId: match.rolloutId },
+          "rollout_ack_recovered_from_db"
+        );
+      }
+    } catch (recoverError) {
+      app.log.warn({ recoverError, agentId: params.agentId }, "rollout_ack_db_recover_failed");
+    }
+  }
   if (!current) return reply.code(404).send({ error: "orchestration_not_found" });
   current.pending = false;
   agentOrchestration.set(params.agentId, current);
@@ -3291,6 +3419,33 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           for (const intent of pendingIntents) {
             paymentIntents.set(intent.intentId, intent);
           }
+          // Reload rollouts that were still in-flight when the coordinator last
+          // restarted so agents can ACK them after a redeploy instead of getting
+          // 404 and leaving rollouts permanently stuck in "requested"/"in_progress".
+          const recentRollouts = await storeRef.listOllamaRollouts(500);
+          const seenTargets = new Set<string>();
+          for (const rollout of recentRollouts) {
+            // listOllamaRollouts returns newest-first; take only the most recent
+            // per target, and only if it is still pending.
+            if (seenTargets.has(rollout.targetId)) continue;
+            seenTargets.add(rollout.targetId);
+            if (rollout.status !== "requested" && rollout.status !== "in_progress") continue;
+            ollamaRollouts.set(rollout.rolloutId, rollout);
+            if (rollout.targetType === "agent") {
+              agentOrchestration.set(rollout.targetId, {
+                rolloutId: rollout.rolloutId,
+                provider: rollout.provider,
+                model: rollout.model,
+                autoInstall: rollout.autoInstall,
+                pending: true,
+                requestedAtMs: rollout.requestedAtMs
+              });
+              app.log.info(
+                { agentId: rollout.targetId, rolloutId: rollout.rolloutId, status: rollout.status },
+                "rollout_rehydrated"
+              );
+            }
+          }
         };
         const startupDbInitTimeoutMs = 10_000;
         await Promise.race([
@@ -3350,6 +3505,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       setInterval(() => {
         void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
       }, STATS_ANCHOR_INTERVAL_MS);
+      setInterval(() => {
+        void pollAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirmation_poll_failed"));
+      }, ANCHOR_CONFIRMATION_POLL_MS);
       await app.listen({ port: 4301, host: "0.0.0.0" });
       // Do not block coordinator readiness on model pull/install.
       // Fly health checks and agent registration should stay available while
@@ -3372,6 +3530,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await runIssuanceTick().catch(() => undefined);
       await maybeAnchorLatestFinalizedEpoch().catch(() => undefined);
       await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
+      await pollAnchorConfirmations().catch(() => undefined);
     })
     .catch((error) => {
       app.log.error(error);
