@@ -1,0 +1,14 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY site-docs ./site-docs
+
+RUN npm run docs:build
+
+EXPOSE 4173
+
+CMD ["npm", "run", "docs:preview", "--", "--host", "0.0.0.0", "--port", "4173"]

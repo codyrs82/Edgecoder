@@ -482,3 +482,16 @@ Set these for beta, then tighten for GA.
 - **Cross-OS pass rate**: >= 95% critical-path test pass on Debian/Ubuntu/Windows/macOS
 - **Model provisioning success**: >= 98% successful signed model downloads on first attempt
 - **Agent check-in freshness**: >= 99% active agents heartbeat within configured interval
+
+---
+
+## 18. Security Guarantees (Current Enforced Baseline)
+
+These are hard guarantees for current production intent and implementation:
+
+- **Coordinator is mesh-internal**: coordinator routes require `x-mesh-token`; unauthenticated public requests are rejected.
+- **No direct public model API**: Ollama is bound to localhost on coordinator runtime and is not exposed as a public edge route.
+- **Agent-mediated model access**: model execution is reachable through authenticated agent/coordinator flows, not anonymous coordinator calls.
+- **IDE requires local agent**: IDE connectivity is through local authenticated agent runtime; IDE clients do not call coordinator model endpoints directly.
+- **Control-plane remains admin-gated**: admin token and IP allowlist policies protect operational and orchestration endpoints.
+- **Stable Fly runtime policy**: use Ollama provider with pre-pulled models and avoid startup-time auto-pull in production to reduce availability risk.

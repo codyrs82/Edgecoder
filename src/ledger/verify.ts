@@ -23,7 +23,11 @@ export function verifyOrderingChain(
       actorId: record.actorId,
       sequence: record.sequence,
       issuedAtMs: record.issuedAtMs,
-      prevHash: record.prevHash
+      prevHash: record.prevHash,
+      coordinatorId: record.coordinatorId,
+      checkpointHeight: record.checkpointHeight,
+      checkpointHash: record.checkpointHash,
+      payloadJson: record.payloadJson
     });
     if (expectedHash !== record.hash) {
       return { ok: false, reason: "hash_mismatch" };

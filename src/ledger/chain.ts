@@ -15,6 +15,10 @@ export class OrderingChain {
     taskId: string;
     subtaskId?: string;
     actorId: string;
+    coordinatorId?: string;
+    checkpointHeight?: number;
+    checkpointHash?: string;
+    payloadJson?: string;
   }): QueueEventRecord {
     const prev = this.records[this.records.length - 1];
     const record = createQueueEventRecord({
@@ -26,6 +30,10 @@ export class OrderingChain {
       sequence: this.records.length + 1,
       issuedAtMs: Date.now(),
       prevHash: prev?.hash ?? "GENESIS",
+      coordinatorId: event.coordinatorId,
+      checkpointHeight: event.checkpointHeight,
+      checkpointHash: event.checkpointHash,
+      payloadJson: event.payloadJson,
       signerPrivateKeyPem: this.signerPrivateKeyPem
     });
     this.records.push(record);

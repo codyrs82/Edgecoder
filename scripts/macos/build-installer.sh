@@ -47,7 +47,10 @@ cp -R "$PAYLOAD_DIR/opt/edgecoder/install" "$PKGROOT/opt/edgecoder/install"
 cp "$PAYLOAD_DIR/etc/edgecoder/edgecoder.env.example" "$PKGROOT/etc/edgecoder/edgecoder.env.example"
 
 chmod 755 "$PKGROOT/opt/edgecoder/bin/edgecoder-runtime.sh"
+chmod 755 "$PKGROOT/opt/edgecoder/bin/edgecoder-configure.sh"
+chmod 755 "$PKGROOT/opt/edgecoder/bin/edgecoder-install-ollama.sh"
 chmod 755 "$SCRIPTS_DIR/preinstall" "$SCRIPTS_DIR/postinstall"
+chmod 755 "$ROOT_DIR/scripts/macos/install-local.sh"
 
 OUTPUT_PKG="$ROOT_DIR/build/EdgeCoder-${VERSION}-macos-installer.pkg"
 echo "Building package: $OUTPUT_PKG"

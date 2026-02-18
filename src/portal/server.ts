@@ -15,6 +15,7 @@ const app = Fastify({ logger: true });
 const store = PortalStore.fromEnv();
 
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
+const EXTERNAL_HTTP_TIMEOUT_MS = Number(process.env.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS ?? 7000);
 const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL ?? "";
 const PORTAL_PUBLIC_URL = process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310";
@@ -41,6 +42,29 @@ const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? (() => {
     return PORTAL_PUBLIC_URL;
   }
 })();
+const PASSKEY_ALLOWED_ORIGINS = (() => {
+  const configured = (process.env.PASSKEY_ALLOWED_ORIGINS ?? PASSKEY_ORIGIN)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const normalized = new Set<string>();
+  for (const value of configured) {
+    try {
+      normalized.add(new URL(value).origin);
+    } catch {
+      // ignore malformed origin entries
+    }
+  }
+  try {
+    normalized.add(new URL(PORTAL_PUBLIC_URL).origin);
+  } catch {
+    // ignore malformed portal public URL
+  }
+  if (normalized.size === 0) normalized.add(PASSKEY_ORIGIN);
+  return [...normalized];
+})();
+const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL ?? "https://github.com/your-org/Edgecoder";
+const DOCS_SITE_URL = process.env.DOCS_SITE_URL ?? "http://127.0.0.1:5173";
 const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") as "bitcoin" | "testnet" | "signet";
 const NODE_ENV = process.env.NODE_ENV ?? "development";
 const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "";
@@ -64,6 +88,10 @@ const COORDINATOR_ADMIN_EMAILS = new Set(
 );
 
 type ProviderName = "google" | "microsoft";
+const IOS_OAUTH_CALLBACK_PREFIX = process.env.IOS_OAUTH_CALLBACK_PREFIX ?? "edgecoder://oauth-callback";
+const MOBILE_OAUTH_TOKEN_TTL_MS = Number(process.env.MOBILE_OAUTH_TOKEN_TTL_MS ?? "300000");
+const oauthNativeRedirectByState = new Map<string, string>();
+const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number }>();
 
 type OauthProviderConfig = {
   clientId: string;
@@ -121,8 +149,8 @@ function validatePortalSecurityConfig(): void {
     throw new Error(`Missing required production environment variables: ${missing.join(", ")}`);
   }
 
-  if (!/^https:\/\//i.test(PASSKEY_ORIGIN)) {
-    throw new Error("PASSKEY_ORIGIN must use https in production.");
+  if (PASSKEY_ALLOWED_ORIGINS.some((origin) => !/^https:\/\//i.test(origin))) {
+    throw new Error("PASSKEY_ALLOWED_ORIGINS must use https in production.");
   }
   if (!/^https:\/\//i.test(PORTAL_PUBLIC_URL)) {
     throw new Error("PORTAL_PUBLIC_URL must use https in production.");
@@ -146,6 +174,39 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
     out[rawKey] = decodeURIComponent(rest.join("="));
   }
   return out;
+}
+
+function normalizeNativeOauthRedirect(value: string | undefined): string | null {
+  if (!value) return null;
+  const candidate = value.trim();
+  if (!candidate) return null;
+  try {
+    const parsed = new URL(candidate);
+    if (!parsed.protocol || parsed.protocol === "http:" || parsed.protocol === "https:") return null;
+    const prefix = IOS_OAUTH_CALLBACK_PREFIX.endsWith("/")
+      ? IOS_OAUTH_CALLBACK_PREFIX.slice(0, -1)
+      : IOS_OAUTH_CALLBACK_PREFIX;
+    return candidate.startsWith(prefix) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function issueMobileOauthSessionToken(userId: string): string {
+  const token = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
+  mobileOauthSessionTokens.set(token, {
+    userId,
+    expiresAtMs: Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS
+  });
+  return token;
+}
+
+function consumeMobileOauthSessionToken(token: string): { userId: string } | null {
+  const record = mobileOauthSessionTokens.get(token);
+  if (!record) return null;
+  mobileOauthSessionTokens.delete(token);
+  if (record.expiresAtMs <= Date.now()) return null;
+  return { userId: record.userId };
 }
 
 function secureCompare(a: string, b: string): boolean {
@@ -639,6 +700,253 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
   }
 }
 
+async function loadIosAgentContributionForUser(agentId: string): Promise<{
+  contribution: {
+    earnedCredits: number;
+    contributedTaskCount: number;
+  };
+  wallet: {
+    accountId: string;
+    balance: number;
+    estimatedSats: number;
+    satsPerCredit: number;
+  };
+  runtime: {
+    connected: boolean;
+    health?: string;
+    mode?: string;
+    localModelProvider?: string;
+    maxConcurrentTasks?: number;
+    swarmEnabled?: boolean;
+    ideEnabled?: boolean;
+  } | null;
+  recentTaskIds: string[];
+}> {
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
+    return {
+      contribution: { earnedCredits: 0, contributedTaskCount: 0 },
+      wallet: { accountId: agentId, balance: 0, estimatedSats: 0, satsPerCredit: 0 },
+      runtime: null,
+      recentTaskIds: []
+    };
+  }
+
+  try {
+    const [creditRes, historyRes, quoteRes, catalogRes] = await Promise.all([
+      request(`${CONTROL_PLANE_URL}/credits/${agentId}/balance`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      }),
+      request(`${CONTROL_PLANE_URL}/credits/${agentId}/history`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      }),
+      request(`${CONTROL_PLANE_URL}/economy/credits/${agentId}/quote`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      }),
+      request(`${CONTROL_PLANE_URL}/agents/catalog`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      })
+    ]);
+
+    const credits = creditRes.statusCode >= 200 && creditRes.statusCode < 300
+      ? ((await creditRes.body.json()) as { balance?: number })
+      : { balance: 0 };
+    const historyPayload = historyRes.statusCode >= 200 && historyRes.statusCode < 300
+      ? ((await historyRes.body.json()) as { history?: Array<{ reason?: string; type?: string; credits?: number; relatedTaskId?: string }> })
+      : { history: [] };
+    const quote = quoteRes.statusCode >= 200 && quoteRes.statusCode < 300
+      ? ((await quoteRes.body.json()) as { estimatedSats?: number; satsPerCredit?: number })
+      : { estimatedSats: 0, satsPerCredit: 0 };
+    const catalog = catalogRes.statusCode >= 200 && catalogRes.statusCode < 300
+      ? ((await catalogRes.body.json()) as { agents?: Array<Record<string, unknown>> })
+      : { agents: [] };
+
+    const history = historyPayload.history ?? [];
+    const earned = history
+      .filter((tx) => tx?.reason === "compute_contribution" && tx?.type === "earn")
+      .reduce((sum, tx) => sum + Number(tx?.credits ?? 0), 0);
+    const contributedTaskIds = Array.from(
+      new Set(
+        history
+          .filter((tx) => tx?.reason === "compute_contribution" && tx?.relatedTaskId)
+          .map((tx) => String(tx.relatedTaskId))
+      )
+    );
+
+    const runtimeAgent = (catalog.agents ?? []).find((item) => String(item?.agentId ?? "") === agentId) ?? null;
+
+    return {
+      contribution: {
+        earnedCredits: Number(earned.toFixed(3)),
+        contributedTaskCount: contributedTaskIds.length
+      },
+      wallet: {
+        accountId: agentId,
+        balance: Number(Number(credits.balance ?? 0).toFixed(3)),
+        estimatedSats: Number(quote.estimatedSats ?? 0),
+        satsPerCredit: Number(quote.satsPerCredit ?? 0)
+      },
+      runtime: runtimeAgent
+        ? {
+            connected: true,
+            health: typeof runtimeAgent.health === "string" ? runtimeAgent.health : undefined,
+            mode: typeof runtimeAgent.mode === "string" ? runtimeAgent.mode : undefined,
+            localModelProvider:
+              typeof runtimeAgent.localModelProvider === "string" ? runtimeAgent.localModelProvider : undefined,
+            maxConcurrentTasks:
+              typeof runtimeAgent.maxConcurrentTasks === "number" ? runtimeAgent.maxConcurrentTasks : undefined,
+            swarmEnabled: typeof runtimeAgent.swarmEnabled === "boolean" ? runtimeAgent.swarmEnabled : undefined,
+            ideEnabled: typeof runtimeAgent.ideEnabled === "boolean" ? runtimeAgent.ideEnabled : undefined
+          }
+        : { connected: false },
+      recentTaskIds: contributedTaskIds.slice(-5).reverse()
+    };
+  } catch {
+    return {
+      contribution: { earnedCredits: 0, contributedTaskCount: 0 },
+      wallet: { accountId: agentId, balance: 0, estimatedSats: 0, satsPerCredit: 0 },
+      runtime: null,
+      recentTaskIds: []
+    };
+  }
+}
+
+async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
+  if (!CONTROL_PLANE_URL) return [];
+  try {
+    const res = await request(`${CONTROL_PLANE_URL}/network/coordinators`, {
+      method: "GET",
+      headers: controlPlaneHeaders(),
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) return [];
+    const payload = (await res.body.json()) as {
+      coordinators?: Array<{ coordinatorUrl?: string }>;
+    };
+    return (payload.coordinators ?? [])
+      .map((item) => String(item.coordinatorUrl ?? "").trim())
+      .filter(Boolean)
+      .filter((value, index, arr) => arr.indexOf(value) === index);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchCoordinatorFederatedSummary(input: {
+  ownerEmail?: string;
+}): Promise<{
+  nodes: Array<{
+    nodeId: string;
+    nodeKind: "agent" | "coordinator";
+    ownerEmail?: string;
+    emailVerified?: boolean;
+    nodeApproved?: boolean;
+    active?: boolean;
+    sourceIp?: string;
+    countryCode?: string;
+    vpnDetected?: boolean;
+    lastSeenMs?: number;
+    updatedAtMs?: number;
+  }>;
+  checkpointHashes: string[];
+  finalityStates: string[];
+  anchorTxRefs: string[];
+  reachedCoordinators: number;
+  stale: boolean;
+}> {
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return { nodes: [], checkpointHashes: [], finalityStates: [], anchorTxRefs: [], reachedCoordinators: 0, stale: true };
+  }
+  const headers: Record<string, string> = {};
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+  const ownerEmailQuery = input.ownerEmail ? `?ownerEmail=${encodeURIComponent(input.ownerEmail)}` : "";
+  const responses = await Promise.all(
+    coordinatorUrls.map(async (baseUrl) => {
+      try {
+        const res = await request(`${baseUrl.replace(/\/$/, "")}/stats/projections/summary${ownerEmailQuery}`, {
+          method: "GET",
+          headers,
+          headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+          bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+        });
+        if (res.statusCode < 200 || res.statusCode >= 300) return null;
+        return (await res.body.json()) as {
+          latestCheckpoint?: { hash?: string };
+          finality?: {
+            finalityState?: string;
+            anchor?: { txRef?: string };
+          };
+          nodes?: Array<{
+            nodeId: string;
+            nodeKind: "agent" | "coordinator";
+            ownerEmail?: string;
+            emailVerified?: boolean;
+            nodeApproved?: boolean;
+            active?: boolean;
+            sourceIp?: string;
+            countryCode?: string;
+            vpnDetected?: boolean;
+            lastSeenMs?: number;
+            updatedAtMs?: number;
+          }>;
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
+  const reached = responses.filter((r) => Boolean(r));
+  const checkpointHashes = reached
+    .map((r) => String(r?.latestCheckpoint?.hash ?? "").trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+  const finalityStates = reached
+    .map((r) => String(r?.finality?.finalityState ?? "").trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+  const anchorTxRefs = reached
+    .map((r) => String(r?.finality?.anchor?.txRef ?? "").trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+  const mergedByNodeId = new Map<
+    string,
+    {
+      nodeId: string;
+      nodeKind: "agent" | "coordinator";
+      ownerEmail?: string;
+      emailVerified?: boolean;
+      nodeApproved?: boolean;
+      active?: boolean;
+      sourceIp?: string;
+      countryCode?: string;
+      vpnDetected?: boolean;
+      lastSeenMs?: number;
+      updatedAtMs?: number;
+    }
+  >();
+  for (const result of reached) {
+    for (const node of result?.nodes ?? []) {
+      const existing = mergedByNodeId.get(node.nodeId);
+      if (!existing || Number(node.updatedAtMs ?? 0) >= Number(existing.updatedAtMs ?? 0)) {
+        mergedByNodeId.set(node.nodeId, node);
+      }
+    }
+  }
+  return {
+    nodes: [...mergedByNodeId.values()],
+    checkpointHashes,
+    finalityStates,
+    anchorTxRefs,
+    reachedCoordinators: reached.length,
+    stale: reached.length === 0 || checkpointHashes.length > 1 || finalityStates.length > 1
+  };
+}
+
 async function loadNetworkInsightsForUser(): Promise<{
   issuance: { epoch: Record<string, unknown> | null; allocations: Array<Record<string, unknown>> };
   modelMesh: { models: Array<Record<string, unknown>>; generatedAtMs?: number };
@@ -870,6 +1178,8 @@ function marketingHomeHtml(): string {
           </div>
           <div class="nav-actions">
             <a class="btn" href="/portal">Portal</a>
+            <a class="btn" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
+            <a class="btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             <a class="btn primary" href="/portal">Get Started</a>
           </div>
         </nav>
@@ -989,6 +1299,36 @@ function marketingHomeHtml(): string {
 
 app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 
+// Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
+const IOS_APP_TEAM_ID = process.env.IOS_APP_TEAM_ID ?? "63CL88WY7G";
+const IOS_APP_BUNDLE_ID = process.env.IOS_APP_BUNDLE_ID ?? "io.edgecoder.ios";
+app.get("/.well-known/apple-app-site-association", async (_req, reply) => {
+  const aasa = {
+    webcredentials: {
+      apps: [`${IOS_APP_TEAM_ID}.${IOS_APP_BUNDLE_ID}`]
+    }
+  };
+  return reply.type("application/json").send(aasa);
+});
+
+app.get("/auth/capabilities", async () => {
+  const oauthGoogleConfigured = Boolean(oauthProviders.google.clientId && oauthProviders.google.clientSecret);
+  const oauthMicrosoftConfigured = Boolean(oauthProviders.microsoft.clientId && oauthProviders.microsoft.clientSecret);
+  return {
+    password: true,
+    passkey: {
+      enabled: Boolean(PASSKEY_RP_ID && PASSKEY_ALLOWED_ORIGINS.length > 0),
+      rpId: PASSKEY_RP_ID,
+      allowedOrigins: PASSKEY_ALLOWED_ORIGINS
+    },
+    oauth: {
+      google: oauthGoogleConfigured,
+      microsoft: oauthMicrosoftConfigured,
+      apple: false
+    }
+  };
+});
+
 app.post("/auth/signup", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const body = z
@@ -1103,12 +1443,17 @@ app.post("/auth/oauth/apple/callback", async (_req, reply) => {
 app.get("/auth/oauth/:provider/start", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
+  const query = z.object({ appRedirect: z.string().optional() }).parse(req.query);
   const provider = oauthProviders[params.provider];
   if (!provider.clientId || !provider.clientSecret) {
     return reply.code(503).send({ error: `${params.provider}_oauth_not_configured` });
   }
+  const nativeRedirect = normalizeNativeOauthRedirect(query.appRedirect);
   const state = randomUUID();
   const callbackUrl = `${PORTAL_PUBLIC_URL}/auth/oauth/${params.provider}/callback`;
+  if (nativeRedirect) {
+    oauthNativeRedirectByState.set(state, nativeRedirect);
+  }
   await store.createOauthState({
     stateId: state,
     provider: params.provider,
@@ -1147,6 +1492,8 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
   const provider = oauthProviders[providerName];
   const state = await portalStore.consumeOauthState(stateId);
   if (!state || state.provider !== providerName) return reply.code(400).send({ error: "oauth_state_invalid" });
+  const nativeRedirect = oauthNativeRedirectByState.get(stateId);
+  if (nativeRedirect) oauthNativeRedirectByState.delete(stateId);
 
   const tokenRes = await request(provider.tokenUrl, {
     method: "POST",
@@ -1216,8 +1563,29 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
   if (user.emailVerified) await ensureCreditAccountForUser(user);
 
   await createSessionForUser(user.userId, reply);
+  if (nativeRedirect) {
+    const mobileToken = issueMobileOauthSessionToken(user.userId);
+    const redirect = new URL(nativeRedirect);
+    redirect.searchParams.set("status", "ok");
+    redirect.searchParams.set("provider", providerName);
+    redirect.searchParams.set("mobile_token", mobileToken);
+    return reply.redirect(redirect.toString());
+  }
   return reply.redirect("/portal/dashboard");
 }
+
+app.post("/auth/oauth/mobile/complete", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const body = z.object({ token: z.string().min(24) }).parse(req.body);
+  const resolved = consumeMobileOauthSessionToken(body.token);
+  if (!resolved) return reply.code(400).send({ error: "oauth_mobile_token_invalid" });
+  await createSessionForUser(resolved.userId, reply);
+  const user = await store.getUserById(resolved.userId);
+  return reply.send({
+    ok: true,
+    user: user ? { userId: user.userId, email: user.email, emailVerified: user.emailVerified } : null
+  });
+});
 
 app.post("/auth/passkey/register/options", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
@@ -1271,7 +1639,7 @@ app.post("/auth/passkey/register/verify", async (req, reply) => {
   const verification = await verifyRegistrationResponse({
     response: normalizedResponse as any,
     expectedChallenge: challenge.challenge,
-    expectedOrigin: PASSKEY_ORIGIN,
+    expectedOrigin: PASSKEY_ALLOWED_ORIGINS,
     expectedRPID: PASSKEY_RP_ID,
     requireUserVerification: false
   }).catch(() => null);
@@ -1295,25 +1663,35 @@ app.post("/auth/passkey/register/verify", async (req, reply) => {
 
 app.post("/auth/passkey/login/options", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const body = z.object({ email: z.string().email() }).parse(req.body);
-  const user = await store.getUserByEmail(normalizeEmail(body.email));
-  if (!user) return reply.code(404).send({ error: "user_not_found" });
-  const credentials = await store.listPasskeysByUserId(user.userId);
-  if (credentials.length === 0) return reply.code(404).send({ error: "passkey_not_registered" });
-  const options = await generateAuthenticationOptions({
-    rpID: PASSKEY_RP_ID,
-    timeout: 60000,
-    userVerification: "preferred",
-    allowCredentials: credentials.map((item) => ({
-      id: item.credentialId,
-      transports: item.transports as any
-    }))
-  });
+  const body = z.object({ email: z.string().email().optional() }).parse(req.body);
+  const normalizedEmail = body.email ? normalizeEmail(body.email) : undefined;
+  const user = normalizedEmail ? await store.getUserByEmail(normalizedEmail) : null;
+  const credentials = user ? await store.listPasskeysByUserId(user.userId) : [];
+  if (normalizedEmail && !user) return reply.code(404).send({ error: "user_not_found" });
+  if (normalizedEmail && credentials.length === 0) return reply.code(404).send({ error: "passkey_not_registered" });
+  const options = await generateAuthenticationOptions(
+    credentials.length > 0
+      ? {
+          rpID: PASSKEY_RP_ID,
+          timeout: 60000,
+          userVerification: "preferred",
+          allowCredentials: credentials.map((item) => ({
+            id: item.credentialId,
+            transports: item.transports as any
+          }))
+        }
+      : {
+          // Discoverable/passkey-first login when email is not provided.
+          rpID: PASSKEY_RP_ID,
+          timeout: 60000,
+          userVerification: "preferred"
+        }
+  );
   const challengeId = randomUUID();
   await store.createPasskeyChallenge({
     challengeId,
-    userId: user.userId,
-    email: user.email,
+    userId: user?.userId,
+    email: user?.email,
     challenge: options.challenge,
     flowType: "authentication",
     expiresAtMs: Date.now() + PASSKEY_CHALLENGE_TTL_MS
@@ -1342,7 +1720,7 @@ app.post("/auth/passkey/login/verify", async (req, reply) => {
   const verification = await verifyAuthenticationResponse({
     response: normalizedResponse as any,
     expectedChallenge: challenge.challenge,
-    expectedOrigin: PASSKEY_ORIGIN,
+    expectedOrigin: PASSKEY_ALLOWED_ORIGINS,
     expectedRPID: PASSKEY_RP_ID,
     requireUserVerification: false,
     credential: {
@@ -1494,7 +1872,7 @@ app.post("/wallet/send/mfa/confirm", async (req, reply) => {
   const verification = await verifyAuthenticationResponse({
     response: body.response as any,
     expectedChallenge: challenge.passkeyChallenge,
-    expectedOrigin: PASSKEY_ORIGIN,
+    expectedOrigin: PASSKEY_ALLOWED_ORIGINS,
     expectedRPID: PASSKEY_RP_ID,
     requireUserVerification: true,
     credential: {
@@ -1570,6 +1948,31 @@ app.get("/ios/dashboard", async (req, reply) => {
   });
 });
 
+app.get("/ios/agents/:agentId/contribution", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const params = z.object({ agentId: z.string().min(3) }).parse(req.params);
+  const node = await store.getNodeEnrollment(params.agentId);
+  if (!node || node.nodeKind !== "agent") {
+    return reply.code(404).send({ error: "agent_not_found" });
+  }
+  if (node.ownerUserId !== user.userId) {
+    return reply.code(403).send({ error: "agent_access_forbidden" });
+  }
+
+  const agentSnapshot = await loadIosAgentContributionForUser(params.agentId);
+  return reply.send({
+    agentId: params.agentId,
+    node: {
+      active: node.active,
+      nodeApproved: node.nodeApproved,
+      lastSeenMs: node.lastSeenMs
+    },
+    ...agentSnapshot
+  });
+});
+
 app.get("/me", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
@@ -1607,24 +2010,47 @@ app.post("/me/theme", async (req, reply) => {
   return reply.send({ ok: true, theme: body.theme });
 });
 
+function deriveIosDeviceIdFromNodeId(nodeId: string): string | undefined {
+  const normalized = String(nodeId).trim().toLowerCase();
+  if (!/^ios-|^iphone-/.test(normalized)) return undefined;
+  const suffix = normalized.replace(/^ios-|^iphone-/, "").replace(/[^a-z0-9]/g, "");
+  return suffix.length >= 6 ? suffix : undefined;
+}
+
 app.post("/nodes/enroll", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
-  const body = z.object({ nodeId: z.string().min(3), nodeKind: z.enum(["agent", "coordinator"]) }).parse(req.body);
+  const body = z
+    .object({
+      nodeId: z.string().min(3),
+      nodeKind: z.enum(["agent", "coordinator"]),
+      deviceId: z.string().min(3).max(128).optional()
+    })
+    .parse(req.body);
+  const enrollmentDeviceId =
+    body.deviceId?.trim().toLowerCase() || (body.nodeKind === "agent" ? deriveIosDeviceIdFromNodeId(body.nodeId) : undefined);
   const registrationToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
-  const record = await store.upsertNodeEnrollment({
+  let record = await store.upsertNodeEnrollment({
     nodeId: body.nodeId,
+    deviceId: enrollmentDeviceId,
     nodeKind: body.nodeKind,
     ownerUserId: user.userId,
     ownerEmail: user.email,
     registrationTokenHash: sha256Hex(registrationToken),
     emailVerified: user.emailVerified
   });
+  if (body.nodeKind === "agent" && user.emailVerified && !record.nodeApproved) {
+    const approved = await store.setNodeApproval(record.nodeId, true);
+    if (approved) {
+      record = approved;
+    }
+  }
   return reply.send({
     ok: true,
     nodeId: record.nodeId,
+    deviceId: record.deviceId,
     nodeKind: record.nodeKind,
     emailVerified: record.emailVerified,
     nodeApproved: record.nodeApproved,
@@ -1697,7 +2123,9 @@ app.get("/coordinator/ops/summary", async (req, reply) => {
     if (access.isSystemAdmin && CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
       const res = await request(`${CONTROL_PLANE_URL}/ops/summary`, {
         method: "GET",
-        headers: controlPlaneHeaders()
+        headers: controlPlaneHeaders(),
+        headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+        bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
       });
       const payload = (await res.body.json()) as { status?: Record<string, unknown> };
       if (res.statusCode >= 200 && res.statusCode < 300 && payload.status) {
@@ -1712,16 +2140,24 @@ app.get("/coordinator/ops/summary", async (req, reply) => {
       };
     }
     const ownerUserId = access.isSystemAdmin ? undefined : user.userId;
-    const pendingNodes = (await store?.listPendingNodes({ limit: 250, ownerUserId })) ?? [];
-    const approvedNodes = store
-      ? await store.listApprovedNodes({
-          ownerUserId,
-          limit: 500
-        })
-      : [];
-    return reply.send({
-      status,
-      pendingNodes: pendingNodes.map((n) => ({
+    const ownerEmail = access.isSystemAdmin ? undefined : user.email;
+    const ownedNodeIds = new Set<string>();
+    if (!access.isSystemAdmin) {
+      const ownedNodes = (await store?.listNodesByOwner(user.userId)) ?? [];
+      for (const n of ownedNodes) ownedNodeIds.add(n.nodeId);
+    }
+    const federated = await fetchCoordinatorFederatedSummary({ ownerEmail });
+    const pendingFromStore = (await store?.listPendingNodes({ limit: 250, ownerUserId })) ?? [];
+    const pendingFromFederated = federated.nodes.filter(
+      (n) => n.nodeApproved !== true && (access.isSystemAdmin || ownedNodeIds.has(n.nodeId))
+    );
+    const pendingByNodeId = new Map<string, (typeof pendingFromFederated)[number]>();
+    for (const n of pendingFromFederated) pendingByNodeId.set(n.nodeId, n);
+    for (const n of pendingFromStore) {
+      // Store can momentarily retain historical enrollment rows that were
+      // already approved; never show those in pending requests.
+      if (n.nodeApproved === true) continue;
+      pendingByNodeId.set(n.nodeId, {
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
         ownerEmail: n.ownerEmail,
@@ -1733,7 +2169,184 @@ app.get("/coordinator/ops/summary", async (req, reply) => {
         vpnDetected: n.lastVpnDetected ?? false,
         lastSeenMs: n.lastSeenMs,
         updatedAtMs: n.updatedAtMs
-      })),
+      });
+    }
+    const approvedFromFederated = federated.nodes.filter(
+      (n) => n.nodeApproved === true && (access.isSystemAdmin || ownedNodeIds.has(n.nodeId))
+    );
+    const approvedFromStore =
+      (await store?.listApprovedNodes({ ownerUserId, limit: 500 }))?.map((n) => ({
+        nodeId: n.nodeId,
+        nodeKind: n.nodeKind,
+        ownerEmail: n.ownerEmail,
+        emailVerified: n.emailVerified,
+        nodeApproved: n.nodeApproved,
+        active: n.active,
+        sourceIp: n.lastIp,
+        countryCode: n.lastCountryCode,
+        vpnDetected: n.lastVpnDetected ?? false,
+        lastSeenMs: n.lastSeenMs,
+        updatedAtMs: n.updatedAtMs
+      })) ?? [];
+    // Always include store-approved nodes so approved devices do not disappear
+    // when federated summaries are temporarily incomplete.
+    const approvedByNodeId = new Map<string, (typeof approvedFromStore)[number]>();
+    for (const n of approvedFromStore) approvedByNodeId.set(n.nodeId, n);
+    for (const n of approvedFromFederated) {
+      const existing = approvedByNodeId.get(n.nodeId) ?? {};
+      approvedByNodeId.set(n.nodeId, {
+        ...existing,
+        ...n,
+        ownerEmail: n.ownerEmail ?? (existing as { ownerEmail?: string }).ownerEmail ?? "unknown",
+        emailVerified: n.emailVerified ?? (existing as { emailVerified?: boolean }).emailVerified ?? false,
+        nodeApproved: n.nodeApproved ?? (existing as { nodeApproved?: boolean }).nodeApproved ?? false,
+        active: n.active ?? (existing as { active?: boolean }).active ?? false,
+        sourceIp: n.sourceIp ?? (existing as { sourceIp?: string }).sourceIp,
+        countryCode: n.countryCode ?? (existing as { countryCode?: string }).countryCode,
+        vpnDetected: n.vpnDetected ?? (existing as { vpnDetected?: boolean }).vpnDetected ?? false,
+        lastSeenMs: n.lastSeenMs ?? (existing as { lastSeenMs?: number }).lastSeenMs,
+        updatedAtMs: n.updatedAtMs ?? (existing as { updatedAtMs?: number }).updatedAtMs ?? Date.now()
+      });
+    }
+    let approvedNodes = [...approvedByNodeId.values()];
+    const agentProviderByNodeId: Record<string, string> = {};
+    const agentOrchestrationStatusByNodeId: Record<string, { phase: string; message: string; progressPct?: number; updatedAtMs: number }> = {};
+    const agentModelRolloutByNodeId: Record<
+      string,
+      { rolloutId?: string; status: string; error?: string; updatedAtMs: number }
+    > = {};
+    if (access.isSystemAdmin && CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+      try {
+        const catalogRes = await request(`${CONTROL_PLANE_URL}/agents/catalog`, {
+          method: "GET",
+          headers: controlPlaneHeaders(),
+          headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+          bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+        });
+        if (catalogRes.statusCode >= 200 && catalogRes.statusCode < 300) {
+          const catalog = (await catalogRes.body.json()) as {
+            agents?: Array<{
+              agentId?: string;
+              localModelProvider?: string;
+              orchestrationStatus?: { phase: string; message: string; progressPct?: number; updatedAtMs: number };
+            }>;
+          };
+          for (const a of catalog.agents ?? []) {
+            const id = a.agentId ?? "";
+            if (id && typeof a.localModelProvider === "string") agentProviderByNodeId[id] = a.localModelProvider;
+            if (id && a.orchestrationStatus) agentOrchestrationStatusByNodeId[id] = a.orchestrationStatus;
+          }
+        }
+      } catch {
+        // best-effort; leave maps empty
+      }
+      try {
+        const rolloutsRes = await request(`${CONTROL_PLANE_URL}/orchestration/rollouts`, {
+          method: "GET",
+          headers: controlPlaneHeaders(),
+          headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+          bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+        });
+        if (rolloutsRes.statusCode >= 200 && rolloutsRes.statusCode < 300) {
+          const payload = (await rolloutsRes.body.json()) as {
+            rollouts?: Array<{
+              rolloutId?: string;
+              targetType?: string;
+              targetId?: string;
+              status?: string;
+              error?: string;
+              updatedAtMs?: number;
+              requestedAtMs?: number;
+            }>;
+          };
+          for (const rollout of payload.rollouts ?? []) {
+            if (rollout.targetType !== "agent") continue;
+            const targetId = rollout.targetId ?? "";
+            const status = rollout.status ?? "";
+            if (!targetId || !status) continue;
+            const updatedAtMs = Number(rollout.updatedAtMs ?? rollout.requestedAtMs ?? 0);
+            const existing = agentModelRolloutByNodeId[targetId];
+            if (!existing || updatedAtMs >= existing.updatedAtMs) {
+              agentModelRolloutByNodeId[targetId] = {
+                rolloutId: rollout.rolloutId,
+                status,
+                error: rollout.error,
+                updatedAtMs
+              };
+            }
+          }
+        }
+      } catch {
+        // best-effort; leave rollout map empty
+      }
+    }
+    const canonicalNodeSuffix = (nodeId: string): string => {
+      return String(nodeId)
+        .toLowerCase()
+        .replace(/^iphone-/, "")
+        .replace(/^ios-/, "")
+        .replace(/[^a-z0-9]/g, "");
+    };
+    const looksLikeIosAlias = (
+      pendingNode: { nodeId: string; nodeKind: "agent" | "coordinator" },
+      approvedNode: { nodeId: string; nodeKind: "agent" | "coordinator" }
+    ): boolean => {
+      if (pendingNode.nodeKind !== approvedNode.nodeKind) return false;
+      const p = canonicalNodeSuffix(pendingNode.nodeId);
+      const a = canonicalNodeSuffix(approvedNode.nodeId);
+      if (!p || !a) return false;
+      const pendingIsIosStyle = /^ios-|^iphone-/i.test(pendingNode.nodeId);
+      const approvedIsIosStyle = /^ios-|^iphone-/i.test(approvedNode.nodeId);
+      if (!pendingIsIosStyle || !approvedIsIosStyle) return false;
+      return p.startsWith(a) || a.startsWith(p);
+    };
+    approvedNodes = approvedNodes.map((n) => {
+      const aliasRollout = Object.entries(agentModelRolloutByNodeId)
+        .filter(([nodeId]) =>
+          looksLikeIosAlias(
+            { nodeId, nodeKind: "agent" },
+            { nodeId: n.nodeId, nodeKind: n.nodeKind }
+          )
+        )
+        .sort((a, b) => Number(b[1].updatedAtMs ?? 0) - Number(a[1].updatedAtMs ?? 0))[0]?.[1];
+      const alias = federated.nodes
+        .filter((candidate) =>
+          looksLikeIosAlias(
+            { nodeId: candidate.nodeId, nodeKind: candidate.nodeKind },
+            { nodeId: n.nodeId, nodeKind: n.nodeKind }
+          )
+        )
+        .sort((a, b) => Number(b.lastSeenMs ?? b.updatedAtMs ?? 0) - Number(a.lastSeenMs ?? a.updatedAtMs ?? 0))[0];
+      const mergedLastSeenMs = n.lastSeenMs ?? alias?.lastSeenMs;
+      const mergedUpdatedAtMs = n.updatedAtMs ?? alias?.updatedAtMs;
+      return {
+        ...n,
+        lastSeenMs: mergedLastSeenMs,
+        updatedAtMs: mergedUpdatedAtMs,
+        sourceIp: n.sourceIp ?? alias?.sourceIp,
+        countryCode: n.countryCode ?? alias?.countryCode,
+        vpnDetected: n.vpnDetected ?? alias?.vpnDetected,
+        localModelProvider: agentProviderByNodeId[n.nodeId] ?? (n as { localModelProvider?: string }).localModelProvider,
+        orchestrationStatus: agentOrchestrationStatusByNodeId[n.nodeId],
+        modelRollout: agentModelRolloutByNodeId[n.nodeId] ?? aliasRollout
+      };
+    });
+    const approvedNodeIds = new Set(approvedNodes.map((n) => n.nodeId));
+    const pendingNodes = [...pendingByNodeId.values()].filter((pendingNode) => {
+      if (approvedNodeIds.has(pendingNode.nodeId)) return false;
+      return !approvedNodes.some((approvedNode) =>
+        looksLikeIosAlias(
+          { nodeId: pendingNode.nodeId, nodeKind: pendingNode.nodeKind },
+          { nodeId: approvedNode.nodeId, nodeKind: approvedNode.nodeKind }
+        )
+      );
+    });
+    const finalityState =
+      federated.finalityStates.length === 1 ? federated.finalityStates[0] : federated.stale ? "stale_federation" : "unknown";
+    const anchorTxRef = federated.anchorTxRefs.length === 1 ? federated.anchorTxRefs[0] : undefined;
+    return reply.send({
+      status,
+      pendingNodes,
       approvedNodes: approvedNodes.map((n) => ({
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
@@ -1741,21 +2354,118 @@ app.get("/coordinator/ops/summary", async (req, reply) => {
         emailVerified: n.emailVerified,
         nodeApproved: n.nodeApproved,
         active: n.active,
-        sourceIp: n.lastIp,
-        countryCode: n.lastCountryCode,
-        vpnDetected: n.lastVpnDetected ?? false,
+        sourceIp: n.sourceIp,
+        countryCode: n.countryCode,
+        vpnDetected: n.vpnDetected ?? false,
         lastSeenMs: n.lastSeenMs,
-        updatedAtMs: n.updatedAtMs
+        updatedAtMs: n.updatedAtMs,
+        localModelProvider: (n as { localModelProvider?: string }).localModelProvider,
+        orchestrationStatus: (n as { orchestrationStatus?: { phase: string; message: string; progressPct?: number; updatedAtMs: number } }).orchestrationStatus,
+        modelRollout: (n as { modelRollout?: { rolloutId?: string; status: string; error?: string; updatedAtMs: number } }).modelRollout
       })),
       access: {
         isSystemAdmin: access.isSystemAdmin,
         isCoordinatorAdmin: access.isCoordinatorAdmin,
         canManageApprovals: access.canManageCoordinatorOps
+      },
+      federation: {
+        reachedCoordinators: federated.reachedCoordinators,
+        checkpointHashes: federated.checkpointHashes,
+        finalityStates: federated.finalityStates,
+        finalityState,
+        anchorTxRefs: federated.anchorTxRefs,
+        anchorTxRef,
+        stale: federated.stale
       }
     });
   } catch {
-    return reply.code(502).send({ error: "control_plane_unreachable" });
+    // Never blank coordinator ops UI; return safe fallback payload.
+    return reply.send({
+      status: { agents: 0, queued: 0, results: 0 },
+      pendingNodes: [],
+      approvedNodes: [],
+      access: {
+        isSystemAdmin: access.isSystemAdmin,
+        isCoordinatorAdmin: access.isCoordinatorAdmin,
+        canManageApprovals: access.canManageCoordinatorOps
+      },
+      federation: {
+        reachedCoordinators: 0,
+        checkpointHashes: [],
+        finalityStates: [],
+        finalityState: "unknown",
+        anchorTxRefs: [],
+        anchorTxRef: undefined,
+        stale: true
+      },
+      degraded: true
+    });
   }
+});
+
+app.get("/coordinator/ops/agent-diagnostics", async (req, reply) => {
+  const principal = await requireCoordinatorOperationsUser(req as any, reply);
+  if (!principal) return;
+  const { user, access } = principal;
+  const query = z.object({ agentId: z.string().min(1) }).parse(req.query);
+  const agentId = query.agentId.trim();
+  if (!agentId) return reply.code(400).send({ error: "agent_id_required" });
+
+  if (!access.isSystemAdmin) {
+    const enrollment = await store?.getNodeEnrollment(agentId);
+    if (!enrollment || enrollment.ownerUserId !== user.userId) {
+      return reply.code(403).send({ error: "agent_diagnostics_forbidden" });
+    }
+  }
+
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.send({ ok: true, agentId, events: [], reachedCoordinators: 0 });
+  }
+
+  const headers: Record<string, string> = {};
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+  const responses = await Promise.all(
+    coordinatorUrls.map(async (baseUrl) => {
+      try {
+        const res = await request(`${baseUrl.replace(/\/$/, "")}/agent/diagnostics/${encodeURIComponent(agentId)}`, {
+          method: "GET",
+          headers
+        });
+        if (res.statusCode < 200 || res.statusCode >= 300) return null;
+        return (await res.body.json()) as {
+          events?: Array<{ eventAtMs?: number; message?: string }>;
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const reached = responses.filter((r) => Boolean(r));
+  const seen = new Set<string>();
+  const merged = reached
+    .flatMap((payload) => payload?.events ?? [])
+    .map((event) => ({
+      eventAtMs: Number(event?.eventAtMs ?? 0),
+      message: String(event?.message ?? "").trim()
+    }))
+    .filter((event) => event.eventAtMs > 0 && event.message.length > 0)
+    .filter((event) => {
+      const key = `${event.eventAtMs}:${event.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => b.eventAtMs - a.eventAtMs)
+    .slice(0, 250);
+
+  return reply.send({
+    ok: true,
+    agentId,
+    events: merged,
+    reachedCoordinators: reached.length
+  });
 });
 
 app.post("/coordinator/ops/node-approval", async (req, reply) => {
@@ -1782,7 +2492,15 @@ app.post("/coordinator/ops/node-approval", async (req, reply) => {
       headers: controlPlaneHeaders(true),
       body: JSON.stringify({ approved: body.approved })
     });
-    return reply.code(res.statusCode).send(await res.body.json());
+    const payload = await res.body.json();
+    if (res.statusCode >= 200 && res.statusCode < 300 && !body.approved && store) {
+      const existing = await store.getNodeEnrollment(body.nodeId);
+      // "Reject" on a pending request should remove it from enrollment queue.
+      if (existing && existing.nodeApproved !== true) {
+        await store.deleteNodeEnrollment(body.nodeId);
+      }
+    }
+    return reply.code(res.statusCode).send(payload);
   } catch {
     return reply.code(502).send({ error: "control_plane_unreachable" });
   }
@@ -1815,6 +2533,77 @@ app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
   } catch {
     return reply.code(502).send({ error: "control_plane_unreachable" });
   }
+});
+
+app.post("/coordinator/ops/agents-model", async (req, reply) => {
+  const principal = await requireCoordinatorOperationsUser(req as any, reply);
+  if (!principal) return;
+  const { user, access } = principal;
+  if (!access.canManageCoordinatorOps) {
+    return reply.code(403).send({ error: "coordinator_operations_forbidden" });
+  }
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
+    return reply.code(503).send({ error: "control_plane_not_configured" });
+  }
+  const body = z
+    .object({
+      agentIds: z.array(z.string().min(3)).min(1).max(250),
+      provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
+      model: z.string().default("qwen2.5-coder:latest"),
+      autoInstall: z.boolean().default(true)
+    })
+    .parse(req.body);
+  const uniqueAgentIds = Array.from(new Set(body.agentIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueAgentIds.length === 0) {
+    return reply.code(400).send({ error: "agent_ids_required" });
+  }
+  if (!access.isSystemAdmin) {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    for (const agentId of uniqueAgentIds) {
+      const enrollment = await store.getNodeEnrollment(agentId);
+      if (!enrollment || enrollment.nodeKind !== "agent" || enrollment.ownerUserId !== user.userId) {
+        return reply.code(403).send({ error: "agent_model_switch_forbidden_for_owner_scope" });
+      }
+    }
+  }
+  const results: Array<{ agentId: string; ok: boolean; statusCode?: number; error?: string; rolloutId?: string }> = [];
+  for (const agentId of uniqueAgentIds) {
+    try {
+      const res = await request(`${CONTROL_PLANE_URL}/orchestration/install-model`, {
+        method: "POST",
+        headers: controlPlaneHeaders(true),
+        body: JSON.stringify({
+          target: "agent",
+          agentId,
+          provider: body.provider,
+          model: body.model,
+          autoInstall: body.autoInstall,
+          requestedBy: user.email
+        })
+      });
+      const payload = (await res.body.json()) as { error?: string; rolloutId?: string };
+      results.push({
+        agentId,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        statusCode: res.statusCode,
+        error: payload?.error,
+        rolloutId: payload?.rolloutId
+      });
+    } catch (error) {
+      results.push({ agentId, ok: false, error: String(error) });
+    }
+  }
+  const success = results.filter((r) => r.ok).length;
+  return reply.send({
+    ok: success > 0,
+    provider: body.provider,
+    model: body.model,
+    autoInstall: body.autoInstall,
+    requested: uniqueAgentIds.length,
+    success,
+    failed: uniqueAgentIds.length - success,
+    results
+  });
 });
 
 app.get("/", async (_req, reply) => reply.type("text/html").send(marketingHomeHtml()));
@@ -2762,6 +3551,8 @@ function portalAuthedPageHtml(input: {
               ${navLink("wallet", "Wallet", "/portal/wallet")}
               ${navLink("operations", "Coordinator Ops", "/portal/coordinator-ops")}
               ${navLink("settings", "Settings", "/portal/settings")}
+              <a class="tab" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
+              <a class="tab" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="sidebar-foot muted">Auditable actions and secure operations</div>
           </aside>
@@ -2774,6 +3565,8 @@ function portalAuthedPageHtml(input: {
                 </div>
               </div>
               <div class="row">
+                <a class="btn" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
+                <a class="btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
                 <button id="switchUserBtn">Switch user</button>
                 <button id="logoutBtn">Sign out</button>
               </div>
@@ -3444,6 +4237,7 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
     <div class="card">
       <h2 style="margin-top:0;">Coordinator Operations</h2>
       <div id="opsAccountLine" class="muted">Loading operator session...</div>
+      <div id="opsFinalityLine" class="muted">Loading finality state...</div>
       <div class="kpis">
         <div class="kpi"><div class="label">Connected agents</div><div class="value" id="opsAgentsValue">-</div></div>
         <div class="kpi"><div class="label">Queue depth</div><div class="value" id="opsQueueValue">-</div></div>
@@ -3472,10 +4266,26 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
         <button id="approvedFilterActiveBtn">Active only</button>
       </div>
       <table>
-        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th></tr></thead>
+        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th><th>Model action</th></tr></thead>
         <tbody id="opsApprovedBody"></tbody>
       </table>
       <div id="opsApprovedNote" class="muted"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Device diagnostics</h3>
+      <div id="opsDiagnosticsTitle" class="muted">Click an agent node ID from Approved nodes to load diagnostics.</div>
+      <div id="opsDiagnosticsMeta" class="muted"></div>
+      <pre id="opsDiagnosticsLog" style="white-space:pre-wrap;max-height:300px;overflow:auto;margin-top:8px;border:1px solid #334155;border-radius:8px;padding:10px;background:#0f172a;color:#cbd5e1;">No diagnostics selected.</pre>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0;">Agent model orchestration</h3>
+      <div class="muted">Switch approved agents between ollama-local and edgecoder-local from this page.</div>
+      <label>Model</label><input id="opsAgentModelInput" type="text" value="qwen2.5-coder:latest" />
+      <div class="row">
+        <button class="primary" id="opsAgentsToOllamaBtn">Switch active agents to Ollama</button>
+        <button id="opsAgentsToEdgecoderBtn">Switch active agents to Edgecoder local</button>
+      </div>
+      <div id="opsAgentsModelNote" class="muted"></div>
     </div>
     <div class="card">
       <h3 style="margin-top:0;">Coordinator local model election</h3>
@@ -3483,12 +4293,22 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
         <input id="opsModelInput" type="text" value="qwen2.5-coder:latest" style="max-width:320px;" />
         <button class="primary" id="opsElectBtn">Elect Ollama on Coordinator</button>
       </div>
+      <div id="opsElectProgressWrap" class="hidden" style="margin-top:8px; max-width:400px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <span id="opsElectProgressLabel" class="muted">Pulling model on coordinator…</span>
+          <span id="opsElectProgressPct" class="muted">0%</span>
+        </div>
+        <div style="height:8px; background:var(--card-border, #334155); border-radius:4px; overflow:hidden;">
+          <div id="opsElectProgressBar" style="height:100%; width:0%; background:var(--brand, #3b82f6); border-radius:4px; transition:width 0.5s ease;"></div>
+        </div>
+      </div>
       <div id="opsElectNote" class="muted"></div>
     </div>
   `;
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
     function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
+    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
     function filterPending(nodes, mode) {
       if (mode === "all") return nodes;
       return (nodes || []).filter((n) => String(n.nodeKind) === mode);
@@ -3505,6 +4325,46 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
     let cachedPending = [];
     let cachedApproved = [];
     let canManageApprovals = false;
+    let pendingSwitch = null;
+    let agentPollInterval = null;
+    let selectedDiagnosticsAgentId = null;
+    let cachedDiagnostics = [];
+    let diagnosticsError = "";
+
+    function checkPendingSwitch() {
+      if (!pendingSwitch) return;
+      const noteEl = document.getElementById("opsAgentsModelNote");
+      const node = (cachedApproved || []).find(function(n) { return n.nodeId === pendingSwitch.agentId; });
+      const rollout = node && node.modelRollout ? node.modelRollout : null;
+      if (node && node.localModelProvider === pendingSwitch.provider) {
+        if (agentPollInterval) { clearInterval(agentPollInterval); agentPollInterval = null; }
+        const label = pendingSwitch.provider === "ollama-local" ? "Ollama" : "Edgecoder";
+        noteEl.textContent = pendingSwitch.agentId + " is now using " + label + ".";
+        showToast(pendingSwitch.agentId + " is now using " + label);
+        pendingSwitch = null;
+        renderApproved();
+        return;
+      }
+      if (rollout && rollout.status === "failed" && Number(rollout.updatedAtMs || 0) >= Number(pendingSwitch.startedAt || 0)) {
+        if (agentPollInterval) { clearInterval(agentPollInterval); agentPollInterval = null; }
+        const reason = rollout.error ? String(rollout.error) : "unknown";
+        noteEl.textContent = "Switch failed: " + reason;
+        showToast("Model switch failed: " + reason, true);
+        pendingSwitch = null;
+        renderApproved();
+        return;
+      }
+      if (Date.now() - pendingSwitch.startedAt > 5 * 60 * 1000) {
+        if (agentPollInterval) { clearInterval(agentPollInterval); agentPollInterval = null; }
+        noteEl.textContent = "No update after 5 min. Refresh the page to check.";
+        pendingSwitch = null;
+        renderApproved();
+        return;
+      }
+      const agentStatus = node && node.orchestrationStatus ? " Agent: " + node.orchestrationStatus.message + (node.orchestrationStatus.progressPct != null ? " " + node.orchestrationStatus.progressPct + "%" : "") : "";
+      const rolloutStatus = rollout ? " Rollout: " + String(rollout.status) : "";
+      noteEl.textContent = "Checking every 12s for " + pendingSwitch.agentId + "… Last checked just now." + agentStatus + rolloutStatus;
+    }
 
     function renderPending() {
       const body = document.getElementById("opsPendingBody");
@@ -3530,14 +4390,98 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
     }
 
     function renderApproved() {
+      function providerLabel(provider) {
+        if (provider === "ollama-local") return "Ollama";
+        if (provider === "edgecoder-local") return "Edgecoder";
+        return "Unknown";
+      }
+      function providerTone(provider) {
+        if (provider === "ollama-local") return "background:#1f2937;color:#93c5fd;border:1px solid #334155;";
+        if (provider === "edgecoder-local") return "background:#052e16;color:#86efac;border:1px solid #14532d;";
+        return "background:#1f2937;color:#cbd5e1;border:1px solid #334155;";
+      }
+      function rolloutTone(status) {
+        if (status === "applied") return "background:#052e16;color:#86efac;border:1px solid #14532d;";
+        if (status === "failed") return "background:#3f1d1d;color:#fca5a5;border:1px solid #7f1d1d;";
+        if (status === "in_progress" || status === "requested") return "background:#1e293b;color:#93c5fd;border:1px solid #1d4ed8;";
+        return "background:#1f2937;color:#cbd5e1;border:1px solid #334155;";
+      }
+      function rolloutLabel(status) {
+        if (status === "applied") return "Applied";
+        if (status === "failed") return "Failed";
+        if (status === "in_progress") return "In progress";
+        if (status === "requested") return "Requested";
+        return "Idle";
+      }
       const body = document.getElementById("opsApprovedBody");
-      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) =>
-        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
-        String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + (n.sourceIp || "unknown") +
-        "</td><td>" + (n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
-        fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>"
-      );
-      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='10'>No approved nodes for this filter.</td></tr>";
+      const staleRolloutMs = 3 * 60 * 1000;
+      const staleAgentSeenMs = 2 * 60 * 1000;
+      const nowMs = Date.now();
+      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
+        const isPending = pendingSwitch && pendingSwitch.agentId === n.nodeId;
+        const currentProvider = String(n.localModelProvider || "");
+        const currentLabel = providerLabel(currentProvider);
+        let actionCell = "<span class='muted'>-</span>";
+        if (canManageApprovals && n.nodeKind === "agent") {
+          const orch = n.orchestrationStatus || null;
+          const rollout = n.modelRollout || null;
+          const rolloutStatus = rollout ? String(rollout.status || "") : "";
+          const rolloutInFlight = rolloutStatus === "requested" || rolloutStatus === "in_progress";
+          const rolloutUpdatedAtMs = rollout ? Number(rollout.updatedAtMs || 0) : 0;
+          const lastSeenAtMs = Number(n.lastSeenMs || 0);
+          const staleRollout = rolloutInFlight && (
+            (rolloutUpdatedAtMs > 0 && nowMs - rolloutUpdatedAtMs > staleRolloutMs) ||
+            (lastSeenAtMs > 0 && nowMs - lastSeenAtMs > staleAgentSeenMs)
+          );
+          const switchingLabel = isPending ? ("Switching to " + (pendingSwitch.provider === "ollama-local" ? "Ollama" : "Edgecoder")) : null;
+          const statusLabel = switchingLabel || (staleRollout ? "Stalled" : rolloutLabel(rolloutStatus));
+          const statusTone = switchingLabel
+            ? rolloutTone("in_progress")
+            : (staleRollout ? rolloutTone("failed") : rolloutTone(rolloutStatus));
+          const statusMessage = orch && orch.message ? String(orch.message) : (rollout && rollout.error ? String(rollout.error) : "");
+          const staleHint = staleRollout
+            ? "<div class='muted' style='font-size:0.85em;margin-top:4px;max-width:280px;white-space:normal'>Rollout looks stale; retry is enabled.</div>"
+            : "";
+          const statusMessageLine = statusMessage
+            ? "<div class='muted' style='font-size:0.9em;margin-top:4px;max-width:280px;white-space:normal'>" + escapeHtml(statusMessage) + "</div>"
+            : "";
+          const progressPct = orch && typeof orch.progressPct === "number" ? Math.max(0, Math.min(100, Math.round(orch.progressPct))) : null;
+          const progressBar = progressPct != null
+            ? "<div class='progress-bar' style='max-width:180px;height:6px;background:#1f2937;border-radius:4px;margin-top:6px;overflow:hidden'><div style='width:" + progressPct + "%;height:100%;background:#3b82f6;border-radius:4px'></div></div><div class='muted' style='font-size:0.85em;margin-top:2px'>" + progressPct + "%</div>"
+            : "";
+          const blockForInFlight = (isPending || rolloutInFlight) && !staleRollout;
+          const disableOllama = blockForInFlight || currentProvider === "ollama-local";
+          const disableEdgecoder = blockForInFlight || currentProvider === "edgecoder-local";
+          const ollamaBtnLabel = currentProvider === "ollama-local" ? "Active" : (blockForInFlight ? "Pending…" : "Use Ollama");
+          const edgecoderBtnLabel = currentProvider === "edgecoder-local" ? "Active" : (blockForInFlight ? "Pending…" : "Use Edgecoder");
+          const rolloutUpdated = rollout && rollout.updatedAtMs ? fmtTime(rollout.updatedAtMs) : "n/a";
+          actionCell =
+            "<div style='display:flex;flex-direction:column;gap:6px;min-width:260px'>" +
+              "<div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>" +
+                "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;" + providerTone(currentProvider) + "'>Current: " + escapeHtml(currentLabel) + "</span>" +
+                "<span style='padding:2px 8px;border-radius:999px;font-size:0.8em;" + statusTone + "'>Status: " + escapeHtml(statusLabel) + "</span>" +
+              "</div>" +
+              "<div class='muted' style='font-size:0.85em'>Rollout update: " + escapeHtml(rolloutUpdated) + "</div>" +
+              statusMessageLine +
+              staleHint +
+              progressBar +
+              "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-top:2px'>" +
+                "<button class='agentModelBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-provider='ollama-local'" + (disableOllama ? " disabled" : "") + ">" + escapeHtml(ollamaBtnLabel) + "</button>" +
+                "<button class='agentModelBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-provider='edgecoder-local'" + (disableEdgecoder ? " disabled" : "") + ">" + escapeHtml(edgecoderBtnLabel) + "</button>" +
+              "</div>" +
+            "</div>";
+        } else if (n.nodeKind === "agent") {
+          actionCell = "<span class='muted'>Current: " + escapeHtml(currentLabel) + " (read-only)</span>";
+        }
+        const nodeCell = n.nodeKind === "agent"
+          ? "<button class='diagNodeBtn' data-agent-id='" + encodeAttr(n.nodeId) + "' style='padding:0;border:none;background:transparent;color:#60a5fa;text-decoration:underline;cursor:pointer'>" + escapeHtml(n.nodeId) + "</button>"
+          : escapeHtml(n.nodeId);
+        return "<tr><td>" + nodeCell + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
+          String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + (n.sourceIp || "unknown") +
+          "</td><td>" + (n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
+          fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td><td>" + actionCell + "</td></tr>";
+      });
+      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='11'>No approved nodes for this filter.</td></tr>";
       const counts = {
         all: cachedApproved.length,
         coordinator: cachedApproved.filter((n) => n.nodeKind === "coordinator").length,
@@ -3553,6 +4497,49 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
       document.getElementById("approvedFilterActiveBtn").className = approvedActiveOnly ? "primary" : "";
     }
 
+    function renderDiagnostics() {
+      const titleEl = document.getElementById("opsDiagnosticsTitle");
+      const metaEl = document.getElementById("opsDiagnosticsMeta");
+      const logEl = document.getElementById("opsDiagnosticsLog");
+      if (!selectedDiagnosticsAgentId) {
+        titleEl.textContent = "Click an agent node ID from Approved nodes to load diagnostics.";
+        metaEl.textContent = "";
+        logEl.textContent = "No diagnostics selected.";
+        return;
+      }
+      titleEl.textContent = "Diagnostics for " + selectedDiagnosticsAgentId;
+      if (diagnosticsError) {
+        metaEl.textContent = diagnosticsError;
+        logEl.textContent = "No diagnostics loaded.";
+        return;
+      }
+      metaEl.textContent = "Events: " + cachedDiagnostics.length;
+      if (!cachedDiagnostics.length) {
+        logEl.textContent = "No diagnostics uploaded yet for this agent.";
+        return;
+      }
+      logEl.textContent = cachedDiagnostics
+        .map((item) => fmtTime(item.eventAtMs) + " | " + String(item.message || ""))
+        .join("\\n");
+    }
+
+    async function loadDiagnostics(agentId) {
+      selectedDiagnosticsAgentId = agentId;
+      cachedDiagnostics = [];
+      diagnosticsError = "";
+      renderDiagnostics();
+      try {
+        const payload = await api("/coordinator/ops/agent-diagnostics?agentId=" + encodeURIComponent(agentId), { method: "GET" });
+        cachedDiagnostics = payload.events || [];
+        diagnosticsError = "";
+        renderDiagnostics();
+      } catch (err) {
+        cachedDiagnostics = [];
+        diagnosticsError = "Could not load diagnostics: " + String(err.message || err);
+        renderDiagnostics();
+      }
+    }
+
     async function refreshOps() {
       const me = await requireAuth();
       const user = me.user || {};
@@ -3564,8 +4551,25 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
       cachedApproved = data.approvedNodes || [];
       canManageApprovals = Boolean(data.access && data.access.canManageApprovals);
       const scopeText = data.access && data.access.isSystemAdmin ? "global scope" : "owner scope";
+      const federationState = data.federation && data.federation.stale ? "stale federation" : "federation healthy";
+      const finalityRaw = String((data.federation && data.federation.finalityState) || "unknown");
+      const finalityLabel =
+        finalityRaw === "anchored_confirmed"
+          ? "hard finalized (Bitcoin anchor confirmed)"
+          : finalityRaw === "anchored_pending"
+            ? "soft finalized (anchor pending)"
+            : finalityRaw === "soft_finalized"
+              ? "soft finalized (quorum commit)"
+              : finalityRaw === "no_checkpoint"
+                ? "no checkpoint yet"
+                : finalityRaw === "stale_federation"
+                  ? "stale federation (checkpoint disagreement)"
+                  : "finality unknown";
+      const anchorTxRef = data.federation && data.federation.anchorTxRef ? String(data.federation.anchorTxRef) : "n/a";
       document.getElementById("opsAccountLine").textContent =
-        (user.email || "unknown") + " | coordinator operations access | " + scopeText;
+        (user.email || "unknown") + " | coordinator operations access | " + scopeText + " | " + federationState;
+      document.getElementById("opsFinalityLine").textContent =
+        "Stats ledger finality: " + finalityLabel + " | anchor tx: " + anchorTxRef;
       renderPending();
       renderApproved();
     }
@@ -3599,24 +4603,196 @@ app.get("/portal/coordinator-ops", async (_req, reply) => {
       }
     });
 
+    document.getElementById("opsApprovedBody").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("diagNodeBtn")) return;
+      const nodeIdRaw = target.getAttribute("data-agent-id");
+      if (!nodeIdRaw) return;
+      const agentId = decodeURIComponent(nodeIdRaw);
+      await loadDiagnostics(agentId);
+    });
+
+    document.getElementById("opsApprovedBody").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("agentModelBtn")) return;
+      const nodeIdRaw = target.getAttribute("data-node-id");
+      const providerRaw = target.getAttribute("data-provider");
+      if (!nodeIdRaw || !providerRaw) return;
+      const agentId = decodeURIComponent(nodeIdRaw);
+      const provider = decodeURIComponent(providerRaw);
+      const model = document.getElementById("opsAgentModelInput").value || "qwen2.5-coder:latest";
+      const note = document.getElementById("opsAgentsModelNote");
+      const cell = target.closest("td");
+      const btnsInCell = cell ? cell.querySelectorAll(".agentModelBtn") : [];
+      const originalText = new Map();
+      btnsInCell.forEach((btn) => {
+        originalText.set(btn, btn.textContent);
+        btn.disabled = true;
+      });
+      target.textContent = "Sending…";
+      note.textContent = "Sending switch to " + agentId + "...";
+      note.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try {
+        const payload = await api("/coordinator/ops/agents-model", {
+          method: "POST",
+          body: JSON.stringify({ agentIds: [agentId], provider, model, autoInstall: provider === "ollama-local" })
+        });
+        const ok = (payload && (payload.success >= 1 || payload.ok === true));
+        if (ok) {
+          if (agentPollInterval) { clearInterval(agentPollInterval); agentPollInterval = null; }
+          pendingSwitch = { agentId: agentId, provider: provider, startedAt: Date.now() };
+          note.textContent = "Switch sent. Checking every 12s for " + agentId + "…";
+          renderApproved();
+          agentPollInterval = setInterval(function() {
+            refreshOps().then(function() { checkPendingSwitch(); });
+          }, 12000);
+          setTimeout(function() { refreshOps().then(function() { checkPendingSwitch(); }); }, 2000);
+          showToast("Model switch sent. Checking for " + agentId + "…");
+        } else {
+          note.textContent = "Switch failed: " + String((payload.results && payload.results[0] && payload.results[0].error) || "unknown");
+          showToast("Switch failed", true);
+        }
+      } catch (err) {
+        note.textContent = "Agent switch failed: " + String(err.message || err);
+        showToast("Switch failed: " + String(err.message || err), true);
+      } finally {
+        btnsInCell.forEach((btn) => {
+          btn.disabled = false;
+          btn.textContent = originalText.get(btn) || btn.textContent;
+        });
+      }
+    });
+
     document.getElementById("opsElectBtn").addEventListener("click", async () => {
       const model = document.getElementById("opsModelInput").value || "qwen2.5-coder:latest";
       const note = document.getElementById("opsElectNote");
-      note.textContent = "Submitting coordinator election...";
+      const btn = document.getElementById("opsElectBtn");
+      const progressWrap = document.getElementById("opsElectProgressWrap");
+      const progressBar = document.getElementById("opsElectProgressBar");
+      const progressPct = document.getElementById("opsElectProgressPct");
+      const progressLabel = document.getElementById("opsElectProgressLabel");
+      const origLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Pulling…";
+      note.textContent = "Coordinator is pulling the model (this may take 2–5 min). Progress below is estimated.";
+      progressWrap.classList.remove("hidden");
+      progressBar.style.width = "0%";
+      progressPct.textContent = "0%";
+      progressLabel.textContent = "Pulling model on coordinator…";
+      const startMs = Date.now();
+      const targetPct = 92;
+      const durationMs = 4 * 60 * 1000;
+      let progressInterval = setInterval(function() {
+        const elapsed = Date.now() - startMs;
+        const pct = Math.min(targetPct, 100 * (1 - Math.exp(-elapsed / (durationMs * 0.4))));
+        progressBar.style.width = pct.toFixed(1) + "%";
+        progressPct.textContent = Math.round(pct) + "%";
+      }, 1500);
       try {
         const payload = await api("/coordinator/ops/coordinator-ollama", {
           method: "POST",
           body: JSON.stringify({ provider: "ollama-local", model, autoInstall: true })
         });
-        note.textContent = "Election submitted: " + String(payload.rolloutId || "ok");
+        clearInterval(progressInterval);
+        progressBar.style.width = "100%";
+        progressPct.textContent = "100%";
+        progressLabel.textContent = "Done";
+        note.textContent = "Coordinator election complete: " + String(payload.rolloutId || "ok") + ". Model " + model + " is now active on the coordinator.";
+        showToast("Coordinator Ollama election complete");
       } catch (err) {
+        clearInterval(progressInterval);
+        progressBar.style.width = progressBar.style.width || "0%";
+        progressLabel.textContent = "Failed";
         note.textContent = "Election failed: " + String(err.message || err);
+        showToast("Coordinator election failed", true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+        setTimeout(function() {
+          progressWrap.classList.add("hidden");
+        }, 3000);
       }
     });
 
-    refreshOps().catch((err) => {
-      showToast("Could not load coordinator operations: " + String(err.message || err), true);
+    document.getElementById("opsAgentsToOllamaBtn").addEventListener("click", async () => {
+      const model = document.getElementById("opsAgentModelInput").value || "qwen2.5-coder:latest";
+      const note = document.getElementById("opsAgentsModelNote");
+      const btn = document.getElementById("opsAgentsToOllamaBtn");
+      const targetIds = (cachedApproved || [])
+        .filter((n) => n.nodeKind === "agent" && n.active === true)
+        .map((n) => String(n.nodeId));
+      if (targetIds.length === 0) {
+        note.textContent = "No active approved agents found.";
+        return;
+      }
+      const origLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+      note.textContent = "Submitting Ollama switch for " + targetIds.length + " agents...";
+      note.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try {
+        const payload = await api("/coordinator/ops/agents-model", {
+          method: "POST",
+          body: JSON.stringify({ agentIds: targetIds, provider: "ollama-local", model, autoInstall: true })
+        });
+        note.textContent = "Bulk switch sent: " + (payload.success || 0) + " ok, " + (payload.failed || 0) + " failed. Agents will pull the model on their machines (may take 1–5 min). Refresh to see status.";
+        showToast("Bulk Ollama switch sent to " + (payload.success || 0) + " agents");
+      } catch (err) {
+        note.textContent = "Bulk switch failed: " + String(err.message || err);
+        showToast("Bulk switch failed", true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+      }
     });
+
+    document.getElementById("opsAgentsToEdgecoderBtn").addEventListener("click", async () => {
+      const model = document.getElementById("opsAgentModelInput").value || "qwen2.5-coder:latest";
+      const note = document.getElementById("opsAgentsModelNote");
+      const btn = document.getElementById("opsAgentsToEdgecoderBtn");
+      const targetIds = (cachedApproved || [])
+        .filter((n) => n.nodeKind === "agent" && n.active === true)
+        .map((n) => String(n.nodeId));
+      if (targetIds.length === 0) {
+        note.textContent = "No active approved agents found.";
+        return;
+      }
+      const origLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+      note.textContent = "Submitting Edgecoder local switch for " + targetIds.length + " agents...";
+      note.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try {
+        const payload = await api("/coordinator/ops/agents-model", {
+          method: "POST",
+          body: JSON.stringify({ agentIds: targetIds, provider: "edgecoder-local", model, autoInstall: false })
+        });
+        note.textContent = "Bulk switch sent: " + (payload.success || 0) + " ok, " + (payload.failed || 0) + " failed. Refresh to see status.";
+        showToast("Bulk Edgecoder switch sent to " + (payload.success || 0) + " agents");
+      } catch (err) {
+        note.textContent = "Bulk switch failed: " + String(err.message || err);
+        showToast("Bulk switch failed", true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+      }
+    });
+
+    async function refreshOpsSafe() {
+      try {
+        await refreshOps();
+      } catch (err) {
+        const message = "Could not load coordinator operations: " + String(err.message || err);
+        document.getElementById("opsAccountLine").textContent = message + " (auto-retrying)";
+        document.getElementById("opsFinalityLine").textContent = "Stats ledger finality: unavailable";
+        document.getElementById("opsAgentsValue").textContent = "-";
+        document.getElementById("opsQueueValue").textContent = "-";
+        document.getElementById("opsResultsValue").textContent = "-";
+        showToast(message, true);
+      }
+    }
+    refreshOpsSafe();
+    setInterval(refreshOpsSafe, 15000);
   `;
   return reply.type("text/html").send(
     portalAuthedPageHtml({
@@ -4057,10 +5233,15 @@ app.post("/internal/nodes/validate", async (req, reply) => {
       nodeId: z.string().min(3),
       nodeKind: z.enum(["agent", "coordinator"]),
       registrationToken: z.string().min(10),
+      deviceId: z.string().min(3).max(128).optional(),
       sourceIp: z.string().optional()
     })
     .parse(req.body);
-  const node = await store.getNodeEnrollment(body.nodeId);
+  const requestDeviceId = body.deviceId?.trim().toLowerCase() || deriveIosDeviceIdFromNodeId(body.nodeId);
+  let node = await store.getNodeEnrollment(body.nodeId);
+  if (!node && requestDeviceId) {
+    node = await store.getNodeEnrollmentByDeviceId(requestDeviceId);
+  }
   if (!node) {
     return reply.code(404).send({ allowed: false, reason: "node_not_enrolled" });
   }
@@ -4072,12 +5253,12 @@ app.post("/internal/nodes/validate", async (req, reply) => {
   }
   const intelligence = await resolveIpIntelligence(body.sourceIp);
   await store.touchNodeValidation({
-    nodeId: body.nodeId,
+    nodeId: node.nodeId,
     sourceIp: body.sourceIp,
     countryCode: intelligence.countryCode,
     vpnDetected: intelligence.vpnDetected
   });
-  const refreshed = await store.getNodeEnrollment(body.nodeId);
+  const refreshed = await store.getNodeEnrollment(node.nodeId);
   if (!refreshed) return reply.code(404).send({ allowed: false, reason: "node_missing_after_touch" });
 
   const reason = !refreshed.emailVerified
@@ -4093,6 +5274,7 @@ app.post("/internal/nodes/validate", async (req, reply) => {
     reason,
     node: {
       nodeId: refreshed.nodeId,
+      deviceId: refreshed.deviceId,
       nodeKind: refreshed.nodeKind,
       ownerEmail: refreshed.ownerEmail,
       emailVerified: refreshed.emailVerified,

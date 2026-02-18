@@ -2,15 +2,50 @@
 
 set -euo pipefail
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "EdgeCoder installer requires Node.js 20+ to be installed first."
-  echo "Install Node.js and run this installer again."
+resolve_node_bin() {
+  local candidate
+
+  if candidate="$(command -v node 2>/dev/null)"; then
+    printf "%s\n" "$candidate"
+    return 0
+  fi
+
+  # Common Homebrew and manual install paths.
+  for candidate in \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node" \
+    "/opt/local/bin/node"; do
+    if [[ -x "$candidate" ]]; then
+      printf "%s\n" "$candidate"
+      return 0
+    fi
+  done
+
+  # Try nvm installs from the invoking user.
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    local nvm_root="/Users/${SUDO_USER}/.nvm/versions/node"
+    if [[ -d "$nvm_root" ]]; then
+      candidate="$(ls -1d "$nvm_root"/v*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)"
+      if [[ -n "$candidate" && -x "$candidate" ]]; then
+        printf "%s\n" "$candidate"
+        return 0
+      fi
+    fi
+  fi
+
+  return 1
+}
+
+NODE_BIN="$(resolve_node_bin || true)"
+if [[ -z "${NODE_BIN}" ]]; then
+  echo "EdgeCoder installer requires Node.js 20+."
+  echo "Install Node.js in a system-visible path (or Homebrew) and retry."
   exit 1
 fi
 
-NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+NODE_MAJOR="$("$NODE_BIN" -p "process.versions.node.split('.')[0]")"
 if [[ "$NODE_MAJOR" -lt 20 ]]; then
-  echo "Detected Node.js $(node -v). EdgeCoder requires Node.js 20+."
+  echo "Detected Node.js $("$NODE_BIN" -v). EdgeCoder requires Node.js 20+."
   exit 1
 fi
 
