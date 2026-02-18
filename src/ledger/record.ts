@@ -12,6 +12,10 @@ export function hashRecordPayload(payload: {
   sequence: number;
   issuedAtMs: number;
   prevHash: string;
+  coordinatorId?: string;
+  checkpointHeight?: number;
+  checkpointHash?: string;
+  payloadJson?: string;
 }): string {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -25,6 +29,10 @@ export function createQueueEventRecord(input: {
   sequence: number;
   issuedAtMs: number;
   prevHash: string;
+  coordinatorId?: string;
+  checkpointHeight?: number;
+  checkpointHash?: string;
+  payloadJson?: string;
   signerPrivateKeyPem: string;
 }): QueueEventRecord {
   const hash = hashRecordPayload({
@@ -34,7 +42,11 @@ export function createQueueEventRecord(input: {
     actorId: input.actorId,
     sequence: input.sequence,
     issuedAtMs: input.issuedAtMs,
-    prevHash: input.prevHash
+    prevHash: input.prevHash,
+    coordinatorId: input.coordinatorId,
+    checkpointHeight: input.checkpointHeight,
+    checkpointHash: input.checkpointHash,
+    payloadJson: input.payloadJson
   });
 
   const signature = signPayload(hash, input.signerPrivateKeyPem);
@@ -47,6 +59,10 @@ export function createQueueEventRecord(input: {
     sequence: input.sequence,
     issuedAtMs: input.issuedAtMs,
     prevHash: input.prevHash,
+    coordinatorId: input.coordinatorId,
+    checkpointHeight: input.checkpointHeight,
+    checkpointHash: input.checkpointHash,
+    payloadJson: input.payloadJson,
     hash,
     signature
   };

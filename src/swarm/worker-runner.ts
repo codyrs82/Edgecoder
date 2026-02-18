@@ -27,11 +27,19 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
 let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
+const COORDINATOR_HTTP_TIMEOUT_MS = Number(process.env.COORDINATOR_HTTP_TIMEOUT_MS ?? "15000");
+const COORDINATOR_POST_RETRIES = Number(process.env.COORDINATOR_POST_RETRIES ?? "2");
 const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
 const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
+const AGENT_DEVICE_ID = (() => {
+  const explicit = (process.env.AGENT_DEVICE_ID ?? process.env.IOS_DEVICE_ID ?? "").trim();
+  if (explicit) return explicit;
+  if (OS === "ios") return AGENT_ID.replace(/^ios-|^iphone-/i, "").trim();
+  return "";
+})();
 const keys = createPeerKeys(AGENT_ID);
 const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
@@ -127,7 +135,7 @@ async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
   try {
     const res = await request(COORDINATOR_DISCOVERY_URL, { method: "GET" });
     if (res.statusCode < 200 || res.statusCode >= 300) return null;
-    const payload = (await res.body.json()) as {
+    const payload = (await parseJsonBodySafe(res)) as {
       coordinators?: Array<{ coordinatorUrl?: string }>;
     };
     const candidate = normalizeUrl(payload.coordinators?.[0]?.coordinatorUrl);
@@ -145,13 +153,54 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry
   return { url: COORDINATOR_BOOTSTRAP_URL, source: "bootstrap" };
 }
 
-async function post(path: string, body: unknown): Promise<any> {
-  const res = await request(`${activeCoordinatorUrl}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...meshHeaders() },
-    body: JSON.stringify(body)
-  });
-  return res.body.json();
+async function post(
+  path: string,
+  body: unknown,
+  options?: { retries?: number; timeoutMs?: number }
+): Promise<any> {
+  const retries = Math.max(0, options?.retries ?? COORDINATOR_POST_RETRIES);
+  const timeoutMs = Math.max(1000, options?.timeoutMs ?? COORDINATOR_HTTP_TIMEOUT_MS);
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const res = await request(`${activeCoordinatorUrl}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...meshHeaders() },
+        headersTimeout: timeoutMs,
+        bodyTimeout: timeoutMs,
+        body: JSON.stringify(body)
+      });
+      const parsed = (await parseJsonBodySafe(res)) as unknown;
+      const rawText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        const payloadText = rawText && rawText !== "{}" ? rawText : "<empty>";
+        throw new Error(`POST ${path} failed (${res.statusCode}): ${payloadText}`);
+      }
+      return parsed;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) break;
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "unknown_post_error"));
+}
+
+async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: { text: () => Promise<string> } }): Promise<unknown> {
+  const contentType = String(res.headers["content-type"] ?? "");
+  const raw = await res.body.text();
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  const looksJson =
+    contentType.toLowerCase().includes("application/json") ||
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[");
+  if (!looksJson) return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return {};
+  }
 }
 
 async function loop(): Promise<void> {
@@ -179,6 +228,7 @@ async function loop(): Promise<void> {
       const powerTelemetry = readAgentPowerTelemetry();
       const registerResponse = (await post("/register", {
         agentId: AGENT_ID,
+        ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
         os: OS,
         version: "0.1.0",
         mode: effectiveMode,
@@ -241,8 +291,8 @@ async function loop(): Promise<void> {
         headers: meshHeaders()
       });
       if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
-        const peersJson = (await idlePeersResponse.body.json()) as { peers: string[] };
-        for (const peerId of peersJson.peers.slice(0, 2)) {
+        const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
+        for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
           if (blacklistSet.has(peerId)) continue;
           if (peerId === AGENT_ID) continue;
           if (peerTunnels.has(peerId)) continue;
@@ -252,7 +302,7 @@ async function loop(): Promise<void> {
             body: JSON.stringify({ fromAgentId: AGENT_ID, toAgentId: peerId })
           });
           if (connect.statusCode >= 200 && connect.statusCode < 300) {
-            const body = (await connect.body.json()) as { token: string };
+            const body = (await parseJsonBodySafe(connect)) as { token?: string };
             if (body.token) peerTunnels.set(peerId, body.token);
           }
         }
@@ -276,22 +326,48 @@ async function loop(): Promise<void> {
       }
 
       if (hb.orchestration?.pending) {
+        const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
+          try {
+            await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct });
+          } catch {
+            // best-effort; coordinator may be unreachable
+          }
+        };
         try {
-          await ensureOllamaModelInstalled({
-            enabled: hb.orchestration.provider === "ollama-local",
-            autoInstall: hb.orchestration.autoInstall,
-            model: hb.orchestration.model ?? OLLAMA_MODEL,
-            role: "agent",
-            host: OLLAMA_HOST
-          });
+          await reportStatus("starting", "Preparing to switch model…");
+          await ensureOllamaModelInstalled(
+            {
+              enabled: hb.orchestration.provider === "ollama-local",
+              autoInstall: hb.orchestration.autoInstall,
+              model: hb.orchestration.model ?? OLLAMA_MODEL,
+              role: "agent",
+              host: OLLAMA_HOST
+            },
+            reportStatus
+          );
           currentProvider = hb.orchestration.provider;
           providers.use(currentProvider);
-          await post(`/orchestration/agents/${AGENT_ID}/ack`, { ok: true });
+          await reportStatus("done", "Model switch complete.");
+          try {
+            await post(
+              `/orchestration/agents/${AGENT_ID}/ack`,
+              { ok: true },
+              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+            );
+          } catch (ackError) {
+            console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
+            await reportStatus("warning", "Model switch done locally; waiting for coordinator ack retry.").catch(() => {});
+          }
         } catch (error) {
-          await post(`/orchestration/agents/${AGENT_ID}/ack`, {
-            ok: false,
-            error: String(error)
-          });
+          await reportStatus("error", String(error)).catch(() => {});
+          await post(
+            `/orchestration/agents/${AGENT_ID}/ack`,
+            {
+              ok: false,
+              error: String(error)
+            },
+            { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+          ).catch(() => {});
         }
       }
 
@@ -401,9 +477,9 @@ async function loop(): Promise<void> {
           headers: meshHeaders()
         });
         if (peersResponse.statusCode >= 200 && peersResponse.statusCode < 300) {
-          const peersJson = (await peersResponse.body.json()) as { peers: string[] };
+          const peersJson = (await parseJsonBodySafe(peersResponse)) as { peers?: string[] };
           const now = Date.now();
-          for (const peerId of peersJson.peers.slice(0, 2)) {
+          for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
             if (blacklistSet.has(peerId)) continue;
             if (peerId === AGENT_ID) continue;
             const lastOffer = lastOfferAtByPeer.get(peerId) ?? 0;

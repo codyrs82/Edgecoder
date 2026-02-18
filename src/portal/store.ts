@@ -4,6 +4,7 @@ export type PortalUser = {
   userId: string;
   email: string;
   emailVerified: boolean;
+  uiTheme: "midnight" | "emerald" | "light";
   passwordHash?: string;
   displayName?: string;
   createdAtMs: number;
@@ -12,6 +13,7 @@ export type PortalUser = {
 
 export type NodeEnrollment = {
   nodeId: string;
+  deviceId?: string;
   nodeKind: "agent" | "coordinator";
   ownerUserId: string;
   ownerEmail: string;
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS portal_users (
   user_id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  ui_theme TEXT NOT NULL DEFAULT 'midnight',
   password_hash TEXT,
   display_name TEXT,
   created_at_ms BIGINT NOT NULL,
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS portal_oauth_states (
 
 CREATE TABLE IF NOT EXISTS portal_node_enrollments (
   node_id TEXT PRIMARY KEY,
+  device_id TEXT,
   node_kind TEXT NOT NULL,
   owner_user_id TEXT NOT NULL,
   owner_email TEXT NOT NULL,
@@ -97,6 +101,32 @@ CREATE TABLE IF NOT EXISTS portal_wallet_onboarding (
   encrypted_private_key_ref TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL,
   acknowledged_at_ms BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS portal_wallet_send_mfa_challenges (
+  challenge_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  amount_sats BIGINT NOT NULL,
+  note TEXT,
+  email_code_hash TEXT NOT NULL,
+  passkey_challenge TEXT NOT NULL,
+  expires_at_ms BIGINT NOT NULL,
+  consumed_at_ms BIGINT,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS portal_wallet_send_requests (
+  request_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  amount_sats BIGINT NOT NULL,
+  note TEXT,
+  status TEXT NOT NULL,
+  mfa_challenge_id TEXT NOT NULL,
+  created_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS portal_passkey_credentials (
@@ -134,6 +164,14 @@ export class PortalStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'midnight'`);
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
+    await this.pool.query(
+      `UPDATE portal_node_enrollments
+       SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
+       WHERE device_id IS NULL
+         AND node_id ~* '^(ios-|iphone-)'`
+    );
   }
 
   async close(): Promise<void> {
@@ -142,7 +180,7 @@ export class PortalStore {
 
   async getUserByEmail(email: string): Promise<PortalUser | null> {
     const result = await this.pool.query(
-      `SELECT user_id, email, email_verified, password_hash, display_name, created_at_ms, verified_at_ms
+      `SELECT user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
        FROM portal_users WHERE lower(email) = lower($1)`,
       [email]
     );
@@ -152,6 +190,7 @@ export class PortalStore {
       userId: row.user_id,
       email: row.email,
       emailVerified: Boolean(row.email_verified),
+      uiTheme: (row.ui_theme ?? "midnight") as "midnight" | "emerald" | "light",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -161,7 +200,7 @@ export class PortalStore {
 
   async getUserById(userId: string): Promise<PortalUser | null> {
     const result = await this.pool.query(
-      `SELECT user_id, email, email_verified, password_hash, display_name, created_at_ms, verified_at_ms
+      `SELECT user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
        FROM portal_users WHERE user_id = $1`,
       [userId]
     );
@@ -171,6 +210,7 @@ export class PortalStore {
       userId: row.user_id,
       email: row.email,
       emailVerified: Boolean(row.email_verified),
+      uiTheme: (row.ui_theme ?? "midnight") as "midnight" | "emerald" | "light",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -181,6 +221,7 @@ export class PortalStore {
   async createUser(input: {
     userId: string;
     email: string;
+    uiTheme?: "midnight" | "emerald" | "light";
     passwordHash?: string;
     displayName?: string;
     emailVerified: boolean;
@@ -188,12 +229,13 @@ export class PortalStore {
     const now = Date.now();
     await this.pool.query(
       `INSERT INTO portal_users (
-        user_id, email, email_verified, password_hash, display_name, created_at_ms, verified_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         input.userId,
         input.email,
         input.emailVerified,
+        input.uiTheme ?? "midnight",
         input.passwordHash ?? null,
         input.displayName ?? null,
         now,
@@ -204,11 +246,16 @@ export class PortalStore {
       userId: input.userId,
       email: input.email,
       emailVerified: input.emailVerified,
+      uiTheme: input.uiTheme ?? "midnight",
       passwordHash: input.passwordHash,
       displayName: input.displayName,
       createdAtMs: now,
       verifiedAtMs: input.emailVerified ? now : undefined
     };
+  }
+
+  async setUserTheme(userId: string, theme: "midnight" | "emerald" | "light"): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET ui_theme = $2 WHERE user_id = $1`, [userId, theme]);
   }
 
   async markUserEmailVerified(userId: string): Promise<void> {
@@ -345,6 +392,7 @@ export class PortalStore {
 
   async upsertNodeEnrollment(input: {
     nodeId: string;
+    deviceId?: string;
     nodeKind: "agent" | "coordinator";
     ownerUserId: string;
     ownerEmail: string;
@@ -352,12 +400,21 @@ export class PortalStore {
     emailVerified: boolean;
   }): Promise<NodeEnrollment> {
     const now = Date.now();
+    const normalizedDeviceId = input.deviceId?.trim().toLowerCase() || undefined;
+    let targetNodeId = input.nodeId;
+    if (normalizedDeviceId) {
+      const existingByDevice = await this.getNodeEnrollmentByDeviceId(normalizedDeviceId);
+      if (existingByDevice) {
+        targetNodeId = existingByDevice.nodeId;
+      }
+    }
     const result = await this.pool.query(
       `INSERT INTO portal_node_enrollments (
-        node_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, created_at_ms, updated_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,FALSE,FALSE,$7,$7)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,FALSE,FALSE,$8,$8)
       ON CONFLICT (node_id) DO UPDATE SET
+        device_id = COALESCE(EXCLUDED.device_id, portal_node_enrollments.device_id),
         node_kind = EXCLUDED.node_kind,
         owner_user_id = EXCLUDED.owner_user_id,
         owner_email = EXCLUDED.owner_email,
@@ -369,11 +426,12 @@ export class PortalStore {
         END,
         updated_at_ms = EXCLUDED.updated_at_ms
       RETURNING
-        node_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
         last_vpn_detected, created_at_ms, updated_at_ms`,
       [
-        input.nodeId,
+        targetNodeId,
+        normalizedDeviceId ?? null,
         input.nodeKind,
         input.ownerUserId,
         input.ownerEmail,
@@ -385,6 +443,7 @@ export class PortalStore {
     const row = result.rows[0];
     return {
       nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
       nodeKind: row.node_kind,
       ownerUserId: row.owner_user_id,
       ownerEmail: row.owner_email,
@@ -404,7 +463,7 @@ export class PortalStore {
   async getNodeEnrollment(nodeId: string): Promise<NodeEnrollment | null> {
     const result = await this.pool.query(
       `SELECT
-        node_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
         last_vpn_detected, created_at_ms, updated_at_ms
        FROM portal_node_enrollments
@@ -415,6 +474,7 @@ export class PortalStore {
     if (!row) return null;
     return {
       nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
       nodeKind: row.node_kind,
       ownerUserId: row.owner_user_id,
       ownerEmail: row.owner_email,
@@ -434,7 +494,7 @@ export class PortalStore {
   async listNodesByOwner(userId: string): Promise<NodeEnrollment[]> {
     const result = await this.pool.query(
       `SELECT
-        node_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
         last_vpn_detected, created_at_ms, updated_at_ms
        FROM portal_node_enrollments
@@ -444,6 +504,7 @@ export class PortalStore {
     );
     return result.rows.map((row) => ({
       nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
       nodeKind: row.node_kind,
       ownerUserId: row.owner_user_id,
       ownerEmail: row.owner_email,
@@ -460,6 +521,108 @@ export class PortalStore {
     }));
   }
 
+  async listPendingNodes(options?: {
+    nodeKind?: "agent" | "coordinator";
+    ownerUserId?: string;
+    limit?: number;
+  }): Promise<NodeEnrollment[]> {
+    const limit = Math.max(1, Math.min(500, options?.limit ?? 200));
+    const args: Array<string | number> = [limit];
+    let where = "WHERE node_approved = FALSE";
+    if (options?.nodeKind) {
+      args.push(options.nodeKind);
+      where += ` AND node_kind = $${args.length}`;
+    }
+    if (options?.ownerUserId) {
+      args.push(options.ownerUserId);
+      where += ` AND owner_user_id = $${args.length}`;
+    }
+    const result = await this.pool.query(
+      `SELECT
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
+        last_vpn_detected, created_at_ms, updated_at_ms
+       FROM portal_node_enrollments
+       ${where}
+       ORDER BY updated_at_ms DESC
+       LIMIT $1`,
+      args
+    );
+    return result.rows.map((row) => ({
+      nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
+      nodeKind: row.node_kind,
+      ownerUserId: row.owner_user_id,
+      ownerEmail: row.owner_email,
+      registrationTokenHash: row.registration_token_hash,
+      emailVerified: Boolean(row.email_verified),
+      nodeApproved: Boolean(row.node_approved),
+      active: Boolean(row.active),
+      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
+      lastIp: row.last_ip ?? undefined,
+      lastCountryCode: row.last_country_code ?? undefined,
+      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    }));
+  }
+
+  async listApprovedNodes(options?: {
+    nodeKind?: "agent" | "coordinator";
+    ownerUserId?: string;
+    activeOnly?: boolean;
+    limit?: number;
+  }): Promise<NodeEnrollment[]> {
+    const limit = Math.max(1, Math.min(1000, options?.limit ?? 500));
+    const args: Array<string | number | boolean> = [limit];
+    const whereParts = ["node_approved = TRUE"];
+    if (options?.nodeKind) {
+      args.push(options.nodeKind);
+      whereParts.push(`node_kind = $${args.length}`);
+    }
+    if (options?.ownerUserId) {
+      args.push(options.ownerUserId);
+      whereParts.push(`owner_user_id = $${args.length}`);
+    }
+    if (options?.activeOnly === true) {
+      whereParts.push("active = TRUE");
+    }
+    const where = `WHERE ${whereParts.join(" AND ")}`;
+    const result = await this.pool.query(
+      `SELECT
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
+        last_vpn_detected, created_at_ms, updated_at_ms
+       FROM portal_node_enrollments
+       ${where}
+       ORDER BY updated_at_ms DESC
+       LIMIT $1`,
+      args
+    );
+    return result.rows.map((row) => ({
+      nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
+      nodeKind: row.node_kind,
+      ownerUserId: row.owner_user_id,
+      ownerEmail: row.owner_email,
+      registrationTokenHash: row.registration_token_hash,
+      emailVerified: Boolean(row.email_verified),
+      nodeApproved: Boolean(row.node_approved),
+      active: Boolean(row.active),
+      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
+      lastIp: row.last_ip ?? undefined,
+      lastCountryCode: row.last_country_code ?? undefined,
+      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    }));
+  }
+
+  async deleteNodeEnrollment(nodeId: string): Promise<boolean> {
+    const result = await this.pool.query(`DELETE FROM portal_node_enrollments WHERE node_id = $1`, [nodeId]);
+    return Number(result.rowCount ?? 0) > 0;
+  }
+
   async setNodeApproval(nodeId: string, approved: boolean): Promise<NodeEnrollment | null> {
     const now = Date.now();
     const result = await this.pool.query(
@@ -469,7 +632,7 @@ export class PortalStore {
            updated_at_ms = $3
        WHERE node_id = $1
        RETURNING
-         node_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
          email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
          last_vpn_detected, created_at_ms, updated_at_ms`,
       [nodeId, approved, now]
@@ -478,6 +641,7 @@ export class PortalStore {
     if (!row) return null;
     return {
       nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
       nodeKind: row.node_kind,
       ownerUserId: row.owner_user_id,
       ownerEmail: row.owner_email,
@@ -510,6 +674,46 @@ export class PortalStore {
        WHERE node_id = $1`,
       [input.nodeId, Date.now(), input.sourceIp ?? null, input.countryCode ?? null, input.vpnDetected ?? null]
     );
+  }
+
+  async getNodeEnrollmentByDeviceId(deviceId: string): Promise<NodeEnrollment | null> {
+    const normalized = deviceId.trim().toLowerCase();
+    if (!normalized) return null;
+    const result = await this.pool.query(
+      `SELECT
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
+        last_vpn_detected, created_at_ms, updated_at_ms
+       FROM portal_node_enrollments
+       WHERE device_id IS NOT NULL
+         AND (
+           lower(device_id) = $1
+           OR lower(device_id) LIKE ($1 || '%')
+           OR $1 LIKE (lower(device_id) || '%')
+         )
+       ORDER BY updated_at_ms DESC
+       LIMIT 1`,
+      [normalized]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
+      nodeKind: row.node_kind,
+      ownerUserId: row.owner_user_id,
+      ownerEmail: row.owner_email,
+      registrationTokenHash: row.registration_token_hash,
+      emailVerified: Boolean(row.email_verified),
+      nodeApproved: Boolean(row.node_approved),
+      active: Boolean(row.active),
+      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
+      lastIp: row.last_ip ?? undefined,
+      lastCountryCode: row.last_country_code ?? undefined,
+      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    };
   }
 
   async getWalletOnboardingByUserId(userId: string): Promise<{
@@ -563,6 +767,29 @@ export class PortalStore {
     );
   }
 
+  async upsertWalletOnboardingSeed(input: {
+    userId: string;
+    accountId: string;
+    network: string;
+    seedPhraseHash: string;
+    encryptedPrivateKeyRef: string;
+  }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(
+      `INSERT INTO portal_wallet_onboarding (
+        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, created_at_ms, acknowledged_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,NULL)
+      ON CONFLICT (user_id) DO UPDATE SET
+        account_id = EXCLUDED.account_id,
+        network = EXCLUDED.network,
+        seed_phrase_hash = EXCLUDED.seed_phrase_hash,
+        encrypted_private_key_ref = EXCLUDED.encrypted_private_key_ref,
+        created_at_ms = EXCLUDED.created_at_ms,
+        acknowledged_at_ms = NULL`,
+      [input.userId, input.accountId, input.network, input.seedPhraseHash, input.encryptedPrivateKeyRef, now]
+    );
+  }
+
   async acknowledgeWalletOnboarding(userId: string): Promise<void> {
     await this.pool.query(
       `UPDATE portal_wallet_onboarding
@@ -570,6 +797,129 @@ export class PortalStore {
        WHERE user_id = $1`,
       [userId, Date.now()]
     );
+  }
+
+  async createWalletSendMfaChallenge(input: {
+    challengeId: string;
+    userId: string;
+    accountId: string;
+    destination: string;
+    amountSats: number;
+    note?: string;
+    emailCodeHash: string;
+    passkeyChallenge: string;
+    expiresAtMs: number;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_wallet_send_mfa_challenges (
+        challenge_id, user_id, account_id, destination, amount_sats, note, email_code_hash,
+        passkey_challenge, expires_at_ms, consumed_at_ms, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10)`,
+      [
+        input.challengeId,
+        input.userId,
+        input.accountId,
+        input.destination,
+        input.amountSats,
+        input.note ?? null,
+        input.emailCodeHash,
+        input.passkeyChallenge,
+        input.expiresAtMs,
+        Date.now()
+      ]
+    );
+  }
+
+  async consumeWalletSendMfaChallenge(challengeId: string): Promise<{
+    challengeId: string;
+    userId: string;
+    accountId: string;
+    destination: string;
+    amountSats: number;
+    note?: string;
+    emailCodeHash: string;
+    passkeyChallenge: string;
+    expiresAtMs: number;
+  } | null> {
+    const now = Date.now();
+    const result = await this.pool.query(
+      `UPDATE portal_wallet_send_mfa_challenges
+       SET consumed_at_ms = $2
+       WHERE challenge_id = $1
+         AND consumed_at_ms IS NULL
+         AND expires_at_ms > $2
+       RETURNING challenge_id, user_id, account_id, destination, amount_sats, note, email_code_hash, passkey_challenge, expires_at_ms`,
+      [challengeId, now]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      challengeId: row.challenge_id,
+      userId: row.user_id,
+      accountId: row.account_id,
+      destination: row.destination,
+      amountSats: Number(row.amount_sats),
+      note: row.note ?? undefined,
+      emailCodeHash: row.email_code_hash,
+      passkeyChallenge: row.passkey_challenge,
+      expiresAtMs: Number(row.expires_at_ms)
+    };
+  }
+
+  async createWalletSendRequest(input: {
+    requestId: string;
+    userId: string;
+    accountId: string;
+    destination: string;
+    amountSats: number;
+    note?: string;
+    status: "pending_manual_review" | "rejected" | "sent";
+    mfaChallengeId: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_wallet_send_requests (
+        request_id, user_id, account_id, destination, amount_sats, note, status, mfa_challenge_id, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        input.requestId,
+        input.userId,
+        input.accountId,
+        input.destination,
+        input.amountSats,
+        input.note ?? null,
+        input.status,
+        input.mfaChallengeId,
+        Date.now()
+      ]
+    );
+  }
+
+  async listWalletSendRequestsByUser(userId: string, limit = 25): Promise<Array<{
+    requestId: string;
+    accountId: string;
+    destination: string;
+    amountSats: number;
+    note?: string;
+    status: string;
+    createdAtMs: number;
+  }>> {
+    const result = await this.pool.query(
+      `SELECT request_id, account_id, destination, amount_sats, note, status, created_at_ms
+       FROM portal_wallet_send_requests
+       WHERE user_id = $1
+       ORDER BY created_at_ms DESC
+       LIMIT $2`,
+      [userId, limit]
+    );
+    return result.rows.map((row) => ({
+      requestId: row.request_id,
+      accountId: row.account_id,
+      destination: row.destination,
+      amountSats: Number(row.amount_sats),
+      note: row.note ?? undefined,
+      status: row.status,
+      createdAtMs: Number(row.created_at_ms)
+    }));
   }
 
   async createPasskeyChallenge(input: {

@@ -161,6 +161,20 @@ When `LOCAL_MODEL_PROVIDER=ollama-local`:
   - `POST /orchestration/install-model`
     - target `coordinator` or `agent` (with `agentId`).
 
+### Does the agent download the model itself? Where from?
+
+Yes. When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`, each node (agent or coordinator) runs `ollama pull <model>` on its own machine via the Ollama CLI. The download source is the **public Ollama registry** (https://ollama.com/library, served by registry.ollama.ai). There is no custom model server in EdgeCoder; the agent uses the same `ollama pull` that any Ollama user runs. Orchestration from the portal or control-plane only triggers *which* model to pull and whether to enable auto-install; the actual download is performed locally by Ollama on that host.
+
+### Model sizes by platform
+
+| Platform | Default model (env) | Typical download size |
+|----------|--------------------|------------------------|
+| **iOS** | `qwen2.5:0.5b` (`IOS_OLLAMA_MODEL` / ios-agent) | ~400 MB (0.5B instruct) |
+| **Workstations / laptops** (macOS, Linux, Windows) | `qwen2.5-coder:latest` (`OLLAMA_MODEL`) | ~4.7 GB (7B variant) |
+| **Coordinator server** | `qwen2.5-coder:latest` | ~4.7 GB (7B variant) |
+
+- iOS agents default to a small model (`qwen2.5:0.5b`) for on-device constraints; desktop and coordinator default to `qwen2.5-coder:latest` (effectively the 7B coding model). You can override with `OLLAMA_MODEL` (or `IOS_OLLAMA_MODEL` for iOS) and choose other tags (e.g. `qwen2.5-coder:1.5b`, ~1 GB; `qwen2.5-coder:32b`, ~20 GB). Exact sizes depend on the tag and quantization; see Ollama library pages for each model.
+
 Model access boundary:
 
 - Coordinator does not expose Ollama endpoints publicly.
@@ -218,6 +232,37 @@ Model access boundary:
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.
 - Portal UI route: `GET /portal` (signup/login, OAuth starts, verification status, node enrollment, credits/wallet panels).
 - Portal users can select a persisted theme profile (`midnight`, `emerald`, `light`) from the dashboard.
+
+## Coordinator Stats Ledger Rollout
+
+Use staged rollout to avoid operational regressions while enabling decentralized coordinator-backed stats.
+
+- Phase 1 (dual-write shadow mode):
+  - Coordinators append signed stats events (`node_validation`, `node_approval`, `earnings_accrual`) to `stats_ledger_records`.
+  - Coordinators maintain `node_status_projection` and `coordinator_earnings_projection`.
+  - Existing coordinator ops views remain available.
+- Phase 2 (federated read + fallback):
+  - Portal reads coordinator stats through coordinator federation (`/stats/projections/summary`) using portal service token.
+  - Portal keeps fallback behavior when coordinator federation is stale or partially unavailable.
+- Phase 3 (quorum-enforced views):
+  - Require checkpoint consistency across coordinators before treating federated stats as final.
+  - Keep stale-state indicators in UI and block privileged actions on inconsistent views.
+
+### Finality policy and anchor verification
+
+- Soft finality:
+  - `soft_finalized` means the checkpoint is quorum-committed by coordinators.
+- Anchor transition:
+  - `anchored_pending` means quorum finalized but Bitcoin anchor confirmation is not yet treated as complete.
+- Hard finality:
+  - `anchored_confirmed` means checkpoint anchor meets the required confirmation threshold.
+- Stale state:
+  - `stale_federation` means coordinators disagree on checkpoint/finality and operators should treat stats as advisory.
+
+Verifier and anchor APIs on coordinator:
+
+- `POST /stats/anchors/anchor-latest` (mesh-auth): creates/updates the latest stats checkpoint anchor record.
+- `GET /stats/anchors/verify?checkpointHash=<hash>` (mesh-auth or portal service token): verifies whether checkpoint has reached configured hard-finality threshold.
 
 ## Abuse Blacklist Coordination
 

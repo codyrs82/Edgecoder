@@ -4,13 +4,30 @@ EdgeCoder is a privacy-first coding assistant system that can run on your own ma
 
 In plain terms: it helps write and test code without always sending your source code to a cloud service.
 
+## Current Live URLs
+
+- User portal: `https://portal.edgecoder.io/portal`
+- Control plane API: `https://control.edgecoder.io` (operator UI is served from portal)
+- Coordinator API base: `https://coordinator.edgecoder.io` (mesh token required)
+
 ## Docs map
 
+- Full wiki-style docs site (VitePress): `site-docs/` (`npm run docs:dev`)
+- End-to-end system walkthrough: `site-docs/guide/how-edgecoder-works.md`
 - Start here (plain-language overview): `README.md`
 - Developer setup and architecture details: `README.dev.md`
 - Full product and architecture plan: `EDGECODER_PLAN.md`
 - Public mesh onboarding and APIs: `docs/public-mesh-operations.md`
+- Agent and coordinator install runbook: `docs/agent-and-coordinator-install.md`
 - macOS machine deployment: `docs/macos-installer.md`
+- Fly deployment and production domain setup: `docs/flyio-bootstrap.md`
+- Docs site deployment and portal/docs URL wiring: `docs/docs-site-deployment.md`
+
+## Production endpoints
+
+- User portal: `https://portal.edgecoder.io/portal`
+- Coordinator operations dashboard: `https://portal.edgecoder.io/portal/coordinator-ops`
+- Coordinator base URL: `https://coordinator.edgecoder.io` (mesh-auth required)
 
 ## What problem this solves
 
@@ -60,6 +77,8 @@ Think of it like:
 ```bash
 npm install
 npm run dev
+# If default ports (4301–4303) are in use, run on alternate ports:
+# npm run dev:alt
 # Optional iOS swarm-only worker profile:
 AGENT_ID=iphone-1 AGENT_REGISTRATION_TOKEN=<portal-token> npm run dev:worker:ios
 # Optional iOS power-aware scheduling telemetry:
@@ -82,16 +101,19 @@ npm run dev:portal
 - Control plane: `http://localhost:4303`
 - IDE provider endpoint: `http://localhost:4304`
 - User portal: `http://localhost:4310`
+- Local docs site (VitePress): `http://localhost:5173` (`npm run docs:dev`)
 
 User portal UI includes:
 
 - signup/login with email/password
-- SSO buttons for Apple, Google, and Microsoft 365
+- SSO buttons for Google and Microsoft 365
 - passkey enrollment and passkey login support
 - email verification status and resend action
 - enrolled node management and token issuance
 - credits, wallet details, and payment intent views
 - first-run wallet seed backup acknowledgement flow
+- polished dark glass UI with KPI cards and streamlined onboarding layout
+- user-selectable themes (Midnight, Emerald, Light Pro) persisted per account
 
 ### Economy and wallet APIs
 
@@ -121,6 +143,8 @@ Key env vars:
 - `LIGHTNING_PROVIDER` (`mock`, `lnd`, `cln`)
 - `PAYMENT_INTENT_TTL_MS` (default `900000`)
 - `PAYMENT_WEBHOOK_SECRET` (optional shared secret for payment webhook ingress)
+- `DOCS_SITE_URL` (external docs URL shown in portal/home nav)
+- `GITHUB_REPO_URL` (repo URL shown in portal/home nav)
 
 ## Run tests
 
@@ -154,6 +178,9 @@ EdgeCoder includes controls for real-world environments:
 
 - admin and UI access controls
 - token-based service protection
+- coordinator mesh-token protection on all coordinator routes
+- no direct public model API on coordinator; model access is agent-mediated
+- IDE mode requires a locally running authenticated agent
 - blacklist propagation for abusive nodes
 - tamper-evident audit/ledger verification
 
@@ -161,6 +188,10 @@ EdgeCoder includes controls for real-world environments:
 
 - Developer guide: `README.dev.md`
 - Planning and architecture: `EDGECODER_PLAN.md`
+- Security guarantees baseline: `EDGECODER_PLAN.md` (Section 18)
 - Public mesh operations: `docs/public-mesh-operations.md`
+- Agent and coordinator install runbook: `docs/agent-and-coordinator-install.md`
 - macOS machine deployment: `docs/macos-installer.md`
 - Fly deployment and split-network setup: `docs/flyio-bootstrap.md`
+- iOS TestFlight/App Store release guide: `docs/ios-app-store-release.md`
+- Docs site deployment: `docs/docs-site-deployment.md`

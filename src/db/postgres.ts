@@ -1030,6 +1030,29 @@ export class PostgresStore {
     }));
   }
 
+  async latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+       FROM bitcoin_anchor_records
+       WHERE checkpoint_hash = $1
+       ORDER BY created_at_ms DESC
+       LIMIT 1`,
+      [checkpointHash]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      anchorId: row.anchor_id,
+      epochId: row.epoch_id,
+      checkpointHash: row.checkpoint_hash,
+      anchorNetwork: row.anchor_network,
+      txRef: row.tx_ref,
+      status: row.status,
+      anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
+      createdAtMs: Number(row.created_at_ms)
+    };
+  }
+
   async persistIssuancePayoutEvent(event: IssuancePayoutEvent): Promise<void> {
     await this.pool.query(
       `INSERT INTO issuance_payout_events (

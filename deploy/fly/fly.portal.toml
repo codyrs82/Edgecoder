@@ -9,8 +9,11 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
-  PORTAL_PUBLIC_URL = "https://edgecoder-portal.fly.dev"
-  CONTROL_PLANE_URL = "https://edgecoder-control-plane.fly.dev"
+  PORTAL_PUBLIC_URL = "https://edgecoder.io"
+  PASSKEY_RP_ID = "edgecoder.io"
+  PASSKEY_ORIGIN = "https://edgecoder.io"
+  CONTROL_PLANE_URL = "https://control.edgecoder.io"
+  DOCS_SITE_URL = "https://edgecoder-docs.fly.dev"
 
 [http_service]
   internal_port = 4310

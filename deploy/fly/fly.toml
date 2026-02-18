@@ -10,6 +10,8 @@ primary_region = "ord"
 [env]
   NODE_ENV = "production"
   NETWORK_MODE = "public_mesh"
+  COORDINATOR_PUBLIC_URL = "https://coordinator.edgecoder.io"
+  CONTROL_PLANE_URL = "https://control.edgecoder.io"
   LOCAL_MODEL_PROVIDER = "edgecoder-local"
   OLLAMA_AUTO_INSTALL = "false"
   OLLAMA_MODEL = "qwen2.5-coder:latest"

@@ -104,6 +104,8 @@ const COORDINATOR_PEER_CACHE_FILE = resolve(
   process.env.COORDINATOR_PEER_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-peer-cache.json`
 );
 const STATS_LEDGER_SYNC_INTERVAL_MS = Number(process.env.STATS_LEDGER_SYNC_INTERVAL_MS ?? "10000");
+const STATS_ANCHOR_INTERVAL_MS = Number(process.env.STATS_ANCHOR_INTERVAL_MS ?? "600000");
+const STATS_ANCHOR_MIN_CONFIRMATIONS = Number(process.env.STATS_ANCHOR_MIN_CONFIRMATIONS ?? "1");
 
 function loadCoordinatorKeys() {
   const peerId = process.env.COORDINATOR_PEER_ID ?? "coordinator-local";
@@ -145,6 +147,7 @@ const agentOrchestration = new Map<
     autoInstall: boolean;
     pending: boolean;
     requestedAtMs: number;
+    status?: { phase: string; message: string; progressPct?: number; updatedAtMs: number };
   }
 >();
 type DirectWorkOffer = {
@@ -183,6 +186,7 @@ const agentCapabilities = new Map<
     vpnDetected?: boolean;
     enrollmentReason?: string;
     powerTelemetry?: AgentPowerTelemetry;
+    lastSeenMs: number;
   }
 >();
 const lastTaskAssignedByAgent = new Map<string, number>();
@@ -219,6 +223,14 @@ let treasuryPolicy: TreasuryPolicy | null = null;
 const keyCustodyEvents: KeyCustodyEvent[] = [];
 const settledTxRefs = new Set<string>();
 let smoothedLoadIndex: number | null = null;
+const diagnosticsByAgentId = new Map<string, Array<{ eventAtMs: number; message: string }>>();
+function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Date.now()): void {
+  const text = String(message ?? "").trim();
+  if (!text) return;
+  const existing = diagnosticsByAgentId.get(agentId) ?? [];
+  const merged = [...existing, { eventAtMs: Number(eventAtMs || Date.now()), message: text }].slice(-250);
+  diagnosticsByAgentId.set(agentId, merged);
+}
 
 function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
   if (!MESH_AUTH_TOKEN) return true;
@@ -228,12 +240,16 @@ function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { co
   return false;
 }
 
-function requirePortalServiceToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
+function hasMeshToken(headers: Record<string, unknown>): boolean {
+  if (!MESH_AUTH_TOKEN) return true;
+  const token = headers["x-mesh-token"];
+  return typeof token === "string" && token === MESH_AUTH_TOKEN;
+}
+
+function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return true;
-  const token = req.headers["x-portal-service-token"];
-  if (typeof token === "string" && token === PORTAL_SERVICE_TOKEN) return true;
-  reply.code(401);
-  return false;
+  const token = headers["x-portal-service-token"];
+  return typeof token === "string" && token === PORTAL_SERVICE_TOKEN;
 }
 
 function parseRecordPayload(record: { payloadJson?: string }): Record<string, unknown> {
@@ -321,6 +337,12 @@ app.addHook("onRequest", async (req, reply) => {
   // portal enrollment token and returns mesh auth material in the response.
   const reqPath = (req as any).url as string | undefined;
   if (reqPath === "/register") return;
+  if (
+    hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/"))
+  ) {
+    return;
+  }
   if (!requireMeshToken(req as any, reply)) {
     return reply.send({ error: "mesh_unauthorized" });
   }
@@ -495,6 +517,7 @@ async function validatePortalNode(input: {
   nodeId: string;
   nodeKind: "agent" | "coordinator";
   registrationToken?: string;
+  deviceId?: string;
   sourceIp?: string;
 }): Promise<{
   allowed: boolean;
@@ -519,11 +542,74 @@ async function validatePortalNode(input: {
           ownerEmail: outcome.ownerEmail ?? null
         })
       });
-      await pgStore?.persistLedgerRecord(validationRecord);
-      await persistStatsLedgerRecord(validationRecord);
+      const validationAuditTimeoutMs = 2_000;
+      await Promise.race([
+        Promise.all([pgStore?.persistLedgerRecord(validationRecord), persistStatsLedgerRecord(validationRecord)]),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("validation_audit_persist_timeout")), validationAuditTimeoutMs)
+        )
+      ]);
     } catch {
       // Best-effort audit signal; validation path should not fail due to ledger write.
     }
+  };
+  const lookupPersistedApprovedAgent = async (): Promise<{
+    ownerEmail?: string;
+    sourceIp?: string;
+    countryCode?: string;
+    vpnDetected?: boolean;
+  } | null> => {
+    if (!pgStore || input.nodeKind !== "agent") return null;
+    try {
+      const projectionLookupTimeoutMs = 1_500;
+      const nodes = await Promise.race([
+        pgStore.listNodeStatusProjection(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("projection_lookup_timeout")), projectionLookupTimeoutMs)
+        )
+      ]);
+      const matched = (nodes ?? []).find((node) => node.nodeId === input.nodeId && node.nodeApproved === true);
+      if (!matched) return null;
+      return {
+        ownerEmail: matched.ownerEmail,
+        sourceIp: matched.sourceIp,
+        countryCode: matched.countryCode,
+        vpnDetected: matched.vpnDetected
+      };
+    } catch {
+      return null;
+    }
+  };
+  const allowIfKnownAgent = async (reason: string): Promise<{
+    allowed: boolean;
+    reason?: string;
+    ownerEmail?: string;
+    sourceIp?: string;
+    countryCode?: string;
+    vpnDetected?: boolean;
+  } | null> => {
+    if (input.nodeKind !== "agent") return null;
+    const existing = agentCapabilities.get(input.nodeId);
+    if (existing) {
+      return {
+        allowed: true,
+        reason,
+        ownerEmail: existing.ownerEmail,
+        sourceIp: existing.sourceIp,
+        countryCode: existing.countryCode,
+        vpnDetected: existing.vpnDetected
+      };
+    }
+    const persisted = await lookupPersistedApprovedAgent();
+    if (!persisted) return null;
+    return {
+      allowed: true,
+      reason,
+      ownerEmail: persisted.ownerEmail,
+      sourceIp: persisted.sourceIp,
+      countryCode: persisted.countryCode,
+      vpnDetected: persisted.vpnDetected
+    };
   };
   if (!PORTAL_SERVICE_URL) {
     const outcome = { allowed: true, reason: "portal_validation_disabled" };
@@ -531,6 +617,11 @@ async function validatePortalNode(input: {
     return outcome;
   }
   if (!input.registrationToken) {
+    const cached = await allowIfKnownAgent("registration_token_missing_cached_agent");
+    if (cached) {
+      await appendValidationEvent(cached);
+      return cached;
+    }
     const outcome = { allowed: false, reason: "registration_token_required" };
     await appendValidationEvent(outcome);
     return outcome;
@@ -538,13 +629,17 @@ async function validatePortalNode(input: {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
   try {
+    const portalValidationTimeoutMs = 5_000;
     const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/validate`, {
       method: "POST",
       headers,
+      headersTimeout: portalValidationTimeoutMs,
+      bodyTimeout: portalValidationTimeoutMs,
       body: JSON.stringify({
         nodeId: input.nodeId,
         nodeKind: input.nodeKind,
         registrationToken: input.registrationToken,
+        deviceId: input.deviceId,
         sourceIp: input.sourceIp
       })
     });
@@ -582,6 +677,13 @@ async function validatePortalNode(input: {
       vpnDetected: payload.node?.vpnDetected
     };
   } catch {
+    // If portal validation is temporarily unavailable, allow agents we already know.
+    // This avoids flapping registrations for long-running approved nodes.
+    const cached = await allowIfKnownAgent("portal_validation_unreachable_cached_agent");
+    if (cached) {
+      await appendValidationEvent(cached);
+      return cached;
+    }
     const outcome = { allowed: false, reason: "portal_validation_unreachable" };
     await appendValidationEvent(outcome);
     return outcome;
@@ -686,6 +788,81 @@ async function maybeFinalizeStatsCheckpoint(): Promise<void> {
   }
 }
 
+async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
+  if (!pgStore) return null;
+  const head = await pgStore.latestStatsLedgerHead();
+  if (!head) return null;
+  const checkpointHash = head.hash;
+  const existing = await pgStore.latestAnchorByCheckpoint(checkpointHash);
+  if (existing && existing.status === "anchored") return existing;
+  const now = Date.now();
+  const record: BitcoinAnchorRecord = {
+    anchorId: existing?.anchorId ?? randomUUID(),
+    epochId: `stats:${head.count}`,
+    checkpointHash,
+    anchorNetwork: BITCOIN_NETWORK,
+    txRef: existing?.txRef ?? `stats-anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
+    status: "anchored",
+    anchoredAtMs: now,
+    createdAtMs: existing?.createdAtMs ?? now
+  };
+  await pgStore.upsertBitcoinAnchor(record);
+  return record;
+}
+
+async function latestStatsFinality(): Promise<{
+  checkpointHash?: string;
+  checkpointHeight?: number;
+  softFinalized: boolean;
+  hardFinalized: boolean;
+  finalityState: "soft_finalized" | "anchored_pending" | "anchored_confirmed" | "no_checkpoint";
+  anchor?: {
+    txRef: string;
+    network: string;
+    status: string;
+    confirmations: number;
+    anchoredAtMs?: number;
+  };
+}> {
+  if (!pgStore) {
+    return {
+      softFinalized: false,
+      hardFinalized: false,
+      finalityState: "no_checkpoint"
+    };
+  }
+  const records = await pgStore.listStatsLedgerRecords(5000);
+  const latestCommit = [...records]
+    .reverse()
+    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
+  if (!latestCommit || !latestCommit.checkpointHash) {
+    return {
+      softFinalized: false,
+      hardFinalized: false,
+      finalityState: "no_checkpoint"
+    };
+  }
+  const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.checkpointHash);
+  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
+  return {
+    checkpointHash: latestCommit.checkpointHash,
+    checkpointHeight: latestCommit.checkpointHeight,
+    softFinalized: true,
+    hardFinalized,
+    finalityState: hardFinalized ? "anchored_confirmed" : "anchored_pending",
+    anchor: anchor
+      ? {
+          txRef: anchor.txRef,
+          network: anchor.anchorNetwork,
+          status: anchor.status,
+          confirmations,
+          anchoredAtMs: anchor.anchoredAtMs
+        }
+      : undefined
+  };
+}
+
 async function ingestStatsLedgerRecords(records: QueueEventRecord[]): Promise<{ ingested: number; skipped: number }> {
   let ingested = 0;
   let skipped = 0;
@@ -753,7 +930,18 @@ function appendBlacklistRecord(record: BlacklistRecord): void {
 
 async function upsertRollout(record: OllamaRolloutRecord): Promise<void> {
   ollamaRollouts.set(record.rolloutId, record);
-  await pgStore?.upsertOllamaRollout(record);
+  try {
+    const rolloutPersistTimeoutMs = 2_000;
+    await Promise.race([
+      pgStore?.upsertOllamaRollout(record),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("rollout_persist_timeout")), rolloutPersistTimeoutMs)
+      )
+    ]);
+  } catch (error) {
+    // Keep orchestration UX responsive even if Postgres is transiently unavailable.
+    app.log.warn({ error, rolloutId: record.rolloutId, targetId: record.targetId }, "rollout_persist_failed");
+  }
 }
 
 function isApprovedCoordinator(peerId: string): boolean {
@@ -1063,6 +1251,7 @@ const defaultPolicy: ExecutionPolicy = {
 
 const registerSchema = z.object({
   agentId: z.string(),
+  deviceId: z.string().min(3).max(128).optional(),
   os: z.string().min(2),
   version: z.string(),
   mode: z.enum(["swarm-only", "ide-enabled"]),
@@ -1090,6 +1279,20 @@ const heartbeatSchema = z.object({
       updatedAtMs: z.number().optional()
     })
     .optional()
+});
+const diagnosticsSchema = z.object({
+  agentId: z.string(),
+  events: z
+    .array(
+      z.object({
+        eventAtMs: z.number().optional(),
+        message: z.string().min(1).max(500)
+      })
+    )
+    .max(40),
+  source: z.string().optional(),
+  runtimeState: z.string().optional(),
+  modelState: z.string().optional()
 });
 
 const taskSchema = z.object({
@@ -1119,16 +1322,20 @@ const resultSchema = z.object({
 
 app.post("/register", async (req, reply) => {
   const body = registerSchema.parse(req.body);
+  const now = Date.now();
   const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
   const activation = await validatePortalNode({
     nodeId: body.agentId,
     nodeKind: "agent",
     registrationToken: body.registrationToken,
+    deviceId: body.deviceId,
     sourceIp
   });
   if (!activation.allowed) {
+    app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
     return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
   }
+  app.log.info({ agentId: body.agentId, reason: activation.reason }, "register_allowed");
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
@@ -1159,9 +1366,10 @@ app.post("/register", async (req, reply) => {
     powerTelemetry: body.powerTelemetry
       ? {
           ...body.powerTelemetry,
-          updatedAtMs: body.powerTelemetry.updatedAtMs ?? Date.now()
+          updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
         }
-      : undefined
+      : undefined,
+    lastSeenMs: now
   });
   const approvalRecord = ordering.append({
     eventType: "node_approval",
@@ -1177,8 +1385,20 @@ app.post("/register", async (req, reply) => {
       vpnDetected: activation.vpnDetected ?? null
     })
   });
-  await pgStore?.persistLedgerRecord(approvalRecord);
-  await persistStatsLedgerRecord(approvalRecord);
+  try {
+    const registerAuditPersistTimeoutMs = 3_000;
+    await Promise.race([
+      Promise.all([
+        pgStore?.persistLedgerRecord(approvalRecord),
+        persistStatsLedgerRecord(approvalRecord)
+      ]),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("register_audit_persist_timeout")), registerAuditPersistTimeoutMs)
+      )
+    ]);
+  } catch (error) {
+    app.log.warn({ error, agentId: body.agentId }, "register_audit_persist_failed");
+  }
   return reply.send({
     accepted: true,
     policy: defaultPolicy,
@@ -1189,6 +1409,10 @@ app.post("/register", async (req, reply) => {
 
 app.post("/heartbeat", async (req, reply) => {
   const body = heartbeatSchema.parse(req.body);
+  const now = Date.now();
+  if (!agentCapabilities.has(body.agentId)) {
+    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+  }
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.send({
@@ -1204,8 +1428,15 @@ app.post("/heartbeat", async (req, reply) => {
     if (existing) {
       existing.powerTelemetry = {
         ...body.powerTelemetry,
-        updatedAtMs: body.powerTelemetry.updatedAtMs ?? Date.now()
+        updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
       };
+      existing.lastSeenMs = now;
+      agentCapabilities.set(body.agentId, existing);
+    }
+  } else {
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) {
+      existing.lastSeenMs = now;
       agentCapabilities.set(body.agentId, existing);
     }
   }
@@ -1230,6 +1461,51 @@ app.post("/heartbeat", async (req, reply) => {
       version: blacklistVersion,
       agents: [...blacklistByAgent.keys()]
     }
+  });
+});
+
+app.post("/agent/diagnostics", async (req, reply) => {
+  const body = diagnosticsSchema.parse(req.body);
+  if (!agentCapabilities.has(body.agentId)) {
+    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+  }
+  const existing = diagnosticsByAgentId.get(body.agentId) ?? [];
+  const normalizedEvents = body.events.map((event) => ({
+    eventAtMs: Number(event.eventAtMs ?? Date.now()),
+    message: event.message
+  }));
+  const merged = [...existing, ...normalizedEvents].slice(-200);
+  diagnosticsByAgentId.set(body.agentId, merged);
+  const last = normalizedEvents.at(-1);
+  app.log.info(
+    {
+      agentId: body.agentId,
+      source: body.source ?? "unknown",
+      runtimeState: body.runtimeState,
+      modelState: body.modelState,
+      eventCount: normalizedEvents.length,
+      lastEvent: last?.message
+    },
+    "agent_diagnostics"
+  );
+  return reply.send({ ok: true, stored: merged.length });
+});
+
+app.get("/agent/diagnostics/:agentId", async (req, reply) => {
+  const meshAuthorized = hasMeshToken((req as any).headers ?? {});
+  const portalAuthorized = hasPortalServiceToken((req as any).headers ?? {});
+  if (!meshAuthorized && !portalAuthorized) {
+    return reply.code(401).send({ error: "diagnostics_access_unauthorized" });
+  }
+  const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
+  const events = diagnosticsByAgentId.get(params.agentId) ?? [];
+  const sorted = [...events].sort((a, b) => Number(b.eventAtMs) - Number(a.eventAtMs));
+  return reply.send({
+    ok: true,
+    agentId: params.agentId,
+    events: sorted.slice(0, 200),
+    count: sorted.length,
+    latestEventAtMs: sorted.length > 0 ? sorted[0].eventAtMs : undefined
   });
 });
 
@@ -1327,6 +1603,9 @@ app.post("/submit", async (req, reply) => {
 
 app.post("/pull", async (req, reply) => {
   const body = pullSchema.parse(req.body);
+  if (!agentCapabilities.has(body.agentId)) {
+    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+  }
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
@@ -1490,12 +1769,24 @@ app.get("/capacity", async () => {
       batteryPullMinIntervalMs: IOS_BATTERY_PULL_MIN_INTERVAL_MS,
       batteryTaskStopLevelPct: IOS_BATTERY_TASK_STOP_LEVEL_PCT
     });
+    const orch = agentOrchestration.get(agentId);
+    const recentDiagnostics = diagnosticsByAgentId.get(agentId) ?? [];
+    const lastDiagnostic = recentDiagnostics.at(-1);
     return {
       agentId,
       ...info,
       connectedPeers: [...info.connectedPeers],
       blacklisted: Boolean(activeBlacklistRecord(agentId)),
-      powerPolicy: powerDecision
+      powerPolicy: powerDecision,
+      lastSeenMs: info.lastSeenMs,
+      orchestrationStatus: orch?.pending && orch?.status ? orch.status : undefined,
+      diagnostics: lastDiagnostic
+        ? {
+            lastEventAtMs: lastDiagnostic.eventAtMs,
+            lastEventMessage: lastDiagnostic.message,
+            recentCount: recentDiagnostics.length
+          }
+        : undefined
     };
   });
   const totalCapacity = agents.reduce((sum, a) => sum + a.maxConcurrentTasks, 0);
@@ -2110,6 +2401,194 @@ app.get("/ledger/verify", async () => {
   const validation = verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem);
   return { ok: validation.ok, reason: validation.reason };
 });
+app.get("/stats/ledger/head", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const head = await pgStore?.latestStatsLedgerHead();
+  const records = (await pgStore?.listStatsLedgerRecords(5000)) ?? [];
+  const latestCommit = [...records]
+    .reverse()
+    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
+  return {
+    coordinatorId: identity.peerId,
+    head: head ?? { issuedAtMs: 0, hash: "GENESIS", count: 0 },
+    checkpoint: latestCommit
+      ? {
+          hash: latestCommit.checkpointHash,
+          height: latestCommit.checkpointHeight ?? null,
+          issuedAtMs: latestCommit.issuedAtMs
+        }
+      : null,
+    quorumThreshold: statsQuorumThreshold()
+  };
+});
+app.get("/stats/ledger/range", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const query = z
+    .object({
+      sinceIssuedAtMs: z.coerce.number().int().min(0).default(0),
+      limit: z.coerce.number().int().positive().max(5000).default(1000)
+    })
+    .parse(req.query);
+  const records = await pgStore?.listStatsLedgerSince(query.sinceIssuedAtMs, query.limit);
+  return { records: records ?? [] };
+});
+app.post("/stats/ledger/ingest", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const body = z
+    .object({
+      records: z.array(
+        z.object({
+          id: z.string(),
+          eventType: z.string(),
+          taskId: z.string(),
+          subtaskId: z.string().optional(),
+          actorId: z.string(),
+          sequence: z.number().int().positive(),
+          issuedAtMs: z.number().int().positive(),
+          prevHash: z.string(),
+          coordinatorId: z.string().optional(),
+          checkpointHeight: z.number().int().optional(),
+          checkpointHash: z.string().optional(),
+          payloadJson: z.string().optional(),
+          hash: z.string(),
+          signature: z.string()
+        })
+      )
+    })
+    .parse(req.body);
+  const { ingested, skipped } = await ingestStatsLedgerRecords(body.records as QueueEventRecord[]);
+  return { ok: true, ingested, skipped };
+});
+app.post("/stats/anchors/anchor-latest", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const anchor = await maybeAnchorLatestStatsCheckpoint();
+  const finality = await latestStatsFinality();
+  return {
+    ok: true,
+    anchor,
+    finality
+  };
+});
+app.get("/stats/anchors/verify", async (req, reply) => {
+  const meshAuthorized = hasMeshToken((req as any).headers ?? {});
+  const portalAuthorized = hasPortalServiceToken((req as any).headers ?? {});
+  if (!meshAuthorized && !portalAuthorized) {
+    return reply.code(401).send({ error: "stats_access_unauthorized" });
+  }
+  const query = z
+    .object({
+      checkpointHash: z.string().min(8)
+    })
+    .parse(req.query);
+  const anchor = await pgStore?.latestAnchorByCheckpoint(query.checkpointHash);
+  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  return {
+    ok: true,
+    checkpointHash: query.checkpointHash,
+    verified: confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS,
+    requiredConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS,
+    anchor: anchor
+      ? {
+          txRef: anchor.txRef,
+          network: anchor.anchorNetwork,
+          status: anchor.status,
+          confirmations,
+          anchoredAtMs: anchor.anchoredAtMs
+        }
+      : null
+  };
+});
+app.get("/stats/projections/summary", async (req, reply) => {
+  const meshAuthorized = hasMeshToken((req as any).headers ?? {});
+  const portalAuthorized = hasPortalServiceToken((req as any).headers ?? {});
+  if (!meshAuthorized && !portalAuthorized) {
+    return reply.code(401).send({ error: "stats_access_unauthorized" });
+  }
+  const query = z
+    .object({
+      ownerEmail: z.string().email().optional()
+    })
+    .parse(req.query);
+  const projectionQueryTimeoutMs = 3_000;
+  const timeoutReject = (label: string) =>
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label}_timeout`)), projectionQueryTimeoutMs)
+    );
+  let nodes: Array<Record<string, unknown>> | undefined;
+  let earnings: unknown[] | undefined;
+  let head: { issuedAtMs: number; hash: string; count: number } | null | undefined;
+  let records: QueueEventRecord[] | undefined;
+  if (pgStore) {
+    try {
+      [nodes, earnings, head, records] = await Promise.race([
+        Promise.all([
+          pgStore.listNodeStatusProjection(query.ownerEmail),
+          pgStore.listCoordinatorEarningsProjection(query.ownerEmail),
+          pgStore.latestStatsLedgerHead(),
+          pgStore.listStatsLedgerRecords(5000)
+        ]),
+        timeoutReject("stats_projection_query")
+      ]);
+    } catch (error) {
+      app.log.warn({ error }, "stats_projection_query_skipped");
+    }
+  }
+  const latestCommit = [...(records ?? [])]
+    .reverse()
+    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
+  let finality: Awaited<ReturnType<typeof latestStatsFinality>> = {
+    softFinalized: false,
+    hardFinalized: false,
+    finalityState: "no_checkpoint"
+  };
+  try {
+    finality = await Promise.race([latestStatsFinality(), timeoutReject("stats_projection_finality")]);
+  } catch (error) {
+    app.log.warn({ error }, "stats_projection_finality_skipped");
+  }
+  const mergedByNodeId = new Map<string, Record<string, unknown>>();
+  for (const node of nodes ?? []) {
+    const nodeId = String(node.nodeId ?? "").trim();
+    if (!nodeId) continue;
+    mergedByNodeId.set(nodeId, node as Record<string, unknown>);
+  }
+  const now = Date.now();
+  for (const [agentId, cap] of agentCapabilities.entries()) {
+    if (query.ownerEmail && cap.ownerEmail !== query.ownerEmail) continue;
+    const existing = mergedByNodeId.get(agentId) ?? {};
+    const existingLastSeenMs = Number(existing.lastSeenMs ?? 0);
+    const mergedLastSeenMs = Math.max(existingLastSeenMs, cap.lastSeenMs ?? 0);
+    mergedByNodeId.set(agentId, {
+      nodeId: agentId,
+      nodeKind: "agent",
+      ownerEmail: cap.ownerEmail ?? existing.ownerEmail,
+      emailVerified: (existing.emailVerified as boolean | undefined) ?? true,
+      nodeApproved: (existing.nodeApproved as boolean | undefined) ?? true,
+      active: now - mergedLastSeenMs <= 120_000,
+      sourceIp: cap.sourceIp ?? existing.sourceIp,
+      countryCode: cap.countryCode ?? existing.countryCode,
+      vpnDetected: cap.vpnDetected ?? existing.vpnDetected,
+      lastSeenMs: mergedLastSeenMs > 0 ? mergedLastSeenMs : undefined,
+      updatedAtMs: Math.max(Number(existing.updatedAtMs ?? 0), mergedLastSeenMs)
+    });
+  }
+  return {
+    coordinatorId: identity.peerId,
+    generatedAt: Date.now(),
+    head: head ?? { issuedAtMs: 0, hash: "GENESIS", count: 0 },
+    quorumThreshold: statsQuorumThreshold(),
+    latestCheckpoint: latestCommit
+      ? {
+          hash: latestCommit.checkpointHash,
+          height: latestCommit.checkpointHeight ?? null,
+          issuedAtMs: latestCommit.issuedAtMs
+        }
+      : null,
+    finality,
+    nodes: [...mergedByNodeId.values()],
+    earnings: earnings ?? []
+  };
+});
 app.get("/mesh/reputation", async () => ({
   peers: mesh.listPeers().map((p) => ({ peerId: p.peerId, score: peerScore.get(p.peerId) ?? 100 }))
 }));
@@ -2597,6 +3076,47 @@ app.get("/orchestration/coordinator/status", async (req, reply) => {
   };
 });
 
+const AGENT_ORCHESTRATION_ONLINE_WINDOW_MS = Number(process.env.AGENT_ORCHESTRATION_ONLINE_WINDOW_MS ?? "120000");
+
+function canonicalNodeSuffix(nodeId: string): string {
+  return String(nodeId)
+    .toLowerCase()
+    .replace(/^iphone-/, "")
+    .replace(/^ios-/, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function looksLikeIosAlias(agentIdA: string, agentIdB: string): boolean {
+  const a = canonicalNodeSuffix(agentIdA);
+  const b = canonicalNodeSuffix(agentIdB);
+  if (!a || !b) return false;
+  const aIosStyle = /^ios-|^iphone-/i.test(agentIdA);
+  const bIosStyle = /^ios-|^iphone-/i.test(agentIdB);
+  if (!aIosStyle || !bIosStyle) return false;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+function resolveRecentOrchestrationAgentId(
+  requestedAgentId: string
+): { agentId: string | null; reason?: "agent_not_connected" | "agent_not_recently_seen" } {
+  const now = Date.now();
+  const exact = agentCapabilities.get(requestedAgentId);
+  if (exact) {
+    if (now - Number(exact.lastSeenMs ?? 0) <= AGENT_ORCHESTRATION_ONLINE_WINDOW_MS) {
+      return { agentId: requestedAgentId };
+    }
+    return { agentId: null, reason: "agent_not_recently_seen" };
+  }
+  const aliasMatch = [...agentCapabilities.entries()]
+    .filter(([agentId, cap]) =>
+      looksLikeIosAlias(agentId, requestedAgentId) &&
+      now - Number(cap.lastSeenMs ?? 0) <= AGENT_ORCHESTRATION_ONLINE_WINDOW_MS
+    )
+    .sort((a, b) => Number(b[1].lastSeenMs ?? 0) - Number(a[1].lastSeenMs ?? 0))[0];
+  if (aliasMatch?.[0]) return { agentId: aliasMatch[0] };
+  return { agentId: null, reason: "agent_not_connected" };
+}
+
 app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ agentId: z.string() }).parse(req.params);
@@ -2608,8 +3128,29 @@ app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => 
       requestedBy: z.string().default("control-plane")
     })
     .parse(req.body);
+  const requestedAgentId = params.agentId;
+  const resolvedTarget = resolveRecentOrchestrationAgentId(requestedAgentId);
+  if (!resolvedTarget.agentId) {
+    appendAgentDiagnostic(
+      requestedAgentId,
+      `Model switch request rejected: ${resolvedTarget.reason ?? "agent_not_connected"}`
+    );
+    return reply.code(409).send({
+      error: "agent_not_connected",
+      reason: resolvedTarget.reason ?? "agent_not_connected",
+      agentId: requestedAgentId
+    });
+  }
+  const targetAgentId = resolvedTarget.agentId;
+  if (targetAgentId !== requestedAgentId) {
+    appendAgentDiagnostic(requestedAgentId, `Routing model switch request to active id ${targetAgentId}`);
+  }
   const rolloutId = randomUUID();
-  agentOrchestration.set(params.agentId, {
+  appendAgentDiagnostic(
+    targetAgentId,
+    `Model switch requested: ${body.provider} (${body.model}) autoInstall=${body.autoInstall ? "true" : "false"}`
+  );
+  agentOrchestration.set(targetAgentId, {
     rolloutId,
     provider: body.provider,
     model: body.model,
@@ -2620,7 +3161,7 @@ app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => 
   await upsertRollout({
     rolloutId,
     targetType: "agent",
-    targetId: params.agentId,
+    targetId: targetAgentId,
     provider: body.provider,
     model: body.model,
     autoInstall: body.autoInstall,
@@ -2629,7 +3170,46 @@ app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => 
     requestedAtMs: Date.now(),
     updatedAtMs: Date.now()
   });
-  return reply.send({ ok: true, agentId: params.agentId, rolloutId });
+  return reply.send({ ok: true, agentId: targetAgentId, requestedAgentId, rolloutId });
+});
+
+app.post("/orchestration/agents/:agentId/status", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const params = z.object({ agentId: z.string() }).parse(req.params);
+  const body = z
+    .object({
+      phase: z.string().max(64),
+      message: z.string().max(512),
+      progressPct: z.number().min(0).max(100).optional()
+    })
+    .parse(req.body);
+  const current = agentOrchestration.get(params.agentId);
+  if (!current) return reply.code(404).send({ error: "orchestration_not_found" });
+  current.status = {
+    phase: body.phase,
+    message: body.message,
+    progressPct: body.progressPct,
+    updatedAtMs: Date.now()
+  };
+  appendAgentDiagnostic(
+    params.agentId,
+    `${body.phase}: ${body.message}${body.progressPct != null ? ` (${body.progressPct}%)` : ""}`,
+    current.status.updatedAtMs
+  );
+  agentOrchestration.set(params.agentId, current);
+  await upsertRollout({
+    rolloutId: current.rolloutId,
+    targetType: "agent",
+    targetId: params.agentId,
+    provider: current.provider,
+    model: current.model ?? OLLAMA_MODEL,
+    autoInstall: current.autoInstall,
+    status: "in_progress",
+    requestedBy: "control-plane",
+    requestedAtMs: current.requestedAtMs,
+    updatedAtMs: Date.now()
+  });
+  return reply.send({ ok: true });
 });
 
 app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
@@ -2640,6 +3220,18 @@ app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
   if (!current) return reply.code(404).send({ error: "orchestration_not_found" });
   current.pending = false;
   agentOrchestration.set(params.agentId, current);
+  appendAgentDiagnostic(
+    params.agentId,
+    body.ok ? "Model switch applied successfully." : `Model switch failed: ${body.error ?? "unknown error"}`
+  );
+  if (body.ok) {
+    const cap = agentCapabilities.get(params.agentId);
+    if (cap) {
+      cap.localModelProvider = current.provider;
+      cap.localModelCatalog = current.provider === "ollama-local" ? [current.model ?? OLLAMA_MODEL] : ["edgecoder-default"];
+      agentCapabilities.set(params.agentId, cap);
+    }
+  }
   await upsertRollout({
     rolloutId: current.rolloutId,
     targetType: "agent",
@@ -2659,7 +3251,18 @@ app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
 app.get("/orchestration/rollouts", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   if (pgStore) {
-    return { rollouts: await pgStore.listOllamaRollouts(200) };
+    try {
+      const rolloutsQueryTimeoutMs = 3_000;
+      const rollouts = await Promise.race([
+        pgStore.listOllamaRollouts(200),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("rollouts_query_timeout")), rolloutsQueryTimeoutMs)
+        )
+      ]);
+      return { rollouts };
+    } catch (error) {
+      app.log.warn({ error }, "rollouts_query_fallback_in_memory");
+    }
   }
   return { rollouts: [...ollamaRollouts.values()] };
 });
@@ -2667,32 +3270,36 @@ app.get("/orchestration/rollouts", async (req, reply) => {
 if (import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
     .then(async () => {
+      // Do not block coordinator readiness indefinitely on database recovery.
       if (pgStore) {
-        await pgStore.migrate();
-        const persistedEvents = await pgStore.listBlacklistEvents();
-        for (const event of persistedEvents) {
-          blacklistAuditLog.push(event);
-          blacklistByAgent.set(event.agentId, event);
-          lastBlacklistEventHash = event.eventHash;
-        }
-        blacklistVersion = blacklistAuditLog.length;
-        const latestCpu = await pgStore.latestPriceEpoch("cpu");
-        const latestGpu = await pgStore.latestPriceEpoch("gpu");
-        if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
-        if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
-        treasuryPolicy = await pgStore.latestTreasuryPolicy();
-        const pendingIntents = await pgStore.listPendingPaymentIntents(500);
-        for (const intent of pendingIntents) {
-          paymentIntents.set(intent.intentId, intent);
-        }
+        const storeRef = pgStore;
+        const initDbState = async () => {
+          await storeRef.migrate();
+          const persistedEvents = await storeRef.listBlacklistEvents();
+          for (const event of persistedEvents) {
+            blacklistAuditLog.push(event);
+            blacklistByAgent.set(event.agentId, event);
+            lastBlacklistEventHash = event.eventHash;
+          }
+          blacklistVersion = blacklistAuditLog.length;
+          const latestCpu = await storeRef.latestPriceEpoch("cpu");
+          const latestGpu = await storeRef.latestPriceEpoch("gpu");
+          if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
+          if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
+          treasuryPolicy = await storeRef.latestTreasuryPolicy();
+          const pendingIntents = await storeRef.listPendingPaymentIntents(500);
+          for (const intent of pendingIntents) {
+            paymentIntents.set(intent.intentId, intent);
+          }
+        };
+        const startupDbInitTimeoutMs = 10_000;
+        await Promise.race([
+          initDbState(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("startup_db_init_timeout")), startupDbInitTimeoutMs)
+          )
+        ]).catch((error) => app.log.warn({ error }, "startup_db_init_skipped"));
       }
-      await ensureOllamaModelInstalled({
-        enabled: PROVIDER === "ollama-local",
-        autoInstall: OLLAMA_AUTO_INSTALL,
-        model: OLLAMA_MODEL,
-        role: "coordinator",
-        host: OLLAMA_HOST
-      });
     })
     .then(async () => {
       setInterval(() => {
@@ -2731,10 +3338,40 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       setInterval(() => {
         void bootstrapPeerMesh();
       }, 45_000);
+      setInterval(() => {
+        void (async () => {
+          const peers = mesh.listPeers();
+          for (const peer of peers) {
+            await syncStatsLedgerFromPeer(peer);
+          }
+          await maybeFinalizeStatsCheckpoint();
+        })().catch((error) => app.log.warn({ error }, "stats_ledger_sync_failed"));
+      }, STATS_LEDGER_SYNC_INTERVAL_MS);
+      setInterval(() => {
+        void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
+      }, STATS_ANCHOR_INTERVAL_MS);
       await app.listen({ port: 4301, host: "0.0.0.0" });
+      // Do not block coordinator readiness on model pull/install.
+      // Fly health checks and agent registration should stay available while
+      // Ollama warms up in the background.
+      void ensureOllamaModelInstalled({
+        enabled: PROVIDER === "ollama-local",
+        autoInstall: OLLAMA_AUTO_INSTALL,
+        model: OLLAMA_MODEL,
+        role: "coordinator",
+        host: OLLAMA_HOST
+      }).catch((error) => app.log.warn({ error }, "coordinator_ollama_bootstrap_failed"));
       await bootstrapPeerMesh();
+      await (async () => {
+        const peers = mesh.listPeers();
+        for (const peer of peers) {
+          await syncStatsLedgerFromPeer(peer);
+        }
+        await maybeFinalizeStatsCheckpoint();
+      })().catch(() => undefined);
       await runIssuanceTick().catch(() => undefined);
       await maybeAnchorLatestFinalizedEpoch().catch(() => undefined);
+      await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
     })
     .catch((error) => {
       app.log.error(error);

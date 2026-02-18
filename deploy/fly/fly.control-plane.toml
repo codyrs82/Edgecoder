@@ -9,7 +9,7 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
-  COORDINATOR_URL = "https://edgecoder-coordinator.fly.dev"
+  COORDINATOR_URL = "https://coordinator.edgecoder.io"
   ALLOWED_UI_IPS = ""
 
 [http_service]
