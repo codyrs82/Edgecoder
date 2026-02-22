@@ -21,7 +21,7 @@ export async function runCode(
   timeoutMs = 4_000
 ): Promise<RunResult> {
   const start = Date.now();
-  const subset = checkSubset(language, code);
+  const subset = await checkSubset(language, code);
   if (!subset.supported) {
     return {
       ...baseResult(language, Date.now() - start),
