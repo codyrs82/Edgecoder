@@ -1,6 +1,8 @@
 import { runCode } from "../executor/run.js";
 import { Language, RunResult, IterationRecord, AgentExecution } from "../common/types.js";
 import { ModelProvider } from "../model/providers.js";
+import { planPrompt, codePrompt, reflectPrompt } from "../model/prompts.js";
+import { extractCode } from "../model/extract.js";
 
 export interface AgentOptions {
   maxIterations?: number;
@@ -18,16 +20,16 @@ export abstract class AgentBase {
 
   protected async planTask(task: string): Promise<string> {
     const res = await this.provider.generate({
-      prompt: `Create a short plan for this coding task:\n${task}`
+      prompt: planPrompt(task)
     });
     return res.text;
   }
 
-  protected async generateCode(task: string, language: Language): Promise<string> {
+  protected async generateCode(task: string, language: Language, plan?: string): Promise<string> {
     const res = await this.provider.generate({
-      prompt: `Write ${language} code for this task:\n${task}`
+      prompt: codePrompt(task, plan ?? task, language)
     });
-    return res.text;
+    return extractCode(res.text, language);
   }
 
   protected async reflectOnFailure(
@@ -36,9 +38,9 @@ export abstract class AgentBase {
     runResult: RunResult
   ): Promise<string> {
     const res = await this.provider.generate({
-      prompt: `This ${runResult.language} code failed.\nTask: ${task}\nCode:\n${code}\nError: ${runResult.stderr}\nExit code: ${runResult.exitCode}\nAnalyze the failure and write corrected code. Output ONLY the fixed code.`
+      prompt: reflectPrompt(task, code, runResult.stderr)
     });
-    return res.text;
+    return extractCode(res.text, runResult.language);
   }
 
   protected async execute(code: string, language: Language): Promise<RunResult> {
@@ -57,7 +59,7 @@ export abstract class AgentBase {
     for (let i = 0; i < this.maxIterations; i++) {
       if (i === 0) {
         plan = await this.planTask(task);
-        generatedCode = await this.generateCode(task, language);
+        generatedCode = await this.generateCode(task, language, plan);
       } else {
         generatedCode = await this.reflectOnFailure(task, generatedCode, runResult!);
         plan = `Retry ${i + 1}: fixing previous error`;
