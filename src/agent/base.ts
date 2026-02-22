@@ -6,16 +6,19 @@ import { extractCode } from "../model/extract.js";
 
 export interface AgentOptions {
   maxIterations?: number;
+  sandbox?: "host" | "docker";
 }
 
 export abstract class AgentBase {
   protected readonly maxIterations: number;
+  protected readonly sandbox: "host" | "docker";
 
   constructor(
     protected readonly provider: ModelProvider,
     options?: AgentOptions
   ) {
     this.maxIterations = options?.maxIterations ?? 3;
+    this.sandbox = options?.sandbox ?? "host";
   }
 
   protected async planTask(task: string): Promise<string> {
@@ -44,7 +47,7 @@ export abstract class AgentBase {
   }
 
   protected async execute(code: string, language: Language): Promise<RunResult> {
-    return runCode(language, code);
+    return runCode(language, code, 4_000, this.sandbox);
   }
 
   protected async runWithRetry(

@@ -4,7 +4,7 @@ import { ModelProvider } from "../model/providers.js";
 
 export class SwarmWorkerAgent extends AgentBase {
   constructor(provider: ModelProvider, options?: AgentOptions) {
-    super(provider, options ?? { maxIterations: 2 });
+    super(provider, { maxIterations: 2, sandbox: "docker", ...options });
   }
 
   async runSubtask(subtask: Subtask, agentId: string): Promise<SubtaskResult> {
