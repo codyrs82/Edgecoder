@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import vm from "node:vm";
 import { Language, RunResult } from "../common/types.js";
 import { checkSubset } from "./subset.js";
+import { isDockerAvailable, runInDockerSandbox } from "./docker-sandbox.js";
+import { log } from "../common/logger.js";
 
 function baseResult(language: Language, durationMs: number): RunResult {
   return {
@@ -18,7 +20,8 @@ function baseResult(language: Language, durationMs: number): RunResult {
 export async function runCode(
   language: Language,
   code: string,
-  timeoutMs = 4_000
+  timeoutMs = 4_000,
+  sandbox: "host" | "docker" = "host"
 ): Promise<RunResult> {
   const start = Date.now();
   const subset = await checkSubset(language, code);
@@ -29,6 +32,14 @@ export async function runCode(
       queueForCloud: true,
       queueReason: "outside_subset"
     };
+  }
+
+  if (sandbox === "docker") {
+    const dockerOk = await isDockerAvailable();
+    if (dockerOk) {
+      return runInDockerSandbox(language, code, timeoutMs);
+    }
+    log.warn("Docker not available, falling back to host execution with AST sandbox");
   }
 
   if (language === "python") {
