@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import { createHash } from "node:crypto";
+import { request } from "undici";
 import { z } from "zod";
 import { verifyPayload } from "../mesh/peer.js";
 
@@ -132,6 +133,54 @@ app.post("/decompose", async (req, reply) => {
   }));
 
   return reply.send({ subtasks });
+});
+
+const escalateSchema = z.object({
+  task: z.string().min(1),
+  failedCode: z.string(),
+  errorHistory: z.array(z.string()),
+  language: z.enum(["python", "javascript"])
+});
+
+app.post("/escalate", async (req, reply) => {
+  const body = escalateSchema.parse(req.body);
+  const ollamaEndpoint = process.env.OLLAMA_GENERATE_ENDPOINT ?? "http://127.0.0.1:11434/api/generate";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:7b";
+
+  const errorContext = body.errorHistory.length > 0
+    ? `\n\nPrevious errors:\n${body.errorHistory.join("\n")}`
+    : "";
+
+  const prompt = `You are a senior coding assistant. A smaller model failed to solve this task after multiple attempts.
+
+Task: ${body.task}
+
+Failed code:
+${body.failedCode}
+${errorContext}
+
+Write correct, working ${body.language} code that solves the task. Output ONLY executable code, no markdown fences, no explanation.`;
+
+  try {
+    const ollamaRes = await request(ollamaEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false })
+    });
+
+    const payload = (await ollamaRes.body.json()) as { response?: string };
+    const improvedCode = payload.response ?? "";
+
+    return reply.send({
+      improvedCode,
+      explanation: "Escalated to larger model for improved solution."
+    });
+  } catch (error) {
+    return reply.code(502).send({
+      improvedCode: "",
+      explanation: `Escalation inference failed: ${String(error)}`
+    });
+  }
 });
 
 app.get("/health", async () => ({ ok: true }));

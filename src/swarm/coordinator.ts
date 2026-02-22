@@ -54,6 +54,7 @@ import {
   buildBlacklistEventHash,
   verifyReporterEvidenceSignature
 } from "../security/blacklist.js";
+import { EscalationRequest, EscalationResult } from "../escalation/types.js";
 
 const app = Fastify({ logger: true });
 const queue = new SwarmQueue(pgStore);
@@ -3265,6 +3266,81 @@ app.get("/orchestration/rollouts", async (req, reply) => {
     }
   }
   return { rollouts: [...ollamaRollouts.values()] };
+});
+
+// --- Escalation: mesh-based hard task routing ---
+
+const escalationStore = new Map<string, EscalationResult & { request: EscalationRequest }>();
+
+const escalationRequestSchema = z.object({
+  taskId: z.string().min(1),
+  agentId: z.string().min(1),
+  task: z.string().min(1),
+  failedCode: z.string(),
+  errorHistory: z.array(z.string()),
+  language: z.enum(["python", "javascript"]),
+  iterationsAttempted: z.number().int().min(1)
+});
+
+app.post("/escalate", async (req, reply) => {
+  const body = escalationRequestSchema.parse(req.body);
+  const taskId = body.taskId;
+
+  escalationStore.set(taskId, {
+    taskId,
+    status: "processing",
+    request: body
+  });
+
+  const inferenceUrl = process.env.INFERENCE_URL ?? "http://127.0.0.1:4302";
+  try {
+    const inferRes = await request(`${inferenceUrl}/escalate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: body.task,
+        failedCode: body.failedCode,
+        errorHistory: body.errorHistory,
+        language: body.language
+      })
+    });
+
+    if (inferRes.statusCode >= 200 && inferRes.statusCode < 300) {
+      const inferResult = (await inferRes.body.json()) as {
+        improvedCode?: string;
+        explanation?: string;
+      };
+      const result: EscalationResult & { request: EscalationRequest } = {
+        taskId,
+        status: "completed",
+        improvedCode: inferResult.improvedCode,
+        explanation: inferResult.explanation,
+        resolvedByModel: "coordinator-inference",
+        request: body
+      };
+      escalationStore.set(taskId, result);
+      return reply.send({
+        taskId,
+        status: "completed",
+        improvedCode: inferResult.improvedCode,
+        explanation: inferResult.explanation
+      });
+    }
+
+    escalationStore.set(taskId, { taskId, status: "failed", request: body });
+    return reply.send({ taskId, status: "failed" });
+  } catch (error) {
+    escalationStore.set(taskId, { taskId, status: "failed", request: body });
+    return reply.code(502).send({ taskId, status: "failed", error: String(error) });
+  }
+});
+
+app.get("/escalate/:taskId", async (req, reply) => {
+  const params = z.object({ taskId: z.string() }).parse(req.params);
+  const result = escalationStore.get(params.taskId);
+  if (!result) return reply.code(404).send({ error: "escalation_not_found" });
+  const { request: _req, ...rest } = result;
+  return reply.send(rest);
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
