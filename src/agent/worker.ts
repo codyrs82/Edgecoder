@@ -1,20 +1,24 @@
-import { AgentBase } from "./base.js";
+import { AgentBase, AgentOptions } from "./base.js";
 import { Language, Subtask, SubtaskResult } from "../common/types.js";
+import { ModelProvider } from "../model/providers.js";
 
 export class SwarmWorkerAgent extends AgentBase {
+  constructor(provider: ModelProvider, options?: AgentOptions) {
+    super(provider, options ?? { maxIterations: 2 });
+  }
+
   async runSubtask(subtask: Subtask, agentId: string): Promise<SubtaskResult> {
     const language: Language = subtask.language;
-    const code = await this.generateCode(subtask.input, language);
-    const result = await this.execute(code, language);
+    const execution = await this.runWithRetry(subtask.input, language);
 
     return {
       subtaskId: subtask.id,
       taskId: subtask.taskId,
       agentId,
-      ok: result.ok,
-      output: result.stdout,
-      error: result.stderr || undefined,
-      durationMs: result.durationMs
+      ok: execution.runResult.ok,
+      output: execution.runResult.stdout,
+      error: execution.runResult.stderr || undefined,
+      durationMs: execution.runResult.durationMs
     };
   }
 }
