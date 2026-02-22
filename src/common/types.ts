@@ -17,6 +17,23 @@ export interface RunResult {
   queueReason?: QueueReasonCode;
 }
 
+export interface IterationRecord {
+  iteration: number;
+  plan: string;
+  code: string;
+  runResult: RunResult;
+}
+
+export interface AgentExecution {
+  plan: string;
+  generatedCode: string;
+  runResult: RunResult;
+  iterations: number;
+  history: IterationRecord[];
+  escalated: boolean;
+  escalationReason?: string;
+}
+
 export interface ExecutionPolicy {
   cpuCapPercent: number;
   memoryLimitMb: number;
