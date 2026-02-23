@@ -5,6 +5,7 @@ import { z } from "zod";
 import { verifyPayload } from "../mesh/peer.js";
 import { extractCode } from "../model/extract.js";
 import { buildModelSwapRoutes } from "../model/swap-routes.js";
+import { buildDashboardRoutes } from "./dashboard.js";
 
 const app = Fastify({ logger: true });
 const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
@@ -38,7 +39,7 @@ function loadTrustedCoordinatorKeys(): Map<string, string> {
 const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health") return;
+  if (req.url === "/health" || req.url.startsWith("/dashboard")) return;
   if (INFERENCE_AUTH_TOKEN) {
     const token = req.headers["x-inference-token"];
     if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
@@ -193,6 +194,7 @@ const modelSwapState = {
   activeModelParamSize: 0,
 };
 buildModelSwapRoutes(app, modelSwapState);
+buildDashboardRoutes(app, modelSwapState);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   app.listen({ port: 4302, host: "0.0.0.0" }).catch((error) => {
