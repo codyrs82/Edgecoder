@@ -45,6 +45,19 @@ const lastOfferAtByPeer = new Map<string, number>();
 let peerWorkCursor = 0;
 let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
+// ── Offline resilience state ──────────────────────────────────
+let consecutiveFailures = 0;
+let coordinatorOnline = true;
+const OFFLINE_THRESHOLD = 3;
+const BACKOFF_BASE_MS = 1500;
+const BACKOFF_MAX_MS = 30_000;
+const RECONNECT_PROBE_INTERVAL_MS = 15_000;
+let lastReconnectProbeMs = 0;
+
+function backoffMs(): number {
+  return Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveFailures, 10), BACKOFF_MAX_MS);
+}
+
 type AgentPowerTelemetry = {
   onExternalPower?: boolean;
   batteryLevelPct?: number;
@@ -187,6 +200,23 @@ async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: 
   }
 }
 
+async function flushPendingResults(): Promise<void> {
+  const pending = localStore.listPendingResults(20);
+  if (pending.length === 0) return;
+  console.log(`[agent:${AGENT_ID}] flushing ${pending.length} buffered result(s)`);
+  for (const row of pending) {
+    try {
+      await post("/result", JSON.parse(row.payload));
+      localStore.markResultSynced(row.subtaskId);
+      console.log(`[agent:${AGENT_ID}] flushed result: ${row.subtaskId}`);
+    } catch {
+      localStore.incrementResultAttempt(row.subtaskId);
+      console.warn(`[agent:${AGENT_ID}] flush failed for ${row.subtaskId} (attempt ${row.attempts + 1}), stopping`);
+      break;
+    }
+  }
+}
+
 async function loop(): Promise<void> {
   const coordinatorSelection = await resolveCoordinatorUrl();
   activeCoordinatorUrl = coordinatorSelection.url;
@@ -263,296 +293,330 @@ async function loop(): Promise<void> {
   while (true) {
     try {
       const powerTelemetry = readAgentPowerTelemetry();
-      const registerResponse = (await post("/register", {
-        agentId: AGENT_ID,
-        ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-        os: OS,
-        version: "0.1.0",
-        mode: effectiveMode,
-        registrationToken: AGENT_REGISTRATION_TOKEN,
-        localModelProvider: currentProvider,
-        clientType: AGENT_CLIENT_TYPE,
-        maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-        powerTelemetry
-      })) as {
-        accepted?: boolean;
-        meshToken?: string;
-      };
-      if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
-        if (meshAuthToken !== registerResponse.meshToken) {
-          meshAuthToken = registerResponse.meshToken;
-          console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-        }
-      }
 
-      const hbStart = Date.now();
-      const hb = (await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry })) as {
-      ok?: boolean;
-      blacklisted?: boolean;
-      reason?: string;
-      orchestration?: {
-        provider: "edgecoder-local" | "ollama-local";
-        model?: string;
-        autoInstall: boolean;
-        pending: boolean;
-      } | null;
-      tunnelInvites?: Array<{ fromAgentId: string; token: string }>;
-      tunnelCloseNotices?: Array<{ peerAgentId: string; token: string; reason: string }>;
-      directWorkOffers?: Array<{
-        offerId: string;
-        fromAgentId: string;
-        toAgentId: string;
-        workType: "code_task" | "model_inference";
-        language?: "python" | "javascript";
-        input: string;
-      }>;
-      blacklist?: { version: number; agents: string[] };
-    };
-      try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
-      if (hb.blacklisted) {
-        console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
-      const blacklistSet = new Set(hb.blacklist?.agents ?? []);
-      for (const notice of hb.tunnelCloseNotices ?? []) {
-        peerTunnels.delete(notice.peerAgentId);
-        await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token });
-      }
-      for (const invite of hb.tunnelInvites ?? []) {
-        if (blacklistSet.has(invite.fromAgentId)) continue;
-        await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token });
-        peerTunnels.set(invite.fromAgentId, invite.token);
-      }
-
-      const idlePeersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
-        method: "GET",
-        headers: meshHeaders()
-      });
-      if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
-        const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
-        for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
-          if (blacklistSet.has(peerId)) continue;
-          if (peerId === AGENT_ID) continue;
-          if (peerTunnels.has(peerId)) continue;
-          const connect = await request(`${activeCoordinatorUrl}/agent-mesh/connect`, {
-            method: "POST",
-            headers: { "content-type": "application/json", ...meshHeaders() },
-            body: JSON.stringify({ fromAgentId: AGENT_ID, toAgentId: peerId })
-          });
-          if (connect.statusCode >= 200 && connect.statusCode < 300) {
-            const body = (await parseJsonBodySafe(connect)) as { token?: string };
-            if (body.token) peerTunnels.set(peerId, body.token);
-          }
-        }
-      }
-
-      for (const token of peerTunnels.values()) {
-        const relayRes = await request(`${activeCoordinatorUrl}/agent-mesh/relay`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...meshHeaders() },
-          body: JSON.stringify({
-            token,
-            fromAgentId: AGENT_ID,
-            payload: `ping:${Date.now()}`
-          })
-        });
-        if (relayRes.statusCode === 404 || relayRes.statusCode === 403) {
-          for (const [peerId, peerToken] of peerTunnels.entries()) {
-            if (peerToken === token) peerTunnels.delete(peerId);
-          }
-        }
-      }
-
-      if (hb.orchestration?.pending) {
-        const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
-          try {
-            await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct });
-          } catch {
-            // best-effort; coordinator may be unreachable
-          }
+      if (coordinatorOnline) {
+        // ═══ ONLINE PATH: all coordinator HTTP calls ═══
+        const registerResponse = (await post("/register", {
+          agentId: AGENT_ID,
+          ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+          os: OS,
+          version: "0.1.0",
+          mode: effectiveMode,
+          registrationToken: AGENT_REGISTRATION_TOKEN,
+          localModelProvider: currentProvider,
+          clientType: AGENT_CLIENT_TYPE,
+          maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+          powerTelemetry
+        })) as {
+          accepted?: boolean;
+          meshToken?: string;
         };
-        try {
-          await reportStatus("starting", "Preparing to switch model…");
-          await ensureOllamaModelInstalled(
-            {
-              enabled: hb.orchestration.provider === "ollama-local",
-              autoInstall: hb.orchestration.autoInstall,
-              model: hb.orchestration.model ?? OLLAMA_MODEL,
-              role: "agent",
-              host: OLLAMA_HOST
-            },
-            reportStatus
-          );
-          currentProvider = hb.orchestration.provider;
-          providers.use(currentProvider);
-          await reportStatus("done", "Model switch complete.");
-          try {
-            await post(
-              `/orchestration/agents/${AGENT_ID}/ack`,
-              { ok: true },
-              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
-            );
-          } catch (ackError) {
-            console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
-            await reportStatus("warning", "Model switch done locally; waiting for coordinator ack retry.").catch(() => {});
+        if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
+          if (meshAuthToken !== registerResponse.meshToken) {
+            meshAuthToken = registerResponse.meshToken;
+            console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
           }
-        } catch (error) {
-          await reportStatus("error", String(error)).catch(() => {});
-          await post(
-            `/orchestration/agents/${AGENT_ID}/ack`,
-            {
-              ok: false,
-              error: String(error)
-            },
-            { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
-          ).catch(() => {});
         }
-      }
 
-      const pulled = (await post("/pull", { agentId: AGENT_ID })) as {
-        subtask: Subtask | null;
-      };
-      if (pulled.subtask) {
-        const st = pulled.subtask;
-        try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
-        const result = await worker.runSubtask(st, AGENT_ID);
-        try {
-          if (result.ok) {
-            localStore.recordTaskComplete(st.id, result.output, result.durationMs);
-          } else {
-            localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
-          }
-        } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
-        const reportNonce = randomUUID();
-        const reportSignature = signPayload(
-          JSON.stringify({
-            subtaskId: result.subtaskId,
-            taskId: result.taskId,
-            agentId: result.agentId,
-            ok: result.ok,
-            durationMs: result.durationMs,
-            reportNonce
-          }),
-          keys.privateKeyPem
-        );
-        result.reportNonce = reportNonce;
-        result.reportSignature = reportSignature;
-        await post("/result", result);
-        continue;
-      }
+        const hbStart = Date.now();
+        const hb = (await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry })) as {
+          ok?: boolean;
+          blacklisted?: boolean;
+          reason?: string;
+          orchestration?: {
+            provider: "edgecoder-local" | "ollama-local";
+            model?: string;
+            autoInstall: boolean;
+            pending: boolean;
+          } | null;
+          tunnelInvites?: Array<{ fromAgentId: string; token: string }>;
+          tunnelCloseNotices?: Array<{ peerAgentId: string; token: string; reason: string }>;
+          directWorkOffers?: Array<{
+            offerId: string;
+            fromAgentId: string;
+            toAgentId: string;
+            workType: "code_task" | "model_inference";
+            language?: "python" | "javascript";
+            input: string;
+          }>;
+          blacklist?: { version: number; agents: string[] };
+        };
+        try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 
-    // If coordinator has no work assigned, accept direct peer work first.
-      const incomingDirect = hb.directWorkOffers ?? [];
-      const canUsePeerDirect = allowPeerDirectWork(powerTelemetry);
-      if (incomingDirect.length > 0 && canUsePeerDirect) {
-        const offer = incomingDirect.find((item) => !blacklistSet.has(item.fromAgentId));
-        if (!offer) {
-          await new Promise((r) => setTimeout(r, 500));
+        // Heartbeat succeeded — reset failure counter
+        consecutiveFailures = 0;
+
+        if (hb.blacklisted) {
+          console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
+          await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
-        const accepted = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/accept`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...meshHeaders() },
-          body: JSON.stringify({
-            offerId: offer.offerId,
-            byAgentId: AGENT_ID
-          })
+        const blacklistSet = new Set(hb.blacklist?.agents ?? []);
+        for (const notice of hb.tunnelCloseNotices ?? []) {
+          peerTunnels.delete(notice.peerAgentId);
+          await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token });
+        }
+        for (const invite of hb.tunnelInvites ?? []) {
+          if (blacklistSet.has(invite.fromAgentId)) continue;
+          await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token });
+          peerTunnels.set(invite.fromAgentId, invite.token);
+        }
+
+        const idlePeersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
+          method: "GET",
+          headers: meshHeaders()
         });
-        if (accepted.statusCode >= 200 && accepted.statusCode < 300) {
-          let peerResult: { ok: boolean; output: string; error?: string; durationMs: number };
-          if (offer.workType === "model_inference") {
-            const started = Date.now();
-            try {
-              const response = await providers.current().generate({ prompt: offer.input });
-              peerResult = {
-                ok: true,
-                output: response.text,
-                durationMs: Date.now() - started
-              };
-            } catch (error) {
-              peerResult = {
-                ok: false,
-                output: "",
-                error: String(error),
-                durationMs: Date.now() - started
-              };
+        if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
+          const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
+          for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
+            if (blacklistSet.has(peerId)) continue;
+            if (peerId === AGENT_ID) continue;
+            if (peerTunnels.has(peerId)) continue;
+            const connect = await request(`${activeCoordinatorUrl}/agent-mesh/connect`, {
+              method: "POST",
+              headers: { "content-type": "application/json", ...meshHeaders() },
+              body: JSON.stringify({ fromAgentId: AGENT_ID, toAgentId: peerId })
+            });
+            if (connect.statusCode >= 200 && connect.statusCode < 300) {
+              const body = (await parseJsonBodySafe(connect)) as { token?: string };
+              if (body.token) peerTunnels.set(peerId, body.token);
             }
-          } else {
-            const peerSubtask: Subtask = {
-              id: `peer-${offer.offerId}`,
-              taskId: `peer-direct-${offer.offerId}`,
-              kind: "single_step",
-              language: offer.language ?? "python",
-              input: offer.input,
-              timeoutMs: 4000,
-              snapshotRef: "peer-direct",
-              projectMeta: {
-                projectId: "peer-direct",
-                resourceClass: "cpu",
-                priority: 10
-              }
-            };
-            const result = await worker.runSubtask(peerSubtask, AGENT_ID);
-            peerResult = {
-              ok: result.ok,
-              output: result.output,
-              error: result.error,
-              durationMs: result.durationMs
-            };
           }
-          await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/result`, {
+        }
+
+        for (const token of peerTunnels.values()) {
+          const relayRes = await request(`${activeCoordinatorUrl}/agent-mesh/relay`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...meshHeaders() },
+            body: JSON.stringify({
+              token,
+              fromAgentId: AGENT_ID,
+              payload: `ping:${Date.now()}`
+            })
+          });
+          if (relayRes.statusCode === 404 || relayRes.statusCode === 403) {
+            for (const [peerId, peerToken] of peerTunnels.entries()) {
+              if (peerToken === token) peerTunnels.delete(peerId);
+            }
+          }
+        }
+
+        if (hb.orchestration?.pending) {
+          const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
+            try {
+              await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct });
+            } catch {
+              // best-effort; coordinator may be unreachable
+            }
+          };
+          try {
+            await reportStatus("starting", "Preparing to switch model…");
+            await ensureOllamaModelInstalled(
+              {
+                enabled: hb.orchestration.provider === "ollama-local",
+                autoInstall: hb.orchestration.autoInstall,
+                model: hb.orchestration.model ?? OLLAMA_MODEL,
+                role: "agent",
+                host: OLLAMA_HOST
+              },
+              reportStatus
+            );
+            currentProvider = hb.orchestration.provider;
+            providers.use(currentProvider);
+            await reportStatus("done", "Model switch complete.");
+            try {
+              await post(
+                `/orchestration/agents/${AGENT_ID}/ack`,
+                { ok: true },
+                { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+              );
+            } catch (ackError) {
+              console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
+              await reportStatus("warning", "Model switch done locally; waiting for coordinator ack retry.").catch(() => {});
+            }
+          } catch (error) {
+            await reportStatus("error", String(error)).catch(() => {});
+            await post(
+              `/orchestration/agents/${AGENT_ID}/ack`,
+              {
+                ok: false,
+                error: String(error)
+              },
+              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+            ).catch(() => {});
+          }
+        }
+
+        const pulled = (await post("/pull", { agentId: AGENT_ID })) as {
+          subtask: Subtask | null;
+        };
+        if (pulled.subtask) {
+          const st = pulled.subtask;
+          try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+          const result = await worker.runSubtask(st, AGENT_ID);
+          try {
+            if (result.ok) {
+              localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+            } else {
+              localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+            }
+          } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+          const reportNonce = randomUUID();
+          const reportSignature = signPayload(
+            JSON.stringify({
+              subtaskId: result.subtaskId,
+              taskId: result.taskId,
+              agentId: result.agentId,
+              ok: result.ok,
+              durationMs: result.durationMs,
+              reportNonce
+            }),
+            keys.privateKeyPem
+          );
+          result.reportNonce = reportNonce;
+          result.reportSignature = reportSignature;
+          try {
+            await post("/result", result);
+          } catch (resultErr) {
+            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(result)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+            console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+          }
+          continue;
+        }
+
+        // If coordinator has no work assigned, accept direct peer work first.
+        const incomingDirect = hb.directWorkOffers ?? [];
+        const canUsePeerDirect = allowPeerDirectWork(powerTelemetry);
+        if (incomingDirect.length > 0 && canUsePeerDirect) {
+          const offer = incomingDirect.find((item) => !blacklistSet.has(item.fromAgentId));
+          if (!offer) {
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          const accepted = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/accept`, {
             method: "POST",
             headers: { "content-type": "application/json", ...meshHeaders() },
             body: JSON.stringify({
               offerId: offer.offerId,
-              byAgentId: AGENT_ID,
-              ok: peerResult.ok,
-              output: peerResult.output,
-              error: peerResult.error,
-              durationMs: peerResult.durationMs
+              byAgentId: AGENT_ID
             })
           });
-          await new Promise((r) => setTimeout(r, 300));
-          continue;
-        }
-      }
-
-    // While idle, offer direct work to nearby peers for spare compute utilization.
-      if (canUsePeerDirect) {
-        const peersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
-          method: "GET",
-          headers: meshHeaders()
-        });
-        if (peersResponse.statusCode >= 200 && peersResponse.statusCode < 300) {
-          const peersJson = (await parseJsonBodySafe(peersResponse)) as { peers?: string[] };
-          const now = Date.now();
-          for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
-            if (blacklistSet.has(peerId)) continue;
-            if (peerId === AGENT_ID) continue;
-            const lastOffer = lastOfferAtByPeer.get(peerId) ?? 0;
-            if (now - lastOffer < peerOfferCooldownMs) continue;
-            const workInput = PEER_DIRECT_WORK_ITEMS[peerWorkCursor % PEER_DIRECT_WORK_ITEMS.length].trim();
-            peerWorkCursor += 1;
-            if (!workInput) continue;
-            const offerRes = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/offer`, {
+          if (accepted.statusCode >= 200 && accepted.statusCode < 300) {
+            let peerResult: { ok: boolean; output: string; error?: string; durationMs: number };
+            if (offer.workType === "model_inference") {
+              const started = Date.now();
+              try {
+                const response = await providers.current().generate({ prompt: offer.input });
+                peerResult = {
+                  ok: true,
+                  output: response.text,
+                  durationMs: Date.now() - started
+                };
+              } catch (error) {
+                peerResult = {
+                  ok: false,
+                  output: "",
+                  error: String(error),
+                  durationMs: Date.now() - started
+                };
+              }
+            } else {
+              const peerSubtask: Subtask = {
+                id: `peer-${offer.offerId}`,
+                taskId: `peer-direct-${offer.offerId}`,
+                kind: "single_step",
+                language: offer.language ?? "python",
+                input: offer.input,
+                timeoutMs: 4000,
+                snapshotRef: "peer-direct",
+                projectMeta: {
+                  projectId: "peer-direct",
+                  resourceClass: "cpu",
+                  priority: 10
+                }
+              };
+              const result = await worker.runSubtask(peerSubtask, AGENT_ID);
+              peerResult = {
+                ok: result.ok,
+                output: result.output,
+                error: result.error,
+                durationMs: result.durationMs
+              };
+            }
+            await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/result`, {
               method: "POST",
               headers: { "content-type": "application/json", ...meshHeaders() },
               body: JSON.stringify({
-                fromAgentId: AGENT_ID,
-                toAgentId: peerId,
-                workType: "code_task",
-                language: "python",
-                input: workInput
+                offerId: offer.offerId,
+                byAgentId: AGENT_ID,
+                ok: peerResult.ok,
+                output: peerResult.output,
+                error: peerResult.error,
+                durationMs: peerResult.durationMs
               })
             });
-            if (offerRes.statusCode >= 200 && offerRes.statusCode < 300) {
-              lastOfferAtByPeer.set(peerId, now);
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
+        }
+
+        // While idle, offer direct work to nearby peers for spare compute utilization.
+        if (canUsePeerDirect) {
+          const peersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
+            method: "GET",
+            headers: meshHeaders()
+          });
+          if (peersResponse.statusCode >= 200 && peersResponse.statusCode < 300) {
+            const peersJson = (await parseJsonBodySafe(peersResponse)) as { peers?: string[] };
+            const now = Date.now();
+            for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
+              if (blacklistSet.has(peerId)) continue;
+              if (peerId === AGENT_ID) continue;
+              const lastOffer = lastOfferAtByPeer.get(peerId) ?? 0;
+              if (now - lastOffer < peerOfferCooldownMs) continue;
+              const workInput = PEER_DIRECT_WORK_ITEMS[peerWorkCursor % PEER_DIRECT_WORK_ITEMS.length].trim();
+              peerWorkCursor += 1;
+              if (!workInput) continue;
+              const offerRes = await request(`${activeCoordinatorUrl}/agent-mesh/direct-work/offer`, {
+                method: "POST",
+                headers: { "content-type": "application/json", ...meshHeaders() },
+                body: JSON.stringify({
+                  fromAgentId: AGENT_ID,
+                  toAgentId: peerId,
+                  workType: "code_task",
+                  language: "python",
+                  input: workInput
+                })
+              });
+              if (offerRes.statusCode >= 200 && offerRes.statusCode < 300) {
+                lastOfferAtByPeer.set(peerId, now);
+              }
             }
           }
         }
+      } else {
+        // ═══ OFFLINE PATH: periodic reconnect probe ═══
+        const now = Date.now();
+        if (now - lastReconnectProbeMs > RECONNECT_PROBE_INTERVAL_MS) {
+          lastReconnectProbeMs = now;
+          try {
+            const probeStart = Date.now();
+            await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry }, { retries: 0, timeoutMs: 5000 });
+            const probeLatency = Date.now() - probeStart;
+            try { localStore.recordHeartbeat(activeCoordinatorUrl, "reconnected", probeLatency); } catch {}
+            // Probe succeeded — back online
+            coordinatorOnline = true;
+            consecutiveFailures = 0;
+            bleMesh?.setOffline(false);
+            console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
+            await flushPendingResults();
+          } catch {
+            console.log(`[agent:${AGENT_ID}] offline probe failed, still offline`);
+          }
+        }
       }
-      // Log BLE discovered peers, persist to SQLite, and run one-time BLE task test
+
+      // ═══ ALWAYS: BLE peer discovery + logging (runs in both modes) ═══
       if (bleTransport) {
         const blePeers = bleTransport.discoveredPeers();
         if (blePeers.length > 0) {
@@ -584,17 +648,27 @@ async function loop(): Promise<void> {
         }
       }
 
-      const idleDelayMs = OS === "ios" && !canUsePeerDirect ? 2500 : 1200;
+      const idleDelayMs = coordinatorOnline
+        ? (OS === "ios" && !allowPeerDirectWork(powerTelemetry) ? 2500 : 1200)
+        : 5000;
       await new Promise((r) => setTimeout(r, idleDelayMs));
     } catch (error) {
-      console.error(`[agent:${AGENT_ID}] loop error: ${String(error)}`);
+      consecutiveFailures++;
+      console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
+      if (coordinatorOnline && consecutiveFailures >= OFFLINE_THRESHOLD) {
+        coordinatorOnline = false;
+        bleMesh?.setOffline(true);
+        console.warn(`[agent:${AGENT_ID}] entering offline mode after ${consecutiveFailures} consecutive failures`);
+      }
       const failover = await resolveCoordinatorUrl();
       if (failover.url !== activeCoordinatorUrl) {
         activeCoordinatorUrl = failover.url;
         cacheCoordinatorUrl(activeCoordinatorUrl);
         console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${activeCoordinatorUrl}`);
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      const delay = backoffMs();
+      console.log(`[agent:${AGENT_ID}] backing off ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
 }
