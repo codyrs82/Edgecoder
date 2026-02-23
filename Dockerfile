@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim AS base
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zstd && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zstd python3 make g++ bluetooth bluez libbluetooth-dev libudev-dev && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
 COPY package*.json ./

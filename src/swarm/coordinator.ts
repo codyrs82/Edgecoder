@@ -3563,7 +3563,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
             "capability_summary",
             identity.peerId,
             summary as unknown as Record<string, unknown>,
-            identity.privateKeyPem,
+            coordinatorKeys.privateKeyPem,
             60_000
           );
           await mesh.broadcast(msg);
