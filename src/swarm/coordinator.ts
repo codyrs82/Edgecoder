@@ -26,7 +26,8 @@ import {
   NetworkMode,
   ResourceClass,
   TreasuryPolicy,
-  WalletType
+  WalletType,
+  CapabilitySummaryPayload
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -56,6 +57,7 @@ import {
   verifyReporterEvidenceSignature
 } from "../security/blacklist.js";
 import { EscalationRequest, EscalationResult } from "../escalation/types.js";
+import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
 
 const app = Fastify({ logger: true });
 const queue = new SwarmQueue(pgStore);
@@ -194,6 +196,7 @@ const agentCapabilities = new Map<
     lastSeenMs: number;
   }
 >();
+const federatedCapabilities = new Map<string, CapabilitySummaryPayload>();
 const lastTaskAssignedByAgent = new Map<string, number>();
 const ollamaRollouts = new Map<string, OllamaRolloutRecord>();
 const pendingTunnelInvites = new Map<string, Array<{ fromAgentId: string; token: string }>>();
@@ -2330,7 +2333,8 @@ app.post("/mesh/ingest", async (req, reply) => {
         "issuance_proposal",
         "issuance_vote",
         "issuance_commit",
-        "issuance_checkpoint"
+        "issuance_checkpoint",
+        "capability_summary"
       ]),
       fromPeerId: z.string(),
       issuedAtMs: z.number(),
@@ -2407,6 +2411,14 @@ app.post("/mesh/ingest", async (req, reply) => {
     if (!current || data.timestampMs >= current.timestampMs) {
       appendBlacklistRecord(data);
     }
+  }
+  if (message.type === "capability_summary") {
+    const payload = message.payload as unknown as CapabilitySummaryPayload;
+    if (payload.coordinatorId && payload.timestamp) {
+      federatedCapabilities.set(payload.coordinatorId, payload);
+      app.log.info({ from: payload.coordinatorId, agents: payload.agentCount }, "capability_summary_received");
+    }
+    return reply.send({ ok: true });
   }
   peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 1));
   return reply.send({ ok: true });
@@ -3523,6 +3535,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       setInterval(() => {
         void bootstrapPeerMesh();
       }, 45_000);
+      setInterval(() => {
+        void (async () => {
+          const agents: AgentCapabilityInfo[] = [...agentCapabilities.entries()].map(
+            ([agentId, cap]) => ({
+              agentId,
+              activeModel: cap.activeModel ?? cap.localModelCatalog[0] ?? "",
+              activeModelParamSize: cap.activeModelParamSize ?? 0,
+              currentLoad: 0,
+            })
+          );
+          const summary = buildCapabilitySummary(identity.peerId, agents);
+          const msg = protocol.createMessage(
+            "capability_summary",
+            identity.peerId,
+            summary as unknown as Record<string, unknown>,
+            identity.privateKeyPem,
+            60_000
+          );
+          await mesh.broadcast(msg);
+        })().catch((error) => app.log.warn({ error }, "capability_gossip_failed"));
+      }, 60_000);
       setInterval(() => {
         void (async () => {
           const peers = mesh.listPeers();
