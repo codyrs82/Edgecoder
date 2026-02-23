@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { request } from "undici";
 import { z } from "zod";
+import { extractCode } from "../model/extract.js";
 import { SwarmQueue } from "./queue.js";
 import {
   BitcoinAnchorRecord,
@@ -3292,11 +3293,69 @@ app.post("/escalate", async (req, reply) => {
     request: body
   });
 
+  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const coordinatorModel = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
+  const useLocalOllama = process.env.LOCAL_MODEL_PROVIDER === "ollama-local";
+
+  const errorContext = body.errorHistory.length > 0
+    ? `\n\nPrevious errors:\n${body.errorHistory.join("\n")}`
+    : "";
+
+  const escalationPrompt = `You are a senior coding assistant. A smaller model failed to solve this task after multiple attempts.
+
+Task: ${body.task}
+
+Failed code:
+${body.failedCode}
+${errorContext}
+
+Write correct, working ${body.language} code that solves the task. Output ONLY executable code, no markdown fences, no explanation.`;
+
+  // Try local Ollama first (coordinator has Ollama co-located on Fly)
+  if (useLocalOllama) {
+    try {
+      const ollamaRes = await request(`${ollamaHost}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: coordinatorModel, prompt: escalationPrompt, stream: false })
+      });
+      const payload = (await ollamaRes.body.json()) as { response?: string };
+      const raw = payload.response ?? "";
+      const improvedCode = raw ? extractCode(raw, body.language) : "";
+
+      if (improvedCode) {
+        const result: EscalationResult & { request: EscalationRequest } = {
+          taskId,
+          status: "completed",
+          improvedCode,
+          explanation: "Escalated to coordinator-local Ollama model.",
+          resolvedByModel: coordinatorModel,
+          request: body
+        };
+        escalationStore.set(taskId, result);
+        return reply.send({
+          taskId,
+          status: "completed",
+          improvedCode,
+          explanation: result.explanation,
+          resolvedByModel: coordinatorModel
+        });
+      }
+    } catch {
+      // Local Ollama failed, fall through to inference service
+    }
+  }
+
+  // Fallback: forward to inference service
   const inferenceUrl = process.env.INFERENCE_URL ?? "http://127.0.0.1:4302";
   try {
+    const escalateHeaders: Record<string, string> = { "content-type": "application/json" };
+    if (INFERENCE_AUTH_TOKEN) {
+      escalateHeaders["x-inference-token"] = INFERENCE_AUTH_TOKEN;
+    }
     const inferRes = await request(`${inferenceUrl}/escalate`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: escalateHeaders,
       body: JSON.stringify({
         task: body.task,
         failedCode: body.failedCode,
