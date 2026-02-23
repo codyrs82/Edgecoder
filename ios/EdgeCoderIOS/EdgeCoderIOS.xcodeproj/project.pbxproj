@@ -25,6 +25,9 @@
 		C3898FECA10395D8E89075FE /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A7CA4F071392F4801C6C60 /* AuthView.swift */; };
 		CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */; };
 		DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */; };
+		B1A2C3D4E5F60718293A4B5D /* ModelLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */; };
+		C2B3D4E5F6071829304B5C6E /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */; };
+		D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C4E5F60718293A415C6D7E /* ModelStatusBanner.swift */; };
 		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
 		FE3020C5296B6D4400A4D780 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */; };
@@ -40,6 +43,9 @@
 		23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyManager.swift; sourceTree = "<group>"; };
 		2733B6A0674685579153C996 /* LocalModelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelManager.swift; sourceTree = "<group>"; };
 		29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwarmView.swift; sourceTree = "<group>"; };
+		B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLibraryView.swift; sourceTree = "<group>"; };
+		C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
+		D3C4E5F60718293A415C6D7E /* ModelStatusBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStatusBanner.swift; sourceTree = "<group>"; };
 		30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		44A7CA4F071392F4801C6C60 /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthView.swift; sourceTree = "<group>"; };
 		58F68F1BB89F29F23B394ED2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -95,6 +101,9 @@
 			isa = PBXGroup;
 			children = (
 				2733B6A0674685579153C996 /* LocalModelManager.swift */,
+				B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */,
+				C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */,
+				D3C4E5F60718293A415C6D7E /* ModelStatusBanner.swift */,
 				87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */,
 				29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */,
 			);
@@ -253,6 +262,9 @@
 				CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */,
 				19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */,
 				89088AFA12BF751F0F4B4831 /* LocalModelManager.swift in Sources */,
+				B1A2C3D4E5F60718293A4B5D /* ModelLibraryView.swift in Sources */,
+				C2B3D4E5F6071829304B5C6E /* ModelPickerView.swift in Sources */,
+				D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */,
 				1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */,
 				FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */,
 				8D5E31F9D98473054447741F /* RootTabView.swift in Sources */,
