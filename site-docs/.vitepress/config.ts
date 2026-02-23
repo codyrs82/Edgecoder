@@ -26,7 +26,9 @@ export default withMermaid(defineConfig({
           { text: "Architecture Deep Dive", link: "/guide/architecture-deep-dive" },
           { text: "Request Lifecycle Sequences", link: "/guide/request-lifecycle-sequences" },
           { text: "Model Provider Abstraction", link: "/guide/model-provider-abstraction" },
-          { text: "Executor Sandbox and Isolation", link: "/guide/executor-sandbox-isolation" }
+          { text: "Executor Sandbox and Isolation", link: "/guide/executor-sandbox-isolation" },
+          { text: "BLE Local Mesh", link: "/guide/ble-local-mesh" },
+          { text: "Model Management", link: "/guide/model-management" }
         ]
       },
       {
@@ -39,7 +41,8 @@ export default withMermaid(defineConfig({
           { text: "Coordinator Discovery and Failover", link: "/operations/coordinator-discovery-failover" },
           { text: "Executor Subset Reference", link: "/operations/executor-subset-reference" },
           { text: "iOS Power Scheduling", link: "/operations/ios-power-scheduling" },
-          { text: "Stats Ledger Rollout", link: "/operations/stats-ledger-rollout" }
+          { text: "Stats Ledger Rollout", link: "/operations/stats-ledger-rollout" },
+          { text: "Coordinator Federation", link: "/operations/coordinator-federation" }
         ]
       },
       {
