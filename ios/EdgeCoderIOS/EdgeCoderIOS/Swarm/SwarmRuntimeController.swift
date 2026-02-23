@@ -31,7 +31,7 @@ final class SwarmRuntimeController: ObservableObject {
 
     let bleMeshManager = BLEMeshManager.shared
     private let api = APIClient.shared
-    private let modelManager = LocalModelManager.shared
+    private let modelManager = LocalModelManager()
     private var runtimeTask: Task<Void, Never>?
 
     private enum DefaultsKey {
@@ -141,9 +141,7 @@ final class SwarmRuntimeController: ObservableObject {
             statusText = "Runtime blocked: connect power to start."
             return
         }
-        if modelManager.state != .ready {
-            await modelManager.installLightweightModel()
-        }
+        // Model activation is handled separately via LocalModelManager.activate(modelId:)
         persistRuntimeSettings()
         runtimeTask?.cancel()
         runtimeTask = Task { [weak self] in
