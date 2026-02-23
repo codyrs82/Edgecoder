@@ -1,6 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
+import { SQLiteStore } from "../../../src/db/sqlite-store.js";
+
+let store: SQLiteStore;
+
+beforeEach(() => {
+  store = new SQLiteStore(":memory:");
+});
+
+afterEach(() => {
+  store.close();
+});
 
 describe("BLEMeshManager", () => {
   it("starts in offline=false by default", () => {
@@ -74,7 +85,7 @@ describe("BLEMeshManager", () => {
       providerSignature: "sig-b"
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -107,7 +118,7 @@ describe("BLEMeshManager", () => {
       providerSignature: "sig-s"
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({

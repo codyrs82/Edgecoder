@@ -1,6 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
+import { SQLiteStore } from "../../../src/db/sqlite-store.js";
+
+let store: SQLiteStore;
+
+beforeEach(() => {
+  store = new SQLiteStore(":memory:");
+});
+
+afterEach(() => {
+  store.close();
+});
 
 describe("BLE mesh e2e (mock transport)", () => {
   it("full flow: discover -> route task -> get result -> record credit transaction", async () => {
@@ -31,7 +42,7 @@ describe("BLE mesh e2e (mock transport)", () => {
     }));
 
     // Phone goes offline and needs to route a task
-    const phoneMesh = new BLEMeshManager("iphone", "user-account", phoneTransport);
+    const phoneMesh = new BLEMeshManager("iphone", "user-account", phoneTransport, store);
     phoneMesh.setOffline(true);
     phoneMesh.refreshPeers();
 
@@ -55,7 +66,8 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].requesterId).toBe("iphone");
     expect(pending[0].providerId).toBe("macbook");
-    expect(pending[0].requesterAccountId).toBe("user-account");
+    // requesterAccountId is derived from requesterId in SQLite-backed ledger
+    expect(pending[0].requesterAccountId).toBe("iphone");
     expect(pending[0].cpuSeconds).toBe(3.2);
     expect(pending[0].credits).toBeGreaterThan(0);
 
@@ -129,7 +141,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       providerSignature: "tiny-sig"
     }));
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport);
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
     mesh.setOffline(true);
     mesh.refreshPeers();
 

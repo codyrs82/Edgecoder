@@ -54,8 +54,6 @@ export class BLEMeshManager {
     request: BLETaskRequest,
     requiredModelSize: number
   ): Promise<BLETaskResponse | null> {
-    if (!this.offline) return null;
-
     this.refreshPeers();
     const bestPeer = this.router.selectBestPeer(requiredModelSize);
     if (!bestPeer) return null;
@@ -95,6 +93,13 @@ export class BLEMeshManager {
 
   markSynced(txIds: string[]): void {
     this.ledger.markSynced(txIds);
+  }
+
+  async sendDirectToPeer(
+    peerId: string,
+    request: BLETaskRequest
+  ): Promise<BLETaskResponse> {
+    return this.transport.sendTaskRequest(peerId, request);
   }
 
   onModelSwapStart(): void {
