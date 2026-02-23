@@ -4,6 +4,7 @@ import { request } from "undici";
 import { z } from "zod";
 import { verifyPayload } from "../mesh/peer.js";
 import { extractCode } from "../model/extract.js";
+import { buildModelSwapRoutes } from "../model/swap-routes.js";
 
 const app = Fastify({ logger: true });
 const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
@@ -186,6 +187,12 @@ Write correct, working ${body.language} code that solves the task. Output ONLY e
 });
 
 app.get("/health", async () => ({ ok: true }));
+
+const modelSwapState = {
+  activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest",
+  activeModelParamSize: 0,
+};
+buildModelSwapRoutes(app, modelSwapState);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   app.listen({ port: 4302, host: "0.0.0.0" }).catch((error) => {
