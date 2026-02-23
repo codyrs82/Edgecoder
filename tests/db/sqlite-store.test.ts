@@ -189,4 +189,52 @@ describe("SQLiteStore", () => {
       expect(store.claimNextOutbound("mac-1")).toBeNull();
     });
   });
+
+  // ── Pending Results ─────────────────────────────────────────
+
+  describe("pending results", () => {
+    const payload = JSON.stringify({ subtaskId: "sub-1", ok: true, output: "hello" });
+
+    it("enqueues and lists a pending result", () => {
+      store.enqueuePendingResult("sub-1", payload);
+      const pending = store.listPendingResults();
+      expect(pending).toHaveLength(1);
+      expect(pending[0].subtaskId).toBe("sub-1");
+      expect(pending[0].payload).toBe(payload);
+      expect(pending[0].attempts).toBe(0);
+    });
+
+    it("markResultSynced removes the row", () => {
+      store.enqueuePendingResult("sub-1", payload);
+      store.markResultSynced("sub-1");
+      expect(store.listPendingResults()).toHaveLength(0);
+    });
+
+    it("incrementResultAttempt bumps count", () => {
+      store.enqueuePendingResult("sub-1", payload);
+      store.incrementResultAttempt("sub-1");
+      store.incrementResultAttempt("sub-1");
+      const pending = store.listPendingResults();
+      expect(pending[0].attempts).toBe(2);
+      expect(pending[0].lastAttemptAt).toBeGreaterThan(0);
+    });
+
+    it("respects limit and orders by created_at ASC", () => {
+      for (let i = 0; i < 5; i++) {
+        store.enqueuePendingResult(`sub-${i}`, `payload-${i}`);
+      }
+      const pending = store.listPendingResults(2);
+      expect(pending).toHaveLength(2);
+      expect(pending[0].subtaskId).toBe("sub-0");
+      expect(pending[1].subtaskId).toBe("sub-1");
+    });
+
+    it("upserts on duplicate subtask_id", () => {
+      store.enqueuePendingResult("sub-1", "old-payload");
+      store.enqueuePendingResult("sub-1", "new-payload");
+      const pending = store.listPendingResults();
+      expect(pending).toHaveLength(1);
+      expect(pending[0].payload).toBe("new-payload");
+    });
+  });
 });

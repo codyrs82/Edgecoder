@@ -36,6 +36,14 @@ export interface HeartbeatRow {
   createdAt: number;
 }
 
+export interface PendingResultRow {
+  subtaskId: string;
+  payload: string;
+  attempts: number;
+  createdAt: number;
+  lastAttemptAt: number | null;
+}
+
 export interface OutboundTaskRow {
   id: string;
   targetAgentId: string;
@@ -88,6 +96,14 @@ CREATE TABLE IF NOT EXISTS kv_config (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS pending_results (
+  subtask_id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS outbound_task_queue (
@@ -327,5 +343,41 @@ export class SQLiteStore {
     this.db
       .prepare(`UPDATE outbound_task_queue SET status = 'failed', completed_at = unixepoch() WHERE id = ?`)
       .run(id);
+  }
+
+  // ── Pending Results (offline buffer) ────────────────────────
+
+  enqueuePendingResult(subtaskId: string, payload: string): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO pending_results (subtask_id, payload)
+         VALUES (?, ?)`
+      )
+      .run(subtaskId, payload);
+  }
+
+  listPendingResults(limit = 20): PendingResultRow[] {
+    return this.db
+      .prepare(
+        `SELECT subtask_id as subtaskId, payload, attempts,
+                created_at as createdAt, last_attempt_at as lastAttemptAt
+         FROM pending_results ORDER BY created_at ASC LIMIT ?`
+      )
+      .all(limit) as PendingResultRow[];
+  }
+
+  markResultSynced(subtaskId: string): void {
+    this.db
+      .prepare(`DELETE FROM pending_results WHERE subtask_id = ?`)
+      .run(subtaskId);
+  }
+
+  incrementResultAttempt(subtaskId: string): void {
+    this.db
+      .prepare(
+        `UPDATE pending_results SET attempts = attempts + 1, last_attempt_at = unixepoch()
+         WHERE subtask_id = ?`
+      )
+      .run(subtaskId);
   }
 }
