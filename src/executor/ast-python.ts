@@ -17,7 +17,7 @@ const ALLOWED_NODE_TYPES = new Set([
   "RShift", "Invert", "Not", "UAdd", "USub", "Eq", "NotEq",
   "Lt", "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn",
   "And", "Or", "keyword", "comprehension", "Starred",
-  "IfExp"
+  "IfExp", "GeneratorExp", "Lambda", "Slice"
 ]);
 
 const BLOCKED_BUILTINS = new Set([

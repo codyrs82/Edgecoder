@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import { verifyPayload } from "../mesh/peer.js";
+import { extractCode } from "../model/extract.js";
 
 const app = Fastify({ logger: true });
 const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
@@ -145,7 +146,7 @@ const escalateSchema = z.object({
 app.post("/escalate", async (req, reply) => {
   const body = escalateSchema.parse(req.body);
   const ollamaEndpoint = process.env.OLLAMA_GENERATE_ENDPOINT ?? "http://127.0.0.1:11434/api/generate";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:7b";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
 
   const errorContext = body.errorHistory.length > 0
     ? `\n\nPrevious errors:\n${body.errorHistory.join("\n")}`
@@ -169,7 +170,8 @@ Write correct, working ${body.language} code that solves the task. Output ONLY e
     });
 
     const payload = (await ollamaRes.body.json()) as { response?: string };
-    const improvedCode = payload.response ?? "";
+    const raw = payload.response ?? "";
+    const improvedCode = raw ? extractCode(raw, body.language) : "";
 
     return reply.send({
       improvedCode,
