@@ -24,7 +24,7 @@ import {
   WalletAccount
 } from "../common/types.js";
 
-const SCHEMA_SQL = `
+export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS queue_tasks (
   subtask_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -120,7 +120,9 @@ CREATE TABLE IF NOT EXISTS agent_registry (
   version TEXT NOT NULL,
   mode TEXT NOT NULL,
   local_model_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-  last_seen_ms BIGINT NOT NULL
+  last_seen_ms BIGINT NOT NULL,
+  active_model TEXT,
+  active_model_param_size DOUBLE PRECISION
 );
 
 CREATE TABLE IF NOT EXISTS blacklist_events (
@@ -1101,17 +1103,21 @@ export class PostgresStore {
     mode: string;
     localModelEnabled: boolean;
     lastSeenMs: number;
+    activeModel?: string;
+    activeModelParamSize?: number;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO agent_registry (agent_id, os, version, mode, local_model_enabled, last_seen_ms)
-       VALUES ($1,$2,$3,$4,$5,$6)
+      `INSERT INTO agent_registry (agent_id, os, version, mode, local_model_enabled, last_seen_ms, active_model, active_model_param_size)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (agent_id) DO UPDATE SET
          os = EXCLUDED.os,
          version = EXCLUDED.version,
          mode = EXCLUDED.mode,
          local_model_enabled = EXCLUDED.local_model_enabled,
-         last_seen_ms = EXCLUDED.last_seen_ms`,
-      [input.agentId, input.os, input.version, input.mode, input.localModelEnabled, input.lastSeenMs]
+         last_seen_ms = EXCLUDED.last_seen_ms,
+         active_model = EXCLUDED.active_model,
+         active_model_param_size = EXCLUDED.active_model_param_size`,
+      [input.agentId, input.os, input.version, input.mode, input.localModelEnabled, input.lastSeenMs, input.activeModel ?? null, input.activeModelParamSize ?? null]
     );
   }
 
@@ -1123,10 +1129,12 @@ export class PostgresStore {
       mode: string;
       localModelEnabled: boolean;
       lastSeenMs: number;
+      activeModel: string | null;
+      activeModelParamSize: number | null;
     }>
   > {
     const result = await this.pool.query(
-      `SELECT agent_id, os, version, mode, local_model_enabled, last_seen_ms
+      `SELECT agent_id, os, version, mode, local_model_enabled, last_seen_ms, active_model, active_model_param_size
        FROM agent_registry
        ORDER BY last_seen_ms DESC`
     );
@@ -1136,7 +1144,9 @@ export class PostgresStore {
       version: row.version,
       mode: row.mode,
       localModelEnabled: Boolean(row.local_model_enabled),
-      lastSeenMs: Number(row.last_seen_ms)
+      lastSeenMs: Number(row.last_seen_ms),
+      activeModel: row.active_model ?? null,
+      activeModelParamSize: row.active_model_param_size != null ? Number(row.active_model_param_size) : null
     }));
   }
 
