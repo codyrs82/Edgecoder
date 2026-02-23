@@ -3402,6 +3402,42 @@ app.get("/escalate/:taskId", async (req, reply) => {
   return reply.send(rest);
 });
 
+const bleSyncSchema = z.object({
+  transactions: z.array(z.object({
+    txId: z.string(),
+    requesterId: z.string(),
+    providerId: z.string(),
+    requesterAccountId: z.string(),
+    providerAccountId: z.string(),
+    credits: z.number().min(0),
+    cpuSeconds: z.number().min(0),
+    taskHash: z.string(),
+    timestamp: z.number(),
+    requesterSignature: z.string(),
+    providerSignature: z.string()
+  }))
+});
+
+const syncedBLETxIds = new Set<string>();
+
+app.post("/credits/ble-sync", async (req, reply) => {
+  const body = bleSyncSchema.parse(req.body);
+  const applied: string[] = [];
+  const skipped: string[] = [];
+
+  for (const tx of body.transactions) {
+    if (syncedBLETxIds.has(tx.txId)) {
+      skipped.push(tx.txId);
+      continue;
+    }
+    // TODO: verify requesterSignature and providerSignature with ed25519
+    syncedBLETxIds.add(tx.txId);
+    applied.push(tx.txId);
+  }
+
+  return reply.send({ applied, skipped, total: body.transactions.length });
+});
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
     .then(async () => {
