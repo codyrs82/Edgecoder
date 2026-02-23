@@ -2424,6 +2424,19 @@ app.post("/mesh/ingest", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+app.get("/mesh/capabilities", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const model = (req.query as Record<string, string>).model;
+  const entries = [...federatedCapabilities.values()];
+  if (model) {
+    const filtered = entries.filter(
+      (c) => c.modelAvailability[model]?.agentCount > 0
+    );
+    return reply.send({ coordinators: filtered });
+  }
+  return reply.send({ coordinators: entries });
+});
+
 app.get("/ledger/snapshot", async () => ({ records: ordering.snapshot(), proof: ordering.latestProof() }));
 app.get("/ledger/verify", async () => {
   const validation = verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem);
