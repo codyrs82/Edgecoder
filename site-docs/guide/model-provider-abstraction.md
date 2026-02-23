@@ -58,3 +58,32 @@ flowchart LR
 - [Executor Sandbox and Isolation](/guide/executor-sandbox-isolation)
 - [Runtime Modes](/reference/runtime-modes)
 - [Environment Variables](/reference/environment-variables)
+
+## llama.cpp (iOS)
+
+iOS devices use llama.cpp for on-device inference with GGUF model files. The `LocalModelManager` handles model lifecycle:
+
+- Download GGUF files from EdgeCoder CDN
+- SHA-256 checksum verification
+- Load into llama.cpp context
+- Generate completions via `llama_decode` / `llama_sampling`
+- Single model in memory (iPhone RAM constraint)
+
+### Model Quality Multiplier
+
+Credit earnings scale with model capability to incentivize running larger models:
+
+| Model Size | Multiplier | Example |
+|---|---|---|
+| 7B+ parameters | 1.0x | Full credit rate |
+| 3B-7B | 0.7x | 70% credit rate |
+| 1.5B-3B | 0.5x | 50% credit rate |
+| < 1.5B | 0.3x | 30% credit rate |
+
+### Runtime Model Swap
+
+Models can be swapped at runtime via:
+- **iOS**: ModelLibraryView UI → `LocalModelManager.activate(modelId)`
+- **Node.js**: `POST /model/swap` HTTP endpoint
+
+Both trigger BLE re-advertisement and heartbeat capability updates.
