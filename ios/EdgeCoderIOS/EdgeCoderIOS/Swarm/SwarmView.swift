@@ -48,12 +48,8 @@ struct SwarmView: View {
                 }
 
                 Section("Local Model") {
-                    TextField("Model", text: $modelManager.selectedModel)
-                    LabeledContent("State", value: modelManager.state.rawValue)
-                    LabeledContent("Runtime mode", value: "llama.cpp/Core ML scaffold")
-                    Text(modelManager.statusText).font(.caption)
-                    LabeledContent("Param size", value: String(format: "%.1fB", modelManager.selectedModelParamSize))
-                    LabeledContent("Installed", value: "\(modelManager.installedModels.count) model(s)")
+                    ModelPickerView(modelManager: modelManager)
+                    ModelStatusBanner(modelManager: modelManager)
                     TextField("Prompt", text: $prompt, axis: .vertical)
                     Button("Run local inference") {
                         Task { await modelManager.runInference(prompt: prompt) }
