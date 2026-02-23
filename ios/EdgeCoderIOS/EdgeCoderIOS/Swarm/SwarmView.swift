@@ -24,7 +24,17 @@ struct SwarmView: View {
                     LabeledContent("Low Power Mode", value: swarmRuntime.isLowPowerMode ? "on" : "off")
                     LabeledContent("External Power", value: swarmRuntime.isOnExternalPower ? "yes" : "no")
                     LabeledContent("Heartbeats sent", value: String(swarmRuntime.heartbeatCount))
-                    LabeledContent("Tasks observed", value: String(swarmRuntime.coordinatorTasksObserved))
+                    LabeledContent("Tasks pulled", value: String(swarmRuntime.coordinatorTasksObserved))
+                    LabeledContent("Tasks completed", value: String(swarmRuntime.tasksCompleted))
+                    LabeledContent("Tasks failed", value: String(swarmRuntime.tasksFailed))
+                    LabeledContent("Credits earned", value: String(swarmRuntime.creditsEarned))
+                    if swarmRuntime.isProcessingTask {
+                        LabeledContent("Status", value: "Processing task...")
+                    }
+                    LabeledContent(
+                        "Last task",
+                        value: swarmRuntime.lastTaskAt?.formatted(date: .omitted, time: .standard) ?? "n/a"
+                    )
                     LabeledContent(
                         "Last heartbeat",
                         value: swarmRuntime.lastHeartbeatAt?.formatted(date: .omitted, time: .standard) ?? "n/a"
@@ -53,10 +63,14 @@ struct SwarmView: View {
                 Section("Local Model") {
                     ModelPickerView(modelManager: swarmRuntime.modelManager)
                     ModelStatusBanner(modelManager: swarmRuntime.modelManager)
+                }
+
+                Section("Test Inference") {
                     TextField("Prompt", text: $prompt, axis: .vertical)
-                    Button("Run local inference") {
+                    Button("Run test inference") {
                         Task { await swarmRuntime.modelManager.runInference(prompt: prompt) }
                     }
+                    .disabled(swarmRuntime.modelManager.state != .ready)
                     if !swarmRuntime.modelManager.lastInferenceOutput.isEmpty {
                         Text(swarmRuntime.modelManager.lastInferenceOutput)
                             .font(.caption)

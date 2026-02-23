@@ -23,6 +23,11 @@ final class SwarmRuntimeController: ObservableObject {
     @Published var heartbeatCount = 0
     @Published var lastHeartbeatAt: Date?
     @Published var coordinatorTasksObserved = 0
+    @Published var tasksCompleted = 0
+    @Published var tasksFailed = 0
+    @Published var creditsEarned = 0
+    @Published var lastTaskAt: Date?
+    @Published var isProcessingTask = false
     @Published var lastRegisterAt: Date?
     @Published var lastRegisterError = ""
     @Published var runtimeEvents: [String] = []
@@ -44,6 +49,9 @@ final class SwarmRuntimeController: ObservableObject {
         static let diagnosticsUploadEnabled = "edgecoder.diagnosticsUploadEnabled"
         static let heartbeatCount = "edgecoder.heartbeatCount"
         static let coordinatorTasksObserved = "edgecoder.coordinatorTasksObserved"
+        static let tasksCompleted = "edgecoder.tasksCompleted"
+        static let tasksFailed = "edgecoder.tasksFailed"
+        static let creditsEarned = "edgecoder.creditsEarned"
         static let autoStartEnabled = "edgecoder.autoStartEnabled"
     }
 
@@ -88,6 +96,9 @@ final class SwarmRuntimeController: ObservableObject {
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
         heartbeatCount = UserDefaults.standard.integer(forKey: DefaultsKey.heartbeatCount)
         coordinatorTasksObserved = UserDefaults.standard.integer(forKey: DefaultsKey.coordinatorTasksObserved)
+        tasksCompleted = UserDefaults.standard.integer(forKey: DefaultsKey.tasksCompleted)
+        tasksFailed = UserDefaults.standard.integer(forKey: DefaultsKey.tasksFailed)
+        creditsEarned = UserDefaults.standard.integer(forKey: DefaultsKey.creditsEarned)
         autoStartEnabled = UserDefaults.standard.object(forKey: DefaultsKey.autoStartEnabled) as? Bool ?? true
         persistRuntimeSettings()
     }
@@ -163,6 +174,39 @@ final class SwarmRuntimeController: ObservableObject {
         appendEvent(statusText)
         await discoverCoordinators()
         bleMeshManager.start()
+        bleMeshManager.startAdvertising(
+            agentId: agentId,
+            model: modelManager.selectedModel,
+            modelParamSize: modelManager.selectedModelParamSize
+        )
+        bleMeshManager.startScanning()
+
+        // Wire BLE task handler to local inference
+        let mgr = modelManager
+        bleMeshManager.taskHandler = { prompt in
+            await mgr.generate(prompt: prompt, maxTokens: 512)
+        }
+
+        // One-time BLE outbound task test: wait for peer discovery, then send a task to Mac
+        Task { [weak self] in
+            guard let self else { return }
+            // Wait for peer discovery (up to 30s)
+            for _ in 0..<30 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if !self.bleMeshManager.discoveredPeers.isEmpty { break }
+            }
+            guard let macPeer = self.bleMeshManager.discoveredPeers.first else {
+                self.appendEvent("[BLE-TEST] no BLE peers discovered, skipping outbound test")
+                return
+            }
+            self.appendEvent("[BLE-TEST] sending task to \(macPeer.agentId) over BLE...")
+            let result = await self.bleMeshManager.sendTask(
+                toAgentId: macPeer.agentId,
+                prompt: "Write a Python function called fibonacci(n) that returns a list of the first n Fibonacci numbers. Include a docstring.",
+                tag: "test"
+            )
+            self.appendEvent("[BLE-TEST] response from \(macPeer.agentId): ok=\(result.ok), output=\(result.output.prefix(150))")
+        }
     }
 
     func pause() {
@@ -242,6 +286,9 @@ final class SwarmRuntimeController: ObservableObject {
         UserDefaults.standard.set(autoStartEnabled, forKey: DefaultsKey.autoStartEnabled)
         UserDefaults.standard.set(heartbeatCount, forKey: DefaultsKey.heartbeatCount)
         UserDefaults.standard.set(coordinatorTasksObserved, forKey: DefaultsKey.coordinatorTasksObserved)
+        UserDefaults.standard.set(tasksCompleted, forKey: DefaultsKey.tasksCompleted)
+        UserDefaults.standard.set(tasksFailed, forKey: DefaultsKey.tasksFailed)
+        UserDefaults.standard.set(creditsEarned, forKey: DefaultsKey.creditsEarned)
     }
 
     private func runtimeLoop() async {
@@ -249,7 +296,12 @@ final class SwarmRuntimeController: ObservableObject {
             let registered = await registerAgent()
             if registered {
                 await sendHeartbeat()
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // Poll for tasks between heartbeats (3 polls per 15s cycle)
+                for _ in 0..<3 {
+                    guard !Task.isCancelled else { break }
+                    await pollAndExecuteTask()
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
             } else {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
@@ -335,7 +387,6 @@ final class SwarmRuntimeController: ObservableObject {
                 appendEvent("Back online — syncing offline ledger.")
                 await syncOfflineLedger()
             }
-            await observeCoordinatorPull()
         } catch is CancellationError {
             return
         } catch {
@@ -359,16 +410,63 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    private func observeCoordinatorPull() async {
+    /// Poll for a task and execute it if one is available.
+    private func pollAndExecuteTask() async {
+        guard modelManager.state == .ready else { return }
+        guard !isProcessingTask else { return }
+
         do {
-            let payload: [String: Any] = ["agentId": agentId]
-            let response = try await postCoordinator(path: "/pull", payload: payload)
-            if response["subtask"] is [String: Any] {
-                coordinatorTasksObserved += 1
-                persistRuntimeSettings()
+            let pullPayload: [String: Any] = ["agentId": agentId]
+            let response = try await postCoordinator(path: "/pull", payload: pullPayload)
+
+            guard let subtask = response["subtask"] as? [String: Any] else {
+                return // No task available — idle
             }
+
+            let subtaskId = subtask["id"] as? String ?? ""
+            let taskId = subtask["taskId"] as? String ?? ""
+            let input = subtask["input"] as? String ?? ""
+
+            guard !subtaskId.isEmpty, !input.isEmpty else { return }
+
+            coordinatorTasksObserved += 1
+            isProcessingTask = true
+            appendEvent("Task \(subtaskId.prefix(8))… pulled — running inference.")
+
+            // Execute inference
+            let result = await modelManager.generate(prompt: input, maxTokens: 512)
+
+            // Build result payload matching coordinator /result schema
+            let resultPayload: [String: Any] = [
+                "subtaskId": subtaskId,
+                "taskId": taskId,
+                "agentId": agentId,
+                "ok": result.ok,
+                "output": result.output,
+                "durationMs": result.durationMs
+            ]
+
+            // POST result back to coordinator
+            _ = try await postCoordinator(path: "/result", payload: resultPayload)
+
+            lastTaskAt = Date()
+            if result.ok {
+                tasksCompleted += 1
+                creditsEarned += 5
+                appendEvent("Task \(subtaskId.prefix(8))… completed (\(result.durationMs)ms) — +5 credits")
+            } else {
+                tasksFailed += 1
+                creditsEarned += 2
+                appendEvent("Task \(subtaskId.prefix(8))… failed (\(result.durationMs)ms) — +2 credits")
+            }
+            isProcessingTask = false
+            persistRuntimeSettings()
+        } catch is CancellationError {
+            isProcessingTask = false
         } catch {
-            // Non-fatal telemetry path; ignore pull observation errors.
+            isProcessingTask = false
+            // Non-fatal; will retry on next poll cycle
+            appendEvent("Task poll/exec error: \(error.localizedDescription)")
         }
     }
 
