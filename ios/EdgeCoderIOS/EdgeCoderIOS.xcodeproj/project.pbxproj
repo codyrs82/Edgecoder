@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A01B1E01AE5F0001C0DE0001 /* BLEChunkedTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01B1E02AE5F0002C0DE0002 /* BLEChunkedTransfer.swift */; };
+		A01B1E03AE5F0003C0DE0003 /* BLEConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01B1E04AE5F0004C0DE0004 /* BLEConstants.swift */; };
 		13ED689E127B2952CBA018B1 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */; };
 		19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAD6A52065D67AE6D4BF8759 /* EdgeCoderIOSApp.swift */; };
 		1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 779E2AB1376A5FBD38731F04 /* Models.swift */; };
@@ -27,6 +29,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A01B1E02AE5F0002C0DE0002 /* BLEChunkedTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEChunkedTransfer.swift; sourceTree = "<group>"; };
+		A01B1E04AE5F0004C0DE0004 /* BLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEConstants.swift; sourceTree = "<group>"; };
 		23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyManager.swift; sourceTree = "<group>"; };
 		2733B6A0674685579153C996 /* LocalModelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelManager.swift; sourceTree = "<group>"; };
 		29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwarmView.swift; sourceTree = "<group>"; };
@@ -61,6 +65,7 @@
 				FDEE1292B3D1F5E347B13F1B /* Auth */,
 				18E84012372F925E131AE0E7 /* Core */,
 				72C65A6CF93352209D512BDB /* Dashboard */,
+				A01B1E05AE5F0005C0DE0005 /* Mesh */,
 				BFD567845246254C2BD775EA /* Settings */,
 				52DB63257A4399AEAEA84C73 /* Shared */,
 				228422E15E6E4FB35FE21ADC /* Swarm */,
@@ -136,6 +141,15 @@
 				58F68F1BB89F29F23B394ED2 /* SettingsView.swift */,
 			);
 			path = Settings;
+			sourceTree = "<group>";
+		};
+		A01B1E05AE5F0005C0DE0005 /* Mesh */ = {
+			isa = PBXGroup;
+			children = (
+				A01B1E02AE5F0002C0DE0002 /* BLEChunkedTransfer.swift */,
+				A01B1E04AE5F0004C0DE0004 /* BLEConstants.swift */,
+			);
+			path = Mesh;
 			sourceTree = "<group>";
 		};
 		FDEE1292B3D1F5E347B13F1B /* Auth */ = {
@@ -220,6 +234,8 @@
 			files = (
 				F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */,
 				13ED689E127B2952CBA018B1 /* AppConfig.swift in Sources */,
+				A01B1E01AE5F0001C0DE0001 /* BLEChunkedTransfer.swift in Sources */,
+				A01B1E03AE5F0003C0DE0003 /* BLEConstants.swift in Sources */,
 				C3898FECA10395D8E89075FE /* AuthView.swift in Sources */,
 				6D94E4336CA624DB6CE14431 /* AuthViewModel.swift in Sources */,
 				CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */,
