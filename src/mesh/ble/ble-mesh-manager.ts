@@ -5,6 +5,14 @@ import { BLETransport } from "./ble-transport.js";
 import { BLERouter } from "./ble-router.js";
 import { OfflineLedger } from "./offline-ledger.js";
 
+/** Maps model param size to a credit quality multiplier */
+export function modelQualityMultiplier(paramSize: number): number {
+  if (paramSize >= 7) return 1.0;
+  if (paramSize >= 3) return 0.7;
+  if (paramSize >= 1.5) return 0.5;
+  return 0.3;
+}
+
 export class BLEMeshManager {
   private offline = false;
   private readonly router = new BLERouter();
@@ -54,7 +62,8 @@ export class BLEMeshManager {
 
     if (response.status === "completed") {
       const taskHash = createHash("sha256").update(request.task).digest("hex");
-      const credits = response.cpuSeconds * baseRatePerSecond("cpu");
+      const qualityMul = modelQualityMultiplier(bestPeer.modelParamSize);
+      const credits = response.cpuSeconds * baseRatePerSecond("cpu") * qualityMul;
       const tx: BLECreditTransaction = {
         txId: randomUUID(),
         requesterId: this.agentId,

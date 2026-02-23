@@ -27,14 +27,15 @@ export class BLERouter {
     }
   }
 
-  computeCost(peer: BLEPeerEntry, requiredModelSize: number): number {
-    const modelFitPenalty = peer.modelParamSize >= requiredModelSize ? 0 : 100;
+  computeCost(peer: BLEPeerEntry, _requiredModelSize?: number): number {
+    // Graduated model preference: smaller models cost more but are never rejected
+    const modelPreferencePenalty = Math.max(0, (7 - peer.modelParamSize) * 8);
     const loadPenalty = peer.currentLoad * 20;
     const batteryPenalty = peer.deviceType === "phone"
       ? (100 - peer.batteryPct) * 0.5
       : 0;
     const signalPenalty = Math.min(30, Math.max(0, (-peer.rssi - 30) * 0.5));
-    return modelFitPenalty + loadPenalty + batteryPenalty + signalPenalty;
+    return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty;
   }
 
   selectBestPeer(requiredModelSize: number): BLEPeerEntry | null {

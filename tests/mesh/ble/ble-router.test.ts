@@ -66,4 +66,20 @@ describe("BLERouter", () => {
     const best = router.selectBestPeer(7);
     expect(best).toBeNull();
   });
+
+  it("accepts any model size (no hard rejection)", () => {
+    const router = new BLERouter();
+    // A small model is still routable — just higher cost
+    router.updatePeer(makePeer({ agentId: "tiny", modelParamSize: 0.5, currentLoad: 0, rssi: -40 }));
+    const best = router.selectBestPeer(7);
+    expect(best).not.toBeNull();
+    expect(best?.agentId).toBe("tiny");
+  });
+
+  it("prefers larger models via graduated cost", () => {
+    const router = new BLERouter();
+    const small = makePeer({ agentId: "small", modelParamSize: 1.5, rssi: -50 });
+    const large = makePeer({ agentId: "large", modelParamSize: 7, rssi: -50 });
+    expect(router.computeCost(large)).toBeLessThan(router.computeCost(small));
+  });
 });
