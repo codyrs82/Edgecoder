@@ -4,6 +4,7 @@ import { baseRatePerSecond } from "../../credits/pricing.js";
 import { BLETransport } from "./ble-transport.js";
 import { BLERouter } from "./ble-router.js";
 import { OfflineLedger } from "./offline-ledger.js";
+import type { SQLiteStore } from "../../db/sqlite-store.js";
 
 /** Maps model param size to a credit quality multiplier */
 export function modelQualityMultiplier(paramSize: number): number {
@@ -16,15 +17,16 @@ export function modelQualityMultiplier(paramSize: number): number {
 export class BLEMeshManager {
   private offline = false;
   private readonly router = new BLERouter();
-  private readonly ledger = new OfflineLedger();
+  private readonly ledger: OfflineLedger;
   private readonly transport: BLETransport;
   private readonly agentId: string;
   private readonly accountId: string;
 
-  constructor(agentId: string, accountId: string, transport: BLETransport) {
+  constructor(agentId: string, accountId: string, transport: BLETransport, store?: SQLiteStore) {
     this.agentId = agentId;
     this.accountId = accountId;
     this.transport = transport;
+    this.ledger = new OfflineLedger(store);
   }
 
   isOffline(): boolean {

@@ -237,4 +237,43 @@ describe("SQLiteStore", () => {
       expect(pending[0].payload).toBe("new-payload");
     });
   });
+
+  // ── BLE Credit Ledger ───────────────────────────────────────
+
+  describe("BLE credit ledger", () => {
+    it("records and lists an unsynced credit transaction", () => {
+      store.recordBLECreditTx("tx-1", "requester-a", "provider-b", 0.5, 1.2, "abc123");
+      const unsynced = store.listUnsyncedBLECredits();
+      expect(unsynced).toHaveLength(1);
+      expect(unsynced[0].txId).toBe("tx-1");
+      expect(unsynced[0].requesterId).toBe("requester-a");
+      expect(unsynced[0].providerId).toBe("provider-b");
+      expect(unsynced[0].credits).toBe(0.5);
+      expect(unsynced[0].cpuSeconds).toBe(1.2);
+      expect(unsynced[0].taskHash).toBe("abc123");
+      expect(unsynced[0].synced).toBe(0);
+    });
+
+    it("markBLECreditsSynced excludes from unsynced list", () => {
+      store.recordBLECreditTx("tx-1", "a", "b", 1, 1, "h1");
+      store.recordBLECreditTx("tx-2", "a", "b", 2, 2, "h2");
+      store.markBLECreditsSynced(["tx-1"]);
+      const unsynced = store.listUnsyncedBLECredits();
+      expect(unsynced).toHaveLength(1);
+      expect(unsynced[0].txId).toBe("tx-2");
+    });
+
+    it("markBLECreditsSynced handles empty array", () => {
+      store.recordBLECreditTx("tx-1", "a", "b", 1, 1, "h1");
+      store.markBLECreditsSynced([]);
+      expect(store.listUnsyncedBLECredits()).toHaveLength(1);
+    });
+
+    it("respects limit", () => {
+      for (let i = 0; i < 5; i++) {
+        store.recordBLECreditTx(`tx-${i}`, "a", "b", i, i, `h${i}`);
+      }
+      expect(store.listUnsyncedBLECredits(2)).toHaveLength(2);
+    });
+  });
 });

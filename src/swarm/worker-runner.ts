@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
-import { Subtask } from "../common/types.js";
+import { Subtask, BLETaskRequest, Language } from "../common/types.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
@@ -217,6 +217,19 @@ async function flushPendingResults(): Promise<void> {
   }
 }
 
+async function flushOfflineLedger(): Promise<void> {
+  const unsynced = localStore.listUnsyncedBLECredits(50);
+  if (unsynced.length === 0) return;
+  console.log(`[agent:${AGENT_ID}] flushing ${unsynced.length} BLE credit transaction(s)`);
+  try {
+    await post("/credits/ble-sync", { transactions: unsynced });
+    localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
+    console.log(`[agent:${AGENT_ID}] BLE credits synced`);
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] BLE credit flush failed (will retry): ${String(e)}`);
+  }
+}
+
 async function loop(): Promise<void> {
   const coordinatorSelection = await resolveCoordinatorUrl();
   activeCoordinatorUrl = coordinatorSelection.url;
@@ -244,7 +257,7 @@ async function loop(): Promise<void> {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
-      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport);
+      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore);
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
         model: OLLAMA_MODEL,
@@ -259,24 +272,30 @@ async function loop(): Promise<void> {
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
         console.log(`[BLE] processing incoming task: ${req.requestId}`);
+        const subtaskId = `ble-${req.requestId}`;
+        try { localStore.recordTaskStart(subtaskId, subtaskId, req.task, req.language ?? "python", "ble-incoming", "ble-mesh"); } catch (e) { console.warn(`[db] BLE task start write failed: ${e}`); }
         const started = Date.now();
         try {
           const response = await providers.current().generate({ prompt: req.task });
+          const durationMs = Date.now() - started;
+          try { localStore.recordTaskComplete(subtaskId, response.text, durationMs); } catch (e) { console.warn(`[db] BLE task complete write failed: ${e}`); }
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
             status: "completed" as const,
             output: response.text,
-            cpuSeconds: (Date.now() - started) / 1000,
+            cpuSeconds: durationMs / 1000,
             providerSignature: "",
           };
         } catch (e) {
+          const durationMs = Date.now() - started;
+          try { localStore.recordTaskFailed(subtaskId, String(e), durationMs); } catch (dbErr) { console.warn(`[db] BLE task fail write failed: ${dbErr}`); }
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
             status: "failed" as const,
             output: String(e),
-            cpuSeconds: (Date.now() - started) / 1000,
+            cpuSeconds: durationMs / 1000,
             providerSignature: "",
           };
         }
@@ -610,8 +629,38 @@ async function loop(): Promise<void> {
             bleMesh?.setOffline(false);
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
+            await flushOfflineLedger();
           } catch {
             console.log(`[agent:${AGENT_ID}] offline probe failed, still offline`);
+          }
+        }
+
+        // Process outbound task queue via BLE peers while offline
+        if (bleMesh && bleTransport) {
+          const peers = bleTransport.discoveredPeers();
+          for (const peer of peers) {
+            const task = localStore.claimNextOutbound(peer.agentId);
+            if (!task) continue;
+            const bleReq: BLETaskRequest = {
+              requestId: task.id,
+              requesterId: AGENT_ID,
+              task: task.prompt,
+              language: task.language as Language,
+              requesterSignature: "",
+            };
+            try {
+              const resp = await bleMesh.routeTask(bleReq, 0);
+              if (resp && resp.status === "completed") {
+                localStore.completeOutbound(task.id, resp.output ?? "");
+                console.log(`[agent:${AGENT_ID}] BLE outbound task completed: ${task.id}`);
+              } else {
+                localStore.failOutbound(task.id);
+                console.warn(`[agent:${AGENT_ID}] BLE outbound task failed: ${task.id}`);
+              }
+            } catch (e) {
+              localStore.failOutbound(task.id);
+              console.warn(`[agent:${AGENT_ID}] BLE outbound task error: ${task.id} - ${String(e)}`);
+            }
           }
         }
       }
