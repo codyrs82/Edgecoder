@@ -103,6 +103,7 @@ export class NobleBLETransport implements BLETransport {
         agentId: ad.agentId,
         model: ad.model,
         modelParamSize: ad.modelParamSize,
+        meshTokenHash: ad.meshTokenHash ?? "",
       })
     );
 
@@ -589,7 +590,7 @@ export class NobleBLETransport implements BLETransport {
                     const agentId = parsed.agentId ?? peripheralId;
                     const peer: BLEPeerEntry = {
                       agentId,
-                      meshTokenHash: "",
+                      meshTokenHash: parsed.meshTokenHash ?? "",
                       accountId: agentId,
                       model: parsed.model ?? "",
                       modelParamSize: parsed.modelParamSize ?? 0,

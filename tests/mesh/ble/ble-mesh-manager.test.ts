@@ -230,6 +230,67 @@ describe("BLEMeshManager trust scoring integration", () => {
   });
 });
 
+describe("BLEMeshManager mesh token auth", () => {
+  it("routeTask skips peers with mismatched mesh token hash", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportB = new MockBLETransport("agent-b", network);
+    transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop", meshTokenHash: "different-hash" });
+    transportB.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "agent-b",
+      status: "completed" as const,
+      output: "ok",
+      cpuSeconds: 1.0,
+      providerSignature: "",
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA);
+    manager.setOwnTokenHash("my-hash");
+    manager.setOffline(true);
+
+    const result = await manager.routeTask({
+      requestId: "req-1",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 1.5);
+
+    expect(result).toBeNull();
+  });
+
+  it("routeTask succeeds when peer has matching mesh token hash", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportB = new MockBLETransport("agent-b", network);
+    transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop", meshTokenHash: "shared-hash" });
+    transportB.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "agent-b",
+      status: "completed" as const,
+      output: "authenticated",
+      cpuSeconds: 1.0,
+      providerSignature: "",
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOwnTokenHash("shared-hash");
+    manager.setOffline(true);
+
+    const result = await manager.routeTask({
+      requestId: "req-1",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 1.5);
+
+    expect(result).not.toBeNull();
+    expect(result!.output).toBe("authenticated");
+  });
+});
+
 describe("modelQualityMultiplier", () => {
   it("returns 1.0 for 7B+ models", () => {
     expect(modelQualityMultiplier(7)).toBe(1.0);

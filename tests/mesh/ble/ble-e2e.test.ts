@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
+import { BLETaskRequest, BLETaskResponse } from "../../../src/common/types.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
 
 let store: SQLiteStore;
@@ -157,5 +159,225 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending).toHaveLength(1);
     // 0.5B model -> 0.3x multiplier -> 5.0 cpuSeconds * 1.0 baseRate * 0.3 = 1.5 credits
     expect(pending[0].credits).toBe(1.5);
+  });
+
+  it("peers with same mesh token hash can exchange tasks", async () => {
+    const TOKEN_HASH = createHash("sha256").update("shared-secret").digest("hex");
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const laptopTransport = new MockBLETransport("laptop", network);
+
+    laptopTransport.startAdvertising({
+      agentId: "laptop",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+      meshTokenHash: TOKEN_HASH,
+    });
+    laptopTransport.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "laptop",
+      status: "completed" as const,
+      output: "authenticated-result",
+      cpuSeconds: 1.0,
+      providerSignature: "",
+    }));
+
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    mesh.setOwnTokenHash(TOKEN_HASH);
+    mesh.setOffline(true);
+
+    const result = await mesh.routeTask({
+      requestId: "auth-test",
+      requesterId: "phone",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 1.5);
+
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("completed");
+    expect(result!.output).toBe("authenticated-result");
+  });
+
+  it("inbound auth: laptop rejects task from unauthenticated phone (worker-runner pattern)", async () => {
+    const LAPTOP_HASH = createHash("sha256").update("coordinator-A").digest("hex");
+    const PHONE_HASH = createHash("sha256").update("coordinator-B").digest("hex");
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const laptopTransport = new MockBLETransport("laptop", network);
+
+    // Phone advertises with a different coordinator hash
+    phoneTransport.startAdvertising({
+      agentId: "phone",
+      model: "qwen2.5-coder:1.5b",
+      modelParamSize: 1.5,
+      memoryMB: 4096,
+      batteryPct: 90,
+      currentLoad: 0,
+      deviceType: "phone",
+      meshTokenHash: PHONE_HASH,
+    });
+
+    // Laptop registers an inbound handler that replicates worker-runner.ts auth check
+    laptopTransport.startAdvertising({
+      agentId: "laptop",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+      meshTokenHash: LAPTOP_HASH,
+    });
+    laptopTransport.startScanning();
+
+    laptopTransport.onTaskRequest(async (req: BLETaskRequest): Promise<BLETaskResponse> => {
+      // Replicate the auth check from worker-runner.ts onTaskRequest
+      const ownHash = LAPTOP_HASH;
+      if (ownHash) {
+        const peers = laptopTransport.discoveredPeers();
+        const requesterPeer = peers.find(p => p.agentId === req.requesterId);
+        if (!requesterPeer || requesterPeer.meshTokenHash !== ownHash) {
+          return {
+            requestId: req.requestId,
+            providerId: "laptop",
+            status: "failed",
+            output: "mesh_token_mismatch",
+            cpuSeconds: 0,
+            providerSignature: "",
+          };
+        }
+      }
+      return {
+        requestId: req.requestId,
+        providerId: "laptop",
+        status: "completed",
+        output: "should-not-reach",
+        cpuSeconds: 1.0,
+        providerSignature: "",
+      };
+    });
+
+    // Phone sends a direct task request to laptop (bypassing router)
+    const resp = await phoneTransport.sendTaskRequest("laptop", {
+      requestId: "unauth-req",
+      requesterId: "phone",
+      task: "steal compute",
+      language: "python",
+      requesterSignature: "",
+    });
+
+    expect(resp.status).toBe("failed");
+    expect(resp.output).toBe("mesh_token_mismatch");
+  });
+
+  it("inbound auth: laptop accepts task from authenticated phone (same coordinator)", async () => {
+    const SHARED_HASH = createHash("sha256").update("same-coordinator").digest("hex");
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const laptopTransport = new MockBLETransport("laptop", network);
+
+    phoneTransport.startAdvertising({
+      agentId: "phone",
+      model: "qwen2.5-coder:1.5b",
+      modelParamSize: 1.5,
+      memoryMB: 4096,
+      batteryPct: 90,
+      currentLoad: 0,
+      deviceType: "phone",
+      meshTokenHash: SHARED_HASH,
+    });
+
+    laptopTransport.startAdvertising({
+      agentId: "laptop",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+      meshTokenHash: SHARED_HASH,
+    });
+    laptopTransport.startScanning();
+
+    laptopTransport.onTaskRequest(async (req: BLETaskRequest): Promise<BLETaskResponse> => {
+      const ownHash = SHARED_HASH;
+      if (ownHash) {
+        const peers = laptopTransport.discoveredPeers();
+        const requesterPeer = peers.find(p => p.agentId === req.requesterId);
+        if (!requesterPeer || requesterPeer.meshTokenHash !== ownHash) {
+          return {
+            requestId: req.requestId,
+            providerId: "laptop",
+            status: "failed",
+            output: "mesh_token_mismatch",
+            cpuSeconds: 0,
+            providerSignature: "",
+          };
+        }
+      }
+      return {
+        requestId: req.requestId,
+        providerId: "laptop",
+        status: "completed",
+        output: "authenticated-work-done",
+        cpuSeconds: 2.0,
+        providerSignature: "",
+      };
+    });
+
+    const resp = await phoneTransport.sendTaskRequest("laptop", {
+      requestId: "auth-req",
+      requesterId: "phone",
+      task: "do work",
+      language: "python",
+      requesterSignature: "",
+    });
+
+    expect(resp.status).toBe("completed");
+    expect(resp.output).toBe("authenticated-work-done");
+  });
+
+  it("peers with different mesh token hashes cannot exchange tasks", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const laptopTransport = new MockBLETransport("laptop", network);
+
+    laptopTransport.startAdvertising({
+      agentId: "laptop",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+      meshTokenHash: "coordinator-A-hash",
+    });
+    laptopTransport.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "laptop",
+      status: "completed" as const,
+      output: "should-not-reach",
+      cpuSeconds: 1.0,
+      providerSignature: "",
+    }));
+
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    mesh.setOwnTokenHash("coordinator-B-hash");
+    mesh.setOffline(true);
+
+    const result = await mesh.routeTask({
+      requestId: "cross-mesh-test",
+      requesterId: "phone",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 1.5);
+
+    expect(result).toBeNull();
   });
 });

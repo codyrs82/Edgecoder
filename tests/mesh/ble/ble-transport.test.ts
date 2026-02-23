@@ -43,6 +43,27 @@ describe("MockBLETransport", () => {
     expect(response.generatedCode).toBe("print('hello')");
   });
 
+  it("propagates meshTokenHash from advertisement to discovered peer", () => {
+    const network = new Map<string, MockBLETransport>();
+    const a = new MockBLETransport("agent-a", network);
+    const b = new MockBLETransport("agent-b", network);
+    b.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 100, currentLoad: 0, deviceType: "laptop", meshTokenHash: "deadbeef" });
+    a.startScanning();
+    const peers = a.discoveredPeers();
+    expect(peers).toHaveLength(1);
+    expect(peers[0].meshTokenHash).toBe("deadbeef");
+  });
+
+  it("defaults meshTokenHash to empty string when not advertised", () => {
+    const network = new Map<string, MockBLETransport>();
+    const a = new MockBLETransport("agent-a", network);
+    const b = new MockBLETransport("agent-b", network);
+    b.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 100, currentLoad: 0, deviceType: "laptop" });
+    a.startScanning();
+    const peers = a.discoveredPeers();
+    expect(peers[0].meshTokenHash).toBe("");
+  });
+
   it("returns failed response when peer has no handler", async () => {
     const network = new Map<string, MockBLETransport>();
     const a = new MockBLETransport("agent-a", network);

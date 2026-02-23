@@ -41,11 +41,12 @@ export class BLERouter {
     return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty + reliabilityPenalty;
   }
 
-  selectBestPeer(requiredModelSize: number): BLEPeerEntry | null {
+  selectBestPeer(requiredModelSize: number, ownTokenHash?: string): BLEPeerEntry | null {
     this.evictStale();
     let best: BLEPeerEntry | null = null;
     let bestCost = COST_THRESHOLD;
     for (const peer of this.peers.values()) {
+      if (ownTokenHash && peer.meshTokenHash !== ownTokenHash) continue;
       const cost = this.computeCost(peer, requiredModelSize);
       if (cost < bestCost) {
         bestCost = cost;

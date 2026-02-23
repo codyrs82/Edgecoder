@@ -104,4 +104,27 @@ describe("BLERouter", () => {
     const best = router.selectBestPeer(1.5);
     expect(best?.agentId).toBe("solid");
   });
+
+  it("selectBestPeer skips peers with mismatched token hash", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "same-mesh", meshTokenHash: "aaa" }));
+    router.updatePeer(makePeer({ agentId: "diff-mesh", meshTokenHash: "bbb" }));
+    const best = router.selectBestPeer(1.5, "aaa");
+    expect(best?.agentId).toBe("same-mesh");
+  });
+
+  it("selectBestPeer returns null when no peers match token hash", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "other", meshTokenHash: "bbb" }));
+    const best = router.selectBestPeer(1.5, "aaa");
+    expect(best).toBeNull();
+  });
+
+  it("selectBestPeer allows all peers when ownTokenHash is undefined", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "a", meshTokenHash: "aaa" }));
+    router.updatePeer(makePeer({ agentId: "b", meshTokenHash: "bbb" }));
+    const best = router.selectBestPeer(1.5);
+    expect(best).not.toBeNull();
+  });
 });
