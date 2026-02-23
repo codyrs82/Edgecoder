@@ -23,7 +23,11 @@
     "test:watch": "vitest",
     "docs:dev": "vitepress dev site-docs",
     "docs:build": "vitepress build site-docs",
-    "docs:preview": "vitepress preview site-docs"
+    "docs:preview": "vitepress preview site-docs",
+    "model:list": "tsx bin/swap-model.ts list",
+    "model:swap": "tsx bin/swap-model.ts swap",
+    "model:status": "tsx bin/swap-model.ts status",
+    "model:pull": "tsx bin/swap-model.ts pull"
   },
   "keywords": [],
   "author": "",
