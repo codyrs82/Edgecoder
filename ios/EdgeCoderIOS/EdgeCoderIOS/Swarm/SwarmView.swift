@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SwarmView: View {
     @EnvironmentObject private var swarmRuntime: SwarmRuntimeController
-    @StateObject private var modelManager = LocalModelManager()
     @State private var prompt = "Summarize my edge node contribution profile."
     @State private var enrollmentNodeId = ""
     @State private var enrollmentToken = ""
@@ -31,6 +30,10 @@ struct SwarmView: View {
                         value: swarmRuntime.lastHeartbeatAt?.formatted(date: .omitted, time: .standard) ?? "n/a"
                     )
 
+                    Toggle("Auto-start on launch", isOn: $swarmRuntime.autoStartEnabled)
+                        .onChange(of: swarmRuntime.autoStartEnabled) { _, _ in
+                            swarmRuntime.persistRuntimeSettings()
+                        }
                     Toggle("Run only when charging", isOn: $swarmRuntime.runOnlyWhileCharging)
 
                     HStack {
@@ -48,14 +51,14 @@ struct SwarmView: View {
                 }
 
                 Section("Local Model") {
-                    ModelPickerView(modelManager: modelManager)
-                    ModelStatusBanner(modelManager: modelManager)
+                    ModelPickerView(modelManager: swarmRuntime.modelManager)
+                    ModelStatusBanner(modelManager: swarmRuntime.modelManager)
                     TextField("Prompt", text: $prompt, axis: .vertical)
                     Button("Run local inference") {
-                        Task { await modelManager.runInference(prompt: prompt) }
+                        Task { await swarmRuntime.modelManager.runInference(prompt: prompt) }
                     }
-                    if !modelManager.lastInferenceOutput.isEmpty {
-                        Text(modelManager.lastInferenceOutput)
+                    if !swarmRuntime.modelManager.lastInferenceOutput.isEmpty {
+                        Text(swarmRuntime.modelManager.lastInferenceOutput)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

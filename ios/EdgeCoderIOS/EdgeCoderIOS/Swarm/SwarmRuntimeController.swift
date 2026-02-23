@@ -31,8 +31,9 @@ final class SwarmRuntimeController: ObservableObject {
 
     let bleMeshManager = BLEMeshManager.shared
     private let api = APIClient.shared
-    private let modelManager = LocalModelManager()
+    let modelManager = LocalModelManager()
     private var runtimeTask: Task<Void, Never>?
+    @Published var autoStartEnabled: Bool = true
 
     private enum DefaultsKey {
         static let agentId = "edgecoder.agentId"
@@ -43,6 +44,7 @@ final class SwarmRuntimeController: ObservableObject {
         static let diagnosticsUploadEnabled = "edgecoder.diagnosticsUploadEnabled"
         static let heartbeatCount = "edgecoder.heartbeatCount"
         static let coordinatorTasksObserved = "edgecoder.coordinatorTasksObserved"
+        static let autoStartEnabled = "edgecoder.autoStartEnabled"
     }
 
     static func defaultIosAgentId() -> String {
@@ -86,7 +88,16 @@ final class SwarmRuntimeController: ObservableObject {
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
         heartbeatCount = UserDefaults.standard.integer(forKey: DefaultsKey.heartbeatCount)
         coordinatorTasksObserved = UserDefaults.standard.integer(forKey: DefaultsKey.coordinatorTasksObserved)
+        autoStartEnabled = UserDefaults.standard.object(forKey: DefaultsKey.autoStartEnabled) as? Bool ?? true
         persistRuntimeSettings()
+    }
+
+    /// Called after enrollment is confirmed. Auto-starts the swarm runtime if enabled.
+    func autoStartIfReady() async {
+        guard autoStartEnabled else { return }
+        guard state == .stopped else { return }
+        guard !registrationToken.isEmpty else { return }
+        await start()
     }
 
     /// Enroll this device with the portal. Call when user is authenticated and token is missing.
@@ -228,6 +239,7 @@ final class SwarmRuntimeController: ObservableObject {
         UserDefaults.standard.set(selectedCoordinatorURL, forKey: DefaultsKey.coordinatorURL)
         UserDefaults.standard.set(runOnlyWhileCharging, forKey: DefaultsKey.runOnlyWhileCharging)
         UserDefaults.standard.set(diagnosticsUploadEnabled, forKey: DefaultsKey.diagnosticsUploadEnabled)
+        UserDefaults.standard.set(autoStartEnabled, forKey: DefaultsKey.autoStartEnabled)
         UserDefaults.standard.set(heartbeatCount, forKey: DefaultsKey.heartbeatCount)
         UserDefaults.standard.set(coordinatorTasksObserved, forKey: DefaultsKey.coordinatorTasksObserved)
     }

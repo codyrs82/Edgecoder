@@ -45,11 +45,15 @@ struct RootTabView: View {
                 selectedTab = .auth
             } else {
                 await swarmRuntime.ensureEnrollment()
+                await swarmRuntime.autoStartIfReady()
             }
         }
         .onChange(of: sessionStore.isAuthenticated) { _, isAuthenticated in
             if isAuthenticated {
-                Task { await swarmRuntime.ensureEnrollment() }
+                Task {
+                    await swarmRuntime.ensureEnrollment()
+                    await swarmRuntime.autoStartIfReady()
+                }
             }
         }
     }
