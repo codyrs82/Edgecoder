@@ -10,7 +10,7 @@ export class OfflineLedger {
 
   record(tx: BLECreditTransaction): void {
     if (this.store) {
-      this.store.recordBLECreditTx(tx.txId, tx.requesterId, tx.providerId, tx.credits, tx.cpuSeconds, tx.taskHash);
+      this.store.recordBLECreditTx(tx.txId, tx.requesterId, tx.providerId, tx.credits, tx.cpuSeconds, tx.taskHash, tx.requesterSignature, tx.providerSignature);
     }
   }
 
@@ -26,8 +26,8 @@ export class OfflineLedger {
       cpuSeconds: row.cpuSeconds,
       taskHash: row.taskHash,
       timestamp: row.createdAt * 1000,
-      requesterSignature: "",
-      providerSignature: ""
+      requesterSignature: row.requesterSig,
+      providerSignature: row.providerSig
     }));
   }
 

@@ -4,6 +4,7 @@ import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { BLETaskRequest, BLETaskResponse } from "../../../src/common/types.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
+import { createPeerKeys, signPayload, verifyPayload } from "../../../src/mesh/peer.js";
 
 let store: SQLiteStore;
 
@@ -379,5 +380,66 @@ describe("BLE mesh e2e (mock transport)", () => {
     }, 1.5);
 
     expect(result).toBeNull();
+  });
+
+  it("signed credit flow: signatures propagate through ledger", async () => {
+    const phoneKeys = createPeerKeys("phone");
+    const laptopKeys = createPeerKeys("laptop");
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const laptopTransport = new MockBLETransport("laptop", network);
+
+    const taskText = "compute signed result";
+    const taskHash = createHash("sha256").update(taskText).digest("hex");
+
+    laptopTransport.startAdvertising({
+      agentId: "laptop",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+    });
+    laptopTransport.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "laptop",
+      status: "completed" as const,
+      output: "signed-output",
+      cpuSeconds: 2.5,
+      providerSignature: signPayload(
+        JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash }),
+        laptopKeys.privateKeyPem
+      ),
+    }));
+
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    mesh.setOffline(true);
+    mesh.refreshPeers();
+
+    const reqSig = signPayload(
+      JSON.stringify({ requesterId: "phone", taskHash }),
+      phoneKeys.privateKeyPem
+    );
+
+    await mesh.routeTask({
+      requestId: "signed-req",
+      requesterId: "phone",
+      task: taskText,
+      language: "python",
+      requesterSignature: reqSig,
+    }, 1.5);
+
+    const pending = mesh.pendingTransactions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].requesterSignature).toBe(reqSig);
+    expect(pending[0].providerSignature).not.toBe("");
+
+    // Verify signatures are cryptographically valid
+    const reqPayload = JSON.stringify({ requesterId: "phone", taskHash });
+    expect(verifyPayload(reqPayload, pending[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
+
+    const provPayload = JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash });
+    expect(verifyPayload(provPayload, pending[0].providerSignature, laptopKeys.publicKeyPem)).toBe(true);
   });
 });

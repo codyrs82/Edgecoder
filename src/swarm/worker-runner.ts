@@ -110,6 +110,10 @@ function computeMeshTokenHash(): string {
   return createHash("sha256").update(meshAuthToken).digest("hex");
 }
 
+function computeTaskHash(task: string): string {
+  return createHash("sha256").update(task).digest("hex");
+}
+
 function normalizeUrl(value: string | undefined): string | null {
   if (!value) return null;
   try {
@@ -227,7 +231,20 @@ async function flushOfflineLedger(): Promise<void> {
   if (unsynced.length === 0) return;
   console.log(`[agent:${AGENT_ID}] flushing ${unsynced.length} BLE credit transaction(s)`);
   try {
-    await post("/credits/ble-sync", { transactions: unsynced });
+    const transactions = unsynced.map(row => ({
+      txId: row.txId,
+      requesterId: row.requesterId,
+      providerId: row.providerId,
+      requesterAccountId: row.requesterId,
+      providerAccountId: row.providerId,
+      credits: row.credits,
+      cpuSeconds: row.cpuSeconds,
+      taskHash: row.taskHash,
+      timestamp: row.createdAt * 1000,
+      requesterSignature: row.requesterSig,
+      providerSignature: row.providerSig,
+    }));
+    await post("/credits/ble-sync", { transactions });
     localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
     console.log(`[agent:${AGENT_ID}] BLE credits synced`);
   } catch (e) {
@@ -304,24 +321,26 @@ async function loop(): Promise<void> {
           const response = await providers.current().generate({ prompt: req.task });
           const durationMs = Date.now() - started;
           try { localStore.recordTaskComplete(subtaskId, response.text, durationMs); } catch (e) { console.warn(`[db] BLE task complete write failed: ${e}`); }
+          const taskHash = computeTaskHash(req.task);
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
             status: "completed" as const,
             output: response.text,
             cpuSeconds: durationMs / 1000,
-            providerSignature: "",
+            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "completed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
           };
         } catch (e) {
           const durationMs = Date.now() - started;
           try { localStore.recordTaskFailed(subtaskId, String(e), durationMs); } catch (dbErr) { console.warn(`[db] BLE task fail write failed: ${dbErr}`); }
+          const taskHash = computeTaskHash(req.task);
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
             status: "failed" as const,
             output: String(e),
             cpuSeconds: durationMs / 1000,
-            providerSignature: "",
+            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "failed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
           };
         }
       });
@@ -350,7 +369,8 @@ async function loop(): Promise<void> {
           localModelProvider: currentProvider,
           clientType: AGENT_CLIENT_TYPE,
           maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-          powerTelemetry
+          powerTelemetry,
+          publicKeyPem: keys.publicKeyPem
         })) as {
           accepted?: boolean;
           meshToken?: string;
@@ -510,7 +530,7 @@ async function loop(): Promise<void> {
                 requesterId: AGENT_ID,
                 task: st.input,
                 language: st.language,
-                requesterSignature: "",
+                requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(st.input) }), keys.privateKeyPem),
               };
               try {
                 const resp = await bleMesh.routeTask(bleReq, 0);
@@ -734,7 +754,7 @@ async function loop(): Promise<void> {
               requesterId: AGENT_ID,
               task: task.prompt,
               language: task.language as Language,
-              requesterSignature: "",
+              requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(task.prompt) }), keys.privateKeyPem),
             };
             try {
               const resp = await bleMesh.routeTask(bleReq, 0);
@@ -770,12 +790,13 @@ async function loop(): Promise<void> {
             setTimeout(async () => {
               try {
                 console.log(`[BLE-TEST] sending test task to ${peer.agentId} over BLE...`);
+                const testTask = "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.";
                 const testReq = {
                   requestId: `ble-test-${Date.now()}`,
                   requesterId: AGENT_ID,
-                  task: "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.",
+                  task: testTask,
                   language: "python" as const,
-                  requesterSignature: "",
+                  requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(testTask) }), keys.privateKeyPem),
                 };
                 const resp = await bleTransport!.sendTaskRequest(peer.agentId, testReq);
                 console.log(`[BLE-TEST] response from ${peer.agentId}: status=${resp.status}, output=${(resp.output ?? "").substring(0, 200)}`);

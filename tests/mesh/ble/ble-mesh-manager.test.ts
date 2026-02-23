@@ -289,6 +289,37 @@ describe("BLEMeshManager mesh token auth", () => {
     expect(result).not.toBeNull();
     expect(result!.output).toBe("authenticated");
   });
+
+  it("propagates request and response signatures into credit transaction", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportB = new MockBLETransport("agent-b", network);
+    transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    transportB.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "agent-b",
+      status: "completed" as const,
+      output: "ok",
+      cpuSeconds: 1.0,
+      providerSignature: "provider-sig-abc",
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+    manager.refreshPeers();
+    await manager.routeTask({
+      requestId: "sig-test",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "requester-sig-xyz",
+    }, 1.5);
+
+    const pending = manager.pendingTransactions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].requesterSignature).toBe("requester-sig-xyz");
+    expect(pending[0].providerSignature).toBe("provider-sig-abc");
+  });
 });
 
 describe("modelQualityMultiplier", () => {
