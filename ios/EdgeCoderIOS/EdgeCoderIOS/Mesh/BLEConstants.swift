@@ -9,12 +9,12 @@ import CoreBluetooth
 enum BLEMeshConstants {
     // MARK: - GATT Service & Characteristic UUIDs
 
-    static let serviceUUID = CBUUID(string: "E0D6EC00-0001-4C3A-9B5E-00EDGEC0DE00")
-    static let peerIdentityUUID = CBUUID(string: "E0D6EC00-0002-4C3A-9B5E-00EDGEC0DE00")
-    static let capabilitiesUUID = CBUUID(string: "E0D6EC00-0003-4C3A-9B5E-00EDGEC0DE00")
-    static let taskRequestUUID = CBUUID(string: "E0D6EC00-0004-4C3A-9B5E-00EDGEC0DE00")
-    static let taskResponseUUID = CBUUID(string: "E0D6EC00-0005-4C3A-9B5E-00EDGEC0DE00")
-    static let ledgerSyncUUID = CBUUID(string: "E0D6EC00-0006-4C3A-9B5E-00EDGEC0DE00")
+    static let serviceUUID = CBUUID(string: "E0D6EC00-0001-4C3A-9B5E-00ED6EC0DE00")
+    static let peerIdentityUUID = CBUUID(string: "E0D6EC00-0002-4C3A-9B5E-00ED6EC0DE00")
+    static let capabilitiesUUID = CBUUID(string: "E0D6EC00-0003-4C3A-9B5E-00ED6EC0DE00")
+    static let taskRequestUUID = CBUUID(string: "E0D6EC00-0004-4C3A-9B5E-00ED6EC0DE00")
+    static let taskResponseUUID = CBUUID(string: "E0D6EC00-0005-4C3A-9B5E-00ED6EC0DE00")
+    static let ledgerSyncUUID = CBUUID(string: "E0D6EC00-0006-4C3A-9B5E-00ED6EC0DE00")
 
     // MARK: - Transfer Parameters
 

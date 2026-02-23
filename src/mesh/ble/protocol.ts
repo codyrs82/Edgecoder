@@ -1,9 +1,9 @@
-export const BLE_SERVICE_UUID = "e0d6ec00-0001-4c3a-9b5e-00edgec0de00";
-export const BLE_CHAR_PEER_IDENTITY = "e0d6ec00-0002-4c3a-9b5e-00edgec0de00";
-export const BLE_CHAR_CAPABILITIES = "e0d6ec00-0003-4c3a-9b5e-00edgec0de00";
-export const BLE_CHAR_TASK_REQUEST = "e0d6ec00-0004-4c3a-9b5e-00edgec0de00";
-export const BLE_CHAR_TASK_RESPONSE = "e0d6ec00-0005-4c3a-9b5e-00edgec0de00";
-export const BLE_CHAR_LEDGER_SYNC = "e0d6ec00-0006-4c3a-9b5e-00edgec0de00";
+export const BLE_SERVICE_UUID = "e0d6ec00-0001-4c3a-9b5e-00ed6ec0de00";
+export const BLE_CHAR_PEER_IDENTITY = "e0d6ec00-0002-4c3a-9b5e-00ed6ec0de00";
+export const BLE_CHAR_CAPABILITIES = "e0d6ec00-0003-4c3a-9b5e-00ed6ec0de00";
+export const BLE_CHAR_TASK_REQUEST = "e0d6ec00-0004-4c3a-9b5e-00ed6ec0de00";
+export const BLE_CHAR_TASK_RESPONSE = "e0d6ec00-0005-4c3a-9b5e-00ed6ec0de00";
+export const BLE_CHAR_LEDGER_SYNC = "e0d6ec00-0006-4c3a-9b5e-00ed6ec0de00";
 
 export const DEFAULT_MTU = 512;
 const CHUNK_HEADER_SIZE = 4; // 2 bytes seqNo + 2 bytes totalChunks
