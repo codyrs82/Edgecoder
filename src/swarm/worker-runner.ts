@@ -489,6 +489,7 @@ async function loop(): Promise<void> {
                 const resp = await bleMesh.routeTask(bleReq, 0);
                 if (resp && resp.status === "completed") {
                   delegated = true;
+                  try { localStore.recordBLETaskResult(resp.providerId, true); } catch {}
                   try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, `ble-delegate:${resp.providerId}`, activeCoordinatorUrl); } catch {}
                   try { localStore.recordTaskComplete(st.id, resp.output ?? "", Math.round(resp.cpuSeconds * 1000)); } catch {}
                   const delegatedResult = {
@@ -519,6 +520,8 @@ async function loop(): Promise<void> {
                     console.warn(`[agent:${AGENT_ID}] delegated result buffered: ${st.id}`);
                   }
                   console.log(`[agent:${AGENT_ID}] task ${st.id} delegated to BLE peer ${resp.providerId}`);
+                } else if (resp) {
+                  try { localStore.recordBLETaskResult(resp.providerId, false); } catch {}
                 }
               } catch (e) {
                 console.warn(`[agent:${AGENT_ID}] BLE delegation failed, executing locally: ${String(e)}`);
@@ -709,9 +712,11 @@ async function loop(): Promise<void> {
             try {
               const resp = await bleMesh.routeTask(bleReq, 0);
               if (resp && resp.status === "completed") {
+                try { localStore.recordBLETaskResult(resp.providerId, true); } catch {}
                 localStore.completeOutbound(task.id, resp.output ?? "");
                 console.log(`[agent:${AGENT_ID}] BLE outbound task completed: ${task.id}`);
               } else {
+                if (resp) { try { localStore.recordBLETaskResult(resp.providerId, false); } catch {} }
                 localStore.failOutbound(task.id);
                 console.warn(`[agent:${AGENT_ID}] BLE outbound task failed: ${task.id}`);
               }
