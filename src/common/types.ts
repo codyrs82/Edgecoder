@@ -397,3 +397,53 @@ export type BlacklistReasonCode =
   | "dos_behavior"
   | "forged_results"
   | "manual_review";
+
+// --- BLE Local Mesh Types ---
+
+export interface BLEPeerEntry {
+  agentId: string;
+  meshTokenHash: string;
+  accountId: string;
+  model: string;
+  modelParamSize: number;
+  memoryMB: number;
+  batteryPct: number;
+  currentLoad: number;
+  deviceType: "phone" | "laptop" | "workstation";
+  rssi: number;
+  lastSeenMs: number;
+}
+
+export interface BLETaskRequest {
+  requestId: string;
+  requesterId: string;
+  task: string;
+  language: Language;
+  failedCode?: string;
+  errorHistory?: string[];
+  requesterSignature: string;
+}
+
+export interface BLETaskResponse {
+  requestId: string;
+  providerId: string;
+  status: "completed" | "failed";
+  generatedCode?: string;
+  output?: string;
+  cpuSeconds: number;
+  providerSignature: string;
+}
+
+export interface BLECreditTransaction {
+  txId: string;
+  requesterId: string;
+  providerId: string;
+  requesterAccountId: string;
+  providerAccountId: string;
+  credits: number;
+  cpuSeconds: number;
+  taskHash: string;
+  timestamp: number;
+  requesterSignature: string;
+  providerSignature: string;
+}
