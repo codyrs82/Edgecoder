@@ -1166,7 +1166,9 @@ app.post("/agents/upsert", async (req, reply) => {
     version: record.version,
     mode: record.mode,
     localModelEnabled: record.localModelEnabled,
-    lastSeenMs: record.lastSeenMs
+    lastSeenMs: record.lastSeenMs,
+    activeModel: undefined,
+    activeModelParamSize: undefined
   });
   return reply.send(record);
 });
@@ -1186,7 +1188,9 @@ app.post("/agents/:agentId/mode", async (req, reply) => {
     version: current.version,
     mode: current.mode,
     localModelEnabled: current.localModelEnabled,
-    lastSeenMs: current.lastSeenMs
+    lastSeenMs: current.lastSeenMs,
+    activeModel: undefined,
+    activeModelParamSize: undefined
   });
   return reply.send(current);
 });
@@ -1206,7 +1210,9 @@ app.post("/agents/:agentId/local-model", async (req, reply) => {
     version: current.version,
     mode: current.mode,
     localModelEnabled: current.localModelEnabled,
-    lastSeenMs: current.lastSeenMs
+    lastSeenMs: current.lastSeenMs,
+    activeModel: undefined,
+    activeModelParamSize: undefined
   });
 
   if (body.enabled && body.manifest) {

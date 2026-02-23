@@ -25,7 +25,7 @@ export class SwarmQueue {
   registerAgent(
     agentId: string,
     policy: ExecutionPolicy,
-    metadata?: { os: string; version: string; mode: string; localModelEnabled?: boolean }
+    metadata?: { os: string; version: string; mode: string; localModelEnabled?: boolean; activeModel?: string; activeModelParamSize?: number }
   ): void {
     const lastHeartbeat = Date.now();
     this.agents.set(agentId, { agentId, policy, lastHeartbeat });
@@ -36,7 +36,9 @@ export class SwarmQueue {
         version: metadata?.version ?? "unknown",
         mode: metadata?.mode ?? "swarm-only",
         localModelEnabled: metadata?.localModelEnabled ?? false,
-        lastSeenMs: lastHeartbeat
+        lastSeenMs: lastHeartbeat,
+        activeModel: metadata?.activeModel,
+        activeModelParamSize: metadata?.activeModelParamSize
       })
       .catch(() => undefined);
   }
@@ -53,7 +55,9 @@ export class SwarmQueue {
         version: "unknown",
         mode: "swarm-only",
         localModelEnabled: false,
-        lastSeenMs: current.lastHeartbeat
+        lastSeenMs: current.lastHeartbeat,
+        activeModel: undefined,
+        activeModelParamSize: undefined
       })
       .catch(() => undefined);
   }
