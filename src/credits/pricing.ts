@@ -16,3 +16,16 @@ export function loadMultiplier(load: LoadSnapshot): number {
 export function baseRatePerSecond(resourceClass: ResourceClass): number {
   return resourceClass === "gpu" ? 4.0 : 1.0;
 }
+
+/**
+ * Compute credits earned for seeding a model to a peer.
+ * @param fileSizeBytes Size of the model file transferred
+ * @param seederCount Number of active seeders for this model (rarity factor)
+ * @returns Credits earned
+ */
+export function modelSeedCredits(fileSizeBytes: number, seederCount: number): number {
+  const sizeGB = fileSizeBytes / 1e9;
+  const baseCredits = sizeGB * 0.5;
+  const rarityMultiplier = 1 / Math.max(1, seederCount);
+  return Number((baseCredits * (1 + rarityMultiplier)).toFixed(3));
+}
