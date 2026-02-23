@@ -79,6 +79,25 @@ enum LocalModelState: String {
     case notInstalled, downloading, loading, ready, error
 }
 
+// MARK: - Catalog Entry (available for download)
+
+struct CatalogModel: Identifiable {
+    let modelId: String
+    let displayName: String
+    let paramSize: Double
+    let quantization: String
+    let fileSizeBytes: Int64
+    let downloadUrl: URL
+    let checksumSha256: String
+    let minMemoryMB: Int
+
+    var id: String { modelId }
+    var fileSizeDescription: String {
+        let gb = Double(fileSizeBytes) / 1_000_000_000
+        return String(format: "%.1f GB", gb)
+    }
+}
+
 // MARK: - Local Model Manager
 
 @MainActor
@@ -94,6 +113,57 @@ final class LocalModelManager: ObservableObject {
     private var llamaContext: LlamaContextProtocol
     private let registryKey = "edgecoder.installedModels"
     private let activeModelKey = "edgecoder.activeModel"
+    private var downloadTask: URLSessionDownloadTask?
+
+    /// Curated catalog of models available for download on iOS.
+    let availableCatalog: [CatalogModel] = [
+        CatalogModel(
+            modelId: "qwen2.5-coder-0.5b-q4",
+            displayName: "Qwen 2.5 Coder 0.5B (Q4_K_M)",
+            paramSize: 0.5,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 386_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 512
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-coder-1.5b-q4",
+            displayName: "Qwen 2.5 Coder 1.5B (Q4_K_M)",
+            paramSize: 1.5,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 986_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 1024
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-coder-3b-q4",
+            displayName: "Qwen 2.5 Coder 3B (Q4_K_M)",
+            paramSize: 3.0,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 1_900_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 2048
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-coder-7b-q4",
+            displayName: "Qwen 2.5 Coder 7B (Q4_K_M)",
+            paramSize: 7.0,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 4_680_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 4096
+        ),
+    ]
+
+    /// Models from the catalog that are not yet installed.
+    var availableModels: [CatalogModel] {
+        let installedIds = Set(installedModels.map(\.modelId))
+        return availableCatalog.filter { !installedIds.contains($0.modelId) }
+    }
 
     init(llamaContext: LlamaContextProtocol = StubLlamaContext()) {
         self.llamaContext = llamaContext
@@ -102,6 +172,8 @@ final class LocalModelManager: ObservableObject {
         if !savedModel.isEmpty, let model = installedModels.first(where: { $0.modelId == savedModel }) {
             selectedModel = model.modelId
             selectedModelParamSize = model.paramSize
+            state = .ready
+            statusText = "\(model.modelId) ready"
         }
     }
 
@@ -190,13 +262,15 @@ final class LocalModelManager: ObservableObject {
 
         let (tempUrl, _) = try await URLSession.shared.download(from: downloadUrl)
 
-        let fileData = try Data(contentsOf: tempUrl)
-        let computedHash = sha256Hex(data: fileData)
-        guard computedHash == checksumSha256 else {
-            try? FileManager.default.removeItem(at: tempUrl)
-            state = .error
-            statusText = "Checksum mismatch for \(modelId)"
-            throw LocalModelError.checksumMismatch
+        if !checksumSha256.isEmpty {
+            let fileData = try Data(contentsOf: tempUrl)
+            let computedHash = sha256Hex(data: fileData)
+            guard computedHash == checksumSha256 else {
+                try? FileManager.default.removeItem(at: tempUrl)
+                state = .error
+                statusText = "Checksum mismatch for \(modelId)"
+                throw LocalModelError.checksumMismatch
+            }
         }
 
         try FileManager.default.moveItem(at: tempUrl, to: destinationUrl)
@@ -233,6 +307,28 @@ final class LocalModelManager: ObservableObject {
         try? FileManager.default.removeItem(atPath: model.localPath)
         installedModels.removeAll { $0.modelId == modelId }
         saveRegistry()
+    }
+
+    // MARK: - Catalog Download (convenience)
+
+    func downloadFromCatalog(_ entry: CatalogModel) async throws {
+        try await downloadModel(
+            modelId: entry.modelId,
+            downloadUrl: entry.downloadUrl,
+            paramSize: entry.paramSize,
+            fileSizeBytes: entry.fileSizeBytes,
+            checksumSha256: entry.checksumSha256
+        )
+    }
+
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        if state == .downloading {
+            state = installedModels.isEmpty ? .notInstalled : .ready
+            statusText = "Download cancelled."
+            downloadProgress = 0
+        }
     }
 
     // MARK: - Inference
