@@ -8,6 +8,7 @@ export interface BLEAdvertisement {
   batteryPct: number;
   currentLoad: number;
   deviceType: "phone" | "laptop" | "workstation";
+  meshTokenHash?: string;
 }
 
 export type TaskRequestHandler = (req: BLETaskRequest) => Promise<BLETaskResponse>;
@@ -59,7 +60,7 @@ export class MockBLETransport implements BLETransport {
       const ad = transport.advertisement;
       peers.push({
         agentId: ad.agentId,
-        meshTokenHash: "",
+        meshTokenHash: ad.meshTokenHash ?? "",
         accountId: ad.agentId,
         model: ad.model,
         modelParamSize: ad.modelParamSize,

@@ -1,5 +1,5 @@
 import { request } from "undici";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
@@ -103,6 +103,11 @@ function allowPeerDirectWork(telemetry: AgentPowerTelemetry | undefined): boolea
 function meshHeaders(): Record<string, string> {
   if (!meshAuthToken) return {};
   return { "x-mesh-token": meshAuthToken };
+}
+
+function computeMeshTokenHash(): string {
+  if (!meshAuthToken) return "";
+  return createHash("sha256").update(meshAuthToken).digest("hex");
 }
 
 function normalizeUrl(value: string | undefined): string | null {
@@ -258,6 +263,7 @@ async function loop(): Promise<void> {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
       bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore);
+      bleMesh.setOwnTokenHash(computeMeshTokenHash());
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
         model: OLLAMA_MODEL,
@@ -266,11 +272,30 @@ async function loop(): Promise<void> {
         batteryPct: 100,
         currentLoad: 0,
         deviceType: "laptop",
+        meshTokenHash: computeMeshTokenHash(),
       });
       bleTransport.startScanning();
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
+        // Authenticate: verify requester shares our mesh token
+        const ownHash = computeMeshTokenHash();
+        if (ownHash) {
+          const peers = bleTransport!.discoveredPeers();
+          const requesterPeer = peers.find(p => p.agentId === req.requesterId);
+          if (!requesterPeer || requesterPeer.meshTokenHash !== ownHash) {
+            console.warn(`[BLE] rejecting task from unauthenticated peer: ${req.requesterId}`);
+            return {
+              requestId: req.requestId,
+              providerId: AGENT_ID,
+              status: "failed" as const,
+              output: "mesh_token_mismatch",
+              cpuSeconds: 0,
+              providerSignature: "",
+            };
+          }
+        }
+
         console.log(`[BLE] processing incoming task: ${req.requestId}`);
         const subtaskId = `ble-${req.requestId}`;
         try { localStore.recordTaskStart(subtaskId, subtaskId, req.task, req.language ?? "python", "ble-incoming", "ble-mesh"); } catch (e) { console.warn(`[db] BLE task start write failed: ${e}`); }
@@ -334,6 +359,8 @@ async function loop(): Promise<void> {
           if (meshAuthToken !== registerResponse.meshToken) {
             meshAuthToken = registerResponse.meshToken;
             console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+            if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
+            if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
           }
         }
 

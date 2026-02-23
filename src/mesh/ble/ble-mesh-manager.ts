@@ -22,6 +22,7 @@ export class BLEMeshManager {
   private readonly store: SQLiteStore | null;
   private readonly agentId: string;
   private readonly accountId: string;
+  private ownTokenHash = "";
 
   constructor(agentId: string, accountId: string, transport: BLETransport, store?: SQLiteStore) {
     this.agentId = agentId;
@@ -29,6 +30,10 @@ export class BLEMeshManager {
     this.transport = transport;
     this.store = store ?? null;
     this.ledger = new OfflineLedger(store);
+  }
+
+  setOwnTokenHash(hash: string): void {
+    this.ownTokenHash = hash;
   }
 
   isOffline(): boolean {
@@ -68,7 +73,7 @@ export class BLEMeshManager {
     requiredModelSize: number
   ): Promise<BLETaskResponse | null> {
     this.refreshPeers();
-    const bestPeer = this.router.selectBestPeer(requiredModelSize);
+    const bestPeer = this.router.selectBestPeer(requiredModelSize, this.ownTokenHash || undefined);
     if (!bestPeer) return null;
 
     const response = await this.transport.sendTaskRequest(bestPeer.agentId, request);
