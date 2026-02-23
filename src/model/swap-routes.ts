@@ -1,0 +1,40 @@
+import type { FastifyInstance } from "fastify";
+import { swapModel, getModelStatus, listModels } from "./swap.js";
+
+export interface ModelSwapState {
+  activeModel: string;
+  activeModelParamSize: number;
+  onModelChanged?: (model: string, paramSize: number) => void;
+}
+
+export function buildModelSwapRoutes(
+  app: FastifyInstance,
+  state: ModelSwapState,
+): void {
+  app.post("/model/swap", async (req, reply) => {
+    const { model } = req.body as { model: string };
+    if (!model || typeof model !== "string") {
+      return reply.code(400).send({ error: "model_required" });
+    }
+
+    const result = await swapModel(model, state.activeModel);
+
+    if (result.status === "ready") {
+      state.activeModel = result.active;
+      state.activeModelParamSize = result.paramSize;
+      state.onModelChanged?.(result.active, result.paramSize);
+    }
+
+    return reply.send(result);
+  });
+
+  app.get("/model/status", async (_req, reply) => {
+    const result = await getModelStatus(state.activeModel);
+    return reply.send(result);
+  });
+
+  app.get("/model/list", async (_req, reply) => {
+    const result = await listModels(state.activeModel);
+    return reply.send(result);
+  });
+}
