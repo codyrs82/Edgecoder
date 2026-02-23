@@ -20,6 +20,8 @@ export interface BLETransport {
   discoveredPeers(): BLEPeerEntry[];
   sendTaskRequest(peerId: string, request: BLETaskRequest): Promise<BLETaskResponse>;
   onTaskRequest(handler: TaskRequestHandler): void;
+  updateAdvertisement(update: Partial<BLEAdvertisement>): void;
+  currentAdvertisement(): BLEAdvertisement | null;
 }
 
 export class MockBLETransport implements BLETransport {
@@ -88,5 +90,15 @@ export class MockBLETransport implements BLETransport {
       };
     }
     return peer.handler(request);
+  }
+
+  updateAdvertisement(update: Partial<BLEAdvertisement>): void {
+    if (this.advertisement) {
+      this.advertisement = { ...this.advertisement, ...update };
+    }
+  }
+
+  currentAdvertisement(): BLEAdvertisement | null {
+    return this.advertisement ?? null;
   }
 }

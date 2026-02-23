@@ -94,4 +94,16 @@ export class BLEMeshManager {
   markSynced(txIds: string[]): void {
     this.ledger.markSynced(txIds);
   }
+
+  onModelSwapStart(): void {
+    this.transport.updateAdvertisement({ currentLoad: -1 });
+  }
+
+  onModelChanged(model: string, paramSize: number): void {
+    this.transport.updateAdvertisement({
+      model,
+      modelParamSize: paramSize,
+      currentLoad: 0,
+    });
+  }
 }
