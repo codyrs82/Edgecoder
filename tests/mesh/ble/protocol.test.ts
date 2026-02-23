@@ -8,10 +8,6 @@ import {
   BLE_CHAR_LEDGER_SYNC,
   encodeChunks,
   decodeChunks,
-  BLEPeerEntry,
-  BLETaskRequest,
-  BLETaskResponse,
-  BLECreditTransaction
 } from "../../../src/mesh/ble/protocol.js";
 
 describe("BLE protocol constants", () => {
@@ -48,6 +44,27 @@ describe("chunk encoding/decoding", () => {
     const chunks = encodeChunks(data, 512);
     expect(chunks).toHaveLength(1);
     const reassembled = decodeChunks(chunks);
+    expect(reassembled.toString()).toBe(data.toString());
+  });
+
+  it("throws on invalid MTU", () => {
+    const data = Buffer.from("test");
+    expect(() => encodeChunks(data, 4)).toThrow(RangeError);
+    expect(() => encodeChunks(data, 0)).toThrow(RangeError);
+  });
+
+  it("handles empty buffer", () => {
+    const chunks = encodeChunks(Buffer.alloc(0), 512);
+    expect(chunks).toHaveLength(0);
+    const reassembled = decodeChunks(chunks);
+    expect(reassembled.length).toBe(0);
+  });
+
+  it("reassembles chunks in shuffled order", () => {
+    const data = Buffer.from("a".repeat(1500));
+    const chunks = encodeChunks(data, 512);
+    const shuffled = [...chunks].reverse();
+    const reassembled = decodeChunks(shuffled);
     expect(reassembled.toString()).toBe(data.toString());
   });
 });
