@@ -304,7 +304,10 @@ final class SwarmRuntimeController: ObservableObject {
     private func sendHeartbeat() async {
         let payload: [String: Any] = [
             "agentId": agentId,
-            "powerTelemetry": currentPowerTelemetry()
+            "powerTelemetry": currentPowerTelemetry(),
+            "activeModel": modelManager.selectedModel,
+            "activeModelParamSize": modelManager.selectedModelParamSize,
+            "modelSwapInProgress": modelManager.state == .loading
         ]
         do {
             _ = try await postCoordinator(path: "/heartbeat", payload: payload)

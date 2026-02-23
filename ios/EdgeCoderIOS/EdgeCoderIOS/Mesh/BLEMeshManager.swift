@@ -29,6 +29,8 @@ final class BLEMeshManager: NSObject, ObservableObject {
     @Published var discoveredPeers: [BLEPeer] = []
     @Published var isOffline = false
 
+    private(set) var currentAgentId: String?
+
     private var centralManager: CBCentralManager?
     private var peripheralManager: CBPeripheralManager?
 
@@ -36,11 +38,28 @@ final class BLEMeshManager: NSObject, ObservableObject {
         super.init()
     }
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     // MARK: - Lifecycle
 
     func start() {
         centralManager = CBCentralManager(delegate: nil, queue: nil)
         peripheralManager = CBPeripheralManager(delegate: nil, queue: nil)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleModelSwapStarted),
+            name: .modelSwapStarted,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleModelDidChange(_:)),
+            name: .modelDidChange,
+            object: nil
+        )
     }
 
     func stop() {
@@ -68,6 +87,7 @@ final class BLEMeshManager: NSObject, ObservableObject {
     // MARK: - Peripheral (Advertising)
 
     func startAdvertising(agentId: String, model: String, modelParamSize: Double) {
+        currentAgentId = agentId
         guard let peripheral = peripheralManager, peripheral.state == .poweredOn else { return }
         let service = CBMutableService(type: BLEMeshConstants.serviceUUID, primary: true)
 
@@ -96,6 +116,23 @@ final class BLEMeshManager: NSObject, ObservableObject {
         peripheralManager?.stopAdvertising()
         peripheralManager?.removeAllServices()
         isAdvertising = false
+    }
+
+    // MARK: - Model Change Handlers
+
+    @objc private func handleModelSwapStarted() {
+        stopAdvertising()
+    }
+
+    @objc private func handleModelDidChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let modelId = userInfo["modelId"] as? String,
+              let paramSize = userInfo["paramSize"] as? Double else { return }
+
+        stopAdvertising()
+        if let agentId = currentAgentId {
+            startAdvertising(agentId: agentId, model: modelId, modelParamSize: paramSize)
+        }
     }
 
     // MARK: - Peer Management
