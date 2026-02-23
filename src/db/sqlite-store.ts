@@ -44,6 +44,17 @@ export interface PendingResultRow {
   lastAttemptAt: number | null;
 }
 
+export interface BLECreditLedgerRow {
+  txId: string;
+  requesterId: string;
+  providerId: string;
+  credits: number;
+  cpuSeconds: number;
+  taskHash: string;
+  createdAt: number;
+  synced: number;
+}
+
 export interface OutboundTaskRow {
   id: string;
   targetAgentId: string;
@@ -104,6 +115,17 @@ CREATE TABLE IF NOT EXISTS pending_results (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   attempts INTEGER NOT NULL DEFAULT 0,
   last_attempt_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS ble_credit_ledger (
+  tx_id TEXT PRIMARY KEY,
+  requester_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  credits REAL NOT NULL,
+  cpu_seconds REAL NOT NULL,
+  task_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  synced INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS outbound_task_queue (
@@ -379,5 +401,42 @@ export class SQLiteStore {
          WHERE subtask_id = ?`
       )
       .run(subtaskId);
+  }
+
+  // ── BLE Credit Ledger ───────────────────────────────────────
+
+  recordBLECreditTx(
+    txId: string,
+    requesterId: string,
+    providerId: string,
+    credits: number,
+    cpuSeconds: number,
+    taskHash: string
+  ): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO ble_credit_ledger (tx_id, requester_id, provider_id, credits, cpu_seconds, task_hash)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(txId, requesterId, providerId, credits, cpuSeconds, taskHash);
+  }
+
+  listUnsyncedBLECredits(limit = 50): BLECreditLedgerRow[] {
+    return this.db
+      .prepare(
+        `SELECT tx_id as txId, requester_id as requesterId, provider_id as providerId,
+                credits, cpu_seconds as cpuSeconds, task_hash as taskHash,
+                created_at as createdAt, synced
+         FROM ble_credit_ledger WHERE synced = 0 ORDER BY created_at ASC LIMIT ?`
+      )
+      .all(limit) as BLECreditLedgerRow[];
+  }
+
+  markBLECreditsSynced(txIds: string[]): void {
+    if (txIds.length === 0) return;
+    const placeholders = txIds.map(() => "?").join(",");
+    this.db
+      .prepare(`UPDATE ble_credit_ledger SET synced = 1 WHERE tx_id IN (${placeholders})`)
+      .run(...txIds);
   }
 }
