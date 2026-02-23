@@ -42,6 +42,8 @@ Authentication and payload specifics should be validated against runtime code an
 | GET | `/stats/projections/summary` | federated stats summary |
 | POST | `/stats/anchors/anchor-latest` | update latest stats anchor |
 | GET | `/stats/anchors/verify` | verify stats anchor/finality |
+| GET | `/mesh/capabilities` | federated capability summaries |
+| POST | `/credits/ble-sync` | sync offline BLE credit transactions |
 
 ## Control Plane
 
@@ -85,6 +87,9 @@ Authentication and payload specifics should be validated against runtime code an
 |---|---|---|
 | GET | `/health` | service health |
 | POST | `/decompose` | decomposition and inference request |
+| POST | `/model/swap` | swap active model |
+| GET | `/model/status` | current model and health |
+| GET | `/model/list` | installed and available models |
 
 ## IDE Provider
 

@@ -41,3 +41,26 @@ This page summarizes the economic model from `docs/public-mesh-operations.md`,
 
 - [Public Mesh Operations Economy Section](https://github.com/your-org/Edgecoder/blob/main/docs/public-mesh-operations.md)
 - [Developer Guide Economy Endpoints](https://github.com/your-org/Edgecoder/blob/main/README.dev.md)
+
+## Model Quality Multiplier
+
+Credit earnings from compute contributions are scaled by the model being used:
+
+- 7B+ parameters: 1.0x (full rate)
+- 3B-7B: 0.7x
+- 1.5B-3B: 0.5x
+- < 1.5B: 0.3x
+
+This incentivizes running capable models while still allowing participation with smaller hardware.
+
+## BLE Offline Credits
+
+When agents operate in BLE mesh mode (offline), credit transactions are recorded locally with dual signatures. On reconnection, transactions sync to the coordinator via `POST /credits/ble-sync` and enter the ordering chain.
+
+## Model Seed Credits
+
+Agents that distribute models to peers earn seed credits:
+
+- Base: 0.5 credits per GB transferred
+- Rarity bonus: `1 / seederCount` multiplier (fewer seeders = more reward)
+- Incentivizes keeping popular models available for the network
