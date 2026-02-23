@@ -113,7 +113,8 @@ export type MeshMessageType =
   | "issuance_proposal"
   | "issuance_vote"
   | "issuance_commit"
-  | "issuance_checkpoint";
+  | "issuance_checkpoint"
+  | "capability_summary";
 
 export interface MeshMessage {
   id: string;
