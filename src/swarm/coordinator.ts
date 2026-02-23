@@ -188,6 +188,9 @@ const agentCapabilities = new Map<
     vpnDetected?: boolean;
     enrollmentReason?: string;
     powerTelemetry?: AgentPowerTelemetry;
+    activeModel?: string;
+    activeModelParamSize?: number;
+    modelSwapInProgress?: boolean;
     lastSeenMs: number;
   }
 >();
@@ -1280,7 +1283,10 @@ const heartbeatSchema = z.object({
       lowPowerMode: z.boolean().optional(),
       updatedAtMs: z.number().optional()
     })
-    .optional()
+    .optional(),
+  activeModel: z.string().optional(),
+  activeModelParamSize: z.number().optional(),
+  modelSwapInProgress: z.boolean().optional()
 });
 const diagnosticsSchema = z.object({
   agentId: z.string(),
@@ -1440,6 +1446,14 @@ app.post("/heartbeat", async (req, reply) => {
     if (existing) {
       existing.lastSeenMs = now;
       agentCapabilities.set(body.agentId, existing);
+    }
+  }
+  if (body.activeModel !== undefined) {
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) {
+      existing.activeModel = body.activeModel;
+      existing.activeModelParamSize = body.activeModelParamSize ?? 0;
+      existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
     }
   }
   const requeued = queue.requeueStale(30_000);
