@@ -1,22 +1,20 @@
 import { request } from "undici";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { homedir } from "node:os";
+import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask } from "../common/types.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
+import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
+import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
+import { localStore } from "../db/local-store.js";
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
-const COORDINATOR_CACHE_FILE = resolve(
-  process.env.COORDINATOR_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-cache.json`
-);
 const AGENT_ID = process.env.AGENT_ID ?? "worker-1";
 const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
 const OS = (process.env.AGENT_OS ?? "macos") as "debian" | "ubuntu" | "windows" | "macos" | "ios";
@@ -107,27 +105,13 @@ function normalizeUrl(value: string | undefined): string | null {
   }
 }
 
-async function readCachedCoordinatorUrl(): Promise<string | null> {
-  try {
-    const raw = await readFile(COORDINATOR_CACHE_FILE, "utf8");
-    const parsed = JSON.parse(raw) as { coordinatorUrl?: string };
-    return normalizeUrl(parsed.coordinatorUrl);
-  } catch {
-    return null;
-  }
+function readCachedCoordinatorUrl(): string | null {
+  const cached = localStore.getConfig("coordinator_url");
+  return cached ? normalizeUrl(cached) : null;
 }
 
-async function cacheCoordinatorUrl(url: string): Promise<void> {
-  try {
-    await mkdir(dirname(COORDINATOR_CACHE_FILE), { recursive: true });
-    await writeFile(
-      COORDINATOR_CACHE_FILE,
-      JSON.stringify({ coordinatorUrl: url, updatedAtMs: Date.now() }, null, 2),
-      "utf8"
-    );
-  } catch {
-    // Cache writes are best-effort only.
-  }
+function cacheCoordinatorUrl(url: string): void {
+  localStore.setConfig("coordinator_url", url);
 }
 
 async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
@@ -148,7 +132,7 @@ async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
 async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry" | "cache" | "bootstrap" }> {
   const discovered = await discoverCoordinatorUrlFromRegistry();
   if (discovered) return { url: discovered, source: "registry" };
-  const cached = await readCachedCoordinatorUrl();
+  const cached = readCachedCoordinatorUrl();
   if (cached) return { url: cached, source: "cache" };
   return { url: COORDINATOR_BOOTSTRAP_URL, source: "bootstrap" };
 }
@@ -206,7 +190,7 @@ async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: 
 async function loop(): Promise<void> {
   const coordinatorSelection = await resolveCoordinatorUrl();
   activeCoordinatorUrl = coordinatorSelection.url;
-  await cacheCoordinatorUrl(activeCoordinatorUrl);
+  cacheCoordinatorUrl(activeCoordinatorUrl);
   console.log(`[agent:${AGENT_ID}] coordinator selected (${coordinatorSelection.source}): ${activeCoordinatorUrl}`);
 
   await ensureOllamaModelInstalled({
@@ -222,6 +206,59 @@ async function loop(): Promise<void> {
   providers.use(currentProvider);
   const worker = new SwarmWorkerAgent(providers.current());
   const effectiveMode = OS === "ios" ? "swarm-only" : MODE;
+
+  // Initialize BLE mesh transport for local peer discovery
+  let bleMesh: BLEMeshManager | null = null;
+  let bleTransport: NobleBLETransport | null = null;
+  if (OS === "macos") {
+    try {
+      bleTransport = new NobleBLETransport(AGENT_ID);
+      await bleTransport.init();
+      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport);
+      bleTransport.startAdvertising({
+        agentId: AGENT_ID,
+        model: OLLAMA_MODEL,
+        modelParamSize: 0,
+        memoryMB: Math.round(totalmem() / 1_000_000),
+        batteryPct: 100,
+        currentLoad: 0,
+        deviceType: "laptop",
+      });
+      bleTransport.startScanning();
+
+      // Register handler for incoming BLE task requests (from iOS peers)
+      bleTransport.onTaskRequest(async (req) => {
+        console.log(`[BLE] processing incoming task: ${req.requestId}`);
+        const started = Date.now();
+        try {
+          const response = await providers.current().generate({ prompt: req.task });
+          return {
+            requestId: req.requestId,
+            providerId: AGENT_ID,
+            status: "completed" as const,
+            output: response.text,
+            cpuSeconds: (Date.now() - started) / 1000,
+            providerSignature: "",
+          };
+        } catch (e) {
+          return {
+            requestId: req.requestId,
+            providerId: AGENT_ID,
+            status: "failed" as const,
+            output: String(e),
+            cpuSeconds: (Date.now() - started) / 1000,
+            providerSignature: "",
+          };
+        }
+      });
+
+      console.log(`[agent:${AGENT_ID}] BLE mesh transport initialized`);
+    } catch (e) {
+      console.warn(`[agent:${AGENT_ID}] BLE mesh init failed (non-fatal): ${String(e)}`);
+      bleTransport = null;
+    }
+  }
+  let bleTaskTestDone = false;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
@@ -248,6 +285,7 @@ async function loop(): Promise<void> {
         }
       }
 
+      const hbStart = Date.now();
       const hb = (await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry })) as {
       ok?: boolean;
       blacklisted?: boolean;
@@ -270,6 +308,7 @@ async function loop(): Promise<void> {
       }>;
       blacklist?: { version: number; agents: string[] };
     };
+      try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
       if (hb.blacklisted) {
         console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
         await new Promise((r) => setTimeout(r, 5000));
@@ -375,7 +414,16 @@ async function loop(): Promise<void> {
         subtask: Subtask | null;
       };
       if (pulled.subtask) {
-        const result = await worker.runSubtask(pulled.subtask, AGENT_ID);
+        const st = pulled.subtask;
+        try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+        const result = await worker.runSubtask(st, AGENT_ID);
+        try {
+          if (result.ok) {
+            localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+          } else {
+            localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+          }
+        } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
         const reportNonce = randomUUID();
         const reportSignature = signPayload(
           JSON.stringify({
@@ -504,6 +552,38 @@ async function loop(): Promise<void> {
           }
         }
       }
+      // Log BLE discovered peers, persist to SQLite, and run one-time BLE task test
+      if (bleTransport) {
+        const blePeers = bleTransport.discoveredPeers();
+        if (blePeers.length > 0) {
+          try { for (const p of blePeers) { localStore.upsertBLEPeer(p.agentId, p.model, p.modelParamSize, p.deviceType, p.rssi); } } catch (e) { console.warn(`[db] BLE peer write failed: ${e}`); }
+          console.log(`[agent:${AGENT_ID}] BLE peers: ${blePeers.map(p => `${p.agentId}(rssi:${p.rssi})`).join(", ")}`);
+
+          if (!bleTaskTestDone) {
+            bleTaskTestDone = true;
+            const peer = blePeers[0];
+            // Delay to let discovery connect/disconnect settle before task
+            console.log(`[BLE-TEST] will send test task to ${peer.agentId} in 5s...`);
+            setTimeout(async () => {
+              try {
+                console.log(`[BLE-TEST] sending test task to ${peer.agentId} over BLE...`);
+                const testReq = {
+                  requestId: `ble-test-${Date.now()}`,
+                  requesterId: AGENT_ID,
+                  task: "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.",
+                  language: "python" as const,
+                  requesterSignature: "",
+                };
+                const resp = await bleTransport!.sendTaskRequest(peer.agentId, testReq);
+                console.log(`[BLE-TEST] response from ${peer.agentId}: status=${resp.status}, output=${(resp.output ?? "").substring(0, 200)}`);
+              } catch (e) {
+                console.error(`[BLE-TEST] error: ${String(e)}`);
+              }
+            }, 5000);
+          }
+        }
+      }
+
       const idleDelayMs = OS === "ios" && !canUsePeerDirect ? 2500 : 1200;
       await new Promise((r) => setTimeout(r, idleDelayMs));
     } catch (error) {
@@ -511,7 +591,7 @@ async function loop(): Promise<void> {
       const failover = await resolveCoordinatorUrl();
       if (failover.url !== activeCoordinatorUrl) {
         activeCoordinatorUrl = failover.url;
-        await cacheCoordinatorUrl(activeCoordinatorUrl);
+        cacheCoordinatorUrl(activeCoordinatorUrl);
         console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${activeCoordinatorUrl}`);
       }
       await new Promise((r) => setTimeout(r, 1500));
