@@ -12,6 +12,14 @@ struct InstalledModel: Codable, Identifiable {
     let checksumSha256: String
 
     var id: String { modelId }
+
+    /// Resolve the current absolute path for this model's GGUF file.
+    /// The stored `localPath` may be stale if the app container UUID changed
+    /// (e.g., after reinstall). This always returns the correct current path.
+    var resolvedPath: String {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("Models/\(modelId).gguf").path
+    }
 }
 
 // MARK: - Notifications
@@ -165,15 +173,26 @@ final class LocalModelManager: ObservableObject {
         return availableCatalog.filter { !installedIds.contains($0.modelId) }
     }
 
-    init(llamaContext: LlamaContextProtocol = StubLlamaContext()) {
+    init(llamaContext: LlamaContextProtocol = RealLlamaContext()) {
         self.llamaContext = llamaContext
         loadRegistry()
         let savedModel = UserDefaults.standard.string(forKey: activeModelKey) ?? ""
         if !savedModel.isEmpty, let model = installedModels.first(where: { $0.modelId == savedModel }) {
             selectedModel = model.modelId
             selectedModelParamSize = model.paramSize
-            state = .ready
-            statusText = "\(model.modelId) ready"
+            state = .loading
+            statusText = "Loading \(model.modelId)..."
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.llamaContext.loadModel(path: model.resolvedPath)
+                    self.state = .ready
+                    self.statusText = "\(model.modelId) ready"
+                } catch {
+                    self.state = .error
+                    self.statusText = "Failed to load \(model.modelId): \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -218,7 +237,7 @@ final class LocalModelManager: ObservableObject {
         llamaContext.unloadModel()
 
         do {
-            try llamaContext.loadModel(path: model.localPath)
+            try llamaContext.loadModel(path: model.resolvedPath)
         } catch {
             state = .error
             statusText = "Failed to load \(model.modelId): \(error.localizedDescription)"
@@ -304,7 +323,7 @@ final class LocalModelManager: ObservableObject {
             statusText = "No model active"
         }
 
-        try? FileManager.default.removeItem(atPath: model.localPath)
+        try? FileManager.default.removeItem(atPath: model.resolvedPath)
         installedModels.removeAll { $0.modelId == modelId }
         saveRegistry()
     }
@@ -343,6 +362,22 @@ final class LocalModelManager: ObservableObject {
             lastInferenceOutput = output
         } catch {
             lastInferenceOutput = "Error: \(error.localizedDescription)"
+        }
+    }
+
+    /// Run inference and return the result directly (for task execution loop).
+    func generate(prompt: String, maxTokens: Int = 512) async -> (ok: Bool, output: String, durationMs: Int) {
+        guard llamaContext.isLoaded else {
+            return (false, "No model loaded.", 0)
+        }
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let output = try await llamaContext.generate(prompt: prompt, maxTokens: maxTokens)
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            return (true, output, elapsed)
+        } catch {
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            return (false, "Error: \(error.localizedDescription)", elapsed)
         }
     }
 

@@ -28,10 +28,12 @@
 		B1A2C3D4E5F60718293A4B5D /* ModelLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */; };
 		C2B3D4E5F6071829304B5C6E /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */; };
 		D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C4E5F60718293A415C6D7E /* ModelStatusBanner.swift */; };
+		E4A5B6C7D8E9F0A1B2C3D4E6 /* RealLlamaContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4A5B6C7D8E9F0A1B2C3D4E5 /* RealLlamaContext.swift */; };
 		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
 		FE3020C5296B6D4400A4D780 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */; };
 		FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */; };
+		G6C7D8E9F0A1B2C3D4E5F607 /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = F5B6C7D8E9F0A1B2C3D4E5F6 /* SwiftLlama */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +65,7 @@
 		D29E66F7BB2B2DD53363564C /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		EA4F6442ACF49CA53C9306F8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EdgeCoder.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E4A5B6C7D8E9F0A1B2C3D4E5 /* RealLlamaContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealLlamaContext.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -104,6 +107,7 @@
 				B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */,
 				C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */,
 				D3C4E5F60718293A415C6D7E /* ModelStatusBanner.swift */,
+				E4A5B6C7D8E9F0A1B2C3D4E5 /* RealLlamaContext.swift */,
 				87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */,
 				29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */,
 			);
@@ -188,6 +192,7 @@
 			buildConfigurationList = 94AA7E990D457214485743F3 /* Build configuration list for PBXNativeTarget "EdgeCoderIOS" */;
 			buildPhases = (
 				689DB0CDC0DFCC6C19717F9C /* Sources */,
+				H7D8E9F0A1B2C3D4E5F60718 /* Frameworks */,
 				0A93C3FDC4A6FEAE9DC6D064 /* Resources */,
 			);
 			buildRules = (
@@ -196,6 +201,7 @@
 			);
 			name = EdgeCoderIOS;
 			packageProductDependencies = (
+				F5B6C7D8E9F0A1B2C3D4E5F6 /* SwiftLlama */,
 			);
 			productName = EdgeCoderIOS;
 			productReference = F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */;
@@ -225,6 +231,9 @@
 			);
 			mainGroup = 98D6A24062EE37A9AD7ED574;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A5B6C7D8E9F0A1B2C3D4E5F6 /* XCRemoteSwiftPackageReference "llama.cpp" */,
+			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -244,6 +253,17 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		H7D8E9F0A1B2C3D4E5F60718 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				G6C7D8E9F0A1B2C3D4E5F607 /* SwiftLlama in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		689DB0CDC0DFCC6C19717F9C /* Sources */ = {
@@ -267,6 +287,7 @@
 				D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */,
 				1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */,
 				FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */,
+				E4A5B6C7D8E9F0A1B2C3D4E6 /* RealLlamaContext.swift in Sources */,
 				8D5E31F9D98473054447741F /* RootTabView.swift in Sources */,
 				7E423092ADCA6E6D683CC0BB /* SessionStore.swift in Sources */,
 				B996DC26F09449F1DFB014C2 /* SettingsView.swift in Sources */,
@@ -463,6 +484,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A5B6C7D8E9F0A1B2C3D4E5F6 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/pgorzelany/swift-llama-cpp.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F5B6C7D8E9F0A1B2C3D4E5F6 /* SwiftLlama */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A5B6C7D8E9F0A1B2C3D4E5F6 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */;
+			productName = SwiftLlama;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1575F32DEB5E0FF9D050C7D1 /* Project object */;
 }
