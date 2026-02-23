@@ -27,7 +27,9 @@ final class SwarmRuntimeController: ObservableObject {
     @Published var lastRegisterError = ""
     @Published var runtimeEvents: [String] = []
     @Published var isReregistering = false
+    @Published var consecutiveHeartbeatFailures = 0
 
+    let bleMeshManager = BLEMeshManager.shared
     private let api = APIClient.shared
     private let modelManager = LocalModelManager.shared
     private var runtimeTask: Task<Void, Never>?
@@ -151,6 +153,7 @@ final class SwarmRuntimeController: ObservableObject {
         statusText = "Swarm runtime running with local model \(modelManager.selectedModel)."
         appendEvent(statusText)
         await discoverCoordinators()
+        bleMeshManager.start()
     }
 
     func pause() {
@@ -164,6 +167,7 @@ final class SwarmRuntimeController: ObservableObject {
     func stop() {
         runtimeTask?.cancel()
         runtimeTask = nil
+        bleMeshManager.stop()
         state = .stopped
         statusText = "Swarm runtime stopped."
         appendEvent(statusText)
@@ -308,13 +312,26 @@ final class SwarmRuntimeController: ObservableObject {
             _ = try await postCoordinator(path: "/heartbeat", payload: payload)
             heartbeatCount += 1
             lastHeartbeatAt = Date()
+            consecutiveHeartbeatFailures = 0
             persistRuntimeSettings()
             statusText = "Heartbeat sent (\(Date().formatted(date: .omitted, time: .standard)))."
             appendEvent(statusText)
+            if bleMeshManager.isOffline {
+                bleMeshManager.isOffline = false
+                bleMeshManager.stopScanning()
+                appendEvent("Back online — syncing offline ledger.")
+                await syncOfflineLedger()
+            }
             await observeCoordinatorPull()
         } catch is CancellationError {
             return
         } catch {
+            consecutiveHeartbeatFailures += 1
+            if consecutiveHeartbeatFailures >= 3 && !bleMeshManager.isOffline {
+                bleMeshManager.isOffline = true
+                bleMeshManager.startScanning()
+                appendEvent("Offline detected (\(consecutiveHeartbeatFailures) failures) — BLE mesh scanning started.")
+            }
             if let apiError = error as? APIClientError,
                case .serverError(let message) = apiError,
                message.contains("mesh_unauthorized") {
@@ -339,6 +356,37 @@ final class SwarmRuntimeController: ObservableObject {
             }
         } catch {
             // Non-fatal telemetry path; ignore pull observation errors.
+        }
+    }
+
+    private func syncOfflineLedger() async {
+        let ledger = OfflineLedger.shared
+        let pending = ledger.pending()
+        guard !pending.isEmpty else { return }
+        appendEvent("Syncing \(pending.count) offline transaction(s) to coordinator.")
+        let txDicts: [[String: Any]] = pending.map { tx in
+            [
+                "txId": tx.txId,
+                "requesterId": tx.requesterId,
+                "providerId": tx.providerId,
+                "requesterAccountId": tx.requesterAccountId,
+                "providerAccountId": tx.providerAccountId,
+                "credits": tx.credits,
+                "cpuSeconds": tx.cpuSeconds,
+                "taskHash": tx.taskHash,
+                "timestamp": tx.timestamp,
+                "requesterSignature": tx.requesterSignature,
+                "providerSignature": tx.providerSignature
+            ]
+        }
+        let payload: [String: Any] = ["transactions": txDicts]
+        do {
+            let response = try await postCoordinator(path: "/credits/ble-sync", payload: payload)
+            let syncedIds = (response["syncedTxIds"] as? [String]) ?? pending.map(\.txId)
+            ledger.markSynced(syncedIds)
+            appendEvent("Offline ledger sync complete — \(syncedIds.count) transaction(s) confirmed.")
+        } catch {
+            appendEvent("Offline ledger sync failed: \(error.localizedDescription)")
         }
     }
 
