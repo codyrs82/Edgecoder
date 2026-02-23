@@ -447,3 +447,61 @@ export interface BLECreditTransaction {
   requesterSignature: string;
   providerSignature: string;
 }
+
+/* ── Model Catalog & Swap ──────────────────────────────── */
+
+export interface ModelCatalogEntry {
+  modelId: string;
+  displayName: string;
+  paramSize: number;
+  quantization: string;
+  fileSizeBytes: number;
+  downloadUrl: string;
+  checksumSha256: string;
+  platform: "ios" | "node" | "all";
+  languages: string[];
+  minMemoryMB: number;
+}
+
+export interface ModelSwapRequest {
+  model: string;
+}
+
+export interface ModelSwapResponse {
+  previous: string;
+  active: string;
+  status: "ready" | "pulling" | "error";
+  paramSize: number;
+  progress?: number;
+  error?: string;
+}
+
+export interface ModelStatusResponse {
+  model: string;
+  paramSize: number;
+  status: "ready" | "loading" | "error" | "no_model";
+  ollamaHealthy: boolean;
+  pullProgress?: number;
+}
+
+export interface ModelListEntry {
+  modelId: string;
+  paramSize: number;
+  quantization?: string;
+  installed: boolean;
+  active: boolean;
+  source: "ollama" | "cdn";
+}
+
+export interface CapabilitySummaryPayload {
+  coordinatorId: string;
+  agentCount: number;
+  modelAvailability: {
+    [modelName: string]: {
+      agentCount: number;
+      totalParamCapacity: number;
+      avgLoad: number;
+    };
+  };
+  timestamp: number;
+}
