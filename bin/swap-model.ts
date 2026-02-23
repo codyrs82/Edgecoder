@@ -64,7 +64,7 @@ async function listModels(host: string): Promise<void> {
     console.error(`Error: ${res.status} ${res.statusText}`);
     process.exit(1);
   }
-  const models = await res.json() as Array<{ model: string; paramSize: number; installed: boolean; active: boolean }>;
+  const models = await res.json() as Array<{ modelId: string; paramSize: number; installed: boolean; active: boolean }>;
 
   console.log("\nInstalled Models:");
   console.log("\u2500".repeat(50));
@@ -74,7 +74,7 @@ async function listModels(host: string): Promise<void> {
   } else {
     for (const m of installed) {
       const active = m.active ? " \u2190 active" : "";
-      console.log(`  ${m.model} (${m.paramSize}B)${active}`);
+      console.log(`  ${m.modelId} (${m.paramSize}B)${active}`);
     }
   }
 
@@ -123,13 +123,13 @@ async function getStatus(host: string): Promise<void> {
     console.error(`Error: ${res.status} ${res.statusText}`);
     process.exit(1);
   }
-  const status = await res.json() as { activeModel: string; paramSize: number; status: string; ollamaConnected: boolean };
+  const status = await res.json() as { model: string; paramSize: number; status: string; ollamaHealthy: boolean };
   console.log(`\nModel Status:`);
   console.log("\u2500".repeat(50));
-  console.log(`  Active:  ${status.activeModel}`);
+  console.log(`  Active:  ${status.model}`);
   console.log(`  Params:  ${status.paramSize}B`);
   console.log(`  Status:  ${status.status}`);
-  console.log(`  Ollama:  ${status.ollamaConnected ? "connected" : "disconnected"}`);
+  console.log(`  Ollama:  ${status.ollamaHealthy ? "connected" : "disconnected"}`);
   console.log();
 }
 
