@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SwarmView: View {
     @EnvironmentObject private var swarmRuntime: SwarmRuntimeController
-    @StateObject private var modelManager = LocalModelManager.shared
+    @StateObject private var modelManager = LocalModelManager()
     @State private var prompt = "Summarize my edge node contribution profile."
     @State private var enrollmentNodeId = ""
     @State private var enrollmentToken = ""
@@ -52,9 +52,8 @@ struct SwarmView: View {
                     LabeledContent("State", value: modelManager.state.rawValue)
                     LabeledContent("Runtime mode", value: "llama.cpp/Core ML scaffold")
                     Text(modelManager.statusText).font(.caption)
-                    Button("Install lightweight model") {
-                        Task { await modelManager.installLightweightModel() }
-                    }
+                    LabeledContent("Param size", value: String(format: "%.1fB", modelManager.selectedModelParamSize))
+                    LabeledContent("Installed", value: "\(modelManager.installedModels.count) model(s)")
                     TextField("Prompt", text: $prompt, axis: .vertical)
                     Button("Run local inference") {
                         Task { await modelManager.runInference(prompt: prompt) }
