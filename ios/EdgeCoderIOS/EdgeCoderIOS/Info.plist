@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>EdgeCoder uses Bluetooth to form a local compute mesh with nearby devices for offline task processing.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
