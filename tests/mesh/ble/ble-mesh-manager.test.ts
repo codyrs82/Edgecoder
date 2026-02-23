@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
+import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 
 describe("BLEMeshManager", () => {
@@ -90,5 +90,59 @@ describe("BLEMeshManager", () => {
     expect(pending[0].requesterId).toBe("agent-a");
     expect(pending[0].providerId).toBe("agent-b");
     expect(pending[0].cpuSeconds).toBe(2.0);
+  });
+
+  it("applies model quality multiplier to credits", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportSmall = new MockBLETransport("agent-small", network);
+    transportSmall.startAdvertising({ agentId: "agent-small", model: "tiny", modelParamSize: 0.5, memoryMB: 2048, batteryPct: 100, currentLoad: 0, deviceType: "phone" });
+    transportSmall.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "agent-small",
+      status: "completed" as const,
+      generatedCode: "x = 1",
+      output: "",
+      cpuSeconds: 10.0,
+      providerSignature: "sig-s"
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA);
+    manager.setOffline(true);
+    manager.refreshPeers();
+    await manager.routeTask({
+      requestId: "req-1",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "sig-a"
+    }, 0.5);
+
+    const pending = manager.pendingTransactions();
+    expect(pending).toHaveLength(1);
+    // 0.5B model → 0.3x multiplier → 10 cpuSeconds * 1.0 baseRate * 0.3 = 3.0
+    expect(pending[0].credits).toBe(3.0);
+  });
+});
+
+describe("modelQualityMultiplier", () => {
+  it("returns 1.0 for 7B+ models", () => {
+    expect(modelQualityMultiplier(7)).toBe(1.0);
+    expect(modelQualityMultiplier(13)).toBe(1.0);
+  });
+
+  it("returns 0.7 for 3B-7B models", () => {
+    expect(modelQualityMultiplier(3)).toBe(0.7);
+    expect(modelQualityMultiplier(5)).toBe(0.7);
+  });
+
+  it("returns 0.5 for 1.5B-3B models", () => {
+    expect(modelQualityMultiplier(1.5)).toBe(0.5);
+    expect(modelQualityMultiplier(2)).toBe(0.5);
+  });
+
+  it("returns 0.3 for sub-1.5B models", () => {
+    expect(modelQualityMultiplier(0.5)).toBe(0.3);
+    expect(modelQualityMultiplier(1)).toBe(0.3);
   });
 });
