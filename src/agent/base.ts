@@ -3,15 +3,18 @@ import { Language, RunResult, IterationRecord, AgentExecution } from "../common/
 import { ModelProvider } from "../model/providers.js";
 import { planPrompt, codePrompt, reflectPrompt } from "../model/prompts.js";
 import { extractCode } from "../model/extract.js";
+import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 
 export interface AgentOptions {
   maxIterations?: number;
   sandbox?: "host" | "docker";
+  bleMeshManager?: BLEMeshManager;
 }
 
 export abstract class AgentBase {
   protected readonly maxIterations: number;
   protected readonly sandbox: "host" | "docker";
+  protected readonly bleMeshManager?: BLEMeshManager;
 
   constructor(
     protected readonly provider: ModelProvider,
@@ -19,6 +22,7 @@ export abstract class AgentBase {
   ) {
     this.maxIterations = options?.maxIterations ?? 3;
     this.sandbox = options?.sandbox ?? "host";
+    this.bleMeshManager = options?.bleMeshManager;
   }
 
   protected async planTask(task: string): Promise<string> {
