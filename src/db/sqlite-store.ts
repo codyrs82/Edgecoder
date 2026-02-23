@@ -53,6 +53,8 @@ export interface BLECreditLedgerRow {
   taskHash: string;
   createdAt: number;
   synced: number;
+  requesterSig: string;
+  providerSig: string;
 }
 
 export interface OutboundTaskRow {
@@ -149,6 +151,9 @@ export class SQLiteStore {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA_SQL);
+    // Idempotent migration: add signature columns to ble_credit_ledger
+    try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN requester_sig TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN provider_sig TEXT NOT NULL DEFAULT ''"); } catch {}
   }
 
   close(): void {
@@ -411,14 +416,16 @@ export class SQLiteStore {
     providerId: string,
     credits: number,
     cpuSeconds: number,
-    taskHash: string
+    taskHash: string,
+    requesterSig = "",
+    providerSig = ""
   ): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO ble_credit_ledger (tx_id, requester_id, provider_id, credits, cpu_seconds, task_hash)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT OR REPLACE INTO ble_credit_ledger (tx_id, requester_id, provider_id, credits, cpu_seconds, task_hash, requester_sig, provider_sig)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(txId, requesterId, providerId, credits, cpuSeconds, taskHash);
+      .run(txId, requesterId, providerId, credits, cpuSeconds, taskHash, requesterSig, providerSig);
   }
 
   listUnsyncedBLECredits(limit = 50): BLECreditLedgerRow[] {
@@ -426,7 +433,8 @@ export class SQLiteStore {
       .prepare(
         `SELECT tx_id as txId, requester_id as requesterId, provider_id as providerId,
                 credits, cpu_seconds as cpuSeconds, task_hash as taskHash,
-                created_at as createdAt, synced
+                created_at as createdAt, synced,
+                requester_sig as requesterSig, provider_sig as providerSig
          FROM ble_credit_ledger WHERE synced = 0 ORDER BY created_at ASC LIMIT ?`
       )
       .all(limit) as BLECreditLedgerRow[];

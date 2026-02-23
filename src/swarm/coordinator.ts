@@ -193,6 +193,7 @@ const agentCapabilities = new Map<
     activeModel?: string;
     activeModelParamSize?: number;
     modelSwapInProgress?: boolean;
+    publicKeyPem?: string;
     lastSeenMs: number;
   }
 >();
@@ -1274,7 +1275,8 @@ const registerSchema = z.object({
       lowPowerMode: z.boolean().optional(),
       updatedAtMs: z.number().optional()
     })
-    .optional()
+    .optional(),
+  publicKeyPem: z.string().optional()
 });
 
 const heartbeatSchema = z.object({
@@ -1380,6 +1382,7 @@ app.post("/register", async (req, reply) => {
           updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
         }
       : undefined,
+    publicKeyPem: body.publicKeyPem,
     lastSeenMs: now
   });
   const approvalRecord = ordering.append({
@@ -3469,7 +3472,23 @@ app.post("/credits/ble-sync", async (req, reply) => {
       skipped.push(tx.txId);
       continue;
     }
-    // TODO: verify requesterSignature and providerSignature with ed25519
+    // Verify ed25519 signatures when both key and signature are present
+    const requesterCap = agentCapabilities.get(tx.requesterId);
+    const providerCap = agentCapabilities.get(tx.providerId);
+    if (requesterCap?.publicKeyPem && tx.requesterSignature) {
+      const requesterPayload = JSON.stringify({ requesterId: tx.requesterId, taskHash: tx.taskHash });
+      if (!verifyPayload(requesterPayload, tx.requesterSignature, requesterCap.publicKeyPem)) {
+        skipped.push(tx.txId);
+        continue;
+      }
+    }
+    if (providerCap?.publicKeyPem && tx.providerSignature) {
+      const providerPayload = JSON.stringify({ providerId: tx.providerId, status: "completed", cpuSeconds: tx.cpuSeconds, taskHash: tx.taskHash });
+      if (!verifyPayload(providerPayload, tx.providerSignature, providerCap.publicKeyPem)) {
+        skipped.push(tx.txId);
+        continue;
+      }
+    }
     syncedBLETxIds.add(tx.txId);
     applied.push(tx.txId);
   }
