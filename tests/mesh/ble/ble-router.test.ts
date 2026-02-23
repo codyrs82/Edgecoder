@@ -82,4 +82,26 @@ describe("BLERouter", () => {
     const large = makePeer({ agentId: "large", modelParamSize: 7, rssi: -50 });
     expect(router.computeCost(large)).toBeLessThan(router.computeCost(small));
   });
+
+  it("penalizes unreliable peers", () => {
+    const router = new BLERouter();
+    const reliable = makePeer({ agentId: "reliable", taskSuccessCount: 10, taskFailCount: 0 });
+    const unreliable = makePeer({ agentId: "unreliable", taskSuccessCount: 2, taskFailCount: 8 });
+    expect(router.computeCost(reliable)).toBeLessThan(router.computeCost(unreliable));
+  });
+
+  it("gives benefit of doubt to new peers", () => {
+    const router = new BLERouter();
+    const newPeer = makePeer({ agentId: "new" });
+    const reliable = makePeer({ agentId: "reliable", taskSuccessCount: 10, taskFailCount: 0 });
+    expect(router.computeCost(newPeer)).toBe(router.computeCost(reliable));
+  });
+
+  it("selectBestPeer prefers reliable peer over unreliable", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "flaky", taskSuccessCount: 1, taskFailCount: 9 }));
+    router.updatePeer(makePeer({ agentId: "solid", taskSuccessCount: 9, taskFailCount: 1 }));
+    const best = router.selectBestPeer(1.5);
+    expect(best?.agentId).toBe("solid");
+  });
 });

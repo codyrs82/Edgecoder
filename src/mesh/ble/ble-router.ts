@@ -35,7 +35,10 @@ export class BLERouter {
       ? (100 - peer.batteryPct) * 0.5
       : 0;
     const signalPenalty = Math.min(30, Math.max(0, (-peer.rssi - 30) * 0.5));
-    return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty;
+    const totalTasks = (peer.taskSuccessCount ?? 0) + (peer.taskFailCount ?? 0);
+    const failRate = totalTasks > 0 ? (peer.taskFailCount ?? 0) / totalTasks : 0;
+    const reliabilityPenalty = failRate * 60;
+    return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty + reliabilityPenalty;
   }
 
   selectBestPeer(requiredModelSize: number): BLEPeerEntry | null {

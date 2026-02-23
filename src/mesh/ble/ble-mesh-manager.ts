@@ -19,6 +19,7 @@ export class BLEMeshManager {
   private readonly router = new BLERouter();
   private readonly ledger: OfflineLedger;
   private readonly transport: BLETransport;
+  private readonly store: SQLiteStore | null;
   private readonly agentId: string;
   private readonly accountId: string;
 
@@ -26,6 +27,7 @@ export class BLEMeshManager {
     this.agentId = agentId;
     this.accountId = accountId;
     this.transport = transport;
+    this.store = store ?? null;
     this.ledger = new OfflineLedger(store);
   }
 
@@ -44,7 +46,18 @@ export class BLEMeshManager {
 
   refreshPeers(): void {
     const discovered = this.transport.discoveredPeers();
+    const trustMap = new Map<string, { success: number; fail: number }>();
+    if (this.store) {
+      for (const row of this.store.listBLEPeers()) {
+        trustMap.set(row.agentId, { success: row.taskSuccessCount, fail: row.taskFailCount });
+      }
+    }
     for (const peer of discovered) {
+      const trust = trustMap.get(peer.agentId);
+      if (trust) {
+        peer.taskSuccessCount = trust.success;
+        peer.taskFailCount = trust.fail;
+      }
       this.router.updatePeer(peer);
     }
     this.router.evictStale();

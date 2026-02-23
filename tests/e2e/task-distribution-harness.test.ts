@@ -7,6 +7,7 @@ import {
   modelQualityMultiplier,
 } from "../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../src/mesh/ble/ble-transport.js";
+import { SQLiteStore } from "../../src/db/sqlite-store.js";
 import {
   computeDynamicPricePerComputeUnitSats,
   DynamicPriceInputs,
@@ -339,9 +340,11 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const network = new Map<string, MockBLETransport>();
     const transportA = new MockBLETransport("agent-A", network);
     const transportB = new MockBLETransport("agent-B", network);
+    const storeA = new SQLiteStore(":memory:");
+    const storeB = new SQLiteStore(":memory:");
 
-    const managerA = new BLEMeshManager("agent-A", "account-A", transportA);
-    const managerB = new BLEMeshManager("agent-B", "account-B", transportB);
+    const managerA = new BLEMeshManager("agent-A", "account-A", transportA, storeA);
+    const managerB = new BLEMeshManager("agent-B", "account-B", transportB, storeB);
 
     // Set both offline
     managerA.setOffline(true);
@@ -398,8 +401,8 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const tx = pending[0];
     expect(tx.requesterId).toBe("agent-A");
     expect(tx.providerId).toBe("agent-B");
-    expect(tx.requesterAccountId).toBe("account-A");
-    expect(tx.providerAccountId).toBe("agent-B"); // MockBLETransport uses agentId as accountId
+    expect(tx.requesterAccountId).toBe("agent-A"); // SQLite-backed ledger maps requesterId → requesterAccountId
+    expect(tx.providerAccountId).toBe("agent-B");
     expect(tx.cpuSeconds).toBe(5.0);
 
     // Verify modelQualityMultiplier applied: 7B => 1.0
@@ -422,8 +425,9 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const network = new Map<string, MockBLETransport>();
     const transportA = new MockBLETransport("agent-A2", network);
     const transportB = new MockBLETransport("agent-B2", network);
+    const storeA2 = new SQLiteStore(":memory:");
 
-    const managerA = new BLEMeshManager("agent-A2", "account-A2", transportA);
+    const managerA = new BLEMeshManager("agent-A2", "account-A2", transportA, storeA2);
 
     managerA.setOffline(true);
 

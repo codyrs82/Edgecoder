@@ -136,6 +136,100 @@ describe("BLEMeshManager", () => {
   });
 });
 
+describe("BLEMeshManager trust scoring integration", () => {
+  it("refreshPeers merges SQLite trust data and routing prefers reliable peer", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportReliable = new MockBLETransport("reliable-peer", network);
+    const transportFlaky = new MockBLETransport("flaky-peer", network);
+
+    // Both peers advertise identical specs
+    const adSpec = { model: "qwen2.5-coder:7b", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" as const };
+    transportReliable.startAdvertising({ agentId: "reliable-peer", ...adSpec });
+    transportFlaky.startAdvertising({ agentId: "flaky-peer", ...adSpec });
+
+    // Both handle tasks
+    for (const t of [transportReliable, transportFlaky]) {
+      t.onTaskRequest(async (req) => ({
+        requestId: req.requestId,
+        providerId: t === transportReliable ? "reliable-peer" : "flaky-peer",
+        status: "completed" as const,
+        output: "ok",
+        cpuSeconds: 1.0,
+        providerSignature: "",
+      }));
+    }
+
+    // Seed SQLite with trust history: reliable = 10 successes, flaky = 8 fails + 2 successes
+    store.upsertBLEPeer("reliable-peer", "qwen2.5-coder:7b", 7, "laptop", -50);
+    store.upsertBLEPeer("flaky-peer", "qwen2.5-coder:7b", 7, "laptop", -50);
+    for (let i = 0; i < 10; i++) store.recordBLETaskResult("reliable-peer", true);
+    for (let i = 0; i < 2; i++) store.recordBLETaskResult("flaky-peer", true);
+    for (let i = 0; i < 8; i++) store.recordBLETaskResult("flaky-peer", false);
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+
+    // Route a task — should pick reliable-peer (lower cost due to trust)
+    const resp = await manager.routeTask({
+      requestId: "trust-test-1",
+      requesterId: "agent-a",
+      task: "test task",
+      language: "python",
+      requesterSignature: "",
+    }, 7);
+
+    expect(resp).not.toBeNull();
+    expect(resp!.providerId).toBe("reliable-peer");
+  });
+
+  it("recordBLETaskResult updates trust and affects subsequent routing", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportPeer = new MockBLETransport("peer-x", network);
+
+    transportPeer.startAdvertising({ agentId: "peer-x", model: "qwen2.5-coder:7b", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    transportPeer.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "peer-x",
+      status: "completed" as const,
+      output: "ok",
+      cpuSeconds: 1.0,
+      providerSignature: "",
+    }));
+
+    // Seed peer in SQLite so recordBLETaskResult has a row to update
+    store.upsertBLEPeer("peer-x", "qwen2.5-coder:7b", 7, "laptop", -50);
+
+    // Record 10 failures
+    for (let i = 0; i < 10; i++) store.recordBLETaskResult("peer-x", false);
+
+    // Verify the trust data is in SQLite
+    const rows = store.listBLEPeers();
+    const peerRow = rows.find(r => r.agentId === "peer-x");
+    expect(peerRow).toBeDefined();
+    expect(peerRow!.taskFailCount).toBe(10);
+    expect(peerRow!.taskSuccessCount).toBe(0);
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+
+    // Even with 100% fail rate, peer is still routable (cost increases but stays under threshold)
+    const resp = await manager.routeTask({
+      requestId: "fail-test-1",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 7);
+
+    // 7B model → modelPenalty=0, load=0, battery=0, signal=(50-30)*0.5=10, reliability=60
+    // Total = 70, under COST_THRESHOLD of 200, so still routable
+    expect(resp).not.toBeNull();
+    expect(resp!.providerId).toBe("peer-x");
+  });
+});
+
 describe("modelQualityMultiplier", () => {
   it("returns 1.0 for 7B+ models", () => {
     expect(modelQualityMultiplier(7)).toBe(1.0);

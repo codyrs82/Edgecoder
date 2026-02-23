@@ -413,6 +413,8 @@ export interface BLEPeerEntry {
   deviceType: "phone" | "laptop" | "workstation";
   rssi: number;
   lastSeenMs: number;
+  taskSuccessCount?: number;
+  taskFailCount?: number;
 }
 
 export interface BLETaskRequest {
