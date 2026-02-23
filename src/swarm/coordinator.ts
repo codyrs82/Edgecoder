@@ -3489,6 +3489,11 @@ app.post("/credits/ble-sync", async (req, reply) => {
         continue;
       }
     }
+    // Settle credits: credit provider, debit requester
+    const providerAccountId = await rewardAccountForAgent(tx.providerId);
+    await adjustCredits(providerAccountId, tx.credits, "ble_compute");
+    await adjustCredits(tx.requesterAccountId, -tx.credits, "ble_compute");
+
     syncedBLETxIds.add(tx.txId);
     applied.push(tx.txId);
   }
