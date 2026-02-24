@@ -10,6 +10,7 @@ import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
 import { signRequest } from "../security/request-signing.js";
+import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
 import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
@@ -43,6 +44,7 @@ const AGENT_DEVICE_ID = (() => {
   return "";
 })();
 const keys = createPeerKeys(AGENT_ID);
+const envelopeKeys = generateX25519KeyPair();
 const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
 const lastOfferAtByPeer = new Map<string, number>();
@@ -469,7 +471,8 @@ async function loop(): Promise<void> {
           clientType: AGENT_CLIENT_TYPE,
           maxConcurrentTasks: MAX_CONCURRENT_TASKS,
           powerTelemetry,
-          publicKeyPem: keys.publicKeyPem
+          publicKeyPem: keys.publicKeyPem,
+          x25519PublicKey: envelopeKeys.publicKey.toString("base64")
         };
         const registerResponse = (await post("/register", registerBody, {
           extraHeaders: signedHeaders("/register", registerBody),
@@ -620,7 +623,35 @@ async function loop(): Promise<void> {
         const pullBody = { agentId: AGENT_ID };
         const pulled = (await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })) as {
           subtask: Subtask | null;
+          envelope?: TaskEnvelope;
         };
+
+        // Decrypt envelope if coordinator sent an encrypted task
+        let taskEnvelope: TaskEnvelope | undefined;
+        if (pulled.envelope) {
+          try {
+            const decrypted = decryptTaskEnvelope(pulled.envelope, envelopeKeys.privateKey);
+            pulled.subtask = {
+              id: pulled.envelope.subtaskId,
+              taskId: pulled.envelope.subtaskId.split(":")[0] ?? pulled.envelope.subtaskId,
+              kind: "single_step",
+              input: decrypted.input,
+              snapshotRef: decrypted.snapshotRef,
+              language: decrypted.kind as Language,
+              timeoutMs: pulled.envelope.metadata.timeoutMs ?? 60_000,
+              projectMeta: {
+                projectId: "default",
+                resourceClass: (pulled.envelope.metadata.resourceClass as "cpu" | "gpu") ?? "cpu",
+                priority: pulled.envelope.metadata.priority ?? 50,
+              },
+            };
+            taskEnvelope = pulled.envelope;
+            console.log(`[agent:${AGENT_ID}] decrypted envelope task: ${pulled.envelope.subtaskId}`);
+          } catch (envelopeErr) {
+            console.error(`[agent:${AGENT_ID}] envelope decryption failed: ${envelopeErr}`);
+          }
+        }
+
         if (pulled.subtask) {
           const st = pulled.subtask;
 
@@ -648,10 +679,33 @@ async function loop(): Promise<void> {
           );
           result.reportNonce = reportNonce;
           result.reportSignature = reportSignature;
+
+          // Encrypt result if task was received as an envelope
+          let resultPayload: Record<string, unknown> = { ...result };
+          if (taskEnvelope) {
+            try {
+              const encrypted = encryptResult(
+                { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
+                taskEnvelope,
+                envelopeKeys.privateKey
+              );
+              resultPayload = {
+                ...encrypted,
+                taskId: result.taskId,
+                agentId: result.agentId,
+                reportNonce,
+                reportSignature,
+              };
+              console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
+            } catch (encryptErr) {
+              console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
+            }
+          }
+
           try {
-            await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
+            await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
           } catch (resultErr) {
-            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(result)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
             console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
           }
           continue;

@@ -61,6 +61,7 @@ import {
 } from "../security/blacklist.js";
 import { EscalationRequest, EscalationResult } from "../escalation/types.js";
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
+import { createTaskEnvelope, decryptResult as decryptEnvelopeResult, type TaskEnvelope, type EncryptedResult } from "../security/envelope.js";
 import { verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
 import { InMemoryNonceStore, verifyNonce } from "../security/nonce-verifier.js";
 import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
@@ -223,9 +224,12 @@ const agentCapabilities = new Map<
     activeModelParamSize?: number;
     modelSwapInProgress?: boolean;
     publicKeyPem?: string;
+    x25519PublicKey?: string;
     lastSeenMs: number;
   }
 >();
+const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
+const ENVELOPE_KEY_TTL_MS = 60 * 60 * 1000; // 1 hour
 const federatedCapabilities = new Map<string, CapabilitySummaryPayload>();
 const lastTaskAssignedByAgent = new Map<string, number>();
 const ollamaRollouts = new Map<string, OllamaRolloutRecord>();
@@ -1449,7 +1453,8 @@ const registerSchema = z.object({
       updatedAtMs: z.number().optional()
     })
     .optional(),
-  publicKeyPem: z.string().optional()
+  publicKeyPem: z.string().optional(),
+  x25519PublicKey: z.string().optional()
 });
 
 const heartbeatSchema = z.object({
@@ -1557,6 +1562,7 @@ app.post("/register", async (req, reply) => {
         }
       : undefined,
     publicKeyPem: body.publicKeyPem,
+    x25519PublicKey: body.x25519PublicKey,
     lastSeenMs: now
   });
   const approvalRecord = ordering.append({
@@ -1871,6 +1877,31 @@ app.post("/pull", async (req, reply) => {
     });
     await pgStore?.persistLedgerRecord(claimRecord);
     await persistStatsLedgerRecord(claimRecord);
+
+    // Envelope encryption: if agent registered an X25519 key, encrypt the task
+    const agentX25519 = capability?.x25519PublicKey;
+    if (agentX25519) {
+      try {
+        const agentPubKey = Buffer.from(agentX25519, "base64");
+        const { envelope, sharedKey } = createTaskEnvelope(
+          { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
+          agentPubKey,
+          task.id,
+          { resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language }
+        );
+        envelopeSharedKeys.set(task.id, { key: sharedKey, createdAtMs: Date.now() });
+        // Expire stale shared keys
+        const now = Date.now();
+        for (const [sid, entry] of envelopeSharedKeys) {
+          if (now - entry.createdAtMs > ENVELOPE_KEY_TTL_MS) envelopeSharedKeys.delete(sid);
+        }
+        app.log.info({ subtaskId: task.id, agentId: body.agentId }, "task_encrypted_with_envelope");
+        return reply.send({ subtask: null, envelope });
+      } catch (envelopeErr) {
+        app.log.warn({ subtaskId: task.id, error: String(envelopeErr) }, "envelope_encryption_failed_falling_back");
+        // Fall through to plaintext
+      }
+    }
   }
   return reply.send({ subtask: task ?? null });
 });
@@ -1879,7 +1910,32 @@ app.post("/result", async (req, reply) => {
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
-  const body = resultSchema.parse(req.body);
+  const rawBody = req.body as Record<string, unknown>;
+
+  // Check if this is an encrypted envelope result
+  const cachedKey = typeof rawBody.subtaskId === "string" ? envelopeSharedKeys.get(rawBody.subtaskId) : undefined;
+  let body: z.infer<typeof resultSchema>;
+  if (cachedKey && typeof rawBody.encryptedPayload === "string") {
+    try {
+      const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, cachedKey.key);
+      envelopeSharedKeys.delete(rawBody.subtaskId as string);
+      body = resultSchema.parse({
+        ...decrypted,
+        subtaskId: rawBody.subtaskId,
+        taskId: rawBody.taskId,
+        agentId: rawBody.agentId,
+        reportNonce: rawBody.reportNonce,
+        reportSignature: rawBody.reportSignature,
+      });
+      app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
+    } catch (decryptErr) {
+      app.log.error({ subtaskId: rawBody.subtaskId, error: String(decryptErr) }, "envelope_result_decrypt_failed");
+      return reply.code(400).send({ error: "envelope_decrypt_failed" });
+    }
+  } else {
+    body = resultSchema.parse(rawBody);
+  }
+
   if (verified && verified.agentId !== body.agentId) {
     return reply.code(401).send({ error: "agent_id_mismatch" });
   }
