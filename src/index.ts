@@ -1,6 +1,7 @@
 import { inferenceService } from "./inference/service.js";
 import { coordinatorServer, initCoordinator } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";
+import websocket from "@fastify/websocket";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -60,6 +61,9 @@ function startWorkerProcess(): void {
 }
 
 async function boot(): Promise<void> {
+  // Register WebSocket plugin for coordinator's /mesh/ws NAT traversal endpoint
+  await coordinatorServer.register(websocket);
+
   try {
     await Promise.all([
       inferenceService.listen({ port: INFERENCE_PORT, host: "0.0.0.0" }),
