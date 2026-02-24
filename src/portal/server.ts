@@ -2475,6 +2475,158 @@ app.post("/coordinator/ops/agents-model", async (req, reply) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Chat API — conversations CRUD + streaming chat
+// ---------------------------------------------------------------------------
+
+app.get("/portal/api/conversations", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const conversations = await store.listConversations(user.userId);
+  return reply.send({ conversations });
+});
+
+app.post("/portal/api/conversations", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const body = z.object({ title: z.string().optional() }).parse(req.body);
+  const conversationId = randomUUID();
+  await store.createConversation({ conversationId, userId: user.userId, title: body.title });
+  return reply.send({ conversationId });
+});
+
+app.get("/portal/api/conversations/:id/messages", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const { id } = req.params as { id: string };
+  const messages = await store.getConversationMessages(id);
+  return reply.send({ messages });
+});
+
+app.patch("/portal/api/conversations/:id", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const { id } = req.params as { id: string };
+  const body = z.object({ title: z.string().min(1) }).parse(req.body);
+  await store.renameConversation(id, body.title);
+  return reply.send({ ok: true });
+});
+
+app.delete("/portal/api/conversations/:id", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const { id } = req.params as { id: string };
+  await store.deleteConversation(id);
+  return reply.send({ ok: true });
+});
+
+app.post("/portal/api/chat", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+
+  const body = z.object({ conversationId: z.string().min(1), message: z.string().min(1) }).parse(req.body);
+
+  // Save user message
+  await store.addMessage({
+    messageId: randomUUID(),
+    conversationId: body.conversationId,
+    role: "user",
+    content: body.message
+  });
+
+  // Build message history from conversation
+  const history = await store.getConversationMessages(body.conversationId);
+  const messages = history.map((m) => ({ role: m.role, content: m.content }));
+
+  // Discover a coordinator
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.code(502).send({ error: "no_coordinators_available" });
+  }
+  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
+
+  // Submit task to coordinator
+  const taskId = randomUUID();
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+  let coordinatorRes;
+  try {
+    coordinatorRes = await request(`${coordinatorUrl}/tasks`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        taskId,
+        submitterAccountId: user.userId,
+        payload: { messages, stream: true },
+        priority: "normal",
+        resourceClass: "gpu"
+      }),
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: 0 // no body timeout for streaming
+    });
+  } catch (err) {
+    return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+  }
+
+  if (coordinatorRes.statusCode < 200 || coordinatorRes.statusCode >= 300) {
+    const errBody = await coordinatorRes.body.text();
+    return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+  }
+
+  // Stream SSE response
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  let fullContent = "";
+  try {
+    for await (const chunk of coordinatorRes.body) {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      const lines = text.split("\n").filter((l: string) => l.trim().length > 0);
+      for (const line of lines) {
+        const trimmed = line.replace(/^data:\s*/, "").trim();
+        if (!trimmed || trimmed === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(trimmed) as {
+            choices?: Array<{ delta?: { content?: string } }>;
+          };
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullContent += delta;
+            reply.raw.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
+          }
+        } catch {
+          // Not valid JSON — skip
+        }
+      }
+    }
+  } catch (streamErr) {
+    reply.raw.write(`data: ${JSON.stringify({ error: "stream_interrupted" })}\n\n`);
+  }
+
+  // Save assistant message
+  if (fullContent.length > 0) {
+    await store.addMessage({
+      messageId: randomUUID(),
+      conversationId: body.conversationId,
+      role: "assistant",
+      content: fullContent
+    });
+  }
+
+  reply.raw.write("data: [DONE]\n\n");
+  reply.raw.end();
+});
+
 app.get("/", async (_req, reply) => reply.type("text/html").send(marketingHomeHtml()));
 
 app.get("/portal-legacy", async (_req, reply) => {
