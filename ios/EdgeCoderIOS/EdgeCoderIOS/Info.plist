@@ -56,7 +56,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>EdgeCoder connects to a local coordinator on your network for task routing and BLE mesh coordination.</string>
+	<string>EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

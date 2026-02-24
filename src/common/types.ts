@@ -115,7 +115,31 @@ export type MeshMessageType =
   | "issuance_vote"
   | "issuance_commit"
   | "issuance_checkpoint"
-  | "capability_summary";
+  | "capability_summary"
+  | "peer_exchange"
+  | "capability_announce";
+
+export type MeshPeerRole = "coordinator" | "agent" | "phone";
+
+export interface PeerExchangePayload {
+  peers: Array<{
+    peerId: string;
+    publicKeyPem: string;
+    peerUrl: string;
+    networkMode: NetworkMode;
+    role: MeshPeerRole;
+    lastSeenMs: number;
+  }>;
+}
+
+export interface CapabilityAnnouncePayload {
+  peerId: string;
+  role: MeshPeerRole;
+  models: string[];
+  maxConcurrentTasks: number;
+  currentLoad: number;
+  deviceType: "server" | "laptop" | "phone";
+}
 
 export interface MeshMessage {
   id: string;

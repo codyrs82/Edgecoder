@@ -27,7 +27,10 @@ import {
   ResourceClass,
   TreasuryPolicy,
   WalletType,
-  CapabilitySummaryPayload
+  CapabilitySummaryPayload,
+  PeerExchangePayload,
+  CapabilityAnnouncePayload,
+  MeshPeerRole
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -2521,6 +2524,7 @@ const peerSchema = z.object({
   publicKeyPem: z.string(),
   coordinatorUrl: z.string().url(),
   networkMode: z.enum(["public_mesh", "enterprise_overlay"]),
+  role: z.enum(["coordinator", "agent", "phone"]).optional(),
   registrationToken: z.string().optional()
 });
 
@@ -2587,7 +2591,9 @@ app.post("/mesh/ingest", async (req, reply) => {
         "issuance_vote",
         "issuance_commit",
         "issuance_checkpoint",
-        "capability_summary"
+        "capability_summary",
+        "peer_exchange",
+        "capability_announce"
       ]),
       fromPeerId: z.string(),
       issuedAtMs: z.number(),
@@ -2597,27 +2603,34 @@ app.post("/mesh/ingest", async (req, reply) => {
     })
     .parse(req.body);
   const peer = mesh.listPeers().find((p) => p.peerId === message.fromPeerId);
-  if (!peer) return reply.code(404).send({ error: "peer_unknown" });
+  // Allow peer_exchange and capability_announce from unknown peers — this is how
+  // new peers introduce themselves to the mesh after registering.
+  if (!peer && message.type !== "peer_exchange" && message.type !== "capability_announce") {
+    return reply.code(404).send({ error: "peer_unknown" });
+  }
 
-  const now = Date.now();
-  const windowStart = now - (now % 10_000);
-  const window = peerMessageWindow.get(peer.peerId);
-  if (!window || window.windowMs !== windowStart) {
-    peerMessageWindow.set(peer.peerId, { windowMs: windowStart, count: 1 });
-  } else {
-    window.count += 1;
-    if (window.count > MESH_RATE_LIMIT_PER_10S) {
-      peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
-      return reply.code(429).send({ error: "peer_rate_limited" });
+  // Rate limiting and signature validation (only when peer is known)
+  if (peer) {
+    const now = Date.now();
+    const windowStart = now - (now % 10_000);
+    const window = peerMessageWindow.get(peer.peerId);
+    if (!window || window.windowMs !== windowStart) {
+      peerMessageWindow.set(peer.peerId, { windowMs: windowStart, count: 1 });
+    } else {
+      window.count += 1;
+      if (window.count > MESH_RATE_LIMIT_PER_10S) {
+        peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
+        return reply.code(429).send({ error: "peer_rate_limited" });
+      }
+    }
+
+    const validation = protocol.validateMessage(message, peer.publicKeyPem);
+    if (!validation.ok) {
+      peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 5));
+      return reply.code(400).send({ error: validation.reason });
     }
   }
-
-  const validation = protocol.validateMessage(message, peer.publicKeyPem);
-  if (!validation.ok) {
-    peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 5));
-    return reply.code(400).send({ error: validation.reason });
-  }
-  if (message.type === "blacklist_update") {
+  if (message.type === "blacklist_update" && peer) {
     const payload = z
       .object({
         eventId: z.string(),
@@ -2670,6 +2683,67 @@ app.post("/mesh/ingest", async (req, reply) => {
     if (payload.coordinatorId && payload.timestamp) {
       federatedCapabilities.set(payload.coordinatorId, payload);
       app.log.info({ from: payload.coordinatorId, agents: payload.agentCount }, "capability_summary_received");
+    }
+    return reply.send({ ok: true });
+  }
+
+  // ── Peer Exchange (BitTorrent-style peer table merge) ──
+  if (message.type === "peer_exchange") {
+    const payload = message.payload as unknown as PeerExchangePayload;
+    let added = 0;
+    for (const p of payload.peers ?? []) {
+      if (p.peerId === identity.peerId) continue;
+      const existing = mesh.listPeers().find(ep => ep.peerId === p.peerId);
+      if (!existing) {
+        mesh.addPeer({
+          peerId: p.peerId,
+          publicKeyPem: p.publicKeyPem,
+          coordinatorUrl: p.peerUrl,
+          networkMode: p.networkMode,
+        });
+        peerScore.set(p.peerId, 100);
+        added++;
+      }
+    }
+    if (added > 0) {
+      app.log.info({ from: message.fromPeerId, added, total: mesh.listPeers().length }, "peer_exchange_merged");
+    }
+    return reply.send({ ok: true, added });
+  }
+
+  // ── Capability Announce (individual peer capabilities) ──
+  if (message.type === "capability_announce") {
+    const payload = message.payload as unknown as CapabilityAnnouncePayload;
+    if (payload.peerId && payload.role) {
+      // Store mesh peer capabilities for agent/phone peers so the coordinator
+      // knows they can accept task_offers via gossip (without full /register).
+      if (payload.role === "agent" || payload.role === "phone") {
+        const existing = agentCapabilities.get(payload.peerId);
+        if (existing) {
+          existing.activeModel = payload.models[0];
+          existing.localModelCatalog = payload.models;
+          existing.maxConcurrentTasks = payload.maxConcurrentTasks;
+          existing.lastSeenMs = Date.now();
+        } else {
+          agentCapabilities.set(payload.peerId, {
+            os: payload.deviceType === "phone" ? "ios" : "macos",
+            version: "mesh-peer",
+            mode: "swarm-only",
+            localModelEnabled: true,
+            localModelProvider: "ollama-local",
+            localModelCatalog: payload.models,
+            clientType: `mesh-${payload.deviceType}`,
+            swarmEnabled: true,
+            ideEnabled: false,
+            maxConcurrentTasks: payload.maxConcurrentTasks,
+            connectedPeers: new Set<string>(),
+            activeModel: payload.models[0],
+            activeModelParamSize: 0,
+            lastSeenMs: Date.now(),
+          });
+        }
+      }
+      app.log.info({ peerId: payload.peerId, role: payload.role, models: payload.models.length }, "capability_announce_received");
     }
     return reply.send({ ok: true });
   }
@@ -2729,7 +2803,7 @@ app.post("/mesh/ingest", async (req, reply) => {
     );
     void mesh.broadcast(claimMsg);
     app.log.info({ subtaskId: d.subtaskId, from: d.originCoordinatorId }, "task_offer_accepted");
-    peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
+    if (peer) peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
     return reply.send({ ok: true, enqueued: true });
   }
 
@@ -2748,7 +2822,31 @@ app.post("/mesh/ingest", async (req, reply) => {
     return reply.send({ ok: true });
   }
 
-  peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 1));
+  // ── Result Announce from mesh peers (agent/phone executed a task) ──
+  if (message.type === "result_announce") {
+    const payload = z.object({
+      taskId: z.string(),
+      subtaskId: z.string(),
+      ok: z.boolean(),
+      output: z.string().optional(),
+      error: z.string().optional(),
+      durationMs: z.number().optional(),
+    }).safeParse(message.payload);
+
+    if (payload.success) {
+      // Remove from our queue if still pending
+      queue.markRemoteClaimed(payload.data.subtaskId);
+      app.log.info(
+        { subtaskId: payload.data.subtaskId, from: message.fromPeerId, ok: payload.data.ok },
+        "result_announce_from_mesh"
+      );
+    }
+    return reply.send({ ok: true });
+  }
+
+  if (peer) {
+    peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 1));
+  }
   return reply.send({ ok: true });
 });
 
@@ -3939,6 +4037,31 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void bootstrapPeerMesh();
       }, 45_000);
+      // ── Peer Exchange: broadcast known peer table to all peers (BitTorrent-style) ──
+      setInterval(() => {
+        void (async () => {
+          const peers = mesh.listPeers();
+          if (peers.length === 0) return;
+          const peerExchangePayload: PeerExchangePayload = {
+            peers: peers.slice(0, 50).map(p => ({
+              peerId: p.peerId,
+              publicKeyPem: p.publicKeyPem,
+              peerUrl: p.coordinatorUrl,
+              networkMode: p.networkMode,
+              role: "coordinator" as MeshPeerRole,
+              lastSeenMs: Date.now(),
+            })),
+          };
+          const msg = protocol.createMessage(
+            "peer_exchange",
+            identity.peerId,
+            peerExchangePayload as unknown as Record<string, unknown>,
+            coordinatorKeys.privateKeyPem,
+            60_000,
+          );
+          await mesh.broadcast(msg);
+        })().catch((error) => app.log.warn({ error }, "peer_exchange_broadcast_failed"));
+      }, 30_000);
       setInterval(() => {
         void (async () => {
           const agents: AgentCapabilityInfo[] = [...agentCapabilities.entries()].map(

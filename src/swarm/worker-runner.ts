@@ -3,13 +3,16 @@ import { randomUUID, createHash } from "node:crypto";
 import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
-import { Subtask, BLETaskRequest, Language } from "../common/types.js";
+import { Subtask, BLETaskRequest, Language, MeshMessage } from "../common/types.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
 import { signRequest } from "../security/request-signing.js";
+import { MeshPeer } from "../mesh/mesh-peer.js";
+import { MeshHttpServer } from "../mesh/mesh-http-server.js";
+import { getLocalIpAddress } from "../mesh/network-utils.js";
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
@@ -286,6 +289,87 @@ async function loop(): Promise<void> {
   providers.use(currentProvider);
   const worker = new SwarmWorkerAgent(providers.current());
   const effectiveMode = OS === "ios" ? "swarm-only" : MODE;
+
+  // ── Initialize HTTP mesh peer (BitTorrent-style P2P) ──
+  let meshPeer: MeshPeer | null = null;
+  let meshServer: MeshHttpServer | null = null;
+  const meshTaskQueue: Array<{ subtask: Subtask; fromPeerId: string }> = [];
+  const meshClaimedTasks = new Set<string>();
+  try {
+    const localIp = getLocalIpAddress();
+    meshPeer = new MeshPeer({
+      peerId: AGENT_ID,
+      keys,
+      publicUrl: `http://${localIp}:0`, // will update after server starts
+      networkMode: "public_mesh",
+      role: "agent",
+      bootstrapUrls: [activeCoordinatorUrl],
+      meshToken: meshAuthToken || undefined,
+    });
+
+    meshServer = new MeshHttpServer({
+      port: 0,
+      meshPeer,
+      meshToken: meshAuthToken || undefined,
+    });
+
+    const meshPort = await meshServer.start();
+    meshPeer.setPublicUrl(`http://${localIp}:${meshPort}`);
+    console.log(`[agent:${AGENT_ID}] mesh HTTP server listening on ${localIp}:${meshPort}`);
+
+    // Handle task_offer: queue tasks received via gossip
+    meshPeer.on("task_offer", async (msg: MeshMessage) => {
+      const p = msg.payload as {
+        subtaskId?: string; taskId?: string; kind?: string;
+        language?: string; input?: string; timeoutMs?: number;
+        snapshotRef?: string; projectMeta?: Subtask["projectMeta"];
+        originCoordinatorId?: string;
+      };
+      if (!p.subtaskId || !p.taskId || !p.input) return;
+      if (meshClaimedTasks.has(p.subtaskId)) return;
+      // Don't accept tasks we originated
+      if (p.originCoordinatorId === AGENT_ID) return;
+      meshTaskQueue.push({
+        subtask: {
+          id: p.subtaskId,
+          taskId: p.taskId,
+          kind: (p.kind as Subtask["kind"]) ?? "single_step",
+          language: (p.language as Language) ?? "python",
+          input: p.input,
+          timeoutMs: p.timeoutMs ?? 30_000,
+          snapshotRef: p.snapshotRef ?? "mesh",
+          projectMeta: p.projectMeta ?? { projectId: "mesh", resourceClass: "cpu", priority: 5 },
+        },
+        fromPeerId: msg.fromPeerId,
+      });
+      // Broadcast claim
+      await meshPeer!.broadcast("task_claim", {
+        subtaskId: p.subtaskId,
+        claimedByCoordinator: AGENT_ID,
+      });
+      meshClaimedTasks.add(p.subtaskId);
+      console.log(`[agent:${AGENT_ID}] mesh task_offer queued: ${p.subtaskId}`);
+    });
+
+    // Handle task_claim: remove tasks claimed by other peers
+    meshPeer.on("task_claim", async (msg: MeshMessage) => {
+      const p = msg.payload as { subtaskId?: string; claimedByCoordinator?: string };
+      if (p.subtaskId && p.claimedByCoordinator !== AGENT_ID) {
+        const idx = meshTaskQueue.findIndex(t => t.subtask.id === p.subtaskId);
+        if (idx >= 0) {
+          meshTaskQueue.splice(idx, 1);
+          console.log(`[agent:${AGENT_ID}] mesh task claimed by ${p.claimedByCoordinator}: ${p.subtaskId}`);
+        }
+      }
+    });
+
+    await meshPeer.bootstrap();
+    console.log(`[agent:${AGENT_ID}] mesh peer bootstrapped, ${meshPeer.peerCount()} peers known`);
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] mesh peer init failed (non-fatal): ${String(e)}`);
+    meshPeer = null;
+    meshServer = null;
+  }
 
   // Initialize BLE mesh transport for local peer discovery
   let bleMesh: BLEMeshManager | null = null;
@@ -573,6 +657,43 @@ async function loop(): Promise<void> {
           continue;
         }
 
+        // ── Mesh task execution: process tasks received via gossip ──
+        if (meshPeer && meshTaskQueue.length > 0) {
+          const meshItem = meshTaskQueue.shift()!;
+          const st = meshItem.subtask;
+          console.log(`[agent:${AGENT_ID}] executing mesh task: ${st.id}`);
+          try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch (e) { console.warn(`[db] mesh task start write failed: ${e}`); }
+          const result = await worker.runSubtask(st, AGENT_ID);
+          try {
+            if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+            else localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+          } catch (e) { console.warn(`[db] mesh task result write failed: ${e}`); }
+          // Broadcast result to mesh
+          await meshPeer.broadcast("result_announce", {
+            taskId: result.taskId,
+            subtaskId: result.subtaskId,
+            ok: result.ok,
+            output: result.output,
+            durationMs: result.durationMs,
+          });
+          // Also try to report to coordinator (best effort)
+          try {
+            const reportNonce = randomUUID();
+            const reportSignature = signPayload(
+              JSON.stringify({
+                subtaskId: result.subtaskId, taskId: result.taskId,
+                agentId: result.agentId, ok: result.ok, durationMs: result.durationMs, reportNonce
+              }),
+              keys.privateKeyPem
+            );
+            result.reportNonce = reportNonce;
+            result.reportSignature = reportSignature;
+            await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
+          } catch { /* mesh broadcast is primary delivery */ }
+          console.log(`[agent:${AGENT_ID}] mesh task ${st.id} complete: ok=${result.ok}`);
+          continue;
+        }
+
         // If coordinator has no work assigned, accept direct peer work first.
         const incomingDirect = hb.directWorkOffers ?? [];
         const canUsePeerDirect = allowPeerDirectWork(powerTelemetry);
@@ -750,6 +871,24 @@ async function loop(): Promise<void> {
             }
           }
         }
+      }
+
+      // ── Mesh task execution during offline mode ──
+      if (!coordinatorOnline && meshPeer && meshTaskQueue.length > 0) {
+        const meshItem = meshTaskQueue.shift()!;
+        const st = meshItem.subtask;
+        console.log(`[agent:${AGENT_ID}] executing mesh task (offline): ${st.id}`);
+        try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch {}
+        const result = await worker.runSubtask(st, AGENT_ID);
+        try {
+          if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+          else localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+        } catch {}
+        await meshPeer.broadcast("result_announce", {
+          taskId: result.taskId, subtaskId: result.subtaskId,
+          ok: result.ok, output: result.output, durationMs: result.durationMs,
+        });
+        console.log(`[agent:${AGENT_ID}] mesh task ${st.id} complete (offline): ok=${result.ok}`);
       }
 
       // ═══ BLE peer discovery — only in offline mode or when explicitly enabled ═══
