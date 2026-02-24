@@ -45,6 +45,15 @@ export async function deleteConversation(id: string): Promise<void> {
   await db.delete(STORE_NAME, id);
 }
 
+export async function renameConversation(id: string, newTitle: string): Promise<void> {
+  const convo = await loadConversation(id);
+  if (convo) {
+    convo.title = newTitle;
+    convo.updatedAt = Date.now();
+    await saveConversation(convo);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
