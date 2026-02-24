@@ -75,3 +75,33 @@ struct ChatRouteResult {
     let creditsSpent: Int?
     let swarmTaskId: String?
 }
+
+// MARK: - Stream Progress
+
+struct StreamProgress {
+    var tokenCount: Int = 0
+    var elapsedMs: Int = 0
+    var route: RouteDecision?
+    var routeLabel: String = ""
+    var model: String = ""
+
+    var routeIcon: String {
+        switch route {
+        case .local: return "bolt.fill"
+        case .blePeer: return "antenna.radiowaves.left.and.right"
+        case .swarm: return "globe"
+        case .offlineStub: return "moon.zzz"
+        case .none: return "bolt.fill"
+        }
+    }
+
+    static let verbs = [
+        "Thinking", "Pondering", "Crafting", "Computing",
+        "Reasoning", "Weaving", "Assembling", "Conjuring",
+        "Brewing", "Forging",
+    ]
+
+    static func randomVerb() -> String {
+        verbs.randomElement() ?? "Thinking"
+    }
+}

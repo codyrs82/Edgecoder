@@ -3,6 +3,10 @@ import SwiftUI
 struct MessageBubble: View {
     let message: ChatMessage
     var streaming: Bool = false
+    var progress: StreamProgress?
+
+    @State private var verb = StreamProgress.randomVerb()
+    @State private var pulseOpacity: Double = 1.0
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -20,18 +24,9 @@ struct MessageBubble: View {
                         .foregroundColor(Theme.textPrimary)
                 }
 
-                // Streaming indicator
+                // Streaming progress indicator
                 if streaming {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Theme.accent)
-                            .frame(width: 6, height: 6)
-                            .opacity(0.8)
-                        Text("Generating...")
-                            .font(.caption2)
-                            .foregroundColor(Theme.textMuted)
-                    }
-                    .padding(.top, 2)
+                    streamingProgressView
                 }
             }
             .padding(.horizontal, 14)
@@ -45,6 +40,59 @@ struct MessageBubble: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 3)
+    }
+
+    // MARK: - Streaming Progress
+
+    private var streamingProgressView: some View {
+        HStack(spacing: 6) {
+            // Pulsing dot
+            Circle()
+                .fill(Theme.accent)
+                .frame(width: 6, height: 6)
+                .opacity(pulseOpacity)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                        pulseOpacity = 0.3
+                    }
+                }
+
+            // Verb
+            Text("\(verb)…")
+                .font(.caption)
+                .foregroundColor(Theme.textMuted)
+
+            if let p = progress {
+                // Elapsed time
+                let seconds = p.elapsedMs / 1000
+                Text("(\(seconds)s")
+                    .font(.caption)
+                    .foregroundColor(Theme.textMuted)
+
+                // Token count
+                Text("· \u{2191} \(p.tokenCount) tokens")
+                    .font(.caption)
+                    .foregroundColor(Theme.textMuted)
+
+                // Route info
+                if !p.routeLabel.isEmpty {
+                    Text("·")
+                        .font(.caption)
+                        .foregroundColor(Theme.textMuted)
+                    Image(systemName: p.routeIcon)
+                        .font(.caption2)
+                        .foregroundColor(Theme.textMuted)
+                    Text("\(p.routeLabel))")
+                        .font(.caption)
+                        .foregroundColor(Theme.textMuted)
+                }  else {
+                    Text(")")
+                        .font(.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+            }
+        }
+        .padding(.top, 4)
     }
 
     // MARK: - Assistant content with code blocks
