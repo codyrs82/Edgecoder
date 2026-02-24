@@ -12,6 +12,9 @@ interface QueueItem {
   subtask: Subtask;
   claimedBy?: string;
   claimedAt?: number;
+  /** If set, local agents cannot claim this task until after this timestamp.
+   *  Gives gossip peers a window to send task_claim before local execution. */
+  claimableAfterMs?: number;
 }
 
 export class SwarmQueue {
@@ -62,13 +65,14 @@ export class SwarmQueue {
       .catch(() => undefined);
   }
 
-  enqueueSubtask(subtask: Omit<Subtask, "id"> & { id?: string }): Subtask {
+  enqueueSubtask(subtask: Omit<Subtask, "id"> & { id?: string }, opts?: { claimDelayMs?: number }): Subtask {
     const materialized: Subtask = { ...subtask, id: subtask.id ?? randomUUID() };
     // Deduplicate — prevent same subtask from being enqueued twice via mesh gossip
     if (this.tasks.some(t => t.subtask.id === materialized.id)) {
       return materialized;
     }
-    this.tasks.push({ subtask: materialized });
+    const claimableAfterMs = opts?.claimDelayMs ? Date.now() + opts.claimDelayMs : undefined;
+    this.tasks.push({ subtask: materialized, claimableAfterMs });
     void this.store?.persistSubtask(materialized).catch(() => undefined);
     return materialized;
   }
@@ -84,7 +88,10 @@ export class SwarmQueue {
   }
 
   claim(agentId: string): Subtask | undefined {
-    const unclaimed = this.tasks.filter((task) => !task.claimedBy);
+    const now = Date.now();
+    const unclaimed = this.tasks.filter(
+      (task) => !task.claimedBy && (!task.claimableAfterMs || now >= task.claimableAfterMs)
+    );
     if (unclaimed.length === 0) return undefined;
 
     // Fair-share: prefer projects with fewer completed results.
