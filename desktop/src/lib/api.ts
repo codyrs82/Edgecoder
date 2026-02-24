@@ -144,3 +144,59 @@ export async function getSystemMetrics(): Promise<SystemMetrics | null> {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// IDE chat provider (:4304)
+// ---------------------------------------------------------------------------
+
+const CHAT_BASE = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+
+export async function streamChat(
+  messages: Array<{ role: string; content: string }>,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${CHAT_BASE}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "edgecoder-local",
+      messages,
+      stream: true,
+      temperature: 0.7,
+      max_tokens: 4096,
+    }),
+    signal,
+  });
+
+  if (!res.ok) throw new Error(`Chat request failed: ${res.status}`);
+  if (!res.body) throw new Error("No response body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+
+      try {
+        const chunk = JSON.parse(data);
+        const content = chunk.choices?.[0]?.delta?.content;
+        if (content) onChunk(content);
+      } catch {
+        // Skip malformed chunks
+      }
+    }
+  }
+}

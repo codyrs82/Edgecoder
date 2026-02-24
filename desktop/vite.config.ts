@@ -23,6 +23,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ollama/, ""),
       },
+      "/chat": {
+        target: "http://localhost:4304",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/chat/, ""),
+      },
     },
   },
   envPrefix: ["VITE_", "TAURI_"],
