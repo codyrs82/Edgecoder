@@ -51,6 +51,37 @@ final class RealLlamaContext: LlamaContextProtocol {
         return response
     }
 
+    func generateStreaming(prompt: String, maxTokens: Int) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            guard self.isLoaded, let service = self.service else {
+                continuation.finish(throwing: LocalModelError.noModelLoaded)
+                return
+            }
+
+            Task {
+                do {
+                    let messages = [LlamaChatMessage(role: .user, content: prompt)]
+                    let samplingConfig = LlamaSamplingConfig(
+                        temperature: 0.7,
+                        seed: UInt32.random(in: 0...UInt32.max)
+                    )
+
+                    // SwiftLlama doesn't expose token-by-token callbacks directly,
+                    // so we generate the full response and yield it as one chunk.
+                    // Future: hook into llama.cpp token callback for true streaming.
+                    let response = try await service.respond(
+                        to: messages,
+                        samplingConfig: samplingConfig
+                    )
+                    continuation.yield(response)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     deinit {
         service = nil
     }

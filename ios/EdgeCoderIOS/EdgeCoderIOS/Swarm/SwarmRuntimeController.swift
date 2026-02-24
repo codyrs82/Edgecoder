@@ -511,7 +511,49 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    private func postCoordinator(path: String, payload: [String: Any]) async throws -> [String: Any] {
+    // MARK: - Chat Task Submission (used by ChatRouter)
+
+    /// Submit a chat prompt to the coordinator task queue and poll for the result.
+    func submitChatTask(prompt: String) async throws -> (output: String, taskId: String) {
+        let taskId = "chat-\(Int(Date().timeIntervalSince1970 * 1000))"
+        let submitPayload: [String: Any] = [
+            "taskId": taskId,
+            "prompt": prompt,
+            "language": "python",
+            "submitterAccountId": agentId,
+            "projectId": "chat-requests",
+            "resourceClass": "cpu",
+            "priority": 60,
+            "subtasks": [["prompt": prompt, "language": "python"]]
+        ]
+
+        let submitResponse = try await postCoordinator(path: "/tasks", payload: submitPayload)
+
+        guard let returnedTaskId = submitResponse["taskId"] as? String,
+              let subtasks = submitResponse["subtasks"] as? [String],
+              let subtaskId = subtasks.first else {
+            throw APIClientError.serverError("Swarm: no subtaskId returned")
+        }
+
+        // Poll for result — up to 90s
+        let pollPath = "/tasks/\(returnedTaskId)/subtasks/\(subtaskId)/result"
+        let deadline = Date().addingTimeInterval(90)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            do {
+                let pollResponse = try await postCoordinator(path: pollPath, payload: [:])
+                if let output = pollResponse["output"] as? String {
+                    return (output: output, taskId: returnedTaskId)
+                }
+            } catch {
+                // Continue polling
+            }
+        }
+
+        throw APIClientError.serverError("Swarm task timed out after 90s")
+    }
+
+    func postCoordinator(path: String, payload: [String: Any]) async throws -> [String: Any] {
         guard let url = URL(string: selectedCoordinatorURL + path) else {
             throw APIClientError.invalidURL
         }
