@@ -125,6 +125,7 @@ export interface Conversation {
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
+  source?: "chat" | "editor";
 }
 
 export interface ChatCompletionChunk {

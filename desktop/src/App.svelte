@@ -72,15 +72,6 @@
   function handleSend(message: string) {
     if (activeTab === "chat" && chatView) {
       chatView.sendMessage(message);
-    } else if (activeTab === "editor" && chatView) {
-      // Prefix the message with current file context
-      const fileContext = editorView?.getActiveFileContext?.();
-      const contextPrefix = fileContext
-        ? `[Currently editing ${fileContext.path} (${fileContext.language})]\n\`\`\`${fileContext.language}\n${fileContext.content}\n\`\`\`\n\n`
-        : '';
-      // Switch to chat tab to show the conversation
-      activeTab = "chat";
-      chatView.sendMessage(contextPrefix + message);
     }
   }
 </script>
@@ -106,7 +97,13 @@
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
-      <button class="header-btn" title="History" onclick={() => historyOpen = !historyOpen}>
+      <button class="header-btn" title="History" onclick={() => {
+        if (activeTab === "chat") {
+          historyOpen = !historyOpen;
+        } else {
+          editorView?.toggleChatPanel?.();
+        }
+      }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
         </svg>
@@ -123,15 +120,24 @@
     </main>
 
     <!-- Bottom Bar -->
-    <footer class="bottom-bar">
-      <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
-        </svg>
-      </button>
-
-      <ChatInput onSend={handleSend} />
-    </footer>
+    {#if activeTab === "chat"}
+      <footer class="bottom-bar">
+        <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
+          </svg>
+        </button>
+        <ChatInput onSend={handleSend} />
+      </footer>
+    {:else}
+      <footer class="bottom-bar minimal">
+        <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
+          </svg>
+        </button>
+      </footer>
+    {/if}
 
     {#if settingsOpen}
       <SettingsOverlay
@@ -242,6 +248,9 @@
     padding: 12px 16px;
     border-top: 0.5px solid var(--border);
     flex-shrink: 0;
+  }
+  .bottom-bar.minimal {
+    padding: 8px 16px;
   }
   .avatar-btn {
     width: 40px;

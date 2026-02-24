@@ -58,14 +58,20 @@ export async function renameConversation(id: string, newTitle: string): Promise<
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function createConversation(): Conversation {
+export function createConversation(source: "chat" | "editor" = "chat"): Conversation {
   return {
     id: crypto.randomUUID(),
     title: "New chat",
     messages: [],
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    source,
   };
+}
+
+export async function listConversationsBySource(source: "chat" | "editor"): Promise<Conversation[]> {
+  const all = await listConversations();
+  return all.filter((c) => (c.source ?? "chat") === source);
 }
 
 export function addMessage(
