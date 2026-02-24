@@ -43,8 +43,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     private func handleProcessingTask(_ task: BGProcessingTask) {
         // Re-schedule immediately so we chain tasks after iOS terminates this one.
-        scheduleProcessingTask()
-        scheduleRefreshTask()
+        Self.scheduleProcessingTask()
+        Self.scheduleRefreshTask()
 
         let controller = SwarmRuntimeController.shared
         let runtimeTask = Task {
@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     private func handleRefreshTask(_ task: BGAppRefreshTask) {
-        scheduleRefreshTask()
+        Self.scheduleRefreshTask()
 
         let controller = SwarmRuntimeController.shared
         let heartbeatTask = Task {
