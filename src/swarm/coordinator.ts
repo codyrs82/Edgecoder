@@ -68,9 +68,15 @@ const app = Fastify({ logger: true });
 const queue = new SwarmQueue(pgStore);
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
+if (process.env.MESH_AUTH_TOKEN) {
+  mesh.setMeshToken(process.env.MESH_AUTH_TOKEN);
+}
 const peerScore = new Map<string, number>();
 const peerMessageWindow = new Map<string, { windowMs: number; count: number }>();
 const MESH_RATE_LIMIT_PER_10S = 50;
+
+/** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
+const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
@@ -1753,6 +1759,29 @@ app.post("/submit", async (req, reply) => {
     })
   );
 
+  // Gossip each subtask as a task_offer to peer coordinators for P2P distribution
+  for (const subtask of created) {
+    const offerMsg = protocol.createMessage(
+      "task_offer",
+      identity.peerId,
+      {
+        subtaskId: subtask.id,
+        taskId: subtask.taskId,
+        kind: subtask.kind,
+        language: subtask.language,
+        input: subtask.input,
+        timeoutMs: subtask.timeoutMs,
+        snapshotRef: subtask.snapshotRef,
+        projectMeta: subtask.projectMeta,
+        originCoordinatorId: identity.peerId,
+        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+      },
+      coordinatorKeys.privateKeyPem,
+      60_000
+    );
+    void mesh.broadcast(offerMsg);
+  }
+
   const message = protocol.createMessage(
     "queue_summary",
     identity.peerId,
@@ -1869,6 +1898,28 @@ app.post("/result", async (req, reply) => {
     });
     await pgStore?.persistLedgerRecord(earningsRecord);
     await persistStatsLedgerRecord(earningsRecord);
+  }
+
+  // Forward result to origin coordinator if this task came from mesh gossip
+  const origin = taskOriginMap.get(body.subtaskId);
+  if (origin && origin.coordinatorId !== identity.peerId) {
+    void (async () => {
+      try {
+        const { request: httpReq } = await import("undici");
+        await httpReq(`${origin.coordinatorUrl}/result`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+          },
+          body: JSON.stringify(body),
+        });
+        app.log.info({ subtaskId: body.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin");
+      } catch (e) {
+        app.log.warn({ subtaskId: body.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed");
+      }
+    })();
+    taskOriginMap.delete(body.subtaskId);
   }
 
   const message = protocol.createMessage(
@@ -2576,6 +2627,78 @@ app.post("/mesh/ingest", async (req, reply) => {
     }
     return reply.send({ ok: true });
   }
+
+  // ── P2P mesh task distribution ──
+  if (message.type === "task_offer") {
+    const payload = z.object({
+      subtaskId: z.string(),
+      taskId: z.string(),
+      kind: z.enum(["micro_loop", "single_step"]),
+      language: z.enum(["python", "javascript"]),
+      input: z.string(),
+      timeoutMs: z.number(),
+      snapshotRef: z.string(),
+      projectMeta: z.object({
+        projectId: z.string(),
+        tenantId: z.string().optional(),
+        resourceClass: z.enum(["cpu", "gpu"]),
+        priority: z.number(),
+      }),
+      originCoordinatorId: z.string(),
+      originCoordinatorUrl: z.string(),
+    }).safeParse(message.payload);
+
+    if (!payload.success) {
+      return reply.code(400).send({ error: "invalid_task_offer_payload" });
+    }
+
+    const d = payload.data;
+    // Don't re-enqueue our own tasks
+    if (d.originCoordinatorId === identity.peerId) {
+      return reply.send({ ok: true, skipped: "own_task" });
+    }
+    // Only accept if we have alive agents (heartbeat in last 30s)
+    const aliveAgents = [...agentCapabilities.values()].filter(
+      a => a.lastSeenMs > Date.now() - 30_000
+    );
+    if (aliveAgents.length === 0) {
+      return reply.send({ ok: true, skipped: "no_agents" });
+    }
+    // Enqueue locally (dedup by subtaskId handled in queue)
+    queue.enqueueSubtask({ ...d, id: d.subtaskId });
+    // Track origin for result forwarding
+    taskOriginMap.set(d.subtaskId, {
+      coordinatorId: d.originCoordinatorId,
+      coordinatorUrl: d.originCoordinatorUrl,
+    });
+    // Broadcast task_claim so origin coordinator knows we're handling it
+    const claimMsg = protocol.createMessage(
+      "task_claim",
+      identity.peerId,
+      { subtaskId: d.subtaskId, claimedByCoordinator: identity.peerId },
+      coordinatorKeys.privateKeyPem,
+    );
+    void mesh.broadcast(claimMsg);
+    app.log.info({ subtaskId: d.subtaskId, from: d.originCoordinatorId }, "task_offer_accepted");
+    peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
+    return reply.send({ ok: true, enqueued: true });
+  }
+
+  if (message.type === "task_claim") {
+    const payload = z.object({
+      subtaskId: z.string(),
+      claimedByCoordinator: z.string(),
+    }).safeParse(message.payload);
+
+    if (payload.success && payload.data.claimedByCoordinator !== identity.peerId) {
+      const removed = queue.markRemoteClaimed(payload.data.subtaskId);
+      if (removed) {
+        app.log.info({ subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator }, "task_claim_remote");
+      }
+    }
+    return reply.send({ ok: true });
+  }
+
   peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 1));
   return reply.send({ ok: true });
 });
@@ -3672,6 +3795,26 @@ app.post("/debug/enqueue", async (req, reply) => {
     snapshotRef: "debug",
     projectMeta: { projectId: "debug", resourceClass: "cpu" as any, priority: 50 }
   });
+  // Gossip task_offer to peer coordinators
+  const offerMsg = protocol.createMessage(
+    "task_offer",
+    identity.peerId,
+    {
+      subtaskId: subtask.id,
+      taskId,
+      kind: subtask.kind,
+      language: subtask.language,
+      input: subtask.input,
+      timeoutMs: subtask.timeoutMs,
+      snapshotRef: subtask.snapshotRef,
+      projectMeta: subtask.projectMeta,
+      originCoordinatorId: identity.peerId,
+      originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+    },
+    coordinatorKeys.privateKeyPem,
+    60_000
+  );
+  void mesh.broadcast(offerMsg);
   return reply.send({ taskId, subtaskId: subtask.id, queued: true });
 });
 

@@ -62,11 +62,25 @@ export class SwarmQueue {
       .catch(() => undefined);
   }
 
-  enqueueSubtask(subtask: Omit<Subtask, "id">): Subtask {
-    const materialized: Subtask = { ...subtask, id: randomUUID() };
+  enqueueSubtask(subtask: Omit<Subtask, "id"> & { id?: string }): Subtask {
+    const materialized: Subtask = { ...subtask, id: subtask.id ?? randomUUID() };
+    // Deduplicate — prevent same subtask from being enqueued twice via mesh gossip
+    if (this.tasks.some(t => t.subtask.id === materialized.id)) {
+      return materialized;
+    }
     this.tasks.push({ subtask: materialized });
     void this.store?.persistSubtask(materialized).catch(() => undefined);
     return materialized;
+  }
+
+  /** Remove an unclaimed task that was claimed by a peer coordinator via mesh gossip. */
+  markRemoteClaimed(subtaskId: string): boolean {
+    const idx = this.tasks.findIndex(t => t.subtask.id === subtaskId && !t.claimedBy);
+    if (idx >= 0) {
+      this.tasks.splice(idx, 1);
+      return true;
+    }
+    return false;
   }
 
   claim(agentId: string): Subtask | undefined {
