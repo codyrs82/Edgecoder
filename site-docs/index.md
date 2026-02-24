@@ -1,72 +1,55 @@
 # EdgeCoder Documentation
 
-This docs site is a consolidated wiki-style view of the full EdgeCoder system.
-It is built from the repository's README files, operational runbooks, security baseline, and unified plan.
+This docs site covers the full EdgeCoder system: a decentralized mesh network for running AI models at the edge.
 
-## High-Level Summary
+## What EdgeCoder Is
 
-### What this system does
+EdgeCoder turns every device into a unified agent that contributes compute to a peer-to-peer mesh. Each node runs a coordinator, worker, and inference service in a single process. Nodes discover each other via gossip mesh and distribute tasks based on capability and availability.
 
-EdgeCoder provides AI coding workflows that can run locally, on private infrastructure, and across approved distributed worker nodes.
-It combines coding assistance, orchestration, security controls, and operational governance in one runtime.
+Users interact through a chat-first desktop app (Tauri + Svelte with Monaco editor), external IDEs via an OpenAI-compatible endpoint, or the iOS app with on-device llama.cpp inference and BLE local mesh.
 
-### Why teams choose it over typical alternatives
+### Why EdgeCoder
 
-- cloud-only tools: often simpler to start, but weaker on private control boundaries
-- local-only tools: private by default, but limited when workloads exceed local capacity
-- EdgeCoder: local-first with optional coordinator-managed scaling and explicit trust/policy controls
+- **No cloud dependency** -- all inference runs locally on commodity hardware using Ollama or llama.cpp.
+- **Permissionless mesh** -- any device can join and contribute compute to earn credits.
+- **Cryptographically auditable** -- every transaction is recorded in an append-only ordering chain anchored to Bitcoin via OP_RETURN.
+- **Privacy-preserving** -- task data stays on the executing node; envelope encryption is staged for activation.
 
-### Main benefits
-
-- **Privacy + control**: keep sensitive work in your environment when required.
-- **Scalable execution**: use mesh capacity for overflow instead of only vertical hardware scaling.
-- **Operational governance**: approvals, blacklist controls, and role-based operations are built in.
-- **Architecture clarity**: separated services (portal/control/coordinator/inference) reduce operational ambiguity.
-- **Auditability**: ledger/stats and issuance flows support stronger integrity verification.
-
-## Start Here (Deep Docs)
+## Start Here
 
 - [System Overview and Benefits](/guide/system-overview-benefits)
 - [How EdgeCoder Works](/guide/how-edgecoder-works)
 - [Architecture Deep Dive](/guide/architecture-deep-dive)
+- [IDE Integration](/guide/ide-integration)
 - [Request Lifecycle Sequences](/guide/request-lifecycle-sequences)
 - [Model Provider Abstraction](/guide/model-provider-abstraction)
 - [Executor Sandbox and Isolation](/guide/executor-sandbox-isolation)
-- [Public Mesh Operations](/operations/public-mesh-operations)
-- [Role-based Runbooks](/operations/role-based-runbooks)
-- [Agent Mesh Peer-Direct Flow](/operations/agent-mesh-peer-direct)
-- [Coordinator Discovery and Failover](/operations/coordinator-discovery-failover)
-- [Executor Subset Reference](/operations/executor-subset-reference)
+- [BLE Local Mesh](/guide/ble-local-mesh)
+- [Model Management](/guide/model-management)
 - [Deployment Topology](/operations/deployment-topology)
+- [Public Mesh Operations](/operations/public-mesh-operations)
 - [iOS Background Execution & Compute Modes](/operations/ios-power-scheduling)
-- [Stats Ledger Rollout](/operations/stats-ledger-rollout)
+- [Coordinator Discovery and Failover](/operations/coordinator-discovery-failover)
+- [Coordinator Federation](/operations/coordinator-federation)
 - [Trust and Security](/security/trust-and-security)
 - [Threat Model](/security/threat-model)
 - [Credits, Pricing, and Issuance](/economy/credits-pricing-issuance)
 - [Settlement Lifecycle](/economy/settlement-lifecycle)
+- [Bitcoin Anchoring](/economy/bitcoin-anchoring)
 - [API Surfaces](/reference/api-surfaces)
 - [API Endpoints Detailed](/reference/api-endpoints-detailed)
 - [Runtime Modes](/reference/runtime-modes)
-- [Issuance and Economy Parameters](/reference/issuance-economy-params)
-- [Coordinator Signing Identity](/reference/coordinator-signing-identity)
 - [Environment Variables](/reference/environment-variables)
 
 ## How This Site Is Organized
 
-- **Guide**
-  - End-to-end system flow and detailed architecture.
-- **Operations**
-  - Mesh operations model, deployment topology, and production-oriented workflows.
-- **Security**
-  - Trust boundaries, identity, supply chain controls, runtime restrictions, and audit posture.
-- **Economy**
-  - Credits, sats conversion model, payment intents, issuance windows, and ledger guarantees.
-- **Reference**
-  - API surface map, env variable index, and links to source docs.
+- **Guide** -- System architecture, unified agent model, desktop app, IDE integration, BLE mesh, and model management.
+- **Operations** -- Deployment topology, mesh operations, iOS scheduling, coordinator federation, and failover.
+- **Security** -- Trust boundaries, threat model, cryptographic stack, envelope encryption, and audit posture.
+- **Economy** -- Credits, dynamic pricing, Bitcoin anchoring, Lightning settlement, and issuance parameters.
+- **Reference** -- API endpoints, environment variables, runtime modes, and source document index.
 
 ## Canonical Source Documents
 
-- [macOS env example](https://github.com/edgecoder-io/edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example)
-- [Linux env example](https://github.com/edgecoder-io/edgecoder/blob/main/scripts/linux/payload/etc/edgecoder/edgecoder.env.example)
-- [GitHub Releases](https://github.com/edgecoder-io/edgecoder/releases)
-- [Developer Guide (README.dev.md)](https://github.com/edgecoder-io/edgecoder/blob/main/README.dev.md)
+- [GitHub Repository](https://github.com/codyrs82/Edgecoder)
+- [Developer Guide (README.dev.md)](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)

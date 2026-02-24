@@ -47,7 +47,7 @@ See [API Surfaces](/reference/api-surfaces) for consolidated endpoint map.
 
 ## Runbook Links (Canonical)
 
-- [Public Mesh Operations Source](https://github.com/your-org/Edgecoder/blob/main/docs/public-mesh-operations.md)
-- [Agent + Coordinator Install](https://github.com/your-org/Edgecoder/blob/main/docs/agent-and-coordinator-install.md)
-- [Fly.io Bootstrap](https://github.com/your-org/Edgecoder/blob/main/docs/flyio-bootstrap.md)
-- [Cross-OS Validation](https://github.com/your-org/Edgecoder/blob/main/docs/cross-os-validation.md)
+- [Public Mesh Operations Source](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
+- [Agent + Coordinator Install](https://github.com/codyrs82/Edgecoder/blob/main/docs/agent-and-coordinator-install.md)
+- [Fly.io Bootstrap](https://github.com/codyrs82/Edgecoder/blob/main/docs/flyio-bootstrap.md)
+- [Cross-OS Validation](https://github.com/codyrs82/Edgecoder/blob/main/docs/cross-os-validation.md)

@@ -13,7 +13,7 @@ primary_region = "ord"
   COORDINATOR_PUBLIC_URL = "https://coordinator-2.edgecoder.io"
   CONTROL_PLANE_URL = "https://control.edgecoder.io"
   COORDINATOR_BOOTSTRAP_URLS = "https://coordinator.edgecoder.io"
-  LOCAL_MODEL_PROVIDER = "edgecoder-local"
+  LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
   OLLAMA_MODEL = "qwen2.5-coder:latest"
 

@@ -55,7 +55,7 @@ This page gives concrete responsibilities and recurring actions by role.
 
 ## Initial setup — macOS
 
-1. Download `EdgeCoder-{version}-macos-installer.pkg` from [portal Downloads](/portal/download) or [GitHub Releases](https://github.com/edgecoder-io/edgecoder/releases).
+1. Download `EdgeCoder-{version}-macos-installer.pkg` from [portal Downloads](/portal/download) or [GitHub Releases](https://github.com/codyrs82/Edgecoder/releases).
 2. Install: double-click the `.pkg` or `sudo installer -pkg EdgeCoder-*.pkg -target /`.
 3. Enroll node in portal → Nodes → copy registration token.
 4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.

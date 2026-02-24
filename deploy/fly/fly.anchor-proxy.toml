@@ -10,11 +10,11 @@ primary_region = "ord"
 [env]
   NODE_ENV = "production"
   BITCOIN_NETWORK = "bitcoin"
-  ANCHOR_PROXY_PORT = "4310"
+  ANCHOR_PROXY_PORT = "4311"
   MAX_BROADCASTS_PER_MINUTE = "10"
 
 [http_service]
-  internal_port = 4310
+  internal_port = 4311
   force_https = true
   auto_stop_machines = false
   auto_start_machines = true

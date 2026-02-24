@@ -100,4 +100,4 @@ Authentication and payload specifics should be validated against runtime code an
 ## Cross-reference
 
 - [API Surfaces](/reference/api-surfaces)
-- [Public Mesh Operations Source](https://github.com/your-org/Edgecoder/blob/main/docs/public-mesh-operations.md)
+- [Public Mesh Operations Source](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)

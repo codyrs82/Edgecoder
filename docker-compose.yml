@@ -16,7 +16,7 @@ services:
     environment:
       - EDGE_RUNTIME_MODE=all-in-one
       - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
-      - LOCAL_MODEL_PROVIDER=edgecoder-local
+      - LOCAL_MODEL_PROVIDER=ollama-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen2.5-coder:latest
     ports:
@@ -32,32 +32,11 @@ services:
       timeout: 3s
       retries: 5
 
-  cloud-review:
-    build: .
-    command: ["node", "dist/handshake/mock-server.js"]
-    ports:
-      - "4305:4305"
-
   ide-provider:
     build: .
     command: ["node", "dist/apps/ide/provider-server.js"]
     ports:
       - "4304:4304"
-    depends_on:
-      seed-node:
-        condition: service_healthy
-
-  worker-1:
-    build: .
-    command: ["node", "dist/swarm/worker-runner.js"]
-    environment:
-      - COORDINATOR_URL=http://seed-node:4301
-      - AGENT_ID=worker-1
-      - AGENT_OS=macos
-      - AGENT_MODE=swarm-only
-      - LOCAL_MODEL_PROVIDER=edgecoder-local
-      - OLLAMA_AUTO_INSTALL=false
-      - OLLAMA_MODEL=qwen2.5-coder:latest
     depends_on:
       seed-node:
         condition: service_healthy
