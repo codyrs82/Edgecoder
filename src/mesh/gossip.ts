@@ -21,8 +21,8 @@ export class GossipMesh {
     return [...this.peers.values()];
   }
 
-  async broadcast(message: MeshMessage): Promise<{ delivered: number; failed: number }> {
-    const peers = this.listPeers();
+  async broadcast(message: MeshMessage, excludePeerId?: string): Promise<{ delivered: number; failed: number }> {
+    const peers = this.listPeers().filter(p => !excludePeerId || p.peerId !== excludePeerId);
     let delivered = 0;
     let failed = 0;
 
