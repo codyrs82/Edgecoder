@@ -34,21 +34,22 @@ struct AppConfig {
 
     static let local = AppConfig(
         environment: .local,
-        portalBaseURL: URL(string: "http://localhost:4301")!,
-        controlPlaneBaseURL: URL(string: "http://localhost:4301")!,
-        coordinatorBootstrapURL: URL(string: "http://localhost:4301")!,
+        portalBaseURL: URL(string: "http://127.0.0.1:4301")!,
+        controlPlaneBaseURL: URL(string: "http://127.0.0.1:4301")!,
+        coordinatorBootstrapURL: URL(string: "http://127.0.0.1:4301")!,
         relyingPartyId: "localhost",
-        passkeyOrigin: "http://localhost:4301"
+        passkeyOrigin: "http://127.0.0.1:4301"
     )
 
     static var current: AppConfig {
         let env = ProcessInfo.processInfo.environment["EDGECODER_IOS_ENV"]?.lowercased()
+        if env == "production" {
+            return .production
+        }
         if env == "staging" {
             return .staging
         }
-        if env == "local" {
-            return .local
-        }
-        return .production
+        // Default to local — production URLs are not yet deployed
+        return .local
     }
 }
