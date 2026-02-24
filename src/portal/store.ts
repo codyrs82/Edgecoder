@@ -29,6 +29,24 @@ export type NodeEnrollment = {
   updatedAtMs: number;
 };
 
+export type PortalConversation = {
+  conversationId: string;
+  userId: string;
+  title: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type PortalMessage = {
+  messageId: string;
+  conversationId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  tokensUsed: number;
+  creditsSpent: number;
+  createdAtMs: number;
+};
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS portal_users (
   user_id TEXT PRIMARY KEY,
@@ -151,6 +169,27 @@ CREATE TABLE IF NOT EXISTS portal_passkey_challenges (
   expires_at_ms BIGINT NOT NULL,
   created_at_ms BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS portal_conversations (
+  conversation_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT 'New chat',
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS portal_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES portal_conversations(conversation_id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content TEXT NOT NULL,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  credits_spent INTEGER NOT NULL DEFAULT 0,
+  created_at_ms BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_portal_messages_conv ON portal_messages(conversation_id, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_portal_conversations_user ON portal_conversations(user_id, updated_at_ms DESC);
 `;
 
 export class PortalStore {
@@ -1081,6 +1120,87 @@ export class PortalStore {
        SET counter = $2, last_used_at_ms = $3
        WHERE credential_id = $1`,
       [credentialId, counter, Date.now()]
+    );
+  }
+
+  async createConversation(input: {
+    conversationId: string;
+    userId: string;
+    title?: string;
+  }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(
+      `INSERT INTO portal_conversations (conversation_id, user_id, title, created_at_ms, updated_at_ms)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [input.conversationId, input.userId, input.title ?? "New chat", now, now]
+    );
+  }
+
+  async listConversations(userId: string, limit = 50): Promise<PortalConversation[]> {
+    const result = await this.pool.query(
+      `SELECT conversation_id, user_id, title, created_at_ms, updated_at_ms
+       FROM portal_conversations WHERE user_id = $1
+       ORDER BY updated_at_ms DESC LIMIT $2`,
+      [userId, limit]
+    );
+    return result.rows.map((r) => ({
+      conversationId: r.conversation_id,
+      userId: r.user_id,
+      title: r.title,
+      createdAtMs: Number(r.created_at_ms),
+      updatedAtMs: Number(r.updated_at_ms)
+    }));
+  }
+
+  async getConversationMessages(conversationId: string): Promise<PortalMessage[]> {
+    const result = await this.pool.query(
+      `SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms
+       FROM portal_messages WHERE conversation_id = $1
+       ORDER BY created_at_ms ASC`,
+      [conversationId]
+    );
+    return result.rows.map((r) => ({
+      messageId: r.message_id,
+      conversationId: r.conversation_id,
+      role: r.role as "user" | "assistant" | "system",
+      content: r.content,
+      tokensUsed: Number(r.tokens_used),
+      creditsSpent: Number(r.credits_spent),
+      createdAtMs: Number(r.created_at_ms)
+    }));
+  }
+
+  async addMessage(input: {
+    messageId: string;
+    conversationId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    tokensUsed?: number;
+    creditsSpent?: number;
+  }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(
+      `INSERT INTO portal_messages (message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [input.messageId, input.conversationId, input.role, input.content, input.tokensUsed ?? 0, input.creditsSpent ?? 0, now]
+    );
+    await this.pool.query(
+      `UPDATE portal_conversations SET updated_at_ms = $1 WHERE conversation_id = $2`,
+      [now, input.conversationId]
+    );
+  }
+
+  async renameConversation(conversationId: string, title: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE portal_conversations SET title = $1, updated_at_ms = $2 WHERE conversation_id = $3`,
+      [title, Date.now(), conversationId]
+    );
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM portal_conversations WHERE conversation_id = $1`,
+      [conversationId]
     );
   }
 }
