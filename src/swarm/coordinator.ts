@@ -747,6 +747,12 @@ async function validatePortalNode(input: {
     await appendValidationEvent(outcome);
     return outcome;
   }
+  // Allow loopback registrations — the embedded worker self-registers against its own coordinator
+  if (input.sourceIp === "127.0.0.1" || input.sourceIp === "::1" || input.sourceIp === "::ffff:127.0.0.1") {
+    const outcome = { allowed: true, reason: "loopback_self_registration" };
+    await appendValidationEvent(outcome);
+    return outcome;
+  }
   if (!input.registrationToken) {
     const cached = await allowIfKnownAgent("registration_token_missing_cached_agent");
     if (cached) {
