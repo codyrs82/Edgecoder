@@ -1,4 +1,5 @@
 import { request } from "undici";
+import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
@@ -272,6 +273,53 @@ async function flushOfflineLedger(): Promise<void> {
   }
 }
 
+function connectMeshWebSocket(
+  coordinatorUrl: string,
+  getMeshPeer: () => MeshPeer | null
+): void {
+  const wsUrl = coordinatorUrl
+    .replace(/^https:/, "wss:")
+    .replace(/^http:/, "ws:");
+  const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken || "")}&peerId=${encodeURIComponent(AGENT_ID)}`;
+
+  let reconnectDelay = 1000;
+  const MAX_RECONNECT_DELAY = 30_000;
+
+  function connect(): void {
+    const ws = new WebSocket(fullUrl);
+
+    ws.on("open", () => {
+      console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
+      reconnectDelay = 1000;
+    });
+
+    ws.on("message", async (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        const peer = getMeshPeer();
+        if (peer) {
+          await peer.handleIngest(message);
+        }
+      } catch (err) {
+        console.warn(`[agent:${AGENT_ID}] ws ingest error: ${(err as Error).message}`);
+      }
+    });
+
+    ws.on("close", () => {
+      console.log(`[agent:${AGENT_ID}] mesh WebSocket closed, reconnecting in ${reconnectDelay}ms`);
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+    });
+
+    ws.on("error", (err) => {
+      console.warn(`[agent:${AGENT_ID}] mesh WebSocket error: ${err.message}`);
+      // 'close' event fires after 'error', so reconnect happens there
+    });
+  }
+
+  connect();
+}
+
 async function loop(): Promise<void> {
   const coordinatorSelection = await resolveCoordinatorUrl();
   activeCoordinatorUrl = coordinatorSelection.url;
@@ -367,6 +415,11 @@ async function loop(): Promise<void> {
 
     await meshPeer.bootstrap();
     console.log(`[agent:${AGENT_ID}] mesh peer bootstrapped, ${meshPeer.peerCount()} peers known`);
+
+    // Open persistent WebSocket to coordinator for NAT traversal.
+    // The coordinator pushes gossip messages down this connection,
+    // bypassing the agent's NAT/firewall.
+    connectMeshWebSocket(activeCoordinatorUrl, () => meshPeer);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] mesh peer init failed (non-fatal): ${String(e)}`);
     meshPeer = null;
