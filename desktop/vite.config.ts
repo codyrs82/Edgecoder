@@ -28,6 +28,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/chat/, ""),
       },
+      "/portal": {
+        target: "http://localhost:4305",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/portal/, ""),
+      },
     },
   },
   envPrefix: ["VITE_", "TAURI_"],
