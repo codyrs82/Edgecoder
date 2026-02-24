@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    listConversations,
+    listConversationsBySource,
     deleteConversation,
     renameConversation,
   } from "../lib/chat-store";
@@ -47,7 +47,7 @@
   async function loadConversations() {
     loading = true;
     try {
-      conversations = await listConversations();
+      conversations = await listConversationsBySource("chat");
     } catch {
       conversations = [];
     } finally {
