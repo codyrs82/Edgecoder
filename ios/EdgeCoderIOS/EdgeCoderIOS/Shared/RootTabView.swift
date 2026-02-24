@@ -61,6 +61,13 @@ struct RootTabView: View {
                 }
             }
         }
+        .onChange(of: swarmRuntime.selectedCoordinatorURL) { _, _ in
+            if swarmRuntime.isLocalCoordinator {
+                Task {
+                    await swarmRuntime.autoStartIfReady()
+                }
+            }
+        }
     }
 }
 
