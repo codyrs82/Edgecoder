@@ -12,3 +12,6 @@ coverage/
 # Xcode user state
 *.xcuserstate
 xcuserdata/
+
+# VitePress cache
+site-docs/.vitepress/cache/
