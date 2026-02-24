@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -274,10 +274,15 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
   diagnosticsByAgentId.set(agentId, merged);
 }
 
+function safeTokenEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
 function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
   if (!MESH_AUTH_TOKEN) return true;
   const token = req.headers["x-mesh-token"];
-  if (typeof token === "string" && token === MESH_AUTH_TOKEN) return true;
+  if (typeof token === "string" && safeTokenEqual(token, MESH_AUTH_TOKEN)) return true;
   reply.code(401);
   return false;
 }
@@ -285,13 +290,13 @@ function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { co
 function hasMeshToken(headers: Record<string, unknown>): boolean {
   if (!MESH_AUTH_TOKEN) return true;
   const token = headers["x-mesh-token"];
-  return typeof token === "string" && token === MESH_AUTH_TOKEN;
+  return typeof token === "string" && safeTokenEqual(token, MESH_AUTH_TOKEN);
 }
 
 function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return true;
   const token = headers["x-portal-service-token"];
-  return typeof token === "string" && token === PORTAL_SERVICE_TOKEN;
+  return typeof token === "string" && safeTokenEqual(token, PORTAL_SERVICE_TOKEN);
 }
 
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
@@ -2370,7 +2375,7 @@ app.post("/economy/payments/webhook", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   if (PAYMENT_WEBHOOK_SECRET) {
     const provided = (req.headers as Record<string, unknown>)["x-payment-webhook-secret"];
-    if (provided !== PAYMENT_WEBHOOK_SECRET) {
+    if (typeof provided !== "string" || !safeTokenEqual(provided, PAYMENT_WEBHOOK_SECRET)) {
       return reply.code(401).send({ error: "webhook_signature_required" });
     }
   }
