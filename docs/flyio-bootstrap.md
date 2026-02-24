@@ -46,12 +46,6 @@ fly postgres attach --app edgecoder-portal edgecoder-portal-postgres
 fly deploy -c deploy/fly/fly.toml
 ```
 
-Deploy additional coordinator (template):
-
-```bash
-fly deploy -c deploy/fly/fly.coordinator-2.toml
-```
-
 ## 3) Deploy Inference Service
 
 ```bash
@@ -182,21 +176,6 @@ fly secrets set \
   -a edgecoder-coordinator
 ```
 
-For `edgecoder-coordinator-2`:
-
-```bash
-fly secrets set \
-  COORDINATOR_PUBLIC_URL="https://coordinator-2.edgecoder.io" \
-  CONTROL_PLANE_URL="https://control.edgecoder.io" \
-  COORDINATOR_BOOTSTRAP_URLS="https://coordinator.edgecoder.io" \
-  COORDINATOR_REGISTRATION_TOKEN="<portal-enrollment-token-for-coordinator-2>" \
-  MESH_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" \
-  PORTAL_SERVICE_URL="https://portal.edgecoder.io" \
-  PORTAL_SERVICE_TOKEN="<LONG_RANDOM_TOKEN>" \
-  -a edgecoder-coordinator-2
-fly deploy -c deploy/fly/fly.coordinator-2.toml
-```
-
 Optional economy/payment secrets:
 
 ```bash
@@ -287,7 +266,6 @@ fly ips allocate-v4 -a edgecoder-coordinator
 fly certs add portal.edgecoder.io -a edgecoder-portal
 fly certs add control.edgecoder.io -a edgecoder-control-plane
 fly certs add coordinator.edgecoder.io -a edgecoder-coordinator
-fly certs add coordinator-2.edgecoder.io -a edgecoder-coordinator-2
 ```
 
 3. DNS records to create at your registrar/DNS provider:
@@ -298,8 +276,6 @@ fly certs add coordinator-2.edgecoder.io -a edgecoder-coordinator-2
 - `AAAA` record: `control` -> `<edgecoder-control-plane IPv6>`
 - `A` record: `coordinator` -> `<edgecoder-coordinator IPv4>`
 - `AAAA` record: `coordinator` -> `<edgecoder-coordinator IPv6>`
-- `A` record: `coordinator-2` -> `<edgecoder-coordinator-2 IPv4>`
-- `AAAA` record: `coordinator-2` -> `<edgecoder-coordinator-2 IPv6>`
 
 Optional apex routing:
 
@@ -313,7 +289,6 @@ Optional apex routing:
 fly certs show portal.edgecoder.io -a edgecoder-portal
 fly certs show control.edgecoder.io -a edgecoder-control-plane
 fly certs show coordinator.edgecoder.io -a edgecoder-coordinator
-fly certs show coordinator-2.edgecoder.io -a edgecoder-coordinator-2
 ```
 
 5. After DNS propagates, update secrets if needed and redeploy:

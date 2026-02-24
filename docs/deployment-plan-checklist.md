@@ -6,8 +6,7 @@ What is already configured vs. what else needs to be deployed for the simplified
 
 | Component | Where | Notes |
 |-----------|--------|------|
-| **Coordinator (primary)** | `deploy/fly/fly.toml` | `edgecoder-coordinator`, region `ord` |
-| **Coordinator (second, same region)** | `deploy/fly/fly.coordinator-2.toml` | `edgecoder-coordinator-2`, region `ord` |
+| **Coordinator (seed)** | `deploy/fly/fly.toml` | `edgecoder-coordinator`, region `ord` |
 | **Inference service** | `deploy/fly/fly.inference.toml` | `edgecoder-inference`, region `ord` |
 | **Control plane** | `deploy/fly/fly.control-plane.toml` | `edgecoder-control-plane`, region `ord` |
 | **User portal** | `deploy/fly/fly.portal.toml` | `edgecoder-portal`, region `ord` |
@@ -16,14 +15,14 @@ What is already configured vs. what else needs to be deployed for the simplified
 | **Portal DB** | Fly Postgres | `edgecoder-portal-postgres` |
 | **Linux agent/coordinator** | `deploy/linux/bootstrap-host.sh`, `scripts/linux/systemd/` | systemd units + env examples |
 | **macOS agent** | `scripts/macos/`, `npm run build:macos-installer` | .pkg installer, `edgecoder.env.example` |
-| **Bootstrap runbook** | `docs/flyio-bootstrap.md` | Postgres, deploy order, secrets, DNS, coordinator-2 |
+| **Bootstrap runbook** | `docs/flyio-bootstrap.md` | Postgres, deploy order, secrets, DNS |
 | **Agent/coordinator install** | `docs/agent-and-coordinator-install.md` | Enrollment, approval, macOS/Linux options |
 
 ## What else needs to be deployed (from the plan)
 
 ### 1. Second region: EU (Phase 2)
 
-- **EU coordinator** – New Fly app (e.g. `edgecoder-coordinator-eu`) in a European region (e.g. `ams`). No Fly config in repo yet; can clone `fly.coordinator-2.toml` and parameterize app name, `primary_region`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_BOOTSTRAP_URLS`.
+- **EU coordinator** – New Fly app (e.g. `edgecoder-coordinator-eu`) in a European region (e.g. `ams`). No Fly config in repo yet; can clone `fly.toml` and parameterize app name, `primary_region`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_BOOTSTRAP_URLS`.
 - **EU inference** – New Fly app (e.g. `edgecoder-inference-eu`) in same region. Clone `fly.inference.toml`, set region and app name; point EU coordinator at it via `INFERENCE_URL` and shared `INFERENCE_AUTH_TOKEN` (or region-specific tokens).
 - **DNS** – e.g. `coordinator-eu.edgecoder.io`, `inference-eu.edgecoder.io` (or subdomain strategy of choice).
 - **Control-plane / discovery** – Ensure `GET /network/coordinators` (or equivalent) includes EU coordinator so agents can discover it. May require control-plane config or DB-backed coordinator registry.
@@ -59,12 +58,11 @@ What is already configured vs. what else needs to be deployed for the simplified
 
 ### 7. Already documented, confirm live
 
-- **coordinator-2** – Bootstrap already includes coordinator-2 deploy and DNS for `coordinator-2.edgecoder.io`. Confirm both coordinators are registered as peers and appear in `GET /network/coordinators`.
 - **Portal + control-plane** – Single home in US/Canada; no need to duplicate until you have multiple control-plane instances.
 
 ## Suggested order
 
-1. **Confirm US/Canada stack** – All Fly apps (coordinator, coordinator-2, inference, control-plane, portal, docs) deployed; DNS and mesh peer registration working.
+1. **Confirm US/Canada stack** – All Fly apps (coordinator, inference, control-plane, portal, docs) deployed; DNS and mesh peer registration working.
 2. **Add EU** – One coordinator + one inference in EU region; discovery and peer mesh updated; document in `flyio-bootstrap.md`.
 3. **Add APAC, then LATAM** – Same pattern; parameterize or duplicate Fly configs and runbook.
 4. **Mac node tiers** – Add env/concept for tier; optional operator view for node earnings.
