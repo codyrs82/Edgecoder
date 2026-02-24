@@ -749,6 +749,19 @@ async function loop(): Promise<void> {
           lastReconnectProbeMs = now;
           try {
             const probeStart = Date.now();
+            // Re-register first (coordinator may have restarted and lost agent state)
+            const registerBody = {
+              agentId: AGENT_ID,
+              ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+              os: OS, version: "0.1.0", mode: effectiveMode,
+              registrationToken: AGENT_REGISTRATION_TOKEN,
+              localModelProvider: currentProvider,
+              clientType: AGENT_CLIENT_TYPE,
+              maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+              powerTelemetry,
+              publicKeyPem: keys.publicKeyPem
+            };
+            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/register", registerBody) });
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
             await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", probeBody) });
             const probeLatency = Date.now() - probeStart;
