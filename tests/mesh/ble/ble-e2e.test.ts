@@ -382,6 +382,72 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(result).toBeNull();
   });
 
+  it("failover: routes to second peer when first fails", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const phoneTransport = new MockBLETransport("phone", network);
+    const flakyTransport = new MockBLETransport("flaky", network);
+    const reliableTransport = new MockBLETransport("reliable", network);
+
+    flakyTransport.startAdvertising({
+      agentId: "flaky",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+    });
+    reliableTransport.startAdvertising({
+      agentId: "reliable",
+      model: "qwen2.5-coder:7b",
+      modelParamSize: 7,
+      memoryMB: 16384,
+      batteryPct: 100,
+      currentLoad: 0,
+      deviceType: "workstation",
+    });
+
+    flakyTransport.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "flaky",
+      status: "failed" as const,
+      output: "ble_timeout",
+      cpuSeconds: 0,
+      providerSignature: "",
+    }));
+    reliableTransport.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "reliable",
+      status: "completed" as const,
+      generatedCode: "print('ok')",
+      output: "ok",
+      cpuSeconds: 2.0,
+      providerSignature: "rel-sig",
+    }));
+
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    mesh.setOffline(true);
+    mesh.refreshPeers();
+
+    const result = await mesh.routeTask({
+      requestId: "failover-test",
+      requesterId: "phone",
+      task: "failover task",
+      language: "python",
+      requesterSignature: "sig",
+    }, 7);
+
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("completed");
+    expect(result!.output).toBe("ok");
+
+    // Credit should go to the reliable peer, not the flaky one
+    const pending = mesh.pendingTransactions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].providerId).toBe("reliable");
+    expect(pending[0].cpuSeconds).toBe(2.0);
+  });
+
   it("signed credit flow: signatures propagate through ledger", async () => {
     const phoneKeys = createPeerKeys("phone");
     const laptopKeys = createPeerKeys("laptop");

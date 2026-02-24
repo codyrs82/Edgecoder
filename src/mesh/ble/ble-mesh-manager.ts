@@ -70,35 +70,39 @@ export class BLEMeshManager {
 
   async routeTask(
     request: BLETaskRequest,
-    requiredModelSize: number
+    requiredModelSize: number,
+    maxRetries = 3
   ): Promise<BLETaskResponse | null> {
     this.refreshPeers();
-    const bestPeer = this.router.selectBestPeer(requiredModelSize, this.ownTokenHash || undefined);
-    if (!bestPeer) return null;
+    const peers = this.router.selectBestPeers(maxRetries, this.ownTokenHash || undefined);
+    if (peers.length === 0) return null;
 
-    const response = await this.transport.sendTaskRequest(bestPeer.agentId, request);
+    for (const peer of peers) {
+      const response = await this.transport.sendTaskRequest(peer.agentId, request);
 
-    if (response.status === "completed") {
-      const taskHash = createHash("sha256").update(request.task).digest("hex");
-      const qualityMul = modelQualityMultiplier(bestPeer.modelParamSize);
-      const credits = response.cpuSeconds * baseRatePerSecond("cpu") * qualityMul;
-      const tx: BLECreditTransaction = {
-        txId: randomUUID(),
-        requesterId: this.agentId,
-        providerId: response.providerId,
-        requesterAccountId: this.accountId,
-        providerAccountId: bestPeer.accountId,
-        credits: Number(credits.toFixed(3)),
-        cpuSeconds: response.cpuSeconds,
-        taskHash,
-        timestamp: Date.now(),
-        requesterSignature: request.requesterSignature,
-        providerSignature: response.providerSignature
-      };
-      this.ledger.record(tx);
+      if (response.status === "completed") {
+        const taskHash = createHash("sha256").update(request.task).digest("hex");
+        const qualityMul = modelQualityMultiplier(peer.modelParamSize);
+        const credits = response.cpuSeconds * baseRatePerSecond("cpu") * qualityMul;
+        const tx: BLECreditTransaction = {
+          txId: randomUUID(),
+          requesterId: this.agentId,
+          providerId: response.providerId,
+          requesterAccountId: this.accountId,
+          providerAccountId: peer.accountId,
+          credits: Number(credits.toFixed(3)),
+          cpuSeconds: response.cpuSeconds,
+          taskHash,
+          timestamp: Date.now(),
+          requesterSignature: request.requesterSignature,
+          providerSignature: response.providerSignature
+        };
+        this.ledger.record(tx);
+        return response;
+      }
+      // Failed — try next peer
     }
-
-    return response;
+    return null;
   }
 
   pendingTransactions(): BLECreditTransaction[] {
