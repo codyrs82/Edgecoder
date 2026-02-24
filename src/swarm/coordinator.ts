@@ -2707,10 +2707,13 @@ app.post("/mesh/ingest", async (req, reply) => {
     }
     // Enqueue locally (dedup by subtaskId handled in queue)
     queue.enqueueSubtask({ ...d, id: d.subtaskId });
-    // Track origin for result forwarding
+    // Track origin for result forwarding — prefer the actual reachable peer
+    // URL from the mesh over the self-reported URL in the payload (which may
+    // be an unreachable custom domain).
+    const originPeer = mesh.listPeers().find(p => p.peerId === d.originCoordinatorId);
     taskOriginMap.set(d.subtaskId, {
       coordinatorId: d.originCoordinatorId,
-      coordinatorUrl: d.originCoordinatorUrl,
+      coordinatorUrl: originPeer?.coordinatorUrl ?? d.originCoordinatorUrl,
     });
     // Broadcast task_claim so origin coordinator knows we're handling it
     const claimMsg = protocol.createMessage(

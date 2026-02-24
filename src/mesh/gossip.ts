@@ -37,18 +37,26 @@ export class GossipMesh {
           const res = await request(`${peer.coordinatorUrl}/mesh/ingest`, {
             method: "POST",
             headers,
-            body: JSON.stringify(message)
+            body: JSON.stringify(message),
+            signal: AbortSignal.timeout(10_000)
           });
+          const body = await res.body.text().catch(() => "");
           if (res.statusCode >= 200 && res.statusCode < 300) {
             delivered += 1;
           } else {
+            console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} failed: ${res.statusCode} ${body}`);
             failed += 1;
           }
-        } catch {
+        } catch (err) {
+          console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} error: ${(err as Error).message}`);
           failed += 1;
         }
       })
     );
+
+    if (peers.length > 0) {
+      console.log(`[gossip] broadcast type=${message.type} to ${peers.length} peers: ${delivered} delivered, ${failed} failed`);
+    }
 
     return { delivered, failed };
   }
