@@ -9,6 +9,7 @@ struct ChatView: View {
     @State private var inputText = ""
     @State private var isStreaming = false
     @State private var streamingContent = ""
+    @State private var streamProgress: StreamProgress?
     @State private var showHistory = false
     @State private var showSettings = false
 
@@ -35,7 +36,8 @@ struct ChatView: View {
                         if isStreaming && !streamingContent.isEmpty {
                             MessageBubble(
                                 message: ChatMessage(role: .assistant, content: streamingContent),
-                                streaming: true
+                                streaming: true,
+                                progress: streamProgress
                             )
                             .id("streaming")
                         }
@@ -204,12 +206,16 @@ struct ChatView: View {
 
         isStreaming = true
         streamingContent = ""
+        streamProgress = nil
 
         Task {
-            let stream = chatRouter.routeChatStreaming(messages: conversation.messages)
+            let session = chatRouter.routeChatStreaming(messages: conversation.messages)
+            // Update progress immediately with route info
+            streamProgress = session.getProgress()
             do {
-                for try await chunk in stream {
+                for try await chunk in session.tokens {
                     streamingContent += chunk
+                    streamProgress = session.getProgress()
                 }
                 conversation.addMessage(role: .assistant, content: streamingContent)
                 conversationStore.save(conversation)
@@ -219,6 +225,7 @@ struct ChatView: View {
                 conversationStore.save(conversation)
             }
             streamingContent = ""
+            streamProgress = nil
             isStreaming = false
         }
     }

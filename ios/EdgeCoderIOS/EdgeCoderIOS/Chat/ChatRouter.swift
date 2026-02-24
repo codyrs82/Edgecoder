@@ -141,24 +141,90 @@ final class ChatRouter: ObservableObject {
         )
     }
 
-    // MARK: - Route Chat (streaming)
+    // MARK: - Route Chat (streaming with progress)
 
-    func routeChatStreaming(messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+    /// Streaming result that yields token strings. Call `progress()` to get current stats.
+    struct StreamingSession {
+        let tokens: AsyncThrowingStream<String, Error>
+        let getProgress: () -> StreamProgress
+    }
+
+    func routeChatStreaming(messages: [ChatMessage]) -> StreamingSession {
         let lastUserContent = messages.last(where: { $0.role == .user })?.content ?? ""
+        let startTime = CFAbsoluteTimeGetCurrent()
+        var tokenCount = 0
+        var routeDecision: RouteDecision = .offlineStub
+        var routeLabel = "offline"
+        var modelName = ""
 
-        // Streaming only supported via local model
+        let routeLabels: [RouteDecision: String] = [
+            .local: "local model",
+            .blePeer: "nearby device",
+            .swarm: "swarm network",
+            .offlineStub: "offline",
+        ]
+
+        // Determine route before streaming
         if modelManager.state == .ready {
-            return modelManager.generateStreaming(prompt: lastUserContent, maxTokens: 512)
+            routeDecision = .local
+            routeLabel = routeLabels[.local] ?? "local"
+            modelName = modelManager.selectedModel
+        } else if !bleMeshManager.discoveredPeers.isEmpty {
+            routeDecision = .blePeer
+            routeLabel = routeLabels[.blePeer] ?? "peer"
+            modelName = "ble-\(bleMeshManager.discoveredPeers.first?.agentId ?? "peer")"
+        } else if !swarmRuntime.meshToken.isEmpty {
+            routeDecision = .swarm
+            routeLabel = routeLabels[.swarm] ?? "swarm"
+            modelName = "swarm"
+        }
+
+        let progress: () -> StreamProgress = {
+            StreamProgress(
+                tokenCount: tokenCount,
+                elapsedMs: Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000),
+                route: routeDecision,
+                routeLabel: routeLabel,
+                model: modelName
+            )
+        }
+
+        // Streaming via local model
+        if modelManager.state == .ready {
+            let innerStream = modelManager.generateStreaming(prompt: lastUserContent, maxTokens: 512)
+            let wrappedStream = AsyncThrowingStream<String, Error> { continuation in
+                Task {
+                    do {
+                        for try await chunk in innerStream {
+                            tokenCount += 1
+                            continuation.yield(chunk)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            return StreamingSession(tokens: wrappedStream, getProgress: progress)
         }
 
         // Fall back to non-streaming wrapped as stream
-        return AsyncThrowingStream { continuation in
-            Task { @MainActor in
+        let fallbackStream = AsyncThrowingStream<String, Error> { continuation in
+            Task { @MainActor [self] in
                 let result = await self.routeChat(messages: messages)
-                continuation.yield(result.text)
+                routeDecision = result.route
+                routeLabel = routeLabels[result.route] ?? result.route.rawValue
+                modelName = result.model
+                // Simulate token-by-token for the progress counter
+                let words = result.text.split(separator: " ")
+                for word in words {
+                    tokenCount += 1
+                    continuation.yield(String(word) + " ")
+                }
                 continuation.finish()
             }
         }
+        return StreamingSession(tokens: fallbackStream, getProgress: progress)
     }
 
     // MARK: - Status
