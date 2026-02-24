@@ -3117,14 +3117,14 @@ app.get("/portal-legacy", async (_req, reply) => {
 
 function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "dashboard" | "nodes" | "wallet" | "operations" | "settings" | "download";
+  activeTab: "chat" | "dashboard" | "wallet" | "settings" | "download";
   heading: string;
   subtitle: string;
   content: string;
   script: string;
 }): string {
   const navLink = (
-    tab: "dashboard" | "nodes" | "wallet" | "operations" | "settings" | "download",
+    tab: "chat" | "dashboard" | "wallet" | "settings" | "download",
     label: string,
     href: string
   ) => {
@@ -3411,16 +3411,15 @@ function portalAuthedPageHtml(input: {
               <div class="mark">E</div>
               <div>
                 <div class="sidebar-title">EdgeCoder Portal</div>
-                <div class="sidebar-subtitle">Ops Console</div>
+                <div class="sidebar-subtitle">AI Network</div>
               </div>
             </div>
             <div class="sidebar-section-label">Navigation</div>
             <div class="nav-row">
+              ${navLink("chat", "Chat", "/portal/chat")}
               ${navLink("dashboard", "Dashboard", "/portal/dashboard")}
-              ${navLink("nodes", "Nodes", "/portal/nodes")}
-              ${navLink("download", "Get EdgeCoder", "/portal/download")}
               ${navLink("wallet", "Wallet", "/portal/wallet")}
-              ${navLink("operations", "Coordinator Ops", "/portal/coordinator-ops")}
+              ${navLink("download", "Get EdgeCoder", "/portal/download")}
               ${navLink("settings", "Settings", "/portal/settings")}
               <a class="tab" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
               <a class="tab" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
