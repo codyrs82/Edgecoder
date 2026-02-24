@@ -5,15 +5,16 @@ services:
       - POSTGRES_USER=edgecoder
       - POSTGRES_PASSWORD=edgecoder
       - POSTGRES_DB=edgecoder
-    ports:
-      - "5432:5432"
     volumes:
-      - edgecoder-postgres:/var/lib/postgresql/data
+      - scale-postgres:/var/lib/postgresql/data
 
   seed-node:
-    build: .
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     command: ["node", "dist/index.js"]
     environment:
+      - NODE_ENV=production
       - EDGE_RUNTIME_MODE=all-in-one
       - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
       - LOCAL_MODEL_PROVIDER=edgecoder-local
@@ -21,39 +22,21 @@ services:
       - OLLAMA_MODEL=qwen2.5-coder:latest
     ports:
       - "4301:4301"
-      - "4302:4302"
-      - "4303:4303"
     depends_on:
-      postgres:
-        condition: service_started
+      - postgres
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 10
 
-  cloud-review:
-    build: .
-    command: ["node", "dist/handshake/mock-server.js"]
-    ports:
-      - "4305:4305"
-
-  ide-provider:
-    build: .
-    command: ["node", "dist/apps/ide/provider-server.js"]
-    ports:
-      - "4304:4304"
-    depends_on:
-      seed-node:
-        condition: service_healthy
-
-  worker-1:
-    build: .
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     command: ["node", "dist/swarm/worker-runner.js"]
     environment:
       - COORDINATOR_URL=http://seed-node:4301
-      - AGENT_ID=worker-1
-      - AGENT_OS=macos
       - AGENT_MODE=swarm-only
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
@@ -61,6 +44,8 @@ services:
     depends_on:
       seed-node:
         condition: service_healthy
+    deploy:
+      replicas: 10
 
 volumes:
-  edgecoder-postgres:
+  scale-postgres:

@@ -16,6 +16,7 @@ Usage:
 Examples:
   sudo bash deploy/linux/bootstrap-host.sh agent https://github.com/your-org/Edgecoder.git main /opt/edgecoder/app
   sudo bash deploy/linux/bootstrap-host.sh coordinator https://github.com/your-org/Edgecoder.git main /opt/edgecoder/app
+  sudo bash deploy/linux/bootstrap-host.sh seed https://github.com/your-org/Edgecoder.git main /opt/edgecoder/app
 
 Notes:
   - Supports Debian/Ubuntu hosts with systemd.
@@ -29,8 +30,8 @@ if [[ -z "${ROLE}" || -z "${REPO_URL}" ]]; then
   exit 1
 fi
 
-if [[ "${ROLE}" != "agent" && "${ROLE}" != "coordinator" ]]; then
-  echo "error: role must be 'agent' or 'coordinator'." >&2
+if [[ "${ROLE}" != "agent" && "${ROLE}" != "coordinator" && "${ROLE}" != "seed" ]]; then
+  echo "error: role must be 'agent', 'coordinator', or 'seed'." >&2
   usage
   exit 1
 fi
@@ -86,3 +87,7 @@ echo "Next steps:"
 echo "  1) Edit /etc/edgecoder/${ROLE}.env"
 echo "  2) Restart service: sudo systemctl restart io.edgecoder.${ROLE}.service"
 echo "  3) Approve node in control plane after first registration attempt"
+
+if [[ "${ROLE}" == "seed" ]]; then
+  echo "  NOTE: Ensure EDGE_RUNTIME_MODE=all-in-one is set in /etc/edgecoder/seed.env"
+fi
