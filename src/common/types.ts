@@ -52,6 +52,7 @@ export interface AgentRegistration {
   os: "debian" | "ubuntu" | "windows" | "macos" | "ios";
   version: string;
   mode: AgentMode;
+  walletAccountId?: string;
 }
 
 export interface Subtask {
@@ -177,7 +178,7 @@ export interface ComputeContributionReport {
 export interface CreditTransaction {
   txId: string;
   accountId: string;
-  type: "earn" | "spend" | "adjust";
+  type: "earn" | "spend" | "adjust" | "held";
   credits: number;
   reason: string;
   timestampMs: number;
@@ -398,6 +399,14 @@ export type BlacklistReasonCode =
   | "dos_behavior"
   | "forged_results"
   | "manual_review";
+
+export interface PaymentReceipt {
+  intentId: string;
+  accountId: string;
+  creditsMinted: number;
+  coordinatorSignature: string;
+  timestampMs: number;
+}
 
 // --- BLE Local Mesh Types ---
 
