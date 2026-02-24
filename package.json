@@ -19,6 +19,8 @@
     "build": "tsc -p tsconfig.json",
     "build:macos-installer": "bash scripts/macos/build-installer.sh",
     "install:macos-local": "bash scripts/macos/install-local.sh",
+    "build:linux-deb": "bash scripts/linux/build-deb.sh",
+    "build:ble-proxy": "bash scripts/macos/build-ble-proxy.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "docs:dev": "vitepress dev site-docs",

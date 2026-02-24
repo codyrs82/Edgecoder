@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "EdgeCoder requires Node.js 20+ to be installed first."
+  echo "Install Node.js and try again:"
+  echo "  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -"
+  echo "  sudo apt-get install -y nodejs"
+  exit 1
+fi
+
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+if [[ "$NODE_MAJOR" -lt 20 ]]; then
+  echo "Detected Node.js $(node -v). EdgeCoder requires Node.js 20+."
+  exit 1
+fi
+
+exit 0

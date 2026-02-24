@@ -1,0 +1,121 @@
+{
+  "name": "edgecoder",
+  "displayName": "EdgeCoder",
+  "description": "Connect your IDE to the EdgeCoder swarm — local Ollama, Bluetooth, or distributed mesh",
+  "version": "0.1.0",
+  "publisher": "edgecoder",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "llm",
+    "ollama",
+    "swarm",
+    "edgecoder"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "edgecoder.runTask",
+        "title": "EdgeCoder: Run Task (auto-route)"
+      },
+      {
+        "command": "edgecoder.runLocal",
+        "title": "EdgeCoder: Run on Local Ollama"
+      },
+      {
+        "command": "edgecoder.runSwarm",
+        "title": "EdgeCoder: Send to Swarm Network"
+      },
+      {
+        "command": "edgecoder.showStatus",
+        "title": "EdgeCoder: Show Router Status"
+      },
+      {
+        "command": "edgecoder.applyCode",
+        "title": "EdgeCoder: Apply Generated Code to Editor"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "edgecoder.runTask",
+          "when": "editorHasSelection",
+          "group": "edgecoder@1"
+        },
+        {
+          "command": "edgecoder.runLocal",
+          "when": "editorHasSelection",
+          "group": "edgecoder@2"
+        },
+        {
+          "command": "edgecoder.runSwarm",
+          "when": "editorHasSelection",
+          "group": "edgecoder@3"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "edgecoder.runTask",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "EdgeCoder",
+      "properties": {
+        "edgecoder.providerUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4304",
+          "description": "URL of the local EdgeCoder provider server"
+        },
+        "edgecoder.defaultLanguage": {
+          "type": "string",
+          "enum": [
+            "python",
+            "javascript"
+          ],
+          "default": "python",
+          "description": "Default language for code generation"
+        },
+        "edgecoder.autoDetectLanguage": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-detect language from current file extension"
+        },
+        "edgecoder.showRouteInfo": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show which route was used (local/swarm/bluetooth) in the result panel"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codyrs82/Edgecoder"
+  }
+}

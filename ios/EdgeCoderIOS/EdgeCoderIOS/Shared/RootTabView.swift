@@ -3,6 +3,7 @@ import SwiftUI
 struct RootTabView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var swarmRuntime: SwarmRuntimeController
+    @StateObject private var bt = BluetoothTransport.shared
     @State private var selectedTab: AppTab = .dashboard
 
     var body: some View {
@@ -24,6 +25,14 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Swarm", systemImage: "network")
                 }
+
+            IDEView()
+                .tag(AppTab.ide)
+                .tabItem {
+                    Label("IDE", systemImage: "laptopcomputer.and.iphone")
+                }
+                // Badge shows count of running BLE IDE tasks
+                .badge(runningTaskCount > 0 ? runningTaskCount : 0)
 
             AuthView()
                 .tag(AppTab.auth)
@@ -69,12 +78,17 @@ struct RootTabView: View {
             }
         }
     }
+
+    private var runningTaskCount: Int {
+        bt.ideTasks.filter { $0.status == .running }.count
+    }
 }
 
 private enum AppTab {
     case dashboard
     case wallet
     case swarm
+    case ide
     case auth
     case settings
 }

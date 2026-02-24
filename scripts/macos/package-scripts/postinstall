@@ -46,4 +46,19 @@ fi
 /bin/launchctl enable "system/${SERVICE_LABEL}" || true
 /bin/launchctl kickstart -k "system/${SERVICE_LABEL}" || true
 
+# --- Ollama daemon ---
+OLLAMA_SERVICE_LABEL="io.edgecoder.ollama"
+OLLAMA_PLIST_SRC="/opt/edgecoder/install/io.edgecoder.ollama.plist"
+OLLAMA_PLIST_DST="/Library/LaunchDaemons/${OLLAMA_SERVICE_LABEL}.plist"
+
+if [[ -f "$OLLAMA_PLIST_SRC" ]]; then
+  cp "$OLLAMA_PLIST_SRC" "$OLLAMA_PLIST_DST"
+  chown root:wheel "$OLLAMA_PLIST_DST"
+  chmod 644 "$OLLAMA_PLIST_DST"
+  /bin/launchctl bootout system "$OLLAMA_PLIST_DST" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap system "$OLLAMA_PLIST_DST"
+  /bin/launchctl enable "system/${OLLAMA_SERVICE_LABEL}"
+  /bin/launchctl kickstart -k "system/${OLLAMA_SERVICE_LABEL}"
+fi
+
 exit 0
