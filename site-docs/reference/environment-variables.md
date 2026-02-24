@@ -1,6 +1,6 @@
 # Environment Variables
 
-Consolidated reference for all environment controls. The primary config file on macOS and Linux is `/etc/edgecoder/edgecoder.env`. See [`scripts/macos/payload/etc/edgecoder/edgecoder.env.example`](https://github.com/edgecoder-io/edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example) for a fully-annotated template.
+Consolidated reference for all environment controls. The primary config file on macOS and Linux is `/etc/edgecoder/edgecoder.env`. See [`scripts/macos/payload/etc/edgecoder/edgecoder.env.example`](https://github.com/codyrs82/Edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example) for a fully-annotated template.
 
 ## Runtime mode
 
@@ -177,4 +177,4 @@ OLLAMA_AUTO_INSTALL=true
 
 - [Deployment Topology](/operations/deployment-topology)
 - [iOS Background Execution](/operations/ios-power-scheduling)
-- [macOS env example](https://github.com/edgecoder-io/edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example)
+- [macOS env example](https://github.com/codyrs82/Edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example)

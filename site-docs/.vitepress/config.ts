@@ -1,7 +1,7 @@
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
-const repoUrl = "https://github.com/your-org/Edgecoder";
+const repoUrl = "https://github.com/codyrs82/Edgecoder";
 
 export default withMermaid(defineConfig({
   title: "EdgeCoder Docs",

@@ -19,7 +19,7 @@ import type { BitcoinNetwork } from "../common/types.js";
 /*  Auth: Bearer token via ANCHOR_PROXY_TOKEN env var.                 */
 /* ------------------------------------------------------------------ */
 
-const PORT = Number(process.env.ANCHOR_PROXY_PORT ?? "4310");
+const PORT = Number(process.env.ANCHOR_PROXY_PORT ?? "4311");
 const ANCHOR_PROXY_TOKEN = process.env.ANCHOR_PROXY_TOKEN;
 const BITCOIND_RPC_URL = process.env.BITCOIND_RPC_URL;
 const BITCOIND_RPC_USER = process.env.BITCOIND_RPC_USER;

@@ -42,5 +42,5 @@ flowchart LR
 
 ## References
 
-- [Security Baseline](https://github.com/your-org/Edgecoder/blob/main/docs/security-baseline.md)
+- [Security Baseline](https://github.com/codyrs82/Edgecoder/blob/main/docs/security-baseline.md)
 - [Trust and Security](/security/trust-and-security)
