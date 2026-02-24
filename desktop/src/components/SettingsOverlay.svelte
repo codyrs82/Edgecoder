@@ -81,7 +81,7 @@
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
   }
   .overlay-header h2 {
@@ -111,7 +111,7 @@
   }
   .settings-nav {
     width: 180px;
-    border-right: 1px solid var(--border);
+    border-right: 0.5px solid var(--border);
     padding: 12px 0;
     display: flex;
     flex-direction: column;

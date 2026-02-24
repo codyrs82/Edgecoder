@@ -29,7 +29,7 @@
     margin-bottom: 0;
   }
   .markdown :global(pre) {
-    background: var(--bg-input, #1e1e1e);
+    background: var(--bg-deep, #1a1a18);
     border-radius: var(--radius-sm, 6px);
     padding: 12px 16px;
     overflow-x: auto;
@@ -41,7 +41,7 @@
     font-size: 13px;
   }
   .markdown :global(:not(pre) > code) {
-    background: var(--bg-input, #1e1e1e);
+    background: var(--bg-deep, #1a1a18);
     padding: 2px 6px;
     border-radius: 4px;
   }
@@ -62,7 +62,7 @@
     width: 100%;
   }
   .markdown :global(th), .markdown :global(td) {
-    border: 1px solid var(--border-strong);
+    border: 0.5px solid var(--border-strong);
     padding: 6px 10px;
     text-align: left;
     font-size: 13px;

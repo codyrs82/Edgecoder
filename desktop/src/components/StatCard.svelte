@@ -19,7 +19,7 @@
 </div>
 
 <style>
-  .stat-card { background: var(--bg-card, #1a1a2e); padding: 1.2rem; border-radius: 8px; }
+  .stat-card { background: var(--bg-surface, #1a1a2e); padding: 1.2rem; border-radius: 8px; }
   .label { display: block; font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.3rem; }
   .value { font-size: 1.6rem; font-weight: 600; }
   .progress-track { margin-top: 0.6rem; height: 4px; background: #2d2d5f; border-radius: 2px; overflow: hidden; }

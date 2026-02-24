@@ -59,7 +59,7 @@
   h1 { margin: 0 0 1.5rem; font-size: 1.4rem; }
   .section {
     background: var(--bg-surface);
-    border: 1px solid var(--border);
+    border: 0.5px solid var(--border);
     padding: 1.2rem 1.4rem;
     border-radius: var(--radius-md);
     margin-bottom: 1.2rem;

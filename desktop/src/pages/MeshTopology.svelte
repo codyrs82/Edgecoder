@@ -210,7 +210,7 @@
      Peer card
   ------------------------------------------------------------------ */
   .peer-card {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border: 1px solid var(--border-card, rgba(255, 255, 255, 0.06));
     border-radius: 10px;
     padding: 1.15rem;

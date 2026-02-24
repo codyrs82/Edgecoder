@@ -368,7 +368,7 @@
   .pull-section {
     margin-bottom: 2rem;
     padding: 1rem;
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border-radius: 10px;
     border: 1px solid var(--border-color, #2d2d5f);
   }
@@ -448,7 +448,7 @@
 
   .skeleton-container {
     padding: 1rem;
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border-radius: 10px;
     border: 1px solid var(--border-color, #2d2d5f);
   }
@@ -457,7 +457,7 @@
     text-align: center;
     padding: 2rem;
     color: var(--text-secondary, #94a3b8);
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border-radius: 10px;
     border: 1px solid var(--border-color, #2d2d5f);
   }
@@ -466,7 +466,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border-radius: 10px;
     border: 1px solid var(--border-color, #2d2d5f);
     overflow: hidden;

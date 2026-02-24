@@ -120,7 +120,7 @@
   .form input {
     padding: 12px 14px;
     background: var(--bg-surface);
-    border: 1px solid var(--border-strong);
+    border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: 14px;
@@ -173,7 +173,7 @@
     flex: 1;
     padding: 10px;
     background: var(--bg-surface);
-    border: 1px solid var(--border-strong);
+    border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     font-size: 13px;

@@ -171,7 +171,7 @@
 
   .tab {
     padding: 0.35rem 0.75rem;
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     color: var(--text-muted, #94a3b8);
     border: none;
     cursor: pointer;

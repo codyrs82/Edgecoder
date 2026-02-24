@@ -325,14 +325,14 @@
   }
 
   .card-slot {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 1.2rem;
     border-radius: 8px;
   }
 
   /* ---- Section C placeholder ---- */
   .placeholder-card {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 2rem;
     border-radius: 8px;
     text-align: center;
@@ -353,7 +353,7 @@
 
   /* ---- Section D chart ---- */
   .chart-card {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 1.2rem;
     border-radius: 8px;
   }

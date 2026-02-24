@@ -220,7 +220,7 @@
 
   /* ── toggle button ────────────────────────────────────────── */
   .toggle-btn {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     color: var(--accent, #3b82f6);
     border: 1px solid var(--accent, #3b82f6);
     padding: 0.5rem 1.2rem;
@@ -236,7 +236,7 @@
 
   /* ── submit form ──────────────────────────────────────────── */
   .submit-form {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 1.25rem;
     border-radius: 8px;
     margin-bottom: 1.5rem;
@@ -331,7 +331,7 @@
 
   /* ── empty state ──────────────────────────────────────────── */
   .empty {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 1.2rem;
     border-radius: 8px;
     opacity: 0.7;

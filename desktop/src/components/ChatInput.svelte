@@ -54,7 +54,7 @@
     align-items: flex-end;
     gap: 8px;
     background: var(--bg-surface);
-    border: 1px solid var(--border-strong);
+    border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-md);
     padding: 8px 12px;
     flex: 1;
