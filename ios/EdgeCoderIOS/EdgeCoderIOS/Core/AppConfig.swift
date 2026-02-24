@@ -3,6 +3,7 @@ import Foundation
 enum AppEnvironment: String, CaseIterable {
     case production
     case staging
+    case local
 }
 
 struct AppConfig {
@@ -31,10 +32,22 @@ struct AppConfig {
         passkeyOrigin: "https://edgecoder-portal.fly.dev"
     )
 
+    static let local = AppConfig(
+        environment: .local,
+        portalBaseURL: URL(string: "http://localhost:4301")!,
+        controlPlaneBaseURL: URL(string: "http://localhost:4301")!,
+        coordinatorBootstrapURL: URL(string: "http://localhost:4301")!,
+        relyingPartyId: "localhost",
+        passkeyOrigin: "http://localhost:4301"
+    )
+
     static var current: AppConfig {
         let env = ProcessInfo.processInfo.environment["EDGECODER_IOS_ENV"]?.lowercased()
         if env == "staging" {
             return .staging
+        }
+        if env == "local" {
+            return .local
         }
         return .production
     }

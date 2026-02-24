@@ -325,6 +325,20 @@ export class SQLiteStore {
       .run(key, value);
   }
 
+  getConfigWithTTL(key: string, maxAgeMs: number): string | undefined {
+    const row = this.db
+      .prepare(`SELECT value, updated_at FROM kv_config WHERE key = ?`)
+      .get(key) as { value: string; updated_at: number } | undefined;
+    if (!row) return undefined;
+    const ageMs = (Date.now() / 1000 - row.updated_at) * 1000;
+    if (ageMs > maxAgeMs) return undefined;
+    return row.value;
+  }
+
+  deleteConfig(key: string): void {
+    this.db.prepare(`DELETE FROM kv_config WHERE key = ?`).run(key);
+  }
+
   // ── Outbound Task Queue ───────────────────────────────────────
 
   enqueueOutboundTask(id: string, targetAgentId: string, prompt: string, language: string): void {
