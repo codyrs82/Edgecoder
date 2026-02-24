@@ -5,8 +5,14 @@
     createConversation,
     addMessage,
     saveConversation,
+    loadConversation as loadConversationFromDb,
   } from "../lib/chat-store";
   import type { Conversation } from "../lib/types";
+
+  interface Props {
+    onOpenInEditor?: (code: string, language: string) => void;
+  }
+  let { onOpenInEditor }: Props = $props();
 
   let conversation: Conversation = $state(createConversation());
   let streamingContent = $state("");
@@ -81,6 +87,27 @@
     abortController = null;
   }
 
+  export async function loadConversation(id: string) {
+    if (isStreaming && abortController) {
+      abortController.abort();
+    }
+    // Save current conversation if it has messages
+    if (conversation.messages.length > 0) {
+      await saveConversation(conversation);
+    }
+    const loaded = await loadConversationFromDb(id);
+    if (loaded) {
+      conversation = loaded;
+      streamingContent = "";
+      isStreaming = false;
+      abortController = null;
+    }
+  }
+
+  export function getConversationId(): string {
+    return conversation.id;
+  }
+
   function handleQuickAction(prompt: string) {
     sendMessage(prompt);
   }
@@ -102,10 +129,10 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} {onOpenInEditor} />
       {/each}
       {#if isStreaming && streamingContent}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} />
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {onOpenInEditor} />
       {/if}
     </div>
   {/if}

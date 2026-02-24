@@ -6,8 +6,9 @@
     role: "user" | "assistant";
     content: string;
     streaming?: boolean;
+    onOpenInEditor?: (code: string, language: string) => void;
   }
-  let { role, content, streaming = false }: Props = $props();
+  let { role, content, streaming = false, onOpenInEditor }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -15,7 +16,7 @@
     <div class="bubble user-bubble">{content}</div>
   {:else}
     <div class="bubble assistant-bubble">
-      <MarkdownRenderer source={content} />
+      <MarkdownRenderer source={content} {onOpenInEditor} />
       {#if streaming}
         <StreamingIndicator />
       {/if}
