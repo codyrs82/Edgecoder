@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Account from "../pages/Account.svelte";
   import Dashboard from "../pages/Dashboard.svelte";
   import MeshTopology from "../pages/MeshTopology.svelte";
   import ModelManager from "../pages/ModelManager.svelte";
@@ -6,13 +7,17 @@
   import TaskQueue from "../pages/TaskQueue.svelte";
   import Settings from "../pages/Settings.svelte";
   import LogViewer from "../pages/LogViewer.svelte";
+  import type { AuthUser } from "../lib/api";
 
   interface Props {
     onClose: () => void;
+    user: AuthUser;
+    onLogout: () => void;
   }
-  let { onClose }: Props = $props();
+  let { onClose, user, onLogout }: Props = $props();
 
   const sections = [
+    { id: "account", label: "Account", component: Account },
     { id: "dashboard", label: "Dashboard", component: Dashboard },
     { id: "mesh", label: "Mesh", component: MeshTopology },
     { id: "models", label: "Models", component: ModelManager },
@@ -22,9 +27,9 @@
     { id: "preferences", label: "Preferences", component: Settings },
   ] as const;
 
-  let activeSectionId = $state("dashboard");
+  let activeSectionId = $state("account");
   let ActiveSection = $derived(
-    sections.find((s) => s.id === activeSectionId)?.component ?? Dashboard
+    sections.find((s) => s.id === activeSectionId)?.component ?? Account
   );
 </script>
 
@@ -50,7 +55,11 @@
       {/each}
     </nav>
     <div class="settings-content">
-      <ActiveSection />
+      {#if activeSectionId === "account"}
+        <Account {user} {onLogout} />
+      {:else}
+        <ActiveSection />
+      {/if}
     </div>
   </div>
 </div>
