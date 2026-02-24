@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EdgeCoder WiX installer manifest.
+
+  This is a skeleton/template. Dynamic file listings for the app\ directory
+  are added during the actual build process (e.g. via heat.exe or manual
+  Component entries). The {{VERSION}} placeholder is replaced by build-msi.sh.
+
+  Build with WiX Toolset:
+    candle.exe edgecoder.wxs
+    light.exe  -out EdgeCoder.msi edgecoder.wixobj
+
+  Build with msitools (Linux):
+    wixl -o EdgeCoder.msi edgecoder.wxs
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="EdgeCoder"
+           Language="1033"
+           Version="{{VERSION}}"
+           Manufacturer="EdgeCoder"
+           UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="EdgeCoder distributed AI coding agent runtime"
+             Comments="EdgeCoder v{{VERSION}}" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of EdgeCoder is already installed."
+                  AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ================================================================= -->
+    <!-- Directory layout                                                  -->
+    <!-- ================================================================= -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+
+      <!-- C:\Program Files\EdgeCoder\ -->
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="EdgeCoder">
+
+          <!-- app\ — Node.js application (dist/, node_modules/, package.json) -->
+          <Directory Id="AppFolder" Name="app" />
+
+          <!-- bin\ — launcher scripts -->
+          <Directory Id="BinFolder" Name="bin" />
+
+        </Directory>
+      </Directory>
+
+      <!-- C:\ProgramData\EdgeCoder\ — mutable config -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="ConfigFolder" Name="EdgeCoder" />
+      </Directory>
+
+    </Directory>
+
+    <!-- ================================================================= -->
+    <!-- Components                                                        -->
+    <!-- ================================================================= -->
+
+    <!-- Runtime launcher script -->
+    <DirectoryRef Id="BinFolder">
+      <Component Id="RuntimeScript" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <File Id="RuntimePs1"
+              Source="msi-stage\bin\edgecoder-runtime.ps1"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Configure script (optional — included when present) -->
+    <DirectoryRef Id="BinFolder">
+      <Component Id="ConfigureScript" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <File Id="ConfigurePs1"
+              Source="msi-stage\bin\edgecoder-configure.ps1"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Config directory with example env file -->
+    <DirectoryRef Id="ConfigFolder">
+      <Component Id="ConfigDir" Guid="D4E5F6A7-B8C9-0123-DEFA-234567890123">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveConfigFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Add bin\ to system PATH -->
+    <DirectoryRef Id="BinFolder">
+      <Component Id="PathEntry" Guid="E5F6A7B8-C9D0-1234-EFAB-345678901234">
+        <CreateFolder />
+        <Environment Id="PATH"
+                     Name="PATH"
+                     Value="[BinFolder]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!--
+      NOTE: App directory components (dist\, node_modules\, package.json)
+      should be generated dynamically using heat.exe:
+
+        heat.exe dir msi-stage\app -cg AppFiles -dr AppFolder \
+          -gg -sfrag -srd -var var.AppSource -out app-files.wxs
+
+      Then include the generated fragment and reference the component group
+      in the Feature below.
+    -->
+
+    <!-- ================================================================= -->
+    <!-- Windows Service definition                                        -->
+    <!-- ================================================================= -->
+    <DirectoryRef Id="BinFolder">
+      <Component Id="EdgeCoderService" Guid="F6A7B8C9-D0E1-2345-FABC-456789012345">
+        <File Id="ServiceRunner"
+              Source="msi-stage\bin\edgecoder-runtime.ps1"
+              KeyPath="yes"
+              Name="edgecoder-service.ps1" />
+
+        <ServiceInstall Id="InstallEdgeCoderService"
+                        Name="EdgeCoder"
+                        DisplayName="EdgeCoder Runtime"
+                        Description="EdgeCoder distributed AI coding agent runtime daemon"
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[BinFolder]edgecoder-service.ps1&quot;" />
+
+        <ServiceControl Id="ControlEdgeCoderService"
+                        Name="EdgeCoder"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ================================================================= -->
+    <!-- Feature tree                                                      -->
+    <!-- ================================================================= -->
+    <Feature Id="Complete" Title="EdgeCoder" Level="1">
+      <ComponentRef Id="RuntimeScript" />
+      <ComponentRef Id="ConfigureScript" />
+      <ComponentRef Id="ConfigDir" />
+      <ComponentRef Id="PathEntry" />
+      <ComponentRef Id="EdgeCoderService" />
+      <!--
+        Add the heat-generated component group here:
+        <ComponentGroupRef Id="AppFiles" />
+      -->
+    </Feature>
+
+  </Product>
+</Wix>
