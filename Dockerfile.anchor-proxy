@@ -5,13 +5,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY tsconfig.json ./
 COPY src ./src
 
 RUN npm run build && npm prune --omit=dev
 
-EXPOSE 4310
+EXPOSE 4311
 
 CMD ["node", "dist/economy/anchor-proxy-service.js"]
