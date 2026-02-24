@@ -67,6 +67,20 @@
     }
   }
 
+  export async function newChat() {
+    if (isStreaming && abortController) {
+      abortController.abort();
+    }
+    // Save current conversation if it has messages
+    if (conversation.messages.length > 0) {
+      await saveConversation(conversation);
+    }
+    conversation = createConversation();
+    streamingContent = "";
+    isStreaming = false;
+    abortController = null;
+  }
+
   function handleQuickAction(prompt: string) {
     sendMessage(prompt);
   }

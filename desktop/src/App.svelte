@@ -16,6 +16,17 @@
   let authChecked = $state(false);
 
   $effect(() => {
+    if (import.meta.env.DEV) {
+      // Dev mode: skip auth, use mock user
+      user = {
+        userId: "dev-user",
+        email: "dev@edgecoder.local",
+        displayName: "Dev User",
+        emailVerified: true,
+      };
+      authChecked = true;
+      return;
+    }
     getMe()
       .then((u) => { user = u; })
       .catch(() => { user = null; })
@@ -43,7 +54,10 @@
   <div class="app-shell">
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
-      <button class="header-btn" title="New chat">
+      <button class="header-btn" title="New chat" onclick={() => {
+        activeTab = "chat";
+        chatView?.newChat();
+      }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 5v14M5 12h14"/>
         </svg>
