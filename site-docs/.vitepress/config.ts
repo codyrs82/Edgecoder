@@ -23,6 +23,7 @@ export default withMermaid(defineConfig({
           { text: "Welcome", link: "/" },
           { text: "System Overview and Benefits", link: "/guide/system-overview-benefits" },
           { text: "How EdgeCoder Works", link: "/guide/how-edgecoder-works" },
+          { text: "IDE Integration (VS Code, Cursor, Windsurf)", link: "/guide/ide-integration" },
           { text: "Architecture Deep Dive", link: "/guide/architecture-deep-dive" },
           { text: "Request Lifecycle Sequences", link: "/guide/request-lifecycle-sequences" },
           { text: "Model Provider Abstraction", link: "/guide/model-provider-abstraction" },
@@ -58,6 +59,7 @@ export default withMermaid(defineConfig({
         items: [
           { text: "Credits, Pricing, Issuance", link: "/economy/credits-pricing-issuance" },
           { text: "Settlement Lifecycle", link: "/economy/settlement-lifecycle" },
+          { text: "Bitcoin Anchoring", link: "/economy/bitcoin-anchoring" },
           { text: "Issuance Parameters", link: "/reference/issuance-economy-params" }
         ]
       },

@@ -62,6 +62,20 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>io.edgecoder.ios.runtime</string>
+		<string>io.edgecoder.ios.heartbeat</string>
+	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

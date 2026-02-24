@@ -11,13 +11,16 @@ async function bootstrapCoordinator(): Promise<void> {
     | "ollama-local";
   const autoInstall = process.env.OLLAMA_AUTO_INSTALL === "true";
   const model = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
+  const agentOs = (process.env.AGENT_OS ?? "macos") as
+    | "macos" | "debian" | "ubuntu" | "windows" | "ios";
 
   await ensureOllamaModelInstalled({
     enabled: provider === "ollama-local",
     autoInstall,
     model,
     role: "coordinator",
-    host: process.env.OLLAMA_HOST
+    host: process.env.OLLAMA_HOST,
+    platform: agentOs
   });
 
   console.log(

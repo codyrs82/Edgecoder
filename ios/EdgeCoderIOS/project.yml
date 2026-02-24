@@ -39,6 +39,11 @@ targets:
             CFBundleURLName: io.edgecoder.ios.oauth
             CFBundleURLSchemes:
               - edgecoder
+        UIBackgroundModes:
+          - fetch
+          - processing
+          - bluetooth-central
+          - bluetooth-peripheral
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
@@ -55,7 +60,12 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
         ITSAppUsesNonExemptEncryption: false
-    dependencies: []
+    dependencies:
+      - package: llama
+packages:
+  llama:
+    url: https://github.com/ggml-org/llama.cpp
+    branch: master
 schemes:
   EdgeCoderIOS:
     build:
