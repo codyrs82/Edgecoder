@@ -244,3 +244,40 @@ export async function streamChat(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Capacity & active jobs
+// ---------------------------------------------------------------------------
+
+export interface AgentCapacity {
+  agentId: string;
+  os: string;
+  version: string;
+  mode: "swarm-only" | "ide-enabled";
+  maxConcurrentTasks: number;
+  connectedPeers: string[];
+  blacklisted: boolean;
+  lastSeenMs: number;
+  powerPolicy: { allowCoordinatorTasks: boolean; reason?: string };
+  diagnostics?: {
+    lastEventAtMs: number;
+    lastEventMessage: string;
+    recentCount: number;
+  };
+}
+
+export interface CapacityResponse {
+  totals: {
+    agentsConnected: number;
+    totalCapacity: number;
+    swarmEnabledCount: number;
+    localOllamaCount: number;
+    ideEnabledCount: number;
+    activeTunnels: number;
+    blacklistedAgents: number;
+  };
+  agents: AgentCapacity[];
+}
+
+export const getCapacity = () =>
+  get<CapacityResponse>(AGENT_BASE, "/capacity");
