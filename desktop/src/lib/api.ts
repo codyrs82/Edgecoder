@@ -146,6 +146,50 @@ export async function getSystemMetrics(): Promise<SystemMetrics | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Portal auth
+// ---------------------------------------------------------------------------
+
+const PORTAL_BASE = import.meta.env.DEV ? "/portal" : "http://localhost:4305";
+
+export interface AuthUser {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  emailVerified: boolean;
+}
+
+export async function login(email: string, password: string): Promise<AuthUser> {
+  const res = await fetch(`${PORTAL_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `Login failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getMe(): Promise<AuthUser> {
+  const res = await fetch(`${PORTAL_BASE}/me`, { credentials: "include" });
+  if (!res.ok) throw new Error("Not authenticated");
+  return res.json();
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${PORTAL_BASE}/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+  });
+}
+
+export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
+  return `${PORTAL_BASE}/auth/oauth/${provider}/start`;
+}
+
+// ---------------------------------------------------------------------------
 // IDE chat provider (:4304)
 // ---------------------------------------------------------------------------
 

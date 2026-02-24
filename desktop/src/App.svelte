@@ -4,10 +4,27 @@
   import ChatView from "./pages/ChatView.svelte";
   import EditorView from "./pages/EditorView.svelte";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
+  import LoginScreen from "./pages/LoginScreen.svelte";
+  import type { AuthUser } from "./lib/api";
+  import { getMe } from "./lib/api";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
   let chatView: ChatView | undefined = $state(undefined);
+
+  let user: AuthUser | null = $state(null);
+  let authChecked = $state(false);
+
+  $effect(() => {
+    getMe()
+      .then((u) => { user = u; })
+      .catch(() => { user = null; })
+      .finally(() => { authChecked = true; });
+  });
+
+  function handleLogin(u: AuthUser) {
+    user = u;
+  }
 
   function handleSend(message: string) {
     if (activeTab === "chat" && chatView) {
@@ -16,48 +33,56 @@
   }
 </script>
 
-<div class="app-shell">
-  <!-- Header / Title Bar -->
-  <header class="header" data-tauri-drag-region>
-    <button class="header-btn" title="New chat">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 5v14M5 12h14"/>
-      </svg>
-    </button>
+{#if !authChecked}
+  <div class="loading-screen">
+    <p>Loading...</p>
+  </div>
+{:else if !user}
+  <LoginScreen onLogin={handleLogin} />
+{:else}
+  <div class="app-shell">
+    <!-- Header / Title Bar -->
+    <header class="header" data-tauri-drag-region>
+      <button class="header-btn" title="New chat">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
 
-    <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
+      <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
-    <button class="header-btn" title="Menu">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
-      </svg>
-    </button>
-  </header>
+      <button class="header-btn" title="Menu">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
+        </svg>
+      </button>
+    </header>
 
-  <!-- Main Content Area -->
-  <main class="content">
-    {#if activeTab === "chat"}
-      <ChatView bind:this={chatView} />
-    {:else}
-      <EditorView />
+    <!-- Main Content Area -->
+    <main class="content">
+      {#if activeTab === "chat"}
+        <ChatView bind:this={chatView} />
+      {:else}
+        <EditorView />
+      {/if}
+    </main>
+
+    <!-- Bottom Bar -->
+    <footer class="bottom-bar">
+      <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
+        </svg>
+      </button>
+
+      <ChatInput onSend={handleSend} />
+    </footer>
+
+    {#if settingsOpen}
+      <SettingsOverlay onClose={() => settingsOpen = false} />
     {/if}
-  </main>
-
-  <!-- Bottom Bar -->
-  <footer class="bottom-bar">
-    <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
-      </svg>
-    </button>
-
-    <ChatInput onSend={handleSend} />
-  </footer>
-
-  {#if settingsOpen}
-    <SettingsOverlay onClose={() => settingsOpen = false} />
-  {/if}
-</div>
+  </div>
+{/if}
 
 <style>
   :root {
@@ -164,4 +189,11 @@
     color: var(--accent);
   }
 
+  .loading-screen {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+  }
 </style>
