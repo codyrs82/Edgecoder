@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 
@@ -43,7 +44,7 @@ const app = Fastify({ logger: true });
 function requireAuth(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }): boolean {
   const authHeader = String(req.headers.authorization ?? "");
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token || token !== ANCHOR_PROXY_TOKEN) {
+  if (!token || !ANCHOR_PROXY_TOKEN || token.length !== ANCHOR_PROXY_TOKEN.length || !timingSafeEqual(Buffer.from(token), Buffer.from(ANCHOR_PROXY_TOKEN))) {
     reply.code(401).send({ error: "unauthorized" });
     return false;
   }

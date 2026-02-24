@@ -153,5 +153,10 @@ export function createLightningProviderFromEnv(): LightningProvider {
     }
     return new ClnRestProvider(baseUrl, apiToken);
   }
+  if (process.env.NODE_ENV === "production") {
+    console.error("FATAL: LIGHTNING_PROVIDER must be set to 'lnd' or 'cln' in production (mock auto-settles all invoices)");
+    process.exit(1);
+  }
+  console.warn("[lightning] using MockLightningProvider — all invoices auto-settle (dev only)");
   return new MockLightningProvider();
 }

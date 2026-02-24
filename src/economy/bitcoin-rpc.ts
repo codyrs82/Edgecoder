@@ -407,6 +407,11 @@ export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): Bit
   if (provider === "blockstream") {
     return new BlockstreamProvider(network);
   }
+  if (process.env.NODE_ENV === "production") {
+    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'bitcoind', 'anchor-proxy', or 'blockstream' in production (mock produces fake transactions)");
+    process.exit(1);
+  }
+  console.warn("[bitcoin] using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");
   return new MockBitcoinAnchorProvider();
 }
 

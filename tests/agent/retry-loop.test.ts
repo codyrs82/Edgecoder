@@ -77,7 +77,7 @@ describe("InteractiveAgent retry loop", () => {
 describe("SwarmWorkerAgent retry loop", () => {
   it("retries subtask on failure (max 2)", async () => {
     const provider = new EdgeCoderLocalProvider();
-    const agent = new SwarmWorkerAgent(provider);
+    const agent = new SwarmWorkerAgent(provider, { sandbox: "host" });
     const result = await agent.runSubtask({
       id: "sub-1",
       taskId: "t-1",

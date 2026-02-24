@@ -39,7 +39,12 @@ export async function runCode(
     if (dockerOk) {
       return runInDockerSandbox(language, code, timeoutMs);
     }
-    log.warn("Docker not available, falling back to host execution with AST sandbox");
+    log.error("Docker sandbox required but Docker is not available — rejecting task");
+    return {
+      ...baseResult(language, Date.now() - start),
+      stderr: "sandbox_unavailable: Docker is required for swarm task execution but is not running",
+      ok: false,
+    };
   }
 
   if (language === "python") {
