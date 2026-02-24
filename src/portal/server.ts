@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { randomUUID, createHash, randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import {
@@ -10,6 +10,26 @@ import {
 } from "@simplewebauthn/server";
 import { PortalStore } from "./store.js";
 import { generateMnemonic } from "bip39";
+import {
+  sha256Hex,
+  normalizeEmail,
+  parseCookies,
+  secureCompare,
+  encodeCookie,
+  clearCookie,
+  hashPassword,
+  verifyPassword,
+  decodeJwtPayload,
+  claimIsTrue,
+  base64UrlFromBuffer,
+  bufferFromBase64Url,
+  normalizeBase64UrlString,
+  deriveWalletSecretRef,
+  generateSixDigitCode,
+  deriveIosDeviceIdFromNodeId,
+  normalizePasskeyResponsePayload,
+  deriveCredentialIdFromVerifyBody
+} from "./portal-utils.js";
 
 const app = Fastify({ logger: true });
 const store = PortalStore.fromEnv();
@@ -157,25 +177,6 @@ function validatePortalSecurityConfig(): void {
   }
 }
 
-function sha256Hex(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function parseCookies(cookieHeader: string | undefined): Record<string, string> {
-  if (!cookieHeader) return {};
-  const out: Record<string, string> = {};
-  for (const segment of cookieHeader.split(";")) {
-    const [rawKey, ...rest] = segment.trim().split("=");
-    if (!rawKey || rest.length === 0) continue;
-    out[rawKey] = decodeURIComponent(rest.join("="));
-  }
-  return out;
-}
-
 function normalizeNativeOauthRedirect(value: string | undefined): string | null {
   if (!value) return null;
   const candidate = value.trim();
@@ -209,129 +210,9 @@ function consumeMobileOauthSessionToken(token: string): { userId: string } | nul
   return { userId: record.userId };
 }
 
-function secureCompare(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
-
-function encodeCookie(name: string, value: string, maxAgeSeconds: number): string {
-  const secure = process.env.NODE_ENV === "production" ? "Secure; " : "";
-  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=${maxAgeSeconds}`;
-}
-
-function clearCookie(name: string): string {
-  const secure = process.env.NODE_ENV === "production" ? "Secure; " : "";
-  return `${name}=; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=0`;
-}
-
-function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString("hex");
-  const derived = scryptSync(password, salt, 64).toString("hex");
-  return `scrypt$${salt}$${derived}`;
-}
-
-function verifyPassword(password: string, encoded: string): boolean {
-  const [algo, salt, hashHex] = encoded.split("$");
-  if (algo !== "scrypt" || !salt || !hashHex) return false;
-  const derived = scryptSync(password, salt, 64).toString("hex");
-  return secureCompare(derived, hashHex);
-}
-
-function decodeJwtPayload<T extends Record<string, unknown>>(token: string): T | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const payloadJson = Buffer.from(parts[1], "base64url").toString("utf8");
-    return JSON.parse(payloadJson) as T;
-  } catch {
-    return null;
-  }
-}
-
-function claimIsTrue(value: unknown): boolean {
-  return value === true || value === "true" || value === 1 || value === "1";
-}
-
-function base64UrlFromBuffer(value: Uint8Array<ArrayBufferLike> | Buffer): string {
-  return Buffer.from(value as any).toString("base64url");
-}
-
-function bufferFromBase64Url(value: string): Buffer {
-  return Buffer.from(value, "base64url");
-}
-
 function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const buffer = Buffer.from(value, "base64url");
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
-}
-
-function normalizeBase64UrlString(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  return trimmed.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function normalizePasskeyResponsePayload(value: unknown): unknown {
-  if (!value || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  const response = source.response && typeof source.response === "object"
-    ? { ...(source.response as Record<string, unknown>) }
-    : {};
-  const normalized: Record<string, unknown> = { ...source };
-  const pick =
-    normalizeBase64UrlString(source.rawId) ??
-    normalizeBase64UrlString(source.credentialId) ??
-    normalizeBase64UrlString(source.id);
-  if (pick) {
-    normalized.id = pick;
-    normalized.rawId = pick;
-  }
-  if (response.clientDataJSON) {
-    response.clientDataJSON = normalizeBase64UrlString(response.clientDataJSON) ?? response.clientDataJSON;
-  }
-  if (response.attestationObject) {
-    response.attestationObject = normalizeBase64UrlString(response.attestationObject) ?? response.attestationObject;
-  }
-  if (response.authenticatorData) {
-    response.authenticatorData = normalizeBase64UrlString(response.authenticatorData) ?? response.authenticatorData;
-  }
-  if (response.signature) {
-    response.signature = normalizeBase64UrlString(response.signature) ?? response.signature;
-  }
-  if (response.userHandle) {
-    response.userHandle = normalizeBase64UrlString(response.userHandle) ?? response.userHandle;
-  }
-  normalized.response = response;
-  return normalized;
-}
-
-function deriveCredentialIdFromVerifyBody(body: {
-  credentialId?: string;
-  response: unknown;
-}): string | undefined {
-  const fromBody = normalizeBase64UrlString(body.credentialId);
-  if (fromBody) return fromBody;
-  if (!body.response || typeof body.response !== "object") return undefined;
-  const response = body.response as Record<string, unknown>;
-  return (
-    normalizeBase64UrlString(response.id) ??
-    normalizeBase64UrlString(response.rawId) ??
-    normalizeBase64UrlString(response.credentialId)
-  );
-}
-
-function deriveWalletSecretRef(seedPhrase: string, accountId: string): string {
-  const digest = createHash("sha256")
-    .update(seedPhrase)
-    .update(":")
-    .update(accountId)
-    .update(":")
-    .update(WALLET_SECRET_PEPPER)
-    .digest("hex");
-  return `seed-sha256:${digest}`;
 }
 
 async function sendVerificationEmail(email: string, verifyToken: string): Promise<void> {
@@ -364,11 +245,6 @@ async function sendVerificationEmail(email: string, verifyToken: string): Promis
     const body = await res.body.text();
     throw new Error(`resend_email_failed:${res.statusCode}:${body}`);
   }
-}
-
-function generateSixDigitCode(): string {
-  const value = randomBytes(4).readUInt32BE(0) % 1_000_000;
-  return String(value).padStart(6, "0");
 }
 
 async function sendWalletSendMfaCodeEmail(input: {
@@ -479,7 +355,7 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
   }
 
   const seedPhrase = generateMnemonic(128);
-  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId);
+  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
   await store?.createWalletOnboarding({
     userId: user.userId,
     accountId,
@@ -532,7 +408,7 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
   const accountId = existing?.accountId ?? `acct-${user.userId}`;
   const network = (existing?.network as "bitcoin" | "testnet" | "signet" | undefined) ?? WALLET_DEFAULT_NETWORK;
   const seedPhrase = generateMnemonic(128);
-  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId);
+  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
 
   await store?.upsertWalletOnboardingSeed({
     userId: user.userId,
@@ -2005,17 +1881,10 @@ app.post("/me/theme", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
-  const body = z.object({ theme: z.enum(["midnight", "emerald", "light"]) }).parse(req.body);
+  const body = z.object({ theme: z.enum(["warm", "midnight", "emerald"]) }).parse(req.body);
   await store.setUserTheme(user.userId, body.theme);
   return reply.send({ ok: true, theme: body.theme });
 });
-
-function deriveIosDeviceIdFromNodeId(nodeId: string): string | undefined {
-  const normalized = String(nodeId).trim().toLowerCase();
-  if (!/^ios-|^iphone-/.test(normalized)) return undefined;
-  const suffix = normalized.replace(/^ios-|^iphone-/, "").replace(/[^a-z0-9]/g, "");
-  return suffix.length >= 6 ? suffix : undefined;
-}
 
 app.post("/nodes/enroll", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
@@ -2817,9 +2686,9 @@ app.get("/portal-legacy", async (_req, reply) => {
               </div>
               <div class="row">
                 <select id="themeSelect" style="min-width: 140px;">
+                  <option value="warm">Warm</option>
                   <option value="midnight">Midnight</option>
                   <option value="emerald">Emerald</option>
-                  <option value="light">Light Pro</option>
                 </select>
                 <button id="refreshBtn">Refresh</button>
                 <button id="logoutBtn">Log out</button>
@@ -2903,37 +2772,40 @@ app.get("/portal-legacy", async (_req, reply) => {
         const toast = document.getElementById("toast");
         const themeSelect = document.getElementById("themeSelect");
         const themePalettes = {
+          warm: {
+            "--bg": "#2f2f2d",
+            "--bg-soft": "#353533",
+            "--card": "rgba(58, 58, 55, 0.96)",
+            "--card-border": "rgba(214, 204, 194, 0.12)",
+            "--text": "#f7f5f0",
+            "--muted": "#8a8478",
+            "--brand": "#c17850",
+            "--brand-2": "#d4895f"
+          },
           midnight: {
-            "--bg": "#070b18",
-            "--card": "rgba(15, 23, 42, 0.72)",
-            "--card-border": "rgba(148, 163, 184, 0.25)",
-            "--text": "#e2e8f0",
-            "--muted": "#94a3b8",
-            "--brand": "#7c3aed",
-            "--brand-2": "#22d3ee"
+            "--bg": "#1a1a2e",
+            "--bg-soft": "#202038",
+            "--card": "rgba(37, 37, 64, 0.96)",
+            "--card-border": "rgba(99, 102, 241, 0.18)",
+            "--text": "#e8e8f0",
+            "--muted": "#8888a0",
+            "--brand": "#6366f1",
+            "--brand-2": "#818cf8"
           },
           emerald: {
-            "--bg": "#04140f",
-            "--card": "rgba(6, 32, 26, 0.75)",
-            "--card-border": "rgba(52, 211, 153, 0.28)",
-            "--text": "#ddfbf1",
-            "--muted": "#8ad7bd",
-            "--brand": "#10b981",
-            "--brand-2": "#22d3ee"
-          },
-          light: {
-            "--bg": "#f1f5f9",
-            "--card": "rgba(255, 255, 255, 0.92)",
-            "--card-border": "rgba(148, 163, 184, 0.35)",
-            "--text": "#0f172a",
-            "--muted": "#475569",
-            "--brand": "#4f46e5",
-            "--brand-2": "#0ea5e9"
+            "--bg": "#1a2e1a",
+            "--bg-soft": "#203520",
+            "--card": "rgba(37, 48, 37, 0.96)",
+            "--card-border": "rgba(34, 197, 94, 0.18)",
+            "--text": "#e8f0e8",
+            "--muted": "#88a088",
+            "--brand": "#22c55e",
+            "--brand-2": "#4ade80"
           }
         };
 
         function applyTheme(theme) {
-          const palette = themePalettes[theme] || themePalettes.midnight;
+          const palette = themePalettes[theme] || themePalettes.warm;
           for (const [key, value] of Object.entries(palette)) {
             document.documentElement.style.setProperty(key, value);
           }
@@ -2991,7 +2863,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           dashboardView.classList.remove("hidden");
 
           const user = summary.user || {};
-          applyTheme(user.uiTheme || "midnight");
+          applyTheme(user.uiTheme || "warm");
           document.getElementById("accountMeta").textContent =
             user.email + " | email verified: " + String(Boolean(user.emailVerified));
           document.getElementById("accountIdLabel").textContent = "acct-" + (user.userId || "unknown");
@@ -3235,7 +3107,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           }
         });
 
-        applyTheme("midnight");
+        applyTheme("warm");
         bootstrap();
       </script>
     </body>
@@ -3268,25 +3140,23 @@ function portalAuthedPageHtml(input: {
       <title>${input.title}</title>
       <style>
         :root {
-          --bg: #f3f6fb;
-          --bg-soft: #e9eef7;
-          --card: rgba(255, 255, 255, 0.96);
-          --card-border: rgba(148, 163, 184, 0.28);
-          --text: #0f172a;
-          --muted: #475569;
-          --brand: #2563eb;
-          --brand-2: #0ea5e9;
-          --ok: #22c55e;
-          --danger: #ef4444;
+          --bg: #2f2f2d;
+          --bg-soft: #353533;
+          --card: rgba(58, 58, 55, 0.96);
+          --card-border: rgba(214, 204, 194, 0.12);
+          --text: #f7f5f0;
+          --muted: #8a8478;
+          --brand: #c17850;
+          --brand-2: #d4895f;
+          --ok: #4ade80;
+          --danger: #f87171;
         }
         * { box-sizing: border-box; }
         body {
           font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           margin: 0;
           color: var(--text);
-          background:
-            radial-gradient(1200px 600px at -10% -30%, rgba(37, 99, 235, 0.09), transparent 60%),
-            var(--bg);
+          background: var(--bg);
           min-height: 100vh;
         }
         .shell { max-width: 1360px; margin: 18px auto 26px; padding: 0 14px; }
@@ -3296,8 +3166,8 @@ function portalAuthedPageHtml(input: {
           gap: 10px;
         }
         .sidebar {
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 255, 0.96));
-          border: 1px solid var(--card-border);
+          background: var(--bg-soft);
+          border: 0.5px solid var(--card-border);
           border-radius: 8px;
           padding: 12px 8px;
           min-height: calc(100vh - 32px);
@@ -3309,7 +3179,7 @@ function portalAuthedPageHtml(input: {
         .sidebar-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
         .sidebar-subtitle { color: var(--muted); font-size: 11px; margin-top: 1px; }
         .sidebar-section-label {
-          color: #64748b;
+          color: var(--muted);
           font-size: 10px;
           text-transform: uppercase;
           letter-spacing: 0.12em;
@@ -3318,7 +3188,7 @@ function portalAuthedPageHtml(input: {
         .sidebar-foot {
           margin: 10px 6px 0;
           padding-top: 8px;
-          border-top: 1px solid rgba(148, 163, 184, 0.3);
+          border-top: 0.5px solid var(--card-border);
           font-size: 11px;
         }
         .topbar {
@@ -3328,9 +3198,9 @@ function portalAuthedPageHtml(input: {
           align-items: center;
           margin-bottom: 8px;
           padding: 10px 12px;
-          border: 1px solid var(--card-border);
+          border: 0.5px solid var(--card-border);
           border-radius: 8px;
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.98));
+          background: var(--card);
         }
         .ticker-row {
           display: grid;
@@ -3342,10 +3212,10 @@ function portalAuthedPageHtml(input: {
           border: 1px solid var(--card-border);
           border-radius: 6px;
           padding: 7px;
-          background: #ffffff;
+          background: var(--card);
         }
         .ticker .label {
-          color: #9db0cf;
+          color: var(--muted);
           font-size: 10px;
           text-transform: uppercase;
           letter-spacing: 0.06em;
@@ -3376,15 +3246,15 @@ function portalAuthedPageHtml(input: {
           border-radius: 6px;
           padding: 7px 8px;
           font-size: 11px;
-          color: #334155;
-          background: rgba(241, 245, 249, 0.88);
+          color: var(--text);
+          background: var(--bg-soft);
           text-decoration: none;
         }
         .tab.active {
-          border-color: rgba(37, 99, 235, 0.45);
-          background: rgba(37, 99, 235, 0.1);
-          color: #1d4ed8;
-          box-shadow: inset 2px 0 0 rgba(37, 99, 235, 0.7);
+          border-color: rgba(193, 120, 80, 0.45);
+          background: rgba(193, 120, 80, 0.1);
+          color: var(--brand-2);
+          box-shadow: inset 2px 0 0 rgba(193, 120, 80, 0.7);
         }
         .card {
           background: var(--card);
@@ -3400,23 +3270,23 @@ function portalAuthedPageHtml(input: {
         button {
           padding: 6px 9px;
           border-radius: 6px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          background: rgba(248, 250, 252, 0.95);
+          border: 1px solid var(--card-border);
+          background: var(--bg-soft);
           color: var(--text);
           cursor: pointer;
           font-size: 12px;
         }
         button.primary {
-          background: linear-gradient(140deg, #2563eb, #1d4ed8);
-          border-color: rgba(37, 99, 235, 0.75);
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          border-color: rgba(193, 120, 80, 0.75);
           color: white;
         }
         input, select {
           width: 100%;
           padding: 7px 8px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
+          border: 1px solid var(--card-border);
           border-radius: 6px;
-          background: #ffffff;
+          background: var(--bg);
           color: var(--text);
           font-size: 12px;
         }
@@ -3424,20 +3294,20 @@ function portalAuthedPageHtml(input: {
           display: block;
           margin: 6px 0 3px;
           font-size: 10px;
-          color: #64748b;
+          color: var(--muted);
           text-transform: uppercase;
           letter-spacing: 0.06em;
         }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
         th, td {
-          border-bottom: 1px solid rgba(148, 163, 184, 0.26);
+          border-bottom: 1px solid var(--card-border);
           text-align: left;
           padding: 6px 5px;
           vertical-align: top;
           font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
         th {
-          color: #475569;
+          color: var(--muted);
           font-weight: 600;
           font-size: 10px;
           text-transform: uppercase;
@@ -3445,7 +3315,7 @@ function portalAuthedPageHtml(input: {
         }
         .grid2 { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 8px; }
         .kpis { display: grid; grid-template-columns: repeat(3, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
-        .kpi { border: 1px solid var(--card-border); border-radius: 6px; padding: 7px; background: #ffffff; }
+        .kpi { border: 1px solid var(--card-border); border-radius: 6px; padding: 7px; background: var(--card); }
         .kpi .label {
           color: var(--muted);
           font-size: 10px;
@@ -3466,9 +3336,9 @@ function portalAuthedPageHtml(input: {
           font-size: 10px;
           text-transform: uppercase;
           letter-spacing: 0.06em;
-          border: 1px solid rgba(116, 137, 173, 0.45);
-          background: #f8fafc;
-          color: #334155;
+          border: 1px solid var(--card-border);
+          background: var(--bg-soft);
+          color: var(--text);
         }
         .status-badge.ok {
           border-color: rgba(34, 197, 94, 0.6);
@@ -3497,10 +3367,10 @@ function portalAuthedPageHtml(input: {
           min-width: 150px;
         }
         .token-box {
-          border: 1px dashed rgba(37, 99, 235, 0.42);
+          border: 1px dashed rgba(193, 120, 80, 0.42);
           border-radius: 6px;
           padding: 8px;
-          background: rgba(239, 246, 255, 0.8);
+          background: var(--bg-soft);
           word-break: break-all;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px;
@@ -3588,12 +3458,12 @@ function portalAuthedPageHtml(input: {
       <script>
         const toast = document.getElementById("toast");
         const themePalettes = {
-          midnight: { "--bg": "#f3f6fb", "--card": "rgba(255, 255, 255, 0.96)", "--card-border": "rgba(148, 163, 184, 0.28)", "--text": "#0f172a", "--muted": "#475569", "--brand": "#2563eb", "--brand-2": "#0ea5e9" },
-          emerald: { "--bg": "#f0fdf8", "--card": "rgba(255, 255, 255, 0.96)", "--card-border": "rgba(110, 231, 183, 0.35)", "--text": "#0f172a", "--muted": "#3f6458", "--brand": "#059669", "--brand-2": "#14b8a6" },
-          light: { "--bg": "#edf2f7", "--card": "rgba(255, 255, 255, 0.95)", "--card-border": "rgba(148, 163, 184, 0.38)", "--text": "#0f172a", "--muted": "#475569", "--brand": "#2563eb", "--brand-2": "#0284c7" }
+          warm: { "--bg": "#2f2f2d", "--bg-soft": "#353533", "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.12)", "--text": "#f7f5f0", "--muted": "#8a8478", "--brand": "#c17850", "--brand-2": "#d4895f" },
+          midnight: { "--bg": "#1a1a2e", "--bg-soft": "#202038", "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.18)", "--text": "#e8e8f0", "--muted": "#8888a0", "--brand": "#6366f1", "--brand-2": "#818cf8" },
+          emerald: { "--bg": "#1a2e1a", "--bg-soft": "#203520", "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.18)", "--text": "#e8f0e8", "--muted": "#88a088", "--brand": "#22c55e", "--brand-2": "#4ade80" }
         };
         function applyTheme(theme) {
-          const palette = themePalettes[theme] || themePalettes.midnight;
+          const palette = themePalettes[theme] || themePalettes.warm;
           for (const [key, value] of Object.entries(palette)) document.documentElement.style.setProperty(key, value);
         }
         function showToast(message, isError = false) {
@@ -3616,7 +3486,7 @@ function portalAuthedPageHtml(input: {
         async function requireAuth() {
           try {
             const me = await api("/me", { method: "GET", headers: {} });
-            applyTheme((me.user || {}).uiTheme || "midnight");
+            applyTheme((me.user || {}).uiTheme || "warm");
             return me;
           } catch {
             window.location.href = "/portal";
@@ -3680,22 +3550,21 @@ app.get("/portal", async (_req, reply) => {
       <title>EdgeCoder Portal | Sign in</title>
       <style>
         :root {
-          --bg: #f3f6fb;
-          --card: rgba(255, 255, 255, 0.96);
-          --card-border: rgba(148, 163, 184, 0.3);
-          --text: #0f172a;
-          --muted: #475569;
-          --brand: #2563eb;
-          --brand-2: #0ea5e9;
+          --bg: #2f2f2d;
+          --bg-soft: #353533;
+          --card: rgba(58, 58, 55, 0.96);
+          --card-border: rgba(214, 204, 194, 0.12);
+          --text: #f7f5f0;
+          --muted: #8a8478;
+          --brand: #c17850;
+          --brand-2: #d4895f;
         }
         * { box-sizing: border-box; }
         body {
           font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           margin: 0;
           color: var(--text);
-          background:
-            radial-gradient(1200px 580px at -10% -30%, rgba(37, 99, 235, 0.08), transparent 60%),
-            var(--bg);
+          background: var(--bg);
           min-height: 100vh;
         }
         .shell { max-width: 980px; margin: 28px auto 42px; padding: 0 16px; }
@@ -3721,30 +3590,30 @@ app.get("/portal", async (_req, reply) => {
           backdrop-filter: blur(10px);
           box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
         }
-        .simple-intro { background: linear-gradient(180deg, #ffffff, #f8fbff); }
+        .simple-intro { background: var(--bg-soft); }
         .simple-intro h2 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.02em; }
-        .simple-intro p { margin: 0; color: #334155; line-height: 1.6; max-width: 760px; }
-        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #cbd5e1; }
+        .simple-intro p { margin: 0; color: var(--muted); line-height: 1.6; max-width: 760px; }
+        label { display: block; margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
         input {
           width: 100%;
           padding: 10px 11px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
+          border: 1px solid var(--card-border);
           border-radius: 10px;
-          background: #ffffff;
+          background: var(--bg);
           color: var(--text);
         }
         .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
         button {
           padding: 9px 12px;
           border-radius: 10px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          background: #f8fafc;
+          border: 1px solid var(--card-border);
+          background: var(--bg-soft);
           color: var(--text);
           cursor: pointer;
         }
         button.primary {
-          background: linear-gradient(140deg, #2563eb, #1d4ed8);
-          border-color: rgba(37, 99, 235, 0.75);
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          border-color: rgba(193, 120, 80, 0.75);
           color: white;
         }
         a { color: inherit; }
@@ -3758,8 +3627,8 @@ app.get("/portal", async (_req, reply) => {
         }
         .hidden { display: none; }
         .session-banner {
-          border: 1px solid rgba(37, 99, 235, 0.34);
-          background: rgba(219, 234, 254, 0.8);
+          border: 1px solid rgba(193, 120, 80, 0.34);
+          background: rgba(58, 58, 55, 0.8);
         }
         @media (max-width: 920px) {
           .auth-stack { grid-template-columns: 1fr; }
@@ -5134,9 +5003,9 @@ app.get("/portal/settings", async (_req, reply) => {
         <div id="accountLine" class="muted">Loading account...</div>
         <label>Theme</label>
         <select id="themeSelect" style="max-width:220px;">
+          <option value="warm">Warm</option>
           <option value="midnight">Midnight</option>
           <option value="emerald">Emerald</option>
-          <option value="light">Light Pro</option>
         </select>
         <div class="row">
           <button class="primary" id="saveThemeBtn">Save theme</button>
@@ -5166,11 +5035,11 @@ app.get("/portal/settings", async (_req, reply) => {
       for (const b of bytes) binary += String.fromCharCode(b);
       return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
     }
-    let currentUserTheme = "midnight";
+    let currentUserTheme = "warm";
     async function bootstrapSettings() {
       const me = await requireAuth();
       const user = me.user || {};
-      currentUserTheme = user.uiTheme || "midnight";
+      currentUserTheme = user.uiTheme || "warm";
       document.getElementById("accountLine").textContent = (user.email || "unknown") + " | user ID: " + (user.userId || "n/a");
       document.getElementById("themeSelect").value = currentUserTheme;
     }
