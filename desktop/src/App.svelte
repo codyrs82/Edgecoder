@@ -2,6 +2,7 @@
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import ChatInput from "./components/ChatInput.svelte";
   import ChatView from "./pages/ChatView.svelte";
+  import SettingsOverlay from "./components/SettingsOverlay.svelte";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -55,22 +56,8 @@
     <ChatInput onSend={handleSend} />
   </footer>
 
-  <!-- Settings Overlay (placeholder) -->
   {#if settingsOpen}
-    <div class="settings-overlay">
-      <div class="settings-header">
-        <button class="back-btn" onclick={() => settingsOpen = false}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-          Back
-        </button>
-        <h2>Settings</h2>
-      </div>
-      <div class="settings-body">
-        <p style="color: var(--text-secondary)">Settings sub-sections will be built in Task 6.</p>
-      </div>
-    </div>
+    <SettingsOverlay onClose={() => settingsOpen = false} />
   {/if}
 </div>
 
@@ -198,50 +185,4 @@
     color: var(--accent);
   }
 
-  /* Settings Overlay */
-  .settings-overlay {
-    position: fixed;
-    inset: 0;
-    background: var(--bg-base);
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    animation: slideUp 0.2s ease;
-  }
-  .settings-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  .settings-header h2 {
-    margin: 0;
-    font-size: 1rem;
-  }
-  .back-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border: none;
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .back-btn:hover {
-    color: var(--text-primary);
-  }
-  .settings-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 24px;
-  }
-
-  @keyframes slideUp {
-    from { transform: translateY(100%); }
-    to { transform: translateY(0); }
-  }
 </style>
