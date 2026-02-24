@@ -4,3 +4,11 @@ build/
 .DS_Store
 *.log
 coverage/
+
+# Rust / Tauri build artifacts
+**/target/
+**/*.rs.bk
+
+# Xcode user state
+*.xcuserstate
+xcuserdata/
