@@ -498,6 +498,8 @@ app.addHook("onRequest", async (req, reply) => {
   // portal enrollment token and returns mesh auth material in the response.
   const reqPath = (req as any).url as string | undefined;
   if (reqPath === "/register") return;
+  // WebSocket upgrade: auth handled inside the WS handler via query params
+  if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
     (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/"))
