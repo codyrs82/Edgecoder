@@ -3996,6 +3996,340 @@ app.get("/portal", async (_req, reply) => {
   return reply.type("text/html").send(html);
 });
 
+/* ───────────────── Chat page ───────────────── */
+app.get("/portal/chat", async (_req, reply) => {
+  const content = `
+    <style>
+      .chat-msg { padding:8px 12px; margin:4px 0; border-radius:8px; max-width:85%; word-wrap:break-word; }
+      .chat-msg.user { background:var(--brand); color:#fff; margin-left:auto; text-align:right; }
+      .chat-msg.assistant { background:var(--bg-soft); margin-right:auto; }
+      .chat-msg pre { background:rgba(0,0,0,0.3); padding:8px; border-radius:6px; overflow-x:auto; margin:6px 0; }
+      .chat-msg code { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; }
+      .conv-item { padding:8px 10px; border-radius:6px; cursor:pointer; margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .conv-item:hover { background:var(--card-border); }
+      .conv-item.active { background:var(--brand); color:#fff; }
+      .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+    </style>
+    <div style="display:grid; grid-template-columns:260px 1fr; gap:10px; height:calc(100vh - 180px);">
+      <!-- Left: Conversation sidebar -->
+      <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <h3 style="margin:0;">Conversations</h3>
+          <button class="primary" id="newChatBtn" style="padding:4px 10px; font-size:12px;">+ New</button>
+        </div>
+        <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:8px;" />
+        <div id="convList" style="flex:1; overflow-y:auto;"></div>
+      </div>
+      <!-- Right: Chat area -->
+      <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
+        <div id="chatHeader" style="display:flex; justify-content:space-between; align-items:center; padding-bottom:8px; border-bottom:0.5px solid var(--card-border); margin-bottom:8px;">
+          <h3 id="chatTitle" style="margin:0;">New chat</h3>
+          <div id="chatMeta" class="muted" style="font-size:11px;"></div>
+        </div>
+        <div id="chatMessages" style="flex:1; overflow-y:auto; padding:8px 0;"></div>
+        <div id="streamingIndicator" class="hidden" style="display:flex; align-items:center; gap:8px; padding:8px 0; color:var(--muted); font-size:12px;">
+          <span class="spinner"></span>
+          <span id="streamStatus">Thinking...</span>
+          <span id="streamTokens"></span>
+        </div>
+        <div style="border-top:0.5px solid var(--card-border); padding-top:10px;">
+          <div style="display:flex; gap:8px;">
+            <textarea id="chatInput" rows="2" placeholder="Message EdgeCoder..." style="flex:1; resize:none; max-height:200px; font-family:inherit;"></textarea>
+            <button class="primary" id="sendBtn" style="align-self:flex-end; padding:8px 16px;">Send</button>
+          </div>
+          <div class="muted" style="font-size:10px; margin-top:4px;">Enter to send, Shift+Enter for newline. Responses use swarm credits.</div>
+        </div>
+      </div>
+    </div>
+  `;
+  const script = `
+    var activeConvId = null;
+    var conversations = [];
+    var abortController = null;
+    var isStreaming = false;
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function renderMarkdown(text) {
+      var html = escapeHtml(text);
+      // Code blocks (triple backtick)
+      html = html.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, function(m, code) {
+        return "<pre><code>" + code.trim() + "</code></pre>";
+      });
+      // Inline code
+      html = html.replace(/\\\`([^\\\`]+?)\\\`/g, "<code>$1</code>");
+      // Bold
+      html = html.replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>");
+      // Italic
+      html = html.replace(/\\*(.+?)\\*/g, "<em>$1</em>");
+      // Newlines to br
+      html = html.replace(/\\n/g, "<br>");
+      return html;
+    }
+
+    function renderConversations() {
+      var list = document.getElementById("convList");
+      var search = document.getElementById("convSearch").value.toLowerCase();
+      var filtered = conversations.filter(function(c) {
+        return !search || (c.title || "").toLowerCase().indexOf(search) !== -1;
+      });
+      var html = "";
+      for (var i = 0; i < filtered.length; i++) {
+        var c = filtered[i];
+        var cls = "conv-item" + (c.conversationId === activeConvId ? " active" : "");
+        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "</div>";
+      }
+      if (filtered.length === 0) {
+        html = "<div class=\\"muted\\" style=\\"padding:8px; font-size:12px;\\">No conversations yet</div>";
+      }
+      list.innerHTML = html;
+    }
+
+    function renderMessages(messages) {
+      var container = document.getElementById("chatMessages");
+      if (!messages || messages.length === 0) {
+        container.innerHTML = "<div class=\\"muted\\" style=\\"text-align:center; padding:40px 0;\\">No messages yet. Start a conversation!</div>";
+        return;
+      }
+      var html = "";
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i];
+        var role = m.role === "user" ? "user" : "assistant";
+        html += "<div class=\\"chat-msg " + role + "\\">" + renderMarkdown(m.content || "") + "</div>";
+      }
+      container.innerHTML = html;
+      container.scrollTop = container.scrollHeight;
+    }
+
+    async function loadConversations() {
+      try {
+        var res = await api("/conversations");
+        conversations = res.conversations || res || [];
+        renderConversations();
+      } catch (err) {
+        showToast("Could not load conversations: " + String(err.message || err), true);
+      }
+    }
+
+    async function loadMessages(convId) {
+      try {
+        var res = await api("/conversations/" + convId + "/messages");
+        var msgs = res.messages || res || [];
+        renderMessages(msgs);
+      } catch (err) {
+        showToast("Could not load messages: " + String(err.message || err), true);
+      }
+    }
+
+    async function selectConversation(convId) {
+      activeConvId = convId;
+      renderConversations();
+      var conv = conversations.find(function(c) { return c.conversationId === convId; });
+      document.getElementById("chatTitle").textContent = (conv && conv.title) || "New chat";
+      document.getElementById("chatMeta").textContent = conv ? new Date(conv.updatedAt || conv.createdAt).toLocaleString() : "";
+      await loadMessages(convId);
+    }
+
+    async function createNewChat() {
+      try {
+        var res = await api("/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
+        await loadConversations();
+        var newId = res.conversationId || (res.conversation && res.conversation.conversationId);
+        if (newId) {
+          await selectConversation(newId);
+        }
+      } catch (err) {
+        showToast("Could not create conversation: " + String(err.message || err), true);
+      }
+    }
+
+    async function sendMessage() {
+      var input = document.getElementById("chatInput");
+      var text = input.value.trim();
+      if (!text || isStreaming) return;
+      input.value = "";
+      input.style.height = "auto";
+
+      // If no active conversation, create one first
+      if (!activeConvId) {
+        try {
+          var res = await api("/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
+          var newId = res.conversationId || (res.conversation && res.conversation.conversationId);
+          if (newId) {
+            activeConvId = newId;
+            await loadConversations();
+            renderConversations();
+          }
+        } catch (err) {
+          showToast("Could not create conversation: " + String(err.message || err), true);
+          return;
+        }
+      }
+
+      // Append user message bubble immediately
+      var chatMessages = document.getElementById("chatMessages");
+      var emptyMsg = chatMessages.querySelector(".muted");
+      if (emptyMsg) emptyMsg.remove();
+      var userBubble = document.createElement("div");
+      userBubble.className = "chat-msg user";
+      userBubble.innerHTML = renderMarkdown(text);
+      chatMessages.appendChild(userBubble);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+
+      // Start streaming
+      isStreaming = true;
+      var indicator = document.getElementById("streamingIndicator");
+      indicator.classList.remove("hidden");
+      document.getElementById("streamStatus").textContent = "Thinking...";
+      document.getElementById("streamTokens").textContent = "";
+      var startTime = Date.now();
+      var tokenCount = 0;
+
+      // Create assistant bubble
+      var assistantBubble = document.createElement("div");
+      assistantBubble.className = "chat-msg assistant";
+      assistantBubble.innerHTML = "";
+      chatMessages.appendChild(assistantBubble);
+
+      var fullContent = "";
+      abortController = new AbortController();
+
+      try {
+        var response = await fetch("/portal/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId: activeConvId, message: text }),
+          signal: abortController.signal,
+          credentials: "same-origin"
+        });
+
+        if (!response.ok) {
+          var errBody = await response.text();
+          throw new Error("Chat request failed: " + response.status + " " + errBody);
+        }
+
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+
+        while (true) {
+          var result = await reader.read();
+          if (result.done) break;
+          buffer += decoder.decode(result.value, { stream: true });
+
+          var lines = buffer.split("\\n");
+          buffer = lines.pop() || "";
+
+          for (var li = 0; li < lines.length; li++) {
+            var line = lines[li].trim();
+            if (!line.startsWith("data: ")) continue;
+            var payload = line.substring(6);
+            if (payload === "[DONE]") continue;
+            try {
+              var parsed = JSON.parse(payload);
+              if (parsed.content) {
+                fullContent += parsed.content;
+                tokenCount++;
+                assistantBubble.innerHTML = renderMarkdown(fullContent);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                document.getElementById("streamStatus").textContent = "Streaming...";
+                document.getElementById("streamTokens").textContent = tokenCount + " chunks, " + elapsed + "s";
+              }
+            } catch (parseErr) {
+              // skip unparseable lines
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          showToast("Chat error: " + String(err.message || err), true);
+          if (!fullContent) {
+            assistantBubble.innerHTML = "<span style=\\"color:var(--danger);\\">Error: " + escapeHtml(String(err.message || err)) + "</span>";
+          }
+        }
+      }
+
+      // Done streaming
+      isStreaming = false;
+      abortController = null;
+      indicator.classList.add("hidden");
+
+      // Auto-rename if title is still "New chat"
+      var currentTitle = document.getElementById("chatTitle").textContent;
+      if (currentTitle === "New chat" && text.length > 0) {
+        var newTitle = text.length > 40 ? text.substring(0, 40) + "..." : text;
+        try {
+          await api("/conversations/" + activeConvId, {
+            method: "PATCH",
+            body: JSON.stringify({ title: newTitle })
+          });
+          document.getElementById("chatTitle").textContent = newTitle;
+          await loadConversations();
+        } catch (renameErr) {
+          // non-critical, ignore
+        }
+      }
+    }
+
+    // Event listeners
+    document.getElementById("newChatBtn").addEventListener("click", createNewChat);
+    document.getElementById("sendBtn").addEventListener("click", sendMessage);
+
+    document.getElementById("chatInput").addEventListener("keydown", function(e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    document.getElementById("chatInput").addEventListener("input", function() {
+      this.style.height = "auto";
+      this.style.height = Math.min(this.scrollHeight, 200) + "px";
+    });
+
+    document.getElementById("convList").addEventListener("click", function(e) {
+      var item = e.target.closest(".conv-item");
+      if (item && item.dataset.id) {
+        selectConversation(item.dataset.id);
+      }
+    });
+
+    document.getElementById("convSearch").addEventListener("input", function() {
+      renderConversations();
+    });
+
+    // Init
+    (async function() {
+      await requireAuth();
+      await loadConversations();
+      if (conversations.length > 0) {
+        await selectConversation(conversations[0].conversationId);
+      } else {
+        renderMessages([]);
+      }
+    })().catch(function(err) {
+      showToast("Could not initialize chat: " + String(err.message || err), true);
+    });
+  `;
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Chat",
+    activeTab: "chat",
+    heading: "Chat",
+    subtitle: "AI assistant powered by the EdgeCoder swarm network.",
+    content,
+    script
+  }));
+});
+
 app.get("/portal/dashboard", async (_req, reply) => {
   const content = `
     <div class="card">
