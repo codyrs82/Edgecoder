@@ -1,14 +1,16 @@
 <script lang="ts">
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import StreamingIndicator from "./StreamingIndicator.svelte";
+  import type { StreamProgress } from "../lib/api";
 
   interface Props {
     role: "user" | "assistant";
     content: string;
     streaming?: boolean;
+    streamProgress?: StreamProgress;
     onOpenInEditor?: (code: string, language: string) => void;
   }
-  let { role, content, streaming = false, onOpenInEditor }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -18,7 +20,7 @@
     <div class="bubble assistant-bubble">
       <MarkdownRenderer source={content} {onOpenInEditor} />
       {#if streaming}
-        <StreamingIndicator />
+        <StreamingIndicator progress={streamProgress} />
       {/if}
     </div>
   {/if}

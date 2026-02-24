@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import { streamChat } from "../lib/api";
+  import type { StreamProgress } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -19,6 +20,7 @@
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
   let isStreaming = $state(false);
+  let streamProgress: StreamProgress | undefined = $state(undefined);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
 
@@ -62,6 +64,7 @@
 
     isStreaming = true;
     streamingContent = "";
+    streamProgress = undefined;
     abortController = new AbortController();
 
     const apiMessages = conversation.messages.map((m) => ({
@@ -77,6 +80,9 @@
           scrollToBottom();
         },
         abortController.signal,
+        (progress) => {
+          streamProgress = progress;
+        },
       );
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
@@ -90,6 +96,7 @@
     } finally {
       streamingContent = "";
       isStreaming = false;
+      streamProgress = undefined;
       abortController = null;
     }
   }
@@ -162,7 +169,7 @@
         <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} {onOpenInEditor} />
       {/each}
       {#if isStreaming && streamingContent}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {onOpenInEditor} />
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} {onOpenInEditor} />
       {/if}
     </div>
   {/if}
