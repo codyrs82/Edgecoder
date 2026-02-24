@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "EdgeCoder \u2014 Node Operator",
+        "title": "EdgeCoder",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -20,12 +20,16 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420 blob:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* https://accounts.google.com https://login.microsoftonline.com https://graph.microsoft.com https://oauth2.googleapis.com; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "appimage", "deb"],
+    "targets": [
+      "dmg",
+      "appimage",
+      "deb"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
