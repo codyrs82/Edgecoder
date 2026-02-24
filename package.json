@@ -39,6 +39,7 @@
   "dependencies": {
     "@abandonware/bleno": "^0.6.2",
     "@abandonware/noble": "^1.9.2-26",
+    "@fastify/websocket": "^11.2.0",
     "@simplewebauthn/server": "^13.2.2",
     "acorn": "^8.16.0",
     "better-sqlite3": "^12.6.2",
@@ -53,6 +54,7 @@
     "@types/node": "^25.2.3",
     "@types/pg": "^8.16.0",
     "@types/web-bluetooth": "^0.0.21",
+    "@types/ws": "^8.18.1",
     "mermaid": "^11.12.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",

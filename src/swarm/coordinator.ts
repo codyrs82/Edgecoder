@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -2635,39 +2636,39 @@ app.post("/mesh/register-peer", async (req, reply) => {
   return reply.send({ ok: true, peerCount: mesh.listPeers().length });
 });
 
-app.post("/mesh/ingest", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const message = z
-    .object({
-      id: z.string(),
-      type: z.enum([
-        "peer_announce",
-        "queue_summary",
-        "task_offer",
-        "task_claim",
-        "result_announce",
-        "ordering_snapshot",
-        "blacklist_update",
-        "issuance_proposal",
-        "issuance_vote",
-        "issuance_commit",
-        "issuance_checkpoint",
-        "capability_summary",
-        "peer_exchange",
-        "capability_announce"
-      ]),
-      fromPeerId: z.string(),
-      issuedAtMs: z.number(),
-      ttlMs: z.number(),
-      payload: z.record(z.string(), z.unknown()),
-      signature: z.string()
-    })
-    .parse(req.body);
+const meshIngestSchema = z.object({
+  id: z.string(),
+  type: z.enum([
+    "peer_announce",
+    "queue_summary",
+    "task_offer",
+    "task_claim",
+    "result_announce",
+    "ordering_snapshot",
+    "blacklist_update",
+    "issuance_proposal",
+    "issuance_vote",
+    "issuance_commit",
+    "issuance_checkpoint",
+    "capability_summary",
+    "peer_exchange",
+    "capability_announce"
+  ]),
+  fromPeerId: z.string(),
+  issuedAtMs: z.number(),
+  ttlMs: z.number(),
+  payload: z.record(z.string(), z.unknown()),
+  signature: z.string()
+});
+
+async function handleMeshIngest(
+  message: z.infer<typeof meshIngestSchema>
+): Promise<{ ok: boolean; statusCode?: number; error?: string; [key: string]: unknown }> {
   const peer = mesh.listPeers().find((p) => p.peerId === message.fromPeerId);
   // Allow peer_exchange and capability_announce from unknown peers — this is how
   // new peers introduce themselves to the mesh after registering.
   if (!peer && message.type !== "peer_exchange" && message.type !== "capability_announce") {
-    return reply.code(404).send({ error: "peer_unknown" });
+    return { ok: false, statusCode: 404, error: "peer_unknown" };
   }
 
   // Rate limiting and signature validation (only when peer is known)
@@ -2681,14 +2682,14 @@ app.post("/mesh/ingest", async (req, reply) => {
       window.count += 1;
       if (window.count > MESH_RATE_LIMIT_PER_10S) {
         peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
-        return reply.code(429).send({ error: "peer_rate_limited" });
+        return { ok: false, statusCode: 429, error: "peer_rate_limited" };
       }
     }
 
     const validation = protocol.validateMessage(message, peer.publicKeyPem);
     if (!validation.ok) {
       peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 5));
-      return reply.code(400).send({ error: validation.reason });
+      return { ok: false, statusCode: 400, error: validation.reason };
     }
   }
   if (message.type === "blacklist_update" && peer) {
@@ -2723,7 +2724,7 @@ app.post("/mesh/ingest", async (req, reply) => {
       .safeParse(message.payload);
     if (!payload.success) {
       peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 5));
-      return reply.code(400).send({ error: "invalid_blacklist_payload" });
+      return { ok: false, statusCode: 400, error: "invalid_blacklist_payload" };
     }
     const data = payload.data;
     const incomingValidation = validateIncomingBlacklistRecord({
@@ -2732,7 +2733,7 @@ app.post("/mesh/ingest", async (req, reply) => {
     });
     if (!incomingValidation.ok) {
       peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
-      return reply.code(400).send({ error: incomingValidation.reason });
+      return { ok: false, statusCode: 400, error: incomingValidation.reason };
     }
     const current = activeBlacklistRecord(data.agentId);
     if (!current || data.timestampMs >= current.timestampMs) {
@@ -2745,7 +2746,7 @@ app.post("/mesh/ingest", async (req, reply) => {
       federatedCapabilities.set(payload.coordinatorId, payload);
       app.log.info({ from: payload.coordinatorId, agents: payload.agentCount }, "capability_summary_received");
     }
-    return reply.send({ ok: true });
+    return { ok: true };
   }
 
   // ── Peer Exchange (BitTorrent-style peer table merge) ──
@@ -2769,7 +2770,7 @@ app.post("/mesh/ingest", async (req, reply) => {
     if (added > 0) {
       app.log.info({ from: message.fromPeerId, added, total: mesh.listPeers().length }, "peer_exchange_merged");
     }
-    return reply.send({ ok: true, added });
+    return { ok: true, added };
   }
 
   // ── Capability Announce (individual peer capabilities) ──
@@ -2806,7 +2807,7 @@ app.post("/mesh/ingest", async (req, reply) => {
       }
       app.log.info({ peerId: payload.peerId, role: payload.role, models: payload.models.length }, "capability_announce_received");
     }
-    return reply.send({ ok: true });
+    return { ok: true };
   }
 
   // ── P2P mesh task distribution ──
@@ -2830,20 +2831,20 @@ app.post("/mesh/ingest", async (req, reply) => {
     }).safeParse(message.payload);
 
     if (!payload.success) {
-      return reply.code(400).send({ error: "invalid_task_offer_payload" });
+      return { ok: false, statusCode: 400, error: "invalid_task_offer_payload" };
     }
 
     const d = payload.data;
     // Don't re-enqueue our own tasks
     if (d.originCoordinatorId === identity.peerId) {
-      return reply.send({ ok: true, skipped: "own_task" });
+      return { ok: true, skipped: "own_task" };
     }
     // Only accept if we have alive agents (heartbeat in last 30s)
     const aliveAgents = [...agentCapabilities.values()].filter(
       a => a.lastSeenMs > Date.now() - 30_000
     );
     if (aliveAgents.length === 0) {
-      return reply.send({ ok: true, skipped: "no_agents" });
+      return { ok: true, skipped: "no_agents" };
     }
     // Enqueue locally (dedup by subtaskId handled in queue)
     queue.enqueueSubtask({ ...d, id: d.subtaskId });
@@ -2865,7 +2866,7 @@ app.post("/mesh/ingest", async (req, reply) => {
     void mesh.broadcast(claimMsg);
     app.log.info({ subtaskId: d.subtaskId, from: d.originCoordinatorId }, "task_offer_accepted");
     if (peer) peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
-    return reply.send({ ok: true, enqueued: true });
+    return { ok: true, enqueued: true };
   }
 
   if (message.type === "task_claim") {
@@ -2880,7 +2881,7 @@ app.post("/mesh/ingest", async (req, reply) => {
         app.log.info({ subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator }, "task_claim_remote");
       }
     }
-    return reply.send({ ok: true });
+    return { ok: true };
   }
 
   // ── Result Announce from mesh peers (agent/phone executed a task) ──
@@ -2902,13 +2903,55 @@ app.post("/mesh/ingest", async (req, reply) => {
         "result_announce_from_mesh"
       );
     }
-    return reply.send({ ok: true });
+    return { ok: true };
   }
 
   if (peer) {
     peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 1));
   }
-  return reply.send({ ok: true });
+  return { ok: true };
+}
+
+app.post("/mesh/ingest", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const message = meshIngestSchema.parse(req.body);
+  const result = await handleMeshIngest(message);
+  return reply.code(result.statusCode ?? (result.ok ? 200 : 400)).send(result);
+});
+
+// ── WebSocket endpoint for NAT traversal ──
+// Agents behind NAT open an outbound WebSocket to this endpoint.
+// The coordinator pushes gossip messages down the persistent connection.
+app.get("/mesh/ws", { websocket: true }, (socket, req) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const token = url.searchParams.get("token");
+  const peerId = url.searchParams.get("peerId");
+  if (!peerId || (MESH_AUTH_TOKEN && (!token || !safeTokenEqual(token, MESH_AUTH_TOKEN)))) {
+    socket.close(4001, "mesh_unauthorized");
+    return;
+  }
+
+  console.log(`[ws] mesh peer connected: ${peerId}`);
+  mesh.setWebSocketForPeer(peerId, socket);
+
+  socket.on("message", async (data) => {
+    try {
+      const message = meshIngestSchema.parse(JSON.parse(data.toString()));
+      await handleMeshIngest(message);
+    } catch (err) {
+      console.warn(`[ws] ingest error from ${peerId}: ${(err as Error).message}`);
+    }
+  });
+
+  socket.on("close", () => {
+    console.log(`[ws] mesh peer disconnected: ${peerId}`);
+    mesh.removeWebSocketForPeer(peerId);
+  });
+
+  socket.on("error", (err) => {
+    console.warn(`[ws] error from ${peerId}: ${err.message}`);
+    mesh.removeWebSocketForPeer(peerId);
+  });
 });
 
 app.get("/mesh/capabilities", async (req, reply) => {
@@ -4189,6 +4232,7 @@ export async function initCoordinator(): Promise<void> {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
+    await app.register(websocket);
     await app.listen({ port: 4301, host: "0.0.0.0" });
     await initCoordinator();
   })().catch((error) => {

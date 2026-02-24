@@ -1,8 +1,10 @@
 import { request } from "undici";
+import type { WebSocket } from "ws";
 import { MeshMessage, MeshPeerIdentity } from "../common/types.js";
 
 export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
+  private wsPeers = new Map<string, WebSocket>();
   private meshToken: string | undefined;
 
   setMeshToken(token: string): void {
@@ -15,6 +17,14 @@ export class GossipMesh {
 
   removePeer(peerId: string): void {
     this.peers.delete(peerId);
+  }
+
+  setWebSocketForPeer(peerId: string, ws: WebSocket): void {
+    this.wsPeers.set(peerId, ws);
+  }
+
+  removeWebSocketForPeer(peerId: string): void {
+    this.wsPeers.delete(peerId);
   }
 
   listPeers(): MeshPeerIdentity[] {
@@ -31,13 +41,28 @@ export class GossipMesh {
       headers["x-mesh-token"] = this.meshToken;
     }
 
+    const serialized = JSON.stringify(message);
+
     await Promise.all(
       peers.map(async (peer) => {
+        // Try WebSocket first (handles NAT traversal)
+        const ws = this.wsPeers.get(peer.peerId);
+        if (ws && ws.readyState === 1 /* OPEN */) {
+          try {
+            ws.send(serialized);
+            delivered += 1;
+            return;
+          } catch {
+            // WS send failed, fall through to HTTP
+          }
+        }
+
+        // HTTP POST fallback (works for same-network peers)
         try {
           const res = await request(`${peer.coordinatorUrl}/mesh/ingest`, {
             method: "POST",
             headers,
-            body: JSON.stringify(message),
+            body: serialized,
             signal: AbortSignal.timeout(10_000)
           });
           const body = await res.body.text().catch(() => "");
