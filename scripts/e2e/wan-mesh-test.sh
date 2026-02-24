@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEED_URL="${SEED_URL:-https://coordinator.edgecoder.io}"
+SEED_URL="${SEED_URL:-https://edgecoder-seed.fly.dev}"
 LOCAL_AGENT_URL="${LOCAL_AGENT_URL:-http://localhost:4301}"
 MESH_TOKEN="${MESH_TOKEN:-}"
+
+AUTH_HEADER=""
+if [[ -n "${MESH_TOKEN}" ]]; then
+  AUTH_HEADER="-H x-mesh-token: ${MESH_TOKEN}"
+fi
 
 echo "=== WAN Mesh E2E Test ==="
 echo "Seed node: ${SEED_URL}"
@@ -12,7 +17,7 @@ echo ""
 
 # 1. Verify seed node is reachable
 echo "[1/6] Checking seed node health..."
-SEED_HEALTH=$(curl -sf "${SEED_URL}/status" || echo "FAIL")
+SEED_HEALTH=$(curl -sf "${SEED_URL}/status" -H "x-mesh-token: ${MESH_TOKEN}" || echo "FAIL")
 if [[ "${SEED_HEALTH}" == "FAIL" ]]; then
   echo "FAIL: Seed node unreachable at ${SEED_URL}/status"
   exit 1
@@ -52,7 +57,7 @@ fi
 
 # 5. Verify ledger consistency (check seed node)
 echo "[5/6] Checking ledger integrity on seed node..."
-LEDGER=$(curl -sf "${SEED_URL}/credits/ledger/verify" || echo "SKIP")
+LEDGER=$(curl -sf "${SEED_URL}/credits/ledger/verify" -H "x-mesh-token: ${MESH_TOKEN}" || echo "SKIP")
 if [[ "${LEDGER}" == "SKIP" ]]; then
   echo "  SKIP: Ledger verify endpoint not available"
 else
