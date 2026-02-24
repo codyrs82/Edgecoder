@@ -58,6 +58,11 @@ import {
 } from "../security/blacklist.js";
 import { EscalationRequest, EscalationResult } from "../escalation/types.js";
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
+import { verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
+import { InMemoryNonceStore, verifyNonce } from "../security/nonce-verifier.js";
+import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
+import { SecurityEventLogger, type SecurityEventType } from "../audit/security-events.js";
+import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
 
 const app = Fastify({ logger: true });
 const queue = new SwarmQueue(pgStore);
@@ -110,6 +115,16 @@ const COORDINATOR_PEER_CACHE_FILE = resolve(
 const STATS_LEDGER_SYNC_INTERVAL_MS = Number(process.env.STATS_LEDGER_SYNC_INTERVAL_MS ?? "10000");
 const STATS_ANCHOR_INTERVAL_MS = Number(process.env.STATS_ANCHOR_INTERVAL_MS ?? "600000");
 const STATS_ANCHOR_MIN_CONFIRMATIONS = Number(process.env.STATS_ANCHOR_MIN_CONFIRMATIONS ?? "1");
+const AGENT_RATE_LIMIT_MAX = Number(process.env.AGENT_RATE_LIMIT_MAX ?? "30");
+const AGENT_RATE_LIMIT_WINDOW_MS = Number(process.env.AGENT_RATE_LIMIT_WINDOW_MS ?? "60000");
+const SECURITY_NONCE_TTL_MS = Number(process.env.SECURITY_NONCE_TTL_MS ?? "300000");
+const SECURITY_MAX_SKEW_MS = Number(process.env.SECURITY_MAX_SKEW_MS ?? "120000");
+const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
+const nonceStore = new InMemoryNonceStore();
+const securityLog = new SecurityEventLogger((event) => {
+  const level = event.level === "CRITICAL" || event.level === "HIGH" ? "warn" : "info";
+  app.log[level]({ securityEvent: event }, `security:${event.event}`);
+});
 
 function loadCoordinatorKeys() {
   const peerId = process.env.COORDINATOR_PEER_ID ?? "coordinator-local";
@@ -259,6 +274,113 @@ function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return true;
   const token = headers["x-portal-service-token"];
   return typeof token === "string" && token === PORTAL_SERVICE_TOKEN;
+}
+
+function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
+  const agentId = headers["x-agent-id"];
+  const timestampMs = headers["x-timestamp-ms"];
+  const nonce = headers["x-nonce"];
+  const bodySha256 = headers["x-body-sha256"];
+  const signature = headers["x-signature"];
+  if (
+    typeof agentId !== "string" ||
+    typeof timestampMs !== "string" ||
+    typeof nonce !== "string" ||
+    typeof bodySha256 !== "string" ||
+    typeof signature !== "string"
+  ) {
+    return null;
+  }
+  return {
+    "x-agent-id": agentId,
+    "x-timestamp-ms": timestampMs,
+    "x-nonce": nonce,
+    "x-body-sha256": bodySha256,
+    "x-signature": signature,
+  };
+}
+
+async function verifyAgentRequest(
+  headers: Record<string, unknown>,
+  routePath: string
+): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
+  const signed = extractSignedHeaders(headers);
+  if (!signed) return null; // No signed headers: backward compat
+
+  const agentId = signed["x-agent-id"];
+
+  // 1. Rate limit (cheapest check first)
+  if (!agentRateLimiter.check(agentId)) {
+    securityLog.log({
+      level: securityLog.severity("auth_rate_limit_hit"),
+      event: "auth_rate_limit_hit",
+      source: { type: "agent", id: agentId },
+      details: { route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    return "rejected";
+  }
+
+  // 2. Look up agent public key
+  const cap = agentCapabilities.get(agentId);
+  if (!cap?.publicKeyPem) {
+    securityLog.log({
+      level: securityLog.severity("invalid_signature"),
+      event: "invalid_signature",
+      source: { type: "agent", id: agentId },
+      details: { reason: "no_public_key", route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    return "rejected";
+  }
+
+  // 3. Verify signature
+  const sigResult = verifySignedRequest({
+    method: "POST",
+    path: routePath,
+    headers: signed,
+    publicKeyPem: cap.publicKeyPem,
+    maxSkewMs: SECURITY_MAX_SKEW_MS,
+  });
+
+  if (!sigResult.valid) {
+    const eventType: SecurityEventType =
+      sigResult.reason === "timestamp_skew" ? "replay_attempt" : "invalid_signature";
+    securityLog.log({
+      level: securityLog.severity(eventType),
+      event: eventType,
+      source: { type: "agent", id: agentId },
+      details: { reason: sigResult.reason, route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    return "rejected";
+  }
+
+  // 4. Nonce replay detection
+  const nonceResult = await verifyNonce(nonceStore, {
+    nonce: sigResult.nonce!,
+    sourceId: agentId,
+    timestampMs: Number(signed["x-timestamp-ms"]),
+    maxSkewMs: SECURITY_MAX_SKEW_MS,
+    ttlMs: SECURITY_NONCE_TTL_MS,
+  });
+
+  if (!nonceResult.valid) {
+    securityLog.log({
+      level: securityLog.severity("replay_attempt"),
+      event: "replay_attempt",
+      source: { type: "agent", id: agentId },
+      details: { nonce: sigResult.nonce, reason: nonceResult.reason, route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    return "rejected";
+  }
+
+  return { agentId: sigResult.agentId!, nonce: sigResult.nonce! };
 }
 
 function parseRecordPayload(record: { payloadJson?: string }): Record<string, unknown> {
@@ -1422,7 +1544,13 @@ app.post("/register", async (req, reply) => {
 });
 
 app.post("/heartbeat", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat");
+  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+
   const body = heartbeatSchema.parse(req.body);
+  if (verified && verified.agentId !== body.agentId) {
+    return reply.code(401).send({ error: "agent_id_mismatch" });
+  }
   const now = Date.now();
   if (!agentCapabilities.has(body.agentId)) {
     return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
@@ -1624,7 +1752,13 @@ app.post("/submit", async (req, reply) => {
 });
 
 app.post("/pull", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull");
+  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+
   const body = pullSchema.parse(req.body);
+  if (verified && verified.agentId !== body.agentId) {
+    return reply.code(401).send({ error: "agent_id_mismatch" });
+  }
   if (!agentCapabilities.has(body.agentId)) {
     return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
   }
@@ -1662,7 +1796,13 @@ app.post("/pull", async (req, reply) => {
 });
 
 app.post("/result", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result");
+  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+
   const body = resultSchema.parse(req.body);
+  if (verified && verified.agentId !== body.agentId) {
+    return reply.code(401).send({ error: "agent_id_mismatch" });
+  }
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
@@ -3605,6 +3745,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       setInterval(() => {
         void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
       }, STATS_ANCHOR_INTERVAL_MS);
+      // ── Security: nonce prune scheduler ──
+      const pruneAdapter: PrunableStore = {
+        async noncePrune() { await nonceStore.prune(); return 0; },
+        async meshMessagePrune() { return 0; },
+      };
+      startPruneScheduler(pruneAdapter, 5 * 60_000);
+      app.log.info("security: request signing verification, nonce replay detection, and rate limiting active");
       await app.listen({ port: 4301, host: "0.0.0.0" });
       // Do not block coordinator readiness on model pull/install.
       // Fly health checks and agent registration should stay available while

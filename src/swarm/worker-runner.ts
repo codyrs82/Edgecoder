@@ -9,6 +9,7 @@ import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
+import { signRequest } from "../security/request-signing.js";
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
@@ -105,6 +106,18 @@ function meshHeaders(): Record<string, string> {
   return { "x-mesh-token": meshAuthToken };
 }
 
+function signedHeaders(path: string, body: unknown): Record<string, string> {
+  const raw = typeof body === "string" ? body : JSON.stringify(body);
+  const bodyHash = createHash("sha256").update(raw).digest("hex");
+  return signRequest({
+    method: "POST",
+    path,
+    bodyHash,
+    privateKeyPem: keys.privateKeyPem,
+    agentId: AGENT_ID,
+  }) as unknown as Record<string, string>;
+}
+
 function computeMeshTokenHash(): string {
   if (!meshAuthToken) return "";
   return createHash("sha256").update(meshAuthToken).digest("hex");
@@ -162,7 +175,7 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry
 async function post(
   path: string,
   body: unknown,
-  options?: { retries?: number; timeoutMs?: number }
+  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string> }
 ): Promise<any> {
   const retries = Math.max(0, options?.retries ?? COORDINATOR_POST_RETRIES);
   const timeoutMs = Math.max(1000, options?.timeoutMs ?? COORDINATOR_HTTP_TIMEOUT_MS);
@@ -171,7 +184,7 @@ async function post(
     try {
       const res = await request(`${activeCoordinatorUrl}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...meshHeaders() },
+        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}) },
         headersTimeout: timeoutMs,
         bodyTimeout: timeoutMs,
         body: JSON.stringify(body)
@@ -215,7 +228,8 @@ async function flushPendingResults(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] flushing ${pending.length} buffered result(s)`);
   for (const row of pending) {
     try {
-      await post("/result", JSON.parse(row.payload));
+      const resultPayload = JSON.parse(row.payload);
+      await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
       localStore.markResultSynced(row.subtaskId);
       console.log(`[agent:${AGENT_ID}] flushed result: ${row.subtaskId}`);
     } catch {
@@ -359,7 +373,7 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
-        const registerResponse = (await post("/register", {
+        const registerBody = {
           agentId: AGENT_ID,
           ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
           os: OS,
@@ -371,6 +385,9 @@ async function loop(): Promise<void> {
           maxConcurrentTasks: MAX_CONCURRENT_TASKS,
           powerTelemetry,
           publicKeyPem: keys.publicKeyPem
+        };
+        const registerResponse = (await post("/register", registerBody, {
+          extraHeaders: signedHeaders("/register", registerBody),
         })) as {
           accepted?: boolean;
           meshToken?: string;
@@ -385,7 +402,8 @@ async function loop(): Promise<void> {
         }
 
         const hbStart = Date.now();
-        const hb = (await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry })) as {
+        const hbBody = { agentId: AGENT_ID, powerTelemetry };
+        const hb = (await post("/heartbeat", hbBody, { extraHeaders: signedHeaders("/heartbeat", hbBody) })) as {
           ok?: boolean;
           blacklisted?: boolean;
           reason?: string;
@@ -513,7 +531,8 @@ async function loop(): Promise<void> {
           }
         }
 
-        const pulled = (await post("/pull", { agentId: AGENT_ID })) as {
+        const pullBody = { agentId: AGENT_ID };
+        const pulled = (await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })) as {
           subtask: Subtask | null;
         };
         if (pulled.subtask) {
@@ -561,7 +580,7 @@ async function loop(): Promise<void> {
                     keys.privateKeyPem
                   );
                   try {
-                    await post("/result", delegatedResult);
+                    await post("/result", delegatedResult, { extraHeaders: signedHeaders("/result", delegatedResult) });
                   } catch (resultErr) {
                     try { localStore.enqueuePendingResult(st.id, JSON.stringify(delegatedResult)); } catch {}
                     console.warn(`[agent:${AGENT_ID}] delegated result buffered: ${st.id}`);
@@ -602,7 +621,7 @@ async function loop(): Promise<void> {
             result.reportNonce = reportNonce;
             result.reportSignature = reportSignature;
             try {
-              await post("/result", result);
+              await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
             } catch (resultErr) {
               try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(result)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
@@ -728,7 +747,8 @@ async function loop(): Promise<void> {
           lastReconnectProbeMs = now;
           try {
             const probeStart = Date.now();
-            await post("/heartbeat", { agentId: AGENT_ID, powerTelemetry }, { retries: 0, timeoutMs: 5000 });
+            const probeBody = { agentId: AGENT_ID, powerTelemetry };
+            await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", probeBody) });
             const probeLatency = Date.now() - probeStart;
             try { localStore.recordHeartbeat(activeCoordinatorUrl, "reconnected", probeLatency); } catch {}
             // Probe succeeded — back online
