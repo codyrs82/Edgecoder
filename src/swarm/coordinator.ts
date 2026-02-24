@@ -3641,6 +3641,27 @@ app.post("/credits/ble-sync", async (req, reply) => {
   return reply.send({ applied, skipped, total: body.transactions.length });
 });
 
+// ── Debug: direct enqueue for E2E testing (no inference decomposition) ──
+app.post("/debug/enqueue", async (req, reply) => {
+  const body = req.body as {
+    input: string;
+    language?: string;
+    taskId?: string;
+  };
+  if (!body.input) return reply.code(400).send({ error: "input required" });
+  const taskId = body.taskId ?? randomUUID();
+  const subtask = queue.enqueueSubtask({
+    taskId,
+    kind: "single_step",
+    language: (body.language as "python" | "javascript") ?? "python",
+    input: body.input,
+    timeoutMs: 30_000,
+    snapshotRef: "debug",
+    projectMeta: { projectId: "debug", resourceClass: "cpu" as any, priority: 50 }
+  });
+  return reply.send({ taskId, subtaskId: subtask.id, queued: true });
+});
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
     .then(async () => {
