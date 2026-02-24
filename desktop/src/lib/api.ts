@@ -195,11 +195,30 @@ export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
 
 const CHAT_BASE = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
 
+export interface StreamRouteInfo {
+  route: string;
+  label: string;
+  model: string;
+  p95Ms?: number;
+  concurrent?: number;
+}
+
+export interface StreamProgress {
+  tokenCount: number;
+  elapsedMs: number;
+  routeInfo?: StreamRouteInfo;
+}
+
 export async function streamChat(
   messages: Array<{ role: string; content: string }>,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  onProgress?: (progress: StreamProgress) => void,
 ): Promise<void> {
+  const streamStart = Date.now();
+  let tokenCount = 0;
+  let routeInfo: StreamRouteInfo | undefined;
+
   const res = await fetch(`${CHAT_BASE}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -236,8 +255,20 @@ export async function streamChat(
 
       try {
         const chunk = JSON.parse(data);
+
+        // Handle route_info metadata event
+        if (chunk.route_info) {
+          routeInfo = chunk.route_info;
+          onProgress?.({ tokenCount, elapsedMs: Date.now() - streamStart, routeInfo });
+          continue;
+        }
+
         const content = chunk.choices?.[0]?.delta?.content;
-        if (content) onChunk(content);
+        if (content) {
+          tokenCount++;
+          onChunk(content);
+          onProgress?.({ tokenCount, elapsedMs: Date.now() - streamStart, routeInfo });
+        }
       } catch {
         // Skip malformed chunks
       }

@@ -448,7 +448,15 @@ export class IntelligentRouter {
   // Status snapshot — used by provider-server for the /status endpoint
   // -------------------------------------------------------------------------
 
-  status(): object {
+  status(): {
+    activeConcurrent: number;
+    concurrencyCap: number;
+    localLatencyP95Ms: number;
+    latencyThresholdMs: number;
+    latencySamples: number;
+    bluetoothEnabled: boolean;
+    swarmEnabled: boolean;
+  } {
     return {
       activeConcurrent: this.activeConcurrent,
       concurrencyCap: this.cfg.localConcurrencyCap,

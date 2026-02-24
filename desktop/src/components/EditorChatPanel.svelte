@@ -3,6 +3,7 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import { streamChat } from "../lib/api";
+  import type { StreamProgress } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -21,6 +22,7 @@
   let conversation: Conversation = $state(createConversation("editor"));
   let streamingContent = $state("");
   let isStreaming = $state(false);
+  let streamProgress: StreamProgress | undefined = $state(undefined);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
 
@@ -74,6 +76,7 @@
 
     isStreaming = true;
     streamingContent = "";
+    streamProgress = undefined;
     abortController = new AbortController();
 
     const fileContext = getFileContext?.();
@@ -94,6 +97,9 @@
           scrollToBottom();
         },
         abortController.signal,
+        (progress) => {
+          streamProgress = progress;
+        },
       );
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
@@ -108,6 +114,7 @@
     } finally {
       streamingContent = "";
       isStreaming = false;
+      streamProgress = undefined;
       abortController = null;
     }
   }
@@ -212,6 +219,7 @@
             role="assistant"
             content={streamingContent}
             streaming={true}
+            {streamProgress}
             onOpenInEditor={onApplyCode}
           />
         {/if}

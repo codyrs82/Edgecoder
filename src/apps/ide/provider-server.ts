@@ -51,6 +51,23 @@ app.post("/v1/chat/completions", async (req, reply) => {
       "Connection": "keep-alive",
     });
 
+    // Send route metadata as first event so the UI can show it immediately
+    const routeLabels: Record<string, string> = {
+      "ollama-local": "local model",
+      "bluetooth-local": "nearby device",
+      "swarm": "swarm network",
+      "edgecoder-local": "offline",
+    };
+    reply.raw.write(`data: ${JSON.stringify({
+      route_info: {
+        route: result.route,
+        label: routeLabels[result.route] ?? result.route,
+        model: result.model,
+        p95Ms: router.status().localLatencyP95Ms,
+        concurrent: router.status().activeConcurrent,
+      }
+    })}\n\n`);
+
     const streamStart = Date.now();
     try {
       for await (const chunk of result.stream) {
