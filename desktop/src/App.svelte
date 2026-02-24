@@ -4,13 +4,16 @@
   import ChatView from "./pages/ChatView.svelte";
   import EditorView from "./pages/EditorView.svelte";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
+  import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
   import type { AuthUser } from "./lib/api";
   import { getMe } from "./lib/api";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
+  let historyOpen = $state(false);
   let chatView: ChatView | undefined = $state(undefined);
+  let editorView: EditorView | undefined = $state(undefined);
 
   let user: AuthUser | null = $state(null);
   let authChecked = $state(false);
@@ -37,9 +40,47 @@
     user = u;
   }
 
+  function handleOpenInEditor(code: string, language: string) {
+    const extMap: Record<string, string> = {
+      python: 'py', javascript: 'js', typescript: 'ts',
+      rust: 'rs', go: 'go', html: 'html', css: 'css', json: 'json',
+      java: 'java', cpp: 'cpp', c: 'c', ruby: 'rb', php: 'php',
+      swift: 'swift', kotlin: 'kt', shell: 'sh', bash: 'sh',
+      yaml: 'yml', toml: 'toml', sql: 'sql', xml: 'xml',
+    };
+    const ext = extMap[language] || 'txt';
+    const filename = `snippet.${ext}`;
+    activeTab = "editor";
+    // Need a tick for EditorView to mount if switching tabs
+    setTimeout(() => {
+      editorView?.openFile(filename, code);
+    }, 50);
+  }
+
+  async function handleSelectConversation(id: string) {
+    activeTab = "chat";
+    if (chatView) {
+      await chatView.loadConversation(id);
+    }
+  }
+
+  function handleNewChatFromSidebar() {
+    activeTab = "chat";
+    chatView?.newChat();
+  }
+
   function handleSend(message: string) {
     if (activeTab === "chat" && chatView) {
       chatView.sendMessage(message);
+    } else if (activeTab === "editor" && chatView) {
+      // Prefix the message with current file context
+      const fileContext = editorView?.getActiveFileContext?.();
+      const contextPrefix = fileContext
+        ? `[Currently editing ${fileContext.path} (${fileContext.language})]\n\`\`\`${fileContext.language}\n${fileContext.content}\n\`\`\`\n\n`
+        : '';
+      // Switch to chat tab to show the conversation
+      activeTab = "chat";
+      chatView.sendMessage(contextPrefix + message);
     }
   }
 </script>
@@ -65,7 +106,7 @@
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
-      <button class="header-btn" title="Menu">
+      <button class="header-btn" title="History" onclick={() => historyOpen = !historyOpen}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
         </svg>
@@ -75,9 +116,9 @@
     <!-- Main Content Area -->
     <main class="content">
       {#if activeTab === "chat"}
-        <ChatView bind:this={chatView} />
+        <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} />
       {:else}
-        <EditorView />
+        <EditorView bind:this={editorView} />
       {/if}
     </main>
 

@@ -72,6 +72,11 @@
     }
   }
 
+  export function getActiveFileContext(): { path: string; content: string; language: string } | null {
+    if (!activeFile) return null;
+    return { path: activeFile.path, content: activeFile.content, language: activeFile.language };
+  }
+
   export function openFile(path: string, content: string) {
     const existing = files.find((f) => f.path === path);
     if (existing) {
