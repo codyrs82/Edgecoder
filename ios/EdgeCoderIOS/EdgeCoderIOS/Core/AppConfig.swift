@@ -43,13 +43,12 @@ struct AppConfig {
 
     static var current: AppConfig {
         let env = ProcessInfo.processInfo.environment["EDGECODER_IOS_ENV"]?.lowercased()
-        if env == "production" {
-            return .production
-        }
         if env == "staging" {
             return .staging
         }
-        // Default to local — production URLs are not yet deployed
-        return .local
+        if env == "local" {
+            return .local
+        }
+        return .production
     }
 }
