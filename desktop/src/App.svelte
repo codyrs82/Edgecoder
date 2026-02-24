@@ -90,23 +90,25 @@
 
 <style>
   :root {
-    --bg-base: #1a1a1a;
-    --bg-surface: #252525;
-    --bg-elevated: #2f2f2f;
-    --bg-input: #1e1e1e;
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.15);
-    --accent: #3b82f6;
-    --accent-hover: #2563eb;
-    --text-primary: #e8e6e3;
-    --text-secondary: #9a9892;
-    --text-muted: #6b6960;
+    --bg-base: #2f2f2d;
+    --bg-surface: #3a3a37;
+    --bg-elevated: #454542;
+    --bg-input: #262624;
+    --bg-deep: #1a1a18;
+    --border: rgba(214, 204, 194, 0.08);
+    --border-strong: rgba(214, 204, 194, 0.15);
+    --accent: #c17850;
+    --accent-hover: #d4895f;
+    --accent-secondary: #4a90d9;
+    --text-primary: #f7f5f0;
+    --text-secondary: #b8b0a4;
+    --text-muted: #8a8478;
     --green: #4ade80;
     --red: #f87171;
     --yellow: #fbbf24;
     --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 16px;
+    --radius-md: 8px;
+    --radius-lg: 10px;
     --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
   }
   :global(body) {
@@ -114,7 +116,7 @@
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 14px;
     line-height: 1.5;
-    background: var(--bg-base);
+    background: var(--bg-deep);
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
   }
@@ -135,7 +137,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 8px 16px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
     -webkit-app-region: drag;
   }
@@ -156,6 +158,10 @@
   .header-btn:hover {
     background: var(--bg-surface);
     color: var(--text-primary);
+    transform: scale(1.05);
+  }
+  .header-btn:active {
+    transform: scale(0.95);
   }
 
   /* Content */
@@ -171,14 +177,14 @@
     align-items: flex-end;
     gap: 12px;
     padding: 12px 16px;
-    border-top: 1px solid var(--border);
+    border-top: 0.5px solid var(--border);
     flex-shrink: 0;
   }
   .avatar-btn {
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    border: 1px solid var(--border-strong);
+    border: 0.5px solid var(--border-strong);
     background: var(--bg-surface);
     color: var(--text-secondary);
     cursor: pointer;

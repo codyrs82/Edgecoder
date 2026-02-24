@@ -202,7 +202,7 @@
   }
 
   .section {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border: 1px solid var(--border, #1e1e3f);
     padding: 1.2rem 1.4rem;
     border-radius: 10px;

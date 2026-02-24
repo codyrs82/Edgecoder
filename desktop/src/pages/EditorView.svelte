@@ -24,13 +24,13 @@
       inherit: true,
       rules: [],
       colors: {
-        "editor.background": "#1a1a1a",
-        "editor.foreground": "#e8e6e3",
-        "editorLineNumber.foreground": "#6b6960",
-        "editorLineNumber.activeForeground": "#9a9892",
-        "editor.selectionBackground": "#264f78",
-        "editor.lineHighlightBackground": "#252525",
-        "editorCursor.foreground": "#3b82f6",
+        "editor.background": "#262624",
+        "editor.foreground": "#f7f5f0",
+        "editorLineNumber.foreground": "#8a8478",
+        "editorLineNumber.activeForeground": "#b8b0a4",
+        "editor.selectionBackground": "#5a4a3a",
+        "editor.lineHighlightBackground": "#2f2f2d",
+        "editorCursor.foreground": "#c17850",
       },
     });
 
@@ -114,7 +114,7 @@
     overflow: hidden;
   }
   .explorer-panel {
-    border-right: 1px solid var(--border);
+    border-right: 0.5px solid var(--border);
     flex-shrink: 0;
     overflow: hidden;
   }
@@ -127,7 +127,7 @@
   .tab-bar {
     display: flex;
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 0.5px solid var(--border);
     overflow-x: auto;
     flex-shrink: 0;
   }

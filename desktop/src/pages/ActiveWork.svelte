@@ -146,7 +146,7 @@
   h1 { margin: 0 0 1.5rem; font-size: 1.4rem; }
   .section {
     background: var(--bg-surface);
-    border: 1px solid var(--border);
+    border: 0.5px solid var(--border);
     padding: 1.2rem 1.4rem;
     border-radius: var(--radius-md);
     margin-bottom: 1.2rem;
@@ -199,7 +199,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 10px 0;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 0.5px solid var(--border);
   }
   .agent-row:last-child, .peer-row:last-child {
     border-bottom: none;
@@ -233,7 +233,7 @@
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 4px;
-    background: rgba(59, 130, 246, 0.1);
+    background: rgba(193, 120, 80, 0.1);
     color: var(--accent);
     white-space: nowrap;
   }

@@ -62,7 +62,7 @@
   }
 
   .balance-card {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     padding: 2.5rem 2rem;
     border-radius: 13px;
     text-align: center;
@@ -102,7 +102,7 @@
   }
 
   .explain-card {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border: 1px solid var(--border, #1e1e3f);
     border-radius: 10px;
     padding: 1.4rem 1.2rem;
@@ -137,7 +137,7 @@
 
   /* Coming soon section */
   .coming-soon {
-    background: var(--bg-card, #1a1a2e);
+    background: var(--bg-surface, #1a1a2e);
     border: 1px solid var(--border, #1e1e3f);
     border-radius: 10px;
     padding: 1.4rem 1.6rem;

@@ -40,7 +40,7 @@
     color: var(--text-primary);
   }
   .tab.active {
-    background: var(--bg-elevated);
+    background: var(--bg-base);
     color: var(--text-primary);
     font-weight: 600;
   }

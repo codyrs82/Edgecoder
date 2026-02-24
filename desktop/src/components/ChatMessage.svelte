@@ -41,7 +41,7 @@
     padding: 10px 14px;
   }
   .user-bubble {
-    background: #1e3a5f;
+    background: var(--bg-surface);
     color: var(--text-primary);
     font-size: 14px;
     line-height: 1.5;
@@ -49,5 +49,8 @@
   }
   .assistant-bubble {
     color: var(--text-primary);
+  }
+  .message:hover {
+    opacity: 1;
   }
 </style>
