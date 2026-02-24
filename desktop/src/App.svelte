@@ -2,6 +2,7 @@
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import ChatInput from "./components/ChatInput.svelte";
   import ChatView from "./pages/ChatView.svelte";
+  import EditorView from "./pages/EditorView.svelte";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
 
   let activeTab: "chat" | "editor" = $state("chat");
@@ -38,10 +39,7 @@
     {#if activeTab === "chat"}
       <ChatView bind:this={chatView} />
     {:else}
-      <div class="placeholder-view">
-        <h2>EdgeCoder Editor</h2>
-        <p>Monaco editor will be integrated here</p>
-      </div>
+      <EditorView />
     {/if}
   </main>
 
@@ -138,25 +136,6 @@
     display: flex;
     flex-direction: column;
   }
-  .placeholder-view {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--text-secondary);
-  }
-  .placeholder-view h2 {
-    margin: 0;
-    font-size: 1.3rem;
-    color: var(--text-primary);
-  }
-  .placeholder-view p {
-    margin: 0;
-    font-size: 0.9rem;
-  }
-
   /* Bottom Bar */
   .bottom-bar {
     display: flex;
