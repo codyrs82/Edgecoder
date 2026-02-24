@@ -290,6 +290,9 @@ function connectMeshWebSocket(
     const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken || "")}&peerId=${encodeURIComponent(AGENT_ID)}`;
     const ws = new WebSocket(fullUrl);
 
+    // Track which coordinator peerId this WS is registered against
+    let registeredPeerId: string | null = null;
+
     ws.on("open", () => {
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
       reconnectDelay = 1000;
@@ -300,6 +303,14 @@ function connectMeshWebSocket(
         const message = JSON.parse(data.toString());
         const peer = getMeshPeer();
         if (peer) {
+          // Register this WS for outbound gossip on first message from the coordinator.
+          // We learn the coordinator's peerId from the message's fromPeerId field,
+          // which isn't known until after bootstrap (and bootstrap may have timed out).
+          if (!registeredPeerId && message.fromPeerId) {
+            registeredPeerId = message.fromPeerId;
+            peer.gossip.setWebSocketForPeer(message.fromPeerId, ws as any);
+            console.log(`[agent:${AGENT_ID}] registered WS for outbound gossip to ${message.fromPeerId}`);
+          }
           await peer.handleIngest(message);
         }
       } catch (err) {
@@ -308,6 +319,12 @@ function connectMeshWebSocket(
     });
 
     ws.on("close", () => {
+      // Unregister WS from gossip mesh
+      if (registeredPeerId) {
+        const peer = getMeshPeer();
+        if (peer) peer.gossip.removeWebSocketForPeer(registeredPeerId);
+        registeredPeerId = null;
+      }
       console.log(`[agent:${AGENT_ID}] mesh WebSocket closed, reconnecting in ${reconnectDelay}ms`);
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
