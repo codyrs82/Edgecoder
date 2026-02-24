@@ -38,14 +38,19 @@ struct RootTabView: View {
                 }
         }
         .task {
-            if !sessionStore.isAuthenticated {
-                await sessionStore.refreshSession()
-            }
-            if !sessionStore.isAuthenticated {
-                selectedTab = .auth
-            } else {
-                await swarmRuntime.ensureEnrollment()
+            if swarmRuntime.isLocalCoordinator {
+                // Local coordinator: skip auth, skip enrollment, auto-start
                 await swarmRuntime.autoStartIfReady()
+            } else {
+                if !sessionStore.isAuthenticated {
+                    await sessionStore.refreshSession()
+                }
+                if !sessionStore.isAuthenticated {
+                    selectedTab = .auth
+                } else {
+                    await swarmRuntime.ensureEnrollment()
+                    await swarmRuntime.autoStartIfReady()
+                }
             }
         }
         .onChange(of: sessionStore.isAuthenticated) { _, isAuthenticated in

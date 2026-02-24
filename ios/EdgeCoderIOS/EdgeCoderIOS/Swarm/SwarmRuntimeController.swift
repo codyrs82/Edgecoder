@@ -40,7 +40,7 @@ final class SwarmRuntimeController: ObservableObject {
     private var runtimeTask: Task<Void, Never>?
     @Published var autoStartEnabled: Bool = true
 
-    private var isLocalCoordinator: Bool {
+    var isLocalCoordinator: Bool {
         let url = selectedCoordinatorURL.lowercased()
         return url.contains("localhost") || url.contains("127.0.0.1") ||
                url.hasPrefix("http://192.168.") || url.hasPrefix("http://10.")
@@ -113,7 +113,7 @@ final class SwarmRuntimeController: ObservableObject {
     func autoStartIfReady() async {
         guard autoStartEnabled else { return }
         guard state == .stopped else { return }
-        guard !registrationToken.isEmpty else { return }
+        guard isLocalCoordinator || !registrationToken.isEmpty else { return }
         await start()
     }
 
