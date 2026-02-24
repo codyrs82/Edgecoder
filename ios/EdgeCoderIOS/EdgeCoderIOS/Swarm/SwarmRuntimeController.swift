@@ -40,6 +40,12 @@ final class SwarmRuntimeController: ObservableObject {
     private var runtimeTask: Task<Void, Never>?
     @Published var autoStartEnabled: Bool = true
 
+    private var isLocalCoordinator: Bool {
+        let url = selectedCoordinatorURL.lowercased()
+        return url.contains("localhost") || url.contains("127.0.0.1") ||
+               url.hasPrefix("http://192.168.") || url.hasPrefix("http://10.")
+    }
+
     private enum DefaultsKey {
         static let agentId = "edgecoder.agentId"
         static let registrationToken = "edgecoder.registrationToken"
@@ -113,6 +119,10 @@ final class SwarmRuntimeController: ObservableObject {
 
     /// Enroll this device with the portal. Call when user is authenticated and token is missing.
     func ensureEnrollment(force: Bool = false) async {
+        guard !isLocalCoordinator else {
+            appendEvent("Skipping portal enrollment for local coordinator.")
+            return
+        }
         let currentAgentId = agentId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !currentAgentId.isEmpty else { return }
         if !force && !registrationToken.isEmpty { return }

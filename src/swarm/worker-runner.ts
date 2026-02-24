@@ -53,6 +53,7 @@ const OFFLINE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 1500;
 const BACKOFF_MAX_MS = 30_000;
 const RECONNECT_PROBE_INTERVAL_MS = 15_000;
+const COORDINATOR_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let lastReconnectProbeMs = 0;
 
 function backoffMs(): number {
@@ -141,7 +142,7 @@ function normalizeUrl(value: string | undefined): string | null {
 }
 
 function readCachedCoordinatorUrl(): string | null {
-  const cached = localStore.getConfig("coordinator_url");
+  const cached = localStore.getConfigWithTTL("coordinator_url", COORDINATOR_CACHE_TTL_MS);
   return cached ? normalizeUrl(cached) : null;
 }
 
@@ -427,8 +428,9 @@ async function loop(): Promise<void> {
         };
         try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 
-        // Heartbeat succeeded — reset failure counter
+        // Heartbeat succeeded — reset failure counter and cache proven URL
         consecutiveFailures = 0;
+        cacheCoordinatorUrl(activeCoordinatorUrl);
 
         if (hb.blacklisted) {
           console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
@@ -754,6 +756,7 @@ async function loop(): Promise<void> {
             // Probe succeeded — back online
             coordinatorOnline = true;
             consecutiveFailures = 0;
+            cacheCoordinatorUrl(activeCoordinatorUrl);
             bleMesh?.setOffline(false);
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
@@ -838,12 +841,12 @@ async function loop(): Promise<void> {
       if (coordinatorOnline && consecutiveFailures >= OFFLINE_THRESHOLD) {
         coordinatorOnline = false;
         bleMesh?.setOffline(true);
-        console.warn(`[agent:${AGENT_ID}] entering offline mode after ${consecutiveFailures} consecutive failures`);
+        try { localStore.deleteConfig("coordinator_url"); } catch {}
+        console.warn(`[agent:${AGENT_ID}] entering offline mode after ${consecutiveFailures} consecutive failures — cleared stale coordinator cache`);
       }
       const failover = await resolveCoordinatorUrl();
       if (failover.url !== activeCoordinatorUrl) {
         activeCoordinatorUrl = failover.url;
-        cacheCoordinatorUrl(activeCoordinatorUrl);
         console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${activeCoordinatorUrl}`);
       }
       const delay = backoffMs();
