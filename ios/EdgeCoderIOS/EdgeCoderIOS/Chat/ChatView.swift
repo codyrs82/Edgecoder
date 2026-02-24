@@ -12,6 +12,8 @@ struct ChatView: View {
     @State private var showHistory = false
     @State private var showSettings = false
 
+    @FocusState private var inputFocused: Bool
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -39,6 +41,10 @@ struct ChatView: View {
                         }
                     }
                     .padding(.vertical, 12)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .onTapGesture {
+                    inputFocused = false
                 }
                 .onChange(of: conversation.messages.count) { _, _ in
                     scrollToBottom(proxy)
@@ -151,6 +157,7 @@ struct ChatView: View {
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
             TextField("Message...", text: $inputText, axis: .vertical)
+                .focused($inputFocused)
                 .textFieldStyle(.plain)
                 .font(.body)
                 .foregroundColor(Theme.textPrimary)
