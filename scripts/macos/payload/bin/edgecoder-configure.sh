@@ -72,10 +72,114 @@ if [[ "${1:-}" == "--help" ]]; then
 EdgeCoder environment setup wizard.
 
 Usage:
-  sudo /opt/edgecoder/bin/edgecoder-configure.sh
+  sudo /opt/edgecoder/bin/edgecoder-configure.sh            # interactive wizard
+  sudo edgecoder --token YOUR_TOKEN                          # quick-connect
+
+Options:
+  --token TOKEN   Configure this node as a worker with the given registration
+                  token and restart the service. Non-interactive; intended for
+                  copy-paste from the portal download page.
+  --help          Show this help message.
 EOF
   exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# --token quick-connect handler
+# ---------------------------------------------------------------------------
+# Accepts:
+#   edgecoder-configure.sh --token TOKEN
+#   edgecoder-configure.sh configure --token TOKEN   (alias from CLI wrapper)
+# ---------------------------------------------------------------------------
+
+# Helper: upsert KEY=VALUE in a file. If the key exists (commented or not),
+# replace the line; otherwise append.  NOTE: macOS sed needs -i ''.
+write_or_update_env() {
+  local file="$1" key="$2" value="$3"
+  if grep -qE "^#?${key}=" "$file" 2>/dev/null; then
+    sed -i '' "s|^#*${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+_resolve_token_arg() {
+  # Pattern 1: --token TOKEN
+  if [[ "${1:-}" == "--token" ]]; then
+    printf '%s' "${2:-}"
+    return
+  fi
+  # Pattern 2: configure --token TOKEN  (CLI wrapper alias)
+  if [[ "${1:-}" == "configure" && "${2:-}" == "--token" ]]; then
+    printf '%s' "${3:-}"
+    return
+  fi
+}
+
+_TOKEN="$(_resolve_token_arg "${@}")"
+
+if [[ "${1:-}" == "--token" || ( "${1:-}" == "configure" && "${2:-}" == "--token" ) ]]; then
+  if [[ -z "$_TOKEN" ]]; then
+    echo "Error: --token requires a non-empty TOKEN argument." >&2
+    echo "" >&2
+    echo "Usage:" >&2
+    echo "  sudo edgecoder --token YOUR_TOKEN" >&2
+    exit 1
+  fi
+
+  LAUNCHD_LABEL="io.edgecoder.runtime"
+
+  # 1. Ensure config directory exists
+  mkdir -p /etc/edgecoder
+
+  # 2. Prepare env file: back up existing or seed from example
+  if [[ -f "$ENV_FILE" ]]; then
+    cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    echo "Backed up existing config to ${ENV_FILE}.bak.*"
+  elif [[ -f "$ENV_EXAMPLE" ]]; then
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+  else
+    # Seed a minimal file so write_or_update_env has something to work with
+    touch "$ENV_FILE"
+  fi
+
+  # 3. Write the quick-connect values
+  write_or_update_env "$ENV_FILE" "AGENT_REGISTRATION_TOKEN" "$_TOKEN"
+  write_or_update_env "$ENV_FILE" "EDGE_RUNTIME_MODE"        "worker"
+  write_or_update_env "$ENV_FILE" "COORDINATOR_URL"           "https://coordinator.edgecoder.io"
+  write_or_update_env "$ENV_FILE" "AGENT_OS"                  "macos"
+
+  chmod 600 "$ENV_FILE"
+
+  # 4. Summary
+  echo ""
+  echo "EdgeCoder quick-connect configured successfully!"
+  echo ""
+  echo "  Config file : $ENV_FILE"
+  echo "  Mode        : worker"
+  echo "  Coordinator : https://coordinator.edgecoder.io"
+  echo "  Token       : ${_TOKEN:0:8}...${_TOKEN: -4} (truncated)"
+  echo ""
+
+  # 5. Restart or advise
+  if launchctl print "system/${LAUNCHD_LABEL}" &>/dev/null; then
+    echo "Restarting EdgeCoder service..."
+    launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+    echo "Service restarted."
+  else
+    echo "EdgeCoder launchd service is not loaded yet."
+    echo "Load it with:"
+    echo "  sudo launchctl bootstrap system /Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+  fi
+
+  echo ""
+  echo "View your nodes at: https://portal.edgecoder.io/portal/nodes"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Interactive wizard (requires a terminal)
+# ---------------------------------------------------------------------------
 
 if [[ ! -t 0 || ! -t 1 ]]; then
   echo "No interactive terminal detected."
