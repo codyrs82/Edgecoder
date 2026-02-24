@@ -1,13 +1,16 @@
 <script lang="ts">
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import ChatInput from "./components/ChatInput.svelte";
+  import ChatView from "./pages/ChatView.svelte";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
+  let chatView: ChatView | undefined = $state(undefined);
 
   function handleSend(message: string) {
-    // TODO: Task 5 will implement chat message handling
-    console.log("send:", message);
+    if (activeTab === "chat" && chatView) {
+      chatView.sendMessage(message);
+    }
   }
 </script>
 
@@ -32,10 +35,7 @@
   <!-- Main Content Area -->
   <main class="content">
     {#if activeTab === "chat"}
-      <div class="placeholder-view">
-        <h2>What would you like to build?</h2>
-        <p>Chat with your local EdgeCoder agent</p>
-      </div>
+      <ChatView bind:this={chatView} />
     {:else}
       <div class="placeholder-view">
         <h2>EdgeCoder Editor</h2>
