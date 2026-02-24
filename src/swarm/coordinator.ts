@@ -302,15 +302,19 @@ function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders |
 
 async function verifyAgentRequest(
   headers: Record<string, unknown>,
-  routePath: string
+  routePath: string,
+  sourceIp?: string
 ): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
   const signed = extractSignedHeaders(headers);
   if (!signed) return null; // No signed headers: backward compat
 
   const agentId = signed["x-agent-id"];
 
-  // 1. Rate limit (cheapest check first)
-  if (!agentRateLimiter.check(agentId)) {
+  // 1. Skip rate limiting for loopback (embedded worker is trusted)
+  const isLoopback = sourceIp === "127.0.0.1" || sourceIp === "::1" || sourceIp === "::ffff:127.0.0.1";
+
+  // 2. Rate limit (cheapest check first) — skip for loopback
+  if (!isLoopback && !agentRateLimiter.check(agentId)) {
     securityLog.log({
       level: securityLog.severity("auth_rate_limit_hit"),
       event: "auth_rate_limit_hit",
@@ -322,9 +326,11 @@ async function verifyAgentRequest(
     return "rejected";
   }
 
-  // 2. Look up agent public key
+  // 3. Look up agent public key — don't count as rate limit hit if key missing
+  //    (agent needs to re-register, not a security threat)
   const cap = agentCapabilities.get(agentId);
   if (!cap?.publicKeyPem) {
+    agentRateLimiter.reset(agentId);
     securityLog.log({
       level: securityLog.severity("invalid_signature"),
       event: "invalid_signature",
@@ -1477,6 +1483,7 @@ app.post("/register", async (req, reply) => {
     return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
   }
   app.log.info({ agentId: body.agentId, reason: activation.reason }, "register_allowed");
+  agentRateLimiter.reset(body.agentId);
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
@@ -1550,7 +1557,7 @@ app.post("/register", async (req, reply) => {
 });
 
 app.post("/heartbeat", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat");
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = heartbeatSchema.parse(req.body);
@@ -1758,7 +1765,7 @@ app.post("/submit", async (req, reply) => {
 });
 
 app.post("/pull", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull");
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = pullSchema.parse(req.body);
@@ -1802,7 +1809,7 @@ app.post("/pull", async (req, reply) => {
 });
 
 app.post("/result", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result");
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = resultSchema.parse(req.body);
