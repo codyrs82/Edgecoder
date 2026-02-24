@@ -16,6 +16,8 @@ if [[ ! -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]]; then
   echo "Created $ENV_FILE from example. Edit it before the service will connect."
 fi
 
+ln -sf /usr/lib/edgecoder/bin/edgecoder-configure.sh /usr/local/bin/edgecoder
+
 if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running --quiet 2>/dev/null || true; then
   systemctl daemon-reload
   systemctl enable "$SERVICE" >/dev/null 2>&1 || true
