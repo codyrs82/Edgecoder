@@ -12,7 +12,7 @@ primary_region = "ord"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
   COORDINATOR_PUBLIC_URL = "https://coordinator.edgecoder.io"
-  LOCAL_MODEL_PROVIDER = "edgecoder-local"
+  LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
   OLLAMA_MODEL = "qwen2.5-coder:latest"
 
