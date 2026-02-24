@@ -35,6 +35,7 @@ protocol LlamaContextProtocol {
     func loadModel(path: String) throws
     func unloadModel()
     func generate(prompt: String, maxTokens: Int) async throws -> String
+    func generateStreaming(prompt: String, maxTokens: Int) -> AsyncThrowingStream<String, Error>
     var isLoaded: Bool { get }
 }
 
@@ -57,6 +58,17 @@ final class StubLlamaContext: LlamaContextProtocol {
     func generate(prompt: String, maxTokens: Int) async throws -> String {
         guard isLoaded else { throw LocalModelError.noModelLoaded }
         return "[stub-llama] \(prompt.prefix(80))"
+    }
+
+    func generateStreaming(prompt: String, maxTokens: Int) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            if !isLoaded {
+                continuation.finish(throwing: LocalModelError.noModelLoaded)
+                return
+            }
+            continuation.yield("[stub-llama] \(prompt.prefix(80))")
+            continuation.finish()
+        }
     }
 }
 
@@ -363,6 +375,14 @@ final class LocalModelManager: ObservableObject {
         } catch {
             lastInferenceOutput = "Error: \(error.localizedDescription)"
         }
+    }
+
+    /// Stream inference tokens for chat UI.
+    func generateStreaming(prompt: String, maxTokens: Int = 512) -> AsyncThrowingStream<String, Error> {
+        guard llamaContext.isLoaded else {
+            return AsyncThrowingStream { $0.finish(throwing: LocalModelError.noModelLoaded) }
+        }
+        return llamaContext.generateStreaming(prompt: prompt, maxTokens: maxTokens)
     }
 
     /// Run inference and return the result directly (for task execution loop).

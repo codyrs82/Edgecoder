@@ -6,6 +6,12 @@ struct EdgeCoderIOSApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var sessionStore = SessionStore()
     @StateObject private var swarmRuntime = SwarmRuntimeController.shared
+    @StateObject private var conversationStore = ConversationStore()
+    @StateObject private var chatRouter = ChatRouter(
+        modelManager: SwarmRuntimeController.shared.modelManager,
+        swarmRuntime: SwarmRuntimeController.shared,
+        bleMeshManager: SwarmRuntimeController.shared.bleMeshManager
+    )
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -33,22 +39,22 @@ struct EdgeCoderIOSApp: App {
             RootTabView()
                 .environmentObject(sessionStore)
                 .environmentObject(swarmRuntime)
+                .environmentObject(conversationStore)
+                .environmentObject(chatRouter)
+                .preferredColorScheme(.dark)
                 .onReceive(
                     NotificationCenter.default.publisher(
                         for: UIApplication.didEnterBackgroundNotification
                     )
                 ) { _ in
                     // Schedule background tasks whenever the app backgrounds
-                    // so iOS can wake us to keep heartbeating.
-                    if swarmRuntime.computeMode != .off {
-                        AppDelegate.scheduleBackgroundTasksIfNeeded()
-                    }
+                    AppDelegate.scheduleBackgroundTasksIfNeeded()
                 }
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
-                // Schedule background processing when app enters background
+                // Auto-save active conversations when backgrounding
                 EdgeCoderIOSApp.scheduleBackgroundBLETask()
                 print("[App] entered background — BLE background modes active, task scheduled")
             case .active:
