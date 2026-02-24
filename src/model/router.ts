@@ -24,6 +24,7 @@
  */
 
 import { request } from "undici";
+import type { Readable } from "node:stream";
 import { OllamaLocalProvider, EdgeCoderLocalProvider } from "./providers.js";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,24 @@ export interface RouterResult {
   /** Task ID if routed via swarm */
   swarmTaskId?: string;
   error?: string;
+}
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface ChatRouteResult {
+  route: RouteDecision;
+  /** For non-streaming: the full response text */
+  text?: string;
+  /** For streaming: the NDJSON body from Ollama (caller consumes) */
+  stream?: Readable;
+  /** The model name used */
+  model: string;
+  latencyMs?: number;
+  creditsSpent?: number;
+  swarmTaskId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +319,129 @@ export class IntelligentRouter {
     }
 
     throw new Error("Swarm task timed out after 90s");
+  }
+
+  // -------------------------------------------------------------------------
+  // Chat routing — multi-message conversations with optional streaming
+  // -------------------------------------------------------------------------
+
+  private readonly ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  private readonly ollamaChatModel = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
+
+  async routeChat(
+    messages: ChatMessage[],
+    opts: { stream?: boolean; temperature?: number; maxTokens?: number } = {}
+  ): Promise<ChatRouteResult> {
+    const stream = opts.stream ?? false;
+    const temperature = opts.temperature ?? 0.7;
+    const maxTokens = opts.maxTokens ?? 4096;
+
+    // 1. Bluetooth-local chat
+    if (await this.isBluetoothAvailable()) {
+      const result = await this.runChatViaBluetooth(messages, maxTokens);
+      if (result) {
+        return { route: "bluetooth-local", text: result, model: "bluetooth" };
+      }
+    }
+
+    // 2. Local Ollama — use if healthy and within capacity + latency budget
+    if (await this.isLocalViable()) {
+      try {
+        this.activeConcurrent++;
+        const t0 = Date.now();
+        const ollamaRes = await request(`${this.ollamaHost}/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: this.ollamaChatModel,
+            messages: messages.map((m) => ({ role: m.role, content: m.content })),
+            stream,
+            options: { temperature, num_predict: maxTokens },
+          }),
+        });
+
+        if (stream) {
+          // Return the raw stream — provider-server converts NDJSON → SSE
+          // Latency is tracked when the stream ends (caller responsibility)
+          return {
+            route: "ollama-local",
+            stream: ollamaRes.body as unknown as Readable,
+            model: this.ollamaChatModel,
+          };
+        }
+
+        // Non-streaming: read full response
+        const payload = (await ollamaRes.body.json()) as {
+          message?: { content?: string };
+        };
+        const elapsed = Date.now() - t0;
+        this.latency.record(elapsed);
+        this.activeConcurrent--;
+        return {
+          route: "ollama-local",
+          text: payload.message?.content ?? "",
+          model: this.ollamaChatModel,
+          latencyMs: elapsed,
+        };
+      } catch (err) {
+        this.activeConcurrent = Math.max(0, this.activeConcurrent - 1);
+        console.warn("[router] local Ollama chat failed, falling to swarm:", String(err));
+      }
+    }
+
+    // 3. Swarm — submit the last user message as a task to the coordinator
+    if (this.cfg.meshAuthToken) {
+      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+      if (lastUserMsg) {
+        try {
+          const result = await this.runViaSwarm(lastUserMsg.content);
+          return {
+            route: "swarm",
+            text: result.text,
+            model: "swarm",
+            creditsSpent: result.creditsSpent,
+            swarmTaskId: result.swarmTaskId,
+          };
+        } catch (err) {
+          console.warn("[router] swarm chat failed, falling to stub:", String(err));
+        }
+      }
+    }
+
+    // 4. Offline stub — always-on safety net
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    return {
+      route: "edgecoder-local",
+      text: "I'm currently offline — local Ollama is unavailable and no swarm peers are reachable. Please check that Ollama is running (`ollama serve`) or connect to the EdgeCoder network.",
+      model: "edgecoder-local",
+    };
+  }
+
+  /** Track that a streaming request finished (called by provider-server) */
+  recordStreamComplete(elapsedMs: number): void {
+    this.latency.record(elapsedMs);
+    this.activeConcurrent = Math.max(0, this.activeConcurrent - 1);
+  }
+
+  private async runChatViaBluetooth(
+    messages: ChatMessage[],
+    maxTokens: number
+  ): Promise<string | null> {
+    const btProxyUrl = process.env.BT_PROXY_URL ?? "http://127.0.0.1:11435";
+    try {
+      const res = await request(`${btProxyUrl}/api/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages, maxTokens, stream: false }),
+        headersTimeout: 30_000,
+        bodyTimeout: 60_000,
+      });
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      const body = (await res.body.json()) as { message?: { content?: string } };
+      return body.message?.content ?? null;
+    } catch {
+      return null;
+    }
   }
 
   // -------------------------------------------------------------------------

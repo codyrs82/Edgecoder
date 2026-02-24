@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import { streamChat } from "../lib/api";
@@ -28,7 +28,30 @@
   let showPicker = $state(false);
 
   onMount(async () => {
+    // Restore last editor conversation
+    const lastId = localStorage.getItem("edgecoder-last-editor-id");
+    if (lastId) {
+      const loaded = await loadConversationFromDb(lastId);
+      if (loaded) {
+        conversation = loaded;
+      }
+    } else {
+      // Fallback: load most recent editor conversation
+      const recent = await listConversationsBySource("editor");
+      if (recent.length > 0) {
+        const loaded = await loadConversationFromDb(recent[0].id);
+        if (loaded) conversation = loaded;
+      }
+    }
     recentConversations = await listConversationsBySource("editor");
+  });
+
+  // Save current conversation when component unmounts (tab switch)
+  onDestroy(() => {
+    if (conversation.messages.length > 0) {
+      localStorage.setItem("edgecoder-last-editor-id", conversation.id);
+      saveConversation(conversation);
+    }
   });
 
   async function refreshConversationList() {
@@ -75,6 +98,7 @@
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
       await saveConversation(conversation);
+      localStorage.setItem("edgecoder-last-editor-id", conversation.id);
       await refreshConversationList();
     } catch (err) {
       if ((err as Error).name !== "AbortError") {

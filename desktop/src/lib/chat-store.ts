@@ -26,7 +26,9 @@ function getDb() {
 
 export async function saveConversation(convo: Conversation): Promise<void> {
   const db = await getDb();
-  await db.put(STORE_NAME, convo);
+  // Strip Svelte 5 reactive proxies — IndexedDB's structured clone can't handle them
+  const plain = JSON.parse(JSON.stringify(convo));
+  await db.put(STORE_NAME, plain);
 }
 
 export async function loadConversation(id: string): Promise<Conversation | undefined> {

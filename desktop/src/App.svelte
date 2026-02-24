@@ -110,13 +110,14 @@
       </button>
     </header>
 
-    <!-- Main Content Area -->
+    <!-- Main Content Area — both views stay mounted, hidden via CSS -->
     <main class="content">
-      {#if activeTab === "chat"}
+      <div class="tab-panel" class:hidden={activeTab !== "chat"}>
         <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} />
-      {:else}
+      </div>
+      <div class="tab-panel" class:hidden={activeTab !== "editor"}>
         <EditorView bind:this={editorView} />
-      {/if}
+      </div>
     </main>
 
     <!-- Bottom Bar -->
@@ -236,9 +237,19 @@
   /* Content */
   .content {
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
+    position: relative;
+  }
+  .tab-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .tab-panel.hidden {
+    display: none;
   }
   /* Bottom Bar */
   .bottom-bar {

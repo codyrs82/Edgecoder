@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import { streamChat } from "../lib/api";
   import {
@@ -6,6 +7,7 @@
     addMessage,
     saveConversation,
     loadConversation as loadConversationFromDb,
+    listConversationsBySource,
   } from "../lib/chat-store";
   import type { Conversation } from "../lib/types";
 
@@ -14,7 +16,7 @@
   }
   let { onOpenInEditor }: Props = $props();
 
-  let conversation: Conversation = $state(createConversation());
+  let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let abortController: AbortController | null = $state(null);
@@ -25,6 +27,32 @@
     { label: "Write tests", prompt: "Help me write tests" },
     { label: "Explain code", prompt: "Explain how this code works" },
   ];
+
+  // Restore last chat conversation on mount
+  onMount(async () => {
+    const lastId = localStorage.getItem("edgecoder-last-chat-id");
+    if (lastId) {
+      const loaded = await loadConversationFromDb(lastId);
+      if (loaded) {
+        conversation = loaded;
+        return;
+      }
+    }
+    // Fallback: load most recent chat conversation
+    const recent = await listConversationsBySource("chat");
+    if (recent.length > 0) {
+      const loaded = await loadConversationFromDb(recent[0].id);
+      if (loaded) conversation = loaded;
+    }
+  });
+
+  // Save current conversation when component unmounts (tab switch)
+  onDestroy(() => {
+    if (conversation.messages.length > 0) {
+      localStorage.setItem("edgecoder-last-chat-id", conversation.id);
+      saveConversation(conversation);
+    }
+  });
 
   export async function sendMessage(text: string) {
     if (isStreaming) return;
@@ -53,6 +81,7 @@
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
       await saveConversation(conversation);
+      localStorage.setItem("edgecoder-last-chat-id", conversation.id);
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         addMessage(conversation, "assistant", `Error: ${(err as Error).message}`);
@@ -81,10 +110,11 @@
     if (conversation.messages.length > 0) {
       await saveConversation(conversation);
     }
-    conversation = createConversation();
+    conversation = createConversation("chat");
     streamingContent = "";
     isStreaming = false;
     abortController = null;
+    localStorage.setItem("edgecoder-last-chat-id", conversation.id);
   }
 
   export async function loadConversation(id: string) {
