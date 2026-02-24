@@ -110,3 +110,31 @@ export interface TaskSubmission {
   resourceClass?: "cpu" | "gpu";
   priority?: number;
 }
+
+// Chat message types (OpenAI-compatible, matching IDE provider-server)
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: number;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChatCompletionChunk {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    delta: { role?: string; content?: string };
+    finish_reason: string | null;
+  }>;
+}
