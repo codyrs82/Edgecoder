@@ -540,94 +540,35 @@ async function loop(): Promise<void> {
         if (pulled.subtask) {
           const st = pulled.subtask;
 
-          // ── BLE delegation: try routing to an idle BLE peer ──
-          let delegated = false;
-          if (bleMesh && bleTransport) {
-            const blePeers = bleTransport.discoveredPeers();
-            const idlePeer = blePeers.find(p => p.currentLoad === 0);
-            if (idlePeer) {
-              const bleReq: BLETaskRequest = {
-                requestId: st.id,
-                requesterId: AGENT_ID,
-                task: st.input,
-                language: st.language,
-                requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(st.input) }), keys.privateKeyPem),
-              };
-              try {
-                const resp = await bleMesh.routeTask(bleReq, 0);
-                if (resp && resp.status === "completed") {
-                  delegated = true;
-                  try { localStore.recordBLETaskResult(resp.providerId, true); } catch {}
-                  try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, `ble-delegate:${resp.providerId}`, activeCoordinatorUrl); } catch {}
-                  try { localStore.recordTaskComplete(st.id, resp.output ?? "", Math.round(resp.cpuSeconds * 1000)); } catch {}
-                  const delegatedResult = {
-                    subtaskId: st.id,
-                    taskId: st.taskId,
-                    agentId: AGENT_ID,
-                    ok: true,
-                    output: resp.output ?? "",
-                    durationMs: Math.round(resp.cpuSeconds * 1000),
-                    reportNonce: randomUUID(),
-                    reportSignature: "",
-                  };
-                  delegatedResult.reportSignature = signPayload(
-                    JSON.stringify({
-                      subtaskId: delegatedResult.subtaskId,
-                      taskId: delegatedResult.taskId,
-                      agentId: delegatedResult.agentId,
-                      ok: delegatedResult.ok,
-                      durationMs: delegatedResult.durationMs,
-                      reportNonce: delegatedResult.reportNonce
-                    }),
-                    keys.privateKeyPem
-                  );
-                  try {
-                    await post("/result", delegatedResult, { extraHeaders: signedHeaders("/result", delegatedResult) });
-                  } catch (resultErr) {
-                    try { localStore.enqueuePendingResult(st.id, JSON.stringify(delegatedResult)); } catch {}
-                    console.warn(`[agent:${AGENT_ID}] delegated result buffered: ${st.id}`);
-                  }
-                  console.log(`[agent:${AGENT_ID}] task ${st.id} delegated to BLE peer ${resp.providerId}`);
-                } else if (resp) {
-                  try { localStore.recordBLETaskResult(resp.providerId, false); } catch {}
-                }
-              } catch (e) {
-                console.warn(`[agent:${AGENT_ID}] BLE delegation failed, executing locally: ${String(e)}`);
-              }
+          // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
+          try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+          const result = await worker.runSubtask(st, AGENT_ID);
+          try {
+            if (result.ok) {
+              localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+            } else {
+              localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
             }
-          }
-
-          if (!delegated) {
-            // ── Local execution (existing path) ──
-            try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
-            const result = await worker.runSubtask(st, AGENT_ID);
-            try {
-              if (result.ok) {
-                localStore.recordTaskComplete(st.id, result.output, result.durationMs);
-              } else {
-                localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
-              }
-            } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
-            const reportNonce = randomUUID();
-            const reportSignature = signPayload(
-              JSON.stringify({
-                subtaskId: result.subtaskId,
-                taskId: result.taskId,
-                agentId: result.agentId,
-                ok: result.ok,
-                durationMs: result.durationMs,
-                reportNonce
-              }),
-              keys.privateKeyPem
-            );
-            result.reportNonce = reportNonce;
-            result.reportSignature = reportSignature;
-            try {
-              await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
-            } catch (resultErr) {
-              try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(result)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
-              console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
-            }
+          } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+          const reportNonce = randomUUID();
+          const reportSignature = signPayload(
+            JSON.stringify({
+              subtaskId: result.subtaskId,
+              taskId: result.taskId,
+              agentId: result.agentId,
+              ok: result.ok,
+              durationMs: result.durationMs,
+              reportNonce
+            }),
+            keys.privateKeyPem
+          );
+          result.reportNonce = reportNonce;
+          result.reportSignature = reportSignature;
+          try {
+            await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
+          } catch (resultErr) {
+            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(result)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+            console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
           }
           continue;
         }
@@ -811,17 +752,17 @@ async function loop(): Promise<void> {
         }
       }
 
-      // ═══ ALWAYS: BLE peer discovery + logging (runs in both modes) ═══
-      if (bleTransport) {
+      // ═══ BLE peer discovery — only in offline mode or when explicitly enabled ═══
+      // BLE is a last-resort transport; HTTP mesh is primary for task distribution.
+      if (bleTransport && (!coordinatorOnline || process.env.BLE_TEST_ENABLED === "true")) {
         const blePeers = bleTransport.discoveredPeers();
         if (blePeers.length > 0) {
           try { for (const p of blePeers) { localStore.upsertBLEPeer(p.agentId, p.model, p.modelParamSize, p.deviceType, p.rssi); } } catch (e) { console.warn(`[db] BLE peer write failed: ${e}`); }
-          console.log(`[agent:${AGENT_ID}] BLE peers: ${blePeers.map(p => `${p.agentId}(rssi:${p.rssi})`).join(", ")}`);
+          console.log(`[agent:${AGENT_ID}] BLE peers (offline): ${blePeers.map(p => `${p.agentId}(rssi:${p.rssi})`).join(", ")}`);
 
-          if (!bleTaskTestDone) {
+          if (!bleTaskTestDone && process.env.BLE_TEST_ENABLED === "true") {
             bleTaskTestDone = true;
             const peer = blePeers[0];
-            // Delay to let discovery connect/disconnect settle before task
             console.log(`[BLE-TEST] will send test task to ${peer.agentId} in 5s...`);
             setTimeout(async () => {
               try {
