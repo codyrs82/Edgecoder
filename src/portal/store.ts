@@ -4,7 +4,7 @@ export type PortalUser = {
   userId: string;
   email: string;
   emailVerified: boolean;
-  uiTheme: "midnight" | "emerald" | "light";
+  uiTheme: "warm" | "midnight" | "emerald";
   passwordHash?: string;
   displayName?: string;
   createdAtMs: number;
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS portal_users (
   user_id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-  ui_theme TEXT NOT NULL DEFAULT 'midnight',
+  ui_theme TEXT NOT NULL DEFAULT 'warm',
   password_hash TEXT,
   display_name TEXT,
   created_at_ms BIGINT NOT NULL,
@@ -164,7 +164,7 @@ export class PortalStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
-    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'midnight'`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'warm'`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
@@ -190,7 +190,7 @@ export class PortalStore {
       userId: row.user_id,
       email: row.email,
       emailVerified: Boolean(row.email_verified),
-      uiTheme: (row.ui_theme ?? "midnight") as "midnight" | "emerald" | "light",
+      uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -210,7 +210,7 @@ export class PortalStore {
       userId: row.user_id,
       email: row.email,
       emailVerified: Boolean(row.email_verified),
-      uiTheme: (row.ui_theme ?? "midnight") as "midnight" | "emerald" | "light",
+      uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -221,7 +221,7 @@ export class PortalStore {
   async createUser(input: {
     userId: string;
     email: string;
-    uiTheme?: "midnight" | "emerald" | "light";
+    uiTheme?: "warm" | "midnight" | "emerald";
     passwordHash?: string;
     displayName?: string;
     emailVerified: boolean;
@@ -235,7 +235,7 @@ export class PortalStore {
         input.userId,
         input.email,
         input.emailVerified,
-        input.uiTheme ?? "midnight",
+        input.uiTheme ?? "warm",
         input.passwordHash ?? null,
         input.displayName ?? null,
         now,
@@ -246,7 +246,7 @@ export class PortalStore {
       userId: input.userId,
       email: input.email,
       emailVerified: input.emailVerified,
-      uiTheme: input.uiTheme ?? "midnight",
+      uiTheme: input.uiTheme ?? "warm",
       passwordHash: input.passwordHash,
       displayName: input.displayName,
       createdAtMs: now,
@@ -254,7 +254,7 @@ export class PortalStore {
     };
   }
 
-  async setUserTheme(userId: string, theme: "midnight" | "emerald" | "light"): Promise<void> {
+  async setUserTheme(userId: string, theme: "warm" | "midnight" | "emerald"): Promise<void> {
     await this.pool.query(`UPDATE portal_users SET ui_theme = $2 WHERE user_id = $1`, [userId, theme]);
   }
 
