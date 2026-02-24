@@ -20,6 +20,7 @@
     "build:macos-installer": "bash scripts/macos/build-installer.sh",
     "install:macos-local": "bash scripts/macos/install-local.sh",
     "build:linux-deb": "bash scripts/linux/build-deb.sh",
+    "build:windows-msi": "bash scripts/windows/build-msi.sh",
     "build:ble-proxy": "bash scripts/macos/build-ble-proxy.sh",
     "test": "vitest run",
     "test:watch": "vitest",

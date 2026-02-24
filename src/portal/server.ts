@@ -3548,7 +3548,7 @@ function portalAuthedPageHtml(input: {
             <div class="nav-row">
               ${navLink("dashboard", "Dashboard", "/portal/dashboard")}
               ${navLink("nodes", "Nodes", "/portal/nodes")}
-              ${navLink("download", "Download", "/portal/download")}
+              ${navLink("download", "Get EdgeCoder", "/portal/download")}
               ${navLink("wallet", "Wallet", "/portal/wallet")}
               ${navLink("operations", "Coordinator Ops", "/portal/coordinator-ops")}
               ${navLink("settings", "Settings", "/portal/settings")}
