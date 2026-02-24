@@ -81,6 +81,7 @@ import { SecurityEventLogger, type SecurityEventType } from "../audit/security-e
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
 
 const app = Fastify({ logger: true });
+await app.register(websocket);
 const queue = new SwarmQueue(pgStore);
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
@@ -4157,7 +4158,6 @@ export async function initCoordinator(): Promise<void> {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
-    await app.register(websocket);
     await app.listen({ port: 4301, host: "0.0.0.0" });
     await initCoordinator();
   })().catch((error) => {
