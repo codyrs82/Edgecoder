@@ -140,6 +140,14 @@
         onLogout={() => { user = null; settingsOpen = false; }}
       />
     {/if}
+
+    <ConversationSidebar
+      open={historyOpen}
+      onClose={() => historyOpen = false}
+      onSelectConversation={handleSelectConversation}
+      onNewChat={handleNewChatFromSidebar}
+      activeConversationId={chatView?.getConversationId() ?? null}
+    />
   </div>
 {/if}
 
