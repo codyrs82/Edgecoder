@@ -1777,6 +1777,11 @@ app.post("/submit", async (req, reply) => {
   await pgStore?.persistLedgerRecord(enqueueRecord);
   await persistStatsLedgerRecord(enqueueRecord);
 
+  // If mesh peers exist, delay local claiming to give peers a chance to claim
+  // via gossip first (prevents duplicate execution across coordinators).
+  const hasMeshPeers = mesh.listPeers().length > 0;
+  const GOSSIP_CLAIM_DELAY_MS = 3_000;
+
   const created = payload.subtasks.map((subtask) =>
     queue.enqueueSubtask({
       ...subtask,
@@ -1786,7 +1791,7 @@ app.post("/submit", async (req, reply) => {
         resourceClass: body.resourceClass as ResourceClass,
         priority: body.priority
       }
-    })
+    }, hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : undefined)
   );
 
   // Gossip each subtask as a task_offer to peer coordinators for P2P distribution
@@ -3830,6 +3835,7 @@ app.post("/debug/enqueue", async (req, reply) => {
   };
   if (!body.input) return reply.code(400).send({ error: "input required" });
   const taskId = body.taskId ?? randomUUID();
+  const hasPeers = mesh.listPeers().length > 0;
   const subtask = queue.enqueueSubtask({
     taskId,
     kind: "single_step",
@@ -3838,7 +3844,7 @@ app.post("/debug/enqueue", async (req, reply) => {
     timeoutMs: 30_000,
     snapshotRef: "debug",
     projectMeta: { projectId: "debug", resourceClass: "cpu" as any, priority: 50 }
-  });
+  }, hasPeers ? { claimDelayMs: 3_000 } : undefined);
   // Gossip task_offer to peer coordinators
   const offerMsg = protocol.createMessage(
     "task_offer",
