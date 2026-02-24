@@ -280,12 +280,14 @@ function connectMeshWebSocket(
   const wsUrl = coordinatorUrl
     .replace(/^https:/, "wss:")
     .replace(/^http:/, "ws:");
-  const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken || "")}&peerId=${encodeURIComponent(AGENT_ID)}`;
 
   let reconnectDelay = 1000;
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
+    // Build URL on each connect so it picks up the latest meshAuthToken
+    // (token may be provisioned from coordinator after initial registration)
+    const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken || "")}&peerId=${encodeURIComponent(AGENT_ID)}`;
     const ws = new WebSocket(fullUrl);
 
     ws.on("open", () => {
