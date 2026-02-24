@@ -1,11 +1,22 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
-import { createHash, createPrivateKey, createPublicKey, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { request } from "undici";
 import { z } from "zod";
+import {
+  safeTokenEqual,
+  normalizeIpCandidate,
+  readHeaderValue,
+  extractClientIp,
+  normalizeUrl,
+  pairKey,
+  weightedMedian,
+  parseRecordPayload,
+  computeIntentFee
+} from "./coordinator-utils.js";
 import { extractCode } from "../model/extract.js";
 import { SwarmQueue } from "./queue.js";
 import {
@@ -275,11 +286,6 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
   diagnosticsByAgentId.set(agentId, merged);
 }
 
-function safeTokenEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
 function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
   if (!MESH_AUTH_TOKEN) return true;
   const token = req.headers["x-mesh-token"];
@@ -413,15 +419,6 @@ async function verifyAgentRequest(
   return { agentId: sigResult.agentId!, nonce: sigResult.nonce! };
 }
 
-function parseRecordPayload(record: { payloadJson?: string }): Record<string, unknown> {
-  if (!record.payloadJson) return {};
-  try {
-    return JSON.parse(record.payloadJson) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
 async function applyStatsProjectionRecord(record: {
   eventType: string;
   taskId: string;
@@ -510,62 +507,6 @@ app.addHook("onRequest", async (req, reply) => {
     return reply.send({ error: "mesh_unauthorized" });
   }
 });
-
-function normalizeIpCandidate(raw: string): string | undefined {
-  const value = raw.trim();
-  if (!value) return undefined;
-  if (value.toLowerCase() === "unknown") return undefined;
-  if (value.startsWith("::ffff:")) return value.slice(7);
-  if (value.startsWith("[") && value.includes("]")) return value.slice(1, value.indexOf("]"));
-  const colonCount = (value.match(/:/g) ?? []).length;
-  if (colonCount === 1 && /^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(value)) {
-    return value.split(":")[0];
-  }
-  return value;
-}
-
-function readHeaderValue(headers: Record<string, unknown>, key: string): string | undefined {
-  const raw = headers[key];
-  if (typeof raw === "string") return raw;
-  if (Array.isArray(raw)) {
-    const first = raw.find((item) => typeof item === "string");
-    return typeof first === "string" ? first : undefined;
-  }
-  return undefined;
-}
-
-function extractClientIp(headers: Record<string, unknown>, fallbackIp?: string): string | undefined {
-  const priorityHeaders = ["fly-client-ip", "cf-connecting-ip", "x-real-ip", "true-client-ip"];
-  for (const key of priorityHeaders) {
-    const headerValue = readHeaderValue(headers, key);
-    const normalized = headerValue ? normalizeIpCandidate(headerValue) : undefined;
-    if (normalized) return normalized;
-  }
-  const forwarded = readHeaderValue(headers, "x-forwarded-for");
-  if (forwarded) {
-    for (const part of forwarded.split(",")) {
-      const normalized = normalizeIpCandidate(part);
-      if (normalized) return normalized;
-    }
-  }
-  if (typeof fallbackIp === "string") {
-    return normalizeIpCandidate(fallbackIp);
-  }
-  return undefined;
-}
-
-function normalizeUrl(value: string | undefined): string | null {
-  if (!value) return null;
-  try {
-    const parsed = new URL(value);
-    parsed.pathname = "";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    return null;
-  }
-}
 
 async function readCachedPeerUrls(): Promise<string[]> {
   try {
@@ -1143,19 +1084,6 @@ function isApprovedCoordinator(peerId: string): boolean {
   return APPROVED_COORDINATOR_IDS.has(peerId);
 }
 
-function weightedMedian(entries: Array<{ value: number; weight: number }>): number {
-  if (entries.length === 0) return 0;
-  const sorted = [...entries].sort((a, b) => a.value - b.value);
-  const totalWeight = sorted.reduce((sum, item) => sum + Math.max(0, item.weight), 0);
-  if (totalWeight <= 0) return sorted[Math.floor(sorted.length / 2)]?.value ?? 0;
-  let cumulative = 0;
-  for (const item of sorted) {
-    cumulative += Math.max(0, item.weight);
-    if (cumulative >= totalWeight / 2) return item.value;
-  }
-  return sorted[sorted.length - 1]?.value ?? 0;
-}
-
 const issuancePoolConfig: IssuancePoolConfig = {
   baseDailyPoolTokens: ISSUANCE_BASE_DAILY_POOL_TOKENS,
   minDailyPoolTokens: ISSUANCE_MIN_DAILY_POOL_TOKENS,
@@ -1411,10 +1339,6 @@ async function settleIntent(intent: PaymentIntent, txRef: string): Promise<{ int
   await pgStore?.persistCoordinatorFeeEvent(feeEvent);
   await allocateIntentPayouts(settled);
   return { intent: settled, feeEvent };
-}
-
-function pairKey(a: string, b: string): string {
-  return [a, b].sort().join("::");
 }
 
 function cleanupStaleTunnels(): number {
@@ -2324,8 +2248,7 @@ app.post("/economy/payments/intents", async (req, reply) => {
     .parse(req.body);
   const currentCpu = latestPriceEpochByResource.get("cpu");
   const satsPerCredit = currentCpu?.pricePerComputeUnitSats ?? 30;
-  const feeSats = Math.floor((body.amountSats * COORDINATOR_FEE_BPS) / 10000);
-  const netSats = Math.max(0, body.amountSats - feeSats);
+  const { feeSats, netSats } = computeIntentFee(body.amountSats, COORDINATOR_FEE_BPS);
   const invoice = await lightningProvider.createInvoice({
     amountSats: body.amountSats,
     memo: `edgecoder_credits:${body.accountId}`,
