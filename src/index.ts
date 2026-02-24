@@ -1,5 +1,5 @@
 import { inferenceService } from "./inference/service.js";
-import { coordinatorServer } from "./swarm/coordinator.js";
+import { coordinatorServer, initCoordinator } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -75,6 +75,9 @@ async function boot(): Promise<void> {
   }
 
   console.log(`[unified-agent] coordinator=:${COORDINATOR_PORT} inference=:${INFERENCE_PORT} control-plane=:${CONTROL_PLANE_PORT}`);
+
+  // Initialize coordinator background tasks (intervals, peer mesh bootstrap, etc.)
+  await initCoordinator();
 
   // Start embedded worker — every node contributes compute to the mesh
   startWorkerProcess();

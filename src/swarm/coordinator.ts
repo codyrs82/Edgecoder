@@ -133,7 +133,12 @@ const securityLog = new SecurityEventLogger((event) => {
 });
 
 function loadCoordinatorKeys() {
-  const peerId = process.env.COORDINATOR_PEER_ID ?? "coordinator-local";
+  // Derive a unique peerId from COORDINATOR_PUBLIC_URL so each coordinator
+  // instance has a distinct identity in the mesh (avoids peerId collision
+  // that prevents mutual peering).
+  const explicitPeerId = process.env.COORDINATOR_PEER_ID;
+  const peerId = explicitPeerId ??
+    `coord-${createHash("sha256").update(COORDINATOR_PUBLIC_URL).digest("hex").slice(0, 12)}`;
   const privateKeyPem = process.env.COORDINATOR_PRIVATE_KEY_PEM;
   const publicKeyPem = process.env.COORDINATOR_PUBLIC_KEY_PEM;
   if (privateKeyPem) {
@@ -600,6 +605,7 @@ async function discoverBootstrapPeers(): Promise<string[]> {
 
 async function bootstrapPeerMesh(): Promise<void> {
   const candidates = await discoverBootstrapPeers();
+  app.log.info({ candidateCount: candidates.length, candidates }, "mesh_bootstrap_start");
   if (candidates.length === 0) return;
 
   const discoveredForCache = new Set<string>();
@@ -607,27 +613,48 @@ async function bootstrapPeerMesh(): Promise<void> {
     try {
       const identityRes = await request(`${peerUrl}/identity`, {
         method: "GET",
-        headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
+        headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined,
+        signal: AbortSignal.timeout(8_000)
       });
-      if (identityRes.statusCode < 200 || identityRes.statusCode >= 300) continue;
+      if (identityRes.statusCode < 200 || identityRes.statusCode >= 300) {
+        // Must consume the body to release the socket (undici requirement)
+        await identityRes.body.text().catch(() => undefined);
+        app.log.warn({ peerUrl, status: identityRes.statusCode }, "mesh_bootstrap_identity_failed");
+        continue;
+      }
       const remote = (await identityRes.body.json()) as {
         peerId: string;
         publicKeyPem: string;
         coordinatorUrl: string;
         networkMode: NetworkMode;
       };
-      if (!remote.peerId || remote.peerId === identity.peerId) continue;
+      app.log.info({ peerUrl, remotePeerId: remote.peerId, localPeerId: identity.peerId }, "mesh_bootstrap_identity_fetched");
+      if (!remote.peerId || remote.peerId === identity.peerId) {
+        app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_skip_same_peer");
+        continue;
+      }
 
+      // Prefer the peer's self-reported coordinatorUrl, but fall back to the
+      // actual URL we successfully reached it on (the bootstrap/discovery URL).
+      // This handles cases where the self-reported URL (e.g. custom domain) is
+      // unreachable but the direct URL (e.g. fly.dev) works.
       const normalizedRemoteUrl = normalizeUrl(remote.coordinatorUrl);
-      if (!normalizedRemoteUrl || normalizedRemoteUrl === normalizeUrl(COORDINATOR_PUBLIC_URL)) continue;
+      const normalizedPeerUrl = normalizeUrl(peerUrl);
+      const effectiveUrl = normalizedRemoteUrl ?? normalizedPeerUrl;
+      if (!effectiveUrl || effectiveUrl === normalizeUrl(COORDINATOR_PUBLIC_URL)) {
+        app.log.warn({ peerUrl, effectiveUrl, localUrl: normalizeUrl(COORDINATOR_PUBLIC_URL) }, "mesh_bootstrap_skip_same_url");
+        continue;
+      }
+      // Use the actual reachable URL for gossip if the self-reported URL is different
+      const gossipUrl = normalizedPeerUrl ?? effectiveUrl;
       mesh.addPeer({
         peerId: remote.peerId,
         publicKeyPem: remote.publicKeyPem,
-        coordinatorUrl: normalizedRemoteUrl,
+        coordinatorUrl: gossipUrl!,
         networkMode: remote.networkMode
       });
       peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
-      discoveredForCache.add(normalizedRemoteUrl);
+      discoveredForCache.add(gossipUrl!);
 
       const registerRes = await request(`${peerUrl}/mesh/register-peer`, {
         method: "POST",
@@ -641,13 +668,16 @@ async function bootstrapPeerMesh(): Promise<void> {
           coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL),
           networkMode,
           registrationToken: COORDINATOR_REGISTRATION_TOKEN
-        })
+        }),
+        signal: AbortSignal.timeout(8_000)
       });
+      await registerRes.body.text().catch(() => undefined);
+      app.log.info({ peerUrl, registerStatus: registerRes.statusCode, remotePeerId: remote.peerId }, "mesh_bootstrap_registered");
       if (registerRes.statusCode >= 200 && registerRes.statusCode < 300) {
         discoveredForCache.add(peerUrl);
       }
-    } catch {
-      // Continue to next candidate.
+    } catch (err) {
+      app.log.warn({ peerUrl, error: (err as Error).message }, "mesh_bootstrap_peer_error");
     }
   }
 
@@ -2493,20 +2523,32 @@ app.post("/mesh/register-peer", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = peerSchema.parse(req.body);
   const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
-  const activation = await validatePortalNode({
-    nodeId: body.peerId,
-    nodeKind: "coordinator",
-    registrationToken: body.registrationToken,
-    sourceIp
-  });
-  if (!activation.allowed) {
-    return reply.code(403).send({ error: "coordinator_not_activated", reason: activation.reason });
+
+  // Coordinators that authenticate with a valid mesh token are trusted peers —
+  // skip portal validation (same pattern as loopback self-registration for agents).
+  // The mesh token IS the shared secret that proves membership in this coordinator mesh.
+  const meshTokenProvided = MESH_AUTH_TOKEN && (req.headers as Record<string, string>)["x-mesh-token"] === MESH_AUTH_TOKEN;
+  let activationReason = "mesh_token_peer";
+
+  if (!meshTokenProvided) {
+    const activation = await validatePortalNode({
+      nodeId: body.peerId,
+      nodeKind: "coordinator",
+      registrationToken: body.registrationToken,
+      sourceIp
+    });
+    if (!activation.allowed) {
+      return reply.code(403).send({ error: "coordinator_not_activated", reason: activation.reason });
+    }
+    if (PORTAL_SERVICE_URL && !activation.ownerEmail) {
+      return reply.code(403).send({ error: "coordinator_not_activated", reason: "owner_email_required" });
+    }
+    activationReason = activation.reason ?? "portal_validated";
   }
-  if (PORTAL_SERVICE_URL && !activation.ownerEmail) {
-    return reply.code(403).send({ error: "coordinator_not_activated", reason: "owner_email_required" });
-  }
+
   mesh.addPeer(body as MeshPeerIdentity);
   peerScore.set(body.peerId, 100);
+  app.log.info({ peerId: body.peerId, reason: activationReason, url: body.coordinatorUrl }, "peer_registered");
   const approvalRecord = ordering.append({
     eventType: "node_approval",
     taskId: `coordinator:${body.peerId}`,
@@ -2514,8 +2556,7 @@ app.post("/mesh/register-peer", async (req, reply) => {
     coordinatorId: identity.peerId,
     payloadJson: JSON.stringify({
       approved: true,
-      activationReason: activation.reason ?? null,
-      ownerEmail: activation.ownerEmail ?? null,
+      activationReason,
       sourceIp: sourceIp ?? null
     })
   });
@@ -3818,41 +3859,41 @@ app.post("/debug/enqueue", async (req, reply) => {
   return reply.send({ taskId, subtaskId: subtask.id, queued: true });
 });
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  Promise.resolve()
-    .then(async () => {
-      // Do not block coordinator readiness indefinitely on database recovery.
-      if (pgStore) {
-        const storeRef = pgStore;
-        const initDbState = async () => {
-          await storeRef.migrate();
-          const persistedEvents = await storeRef.listBlacklistEvents();
-          for (const event of persistedEvents) {
-            blacklistAuditLog.push(event);
-            blacklistByAgent.set(event.agentId, event);
-            lastBlacklistEventHash = event.eventHash;
-          }
-          blacklistVersion = blacklistAuditLog.length;
-          const latestCpu = await storeRef.latestPriceEpoch("cpu");
-          const latestGpu = await storeRef.latestPriceEpoch("gpu");
-          if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
-          if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
-          treasuryPolicy = await storeRef.latestTreasuryPolicy();
-          const pendingIntents = await storeRef.listPendingPaymentIntents(500);
-          for (const intent of pendingIntents) {
-            paymentIntents.set(intent.intentId, intent);
-          }
-        };
-        const startupDbInitTimeoutMs = 10_000;
-        await Promise.race([
-          initDbState(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("startup_db_init_timeout")), startupDbInitTimeoutMs)
-          )
-        ]).catch((error) => app.log.warn({ error }, "startup_db_init_skipped"));
+/** Initialize coordinator background tasks, intervals, and peer mesh.
+ *  Call after the Fastify server is listening (either standalone or unified mode). */
+export async function initCoordinator(): Promise<void> {
+  // Do not block coordinator readiness indefinitely on database recovery.
+  if (pgStore) {
+    const storeRef = pgStore;
+    const initDbState = async () => {
+      await storeRef.migrate();
+      const persistedEvents = await storeRef.listBlacklistEvents();
+      for (const event of persistedEvents) {
+        blacklistAuditLog.push(event);
+        blacklistByAgent.set(event.agentId, event);
+        lastBlacklistEventHash = event.eventHash;
       }
-    })
-    .then(async () => {
+      blacklistVersion = blacklistAuditLog.length;
+      const latestCpu = await storeRef.latestPriceEpoch("cpu");
+      const latestGpu = await storeRef.latestPriceEpoch("gpu");
+      if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
+      if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
+      treasuryPolicy = await storeRef.latestTreasuryPolicy();
+      const pendingIntents = await storeRef.listPendingPaymentIntents(500);
+      for (const intent of pendingIntents) {
+        paymentIntents.set(intent.intentId, intent);
+      }
+    };
+    const startupDbInitTimeoutMs = 10_000;
+    await Promise.race([
+      initDbState(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("startup_db_init_timeout")), startupDbInitTimeoutMs)
+      )
+    ]).catch((error) => app.log.warn({ error }, "startup_db_init_skipped"));
+  }
+
+  {
       setInterval(() => {
         cleanupStaleTunnels();
       }, 15_000);
@@ -3927,35 +3968,40 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         async noncePrune() { await nonceStore.prune(); return 0; },
         async meshMessagePrune() { return 0; },
       };
-      startPruneScheduler(pruneAdapter, 5 * 60_000);
-      app.log.info("security: request signing verification, nonce replay detection, and rate limiting active");
-      await app.listen({ port: 4301, host: "0.0.0.0" });
-      // Do not block coordinator readiness on model pull/install.
-      // Fly health checks and agent registration should stay available while
-      // Ollama warms up in the background.
-      void ensureOllamaModelInstalled({
-        enabled: PROVIDER === "ollama-local",
-        autoInstall: OLLAMA_AUTO_INSTALL,
-        model: OLLAMA_MODEL,
-        role: "coordinator",
-        host: OLLAMA_HOST
-      }).catch((error) => app.log.warn({ error }, "coordinator_ollama_bootstrap_failed"));
-      await bootstrapPeerMesh();
-      await (async () => {
-        const peers = mesh.listPeers();
-        for (const peer of peers) {
-          await syncStatsLedgerFromPeer(peer);
-        }
-        await maybeFinalizeStatsCheckpoint();
-      })().catch(() => undefined);
-      await runIssuanceTick().catch(() => undefined);
-      await maybeAnchorLatestFinalizedEpoch().catch(() => undefined);
-      await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
-    })
-    .catch((error) => {
-      app.log.error(error);
-      process.exit(1);
-    });
+    startPruneScheduler(pruneAdapter, 5 * 60_000);
+    app.log.info("security: request signing verification, nonce replay detection, and rate limiting active");
+  }
+  // Do not block coordinator readiness on model pull/install.
+  // Fly health checks and agent registration should stay available while
+  // Ollama warms up in the background.
+  void ensureOllamaModelInstalled({
+    enabled: PROVIDER === "ollama-local",
+    autoInstall: OLLAMA_AUTO_INSTALL,
+    model: OLLAMA_MODEL,
+    role: "coordinator",
+    host: OLLAMA_HOST
+  }).catch((error) => app.log.warn({ error }, "coordinator_ollama_bootstrap_failed"));
+  await bootstrapPeerMesh();
+  await (async () => {
+    const peers = mesh.listPeers();
+    for (const peer of peers) {
+      await syncStatsLedgerFromPeer(peer);
+    }
+    await maybeFinalizeStatsCheckpoint();
+  })().catch(() => undefined);
+  await runIssuanceTick().catch(() => undefined);
+  await maybeAnchorLatestFinalizedEpoch().catch(() => undefined);
+  await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  (async () => {
+    await app.listen({ port: 4301, host: "0.0.0.0" });
+    await initCoordinator();
+  })().catch((error) => {
+    app.log.error(error);
+    process.exit(1);
+  });
 }
 
 export { app as coordinatorServer };
