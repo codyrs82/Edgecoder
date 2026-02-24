@@ -322,6 +322,130 @@ describe("BLEMeshManager mesh token auth", () => {
   });
 });
 
+describe("BLEMeshManager retry/failover", () => {
+  it("retries on next peer after first peer fails", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportFail = new MockBLETransport("peer-fail", network);
+    const transportOk = new MockBLETransport("peer-ok", network);
+
+    // peer-fail has slightly lower cost (better signal)
+    transportFail.startAdvertising({ agentId: "peer-fail", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    transportOk.startAdvertising({ agentId: "peer-ok", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+
+    transportFail.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "peer-fail",
+      status: "failed" as const,
+      output: "connection lost",
+      cpuSeconds: 0,
+      providerSignature: "",
+    }));
+    transportOk.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "peer-ok",
+      status: "completed" as const,
+      output: "done",
+      cpuSeconds: 2.0,
+      providerSignature: "sig",
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+
+    const result = await manager.routeTask({
+      requestId: "retry-1",
+      requesterId: "agent-a",
+      task: "test retry",
+      language: "python",
+      requesterSignature: "",
+    }, 7);
+
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("completed");
+    expect(result!.providerId).toBe("peer-ok");
+  });
+
+  it("returns null when all peers fail", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportB = new MockBLETransport("peer-b", network);
+    const transportC = new MockBLETransport("peer-c", network);
+
+    transportB.startAdvertising({ agentId: "peer-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    transportC.startAdvertising({ agentId: "peer-c", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+
+    for (const t of [transportB, transportC]) {
+      t.onTaskRequest(async (req) => ({
+        requestId: req.requestId,
+        providerId: t === transportB ? "peer-b" : "peer-c",
+        status: "failed" as const,
+        output: "error",
+        cpuSeconds: 0,
+        providerSignature: "",
+      }));
+    }
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+
+    const result = await manager.routeTask({
+      requestId: "all-fail",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 7);
+
+    expect(result).toBeNull();
+    expect(manager.pendingTransactions()).toHaveLength(0);
+  });
+
+  it("credits correct peer on second attempt", async () => {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportFail = new MockBLETransport("peer-fail", network);
+    const transportOk = new MockBLETransport("peer-ok", network);
+
+    transportFail.startAdvertising({ agentId: "peer-fail", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    transportOk.startAdvertising({ agentId: "peer-ok", model: "tiny", modelParamSize: 3, memoryMB: 4096, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+
+    transportFail.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "peer-fail",
+      status: "failed" as const,
+      output: "err",
+      cpuSeconds: 0,
+      providerSignature: "",
+    }));
+    transportOk.onTaskRequest(async (req) => ({
+      requestId: req.requestId,
+      providerId: "peer-ok",
+      status: "completed" as const,
+      output: "ok",
+      cpuSeconds: 5.0,
+      providerSignature: "sig",
+    }));
+
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+
+    await manager.routeTask({
+      requestId: "credit-test",
+      requesterId: "agent-a",
+      task: "test",
+      language: "python",
+      requesterSignature: "",
+    }, 7);
+
+    const pending = manager.pendingTransactions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].providerId).toBe("peer-ok");
+    // 3B model → 0.7 multiplier → 5 * 1.0 * 0.7 = 3.5
+    expect(pending[0].credits).toBe(3.5);
+  });
+});
+
 describe("modelQualityMultiplier", () => {
   it("returns 1.0 for 7B+ models", () => {
     expect(modelQualityMultiplier(7)).toBe(1.0);

@@ -128,3 +128,42 @@ describe("BLERouter", () => {
     expect(best).not.toBeNull();
   });
 });
+
+describe("BLERouter selectBestPeers", () => {
+  it("returns peers sorted by cost ascending", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "busy", currentLoad: 3, rssi: -50 }));
+    router.updatePeer(makePeer({ agentId: "idle", currentLoad: 0, rssi: -40 }));
+    router.updatePeer(makePeer({ agentId: "medium", currentLoad: 1, rssi: -50 }));
+    const peers = router.selectBestPeers(10);
+    expect(peers[0].agentId).toBe("idle");
+    expect(peers[peers.length - 1].agentId).toBe("busy");
+  });
+
+  it("respects limit parameter", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "a", rssi: -40 }));
+    router.updatePeer(makePeer({ agentId: "b", rssi: -50 }));
+    router.updatePeer(makePeer({ agentId: "c", rssi: -60 }));
+    const peers = router.selectBestPeers(2);
+    expect(peers).toHaveLength(2);
+  });
+
+  it("filters by token hash", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "match", meshTokenHash: "aaa" }));
+    router.updatePeer(makePeer({ agentId: "no-match", meshTokenHash: "bbb" }));
+    const peers = router.selectBestPeers(10, "aaa");
+    expect(peers).toHaveLength(1);
+    expect(peers[0].agentId).toBe("match");
+  });
+
+  it("excludes peers over cost threshold", () => {
+    const router = new BLERouter();
+    router.updatePeer(makePeer({ agentId: "good", currentLoad: 0, rssi: -40 }));
+    router.updatePeer(makePeer({ agentId: "bad", modelParamSize: 0.1, currentLoad: 10, rssi: -90 }));
+    const peers = router.selectBestPeers(10);
+    expect(peers).toHaveLength(1);
+    expect(peers[0].agentId).toBe("good");
+  });
+});
