@@ -173,10 +173,15 @@ final class BluetoothTransport: NSObject, ObservableObject {
         let task = Task { [weak self] in
             guard let self, let mm = self.modelManager else { return }
             let startMs = Int(Date().timeIntervalSince1970 * 1000)
-            if mm.state != .ready {
-                await mm.installLightweightModel()
+            guard mm.state == .ready else {
+                let errResponse: [String: Any] = ["id": requestId, "output": "[no model loaded]", "ok": false, "durationMs": 0]
+                if let data = try? JSONSerialization.data(withJSONObject: errResponse) {
+                    await self.sendResponse(requestId: requestId, data: data)
+                }
+                await self.completeIDETask(id: requestId, output: "[no model loaded]", ok: false, durationMs: 0)
+                return
             }
-            await mm.runInference(prompt: prompt, maxTokens: maxTokens)
+            await mm.runInference(prompt: prompt)
             let output = mm.lastInferenceOutput
             let durationMs = Int(Date().timeIntervalSince1970 * 1000) - startMs
             let ok = !output.isEmpty && output != "[empty response]"

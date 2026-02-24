@@ -34,6 +34,16 @@
 		FE3020C5296B6D4400A4D780 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */; };
 		FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */; };
 		G6C7D8E9F0A1B2C3D4E5F607 /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = F5B6C7D8E9F0A1B2C3D4E5F6 /* SwiftLlama */; };
+		AA01010101010101AA010101 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA01010101010101AA010102 /* AppDelegate.swift */; };
+		AA02020202020202AA020201 /* BluetoothTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02020202020202AA020202 /* BluetoothTransport.swift */; };
+		AA03030303030303AA030301 /* IDEView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03030303030303AA030302 /* IDEView.swift */; };
+		AA04040404040404AA040401 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04040404040404AA040402 /* Theme.swift */; };
+		AA05050505050505AA050501 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05050505050505AA050502 /* ChatModels.swift */; };
+		AA06060606060606AA060601 /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA06060606060606AA060602 /* ConversationStore.swift */; };
+		AA07070707070707AA070701 /* ChatRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA07070707070707AA070702 /* ChatRouter.swift */; };
+		AA08080808080808AA080801 /* MessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA08080808080808AA080802 /* MessageBubble.swift */; };
+		AA09090909090909AA090901 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09090909090909AA090902 /* ChatView.swift */; };
+		AA10101010101010AA100101 /* ConversationSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10101010101010AA100102 /* ConversationSidebar.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -66,20 +76,33 @@
 		EA4F6442ACF49CA53C9306F8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F0218CF6CC8A55B4374CD459 /* EdgeCoder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EdgeCoder.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E4A5B6C7D8E9F0A1B2C3D4E5 /* RealLlamaContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealLlamaContext.swift; sourceTree = "<group>"; };
+		AA01010101010101AA010102 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		AA02020202020202AA020202 /* BluetoothTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothTransport.swift; sourceTree = "<group>"; };
+		AA03030303030303AA030302 /* IDEView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IDEView.swift; sourceTree = "<group>"; };
+		AA04040404040404AA040402 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		AA05050505050505AA050502 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
+		AA06060606060606AA060602 /* ConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStore.swift; sourceTree = "<group>"; };
+		AA07070707070707AA070702 /* ChatRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRouter.swift; sourceTree = "<group>"; };
+		AA08080808080808AA080802 /* MessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubble.swift; sourceTree = "<group>"; };
+		AA09090909090909AA090902 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		AA10101010101010AA100102 /* ConversationSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebar.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		10340914E0157A2F9D1782C8 /* EdgeCoderIOS */ = {
 			isa = PBXGroup;
 			children = (
+				AA01010101010101AA010102 /* AppDelegate.swift */,
 				CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */,
 				BE8E161A0ADC90132E5B3989 /* EdgeCoderIOS.entitlements */,
 				AAD6A52065D67AE6D4BF8759 /* EdgeCoderIOSApp.swift */,
 				EA4F6442ACF49CA53C9306F8 /* Info.plist */,
 				30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */,
 				FDEE1292B3D1F5E347B13F1B /* Auth */,
+				AA11111111111111AA110001 /* Chat */,
 				18E84012372F925E131AE0E7 /* Core */,
 				72C65A6CF93352209D512BDB /* Dashboard */,
+				AA12121212121212AA120001 /* IDE */,
 				A01B1E05AE5F0005C0DE0005 /* Mesh */,
 				BFD567845246254C2BD775EA /* Settings */,
 				52DB63257A4399AEAEA84C73 /* Shared */,
@@ -96,6 +119,7 @@
 				6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */,
 				779E2AB1376A5FBD38731F04 /* Models.swift */,
 				AC9A2FF9401D82989E5176F5 /* SessionStore.swift */,
+				AA04040404040404AA040402 /* Theme.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -103,6 +127,7 @@
 		228422E15E6E4FB35FE21ADC /* Swarm */ = {
 			isa = PBXGroup;
 			children = (
+				AA02020202020202AA020202 /* BluetoothTransport.swift */,
 				2733B6A0674685579153C996 /* LocalModelManager.swift */,
 				B1A2C3D4E5F60718293A4B5C /* ModelLibraryView.swift */,
 				C2B3D4E5F6071829304B5C6D /* ModelPickerView.swift */,
@@ -182,6 +207,27 @@
 				23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */,
 			);
 			path = Auth;
+			sourceTree = "<group>";
+		};
+		AA11111111111111AA110001 /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				AA05050505050505AA050502 /* ChatModels.swift */,
+				AA07070707070707AA070702 /* ChatRouter.swift */,
+				AA09090909090909AA090902 /* ChatView.swift */,
+				AA10101010101010AA100102 /* ConversationSidebar.swift */,
+				AA06060606060606AA060602 /* ConversationStore.swift */,
+				AA08080808080808AA080802 /* MessageBubble.swift */,
+			);
+			path = Chat;
+			sourceTree = "<group>";
+		};
+		AA12121212121212AA120001 /* IDE */ = {
+			isa = PBXGroup;
+			children = (
+				AA03030303030303AA030302 /* IDEView.swift */,
+			);
+			path = IDE;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -272,16 +318,25 @@
 			files = (
 				F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */,
 				13ED689E127B2952CBA018B1 /* AppConfig.swift in Sources */,
+				AA01010101010101AA010101 /* AppDelegate.swift in Sources */,
 				A01B1E01AE5F0001C0DE0001 /* BLEChunkedTransfer.swift in Sources */,
 				A01B1E03AE5F0003C0DE0003 /* BLEConstants.swift in Sources */,
 				A01B1E06AE5F0006C0DE0006 /* BLEMeshManager.swift in Sources */,
 				A01B1E09AE5F0009C0DE0009 /* BLEMeshRouter.swift in Sources */,
 				A01B1E0BAE5F000BC0DE000B /* OfflineLedger.swift in Sources */,
+				AA02020202020202AA020201 /* BluetoothTransport.swift in Sources */,
 				C3898FECA10395D8E89075FE /* AuthView.swift in Sources */,
 				6D94E4336CA624DB6CE14431 /* AuthViewModel.swift in Sources */,
+				AA05050505050505AA050501 /* ChatModels.swift in Sources */,
+				AA07070707070707AA070701 /* ChatRouter.swift in Sources */,
+				AA09090909090909AA090901 /* ChatView.swift in Sources */,
+				AA10101010101010AA100101 /* ConversationSidebar.swift in Sources */,
+				AA06060606060606AA060601 /* ConversationStore.swift in Sources */,
 				CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */,
 				19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */,
+				AA03030303030303AA030301 /* IDEView.swift in Sources */,
 				89088AFA12BF751F0F4B4831 /* LocalModelManager.swift in Sources */,
+				AA08080808080808AA080801 /* MessageBubble.swift in Sources */,
 				B1A2C3D4E5F60718293A4B5D /* ModelLibraryView.swift in Sources */,
 				C2B3D4E5F6071829304B5C6E /* ModelPickerView.swift in Sources */,
 				D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */,
@@ -293,6 +348,7 @@
 				B996DC26F09449F1DFB014C2 /* SettingsView.swift in Sources */,
 				DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */,
 				EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */,
+				AA04040404040404AA040401 /* Theme.swift in Sources */,
 				B016C5F9FAFAD95844D7FF05 /* WalletView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
