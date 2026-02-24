@@ -79,7 +79,11 @@
     </footer>
 
     {#if settingsOpen}
-      <SettingsOverlay onClose={() => settingsOpen = false} />
+      <SettingsOverlay
+        onClose={() => settingsOpen = false}
+        user={user!}
+        onLogout={() => { user = null; settingsOpen = false; }}
+      />
     {/if}
   </div>
 {/if}
