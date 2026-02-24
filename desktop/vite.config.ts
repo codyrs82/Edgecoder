@@ -7,6 +7,23 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    proxy: {
+      "/api": {
+        target: "http://localhost:4301",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/inference": {
+        target: "http://localhost:4302",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/inference/, ""),
+      },
+      "/ollama": {
+        target: "http://localhost:11434",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ollama/, ""),
+      },
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
