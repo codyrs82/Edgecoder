@@ -95,9 +95,7 @@ final class SwarmRuntimeController: ObservableObject {
         }
         registrationToken = UserDefaults.standard.string(forKey: DefaultsKey.registrationToken) ?? ""
         meshToken = UserDefaults.standard.string(forKey: DefaultsKey.meshToken) ?? ""
-        if let value = UserDefaults.standard.string(forKey: DefaultsKey.coordinatorURL), !value.isEmpty,
-           // Don't restore stale production/staging URLs when default config is local
-           !(AppConfig.current.environment == .local && value.contains("edgecoder")) {
+        if let value = UserDefaults.standard.string(forKey: DefaultsKey.coordinatorURL), !value.isEmpty {
             selectedCoordinatorURL = value
         }
         runOnlyWhileCharging = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
