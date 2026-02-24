@@ -5233,215 +5233,214 @@ app.get("/portal/settings", async (_req, reply) => {
   }));
 });
 
-app.get("/portal/download", async (_req, reply) => {
+export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
+  const ua = userAgent.toLowerCase();
+  if (/iphone|ipad|ipod/.test(ua)) return "ios";
+  if (/macintosh|mac os x/.test(ua)) return "macos";
+  if (/windows/.test(ua)) return "windows";
+  if (/linux|ubuntu|debian/.test(ua)) return "linux";
+  return "unknown";
+}
+
+app.get("/portal/download", async (req, reply) => {
   const GH_RELEASE_BASE = "https://github.com/edgecoder-io/edgecoder/releases/latest/download";
   const GH_RELEASES_PAGE = "https://github.com/edgecoder-io/edgecoder/releases/latest";
-  const btnPrimary = "padding:6px 12px;border-radius:6px;background:linear-gradient(140deg,#2563eb,#1d4ed8);color:white;text-decoration:none;font-size:12px;border:1px solid rgba(37,99,235,0.75);display:inline-block;";
-  const btnSecondary = "padding:6px 12px;border-radius:6px;background:rgba(248,250,252,0.95);color:var(--text);text-decoration:none;font-size:12px;border:1px solid rgba(148,163,184,0.4);display:inline-block;";
-  const sectionLabel = "color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.12em;margin:10px 0 4px;";
-  const codeBlock = "border:1px dashed rgba(37,99,235,0.42);border-radius:6px;padding:7px 9px;background:rgba(239,246,255,0.8);word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;user-select:all;margin:0;";
+  const userAgent = req.headers["user-agent"] || "";
+  const detectedOS = detectOS(userAgent);
+  const queryToken = ((req.query as Record<string, string>)?.token || "").trim();
+  const tokenDisplay = queryToken || "YOUR_TOKEN";
+
+  const osLabels: Record<string, string> = {
+    macos: "macOS", windows: "Windows", linux: "Linux", ios: "iOS", unknown: "your OS"
+  };
+
+  /* ── helper: build a wizard card ─────────────────────────────────── */
+  function wizardCard(
+    id: string,
+    icon: string,
+    title: string,
+    steps: string[],
+    isPrimary: boolean
+  ): string {
+    const cls = isPrimary ? "wizard-card" : "wizard-card secondary";
+    const badge = isPrimary
+      ? `<span class="rec-badge">Recommended for you</span>`
+      : "";
+    const stepsHtml = steps
+      .map(
+        (s, i) =>
+          `<div class="step"><span class="step-num">${i + 1}</span><div class="step-content">${s}</div></div>`
+      )
+      .join("");
+    return `<div class="${cls}" id="card-${id}">${badge}<h3 style="margin:0 0 14px;font-size:15px;">${icon}&nbsp; ${title}</h3>${stepsHtml}</div>`;
+  }
+
+  /* ── platform card builders ──────────────────────────────────────── */
+  const macCard = wizardCard("macos", "&#127822;", "macOS", [
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg">Download .pkg installer</a>
+     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
+    `Double-click the <strong>.pkg</strong> file and follow the prompts.`,
+    `<div class="code-block" id="mac-cmd"><code>sudo edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('mac-cmd')">Copy</button></div>`
+  ], detectedOS === "macos");
+
+  const winCard = wizardCard("windows", "&#128187;", "Windows", [
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-windows-x64.msi">Download .msi installer</a>
+     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
+    `Run the <strong>.msi</strong> file. Click Next. Allow admin access.`,
+    `<div class="code-block" id="win-cmd"><code>edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('win-cmd')">Copy</button></div>
+     <span style="font-size:10px;color:var(--muted);">Run in PowerShell as Administrator</span>`
+  ], detectedOS === "windows");
+
+  const linuxCard = wizardCard("linux", "&#128039;", "Linux (Debian / Ubuntu)", [
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-linux-amd64.deb">Download .deb package</a>
+     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
+    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder-1.0.0-linux-amd64.deb</code><button class="copy-btn" onclick="copyCmd('linux-install')">Copy</button></div>`,
+    `<div class="code-block" id="linux-cmd"><code>sudo edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('linux-cmd')">Copy</button></div>`
+  ], detectedOS === "linux");
+
+  const iosCard = wizardCard("ios", "&#128241;", "iOS (iPhone / iPad)", [
+    `<a class="dl-btn" href="#">Download from App Store</a>
+     <span style="font-size:10px;color:var(--muted);margin-left:8px;">TestFlight available now</span>`,
+    `Sign in with your <strong>EdgeCoder account</strong>.`,
+    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('ios-token')">Copy</button></div>`
+  ], detectedOS === "ios");
+
+  const vscodeCard = wizardCard("vscode", "&#9881;&#65039;", "VS Code Extension", [
+    `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" onclick="copyCmd('vscode-cmd')">Copy</button></div>
+     <span style="font-size:10px;color:var(--muted);">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
+    `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
+  ], false);
+
+  const dockerCard = wizardCard("docker", "&#128051;", "Docker", [
+    `<div class="code-block" id="docker-cmd"><code>docker run -d --restart unless-stopped \\
+  --name edgecoder \\
+  -e EDGE_RUNTIME_MODE=worker \\
+  -e AGENT_REGISTRATION_TOKEN=${tokenDisplay} \\
+  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" onclick="copyCmd('docker-cmd')">Copy</button></div>`
+  ], false);
+
+  /* ── pick primary vs secondary cards ─────────────────────────────── */
+  const allCards: Record<string, string> = {
+    macos: macCard, windows: winCard, linux: linuxCard, ios: iosCard, vscode: vscodeCard, docker: dockerCard
+  };
+  const primaryKey = (detectedOS === "unknown") ? "macos" : detectedOS;
+  const primaryCard = allCards[primaryKey];
+  const secondaryCards = Object.entries(allCards)
+    .filter(([k]) => k !== primaryKey)
+    .map(([, v]) => v)
+    .join("");
 
   const content = `
-    <!-- ── OS packages ───────────────────────────────────────────────── -->
-    <div class="grid2">
+    <style>
+      .hero-dl{text-align:center;padding:28px 0 18px;}
+      .hero-dl h1{font-size:28px;font-weight:700;margin:0 0 6px;color:var(--text);}
+      .hero-dl p{font-size:14px;color:var(--muted);margin:0 0 10px;}
+      .hero-dl .os-badge{display:inline-block;background:#dcfce7;color:#166534;font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;}
+      .feature-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 24px;}
+      @media(max-width:720px){.feature-row{grid-template-columns:repeat(2,1fr);}}
+      .feature-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;}
+      .feature-card .fc-icon{font-size:22px;margin-bottom:6px;}
+      .feature-card .fc-title{font-size:12px;font-weight:700;margin-bottom:4px;color:var(--text);}
+      .feature-card .fc-desc{font-size:11px;color:var(--muted);line-height:1.45;}
+      .wizard-card{position:relative;background:var(--card);border:2px solid #2563eb;border-radius:12px;padding:22px 20px;margin-bottom:18px;}
+      .wizard-card.secondary{border:1px solid var(--border);}
+      .rec-badge{position:absolute;top:-10px;left:16px;background:#dcfce7;color:#166534;font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;}
+      .step{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
+      .step:last-child{margin-bottom:0;}
+      .step-num{flex-shrink:0;width:28px;height:28px;border-radius:50%;background:linear-gradient(140deg,#2563eb,#1d4ed8);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;margin-top:1px;}
+      .step-content{font-size:13px;color:var(--text);line-height:1.55;flex:1;}
+      .step-content strong{font-weight:600;}
+      .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:linear-gradient(140deg,#2563eb,#1d4ed8);color:#fff;text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
+      .dl-btn:hover{opacity:.88;}
+      .code-block{position:relative;background:rgba(239,246,255,0.85);border:1px dashed rgba(37,99,235,0.42);border-radius:8px;padding:9px 60px 9px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;line-height:1.55;}
+      .code-block code{background:none;padding:0;font-size:inherit;color:inherit;}
+      .copy-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:rgba(37,99,235,0.1);color:#2563eb;border:1px solid rgba(37,99,235,0.25);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:600;transition:background .15s;}
+      .copy-btn:hover{background:rgba(37,99,235,0.18);}
+      .toggle-link{background:none;border:none;color:#2563eb;cursor:pointer;font-size:13px;font-weight:600;padding:0;margin:10px 0 16px;display:inline-block;}
+      .toggle-link:hover{text-decoration:underline;}
+      .other-platforms{display:none;}
+      .other-platforms.show{display:block;}
+      .other-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
+      @media(max-width:720px){.other-grid{grid-template-columns:1fr;}}
+    </style>
 
-      <!-- macOS -->
-      <div class="card">
-        <h2 style="margin-top:0;font-size:14px;">🍎&nbsp; macOS</h2>
-        <p class="muted" style="margin-top:4px;">One installer runs as an agent <em>or</em> coordinator — set <code>EDGE_RUNTIME_MODE</code> in the env file after install. Works on Apple Silicon and Intel. Requires Node.js 20+.</p>
-        <div class="kpis" style="margin-top:6px;">
-          <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.pkg</div></div>
-          <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">arm64 + x86_64</div></div>
-          <div class="kpi"><div class="label">Req</div><div class="value" style="font-size:11px;">Node.js 20+</div></div>
-          <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">LaunchDaemon</div></div>
-        </div>
-        <div class="row" style="margin-top:10px;gap:6px;">
-          <a href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg" style="${btnPrimary}">⬇ Download .pkg</a>
-          <a href="${GH_RELEASES_PAGE}" style="${btnSecondary}" target="_blank">All releases ↗</a>
-        </div>
-        <div style="margin-top:12px;">
-          <div style="${sectionLabel}">After install — agent mode</div>
-          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
-# Set:  EDGE_RUNTIME_MODE=worker
-#       AGENT_ID=my-mac-node-001
-#       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
-#       COORDINATOR_URL=https://coordinator.edgecoder.io
-sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">After install — coordinator mode</div>
-          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
-# Set:  EDGE_RUNTIME_MODE=coordinator
-#       COORDINATOR_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
-sudo launchctl kickstart -k system/io.edgecoder.runtime</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">View logs</div>
-          <pre style="${codeBlock}">tail -f /var/log/edgecoder/runtime.log</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">Check service status</div>
-          <pre style="${codeBlock}">sudo launchctl print system/io.edgecoder.runtime</pre>
-        </div>
-      </div>
-
-      <!-- Linux -->
-      <div class="card">
-        <h2 style="margin-top:0;font-size:14px;">🐧&nbsp; Linux (Debian / Ubuntu)</h2>
-        <p class="muted" style="margin-top:4px;">One .deb package for agent or coordinator. Installs a systemd service that starts on boot. Requires Node.js 20+.</p>
-        <div class="kpis" style="margin-top:6px;">
-          <div class="kpi"><div class="label">Format</div><div class="value" style="font-size:11px;">.deb</div></div>
-          <div class="kpi"><div class="label">Arch</div><div class="value" style="font-size:11px;">amd64</div></div>
-          <div class="kpi"><div class="label">Req</div><div class="value" style="font-size:11px;">Node.js 20+</div></div>
-          <div class="kpi"><div class="label">Service</div><div class="value" style="font-size:11px;">systemd</div></div>
-        </div>
-        <div class="row" style="margin-top:10px;gap:6px;">
-          <a href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-linux-amd64.deb" style="${btnPrimary}">⬇ Download .deb</a>
-          <a href="${GH_RELEASES_PAGE}" style="${btnSecondary}" target="_blank">All releases ↗</a>
-        </div>
-        <div style="margin-top:12px;">
-          <div style="${sectionLabel}">Install Node.js 20+ (if needed)</div>
-          <pre style="${codeBlock}">curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt-get install -y nodejs</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">Install package</div>
-          <pre style="${codeBlock}">sudo dpkg -i EdgeCoder-1.0.0-linux-amd64.deb</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">After install — agent mode</div>
-          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
-# Set:  EDGE_RUNTIME_MODE=worker
-#       AGENT_ID=my-linux-node-001
-#       AGENT_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
-#       COORDINATOR_URL=https://coordinator.edgecoder.io
-sudo systemctl restart edgecoder</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">After install — coordinator mode</div>
-          <pre style="${codeBlock}">sudo nano /etc/edgecoder/edgecoder.env
-# Set:  EDGE_RUNTIME_MODE=coordinator
-#       COORDINATOR_REGISTRATION_TOKEN=&lt;token from Nodes page&gt;
-sudo systemctl restart edgecoder</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">View logs</div>
-          <pre style="${codeBlock}">journalctl -u edgecoder -f</pre>
-        </div>
-        <div style="margin-top:8px;">
-          <div style="${sectionLabel}">Check service status</div>
-          <pre style="${codeBlock}">systemctl status edgecoder</pre>
-        </div>
-      </div>
-
+    <!-- ── Hero ──────────────────────────────────────────────────────── -->
+    <div class="hero-dl">
+      <h1>Get EdgeCoder</h1>
+      <p>Install the agent. Join the mesh. Earn credits.</p>
+      <span class="os-badge">Detected: ${osLabels[detectedOS] || "Unknown"}</span>
     </div>
 
-    <!-- ── iOS ──────────────────────────────────────────────────────────── -->
-    <div class="card" style="margin-top:0;">
-      <h2 style="margin-top:0;font-size:14px;">📱&nbsp; iOS (iPhone / iPad)</h2>
-      <p class="muted" style="margin-top:4px;">Run EdgeCoder on your iPhone or iPad to contribute on-device compute to the swarm. Supports three modes: <strong>Off</strong> (idle), <strong>On</strong> (internet swarm with rewards), and <strong>Bluetooth Local</strong> (serve compute to a nearby Mac without internet).</p>
-      <div class="kpis" style="margin-top:6px;">
-        <div class="kpi"><div class="label">Runtime</div><div class="value" style="font-size:11px;">llama.cpp / Core ML</div></div>
-        <div class="kpi"><div class="label">Background</div><div class="value" style="font-size:11px;">BGTask + BLE</div></div>
-        <div class="kpi"><div class="label">BT Local</div><div class="value" style="font-size:11px;">No internet needed</div></div>
+    <!-- ── Feature cards ─────────────────────────────────────────────── -->
+    <div class="feature-row">
+      <div class="feature-card">
+        <div class="fc-icon">&#127760;</div>
+        <div class="fc-title">P2P Mesh Network</div>
+        <div class="fc-desc">Your device joins a global peer-to-peer mesh for distributed AI inference.</div>
       </div>
-      <div class="grid2" style="gap:8px;margin-top:10px;">
-        <div>
-          <div style="${sectionLabel}">Setup</div>
-          <ol style="padding-left:16px;font-size:11px;color:var(--muted);line-height:1.9;margin:0;">
-            <li>Download <strong>EdgeCoder</strong> from the App Store (coming soon — TestFlight for now).</li>
-            <li>Sign in with your EdgeCoder account.</li>
-            <li>Go to <strong>Swarm</strong> tab → set your Coordinator URL.</li>
-            <li>Go to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a>, enroll the device, copy the registration token.</li>
-            <li>Paste the token in the Swarm tab → tap <strong>On</strong> to start contributing.</li>
-          </ol>
-        </div>
-        <div>
-          <div style="${sectionLabel}">Bluetooth Local mode</div>
-          <p style="font-size:11px;color:var(--muted);margin:0 0 6px;">Use your phone's compute for local IDE tasks on a nearby Mac — no internet or rewards.</p>
-          <ol style="padding-left:16px;font-size:11px;color:var(--muted);line-height:1.9;margin:0;">
-            <li>On Mac: set <code>EDGE_RUNTIME_MODE=worker</code> and <code>AGENT_MODE=ide-enabled</code>.</li>
-            <li>On iPhone: select <strong>Bluetooth Local</strong> mode in the Swarm tab.</li>
-            <li>iPhone advertises over BLE — Mac auto-discovers and routes inference requests.</li>
-            <li>If the Mac loses internet, it auto-switches to Bluetooth Local as fallback.</li>
-          </ol>
-        </div>
+      <div class="feature-card">
+        <div class="fc-icon">&#9889;</div>
+        <div class="fc-title">Earn Credits</div>
+        <div class="fc-desc">Contribute idle compute and earn EdgeCoder credits automatically.</div>
+      </div>
+      <div class="feature-card">
+        <div class="fc-icon">&#128274;</div>
+        <div class="fc-title">Private &amp; Local-First</div>
+        <div class="fc-desc">Code and prompts stay on your machine. Inference runs locally when possible.</div>
+      </div>
+      <div class="feature-card">
+        <div class="fc-icon">&#128421;</div>
+        <div class="fc-title">Multi-Platform</div>
+        <div class="fc-desc">macOS, Windows, Linux, iOS, Docker, and VS Code — one mesh everywhere.</div>
       </div>
     </div>
 
-    <!-- ── Docker ──────────────────────────────────────────────────────── -->
-    <div class="card" style="margin-top:0;">
-      <h2 style="margin-top:0;font-size:14px;">🐳&nbsp; Docker</h2>
-      <p class="muted" style="margin-top:4px;">Run EdgeCoder in a container. Set <code>EDGE_RUNTIME_MODE</code> to <code>worker</code> (agent) or <code>coordinator</code>. The image includes Node.js 20.</p>
-      <div class="grid2" style="gap:8px;margin-top:6px;">
-        <div>
-          <div style="${sectionLabel}">Agent (worker)</div>
-          <pre style="${codeBlock}">docker run -d --restart unless-stopped \\
-  --name edgecoder-agent \\
-  -e EDGE_RUNTIME_MODE=worker \\
-  -e AGENT_ID=docker-worker-001 \\
-  -e AGENT_OS=linux \\
-  -e AGENT_REGISTRATION_TOKEN=&lt;token&gt; \\
-  -e COORDINATOR_URL=https://coordinator.edgecoder.io \\
-  ghcr.io/edgecoder-io/edgecoder:latest</pre>
-        </div>
-        <div>
-          <div style="${sectionLabel}">Coordinator</div>
-          <pre style="${codeBlock}">docker run -d --restart unless-stopped \\
-  --name edgecoder-coordinator \\
-  -p 4301:4301 \\
-  -e EDGE_RUNTIME_MODE=coordinator \\
-  -e COORDINATOR_REGISTRATION_TOKEN=&lt;token&gt; \\
-  -e DATABASE_URL=&lt;postgres-url&gt; \\
-  ghcr.io/edgecoder-io/edgecoder:latest</pre>
-        </div>
+    <!-- ── Primary platform card ─────────────────────────────────────── -->
+    ${primaryCard}
+
+    <!-- ── Other platforms toggle ─────────────────────────────────────── -->
+    <button class="toggle-link" id="toggle-others" onclick="toggleOthers()">Show other platforms</button>
+    <div class="other-platforms" id="other-platforms">
+      <div class="other-grid">
+        ${secondaryCards}
       </div>
-    </div>
-
-    <!-- ── Getting started ────────────────────────────────────────────── -->
-    <div class="card" style="margin-top:0;">
-      <h2 style="margin-top:0;font-size:14px;">Getting started</h2>
-      <ol style="padding-left:18px;font-size:12px;color:var(--muted);line-height:2;">
-        <li>Go to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> and generate a registration token — choose <strong>Agent</strong> or <strong>Coordinator</strong>.</li>
-        <li>Download the installer for your OS and follow the platform install steps above.</li>
-        <li><strong>macOS / Linux:</strong> edit <code>/etc/edgecoder/edgecoder.env</code> — set <code>EDGE_RUNTIME_MODE</code>, <code>AGENT_ID</code>, and your registration token.</li>
-        <li>Restart the service: <code>sudo launchctl kickstart -k system/io.edgecoder.runtime</code> (macOS) or <code>sudo systemctl restart edgecoder</code> (Linux).</li>
-        <li>Return to <a href="/portal/nodes" style="color:var(--brand);">Nodes</a> to confirm the node appears, then approve it.</li>
-      </ol>
-    </div>
-
-    <!-- ── Config reference ───────────────────────────────────────────── -->
-    <div class="card" style="margin-top:0;">
-      <h2 style="margin-top:0;font-size:14px;">Configuration reference <span class="muted" style="font-weight:400;font-size:11px;">(/etc/edgecoder/edgecoder.env)</span></h2>
-      <table style="margin-top:4px;">
-        <thead><tr><th>Variable</th><th>Values / Example</th><th>Description</th></tr></thead>
-        <tbody>
-          <tr><td><code>EDGE_RUNTIME_MODE</code></td><td><code>worker</code> | <code>coordinator</code> | <code>ide-provider</code></td><td>Controls which service the daemon runs as.</td></tr>
-          <tr><td><code>AGENT_ID</code></td><td><code>mac-worker-001</code></td><td>Unique identifier for this node in the swarm. Must match the enrolled node ID.</td></tr>
-          <tr><td><code>AGENT_OS</code></td><td><code>macos</code> | <code>ubuntu</code> | <code>debian</code> | <code>ios</code></td><td>OS label reported to coordinator for telemetry.</td></tr>
-          <tr><td><code>AGENT_MODE</code></td><td><code>swarm-only</code> | <code>ide-enabled</code></td><td>Whether this agent also serves IDE inference requests.</td></tr>
-          <tr><td><code>AGENT_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=worker. From node enrollment.</td></tr>
-          <tr><td><code>COORDINATOR_REGISTRATION_TOKEN</code></td><td><em>from Nodes page</em></td><td>Required when EDGE_RUNTIME_MODE=coordinator.</td></tr>
-          <tr><td><code>COORDINATOR_URL</code></td><td><code>https://coordinator.edgecoder.io</code></td><td>URL of the coordinator (agent mode). Default points to managed coordinator.</td></tr>
-          <tr><td><code>MESH_AUTH_TOKEN</code></td><td><em>shared secret</em></td><td>Mesh authentication token. Auto-provisioned on successful registration if left blank.</td></tr>
-          <tr><td><code>LOCAL_MODEL_PROVIDER</code></td><td><code>edgecoder-local</code> | <code>ollama-local</code></td><td>Inference backend. Use <code>ollama-local</code> when Ollama is installed.</td></tr>
-          <tr><td><code>OLLAMA_MODEL</code></td><td><code>qwen2.5-coder:latest</code></td><td>Model tag to use/pull when provider is ollama-local.</td></tr>
-          <tr><td><code>OLLAMA_AUTO_INSTALL</code></td><td><code>true</code> | <code>false</code></td><td>Auto-pull the Ollama model on startup if not present.</td></tr>
-          <tr><td><code>MAX_CONCURRENT_TASKS</code></td><td><code>1</code></td><td>Parallel task limit per agent.</td></tr>
-          <tr><td><code>PEER_OFFER_COOLDOWN_MS</code></td><td><code>20000</code></td><td>Cooldown between peer-direct offers while idle (ms).</td></tr>
-          <tr><td><code>NODE_BIN</code></td><td><code>/usr/local/bin/node</code></td><td>Override Node.js binary path if auto-detection fails.</td></tr>
-        </tbody>
-      </table>
     </div>
   `;
+
   const script = `
     requireAuth().catch(() => {});
+
+    function copyCmd(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      var text = el.textContent.replace(/Copy$/, '').replace(/Copied!$/, '').trim();
+      navigator.clipboard.writeText(text).then(function() {
+        var btn = el.querySelector('.copy-btn');
+        if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy'; }, 2000); }
+      });
+    }
+
+    function toggleOthers() {
+      var el = document.getElementById('other-platforms');
+      var btn = document.getElementById('toggle-others');
+      if (!el || !btn) return;
+      el.classList.toggle('show');
+      btn.textContent = el.classList.contains('show') ? 'Hide other platforms' : 'Show other platforms';
+    }
+    ${queryToken ? `
+    (function() {
+      document.querySelectorAll('.code-block code').forEach(function(el) {
+        el.innerHTML = el.innerHTML.replace(/YOUR_TOKEN/g, '${queryToken}');
+      });
+    })();
+    ` : ""}
   `;
+
   return reply.type("text/html").send(portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Download",
+    title: "EdgeCoder Portal | Get EdgeCoder",
     activeTab: "download",
-    heading: "Download",
-    subtitle: "Install agents and coordinators on macOS, Linux, or Docker.",
+    heading: "Get EdgeCoder",
+    subtitle: "Install the agent, join the mesh, start contributing.",
     content,
     script
   }));
