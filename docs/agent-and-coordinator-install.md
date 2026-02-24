@@ -179,13 +179,13 @@ Use this for horizontal scale or regional redundancy.
 
 ### 2) Deploy coordinator runtime
 
-If using Fly, create another coordinator app (example: `edgecoder-coordinator-2`) and deploy same build.
+If using Fly, create a new coordinator app and deploy the same build. Any node in the gossip mesh can act as a coordinator — there is no fixed "coordinator-2" role.
 
 Minimum runtime env:
 
 ```dotenv
 MESH_AUTH_TOKEN=<mesh-token>
-COORDINATOR_PUBLIC_URL=https://coordinator-2.edgecoder.io
+COORDINATOR_PUBLIC_URL=https://<your-coordinator>.fly.dev
 CONTROL_PLANE_URL=https://control.edgecoder.io
 COORDINATOR_BOOTSTRAP_URLS=https://coordinator.edgecoder.io
 COORDINATOR_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
