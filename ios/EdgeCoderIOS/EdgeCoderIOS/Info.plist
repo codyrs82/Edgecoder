@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>EdgeCoder uses Bluetooth to form a local compute mesh with nearby devices for offline task processing.</string>
+	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.</string>
 	<key>CFBundleDevelopmentRegion</key>
@@ -48,6 +48,8 @@
 	<array>
 		<string>io.edgecoder.ble-mesh</string>
 		<string>io.edgecoder.inference</string>
+		<string>io.edgecoder.ios.runtime</string>
+		<string>io.edgecoder.ios.heartbeat</string>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>8</string>
@@ -62,20 +64,6 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>io.edgecoder.ios.runtime</string>
-		<string>io.edgecoder.ios.heartbeat</string>
-	</array>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>fetch</string>
-		<string>processing</string>
-		<string>bluetooth-central</string>
-		<string>bluetooth-peripheral</string>
-	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
