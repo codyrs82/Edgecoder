@@ -69,4 +69,19 @@ describe("bitcoin anchor provider", () => {
     expect(() => createBitcoinAnchorProviderFromEnv("bitcoin")).toThrow("anchor_proxy_missing_env");
     delete process.env.BITCOIN_ANCHOR_PROVIDER;
   });
+
+  test("mock provider sendToMany returns txid", async () => {
+    const provider = new MockBitcoinAnchorProvider();
+    const result = await provider.sendToMany([
+      { address: "bc1qtest1", amountSats: 50000 },
+      { address: "bc1qtest2", amountSats: 30000 }
+    ]);
+    expect(result.txid).toBeTruthy();
+    expect(result.txid.length).toBe(64);
+  });
+
+  test("mock provider sendToMany rejects empty outputs", async () => {
+    const provider = new MockBitcoinAnchorProvider();
+    await expect(provider.sendToMany([])).rejects.toThrow("no_outputs");
+  });
 });

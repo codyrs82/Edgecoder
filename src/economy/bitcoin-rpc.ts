@@ -27,6 +27,8 @@ export interface BitcoinAnchorProvider {
   getConfirmations(txid: string): Promise<AnchorConfirmationResult>;
   /** Check RPC connectivity and return node info. */
   healthCheck(): Promise<BitcoinNodeHealth>;
+  /** Send BTC to multiple outputs in a single transaction (for payout sweeps). */
+  sendToMany(outputs: SendToManyOutput[]): Promise<SendToManyResult>;
 }
 
 export interface BitcoinNodeHealth {
@@ -39,6 +41,16 @@ export interface BitcoinNodeHealth {
   walletBalance?: number;
   provider: string;
   error?: string;
+}
+
+export interface SendToManyOutput {
+  address: string;
+  amountSats: number;
+}
+
+export interface SendToManyResult {
+  txid: string;
+  rawHex?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -173,6 +185,46 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
       };
     }
   }
+
+  async sendToMany(outputs: SendToManyOutput[]): Promise<SendToManyResult> {
+    if (outputs.length === 0) throw new Error("no_outputs");
+    const amounts: Record<string, number> = {};
+    for (const out of outputs) {
+      amounts[out.address] = (amounts[out.address] ?? 0) + out.amountSats / 1e8;
+    }
+    const utxos = (await this.rpc("listunspent", [1, 9999999])) as Array<{
+      txid: string; vout: number; amount: number;
+    }>;
+    if (utxos.length === 0) throw new Error("bitcoind_no_utxos");
+    const totalBtc = outputs.reduce((s, o) => s + o.amountSats / 1e8, 0);
+    const feeRate = ((await this.rpc("estimatesmartfee", [6])) as { feerate?: number }).feerate ?? 0.00001;
+    const estVbytes = 10 + outputs.length * 34 + utxos.length * 68;
+    const feeBtc = feeRate * estVbytes / 1000;
+    let inputTotal = 0;
+    const selectedUtxos: Array<{ txid: string; vout: number }> = [];
+    for (const utxo of utxos) {
+      selectedUtxos.push({ txid: utxo.txid, vout: utxo.vout });
+      inputTotal += utxo.amount;
+      if (inputTotal >= totalBtc + feeBtc) break;
+    }
+    if (inputTotal < totalBtc + feeBtc) throw new Error("bitcoind_insufficient_funds");
+    const changeBtc = inputTotal - totalBtc - feeBtc;
+    const txOutputs: Record<string, unknown>[] = [];
+    for (const [addr, btc] of Object.entries(amounts)) {
+      txOutputs.push({ [addr]: Number(btc.toFixed(8)) });
+    }
+    if (changeBtc > 0.00000546) {
+      const changeAddr = (await this.rpc("getrawchangeaddress")) as string;
+      txOutputs.push({ [changeAddr]: Number(changeBtc.toFixed(8)) });
+    }
+    const rawTx = (await this.rpc("createrawtransaction", [selectedUtxos, txOutputs])) as string;
+    const signed = (await this.rpc("signrawtransactionwithwallet", [rawTx])) as {
+      hex: string; complete: boolean;
+    };
+    if (!signed.complete) throw new Error("bitcoind_signing_incomplete");
+    const txid = (await this.rpc("sendrawtransaction", [signed.hex])) as string;
+    return { txid, rawHex: signed.hex };
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -275,6 +327,10 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
       };
     }
   }
+
+  async sendToMany(_outputs: SendToManyOutput[]): Promise<SendToManyResult> {
+    throw new Error("sendToMany not supported by this provider");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -359,6 +415,10 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
       };
     }
   }
+
+  async sendToMany(_outputs: SendToManyOutput[]): Promise<SendToManyResult> {
+    throw new Error("sendToMany not supported by this provider");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -377,6 +437,14 @@ export class MockBitcoinAnchorProvider implements BitcoinAnchorProvider {
 
   async healthCheck(): Promise<BitcoinNodeHealth> {
     return { reachable: true, chain: "mock", blocks: 900_000, headers: 900_000, provider: "mock" };
+  }
+
+  async sendToMany(outputs: SendToManyOutput[]): Promise<SendToManyResult> {
+    if (outputs.length === 0) throw new Error("no_outputs");
+    const txid = createHash("sha256")
+      .update(`mock-sweep:${outputs.length}:${Date.now()}`)
+      .digest("hex");
+    return { txid };
   }
 }
 
