@@ -17,6 +17,8 @@ import {
   parseRecordPayload,
   computeIntentFee
 } from "./coordinator-utils.js";
+import { RobotQueue } from "./robot-queue.js";
+import { registerRobotRoutes } from "./robot-routes.js";
 import { extractCode } from "../model/extract.js";
 import { SwarmQueue } from "./queue.js";
 import {
@@ -100,6 +102,12 @@ const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
 const COORDINATOR_FEE_BPS = Number(process.env.COORDINATOR_FEE_BPS ?? "150");
 const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordinator-fee:default";
 const BITCOIN_NETWORK = (process.env.BITCOIN_NETWORK ?? "testnet") as "bitcoin" | "testnet" | "signet";
+const ROBOT_QUEUE_ENABLED = process.env.ROBOT_QUEUE_ENABLED === "true";
+const ROBOT_COORDINATOR_FEE_BPS = Number(process.env.ROBOT_COORDINATOR_FEE_BPS ?? "200");
+const ROBOT_SWEEP_INTERVAL_MS = Number(process.env.ROBOT_SWEEP_INTERVAL_MS ?? "86400000");
+const ROBOT_MIN_SWEEP_SATS = Number(process.env.ROBOT_MIN_SWEEP_SATS ?? "10000");
+const ROBOT_TASK_DEFAULT_TIMEOUT_MS = Number(process.env.ROBOT_TASK_DEFAULT_TIMEOUT_MS ?? "3600000");
+const ROBOT_AUTO_SETTLE_DELAY_MS = Number(process.env.ROBOT_AUTO_SETTLE_DELAY_MS ?? "86400000");
 const APPROVED_COORDINATOR_IDS = new Set(
   (process.env.APPROVED_COORDINATOR_IDS ?? "")
     .split(",")
@@ -305,6 +313,25 @@ function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return true;
   const token = headers["x-portal-service-token"];
   return typeof token === "string" && safeTokenEqual(token, PORTAL_SERVICE_TOKEN);
+}
+
+const robotQueue = ROBOT_QUEUE_ENABLED
+  ? new RobotQueue({
+      coordinatorFeeBps: ROBOT_COORDINATOR_FEE_BPS,
+      defaultTimeoutMs: ROBOT_TASK_DEFAULT_TIMEOUT_MS,
+      autoSettleDelayMs: ROBOT_AUTO_SETTLE_DELAY_MS,
+      sweepIntervalMs: ROBOT_SWEEP_INTERVAL_MS,
+      minSweepSats: ROBOT_MIN_SWEEP_SATS,
+      bitcoinNetwork: BITCOIN_NETWORK
+    })
+  : null;
+
+if (robotQueue) {
+  registerRobotRoutes(app, robotQueue, {
+    hasMeshToken: (headers) => hasMeshToken(headers),
+    hasPortalServiceToken: (headers) => hasPortalServiceToken(headers),
+    lightningProvider
+  });
 }
 
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
