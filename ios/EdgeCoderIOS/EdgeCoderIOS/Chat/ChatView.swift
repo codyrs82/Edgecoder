@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var streamProgress: StreamProgress?
     @State private var showHistory = false
     @State private var showSettings = false
+    @State private var showModelPicker = false
 
     @FocusState private var inputFocused: Bool
 
@@ -82,6 +83,16 @@ struct ChatView: View {
             SettingsView()
                 .environmentObject(sessionStore)
         }
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerSheet(
+                selectedModel: $conversation.selectedModel,
+                isPresented: $showModelPicker,
+                localModels: chatRouter.modelManager.installedModels,
+                localActiveModel: chatRouter.modelManager.selectedModel,
+                catalogModels: chatRouter.modelManager.availableCatalog,
+                blePeers: chatRouter.bleMeshManager.discoveredPeers
+            )
+        }
     }
 
     // MARK: - Header
@@ -98,10 +109,19 @@ struct ChatView: View {
 
             Spacer()
 
-            Text(conversation.title)
-                .font(.headline)
-                .foregroundColor(Theme.textPrimary)
-                .lineLimit(1)
+            Button {
+                showModelPicker = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text(conversation.selectedModel ?? "Auto")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundColor(Theme.textMuted)
+                }
+            }
 
             Spacer()
 
@@ -209,7 +229,10 @@ struct ChatView: View {
         streamProgress = nil
 
         Task {
-            let session = chatRouter.routeChatStreaming(messages: conversation.messages)
+            let session = chatRouter.routeChatStreaming(
+                messages: conversation.messages,
+                requestedModel: conversation.selectedModel
+            )
             // Update progress immediately with route info
             streamProgress = session.getProgress()
             do {

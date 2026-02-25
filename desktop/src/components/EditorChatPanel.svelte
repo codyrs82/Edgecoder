@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
+  import ModelPicker from "./ModelPicker.svelte";
   import { streamChat } from "../lib/api";
   import type { StreamProgress } from "../lib/api";
   import {
@@ -100,6 +101,7 @@
         (progress) => {
           streamProgress = progress;
         },
+        conversation.selectedModel,
       );
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
@@ -172,6 +174,10 @@
         <polyline points="6 9 12 15 18 9"/>
       </svg>
     </button>
+    <ModelPicker
+      selectedModel={conversation.selectedModel}
+      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
+    />
     <button class="new-chat-btn" onclick={newChat} title="New coding chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 5v14M5 12h14"/>

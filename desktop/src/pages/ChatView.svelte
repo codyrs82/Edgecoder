@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
+  import ModelPicker from "../components/ModelPicker.svelte";
   import { streamChat } from "../lib/api";
   import type { StreamProgress } from "../lib/api";
   import {
@@ -83,6 +84,7 @@
         (progress) => {
           streamProgress = progress;
         },
+        conversation.selectedModel,
       );
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
@@ -151,6 +153,13 @@
 </script>
 
 <div class="chat-view" bind:this={scrollContainer}>
+  <div class="chat-header">
+    <ModelPicker
+      selectedModel={conversation.selectedModel}
+      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
+    />
+  </div>
+
   {#if conversation.messages.length === 0 && !isStreaming}
     <div class="empty-state">
       <h2>What would you like to build?</h2>
@@ -181,6 +190,12 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+  }
+  .chat-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 16px;
+    flex-shrink: 0;
   }
   .empty-state {
     flex: 1;

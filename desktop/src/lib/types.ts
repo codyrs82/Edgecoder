@@ -126,6 +126,7 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   source?: "chat" | "editor";
+  selectedModel?: string;
 }
 
 export interface ChatCompletionChunk {
