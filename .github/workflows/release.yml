@@ -79,8 +79,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Windows .msi installer
+      - name: Stage Windows build
         run: npm run build:windows-msi
+
+      - name: Compile .msi with wixl
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          cd build/windows
+          wixl -o "../EdgeCoder-${VERSION}-windows-x64.msi" edgecoder.wxs
 
       - name: Upload Windows .msi artifact
         uses: actions/upload-artifact@v4
