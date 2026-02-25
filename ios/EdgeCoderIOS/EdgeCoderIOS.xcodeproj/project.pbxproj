@@ -44,6 +44,7 @@
 		AA08080808080808AA080801 /* MessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA08080808080808AA080802 /* MessageBubble.swift */; };
 		AA09090909090909AA090901 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09090909090909AA090902 /* ChatView.swift */; };
 		AA10101010101010AA100101 /* ConversationSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10101010101010AA100102 /* ConversationSidebar.swift */; };
+		AA13131313131313AA130101 /* ModelPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA13131313131313AA130102 /* ModelPickerSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -86,6 +87,7 @@
 		AA08080808080808AA080802 /* MessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubble.swift; sourceTree = "<group>"; };
 		AA09090909090909AA090902 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		AA10101010101010AA100102 /* ConversationSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebar.swift; sourceTree = "<group>"; };
+		AA13131313131313AA130102 /* ModelPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -218,6 +220,7 @@
 				AA10101010101010AA100102 /* ConversationSidebar.swift */,
 				AA06060606060606AA060602 /* ConversationStore.swift */,
 				AA08080808080808AA080802 /* MessageBubble.swift */,
+				AA13131313131313AA130102 /* ModelPickerSheet.swift */,
 			);
 			path = Chat;
 			sourceTree = "<group>";
@@ -337,6 +340,7 @@
 				AA03030303030303AA030301 /* IDEView.swift in Sources */,
 				89088AFA12BF751F0F4B4831 /* LocalModelManager.swift in Sources */,
 				AA08080808080808AA080801 /* MessageBubble.swift in Sources */,
+				AA13131313131313AA130101 /* ModelPickerSheet.swift in Sources */,
 				B1A2C3D4E5F60718293A4B5D /* ModelLibraryView.swift in Sources */,
 				C2B3D4E5F6071829304B5C6E /* ModelPickerView.swift in Sources */,
 				D3C4E5F60718293A415C6D7F /* ModelStatusBanner.swift in Sources */,
