@@ -3275,14 +3275,6 @@ function portalAuthedPageHtml(input: {
   content: string;
   script: string;
 }): string {
-  const navLink = (
-    tab: "chat" | "dashboard" | "wallet" | "settings" | "download",
-    label: string,
-    href: string
-  ) => {
-    const activeClass = input.activeTab === tab ? "tab active" : "tab";
-    return `<a class="${activeClass}" href="${href}">${label}</a>`;
-  };
 
   return `<!doctype html>
   <html>
@@ -3311,73 +3303,36 @@ function portalAuthedPageHtml(input: {
           background: var(--bg);
           min-height: 100vh;
         }
-        .shell { max-width: 1360px; margin: 18px auto 26px; padding: 0 14px; }
-        .workspace {
-          display: grid;
-          grid-template-columns: 232px 1fr;
-          gap: 10px;
-        }
-        .sidebar {
-          background: var(--bg-soft);
-          border: 0.5px solid var(--card-border);
-          border-radius: 8px;
-          padding: 12px 8px;
-          min-height: calc(100vh - 32px);
-          position: sticky;
-          top: 10px;
-        }
-        .main { min-width: 0; }
-        .sidebar-brand { display: flex; align-items: center; gap: 8px; padding: 0 6px 8px; }
-        .sidebar-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-        .sidebar-subtitle { color: var(--muted); font-size: 11px; margin-top: 1px; }
-        .sidebar-section-label {
-          color: var(--muted);
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.12em;
-          margin: 10px 6px 6px;
-        }
-        .sidebar-foot {
-          margin: 10px 6px 0;
-          padding-top: 8px;
-          border-top: 0.5px solid var(--card-border);
-          font-size: 11px;
-        }
+        .shell { max-width: 1360px; margin: 0 auto; padding: 0 14px; }
         .topbar {
           display: flex;
           justify-content: space-between;
-          gap: 8px;
           align-items: center;
-          margin-bottom: 8px;
-          padding: 10px 12px;
-          border: 0.5px solid var(--card-border);
-          border-radius: 8px;
-          background: var(--card);
+          padding: 8px 12px;
+          border-bottom: 0.5px solid var(--card-border);
+          background: var(--bg-soft);
         }
-        .ticker-row {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(120px, 1fr));
-          gap: 8px;
-          margin-bottom: 8px;
-        }
-        .ticker {
-          border: 1px solid var(--card-border);
-          border-radius: 6px;
-          padding: 7px;
-          background: var(--card);
-        }
-        .ticker .label {
-          color: var(--muted);
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-        }
-        .ticker .value {
-          margin-top: 3px;
-          font-size: 14px;
-          font-weight: 700;
+        .topbar-left { display: flex; align-items: center; gap: 10px; }
+        .topbar-left a { text-decoration: none; color: var(--text); display: flex; align-items: center; gap: 8px; }
+        .topbar-right { display: flex; align-items: center; gap: 10px; }
+        .topbar-credits {
           font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 12px;
+          color: var(--muted);
+          padding: 3px 8px;
+          border: 0.5px solid var(--card-border);
+          border-radius: 6px;
+          background: var(--bg);
         }
+        .topbar-icon {
+          width: 32px; height: 32px;
+          display: inline-flex; align-items: center; justify-content: center;
+          border-radius: 6px; border: 0.5px solid var(--card-border);
+          background: var(--bg); color: var(--muted); text-decoration: none;
+          font-size: 16px; cursor: pointer; transition: background 0.15s;
+        }
+        .topbar-icon:hover { background: var(--card); color: var(--text); }
+        .main { min-width: 0; }
         .brand { display: inline-flex; align-items: center; gap: 10px; }
         .mark {
           width: 28px;
@@ -3387,27 +3342,11 @@ function portalAuthedPageHtml(input: {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset, 0 8px 18px rgba(16, 97, 143, 0.22);
+          box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset;
           font-size: 12px;
         }
-        .title { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
+        .topbar-title { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
         .muted { color: var(--muted); font-size: 11px; }
-        .nav-row { display: flex; flex-direction: column; gap: 4px; }
-        .tab {
-          border: 1px solid var(--card-border);
-          border-radius: 6px;
-          padding: 7px 8px;
-          font-size: 11px;
-          color: var(--text);
-          background: var(--bg-soft);
-          text-decoration: none;
-        }
-        .tab.active {
-          border-color: rgba(193, 120, 80, 0.45);
-          background: rgba(193, 120, 80, 0.1);
-          color: var(--brand-2);
-          box-shadow: inset 2px 0 0 rgba(193, 120, 80, 0.7);
-        }
         .card {
           background: var(--card);
           border: 1px solid var(--card-border);
@@ -3537,72 +3476,28 @@ function portalAuthedPageHtml(input: {
         }
         .hidden { display: none; }
         @media (max-width: 920px) {
-          .workspace { grid-template-columns: 1fr; }
-          .sidebar {
-            min-height: auto;
-            position: static;
-          }
-          .nav-row { flex-direction: row; flex-wrap: wrap; }
-          .tab {
-            border-radius: 999px;
-            padding: 6px 10px;
-            text-transform: none;
-            letter-spacing: 0;
-          }
           .grid2 { grid-template-columns: 1fr; }
           .kpis { grid-template-columns: 1fr; }
-          .ticker-row { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
         }
       </style>
     </head>
     <body>
+      <div class="topbar">
+        <div class="topbar-left">
+          <a href="/portal/chat">
+            <div class="mark">E</div>
+            <span class="topbar-title">EdgeCoder</span>
+          </a>
+        </div>
+        <div class="topbar-right">
+          <span class="topbar-credits" id="topTickerCredits" title="Credits">-</span>
+          <a class="topbar-icon" href="/portal/settings" title="Settings">&#9881;</a>
+          <a class="topbar-icon" id="logoutBtn" href="#" title="Sign out">&#10140;</a>
+        </div>
+      </div>
       <div class="shell">
-        <div class="workspace">
-          <aside class="sidebar">
-            <div class="sidebar-brand">
-              <div class="mark">E</div>
-              <div>
-                <div class="sidebar-title">EdgeCoder Portal</div>
-                <div class="sidebar-subtitle">AI Network</div>
-              </div>
-            </div>
-            <div class="sidebar-section-label">Navigation</div>
-            <div class="nav-row">
-              ${navLink("chat", "Chat", "/portal/chat")}
-              ${navLink("dashboard", "Dashboard", "/portal/dashboard")}
-              ${navLink("wallet", "Wallet", "/portal/wallet")}
-              ${navLink("download", "Get EdgeCoder", "/portal/download")}
-              ${navLink("settings", "Settings", "/portal/settings")}
-              <a class="tab" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
-              <a class="tab" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
-            </div>
-            <div class="sidebar-foot muted">Auditable actions and secure operations</div>
-          </aside>
-          <main class="main">
-            <div class="topbar">
-              <div class="brand">
-                <div>
-                  <h1 class="title">${input.heading}</h1>
-                  <div class="muted">${input.subtitle}</div>
-                </div>
-              </div>
-              <div class="row">
-                <a class="btn" href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
-                <a class="btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
-                <button id="switchUserBtn">Switch user</button>
-                <button id="logoutBtn">Sign out</button>
-              </div>
-            </div>
-            <div class="ticker-row">
-              <div class="ticker"><div class="label">Credits</div><div class="value" id="topTickerCredits">-</div></div>
-              <div class="ticker"><div class="label">Nodes</div><div class="value" id="topTickerNodes">-</div></div>
-              <div class="ticker"><div class="label">Pending Sends</div><div class="value" id="topTickerSends">-</div></div>
-              <div class="ticker"><div class="label">Wallet</div><div class="value" id="topTickerWallet">-</div></div>
-            </div>
-            <div class="content-stack">
-              ${input.content}
-            </div>
-          </main>
+        <div class="content-stack" style="padding-top:12px;">
+          ${input.content}
         </div>
       </div>
       <div id="toast" class="card hidden"></div>
@@ -3657,30 +3552,17 @@ function portalAuthedPageHtml(input: {
             const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
             const credits = (summary.walletSnapshot || {}).credits;
             const creditVal = credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
-            const nodeCount = String((summary.nodes || []).length);
-            const walletCount = String(((summary.walletSnapshot || {}).wallets || []).length);
-            const sendReq = await api("/wallet/send/requests", { method: "GET", headers: {} }).catch(() => ({ requests: [] }));
-            const pendingSends = ((sendReq.requests || []).filter((r) => String(r.status) === "pending_manual_review")).length;
-            document.getElementById("topTickerCredits").textContent = creditVal;
-            document.getElementById("topTickerNodes").textContent = nodeCount;
-            document.getElementById("topTickerWallet").textContent = walletCount;
-            document.getElementById("topTickerSends").textContent = String(pendingSends);
+            document.getElementById("topTickerCredits").textContent = creditVal + " credits";
           } catch {
             // noop on pages that redirect unauthenticated users
           }
         }
-        document.getElementById("logoutBtn").addEventListener("click", async () => {
+        document.getElementById("logoutBtn").addEventListener("click", async (e) => {
+          e.preventDefault();
           try {
             await api("/auth/logout", { method: "POST", body: JSON.stringify({}) });
           } finally {
             window.location.href = "/";
-          }
-        });
-        document.getElementById("switchUserBtn").addEventListener("click", async () => {
-          try {
-            await api("/auth/logout", { method: "POST", body: JSON.stringify({}) });
-          } finally {
-            window.location.href = "/portal?switch=1";
           }
         });
         loadTopTicker();
@@ -4011,7 +3893,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
     </style>
-    <div style="display:grid; grid-template-columns:260px 1fr; gap:10px; height:calc(100vh - 180px);">
+    <div style="display:grid; grid-template-columns:260px 1fr; gap:10px; height:calc(100vh - 70px);">
       <!-- Left: Conversation sidebar -->
       <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -5083,9 +4965,27 @@ app.get("/portal/wallet", async (_req, reply) => {
 
 app.get("/portal/settings", async (_req, reply) => {
   const content = `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+      <a href="/portal/dashboard" class="card" style="text-decoration:none; color:var(--text);">
+        <h3 style="margin:0 0 4px;">Dashboard</h3>
+        <div class="muted">Account overview, nodes, and network stats</div>
+      </a>
+      <a href="/portal/wallet" class="card" style="text-decoration:none; color:var(--text);">
+        <h3 style="margin:0 0 4px;">Wallet & Credits</h3>
+        <div class="muted">Manage credits, seeds, and send tokens</div>
+      </a>
+      <a href="/portal/download" class="card" style="text-decoration:none; color:var(--text);">
+        <h3 style="margin:0 0 4px;">Get EdgeCoder</h3>
+        <div class="muted">Download installers for all platforms</div>
+      </a>
+      <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer" class="card" style="text-decoration:none; color:var(--text);">
+        <h3 style="margin:0 0 4px;">Documentation</h3>
+        <div class="muted">Guides, API reference, and setup help</div>
+      </a>
+    </div>
     <div class="grid2">
       <div class="card">
-        <h2 style="margin-top:0;">Account settings</h2>
+        <h2 style="margin-top:0;">Account</h2>
         <div id="accountLine" class="muted">Loading account...</div>
         <label>Theme</label>
         <select id="themeSelect" style="max-width:220px;">
