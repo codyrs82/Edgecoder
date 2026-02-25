@@ -89,19 +89,11 @@
       </Component>
     </DirectoryRef>
 
-    <!-- Add bin\ to system PATH -->
-    <DirectoryRef Id="BinFolder">
-      <Component Id="PathEntry" Guid="E5F6A7B8-C9D0-1234-EFAB-345678901234">
-        <CreateFolder />
-        <Environment Id="PATH"
-                     Name="PATH"
-                     Value="[BinFolder]"
-                     Permanent="no"
-                     Part="last"
-                     Action="set"
-                     System="yes" />
-      </Component>
-    </DirectoryRef>
+    <!--
+      NOTE: Environment element (for adding bin\ to system PATH) is not
+      supported by wixl. Users can add bin\ to PATH manually if needed.
+      The Windows service runs via absolute path so PATH is not required.
+    -->
 
     <!--
       NOTE: App directory components (dist\, node_modules\, package.json)
@@ -150,7 +142,6 @@
       <ComponentRef Id="RuntimeScript" />
       <ComponentRef Id="ConfigureScript" />
       <ComponentRef Id="ConfigDir" />
-      <ComponentRef Id="PathEntry" />
       <ComponentRef Id="EdgeCoderService" />
       <!--
         Add the heat-generated component group here:
