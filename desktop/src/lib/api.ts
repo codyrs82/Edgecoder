@@ -214,6 +214,7 @@ export async function streamChat(
   onChunk: (text: string) => void,
   signal?: AbortSignal,
   onProgress?: (progress: StreamProgress) => void,
+  requestedModel?: string,
 ): Promise<void> {
   const streamStart = Date.now();
   let tokenCount = 0;
@@ -223,7 +224,7 @@ export async function streamChat(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "edgecoder-local",
+      model: requestedModel ?? "edgecoder-local",
       messages,
       stream: true,
       temperature: 0.7,
@@ -312,3 +313,17 @@ export interface CapacityResponse {
 
 export const getCapacity = () =>
   get<CapacityResponse>(AGENT_BASE, "/capacity");
+
+// ---------------------------------------------------------------------------
+// Swarm model availability
+// ---------------------------------------------------------------------------
+
+export interface SwarmModelInfo {
+  model: string;
+  paramSize: number;
+  agentCount: number;
+  avgLoad: number;
+}
+
+export const getAvailableModels = () =>
+  get<SwarmModelInfo[]>(AGENT_BASE, "/models/available");

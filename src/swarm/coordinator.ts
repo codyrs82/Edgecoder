@@ -1428,7 +1428,8 @@ const taskSchema = z.object({
   projectId: z.string().default("default"),
   tenantId: z.string().optional(),
   resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
-  priority: z.number().min(0).max(100).default(50)
+  priority: z.number().min(0).max(100).default(50),
+  requestedModel: z.string().optional()
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -1727,6 +1728,7 @@ app.post("/submit", async (req, reply) => {
   const created = payload.subtasks.map((subtask) =>
     queue.enqueueSubtask({
       ...subtask,
+      requestedModel: body.requestedModel,
       projectMeta: {
         projectId: body.projectId,
         tenantId: body.tenantId,
@@ -1799,7 +1801,7 @@ app.post("/pull", async (req, reply) => {
       return reply.send({ subtask: null, powerDeferred: true, reason: decision.reason });
     }
   }
-  const task = queue.claim(body.agentId);
+  const task = queue.claim(body.agentId, capability?.activeModel);
   if (task) {
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
     const claimRecord = ordering.append({
@@ -2012,6 +2014,27 @@ app.get("/features", async () => ({
   public_mesh: networkMode === "public_mesh",
   enterprise_overlay: networkMode === "enterprise_overlay"
 }));
+app.get("/models/available", async (_req, reply) => {
+  const modelMap: Record<string, { model: string; paramSize: number; agentCount: number; avgLoad: number }> = {};
+
+  for (const [_agentId, cap] of agentCapabilities) {
+    const model = cap.activeModel;
+    if (!model) continue;
+    if (!modelMap[model]) {
+      modelMap[model] = { model, paramSize: cap.activeModelParamSize ?? 0, agentCount: 0, avgLoad: 0 };
+    }
+    modelMap[model].agentCount += 1;
+    // agentCapabilities does not track per-agent load; default to 0
+    modelMap[model].avgLoad += 0;
+  }
+
+  const models = Object.values(modelMap).map(m => ({
+    ...m,
+    avgLoad: m.agentCount > 0 ? m.avgLoad / m.agentCount : 0,
+  }));
+
+  return reply.send(models);
+});
 app.get("/capacity", async () => {
   const agents = [...agentCapabilities.entries()].map(([agentId, info]) => {
     const powerDecision = evaluateAgentPowerPolicy({

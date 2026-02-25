@@ -87,16 +87,22 @@ export class SwarmQueue {
     return false;
   }
 
-  claim(agentId: string): Subtask | undefined {
+  claim(agentId: string, agentActiveModel?: string): Subtask | undefined {
     const now = Date.now();
     const unclaimed = this.tasks.filter(
       (task) => !task.claimedBy && (!task.claimableAfterMs || now >= task.claimableAfterMs)
     );
     if (unclaimed.length === 0) return undefined;
 
+    // Partition into model-matching and non-matching
+    const matching = agentActiveModel
+      ? unclaimed.filter(t => t.subtask.requestedModel === agentActiveModel)
+      : [];
+    const pool = matching.length > 0 ? matching : unclaimed;
+
     // Fair-share: prefer projects with fewer completed results.
-    let item = unclaimed[0];
-    for (const candidate of unclaimed) {
+    let item = pool[0];
+    for (const candidate of pool) {
       const currentProject = item.subtask.projectMeta.projectId;
       const candidateProject = candidate.subtask.projectMeta.projectId;
       const currentCount = this.projectCompleted.get(currentProject) ?? 0;

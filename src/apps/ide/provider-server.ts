@@ -39,6 +39,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     stream: body.stream,
     temperature: body.temperature,
     maxTokens: body.max_tokens,
+    requestedModel: body.model !== "edgecoder-local" ? body.model : undefined,
   });
 
   app.log.info({ route: result.route, model: result.model }, "chat routed");

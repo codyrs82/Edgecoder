@@ -252,7 +252,8 @@ export class IntelligentRouter {
   // -------------------------------------------------------------------------
 
   private async runViaSwarm(
-    prompt: string
+    prompt: string,
+    requestedModel?: string
   ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
     const coordinatorUrl = this.cfg.coordinatorUrl.replace(/\/$/, "");
     const headers = {
@@ -272,6 +273,7 @@ export class IntelligentRouter {
         projectId: "ide-requests",
         resourceClass: "cpu",
         priority: 60,
+        requestedModel,
         subtasks: [{ prompt, language: this.cfg.swarmLanguage ?? "python" }]
       }),
       headersTimeout: 15_000,
@@ -330,11 +332,12 @@ export class IntelligentRouter {
 
   async routeChat(
     messages: ChatMessage[],
-    opts: { stream?: boolean; temperature?: number; maxTokens?: number } = {}
+    opts: { stream?: boolean; temperature?: number; maxTokens?: number; requestedModel?: string } = {}
   ): Promise<ChatRouteResult> {
     const stream = opts.stream ?? false;
     const temperature = opts.temperature ?? 0.7;
     const maxTokens = opts.maxTokens ?? 4096;
+    const chatModel = opts.requestedModel ?? this.ollamaChatModel;
 
     // 1. Bluetooth-local chat
     if (await this.isBluetoothAvailable()) {
@@ -353,7 +356,7 @@ export class IntelligentRouter {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            model: this.ollamaChatModel,
+            model: chatModel,
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream,
             options: { temperature, num_predict: maxTokens },
@@ -366,7 +369,7 @@ export class IntelligentRouter {
           return {
             route: "ollama-local",
             stream: ollamaRes.body as unknown as Readable,
-            model: this.ollamaChatModel,
+            model: chatModel,
           };
         }
 
@@ -380,7 +383,7 @@ export class IntelligentRouter {
         return {
           route: "ollama-local",
           text: payload.message?.content ?? "",
-          model: this.ollamaChatModel,
+          model: chatModel,
           latencyMs: elapsed,
         };
       } catch (err) {
@@ -394,7 +397,7 @@ export class IntelligentRouter {
       const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
       if (lastUserMsg) {
         try {
-          const result = await this.runViaSwarm(lastUserMsg.content);
+          const result = await this.runViaSwarm(lastUserMsg.content, opts.requestedModel);
           return {
             route: "swarm",
             text: result.text,

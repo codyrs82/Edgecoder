@@ -64,6 +64,7 @@ export interface Subtask {
   timeoutMs: number;
   snapshotRef: string;
   projectMeta: TaskProjectMeta;
+  requestedModel?: string;
 }
 
 export interface SubtaskResult {
