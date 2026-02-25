@@ -460,14 +460,16 @@ final class SwarmRuntimeController: ObservableObject {
             _ = try await postCoordinator(path: "/result", payload: resultPayload)
 
             lastTaskAt = Date()
+            let earnedCredits = Int(max(0.5, modelManager.selectedModelParamSize))
             if result.ok {
                 tasksCompleted += 1
-                creditsEarned += 5
-                appendEvent("Task \(subtaskId.prefix(8))… completed (\(result.durationMs)ms) — +5 credits")
+                creditsEarned += earnedCredits
+                appendEvent("Task \(subtaskId.prefix(8))… completed (\(result.durationMs)ms) — +\(earnedCredits) credits")
             } else {
                 tasksFailed += 1
-                creditsEarned += 2
-                appendEvent("Task \(subtaskId.prefix(8))… failed (\(result.durationMs)ms) — +2 credits")
+                let failCredits = max(1, earnedCredits / 2)
+                creditsEarned += failCredits
+                appendEvent("Task \(subtaskId.prefix(8))… failed (\(result.durationMs)ms) — +\(failCredits) credits")
             }
             isProcessingTask = false
             persistRuntimeSettings()
@@ -514,9 +516,9 @@ final class SwarmRuntimeController: ObservableObject {
     // MARK: - Chat Task Submission (used by ChatRouter)
 
     /// Submit a chat prompt to the coordinator task queue and poll for the result.
-    func submitChatTask(prompt: String) async throws -> (output: String, taskId: String) {
+    func submitChatTask(prompt: String, requestedModel: String? = nil) async throws -> (output: String, taskId: String) {
         let taskId = "chat-\(Int(Date().timeIntervalSince1970 * 1000))"
-        let submitPayload: [String: Any] = [
+        var submitPayload: [String: Any] = [
             "taskId": taskId,
             "prompt": prompt,
             "language": "python",
@@ -526,6 +528,9 @@ final class SwarmRuntimeController: ObservableObject {
             "priority": 60,
             "subtasks": [["prompt": prompt, "language": "python"]]
         ]
+        if let model = requestedModel {
+            submitPayload["requestedModel"] = model
+        }
 
         let submitResponse = try await postCoordinator(path: "/tasks", payload: submitPayload)
 

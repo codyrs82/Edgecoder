@@ -90,6 +90,12 @@ struct MessageBubble: View {
                         .font(.caption)
                         .foregroundColor(Theme.textMuted)
                 }
+
+                if let credits = p.creditsSpent {
+                    Text("· \(String(format: "%.1f", credits)) cr")
+                        .font(.caption)
+                        .foregroundColor(Theme.accent)
+                }
             }
         }
         .padding(.top, 4)

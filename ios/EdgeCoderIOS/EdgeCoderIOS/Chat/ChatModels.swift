@@ -31,6 +31,7 @@ struct Conversation: Codable, Identifiable, Equatable {
     let source: Source
     let createdAt: Date
     var updatedAt: Date
+    var selectedModel: String?
 
     enum Source: String, Codable {
         case chat
@@ -84,6 +85,7 @@ struct StreamProgress {
     var route: RouteDecision?
     var routeLabel: String = ""
     var model: String = ""
+    var creditsSpent: Double?
 
     var routeIcon: String {
         switch route {

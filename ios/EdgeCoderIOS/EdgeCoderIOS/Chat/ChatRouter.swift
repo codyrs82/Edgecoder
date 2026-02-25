@@ -36,9 +36,9 @@ final class ChatRouter: ObservableObject {
     private let concurrencyCap = 1 // iOS devices: single concurrent inference
     private let latencyThresholdMs = 15_000 // More lenient for mobile
 
-    private let modelManager: LocalModelManager
-    private let swarmRuntime: SwarmRuntimeController
-    private let bleMeshManager: BLEMeshManager
+    let modelManager: LocalModelManager
+    let swarmRuntime: SwarmRuntimeController
+    let bleMeshManager: BLEMeshManager
 
     init(
         modelManager: LocalModelManager,
@@ -52,39 +52,46 @@ final class ChatRouter: ObservableObject {
 
     // MARK: - Route Chat (non-streaming)
 
-    func routeChat(messages: [ChatMessage]) async -> ChatRouteResult {
+    func routeChat(messages: [ChatMessage], requestedModel: String? = nil) async -> ChatRouteResult {
         let started = CFAbsoluteTimeGetCurrent()
         let lastUserContent = messages.last(where: { $0.role == .user })?.content ?? ""
 
         // 1. Local llama.cpp — if model is loaded and within capacity
         if modelManager.state == .ready && activeConcurrent < concurrencyCap {
-            let p95 = latency.p95EstimateMs
-            if p95 == 0 || p95 <= latencyThresholdMs {
-                activeConcurrent += 1
-                let t0 = CFAbsoluteTimeGetCurrent()
-                let result = await modelManager.generate(prompt: lastUserContent, maxTokens: 512)
-                let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-                latency.record(ms: elapsed)
-                activeConcurrent = max(0, activeConcurrent - 1)
+            // Skip local if user requested a different model
+            let localModelMatches = requestedModel == nil || requestedModel == modelManager.selectedModel
+            if localModelMatches {
+                let p95 = latency.p95EstimateMs
+                if p95 == 0 || p95 <= latencyThresholdMs {
+                    activeConcurrent += 1
+                    let t0 = CFAbsoluteTimeGetCurrent()
+                    let result = await modelManager.generate(prompt: lastUserContent, maxTokens: 512)
+                    let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                    latency.record(ms: elapsed)
+                    activeConcurrent = max(0, activeConcurrent - 1)
 
-                if result.ok {
-                    let routeResult = ChatRouteResult(
-                        route: .local,
-                        text: result.output,
-                        model: modelManager.selectedModel,
-                        latencyMs: elapsed,
-                        creditsSpent: nil,
-                        swarmTaskId: nil
-                    )
-                    lastRoute = .local
-                    lastLatencyMs = elapsed
-                    return routeResult
+                    if result.ok {
+                        let routeResult = ChatRouteResult(
+                            route: .local,
+                            text: result.output,
+                            model: modelManager.selectedModel,
+                            latencyMs: elapsed,
+                            creditsSpent: nil,
+                            swarmTaskId: nil
+                        )
+                        lastRoute = .local
+                        lastLatencyMs = elapsed
+                        return routeResult
+                    }
                 }
             }
         }
 
         // 2. BLE peer — if a nearby peer is discovered
-        if let peer = bleMeshManager.discoveredPeers.first {
+        let matchingPeer = requestedModel != nil
+            ? bleMeshManager.discoveredPeers.first(where: { $0.model == requestedModel })
+            : bleMeshManager.discoveredPeers.first
+        if let peer = matchingPeer {
             let bleResult = await bleMeshManager.sendTask(
                 toAgentId: peer.agentId,
                 prompt: lastUserContent,
@@ -109,14 +116,20 @@ final class ChatRouter: ObservableObject {
         // 3. Coordinator/swarm — submit to task queue
         if !swarmRuntime.meshToken.isEmpty {
             do {
-                let swarmResult = try await swarmRuntime.submitChatTask(prompt: lastUserContent)
+                let swarmResult = try await swarmRuntime.submitChatTask(prompt: lastUserContent, requestedModel: requestedModel)
                 let elapsed = Int((CFAbsoluteTimeGetCurrent() - started) * 1000)
+                let paramSize: Double
+                if let catalog = modelManager.availableCatalog.first(where: { $0.modelId == requestedModel }) {
+                    paramSize = catalog.paramSize
+                } else {
+                    paramSize = 1.0
+                }
                 let routeResult = ChatRouteResult(
                     route: .swarm,
                     text: swarmResult.output,
                     model: "swarm",
                     latencyMs: elapsed,
-                    creditsSpent: 5,
+                    creditsSpent: Int(max(0.5, paramSize)),
                     swarmTaskId: swarmResult.taskId
                 )
                 lastRoute = .swarm
@@ -149,7 +162,7 @@ final class ChatRouter: ObservableObject {
         let getProgress: () -> StreamProgress
     }
 
-    func routeChatStreaming(messages: [ChatMessage]) -> StreamingSession {
+    func routeChatStreaming(messages: [ChatMessage], requestedModel: String? = nil) -> StreamingSession {
         let lastUserContent = messages.last(where: { $0.role == .user })?.content ?? ""
         let startTime = CFAbsoluteTimeGetCurrent()
         var tokenCount = 0
@@ -166,31 +179,51 @@ final class ChatRouter: ObservableObject {
 
         // Determine route before streaming
         if modelManager.state == .ready {
-            routeDecision = .local
-            routeLabel = routeLabels[.local] ?? "local"
-            modelName = modelManager.selectedModel
-        } else if !bleMeshManager.discoveredPeers.isEmpty {
-            routeDecision = .blePeer
-            routeLabel = routeLabels[.blePeer] ?? "peer"
-            modelName = "ble-\(bleMeshManager.discoveredPeers.first?.agentId ?? "peer")"
-        } else if !swarmRuntime.meshToken.isEmpty {
+            let localModelMatches = requestedModel == nil || requestedModel == modelManager.selectedModel
+            if localModelMatches {
+                routeDecision = .local
+                routeLabel = routeLabels[.local] ?? "local"
+                modelName = modelManager.selectedModel
+            }
+        }
+        // Only check BLE if we haven't found a route yet
+        if routeDecision == .offlineStub && !bleMeshManager.discoveredPeers.isEmpty {
+            let matchingPeer = requestedModel != nil
+                ? bleMeshManager.discoveredPeers.first(where: { $0.model == requestedModel })
+                : bleMeshManager.discoveredPeers.first
+            if matchingPeer != nil {
+                routeDecision = .blePeer
+                routeLabel = routeLabels[.blePeer] ?? "peer"
+                modelName = "ble-\(matchingPeer!.agentId)"
+            }
+        }
+        if routeDecision == .offlineStub && !swarmRuntime.meshToken.isEmpty {
             routeDecision = .swarm
             routeLabel = routeLabels[.swarm] ?? "swarm"
             modelName = "swarm"
         }
 
         let progress: () -> StreamProgress = {
-            StreamProgress(
+            let paramSize: Double
+            if routeDecision == .local {
+                paramSize = self.modelManager.selectedModelParamSize
+            } else if let catalog = self.modelManager.availableCatalog.first(where: { $0.modelId == requestedModel }) {
+                paramSize = catalog.paramSize
+            } else {
+                paramSize = 1.0
+            }
+            return StreamProgress(
                 tokenCount: tokenCount,
                 elapsedMs: Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000),
                 route: routeDecision,
                 routeLabel: routeLabel,
-                model: modelName
+                model: modelName,
+                creditsSpent: routeDecision == .swarm ? max(0.5, paramSize) : nil
             )
         }
 
         // Streaming via local model
-        if modelManager.state == .ready {
+        if routeDecision == .local {
             let innerStream = modelManager.generateStreaming(prompt: lastUserContent, maxTokens: 512)
             let wrappedStream = AsyncThrowingStream<String, Error> { continuation in
                 Task {
@@ -211,7 +244,7 @@ final class ChatRouter: ObservableObject {
         // Fall back to non-streaming wrapped as stream
         let fallbackStream = AsyncThrowingStream<String, Error> { continuation in
             Task { @MainActor [self] in
-                let result = await self.routeChat(messages: messages)
+                let result = await self.routeChat(messages: messages, requestedModel: requestedModel)
                 routeDecision = result.route
                 routeLabel = routeLabels[result.route] ?? result.route.rawValue
                 modelName = result.model
