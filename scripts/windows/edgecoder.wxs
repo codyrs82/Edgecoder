@@ -67,7 +67,7 @@
     <DirectoryRef Id="BinFolder">
       <Component Id="RuntimeScript" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
         <File Id="RuntimePs1"
-              Source="msi-stage\bin\edgecoder-runtime.ps1"
+              Source="msi-stage/bin/edgecoder-runtime.ps1"
               KeyPath="yes" />
       </Component>
     </DirectoryRef>
@@ -76,7 +76,7 @@
     <DirectoryRef Id="BinFolder">
       <Component Id="ConfigureScript" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
         <File Id="ConfigurePs1"
-              Source="msi-stage\bin\edgecoder-configure.ps1"
+              Source="msi-stage/bin/edgecoder-configure.ps1"
               KeyPath="yes" />
       </Component>
     </DirectoryRef>
@@ -120,7 +120,7 @@
     <DirectoryRef Id="BinFolder">
       <Component Id="EdgeCoderService" Guid="F6A7B8C9-D0E1-2345-FABC-456789012345">
         <File Id="ServiceRunner"
-              Source="msi-stage\bin\edgecoder-runtime.ps1"
+              Source="msi-stage/bin/edgecoder-runtime.ps1"
               KeyPath="yes"
               Name="edgecoder-service.ps1" />
 

@@ -53,19 +53,22 @@ sed "s/{{VERSION}}/${VERSION}/g" "$WXS_FILE" > "$BUILD_DIR/edgecoder.wxs"
 
 echo ""
 echo "Build staging complete."
-echo ""
-echo "Staged files:"
-echo "  $BUILD_DIR/msi-stage/app/    - Application runtime"
-echo "  $BUILD_DIR/msi-stage/bin/    - Launcher scripts"
-echo "  $BUILD_DIR/msi-stage/config/ - Configuration templates"
-echo "  $BUILD_DIR/edgecoder.wxs     - WiX manifest (v${VERSION})"
-echo ""
-echo "To build the .msi installer, run one of the following:"
-echo ""
-echo "  Option A - WiX Toolset (Windows):"
-echo "    candle.exe -nologo -out $BUILD_DIR\\edgecoder.wixobj $BUILD_DIR\\edgecoder.wxs"
-echo "    light.exe  -nologo -out $ROOT_DIR\\build\\EdgeCoder-${VERSION}-windows.msi $BUILD_DIR\\edgecoder.wixobj"
-echo ""
-echo "  Option B - msitools (Linux cross-compile):"
-echo "    wixl -o $ROOT_DIR/build/EdgeCoder-${VERSION}-windows.msi $BUILD_DIR/edgecoder.wxs"
-echo ""
+
+MSI_OUTPUT="$ROOT_DIR/build/EdgeCoder-${VERSION}-windows-x64.msi"
+
+# Compile .msi if wixl is available (Linux cross-compile via msitools)
+if command -v wixl >/dev/null 2>&1; then
+  echo "Compiling .msi with wixl..."
+  # Run from build/windows/ so relative Source paths (msi-stage/...) resolve
+  (cd "$BUILD_DIR" && wixl -o "$MSI_OUTPUT" edgecoder.wxs)
+  echo "MSI installer created: $MSI_OUTPUT"
+else
+  echo ""
+  echo "wixl not found — staged files ready for manual compilation:"
+  echo "  $BUILD_DIR/msi-stage/app/    - Application runtime"
+  echo "  $BUILD_DIR/msi-stage/bin/    - Launcher scripts"
+  echo "  $BUILD_DIR/msi-stage/config/ - Configuration templates"
+  echo "  $BUILD_DIR/edgecoder.wxs     - WiX manifest (v${VERSION})"
+  echo ""
+  echo "Install msitools (apt-get install msitools) or use WiX Toolset on Windows."
+fi
