@@ -29,3 +29,12 @@ export function modelSeedCredits(fileSizeBytes: number, seederCount: number): nu
   const rarityMultiplier = 1 / Math.max(1, seederCount);
   return Number((baseCredits * (1 + rarityMultiplier)).toFixed(3));
 }
+
+/**
+ * Credit cost for a swarm request based on model parameter count.
+ * @param paramSizeB Model size in billions of parameters (e.g. 7 for a 7B model)
+ * @returns Credits to charge the requester (minimum 0.5)
+ */
+export function modelCostCredits(paramSizeB: number): number {
+  return Math.max(0.5, paramSizeB);
+}
