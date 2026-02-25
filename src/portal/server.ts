@@ -3993,7 +3993,7 @@ app.get("/portal/chat", async (_req, reply) => {
 
     async function loadConversations() {
       try {
-        var res = await api("/conversations");
+        var res = await api("/portal/api/conversations");
         conversations = res.conversations || res || [];
         renderConversations();
       } catch (err) {
@@ -4003,7 +4003,7 @@ app.get("/portal/chat", async (_req, reply) => {
 
     async function loadMessages(convId) {
       try {
-        var res = await api("/conversations/" + convId + "/messages");
+        var res = await api("/portal/api/conversations/" + convId + "/messages");
         var msgs = res.messages || res || [];
         renderMessages(msgs);
       } catch (err) {
@@ -4022,7 +4022,7 @@ app.get("/portal/chat", async (_req, reply) => {
 
     async function createNewChat() {
       try {
-        var res = await api("/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
+        var res = await api("/portal/api/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
         await loadConversations();
         var newId = res.conversationId || (res.conversation && res.conversation.conversationId);
         if (newId) {
@@ -4043,7 +4043,7 @@ app.get("/portal/chat", async (_req, reply) => {
       // If no active conversation, create one first
       if (!activeConvId) {
         try {
-          var res = await api("/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
+          var res = await api("/portal/api/conversations", { method: "POST", body: JSON.stringify({ title: "New chat" }) });
           var newId = res.conversationId || (res.conversation && res.conversation.conversationId);
           if (newId) {
             activeConvId = newId;
@@ -4150,7 +4150,7 @@ app.get("/portal/chat", async (_req, reply) => {
       if (currentTitle === "New chat" && text.length > 0) {
         var newTitle = text.length > 40 ? text.substring(0, 40) + "..." : text;
         try {
-          await api("/conversations/" + activeConvId, {
+          await api("/portal/api/conversations/" + activeConvId, {
             method: "PATCH",
             body: JSON.stringify({ title: newTitle })
           });
