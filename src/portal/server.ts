@@ -90,13 +90,13 @@ const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") 
 const NODE_ENV = process.env.NODE_ENV ?? "development";
 const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "";
 const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
-  (process.env.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "admin@example.com")
+  (process.env.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
     .split(",")
     .map((value) => normalizeEmail(value))
     .filter(Boolean)
 );
 const SYSTEM_ADMIN_EMAILS = new Set(
-  (process.env.SYSTEM_ADMIN_EMAILS ?? "admin@example.com")
+  (process.env.SYSTEM_ADMIN_EMAILS ?? "")
     .split(",")
     .map((value) => normalizeEmail(value))
     .filter(Boolean)
