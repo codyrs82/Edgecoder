@@ -127,6 +127,8 @@ export interface Conversation {
   updatedAt: number;
   source?: "chat" | "editor";
   selectedModel?: string;
+  /** When synced with the portal server, stores the server-side conversation ID */
+  portalConversationId?: string;
 }
 
 export interface ChatCompletionChunk {

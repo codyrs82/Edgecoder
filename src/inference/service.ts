@@ -4,6 +4,7 @@ import { request } from "undici";
 import { z } from "zod";
 import { verifyPayload } from "../mesh/peer.js";
 import { extractCode } from "../model/extract.js";
+import { decomposePrompt, reflectPrompt } from "../model/prompts.js";
 import { buildModelSwapRoutes } from "../model/swap-routes.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 
@@ -17,6 +18,68 @@ const INFERENCE_COORDINATOR_PEER_ID = process.env.INFERENCE_COORDINATOR_PEER_ID 
 const INFERENCE_COORDINATOR_PUBLIC_KEY_PEM = process.env.INFERENCE_COORDINATOR_PUBLIC_KEY_PEM ?? "";
 const INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON = process.env.INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON ?? "";
 const seenInferenceNonces = new Map<string, number>();
+
+const metrics = {
+  decomposeRequests: 0,
+  decomposeSuccesses: 0,
+  decomposeModelCalls: 0,
+  decomposeFallbacks: 0,
+  escalateRequests: 0,
+  escalateSuccesses: 0,
+  escalateFailures: 0,
+  totalLatencyMs: 0,
+};
+
+export function parseDecomposition(
+  raw: string,
+  parsed: { taskId: string; prompt: string; language: string; snapshotRef: string },
+): Array<{
+  taskId: string;
+  kind: "micro_loop";
+  input: string;
+  language: string;
+  timeoutMs: number;
+  snapshotRef: string;
+}> {
+  try {
+    // Strip markdown fences if present
+    let cleaned = raw.trim();
+    const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+    if (fenceMatch) {
+      cleaned = fenceMatch[1].trim();
+    }
+
+    const items = JSON.parse(cleaned) as Array<{ input: string; language?: string }>;
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("Not an array or empty");
+    }
+
+    return items.slice(0, 10).map((item) => {
+      const input = typeof item.input === "string" ? item.input : String(item.input ?? "");
+      const timeoutMs = Math.min(5000 + Math.floor(input.length / 50) * 1000, 60_000);
+      return {
+        taskId: parsed.taskId,
+        kind: "micro_loop" as const,
+        input,
+        language: item.language ?? parsed.language,
+        timeoutMs,
+        snapshotRef: parsed.snapshotRef,
+      };
+    });
+  } catch {
+    // Fallback: single subtask with original prompt
+    return [
+      {
+        taskId: parsed.taskId,
+        kind: "micro_loop" as const,
+        input: parsed.prompt,
+        language: parsed.language,
+        timeoutMs: 30_000,
+        snapshotRef: parsed.snapshotRef,
+      },
+    ];
+  }
+}
 
 function loadTrustedCoordinatorKeys(): Map<string, string> {
   const out = new Map<string, string>();
@@ -39,7 +102,7 @@ function loadTrustedCoordinatorKeys(): Map<string, string> {
 const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health" || req.url.startsWith("/dashboard")) return;
+  if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard")) return;
   if (INFERENCE_AUTH_TOKEN) {
     const token = req.headers["x-inference-token"];
     if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
@@ -119,23 +182,45 @@ const decomposeSchema = z.object({
 });
 
 app.post("/decompose", async (req, reply) => {
+  const startMs = Date.now();
+  metrics.decomposeRequests++;
   const parsed = decomposeSchema.parse(req.body);
-  const chunks = parsed.prompt
-    .split(/[.?!]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .slice(0, 5);
+  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
 
-  const subtasks = chunks.map((chunk, idx) => ({
-    taskId: parsed.taskId,
-    kind: "micro_loop" as const,
-    input: chunk,
-    language: parsed.language,
-    timeoutMs: 4000 + idx * 1000,
-    snapshotRef: parsed.snapshotRef
-  }));
+  const prompt = decomposePrompt(parsed.prompt);
 
-  return reply.send({ subtasks });
+  try {
+    metrics.decomposeModelCalls++;
+    const ollamaRes = await request(`${ollamaHost}/api/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false }),
+      headersTimeout: 120_000,
+      bodyTimeout: 0,
+    });
+
+    const payload = (await ollamaRes.body.json()) as { response?: string };
+    const raw = payload.response ?? "";
+
+    const subtasks = parseDecomposition(raw, parsed);
+    metrics.decomposeSuccesses++;
+    metrics.totalLatencyMs += Date.now() - startMs;
+    return reply.send({ subtasks });
+  } catch {
+    metrics.decomposeFallbacks++;
+    metrics.totalLatencyMs += Date.now() - startMs;
+    return reply.send({
+      subtasks: [{
+        taskId: parsed.taskId,
+        kind: "micro_loop" as const,
+        input: parsed.prompt,
+        language: parsed.language,
+        timeoutMs: 30_000,
+        snapshotRef: parsed.snapshotRef,
+      }]
+    });
+  }
 });
 
 const escalateSchema = z.object({
@@ -146,40 +231,40 @@ const escalateSchema = z.object({
 });
 
 app.post("/escalate", async (req, reply) => {
+  const startMs = Date.now();
+  metrics.escalateRequests++;
   const body = escalateSchema.parse(req.body);
-  const ollamaEndpoint = process.env.OLLAMA_GENERATE_ENDPOINT ?? "http://127.0.0.1:11434/api/generate";
+  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
 
   const errorContext = body.errorHistory.length > 0
-    ? `\n\nPrevious errors:\n${body.errorHistory.join("\n")}`
+    ? body.errorHistory.join("\n")
     : "";
 
-  const prompt = `You are a senior coding assistant. A smaller model failed to solve this task after multiple attempts.
-
-Task: ${body.task}
-
-Failed code:
-${body.failedCode}
-${errorContext}
-
-Write correct, working ${body.language} code that solves the task. Output ONLY executable code, no markdown fences, no explanation.`;
+  const prompt = reflectPrompt(body.task, body.failedCode, errorContext);
 
   try {
-    const ollamaRes = await request(ollamaEndpoint, {
+    const ollamaRes = await request(`${ollamaHost}/api/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model, prompt, stream: false })
+      body: JSON.stringify({ model, prompt, stream: false }),
+      headersTimeout: 120_000,
+      bodyTimeout: 0,
     });
 
     const payload = (await ollamaRes.body.json()) as { response?: string };
     const raw = payload.response ?? "";
     const improvedCode = raw ? extractCode(raw, body.language) : "";
 
+    metrics.escalateSuccesses++;
+    metrics.totalLatencyMs += Date.now() - startMs;
     return reply.send({
       improvedCode,
       explanation: "Escalated to larger model for improved solution."
     });
   } catch (error) {
+    metrics.escalateFailures++;
+    metrics.totalLatencyMs += Date.now() - startMs;
     return reply.code(502).send({
       improvedCode: "",
       explanation: `Escalation inference failed: ${String(error)}`
@@ -189,12 +274,14 @@ Write correct, working ${body.language} code that solves the task. Output ONLY e
 
 app.get("/health", async () => ({ ok: true }));
 
+app.get("/metrics", async () => ({ ...metrics }));
+
 const modelSwapState = {
   activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest",
   activeModelParamSize: 0,
 };
 buildModelSwapRoutes(app, modelSwapState);
-buildDashboardRoutes(app, modelSwapState);
+buildDashboardRoutes(app, modelSwapState, metrics);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   app.listen({ port: 4302, host: "0.0.0.0" }).catch((error) => {

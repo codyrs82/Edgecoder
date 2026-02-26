@@ -16,6 +16,10 @@ import {
   PaymentIntent,
   PriceEpochRecord,
   OllamaRolloutRecord,
+  RolloutPolicy,
+  RolloutStage,
+  AgentRolloutState,
+  AgentRolloutStatus,
   TreasuryPolicy,
   QueueEventRecord,
   Subtask,
@@ -325,6 +329,31 @@ CREATE TABLE IF NOT EXISTS issuance_payout_events (
   tokens DOUBLE PRECISION NOT NULL,
   source_intent_id TEXT,
   created_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rollout_policies (
+  rollout_id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL,
+  target_provider TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  canary_percent INT NOT NULL DEFAULT 10,
+  batch_size INT NOT NULL DEFAULT 5,
+  batch_interval_ms BIGINT NOT NULL DEFAULT 60000,
+  health_check_required BOOLEAN NOT NULL DEFAULT true,
+  auto_promote BOOLEAN NOT NULL DEFAULT false,
+  rollback_on_failure_percent INT NOT NULL DEFAULT 30,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_rollout_states (
+  rollout_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  error TEXT,
+  PRIMARY KEY (rollout_id, agent_id)
 );
 `;
 
@@ -1361,6 +1390,140 @@ export class PostgresStore {
       status: row.status,
       requestedBy: row.requested_by,
       requestedAtMs: Number(row.requested_at_ms),
+      updatedAtMs: Number(row.updated_at_ms),
+      error: row.error ?? undefined
+    }));
+  }
+
+  /* ── Staged Rollout Policies ──────────────────────────── */
+
+  async upsertRolloutPolicy(policy: RolloutPolicy): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO rollout_policies (
+        rollout_id, model_id, target_provider, stage, canary_percent, batch_size,
+        batch_interval_ms, health_check_required, auto_promote,
+        rollback_on_failure_percent, created_at_ms, updated_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ON CONFLICT (rollout_id) DO UPDATE SET
+        stage = EXCLUDED.stage,
+        canary_percent = EXCLUDED.canary_percent,
+        batch_size = EXCLUDED.batch_size,
+        batch_interval_ms = EXCLUDED.batch_interval_ms,
+        health_check_required = EXCLUDED.health_check_required,
+        auto_promote = EXCLUDED.auto_promote,
+        rollback_on_failure_percent = EXCLUDED.rollback_on_failure_percent,
+        updated_at_ms = EXCLUDED.updated_at_ms`,
+      [
+        policy.rolloutId,
+        policy.modelId,
+        policy.targetProvider,
+        policy.stage,
+        policy.canaryPercent,
+        policy.batchSize,
+        policy.batchIntervalMs,
+        policy.healthCheckRequired,
+        policy.autoPromote,
+        policy.rollbackOnFailurePercent,
+        policy.createdAtMs,
+        policy.updatedAtMs
+      ]
+    );
+  }
+
+  async getRolloutPolicy(rolloutId: string): Promise<RolloutPolicy | null> {
+    const result = await this.pool.query(
+      `SELECT rollout_id, model_id, target_provider, stage, canary_percent, batch_size,
+              batch_interval_ms, health_check_required, auto_promote,
+              rollback_on_failure_percent, created_at_ms, updated_at_ms
+       FROM rollout_policies WHERE rollout_id = $1`,
+      [rolloutId]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      rolloutId: row.rollout_id,
+      modelId: row.model_id,
+      targetProvider: row.target_provider,
+      stage: row.stage as RolloutStage,
+      canaryPercent: Number(row.canary_percent),
+      batchSize: Number(row.batch_size),
+      batchIntervalMs: Number(row.batch_interval_ms),
+      healthCheckRequired: Boolean(row.health_check_required),
+      autoPromote: Boolean(row.auto_promote),
+      rollbackOnFailurePercent: Number(row.rollback_on_failure_percent),
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    };
+  }
+
+  async listRolloutPolicies(limit = 100): Promise<RolloutPolicy[]> {
+    const result = await this.pool.query(
+      `SELECT rollout_id, model_id, target_provider, stage, canary_percent, batch_size,
+              batch_interval_ms, health_check_required, auto_promote,
+              rollback_on_failure_percent, created_at_ms, updated_at_ms
+       FROM rollout_policies
+       ORDER BY updated_at_ms DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return result.rows.map((row) => ({
+      rolloutId: row.rollout_id,
+      modelId: row.model_id,
+      targetProvider: row.target_provider,
+      stage: row.stage as RolloutStage,
+      canaryPercent: Number(row.canary_percent),
+      batchSize: Number(row.batch_size),
+      batchIntervalMs: Number(row.batch_interval_ms),
+      healthCheckRequired: Boolean(row.health_check_required),
+      autoPromote: Boolean(row.auto_promote),
+      rollbackOnFailurePercent: Number(row.rollback_on_failure_percent),
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    }));
+  }
+
+  async updateRolloutStage(rolloutId: string, stage: RolloutStage): Promise<void> {
+    await this.pool.query(
+      `UPDATE rollout_policies SET stage = $1, updated_at_ms = $2 WHERE rollout_id = $3`,
+      [stage, Date.now(), rolloutId]
+    );
+  }
+
+  /* ── Agent Rollout States ─────────────────────────────── */
+
+  async upsertAgentRolloutState(state: AgentRolloutState): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO agent_rollout_states (
+        rollout_id, agent_id, status, model_version, updated_at_ms, error
+      ) VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (rollout_id, agent_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        model_version = EXCLUDED.model_version,
+        updated_at_ms = EXCLUDED.updated_at_ms,
+        error = EXCLUDED.error`,
+      [
+        state.rolloutId,
+        state.agentId,
+        state.status,
+        state.modelVersion,
+        state.updatedAtMs,
+        state.error ?? null
+      ]
+    );
+  }
+
+  async listAgentRolloutStates(rolloutId: string): Promise<AgentRolloutState[]> {
+    const result = await this.pool.query(
+      `SELECT rollout_id, agent_id, status, model_version, updated_at_ms, error
+       FROM agent_rollout_states WHERE rollout_id = $1
+       ORDER BY updated_at_ms DESC`,
+      [rolloutId]
+    );
+    return result.rows.map((row) => ({
+      rolloutId: row.rollout_id,
+      agentId: row.agent_id,
+      status: row.status as AgentRolloutStatus,
+      modelVersion: row.model_version,
       updatedAtMs: Number(row.updated_at_ms),
       error: row.error ?? undefined
     }));

@@ -1,12 +1,13 @@
 import Fastify from "fastify";
 import { request } from "undici";
 import { z } from "zod";
-import { AgentMode, LocalModelManifest, NetworkMode } from "../common/types.js";
+import { AgentMode, LocalModelManifest, NetworkMode, RolloutPolicy, RolloutStage, AgentRolloutState } from "../common/types.js";
 import { adjustCredits, creditEngine } from "../credits/store.js";
 import { verifyManifest } from "./manifest.js";
 import { defaultDeploymentPlan } from "./deployment.js";
 import { pgStore } from "../db/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
+import { buildAdminDashboardRoutes } from "./dashboard.js";
 
 const app = Fastify({ logger: true });
 const coordinatorUrl = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
@@ -704,6 +705,230 @@ app.get("/orchestration/rollouts", async (req, reply) => {
   }
 });
 
+/* ── Staged Rollout Endpoints ───────────────────────────── */
+
+app.get("/rollouts", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const policies = await pgStore.listRolloutPolicies();
+  const enriched = await Promise.all(
+    policies.map(async (policy) => {
+      const agentStates = await pgStore!.listAgentRolloutStates(policy.rolloutId);
+      const total = agentStates.length;
+      const applied = agentStates.filter(
+        (s) => s.status === "applied" || s.status === "healthy"
+      ).length;
+      return {
+        ...policy,
+        progressPercent: total > 0 ? Math.round((applied / total) * 100) : 0,
+        agentCount: total
+      };
+    })
+  );
+  return reply.send({ rollouts: enriched });
+});
+
+app.get("/rollouts/:rolloutId", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const params = z.object({ rolloutId: z.string() }).parse(req.params);
+  const policy = await pgStore.getRolloutPolicy(params.rolloutId);
+  if (!policy) return reply.code(404).send({ error: "rollout_not_found" });
+  const agentStates = await pgStore.listAgentRolloutStates(params.rolloutId);
+  return reply.send({ ...policy, agentStates });
+});
+
+app.post("/rollouts", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const body = z
+    .object({
+      modelId: z.string().min(1),
+      targetProvider: z.enum(["ollama-local", "edgecoder-local"]),
+      canaryPercent: z.number().int().min(1).max(100).default(10),
+      batchSize: z.number().int().min(1).default(5),
+      batchIntervalMs: z.number().int().min(0).default(60000),
+      healthCheckRequired: z.boolean().default(true),
+      autoPromote: z.boolean().default(false),
+      rollbackOnFailurePercent: z.number().int().min(1).max(100).default(30)
+    })
+    .parse(req.body);
+
+  const now = Date.now();
+  const rolloutId = `rollout-${now}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const policy: RolloutPolicy = {
+    rolloutId,
+    modelId: body.modelId,
+    targetProvider: body.targetProvider,
+    stage: "canary",
+    canaryPercent: body.canaryPercent,
+    batchSize: body.batchSize,
+    batchIntervalMs: body.batchIntervalMs,
+    healthCheckRequired: body.healthCheckRequired,
+    autoPromote: body.autoPromote,
+    rollbackOnFailurePercent: body.rollbackOnFailurePercent,
+    createdAtMs: now,
+    updatedAtMs: now
+  };
+
+  await pgStore.upsertRolloutPolicy(policy);
+
+  // Select canary agents from the currently registered agents
+  const allAgentIds = [...agents.keys()];
+  const canaryCount = Math.max(1, Math.ceil(allAgentIds.length * (body.canaryPercent / 100)));
+  const canaryAgents = allAgentIds.slice(0, canaryCount);
+
+  for (const agentId of canaryAgents) {
+    const agentState: AgentRolloutState = {
+      rolloutId,
+      agentId,
+      status: "pending",
+      modelVersion: body.modelId,
+      updatedAtMs: now
+    };
+    await pgStore.upsertAgentRolloutState(agentState);
+  }
+
+  return reply.code(201).send({ ...policy, canaryAgents });
+});
+
+const STAGE_ORDER: RolloutStage[] = ["canary", "batch", "full"];
+
+app.post("/rollouts/:rolloutId/promote", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const params = z.object({ rolloutId: z.string() }).parse(req.params);
+
+  const policy = await pgStore.getRolloutPolicy(params.rolloutId);
+  if (!policy) return reply.code(404).send({ error: "rollout_not_found" });
+
+  if (policy.stage === "rolled_back") {
+    return reply.code(400).send({ error: "cannot_promote_rolled_back" });
+  }
+  if (policy.stage === "paused") {
+    return reply.code(400).send({ error: "cannot_promote_paused" });
+  }
+  if (policy.stage === "full") {
+    return reply.code(400).send({ error: "already_fully_rolled_out" });
+  }
+
+  // Health check gate: verify failure rate is below threshold
+  if (policy.healthCheckRequired) {
+    const agentStates = await pgStore.listAgentRolloutStates(params.rolloutId);
+    const total = agentStates.length;
+    if (total > 0) {
+      const failed = agentStates.filter((s) => s.status === "failed").length;
+      const failurePercent = (failed / total) * 100;
+      if (failurePercent >= policy.rollbackOnFailurePercent) {
+        return reply.code(400).send({
+          error: "health_check_failed",
+          failurePercent: Math.round(failurePercent),
+          threshold: policy.rollbackOnFailurePercent
+        });
+      }
+    }
+  }
+
+  const previousStage = policy.stage;
+  const currentIdx = STAGE_ORDER.indexOf(previousStage);
+  const nextStage = STAGE_ORDER[currentIdx + 1];
+  if (!nextStage) {
+    return reply.code(400).send({ error: "no_next_stage" });
+  }
+
+  await pgStore.updateRolloutStage(params.rolloutId, nextStage);
+
+  // If promoting to batch or full, add more agents
+  if (nextStage === "batch" || nextStage === "full") {
+    const existingStates = await pgStore.listAgentRolloutStates(params.rolloutId);
+    const enrolledIds = new Set(existingStates.map((s) => s.agentId));
+    const remainingAgents = [...agents.keys()].filter((id) => !enrolledIds.has(id));
+
+    let toEnroll: string[];
+    if (nextStage === "full") {
+      toEnroll = remainingAgents;
+    } else {
+      toEnroll = remainingAgents.slice(0, policy.batchSize);
+    }
+
+    const now = Date.now();
+    for (const agentId of toEnroll) {
+      await pgStore.upsertAgentRolloutState({
+        rolloutId: params.rolloutId,
+        agentId,
+        status: "pending",
+        modelVersion: policy.modelId,
+        updatedAtMs: now
+      });
+    }
+  }
+
+  const updatedPolicy = await pgStore.getRolloutPolicy(params.rolloutId);
+  return reply.send({ ...updatedPolicy, previousStage });
+});
+
+app.post("/rollouts/:rolloutId/rollback", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const params = z.object({ rolloutId: z.string() }).parse(req.params);
+
+  const policy = await pgStore.getRolloutPolicy(params.rolloutId);
+  if (!policy) return reply.code(404).send({ error: "rollout_not_found" });
+
+  await pgStore.updateRolloutStage(params.rolloutId, "rolled_back");
+
+  // Mark all non-failed agents as needing rollback
+  const agentStates = await pgStore.listAgentRolloutStates(params.rolloutId);
+  const now = Date.now();
+  const rolledBackAgents: string[] = [];
+  for (const state of agentStates) {
+    if (state.status === "applied" || state.status === "healthy" || state.status === "pending" || state.status === "downloading") {
+      await pgStore.upsertAgentRolloutState({
+        ...state,
+        status: "failed",
+        error: "rolled_back",
+        updatedAtMs: now
+      });
+      rolledBackAgents.push(state.agentId);
+    }
+  }
+
+  const updatedPolicy = await pgStore.getRolloutPolicy(params.rolloutId);
+  return reply.send({ ...updatedPolicy, rolledBackAgents });
+});
+
+/* ── Agent heartbeat rollout status reporting ──────────── */
+
+app.post("/rollouts/:rolloutId/agents/:agentId/status", async (req, reply) => {
+  if (!authorizeAdmin(req as any, reply)) return;
+  if (!pgStore) return reply.code(503).send({ error: "postgres_required" });
+  const params = z
+    .object({ rolloutId: z.string(), agentId: z.string() })
+    .parse(req.params);
+  const body = z
+    .object({
+      status: z.enum(["pending", "downloading", "applied", "healthy", "failed"]),
+      modelVersion: z.string().optional(),
+      error: z.string().optional()
+    })
+    .parse(req.body);
+
+  const policy = await pgStore.getRolloutPolicy(params.rolloutId);
+  if (!policy) return reply.code(404).send({ error: "rollout_not_found" });
+
+  await pgStore.upsertAgentRolloutState({
+    rolloutId: params.rolloutId,
+    agentId: params.agentId,
+    status: body.status,
+    modelVersion: body.modelVersion ?? policy.modelId,
+    updatedAtMs: Date.now(),
+    error: body.error
+  });
+
+  return reply.send({ ok: true });
+});
+
 app.get("/economy/price/current", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   try {
@@ -1282,6 +1507,19 @@ app.get("/agents/:agentId/manifest", async (req, reply) => {
   const manifest = manifests.get(params.agentId);
   if (!manifest) return reply.code(404).send({ error: "manifest_not_found" });
   return reply.send(manifest);
+});
+
+/* ── Admin Dashboard ───────────────────────────────────── */
+
+buildAdminDashboardRoutes(app, {
+  agents: agents as any,
+  networkMode: () => networkMode,
+  creditEngine,
+  pgStore,
+  coordinatorUrl,
+  coordinatorMeshHeaders,
+  portalServiceUrl: PORTAL_SERVICE_URL,
+  authorizeAdmin,
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -12,8 +12,17 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$AppDir   = 'C:\Program Files\EdgeCoder\app'
-$EnvFile  = if ($env:EDGECODER_ENV_FILE) { $env:EDGECODER_ENV_FILE } else { 'C:\ProgramData\EdgeCoder\edgecoder.env' }
+$InstallDir = "$env:ProgramFiles\EdgeCoder"
+$AppDir     = Join-Path $InstallDir 'app'
+$ConfigDir  = "$env:APPDATA\EdgeCoder"
+$LogDir     = "$env:LOCALAPPDATA\EdgeCoder\logs"
+$EnvFile    = if ($env:EDGECODER_ENV_FILE) { $env:EDGECODER_ENV_FILE } else { 'C:\ProgramData\EdgeCoder\edgecoder.env' }
+
+# ---------------------------------------------------------------------------
+# Ensure runtime directories exist
+# ---------------------------------------------------------------------------
+New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir    | Out-Null
 
 # ---------------------------------------------------------------------------
 # Load environment variables from env file
@@ -104,6 +113,16 @@ if (-not $entryPoints.ContainsKey($Mode)) {
 
 $entryPoint = $entryPoints[$Mode]
 
-# Use Start-Process with -NoNewWindow -Wait to behave like exec
-$process = Start-Process -FilePath $NodeBin -ArgumentList $entryPoint -NoNewWindow -Wait -PassThru
-exit $process.ExitCode
+# ---------------------------------------------------------------------------
+# Export platform directories for the Node.js runtime
+# ---------------------------------------------------------------------------
+$env:NODE_ENV = 'production'
+if (-not $env:EDGECODER_CONFIG_DIR) { $env:EDGECODER_CONFIG_DIR = $ConfigDir }
+if (-not $env:EDGECODER_LOG_DIR)    { $env:EDGECODER_LOG_DIR    = $LogDir }
+
+# ---------------------------------------------------------------------------
+# Launch with log tee
+# ---------------------------------------------------------------------------
+$logFile = Join-Path $LogDir 'runtime.log'
+& $NodeBin $entryPoint 2>&1 | Tee-Object -FilePath $logFile -Append
+exit $LASTEXITCODE

@@ -4,7 +4,9 @@ import { randomUUID, createHash } from "node:crypto";
 import { totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
-import { Subtask, BLETaskRequest, Language, MeshMessage } from "../common/types.js";
+import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
+import { isDockerAvailable } from "../executor/docker-sandbox.js";
+import { enforceSandboxPolicy } from "./sandbox-enforcement.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
@@ -15,15 +17,23 @@ import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnv
 import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
+import { isValidSnapshotRef } from "./snapshot-resolver.js";
+import { collectDesktopTelemetry } from "./desktop-telemetry.js";
+import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
+
+const platformInfo: PlatformInfo = detectPlatform();
+const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
+const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
 const AGENT_ID = process.env.AGENT_ID ?? "worker-1";
 const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
-const OS = (process.env.AGENT_OS ?? "macos") as "debian" | "ubuntu" | "windows" | "macos" | "ios";
+const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
 const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
   | "edgecoder-local"
   | "ollama-local";
@@ -37,6 +47,10 @@ const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
 const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
+const SANDBOX_MODE: SandboxMode = (process.env.SANDBOX_MODE ?? (
+  (process.env.AGENT_MODE ?? "swarm-only") === "swarm-only" ? "docker" : "none"
+)) as SandboxMode;
+const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
 const AGENT_DEVICE_ID = (() => {
   const explicit = (process.env.AGENT_DEVICE_ID ?? process.env.IOS_DEVICE_ID ?? "").trim();
@@ -71,6 +85,12 @@ type AgentPowerTelemetry = {
   batteryLevelPct?: number;
   lowPowerMode?: boolean;
   updatedAtMs?: number;
+  onACPower?: boolean;
+  batteryPct?: number;
+  thermalState?: "nominal" | "fair" | "serious" | "critical";
+  cpuUsagePct?: number;
+  memoryUsagePct?: number;
+  deviceType?: "desktop" | "laptop" | "phone" | "tablet" | "server";
 };
 
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
@@ -88,24 +108,49 @@ function parseOptionalNumber(value: string | undefined): number | undefined {
   return parsed;
 }
 
+let cachedDesktopTelemetry: AgentPowerTelemetry | undefined;
+let lastDesktopTelemetryMs = 0;
+const DESKTOP_TELEMETRY_CACHE_MS = 10_000;
+
 function readAgentPowerTelemetry(): AgentPowerTelemetry | undefined {
-  if (OS !== "ios") return undefined;
-  const onExternalPower = parseOptionalBoolean(process.env.IOS_ON_EXTERNAL_POWER);
-  const batteryLevelPct = parseOptionalNumber(process.env.IOS_BATTERY_LEVEL_PCT);
-  const lowPowerMode = parseOptionalBoolean(process.env.IOS_LOW_POWER_MODE);
-  return {
-    onExternalPower,
-    batteryLevelPct: typeof batteryLevelPct === "number" ? Math.max(0, Math.min(100, batteryLevelPct)) : undefined,
-    lowPowerMode,
-    updatedAtMs: Date.now()
-  };
+  if (OS === "ios") {
+    const onExternalPower = parseOptionalBoolean(process.env.IOS_ON_EXTERNAL_POWER);
+    const batteryLevelPct = parseOptionalNumber(process.env.IOS_BATTERY_LEVEL_PCT);
+    const lowPowerMode = parseOptionalBoolean(process.env.IOS_LOW_POWER_MODE);
+    return {
+      onExternalPower,
+      batteryLevelPct: typeof batteryLevelPct === "number" ? Math.max(0, Math.min(100, batteryLevelPct)) : undefined,
+      lowPowerMode,
+      updatedAtMs: Date.now()
+    };
+  }
+
+  // For desktop/laptop, return cached telemetry (refreshed async)
+  const now = Date.now();
+  if (now - lastDesktopTelemetryMs > DESKTOP_TELEMETRY_CACHE_MS || !cachedDesktopTelemetry) {
+    lastDesktopTelemetryMs = now;
+    collectDesktopTelemetry()
+      .then((t) => { cachedDesktopTelemetry = t; })
+      .catch(() => {
+        cachedDesktopTelemetry = { onACPower: true, deviceType: "desktop", updatedAtMs: Date.now() };
+      });
+  }
+  return cachedDesktopTelemetry;
 }
 
 function allowPeerDirectWork(telemetry: AgentPowerTelemetry | undefined): boolean {
-  if (OS !== "ios") return true;
-  if (!telemetry) return false;
-  if (telemetry.lowPowerMode === true) return false;
-  return telemetry.onExternalPower === true;
+  if (OS === "ios") {
+    if (!telemetry) return false;
+    if (telemetry.lowPowerMode === true) return false;
+    return telemetry.onExternalPower === true;
+  }
+  // Desktop/laptop: use desktop telemetry
+  if (!telemetry) return true;
+  if (telemetry.deviceType === "server" || telemetry.deviceType === "desktop") return true;
+  if (telemetry.thermalState === "serious" || telemetry.thermalState === "critical") return false;
+  if (typeof telemetry.batteryPct === "number" && telemetry.onACPower === false && telemetry.batteryPct <= 40) return false;
+  if (telemetry.onACPower === true) return true;
+  return telemetry.onACPower !== false;
 }
 
 function meshHeaders(): Record<string, string> {
@@ -340,6 +385,9 @@ function connectMeshWebSocket(
 }
 
 async function loop(): Promise<void> {
+  console.log(`[agent:${AGENT_ID}] platform: os=${platformInfo.os} arch=${platformInfo.arch} docker=${platformInfo.isDocker} wsl=${platformInfo.isWSL} systemd=${platformInfo.hasSystemd} pkg=${platformInfo.packageManager} shell=${platformInfo.shell}`);
+  console.log(`[agent:${AGENT_ID}] configDir=${PLATFORM_CONFIG_DIR} logDir=${PLATFORM_LOG_DIR}`);
+
   const coordinatorSelection = await resolveCoordinatorUrl();
   activeCoordinatorUrl = coordinatorSelection.url;
   cacheCoordinatorUrl(activeCoordinatorUrl);
@@ -532,6 +580,14 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
+        // ── Sandbox policy enforcement ──
+        const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
+        if (sandboxError) {
+          console.error(`[agent:${AGENT_ID}] ${sandboxError}`);
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
+
         const registerBody = {
           agentId: AGENT_ID,
           ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
@@ -542,6 +598,7 @@ async function loop(): Promise<void> {
           localModelProvider: currentProvider,
           clientType: AGENT_CLIENT_TYPE,
           maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+          sandboxMode: SANDBOX_MODE,
           powerTelemetry,
           publicKeyPem: keys.publicKeyPem,
           x25519PublicKey: envelopeKeys.publicKey.toString("base64")
@@ -562,7 +619,7 @@ async function loop(): Promise<void> {
         }
 
         const hbStart = Date.now();
-        const hbBody = { agentId: AGENT_ID, powerTelemetry };
+        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE };
         const hb = (await post("/heartbeat", hbBody, { extraHeaders: signedHeaders("/heartbeat", hbBody) })) as {
           ok?: boolean;
           blacklisted?: boolean;
@@ -727,9 +784,28 @@ async function loop(): Promise<void> {
         if (pulled.subtask) {
           const st = pulled.subtask;
 
+          // ── Frozen snapshot enforcement (Design Decision #8) ──
+          if (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef)) {
+            if (SNAPSHOT_ENFORCEMENT === "strict") {
+              console.error(`[agent:${AGENT_ID}] snapshot enforcement STRICT: refusing subtask ${st.id} — invalid snapshotRef: "${st.snapshotRef ?? ""}"`);
+              try {
+                await post("/result", {
+                  subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
+                  ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
+                  durationMs: 0,
+                }, { extraHeaders: signedHeaders("/result", { subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: "snapshot_invalid", durationMs: 0 }) });
+              } catch { /* best effort */ }
+              continue;
+            }
+            console.warn(`[agent:${AGENT_ID}] snapshot warning: subtask ${st.id} has invalid snapshotRef: "${st.snapshotRef ?? ""}" — proceeding (enforcement=${SNAPSHOT_ENFORCEMENT})`);
+          } else {
+            console.log(`[agent:${AGENT_ID}] snapshot verified for subtask ${st.id}: ${st.snapshotRef}`);
+          }
+
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
           try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
           const result = await worker.runSubtask(st, AGENT_ID);
+          result.snapshotRef = st.snapshotRef;
           try {
             if (result.ok) {
               localStore.recordTaskComplete(st.id, result.output, result.durationMs);
@@ -787,9 +863,10 @@ async function loop(): Promise<void> {
         if (meshPeer && meshTaskQueue.length > 0) {
           const meshItem = meshTaskQueue.shift()!;
           const st = meshItem.subtask;
-          console.log(`[agent:${AGENT_ID}] executing mesh task: ${st.id}`);
+          console.log(`[agent:${AGENT_ID}] executing mesh task: ${st.id} (snapshot: ${st.snapshotRef})`);
           try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch (e) { console.warn(`[db] mesh task start write failed: ${e}`); }
           const result = await worker.runSubtask(st, AGENT_ID);
+          result.snapshotRef = st.snapshotRef;
           try {
             if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
             else localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
@@ -801,6 +878,7 @@ async function loop(): Promise<void> {
             ok: result.ok,
             output: result.output,
             durationMs: result.durationMs,
+            snapshotRef: result.snapshotRef,
           });
           // Also try to report to coordinator (best effort)
           try {
@@ -1003,9 +1081,10 @@ async function loop(): Promise<void> {
       if (!coordinatorOnline && meshPeer && meshTaskQueue.length > 0) {
         const meshItem = meshTaskQueue.shift()!;
         const st = meshItem.subtask;
-        console.log(`[agent:${AGENT_ID}] executing mesh task (offline): ${st.id}`);
+        console.log(`[agent:${AGENT_ID}] executing mesh task (offline): ${st.id} (snapshot: ${st.snapshotRef})`);
         try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch {}
         const result = await worker.runSubtask(st, AGENT_ID);
+        result.snapshotRef = st.snapshotRef;
         try {
           if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
           else localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
@@ -1013,6 +1092,7 @@ async function loop(): Promise<void> {
         await meshPeer.broadcast("result_announce", {
           taskId: result.taskId, subtaskId: result.subtaskId,
           ok: result.ok, output: result.output, durationMs: result.durationMs,
+          snapshotRef: result.snapshotRef,
         });
         console.log(`[agent:${AGENT_ID}] mesh task ${st.id} complete (offline): ok=${result.ok}`);
       }

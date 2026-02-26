@@ -50,10 +50,126 @@ $EnvFile = Join-Path $EnvDir 'edgecoder.env'
 $ServiceName = 'EdgeCoder'
 $CoordinatorUrl = 'https://coordinator.edgecoder.io'
 $PortalNodesUrl = 'https://portal.edgecoder.io/portal/nodes'
+$OllamaInstaller = Join-Path $PSScriptRoot 'edgecoder-install-ollama.ps1'
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+function Invoke-OllamaInstall {
+    <#
+    .SYNOPSIS
+        Run the Ollama install script (best-effort, non-fatal).
+    #>
+    if (Test-Path $OllamaInstaller) {
+        Write-Host ''
+        Write-Host 'Bootstrapping Ollama (best-effort)...'
+        try {
+            & $OllamaInstaller
+        } catch {
+            Write-Host "Warning: Ollama auto-install encountered an error: $_"
+        }
+    }
+}
+
+function Set-FirewallRules {
+    <#
+    .SYNOPSIS
+        Create Windows Firewall rules for EdgeCoder ports (4301-4310).
+    #>
+    $ruleName = 'EdgeCoder Runtime'
+    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+
+    if ($existing) {
+        Write-Host "Firewall rule '$ruleName' already exists. Updating..."
+        Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    }
+
+    try {
+        New-NetFirewallRule -DisplayName $ruleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 4301-4310 `
+            -Profile Domain,Private `
+            -Description 'Allow EdgeCoder runtime ports (coordinator, inference, control-plane, mesh)' `
+            -ErrorAction Stop | Out-Null
+
+        Write-Host "Firewall rule created: $ruleName (TCP 4301-4310, Domain+Private profiles)"
+    } catch {
+        Write-Host "Warning: could not create firewall rule: $_"
+    }
+}
+
+function Set-EnvironmentVariables {
+    <#
+    .SYNOPSIS
+        Set machine-level environment variables for EdgeCoder directories.
+    #>
+    $vars = @{
+        'EDGECODER_CONFIG_DIR' = "$env:APPDATA\EdgeCoder"
+        'EDGECODER_LOG_DIR'    = "$env:LOCALAPPDATA\EdgeCoder\logs"
+    }
+
+    foreach ($kv in $vars.GetEnumerator()) {
+        $current = [Environment]::GetEnvironmentVariable($kv.Key, 'Machine')
+        if ($current -ne $kv.Value) {
+            [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, 'Machine')
+            Write-Host "Set machine env: $($kv.Key) = $($kv.Value)"
+        } else {
+            Write-Host "Machine env already set: $($kv.Key)"
+        }
+    }
+}
+
+function Register-WindowsService {
+    <#
+    .SYNOPSIS
+        Register EdgeCoder as a Windows service using sc.exe.
+        Falls back to NSSM if sc.exe registration is not suitable.
+    #>
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($null -ne $svc) {
+        Write-Host "Windows service '$ServiceName' is already registered (status: $($svc.Status))."
+        return
+    }
+
+    $runtimeScript = Join-Path $PSScriptRoot 'edgecoder-runtime.ps1'
+    $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue)?.Source
+    if (-not $pwsh) {
+        $pwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue)?.Source
+    }
+
+    if (-not $pwsh) {
+        Write-Host 'Warning: could not locate PowerShell binary to register service.'
+        return
+    }
+
+    # Try NSSM first (more robust for scripts)
+    $nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
+    if ($nssm) {
+        try {
+            & $nssm.Source install $ServiceName $pwsh "-ExecutionPolicy Bypass -File `"$runtimeScript`""
+            & $nssm.Source set $ServiceName Description 'EdgeCoder Runtime Service'
+            & $nssm.Source set $ServiceName Start SERVICE_AUTO_START
+            Write-Host "Windows service '$ServiceName' registered via NSSM."
+            return
+        } catch {
+            Write-Host "Warning: NSSM registration failed: $_"
+        }
+    }
+
+    # Fallback: sc.exe with a wrapper
+    try {
+        $binPath = "`"$pwsh`" -ExecutionPolicy Bypass -File `"$runtimeScript`""
+        & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "EdgeCoder Runtime"
+        Write-Host "Windows service '$ServiceName' registered via sc.exe."
+        Write-Host 'Note: sc.exe services using PowerShell scripts may need NSSM for production use.'
+    } catch {
+        Write-Host "Warning: could not register Windows service: $_"
+        Write-Host 'Install NSSM (https://nssm.cc) for reliable service registration.'
+    }
+}
 
 function Show-Help {
     $helpText = @"
@@ -186,6 +302,16 @@ function Invoke-TokenQuickConnect {
         Write-Host "EdgeCoder Windows service ('$ServiceName') is not installed yet."
         Write-Host 'Install and start it, then the new configuration will be picked up.'
     }
+
+    # Bootstrap Ollama after quick-connect configuration
+    Invoke-OllamaInstall
+
+    # Set up firewall rules and environment variables
+    Set-FirewallRules
+    Set-EnvironmentVariables
+
+    # Register as Windows service if not already present
+    Register-WindowsService
 
     Write-Host ''
     Write-Host "View your nodes at: $PortalNodesUrl"

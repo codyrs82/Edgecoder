@@ -4,6 +4,10 @@
     deleteConversation,
     renameConversation,
   } from "../lib/chat-store";
+  import {
+    portalDeleteConversation,
+    portalRenameConversation,
+  } from "../lib/api";
   import type { Conversation } from "../lib/types";
 
   interface Props {
@@ -22,6 +26,7 @@
   let menuOpenId: string | null = $state(null);
   let renamingId: string | null = $state(null);
   let renameValue = $state("");
+  let confirmDeleteId: string | null = $state(null);
 
   let filtered = $derived.by(() => {
     if (!searchQuery.trim()) return conversations;
@@ -41,6 +46,7 @@
       searchQuery = "";
       menuOpenId = null;
       renamingId = null;
+      confirmDeleteId = null;
     }
   });
 
@@ -73,10 +79,13 @@
   }
 
   function getPreview(convo: Conversation): string {
+    const msgCount = convo.messages.length;
     const firstMsg = convo.messages[0];
+    const prefix = msgCount > 0 ? `${msgCount} msg${msgCount !== 1 ? "s" : ""} · ` : "";
     if (!firstMsg) return "No messages yet";
     const text = firstMsg.content;
-    return text.length > 80 ? text.slice(0, 80) + "..." : text;
+    const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
+    return prefix + preview;
   }
 
   function handleSelect(id: string) {
@@ -86,7 +95,19 @@
   }
 
   async function handleDelete(id: string) {
+    // First click: show confirmation (keep menu open)
+    if (confirmDeleteId !== id) {
+      confirmDeleteId = id;
+      return;
+    }
+    // Second click: actually delete
+    confirmDeleteId = null;
     menuOpenId = null;
+    const convo = conversations.find((c) => c.id === id);
+    // Delete from portal if synced
+    if (convo?.portalConversationId) {
+      portalDeleteConversation(convo.portalConversationId).catch(() => {});
+    }
     await deleteConversation(id);
     conversations = conversations.filter((c) => c.id !== id);
   }
@@ -99,10 +120,18 @@
 
   async function commitRename() {
     if (renamingId && renameValue.trim()) {
-      await renameConversation(renamingId, renameValue.trim());
+      const trimmed = renameValue.trim();
+      await renameConversation(renamingId, trimmed);
       const idx = conversations.findIndex((c) => c.id === renamingId);
       if (idx !== -1) {
-        conversations[idx].title = renameValue.trim();
+        // Also rename on portal if synced
+        if (conversations[idx].portalConversationId) {
+          portalRenameConversation(
+            conversations[idx].portalConversationId!,
+            trimmed,
+          ).catch(() => {});
+        }
+        conversations[idx].title = trimmed;
         conversations[idx].updatedAt = Date.now();
       }
     }
@@ -135,6 +164,7 @@
 
   function toggleMenu(e: MouseEvent, id: string) {
     e.stopPropagation();
+    confirmDeleteId = null;
     menuOpenId = menuOpenId === id ? null : id;
   }
 </script>
@@ -241,7 +271,7 @@
                     <polyline points="3 6 5 6 21 6"/>
                     <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                   </svg>
-                  Delete
+                  {confirmDeleteId === convo.id ? "Confirm delete?" : "Delete"}
                 </button>
               </div>
             {/if}

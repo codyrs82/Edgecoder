@@ -65,6 +65,8 @@ export interface Subtask {
   snapshotRef: string;
   projectMeta: TaskProjectMeta;
   requestedModel?: string;
+  dependsOn?: string[];
+  subtaskIndex?: number;
 }
 
 export interface SubtaskResult {
@@ -75,6 +77,7 @@ export interface SubtaskResult {
   output: string;
   error?: string;
   durationMs: number;
+  snapshotRef?: string;
   reportNonce?: string;
   reportSignature?: string;
 }
@@ -243,6 +246,34 @@ export interface OllamaRolloutRecord {
   status: "requested" | "in_progress" | "applied" | "failed";
   requestedBy: string;
   requestedAtMs: number;
+  updatedAtMs: number;
+  error?: string;
+}
+
+export type RolloutStage = "canary" | "batch" | "full" | "paused" | "rolled_back";
+
+export interface RolloutPolicy {
+  rolloutId: string;
+  modelId: string;
+  targetProvider: "ollama-local" | "edgecoder-local";
+  stage: RolloutStage;
+  canaryPercent: number;
+  batchSize: number;
+  batchIntervalMs: number;
+  healthCheckRequired: boolean;
+  autoPromote: boolean;
+  rollbackOnFailurePercent: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export type AgentRolloutStatus = "pending" | "downloading" | "applied" | "healthy" | "failed";
+
+export interface AgentRolloutState {
+  rolloutId: string;
+  agentId: string;
+  status: AgentRolloutStatus;
+  modelVersion: string;
   updatedAtMs: number;
   error?: string;
 }
@@ -528,6 +559,17 @@ export interface ModelListEntry {
   installed: boolean;
   active: boolean;
   source: "ollama" | "cdn";
+}
+
+export type SandboxMode = "none" | "docker" | "vm";
+
+export interface SandboxPolicy {
+  required: boolean;          // Whether sandbox is mandatory
+  allowedModes: SandboxMode[]; // Which sandbox modes are acceptable
+  maxMemoryMB?: number;       // Memory limit for sandboxed execution
+  maxCpuPercent?: number;     // CPU limit
+  networkAccess?: boolean;    // Whether sandboxed code can access network
+  timeoutMs?: number;         // Execution timeout override
 }
 
 export interface CapabilitySummaryPayload {

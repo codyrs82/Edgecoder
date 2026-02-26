@@ -29,6 +29,10 @@ primary_region = "ord"
     hard_limit = 200
     soft_limit = 150
 
+[mounts]
+  source = "ollama_data"
+  destination = "/root/.ollama"
+
 [[vm]]
   memory = "8192mb"
   cpu_kind = "performance"

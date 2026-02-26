@@ -6,6 +6,7 @@ LOG_DIR="/var/log/edgecoder"
 ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
 ENV_FILE="/etc/edgecoder/edgecoder.env"
 SERVICE="edgecoder"
+OLLAMA_INSTALLER="/usr/lib/edgecoder/bin/edgecoder-install-ollama.sh"
 
 mkdir -p "$LOG_DIR"
 chmod 755 "$LOG_DIR"
@@ -22,6 +23,11 @@ if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running --quiet 2
   systemctl daemon-reload
   systemctl enable "$SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE" >/dev/null 2>&1 || true
+fi
+
+# Bootstrap Ollama as part of package install (best-effort, non-fatal).
+if [[ -x "$OLLAMA_INSTALLER" ]]; then
+  "$OLLAMA_INSTALLER" || true
 fi
 
 echo ""

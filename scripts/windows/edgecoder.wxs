@@ -81,6 +81,15 @@
       </Component>
     </DirectoryRef>
 
+    <!-- Ollama install script -->
+    <DirectoryRef Id="BinFolder">
+      <Component Id="OllamaInstallScript" Guid="E5F6A7B8-C9D0-1234-EFAB-567890123456">
+        <File Id="OllamaInstallPs1"
+              Source="msi-stage/bin/edgecoder-install-ollama.ps1"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
     <!-- Config directory with example env file -->
     <DirectoryRef Id="ConfigFolder">
       <Component Id="ConfigDir" Guid="D4E5F6A7-B8C9-0123-DEFA-234567890123">
@@ -136,11 +145,28 @@
     </DirectoryRef>
 
     <!-- ================================================================= -->
+    <!-- Custom action: install Ollama after file deployment (best-effort) -->
+    <!-- ================================================================= -->
+    <CustomAction Id="InstallOllama"
+                  Directory="BinFolder"
+                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[BinFolder]edgecoder-install-ollama.ps1&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallOllama" After="InstallFiles">
+        NOT Installed
+      </Custom>
+    </InstallExecuteSequence>
+
+    <!-- ================================================================= -->
     <!-- Feature tree                                                      -->
     <!-- ================================================================= -->
     <Feature Id="Complete" Title="EdgeCoder" Level="1">
       <ComponentRef Id="RuntimeScript" />
       <ComponentRef Id="ConfigureScript" />
+      <ComponentRef Id="OllamaInstallScript" />
       <ComponentRef Id="ConfigDir" />
       <ComponentRef Id="EdgeCoderService" />
       <!--

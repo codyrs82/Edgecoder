@@ -160,6 +160,7 @@
 
 <style>
   :root {
+    /* Core palette — desktop canonical names */
     --bg-base: #2f2f2d;
     --bg-surface: #3a3a37;
     --bg-elevated: #454542;
@@ -180,6 +181,19 @@
     --radius-md: 8px;
     --radius-lg: 10px;
     --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+
+    /* Portal-compatible aliases — keeps portal-authored CSS working unchanged */
+    --bg: var(--bg-deep);
+    --bg-soft: var(--bg-base);
+    --card: rgba(58, 58, 55, 0.96);
+    --card-border: var(--border);
+    --text: var(--text-primary);
+    --muted: var(--text-muted);
+    --brand: var(--accent);
+    --brand-2: var(--accent-hover);
+    --ok: var(--green);
+    --warn: var(--yellow);
+    --danger: var(--red);
   }
   :global(body) {
     margin: 0;

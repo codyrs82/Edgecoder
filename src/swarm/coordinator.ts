@@ -41,10 +41,12 @@ import {
   ResourceClass,
   TreasuryPolicy,
   WalletType,
+  Subtask,
   CapabilitySummaryPayload,
   PeerExchangePayload,
   CapabilityAnnouncePayload,
-  MeshPeerRole
+  MeshPeerRole,
+  SandboxMode
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -74,6 +76,7 @@ import {
   verifyReporterEvidenceSignature
 } from "../security/blacklist.js";
 import { EscalationRequest, EscalationResult } from "../escalation/types.js";
+import { EscalationResolver, createEscalationResolverFromEnv } from "../escalation/server.js";
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
 import { createTaskEnvelope, decryptResult as decryptEnvelopeResult, type TaskEnvelope, type EncryptedResult } from "../security/envelope.js";
 import { verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
@@ -81,6 +84,7 @@ import { InMemoryNonceStore, verifyNonce } from "../security/nonce-verifier.js";
 import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
 import { SecurityEventLogger, type SecurityEventType } from "../audit/security-events.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
+import { isValidSnapshotRef } from "./snapshot-resolver.js";
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -246,6 +250,7 @@ const agentCapabilities = new Map<
     modelSwapInProgress?: boolean;
     publicKeyPem?: string;
     x25519PublicKey?: string;
+    sandboxMode: SandboxMode;
     lastSeenMs: number;
   }
 >();
@@ -294,6 +299,10 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
   const merged = [...existing, { eventAtMs: Number(eventAtMs || Date.now()), message: text }].slice(-250);
   diagnosticsByAgentId.set(agentId, merged);
 }
+
+// ── Subtask dependency tracking ─────────────────────────────────────────────
+import { SubtaskDepTracker } from "./subtask-deps.js";
+const depTracker = new SubtaskDepTracker();
 
 function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
   if (!MESH_AUTH_TOKEN) return true;
@@ -527,7 +536,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/"))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat")
   ) {
     return;
   }
@@ -1410,11 +1419,18 @@ const registerSchema = z.object({
       onExternalPower: z.boolean().optional(),
       batteryLevelPct: z.number().min(0).max(100).optional(),
       lowPowerMode: z.boolean().optional(),
-      updatedAtMs: z.number().optional()
+      updatedAtMs: z.number().optional(),
+      onACPower: z.boolean().optional(),
+      batteryPct: z.number().min(0).max(100).optional(),
+      thermalState: z.enum(["nominal", "fair", "serious", "critical"]).optional(),
+      cpuUsagePct: z.number().min(0).max(100).optional(),
+      memoryUsagePct: z.number().min(0).max(100).optional(),
+      deviceType: z.enum(["desktop", "laptop", "phone", "tablet", "server"]).optional()
     })
     .optional(),
   publicKeyPem: z.string().optional(),
-  x25519PublicKey: z.string().optional()
+  x25519PublicKey: z.string().optional(),
+  sandboxMode: z.enum(["none", "docker", "vm"]).default("none")
 });
 
 const heartbeatSchema = z.object({
@@ -1424,12 +1440,19 @@ const heartbeatSchema = z.object({
       onExternalPower: z.boolean().optional(),
       batteryLevelPct: z.number().min(0).max(100).optional(),
       lowPowerMode: z.boolean().optional(),
-      updatedAtMs: z.number().optional()
+      updatedAtMs: z.number().optional(),
+      onACPower: z.boolean().optional(),
+      batteryPct: z.number().min(0).max(100).optional(),
+      thermalState: z.enum(["nominal", "fair", "serious", "critical"]).optional(),
+      cpuUsagePct: z.number().min(0).max(100).optional(),
+      memoryUsagePct: z.number().min(0).max(100).optional(),
+      deviceType: z.enum(["desktop", "laptop", "phone", "tablet", "server"]).optional()
     })
     .optional(),
   activeModel: z.string().optional(),
   activeModelParamSize: z.number().optional(),
-  modelSwapInProgress: z.boolean().optional()
+  modelSwapInProgress: z.boolean().optional(),
+  sandboxMode: z.enum(["none", "docker", "vm"]).optional()
 });
 const diagnosticsSchema = z.object({
   agentId: z.string(),
@@ -1450,13 +1473,16 @@ const taskSchema = z.object({
   taskId: z.string(),
   prompt: z.string().min(1),
   language: z.enum(["python", "javascript"]).default("python"),
-  snapshotRef: z.string().min(1),
+  snapshotRef: z.string().min(1).refine(isValidSnapshotRef, {
+    message: "snapshotRef must be a 40-char hex commit hash or an https:// tarball URL"
+  }),
   submitterAccountId: z.string().default("anonymous"),
   projectId: z.string().default("default"),
   tenantId: z.string().optional(),
   resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
   priority: z.number().min(0).max(100).default(50),
-  requestedModel: z.string().optional()
+  requestedModel: z.string().optional(),
+  sandboxRequired: z.boolean().default(false)
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -1524,6 +1550,7 @@ app.post("/register", async (req, reply) => {
       : undefined,
     publicKeyPem: body.publicKeyPem,
     x25519PublicKey: body.x25519PublicKey,
+    sandboxMode: body.sandboxMode as SandboxMode,
     lastSeenMs: now
   });
   const approvalRecord = ordering.append({
@@ -1607,6 +1634,12 @@ app.post("/heartbeat", async (req, reply) => {
       existing.activeModel = body.activeModel;
       existing.activeModelParamSize = body.activeModelParamSize ?? 0;
       existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
+    }
+  }
+  if (body.sandboxMode !== undefined) {
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) {
+      existing.sandboxMode = body.sandboxMode as SandboxMode;
     }
   }
   const requeued = queue.requeueStale(30_000);
@@ -1736,6 +1769,8 @@ app.post("/submit", async (req, reply) => {
       language: "python" | "javascript";
       timeoutMs: number;
       snapshotRef: string;
+      dependsOn?: string[];
+      subtaskIndex?: number;
     }>;
   };
 
@@ -1752,20 +1787,53 @@ app.post("/submit", async (req, reply) => {
   const hasMeshPeers = mesh.listPeers().length > 0;
   const GOSSIP_CLAIM_DELAY_MS = 3_000;
 
-  const created = payload.subtasks.map((subtask) =>
-    queue.enqueueSubtask({
-      ...subtask,
-      requestedModel: body.requestedModel,
-      projectMeta: {
-        projectId: body.projectId,
-        tenantId: body.tenantId,
-        resourceClass: body.resourceClass as ResourceClass,
-        priority: body.priority
-      }
-    }, hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : undefined)
-  );
+  // Assign stable IDs before scheduling so dependsOn references resolve
+  const subtasksWithIds = payload.subtasks.map((s) => ({
+    ...s,
+    id: randomUUID(),
+    requestedModel: body.requestedModel,
+    projectMeta: {
+      projectId: body.projectId,
+      tenantId: body.tenantId,
+      resourceClass: body.resourceClass as ResourceClass,
+      priority: body.priority
+    }
+  }));
 
-  // Gossip each subtask as a task_offer to peer coordinators for P2P distribution
+  // Detect circular dependencies and warn (enqueue anyway to avoid deadlock)
+  const circularIds = depTracker.detectCircularDeps(subtasksWithIds);
+  if (circularIds.size > 0) {
+    app.log.warn(
+      { taskId: body.taskId, circularIds: [...circularIds] },
+      "circular_subtask_dependencies_detected_enqueuing_anyway"
+    );
+  }
+
+  const enqueueOpts = hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : undefined;
+  const created: Subtask[] = [];
+  const deferred: string[] = [];
+
+  for (const subtask of subtasksWithIds) {
+    const deps = subtask.dependsOn;
+    const hasDeps = Array.isArray(deps) && deps.length > 0;
+    const isCircular = circularIds.has(subtask.id);
+
+    if (hasDeps && !isCircular) {
+      // Hold until dependencies complete
+      depTracker.hold({
+        subtask,
+        dependsOn: deps!,
+        enqueueOpts
+      });
+      deferred.push(subtask.id);
+    } else {
+      // Enqueue immediately (no deps, or circular — enqueue to prevent deadlock)
+      const enqueued = queue.enqueueSubtask(subtask, enqueueOpts);
+      created.push(enqueued);
+    }
+  }
+
+  // Gossip each immediately-enqueued subtask as a task_offer to peer coordinators
   for (const subtask of created) {
     const offerMsg = protocol.createMessage(
       "task_offer",
@@ -1788,15 +1856,16 @@ app.post("/submit", async (req, reply) => {
     void mesh.broadcast(offerMsg);
   }
 
+  const allIds = [...created.map((s) => s.id), ...deferred];
   const message = protocol.createMessage(
     "queue_summary",
     identity.peerId,
-    { taskId: body.taskId, queued: created.length, projectId: body.projectId },
+    { taskId: body.taskId, queued: created.length, deferred: deferred.length, projectId: body.projectId },
     coordinatorKeys.privateKeyPem
   );
   void mesh.broadcast(message);
 
-  return reply.send({ taskId: body.taskId, subtasks: created.map((s) => s.id) });
+  return reply.send({ taskId: body.taskId, subtasks: allIds });
 });
 
 app.post("/pull", async (req, reply) => {
@@ -1815,8 +1884,9 @@ app.post("/pull", async (req, reply) => {
     return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
   }
   const capability = agentCapabilities.get(body.agentId);
+  let powerDecisionForPull: ReturnType<typeof evaluateAgentPowerPolicy> | undefined;
   if (capability) {
-    const decision = evaluateAgentPowerPolicy({
+    powerDecisionForPull = evaluateAgentPowerPolicy({
       os: capability.os,
       telemetry: capability.powerTelemetry,
       nowMs: Date.now(),
@@ -1824,12 +1894,33 @@ app.post("/pull", async (req, reply) => {
       batteryPullMinIntervalMs: IOS_BATTERY_PULL_MIN_INTERVAL_MS,
       batteryTaskStopLevelPct: IOS_BATTERY_TASK_STOP_LEVEL_PCT
     });
-    if (!decision.allowCoordinatorTasks) {
-      return reply.send({ subtask: null, powerDeferred: true, reason: decision.reason });
+    if (!powerDecisionForPull.allowCoordinatorTasks) {
+      return reply.send({ subtask: null, powerDeferred: true, reason: powerDecisionForPull.reason });
+    }
+    if (powerDecisionForPull.deferMs && powerDecisionForPull.deferMs > 0) {
+      return reply.send({ subtask: null, powerDeferred: true, deferMs: powerDecisionForPull.deferMs, reason: powerDecisionForPull.reason });
     }
   }
   const task = queue.claim(body.agentId, capability?.activeModel);
   if (task) {
+    // ── Sandbox capability check: if task requires sandbox, verify agent supports it ──
+    const agentSandbox: SandboxMode = capability?.sandboxMode ?? "none";
+    const taskRequiresSandbox = (task.projectMeta?.tenantId && task.projectMeta.tenantId !== "")
+      || agentSandbox === "docker" || agentSandbox === "vm";
+    if (taskRequiresSandbox && agentSandbox === "none") {
+      // Agent lacks sandbox — requeue the task so another agent can pick it up
+      app.log.warn({ subtaskId: task.id, agentId: body.agentId }, "sandbox_capability_mismatch");
+      queue.requeue(task.id);
+      return reply.send({ subtask: null, sandboxRequired: true, reason: "agent_lacks_sandbox_capability" });
+    }
+
+    // ── Power policy: small-tasks-only check ──
+    if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
+      app.log.info({ subtaskId: task.id, agentId: body.agentId, reason: powerDecisionForPull.reason }, "power_small_task_filter");
+      queue.requeue(task.id);
+      return reply.send({ subtask: null, powerDeferred: true, reason: powerDecisionForPull.reason });
+    }
+
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
     const claimRecord = ordering.append({
       eventType: "task_claim",
@@ -1907,6 +1998,40 @@ app.post("/result", async (req, reply) => {
   }
   const subtask = queue.getSubtask(body.subtaskId);
   queue.complete(body);
+
+  // ── Dependency tracking: store output and release dependent subtasks ──
+  const released = depTracker.recordCompletionAndRelease(
+    body.subtaskId,
+    body.output ?? "",
+    (s, opts) => queue.enqueueSubtask(s, opts)
+  );
+  for (const releasedSubtask of released) {
+    app.log.info(
+      { subtaskId: releasedSubtask.id, taskId: releasedSubtask.taskId },
+      "dependent_subtask_released"
+    );
+    // Gossip released subtasks to peer coordinators
+    const offerMsg = protocol.createMessage(
+      "task_offer",
+      identity.peerId,
+      {
+        subtaskId: releasedSubtask.id,
+        taskId: releasedSubtask.taskId,
+        kind: releasedSubtask.kind,
+        language: releasedSubtask.language,
+        input: releasedSubtask.input,
+        timeoutMs: releasedSubtask.timeoutMs,
+        snapshotRef: releasedSubtask.snapshotRef,
+        projectMeta: releasedSubtask.projectMeta,
+        originCoordinatorId: identity.peerId,
+        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+      },
+      coordinatorKeys.privateKeyPem,
+      60_000
+    );
+    void mesh.broadcast(offerMsg);
+  }
+
   const completeRecord = ordering.append({
     eventType: "task_complete",
     taskId: body.taskId,
@@ -3817,6 +3942,7 @@ app.get("/orchestration/rollouts", async (req, reply) => {
 // --- Escalation: mesh-based hard task routing ---
 
 const escalationStore = new Map<string, EscalationResult & { request: EscalationRequest }>();
+const escalationResolver = createEscalationResolverFromEnv();
 
 const escalationRequestSchema = z.object({
   taskId: z.string().min(1),
@@ -3826,6 +3952,80 @@ const escalationRequestSchema = z.object({
   errorHistory: z.array(z.string()),
   language: z.enum(["python", "javascript"]),
   iterationsAttempted: z.number().int().min(1)
+});
+
+// Portal chat completion — streams Ollama response for portal web chat
+app.post("/portal/chat", async (req, reply) => {
+  const body = z.object({
+    messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
+    model: z.string().optional(),
+    temperature: z.number().optional(),
+    max_tokens: z.number().optional()
+  }).parse(req.body);
+
+  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
+
+  // Auto-detect available model if configured one isn't available
+  try {
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
+    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string }> };
+      const available = tags.models?.map((m) => m.name) ?? [];
+      if (available.length > 0 && !available.some((m) => m === chatModel || m.startsWith(chatModel + ":"))) {
+        chatModel = available[0];
+      }
+    }
+  } catch {
+    // proceed with configured model
+  }
+
+  const ollamaRes = await request(`${ollamaHost}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: chatModel,
+      messages: body.messages,
+      stream: true,
+      options: {
+        temperature: body.temperature ?? 0.7,
+        num_predict: body.max_tokens ?? 4096
+      }
+    }),
+    headersTimeout: 120_000, // LLM cold start can take 30-60s on CPU
+    bodyTimeout: 0
+  });
+
+  if (ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
+    const errText = await ollamaRes.body.text().catch(() => "");
+    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: errText });
+  }
+
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  for await (const chunk of ollamaRes.body) {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+        if (parsed.message?.content) {
+          reply.raw.write(`data: ${JSON.stringify({ content: parsed.message.content })}\n\n`);
+        }
+        if (parsed.done) {
+          reply.raw.write("data: [DONE]\n\n");
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
+
+  reply.raw.end();
 });
 
 app.post("/escalate", async (req, reply) => {
@@ -3931,11 +4131,23 @@ Write correct, working ${body.language} code that solves the task. Output ONLY e
       });
     }
 
+    // Inference service returned a non-2xx status — fall through to escalation resolver
+  } catch {
+    // Inference service unreachable — fall through to escalation resolver
+  }
+
+  // Fallback: escalation resolver (parent coordinator → cloud inference)
+  try {
+    const resolved = await escalationResolver.resolve(body);
+    const storeEntry: EscalationResult & { request: EscalationRequest } = {
+      ...resolved,
+      request: body
+    };
+    escalationStore.set(taskId, storeEntry);
+    return reply.send(resolved);
+  } catch (resolveError) {
     escalationStore.set(taskId, { taskId, status: "failed", request: body });
-    return reply.send({ taskId, status: "failed" });
-  } catch (error) {
-    escalationStore.set(taskId, { taskId, status: "failed", request: body });
-    return reply.code(502).send({ taskId, status: "failed", error: String(error) });
+    return reply.code(502).send({ taskId, status: "failed", error: String(resolveError) });
   }
 });
 
@@ -3945,6 +4157,28 @@ app.get("/escalate/:taskId", async (req, reply) => {
   if (!result) return reply.code(404).send({ error: "escalation_not_found" });
   const { request: _req, ...rest } = result;
   return reply.send(rest);
+});
+
+/** Callback endpoint — the EscalationResolver posts resolved results here. */
+app.post("/escalate/:taskId/result", async (req, reply) => {
+  const params = z.object({ taskId: z.string() }).parse(req.params);
+  const resultBody = z.object({
+    taskId: z.string(),
+    status: z.enum(["pending", "processing", "completed", "failed"]),
+    improvedCode: z.string().optional(),
+    explanation: z.string().optional(),
+    resolvedByAgentId: z.string().optional(),
+    resolvedByModel: z.string().optional()
+  }).parse(req.body);
+
+  const existing = escalationStore.get(params.taskId);
+  if (!existing) return reply.code(404).send({ error: "escalation_not_found" });
+
+  escalationStore.set(params.taskId, {
+    ...resultBody,
+    request: existing.request
+  });
+  return reply.send({ ok: true });
 });
 
 const bleSyncSchema = z.object({

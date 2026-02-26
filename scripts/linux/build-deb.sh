@@ -50,8 +50,16 @@ echo "Copying application payload..."
 cp -R "$STAGE_APP/." "$PKGROOT/usr/lib/edgecoder/app/"
 cp "$PAYLOAD_DIR/bin/edgecoder-runtime.sh" "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-runtime.sh"
 cp "$PAYLOAD_DIR/bin/edgecoder-configure.sh" "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-configure.sh"
+cp "$PAYLOAD_DIR/bin/edgecoder-install-ollama.sh" "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-install-ollama.sh"
 cp "$PAYLOAD_DIR/etc/edgecoder/edgecoder.env.example" "$PKGROOT/etc/edgecoder/edgecoder.env.example"
 cp "$PAYLOAD_DIR/lib/systemd/system/edgecoder.service" "$PKGROOT/lib/systemd/system/edgecoder.service"
+
+# Ollama systemd service managed by EdgeCoder
+OLLAMA_SERVICE_SRC="$ROOT_DIR/scripts/linux/edgecoder-ollama.service"
+if [[ -f "$OLLAMA_SERVICE_SRC" ]]; then
+  cp "$OLLAMA_SERVICE_SRC" "$PKGROOT/usr/lib/edgecoder/edgecoder-ollama.service"
+  chmod 644 "$PKGROOT/usr/lib/edgecoder/edgecoder-ollama.service"
+fi
 
 echo "Writing DEBIAN control files..."
 cat > "$PKGROOT/DEBIAN/control" <<CONTROL
@@ -74,6 +82,7 @@ cp "$SCRIPTS_DIR/postinst" "$PKGROOT/DEBIAN/postinst"
 
 chmod 755 "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-runtime.sh"
 chmod 755 "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-configure.sh"
+chmod 755 "$PKGROOT/usr/lib/edgecoder/bin/edgecoder-install-ollama.sh"
 chmod 755 "$PKGROOT/DEBIAN/preinst" "$PKGROOT/DEBIAN/postinst"
 chmod 644 "$PKGROOT/lib/systemd/system/edgecoder.service"
 chmod 755 "$PKGROOT/var/log/edgecoder"

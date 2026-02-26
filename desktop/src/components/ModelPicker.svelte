@@ -10,6 +10,7 @@
   let { selectedModel, onSelect }: Props = $props();
 
   let open = $state(false);
+  let loading = $state(false);
   let ollamaModels: OllamaModel[] = $state([]);
   let runningModels: OllamaRunningModel[] = $state([]);
   let swarmModels: SwarmModelInfo[] = $state([]);
@@ -23,10 +24,11 @@
   }
 
   async function refresh() {
+    loading = true;
     try {
       const [tags, ps, swarm] = await Promise.all([
-        getOllamaTags(),
-        getOllamaPs(),
+        getOllamaTags().catch(() => ({ models: [] })),
+        getOllamaPs().catch(() => ({ models: [] })),
         getAvailableModels().catch(() => []),
       ]);
       ollamaModels = tags.models ?? [];
@@ -34,6 +36,8 @@
       swarmModels = swarm;
     } catch {
       // Silent
+    } finally {
+      loading = false;
     }
   }
 
@@ -44,6 +48,13 @@
 
   function isRunning(name: string): boolean {
     return runningModels.some(m => m.name === name || m.model === name);
+  }
+
+  function paramSizeLabel(model: OllamaModel): string {
+    const parts = [];
+    if (model.details.parameter_size) parts.push(model.details.parameter_size);
+    if (model.details.quantization_level) parts.push(model.details.quantization_level);
+    return parts.join(" · ") || "Unknown";
   }
 </script>
 
@@ -64,6 +75,10 @@
         <span class="option-meta">Best available route</span>
       </button>
 
+      {#if loading}
+        <div class="picker-loading">Loading models...</div>
+      {/if}
+
       {#if ollamaModels.length > 0}
         <div class="picker-section-label">Local Models</div>
         {#each ollamaModels as model}
@@ -79,7 +94,7 @@
               {/if}
             </span>
             <span class="option-meta">
-              {model.details.parameter_size} · Free
+              {paramSizeLabel(model)} · Free
             </span>
           </button>
         {/each}
@@ -102,6 +117,10 @@
             </span>
           </button>
         {/each}
+      {/if}
+
+      {#if !loading && ollamaModels.length === 0 && swarmModels.length === 0}
+        <div class="picker-empty">No models discovered. Check that Ollama is running.</div>
       {/if}
     </div>
   {/if}
@@ -200,5 +219,12 @@
     height: 6px;
     border-radius: 50%;
     background: var(--accent);
+  }
+  .picker-loading,
+  .picker-empty {
+    padding: 12px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
   }
 </style>

@@ -140,6 +140,15 @@ export class SwarmQueue {
     return item?.subtask;
   }
 
+  /** Requeue a single subtask by clearing its claim so it becomes available again. */
+  requeue(subtaskId: string): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (!item) return false;
+    item.claimedBy = undefined;
+    item.claimedAt = undefined;
+    return true;
+  }
+
   requeueStale(claimTimeoutMs: number): number {
     const now = Date.now();
     let count = 0;

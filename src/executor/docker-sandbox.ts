@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { Language, RunResult } from "../common/types.js";
+import { Language, RunResult, SandboxPolicy } from "../common/types.js";
 
 const DOCKER_IMAGES: Record<Language, string> = {
   python: "edgecoder/sandbox-python:latest",
@@ -14,25 +14,64 @@ export async function isDockerAvailable(): Promise<boolean> {
   });
 }
 
+export interface DockerSandboxOptions {
+  memoryMB?: number;       // Memory limit in megabytes (default: 256)
+  cpuPercent?: number;     // CPU limit as percentage, 100 = 1 full core (default: 50)
+  networkAccess?: boolean; // Allow network access (default: false)
+  readOnly?: boolean;      // Read-only filesystem (default: true)
+}
+
+/** Build the Docker CLI flags from a SandboxPolicy or explicit options. */
+export function buildDockerArgs(
+  image: string,
+  code: string,
+  options?: DockerSandboxOptions
+): string[] {
+  const memoryMB = options?.memoryMB ?? 256;
+  const cpuPercent = options?.cpuPercent ?? 50;
+  const networkAccess = options?.networkAccess ?? false;
+  const readOnly = options?.readOnly ?? true;
+
+  const args: string[] = ["run", "--rm"];
+
+  if (!networkAccess) {
+    args.push("--network=none");
+  }
+  if (readOnly) {
+    args.push("--read-only");
+  }
+
+  args.push(`--memory=${memoryMB}m`);
+  args.push(`--cpus=${(cpuPercent / 100).toFixed(2)}`);
+  args.push("--pids-limit=50");
+  args.push(image);
+  args.push(code);
+
+  return args;
+}
+
+/** Convert a SandboxPolicy into DockerSandboxOptions. */
+export function policyToDockerOptions(policy?: SandboxPolicy): DockerSandboxOptions {
+  if (!policy) return {};
+  return {
+    memoryMB: policy.maxMemoryMB,
+    cpuPercent: policy.maxCpuPercent,
+    networkAccess: policy.networkAccess,
+    readOnly: true
+  };
+}
+
 export async function runInDockerSandbox(
   language: Language,
   code: string,
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  options?: DockerSandboxOptions
 ): Promise<RunResult> {
   const start = Date.now();
   const image = DOCKER_IMAGES[language];
 
   return new Promise<RunResult>((resolve) => {
-    const args = [
-      "run", "--rm",
-      "--network=none",
-      "--read-only",
-      "--memory=256m",
-      "--cpus=0.5",
-      "--pids-limit=50",
-      image,
-      code
-    ];
+    const args = buildDockerArgs(image, code, options);
 
     const proc = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"]

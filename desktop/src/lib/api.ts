@@ -178,6 +178,163 @@ export async function getMe(): Promise<AuthUser> {
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Portal conversation API (:4305 /portal/api/*)
+// ---------------------------------------------------------------------------
+
+export interface PortalConversation {
+  conversationId: string;
+  userId: string;
+  title: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface PortalMessage {
+  messageId: string;
+  conversationId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  tokensUsed: number;
+  creditsSpent: number;
+  createdAtMs: number;
+}
+
+export async function portalListConversations(): Promise<PortalConversation[]> {
+  const res = await fetch(`${PORTAL_BASE}/portal/api/conversations`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`List conversations failed: ${res.status}`);
+  const body = await res.json();
+  return body.conversations ?? body ?? [];
+}
+
+export async function portalCreateConversation(
+  title?: string,
+): Promise<string> {
+  const res = await fetch(`${PORTAL_BASE}/portal/api/conversations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Create conversation failed: ${res.status}`);
+  const body = await res.json();
+  return body.conversationId;
+}
+
+export async function portalGetMessages(
+  conversationId: string,
+): Promise<PortalMessage[]> {
+  const res = await fetch(
+    `${PORTAL_BASE}/portal/api/conversations/${conversationId}/messages`,
+    { credentials: "include" },
+  );
+  if (!res.ok) throw new Error(`Get messages failed: ${res.status}`);
+  const body = await res.json();
+  return body.messages ?? body ?? [];
+}
+
+export async function portalRenameConversation(
+  conversationId: string,
+  title: string,
+): Promise<void> {
+  const res = await fetch(
+    `${PORTAL_BASE}/portal/api/conversations/${conversationId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+      credentials: "include",
+    },
+  );
+  if (!res.ok) throw new Error(`Rename conversation failed: ${res.status}`);
+}
+
+export async function portalDeleteConversation(
+  conversationId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${PORTAL_BASE}/portal/api/conversations/${conversationId}`,
+    {
+      method: "DELETE",
+      credentials: "include",
+    },
+  );
+  if (!res.ok) throw new Error(`Delete conversation failed: ${res.status}`);
+}
+
+/**
+ * Stream chat through the portal server.
+ *
+ * The portal SSE format emits `data: {"content":"..."}` chunks (simpler than
+ * the OpenAI-compatible format used by the IDE provider-server).
+ */
+export async function streamPortalChat(
+  conversationId: string,
+  message: string,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+  onProgress?: (progress: StreamProgress) => void,
+): Promise<void> {
+  const streamStart = Date.now();
+  let tokenCount = 0;
+
+  const res = await fetch(`${PORTAL_BASE}/portal/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversationId, message }),
+    signal,
+    credentials: "include",
+  });
+
+  if (!res.ok) throw new Error(`Portal chat request failed: ${res.status}`);
+  if (!res.body) throw new Error("No response body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+
+      try {
+        const chunk = JSON.parse(data);
+
+        if (chunk.error) {
+          // Portal signals errors like "stream_interrupted"
+          throw new Error(`Stream error: ${chunk.error}`);
+        }
+
+        if (chunk.content) {
+          tokenCount++;
+          onChunk(chunk.content);
+          onProgress?.({
+            tokenCount,
+            elapsedMs: Date.now() - streamStart,
+          });
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("Stream error:")) {
+          throw e;
+        }
+        // Skip malformed JSON — non-critical
+      }
+    }
+  }
+}
+
 export async function logout(): Promise<void> {
   await fetch(`${PORTAL_BASE}/auth/logout`, {
     method: "POST",

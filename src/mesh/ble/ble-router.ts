@@ -1,13 +1,31 @@
 import { BLEPeerEntry } from "../../common/types.js";
+import { ConnectionQualityMonitor } from "./connection-quality.js";
 
 const EVICTION_MS = 60_000;
 const COST_THRESHOLD = 200;
 
+export interface NetworkHealthStats {
+  totalPeers: number;
+  activePeers: number;
+  blacklistedPeers: number;
+  avgConnectionScore: number;
+}
+
 export class BLERouter {
   private readonly peers = new Map<string, BLEPeerEntry>();
+  private readonly qualityMonitor: ConnectionQualityMonitor;
+
+  constructor(qualityMonitor?: ConnectionQualityMonitor) {
+    this.qualityMonitor = qualityMonitor ?? new ConnectionQualityMonitor();
+  }
+
+  getQualityMonitor(): ConnectionQualityMonitor {
+    return this.qualityMonitor;
+  }
 
   updatePeer(peer: BLEPeerEntry): void {
     this.peers.set(peer.agentId, peer);
+    this.qualityMonitor.recordRssi(peer.agentId, peer.rssi);
   }
 
   removePeer(agentId: string): void {
@@ -38,7 +56,13 @@ export class BLERouter {
     const totalTasks = (peer.taskSuccessCount ?? 0) + (peer.taskFailCount ?? 0);
     const failRate = totalTasks > 0 ? (peer.taskFailCount ?? 0) / totalTasks : 0;
     const reliabilityPenalty = failRate * 60;
-    return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty + reliabilityPenalty;
+
+    // Augment with connection quality data: higher quality score reduces cost
+    const qualityScore = this.qualityMonitor.getConnectionScore(peer.agentId);
+    // qualityScore is 0-100; invert to penalty: 100 = 0 penalty, 0 = 30 penalty
+    const qualityPenalty = Math.max(0, (100 - qualityScore) * 0.3);
+
+    return modelPreferencePenalty + loadPenalty + batteryPenalty + signalPenalty + reliabilityPenalty + qualityPenalty;
   }
 
   selectBestPeers(limit: number, ownTokenHash?: string): BLEPeerEntry[] {
@@ -46,6 +70,8 @@ export class BLERouter {
     const candidates: { peer: BLEPeerEntry; cost: number }[] = [];
     for (const peer of this.peers.values()) {
       if (ownTokenHash && peer.meshTokenHash !== ownTokenHash) continue;
+      // Skip blacklisted peers
+      if (this.qualityMonitor.shouldBlacklist(peer.agentId)) continue;
       const cost = this.computeCost(peer);
       if (cost < COST_THRESHOLD) {
         candidates.push({ peer, cost });
@@ -57,5 +83,27 @@ export class BLERouter {
 
   selectBestPeer(requiredModelSize: number, ownTokenHash?: string): BLEPeerEntry | null {
     return this.selectBestPeers(1, ownTokenHash)[0] ?? null;
+  }
+
+  getNetworkHealth(): NetworkHealthStats {
+    this.evictStale();
+    const allPeers = [...this.peers.values()];
+    let totalScore = 0;
+    let blacklisted = 0;
+
+    for (const peer of allPeers) {
+      const score = this.qualityMonitor.getConnectionScore(peer.agentId);
+      totalScore += score;
+      if (this.qualityMonitor.shouldBlacklist(peer.agentId)) {
+        blacklisted++;
+      }
+    }
+
+    return {
+      totalPeers: allPeers.length,
+      activePeers: allPeers.length - blacklisted,
+      blacklistedPeers: blacklisted,
+      avgConnectionScore: allPeers.length > 0 ? Math.round(totalScore / allPeers.length) : 0,
+    };
   }
 }

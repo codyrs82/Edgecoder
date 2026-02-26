@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import vm from "node:vm";
 import { Language, RunResult } from "../common/types.js";
 import { checkSubset } from "./subset.js";
-import { isDockerAvailable, runInDockerSandbox } from "./docker-sandbox.js";
+import { isDockerAvailable, runInDockerSandbox, type DockerSandboxOptions } from "./docker-sandbox.js";
 import { log } from "../common/logger.js";
 
 function baseResult(language: Language, durationMs: number): RunResult {
@@ -21,7 +21,8 @@ export async function runCode(
   language: Language,
   code: string,
   timeoutMs = 4_000,
-  sandbox: "host" | "docker" = "host"
+  sandbox: "host" | "docker" = "host",
+  dockerOptions?: DockerSandboxOptions
 ): Promise<RunResult> {
   const start = Date.now();
   const subset = await checkSubset(language, code);
@@ -37,7 +38,7 @@ export async function runCode(
   if (sandbox === "docker") {
     const dockerOk = await isDockerAvailable();
     if (dockerOk) {
-      return runInDockerSandbox(language, code, timeoutMs);
+      return runInDockerSandbox(language, code, timeoutMs, dockerOptions);
     }
     log.error("Docker sandbox required but Docker is not available — rejecting task");
     return {

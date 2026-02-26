@@ -4,6 +4,7 @@ import type { ModelSwapState } from "../model/swap-routes.js";
 export function buildDashboardRoutes(
   app: FastifyInstance,
   state: ModelSwapState,
+  metricsRef?: Record<string, number>,
 ): void {
   app.get("/dashboard", async (_req, reply) => {
     return reply.type("text/html").send(dashboardHtml());
@@ -19,6 +20,7 @@ export function buildDashboardRoutes(
       uptimeSeconds: Math.floor(process.uptime()),
       memoryMB: Math.round(process.memoryUsage.rss() / 1_048_576),
       nodeVersion: process.version,
+      ...(metricsRef ? { metrics: { ...metricsRef } } : {}),
     });
   });
 }

@@ -41,6 +41,7 @@ const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL ?? "";
 const PORTAL_PUBLIC_URL = process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const CONTROL_PLANE_ADMIN_TOKEN = process.env.CONTROL_PLANE_ADMIN_TOKEN ?? "";
+const COORDINATOR_DISCOVERY_URL = process.env.COORDINATOR_DISCOVERY_URL ?? "";
 const SESSION_TTL_MS = Number(process.env.PORTAL_SESSION_TTL_MS ?? `${1000 * 60 * 60 * 24 * 7}`);
 const EMAIL_VERIFY_TTL_MS = Number(process.env.PORTAL_EMAIL_VERIFY_TTL_MS ?? `${1000 * 60 * 60 * 24}`);
 const PASSKEY_CHALLENGE_TTL_MS = Number(process.env.PASSKEY_CHALLENGE_TTL_MS ?? "300000");
@@ -159,8 +160,8 @@ function validatePortalSecurityConfig(): void {
 
   const missing: string[] = [];
   if (!PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
-  if (!CONTROL_PLANE_URL) missing.push("CONTROL_PLANE_URL");
-  if (!CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
+  if (!CONTROL_PLANE_URL && !COORDINATOR_DISCOVERY_URL) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URL");
+  if (CONTROL_PLANE_URL && !CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
   if (!PASSKEY_RP_ID) missing.push("PASSKEY_RP_ID");
   if (!PASSKEY_RP_NAME) missing.push("PASSKEY_RP_NAME");
   if (!PASSKEY_ORIGIN) missing.push("PASSKEY_ORIGIN");
@@ -691,25 +692,36 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
 }
 
 async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
-  if (!CONTROL_PLANE_URL) return [];
-  try {
-    const res = await request(`${CONTROL_PLANE_URL}/network/coordinators`, {
-      method: "GET",
-      headers: controlPlaneHeaders(),
-      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
-      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
-    });
-    if (res.statusCode < 200 || res.statusCode >= 300) return [];
-    const payload = (await res.body.json()) as {
-      coordinators?: Array<{ coordinatorUrl?: string }>;
-    };
-    return (payload.coordinators ?? [])
-      .map((item) => String(item.coordinatorUrl ?? "").trim())
-      .filter(Boolean)
-      .filter((value, index, arr) => arr.indexOf(value) === index);
-  } catch {
-    return [];
+  // Try control plane API first
+  if (CONTROL_PLANE_URL) {
+    try {
+      const res = await request(`${CONTROL_PLANE_URL}/network/coordinators`, {
+        method: "GET",
+        headers: controlPlaneHeaders(),
+        headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+        bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+      });
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const payload = (await res.body.json()) as {
+          coordinators?: Array<{ coordinatorUrl?: string }>;
+        };
+        const urls = (payload.coordinators ?? [])
+          .map((item) => String(item.coordinatorUrl ?? "").trim())
+          .filter(Boolean)
+          .filter((value, index, arr) => arr.indexOf(value) === index);
+        if (urls.length > 0) return urls;
+      }
+    } catch {
+      // fall through
+    }
   }
+
+  // Fall back to COORDINATOR_DISCOVERY_URL as a direct coordinator URL
+  if (COORDINATOR_DISCOVERY_URL) {
+    return [COORDINATOR_DISCOVERY_URL.replace(/\/$/, "")];
+  }
+
+  return [];
 }
 
 async function fetchCoordinatorFederatedSummary(input: {
@@ -877,25 +889,36 @@ function marketingHomeHtml(): string {
       />
       <style>
         :root {
-          --bg: #f4f7fc;
-          --surface: rgba(255, 255, 255, 0.96);
-          --surface-strong: rgba(248, 251, 255, 0.98);
-          --text: #0f172a;
-          --muted: #475569;
-          --brand: #2563eb;
-          --brand-2: #0ea5e9;
-          --ok: #22c55e;
-          --border: rgba(148, 163, 184, 0.28);
+          --bg: #1a1a18;
+          --bg-soft: #2f2f2d;
+          --bg-surface: #3a3a37;
+          --bg-elevated: #454542;
+          --bg-input: #262624;
+          --surface: rgba(58, 58, 55, 0.96);
+          --surface-strong: rgba(69, 69, 66, 0.98);
+          --card: rgba(58, 58, 55, 0.96);
+          --card-border: rgba(214, 204, 194, 0.08);
+          --border-strong: rgba(214, 204, 194, 0.15);
+          --text: #f7f5f0;
+          --text-secondary: #b8b0a4;
+          --muted: #8a8478;
+          --brand: #c17850;
+          --brand-2: #d4895f;
+          --ok: #4ade80;
+          --danger: #f87171;
+          --yellow: #fbbf24;
+          --border: rgba(214, 204, 194, 0.08);
+          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
         body {
-          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: 14px;
+          line-height: 1.5;
           color: var(--text);
-          background:
-            radial-gradient(1000px 500px at 0% -20%, rgba(37, 99, 235, 0.12), transparent 60%),
-            radial-gradient(900px 500px at 100% 0%, rgba(14, 165, 233, 0.1), transparent 60%),
-            var(--bg);
+          background: var(--bg);
+          -webkit-font-smoothing: antialiased;
         }
         a { color: inherit; text-decoration: none; }
         .shell {
@@ -925,7 +948,7 @@ function marketingHomeHtml(): string {
           align-items: center;
           justify-content: center;
           background: linear-gradient(135deg, var(--brand), var(--brand-2));
-          box-shadow: 0 10px 28px rgba(34, 211, 238, 0.24);
+          box-shadow: 0 10px 28px rgba(193, 120, 80, 0.18);
         }
         .nav-actions {
           display: flex;
@@ -937,24 +960,25 @@ function marketingHomeHtml(): string {
           border-radius: 10px;
           padding: 9px 13px;
           font-size: 14px;
-          background: rgba(255, 255, 255, 0.9);
+          background: var(--bg-soft);
+          color: var(--text);
           transition: transform 0.08s ease, border-color 0.12s ease;
         }
-        .btn:hover { transform: translateY(-1px); border-color: #cbd5e1; }
+        .btn:hover { transform: translateY(-1px); border-color: var(--border-strong); }
         .btn.primary {
-          background: linear-gradient(135deg, #2563eb, #1d4ed8);
-          border-color: rgba(37, 99, 235, 0.72);
+          background: linear-gradient(135deg, var(--brand), var(--brand-2));
+          border-color: rgba(193, 120, 80, 0.72);
           color: #fff;
         }
         .hero {
           border: 1px solid var(--border);
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.95));
+          background: var(--bg-soft);
           border-radius: 18px;
           padding: 34px;
-          box-shadow: 0 12px 26px rgba(15, 23, 42, 0.08);
+          box-shadow: 0 12px 26px rgba(0, 0, 0, 0.2);
         }
         .eyebrow {
-          color: #1d4ed8;
+          color: var(--brand);
           text-transform: uppercase;
           letter-spacing: 0.08em;
           font-size: 11px;
@@ -969,7 +993,7 @@ function marketingHomeHtml(): string {
         }
         .lead {
           margin: 0;
-          color: #334155;
+          color: var(--text-secondary);
           max-width: 760px;
           font-size: 18px;
           line-height: 1.55;
@@ -988,7 +1012,7 @@ function marketingHomeHtml(): string {
         }
         .stat {
           border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.95);
+          background: var(--bg-surface);
           border-radius: 12px;
           padding: 12px;
         }
@@ -1002,7 +1026,7 @@ function marketingHomeHtml(): string {
           background: var(--surface);
         }
         .section h2 { margin: 0 0 8px; font-size: 24px; letter-spacing: -0.01em; }
-        .section p { margin: 0; color: #334155; line-height: 1.6; }
+        .section p { margin: 0; color: var(--text-secondary); line-height: 1.6; }
         .grid {
           margin-top: 14px;
           display: grid;
@@ -1013,17 +1037,17 @@ function marketingHomeHtml(): string {
           border: 1px solid var(--border);
           border-radius: 12px;
           padding: 14px;
-          background: rgba(255, 255, 255, 0.94);
+          background: var(--bg-surface);
         }
         .card h3 { margin: 0 0 6px; font-size: 17px; }
         .card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
         .steps {
           margin: 12px 0 0;
           padding-left: 18px;
-          color: #334155;
+          color: var(--text-secondary);
           line-height: 1.65;
         }
-        .steps b { color: #0f172a; }
+        .steps b { color: var(--text); }
         .footer {
           margin-top: 20px;
           border: 1px solid var(--border);
@@ -2551,24 +2575,17 @@ app.post("/portal/api/chat", async (req, reply) => {
   }
   const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
 
-  // Submit task to coordinator
-  const taskId = randomUUID();
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+  // Call coordinator's portal chat endpoint (streams Ollama via SSE)
+  const chatHeaders: Record<string, string> = { "content-type": "application/json" };
+  if (PORTAL_SERVICE_TOKEN) chatHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
 
   let coordinatorRes;
   try {
-    coordinatorRes = await request(`${coordinatorUrl}/tasks`, {
+    coordinatorRes = await request(`${coordinatorUrl}/portal/chat`, {
       method: "POST",
-      headers,
-      body: JSON.stringify({
-        taskId,
-        submitterAccountId: user.userId,
-        payload: { messages, stream: true },
-        priority: "normal",
-        resourceClass: "gpu"
-      }),
-      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      headers: chatHeaders,
+      body: JSON.stringify({ messages }),
+      headersTimeout: 60_000, // LLM inference can take 30s+ on cold start
       bodyTimeout: 0 // no body timeout for streaming
     });
   } catch (err) {
@@ -2580,7 +2597,7 @@ app.post("/portal/api/chat", async (req, reply) => {
     return reply.code(502).send({ error: "coordinator_error", detail: errBody });
   }
 
-  // Stream SSE response
+  // Stream SSE response from coordinator to browser
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -2591,25 +2608,22 @@ app.post("/portal/api/chat", async (req, reply) => {
   try {
     for await (const chunk of coordinatorRes.body) {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      const lines = text.split("\n").filter((l: string) => l.trim().length > 0);
-      for (const line of lines) {
+      for (const line of text.split("\n")) {
         const trimmed = line.replace(/^data:\s*/, "").trim();
-        if (!trimmed || trimmed === "[DONE]") continue;
+        if (!trimmed) continue;
+        if (trimmed === "[DONE]") break;
         try {
-          const parsed = JSON.parse(trimmed) as {
-            choices?: Array<{ delta?: { content?: string } }>;
-          };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            fullContent += delta;
-            reply.raw.write(`data: ${JSON.stringify({ content: delta })}\n\n`);
+          const parsed = JSON.parse(trimmed) as { content?: string };
+          if (parsed.content) {
+            fullContent += parsed.content;
+            reply.raw.write(`data: ${JSON.stringify({ content: parsed.content })}\n\n`);
           }
         } catch {
-          // Not valid JSON — skip
+          // skip unparseable lines
         }
       }
     }
-  } catch (streamErr) {
+  } catch {
     reply.raw.write(`data: ${JSON.stringify({ error: "stream_interrupted" })}\n\n`);
   }
 
@@ -2627,6 +2641,160 @@ app.post("/portal/api/chat", async (req, reply) => {
   reply.raw.end();
 });
 
+// ---------------------------------------------------------------------------
+// Reviews API — Cloud Review Diff UI for handshake escalations
+// ---------------------------------------------------------------------------
+
+app.get("/portal/api/reviews", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.send({ reviews: [] });
+  }
+  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
+  const headers: Record<string, string> = {};
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+  try {
+    const res = await request(`${coordinatorUrl}/escalate`, {
+      method: "GET",
+      headers,
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      const payload = (await res.body.json()) as {
+        escalations?: Array<{
+          taskId: string;
+          status: string;
+          request?: { task?: string; language?: string };
+          improvedCode?: string;
+        }>;
+      };
+      const reviews = (payload.escalations ?? []).map((e) => ({
+        taskId: e.taskId,
+        status: e.status,
+        task: e.request?.task ?? "",
+        language: e.request?.language ?? "",
+        createdAtMs: Date.now()
+      }));
+      return reply.send({ reviews });
+    }
+    // If the coordinator doesn't support listing, return empty
+    await res.body.text();
+    return reply.send({ reviews: [] });
+  } catch {
+    return reply.send({ reviews: [] });
+  }
+});
+
+app.get("/portal/api/reviews/:taskId", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+
+  const { taskId } = req.params as { taskId: string };
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.code(502).send({ error: "no_coordinators_available" });
+  }
+  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
+  const headers: Record<string, string> = {};
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+  try {
+    const res = await request(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}`, {
+      method: "GET",
+      headers,
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    if (res.statusCode === 404) {
+      await res.body.text();
+      return reply.code(404).send({ error: "review_not_found" });
+    }
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      const payload = (await res.body.json()) as {
+        taskId: string;
+        status: string;
+        improvedCode?: string;
+        explanation?: string;
+        resolvedByModel?: string;
+        request?: {
+          task?: string;
+          failedCode?: string;
+          language?: string;
+          errorHistory?: string[];
+        };
+      };
+      return reply.send({
+        taskId: payload.taskId,
+        status: payload.status,
+        improvedCode: payload.improvedCode ?? "",
+        explanation: payload.explanation ?? "",
+        resolvedByModel: payload.resolvedByModel ?? "",
+        task: payload.request?.task ?? "",
+        failedCode: payload.request?.failedCode ?? "",
+        language: payload.request?.language ?? "",
+        errorHistory: payload.request?.errorHistory ?? []
+      });
+    }
+    const errBody = await res.body.text();
+    return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+  } catch (err) {
+    return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+  }
+});
+
+app.post("/portal/api/reviews/:taskId/decision", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+
+  const { taskId } = req.params as { taskId: string };
+  const body = z.object({
+    decision: z.enum(["accept", "reject", "edit"]),
+    editedCode: z.string().optional()
+  }).parse(req.body);
+
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.code(502).send({ error: "no_coordinators_available" });
+  }
+  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+  const status = body.decision === "reject" ? "failed" : "completed";
+  const improvedCode = body.decision === "edit" ? body.editedCode : undefined;
+
+  try {
+    const res = await request(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}/result`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        taskId,
+        status,
+        improvedCode,
+        explanation: `User decision: ${body.decision}`
+      }),
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      const payload = await res.body.json();
+      return reply.send({ ok: true, detail: payload });
+    }
+    const errBody = await res.body.text();
+    return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+  } catch (err) {
+    return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+  }
+});
+
 app.get("/", async (_req, reply) => reply.type("text/html").send(marketingHomeHtml()));
 
 app.get("/portal-legacy", async (_req, reply) => {
@@ -2638,28 +2806,35 @@ app.get("/portal-legacy", async (_req, reply) => {
       <title>EdgeCoder Portal</title>
       <style>
         :root {
-          --bg: #070b18;
-          --bg-soft: #0f172a;
-          --card: rgba(15, 23, 42, 0.72);
-          --card-border: rgba(148, 163, 184, 0.25);
-          --text: #e2e8f0;
-          --muted: #94a3b8;
-          --brand: #7c3aed;
-          --brand-2: #22d3ee;
-          --ok: #22c55e;
-          --warn: #f59e0b;
-          --danger: #ef4444;
+          --bg: #1a1a18;
+          --bg-soft: #2f2f2d;
+          --bg-surface: #3a3a37;
+          --bg-elevated: #454542;
+          --bg-input: #262624;
+          --card: rgba(58, 58, 55, 0.96);
+          --card-border: rgba(214, 204, 194, 0.08);
+          --border-strong: rgba(214, 204, 194, 0.15);
+          --text: #f7f5f0;
+          --text-secondary: #b8b0a4;
+          --muted: #8a8478;
+          --brand: #c17850;
+          --brand-2: #d4895f;
+          --ok: #4ade80;
+          --warn: #fbbf24;
+          --danger: #f87171;
+          --yellow: #fbbf24;
+          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
         }
         * { box-sizing: border-box; }
         body {
-          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: 14px;
+          line-height: 1.5;
           margin: 0;
           color: var(--text);
-          background:
-            radial-gradient(1200px 500px at -20% -20%, rgba(124, 58, 237, 0.35), transparent 60%),
-            radial-gradient(800px 400px at 110% 10%, rgba(34, 211, 238, 0.24), transparent 60%),
-            var(--bg);
+          background: var(--bg);
           min-height: 100vh;
+          -webkit-font-smoothing: antialiased;
         }
         .shell { max-width: 1180px; margin: 24px auto 48px; padding: 0 16px; }
         h1, h2, h3 { margin: 8px 0; letter-spacing: -0.01em; }
@@ -2691,8 +2866,8 @@ app.get("/portal-legacy", async (_req, reply) => {
           border-radius: 999px;
           padding: 5px 10px;
           font-size: 12px;
-          color: #cbd5e1;
-          background: rgba(15, 23, 42, 0.45);
+          color: var(--text-secondary);
+          background: var(--bg-surface);
           backdrop-filter: blur(8px);
         }
         .grid { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 14px; }
@@ -2703,7 +2878,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           padding: 16px;
           margin-bottom: 12px;
           backdrop-filter: blur(10px);
-          box-shadow: 0 10px 30px rgba(2, 6, 23, 0.45);
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
         }
         .card h2, .card h3 { margin-top: 0; }
         .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -2712,57 +2887,60 @@ app.get("/portal-legacy", async (_req, reply) => {
           border: 1px solid var(--card-border);
           border-radius: 10px;
           padding: 10px;
-          background: rgba(2, 6, 23, 0.35);
+          background: var(--bg-input);
         }
         .kpi .label { color: var(--muted); font-size: 12px; }
         .kpi .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
-        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #cbd5e1; }
+        label { display: block; margin: 8px 0 4px; font-size: 13px; color: var(--text-secondary); }
         input, select {
           width: 100%;
           padding: 10px 11px;
-          border: 1px solid rgba(148, 163, 184, 0.35);
+          border: 1px solid var(--card-border);
           border-radius: 10px;
-          background: rgba(2, 6, 23, 0.7);
+          background: var(--bg-input);
           color: var(--text);
+          font-family: inherit;
         }
-        input::placeholder { color: #64748b; }
+        input::placeholder { color: var(--muted); }
         button {
           padding: 9px 12px;
           border-radius: 10px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          background: rgba(15, 23, 42, 0.7);
+          border: 1px solid var(--card-border);
+          background: var(--bg-soft);
           color: var(--text);
           cursor: pointer;
           transition: transform .08s ease, border-color .12s ease, background .12s ease;
         }
-        button:hover { border-color: #cbd5e1; transform: translateY(-1px); }
+        button:hover { border-color: var(--border-strong); transform: translateY(-1px); }
         button.primary {
-          background: linear-gradient(140deg, var(--brand), #6d28d9);
-          border-color: rgba(167, 139, 250, 0.9);
+          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          border-color: rgba(193, 120, 80, 0.7);
           color: white;
         }
-        button.primary:hover { background: linear-gradient(140deg, #8b5cf6, #7c3aed); }
+        button.primary:hover { background: linear-gradient(140deg, var(--brand-2), var(--brand)); }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td {
-          border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+          border-bottom: 1px solid var(--card-border);
           text-align: left;
           padding: 8px 6px;
           vertical-align: top;
+          font-family: inherit;
         }
-        th { color: #cbd5e1; font-weight: 600; }
+        th { color: var(--text-secondary); font-weight: 600; }
         code {
-          background: rgba(59, 130, 246, 0.18);
-          border: 1px solid rgba(147, 197, 253, 0.35);
+          background: rgba(193, 120, 80, 0.15);
+          border: 1px solid rgba(193, 120, 80, 0.25);
           padding: 2px 5px;
           border-radius: 6px;
+          font-family: var(--font-mono);
         }
         .token-box {
-          border: 1px dashed rgba(125, 211, 252, 0.55);
+          border: 1px dashed rgba(193, 120, 80, 0.4);
           border-radius: 10px;
           padding: 10px;
-          background: rgba(6, 78, 59, 0.28);
+          background: rgba(193, 120, 80, 0.08);
           word-break: break-all;
-          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-family: var(--font-mono);
           line-height: 1.45;
         }
         #toast {
@@ -2925,34 +3103,28 @@ app.get("/portal-legacy", async (_req, reply) => {
         const themeSelect = document.getElementById("themeSelect");
         const themePalettes = {
           warm: {
-            "--bg": "#2f2f2d",
-            "--bg-soft": "#353533",
-            "--card": "rgba(58, 58, 55, 0.96)",
-            "--card-border": "rgba(214, 204, 194, 0.12)",
-            "--text": "#f7f5f0",
-            "--muted": "#8a8478",
-            "--brand": "#c17850",
-            "--brand-2": "#d4895f"
+            "--bg": "#1a1a18", "--bg-soft": "#2f2f2d", "--bg-surface": "#3a3a37",
+            "--bg-elevated": "#454542", "--bg-input": "#262624",
+            "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.08)",
+            "--border-strong": "rgba(214, 204, 194, 0.15)",
+            "--text": "#f7f5f0", "--text-secondary": "#b8b0a4", "--muted": "#8a8478",
+            "--brand": "#c17850", "--brand-2": "#d4895f"
           },
           midnight: {
-            "--bg": "#1a1a2e",
-            "--bg-soft": "#202038",
-            "--card": "rgba(37, 37, 64, 0.96)",
-            "--card-border": "rgba(99, 102, 241, 0.18)",
-            "--text": "#e8e8f0",
-            "--muted": "#8888a0",
-            "--brand": "#6366f1",
-            "--brand-2": "#818cf8"
+            "--bg": "#0f0f1e", "--bg-soft": "#1a1a2e", "--bg-surface": "#252540",
+            "--bg-elevated": "#30304a", "--bg-input": "#141428",
+            "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.12)",
+            "--border-strong": "rgba(99, 102, 241, 0.2)",
+            "--text": "#e8e8f0", "--text-secondary": "#a0a0c0", "--muted": "#8888a0",
+            "--brand": "#6366f1", "--brand-2": "#818cf8"
           },
           emerald: {
-            "--bg": "#1a2e1a",
-            "--bg-soft": "#203520",
-            "--card": "rgba(37, 48, 37, 0.96)",
-            "--card-border": "rgba(34, 197, 94, 0.18)",
-            "--text": "#e8f0e8",
-            "--muted": "#88a088",
-            "--brand": "#22c55e",
-            "--brand-2": "#4ade80"
+            "--bg": "#0f1e0f", "--bg-soft": "#1a2e1a", "--bg-surface": "#253025",
+            "--bg-elevated": "#304030", "--bg-input": "#142814",
+            "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.12)",
+            "--border-strong": "rgba(34, 197, 94, 0.2)",
+            "--text": "#e8f0e8", "--text-secondary": "#a0c0a0", "--muted": "#88a088",
+            "--brand": "#22c55e", "--brand-2": "#4ade80"
           }
         };
 
@@ -3015,7 +3187,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           dashboardView.classList.remove("hidden");
 
           const user = summary.user || {};
-          applyTheme(user.uiTheme || "warm");
+          applyTheme("warm");
           document.getElementById("accountMeta").textContent =
             user.email + " | email verified: " + String(Boolean(user.emailVerified));
           document.getElementById("accountIdLabel").textContent = "acct-" + (user.userId || "unknown");
@@ -3269,7 +3441,7 @@ app.get("/portal-legacy", async (_req, reply) => {
 
 function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "chat" | "dashboard" | "wallet" | "settings" | "download";
+  activeTab: "chat" | "dashboard" | "wallet" | "settings" | "download" | "reviews";
   heading: string;
   subtitle: string;
   content: string;
@@ -3284,24 +3456,34 @@ function portalAuthedPageHtml(input: {
       <title>${input.title}</title>
       <style>
         :root {
-          --bg: #2f2f2d;
-          --bg-soft: #353533;
+          --bg: #1a1a18;
+          --bg-soft: #2f2f2d;
+          --bg-surface: #3a3a37;
+          --bg-elevated: #454542;
+          --bg-input: #262624;
           --card: rgba(58, 58, 55, 0.96);
-          --card-border: rgba(214, 204, 194, 0.12);
+          --card-border: rgba(214, 204, 194, 0.08);
+          --border-strong: rgba(214, 204, 194, 0.15);
           --text: #f7f5f0;
+          --text-secondary: #b8b0a4;
           --muted: #8a8478;
           --brand: #c17850;
           --brand-2: #d4895f;
           --ok: #4ade80;
           --danger: #f87171;
+          --yellow: #fbbf24;
+          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
         }
         * { box-sizing: border-box; }
         body {
-          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: 14px;
+          line-height: 1.5;
           margin: 0;
           color: var(--text);
           background: var(--bg);
           min-height: 100vh;
+          -webkit-font-smoothing: antialiased;
         }
         .shell { max-width: 1360px; margin: 0 auto; padding: 0 14px; }
         .topbar {
@@ -3316,7 +3498,7 @@ function portalAuthedPageHtml(input: {
         .topbar-left a { text-decoration: none; color: var(--text); display: flex; align-items: center; gap: 8px; }
         .topbar-right { display: flex; align-items: center; gap: 10px; }
         .topbar-credits {
-          font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-family: var(--font-mono);
           font-size: 12px;
           color: var(--muted);
           padding: 3px 8px;
@@ -3354,7 +3536,7 @@ function portalAuthedPageHtml(input: {
           padding: 11px;
           margin-bottom: 8px;
           backdrop-filter: blur(10px);
-          box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
         }
         .content-stack { margin-top: 0; }
         .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -3372,14 +3554,19 @@ function portalAuthedPageHtml(input: {
           border-color: rgba(193, 120, 80, 0.75);
           color: white;
         }
-        input, select {
+        input, select, textarea {
           width: 100%;
           padding: 7px 8px;
           border: 1px solid var(--card-border);
           border-radius: 6px;
-          background: var(--bg);
+          background: var(--bg-input);
           color: var(--text);
-          font-size: 12px;
+          font-size: 13px;
+          font-family: inherit;
+        }
+        input:focus, select:focus, textarea:focus {
+          outline: none;
+          border-color: var(--brand);
         }
         label {
           display: block;
@@ -3395,7 +3582,7 @@ function portalAuthedPageHtml(input: {
           text-align: left;
           padding: 6px 5px;
           vertical-align: top;
-          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-family: inherit;
         }
         th {
           color: var(--muted);
@@ -3491,6 +3678,7 @@ function portalAuthedPageHtml(input: {
         </div>
         <div class="topbar-right">
           <span class="topbar-credits" id="topTickerCredits" title="Credits">-</span>
+          <a class="topbar-icon" href="/portal/reviews" title="Reviews" style="font-size:14px;">&#9998;</a>
           <a class="topbar-icon" href="/portal/settings" title="Settings">&#9881;</a>
           <a class="topbar-icon" id="logoutBtn" href="#" title="Sign out">&#10140;</a>
         </div>
@@ -3504,9 +3692,9 @@ function portalAuthedPageHtml(input: {
       <script>
         const toast = document.getElementById("toast");
         const themePalettes = {
-          warm: { "--bg": "#2f2f2d", "--bg-soft": "#353533", "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.12)", "--text": "#f7f5f0", "--muted": "#8a8478", "--brand": "#c17850", "--brand-2": "#d4895f" },
-          midnight: { "--bg": "#1a1a2e", "--bg-soft": "#202038", "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.18)", "--text": "#e8e8f0", "--muted": "#8888a0", "--brand": "#6366f1", "--brand-2": "#818cf8" },
-          emerald: { "--bg": "#1a2e1a", "--bg-soft": "#203520", "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.18)", "--text": "#e8f0e8", "--muted": "#88a088", "--brand": "#22c55e", "--brand-2": "#4ade80" }
+          warm: { "--bg": "#1a1a18", "--bg-soft": "#2f2f2d", "--bg-surface": "#3a3a37", "--bg-elevated": "#454542", "--bg-input": "#262624", "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.08)", "--border-strong": "rgba(214, 204, 194, 0.15)", "--text": "#f7f5f0", "--text-secondary": "#b8b0a4", "--muted": "#8a8478", "--brand": "#c17850", "--brand-2": "#d4895f" },
+          midnight: { "--bg": "#0f0f1e", "--bg-soft": "#1a1a2e", "--bg-surface": "#252540", "--bg-elevated": "#30304a", "--bg-input": "#141428", "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.12)", "--border-strong": "rgba(99, 102, 241, 0.2)", "--text": "#e8e8f0", "--text-secondary": "#a0a0c0", "--muted": "#8888a0", "--brand": "#6366f1", "--brand-2": "#818cf8" },
+          emerald: { "--bg": "#0f1e0f", "--bg-soft": "#1a2e1a", "--bg-surface": "#253025", "--bg-elevated": "#304030", "--bg-input": "#142814", "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.12)", "--border-strong": "rgba(34, 197, 94, 0.2)", "--text": "#e8f0e8", "--text-secondary": "#a0c0a0", "--muted": "#88a088", "--brand": "#22c55e", "--brand-2": "#4ade80" }
         };
         function applyTheme(theme) {
           const palette = themePalettes[theme] || themePalettes.warm;
@@ -3532,7 +3720,7 @@ function portalAuthedPageHtml(input: {
         async function requireAuth() {
           try {
             const me = await api("/me", { method: "GET", headers: {} });
-            applyTheme((me.user || {}).uiTheme || "warm");
+            applyTheme("warm");
             return me;
           } catch {
             window.location.href = "/portal";
@@ -3583,22 +3771,31 @@ app.get("/portal", async (_req, reply) => {
       <title>EdgeCoder Portal | Sign in</title>
       <style>
         :root {
-          --bg: #2f2f2d;
-          --bg-soft: #353533;
+          --bg: #1a1a18;
+          --bg-soft: #2f2f2d;
+          --bg-surface: #3a3a37;
+          --bg-elevated: #454542;
+          --bg-input: #262624;
           --card: rgba(58, 58, 55, 0.96);
-          --card-border: rgba(214, 204, 194, 0.12);
+          --card-border: rgba(214, 204, 194, 0.08);
+          --border-strong: rgba(214, 204, 194, 0.15);
           --text: #f7f5f0;
+          --text-secondary: #b8b0a4;
           --muted: #8a8478;
           --brand: #c17850;
           --brand-2: #d4895f;
+          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
         }
         * { box-sizing: border-box; }
         body {
-          font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: 14px;
+          line-height: 1.5;
           margin: 0;
           color: var(--text);
           background: var(--bg);
           min-height: 100vh;
+          -webkit-font-smoothing: antialiased;
         }
         .shell { max-width: 980px; margin: 28px auto 42px; padding: 0 16px; }
         .hero { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
@@ -3621,7 +3818,7 @@ app.get("/portal", async (_req, reply) => {
           border-radius: 12px;
           padding: 16px;
           backdrop-filter: blur(10px);
-          box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
         }
         .simple-intro { background: var(--bg-soft); }
         .simple-intro h2 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.02em; }
@@ -3882,45 +4079,59 @@ app.get("/portal", async (_req, reply) => {
 app.get("/portal/chat", async (_req, reply) => {
   const content = `
     <style>
-      .chat-msg { padding:8px 12px; margin:4px 0; border-radius:8px; max-width:85%; word-wrap:break-word; }
-      .chat-msg.user { background:var(--brand); color:#fff; margin-left:auto; text-align:right; }
-      .chat-msg.assistant { background:var(--bg-soft); margin-right:auto; }
-      .chat-msg pre { background:rgba(0,0,0,0.3); padding:8px; border-radius:6px; overflow-x:auto; margin:6px 0; }
+      .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
+      .content-stack { padding:0 !important; margin:0 !important; }
+      .chat-layout { display:flex; height:calc(100vh - 52px); }
+      .conv-sidebar { width:260px; min-width:260px; border-right:0.5px solid var(--card-border); background:var(--bg-soft); display:flex; flex-direction:column; padding:12px; }
+      .conv-sidebar h3 { margin:0 0 8px 0; font-size:14px; }
+      .conv-item { padding:8px 10px; border-radius:6px; cursor:pointer; margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
+      .conv-item:hover { background:var(--bg-surface); }
+      .conv-item.active { background:var(--bg-surface); color:var(--brand); }
+      .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
+      .chat-scroll { flex:1; overflow-y:auto; }
+      .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
+      .chat-msg { padding:16px 0; line-height:1.6; font-size:15px; }
+      .chat-msg + .chat-msg { border-top:0.5px solid var(--card-border); }
+      .chat-msg .msg-role { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; color:var(--muted); }
+      .chat-msg.user .msg-role { color:var(--brand); }
+      .chat-msg .msg-body { color:var(--text); }
+      .chat-msg pre { background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; overflow-x:auto; margin:8px 0; }
       .chat-msg code { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; }
-      .conv-item { padding:8px 10px; border-radius:6px; cursor:pointer; margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .conv-item:hover { background:var(--card-border); }
-      .conv-item.active { background:var(--brand); color:#fff; }
+      .chat-input-area { border-top:0.5px solid var(--card-border); background:var(--bg); }
+      .chat-input-wrap { max-width:768px; margin:0 auto; padding:12px 24px 16px; }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
     </style>
-    <div style="display:grid; grid-template-columns:260px 1fr; gap:10px; height:calc(100vh - 70px);">
+    <div class="chat-layout">
       <!-- Left: Conversation sidebar -->
-      <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
+      <div class="conv-sidebar">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <h3 style="margin:0;">Conversations</h3>
+          <h3>Conversations</h3>
           <button class="primary" id="newChatBtn" style="padding:4px 10px; font-size:12px;">+ New</button>
         </div>
-        <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:8px;" />
+        <input id="convSearch" type="text" placeholder="Search..." style="margin-bottom:8px; font-size:12px;" />
         <div id="convList" style="flex:1; overflow-y:auto;"></div>
       </div>
       <!-- Right: Chat area -->
-      <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
-        <div id="chatHeader" style="display:flex; justify-content:space-between; align-items:center; padding-bottom:8px; border-bottom:0.5px solid var(--card-border); margin-bottom:8px;">
-          <h3 id="chatTitle" style="margin:0;">New chat</h3>
-          <div id="chatMeta" class="muted" style="font-size:11px;"></div>
+      <div class="chat-main">
+        <div class="chat-scroll">
+          <div class="chat-thread" id="chatMessages">
+            <div class="muted" style="padding:40px 0;">Start a conversation.</div>
+          </div>
         </div>
-        <div id="chatMessages" style="flex:1; overflow-y:auto; padding:8px 0;"></div>
-        <div id="streamingIndicator" class="hidden" style="display:flex; align-items:center; gap:8px; padding:8px 0; color:var(--muted); font-size:12px;">
+        <div id="streamingIndicator" class="hidden" style="max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:4px 24px; color:var(--muted); font-size:12px;">
           <span class="spinner"></span>
           <span id="streamStatus">Thinking...</span>
           <span id="streamTokens"></span>
         </div>
-        <div style="border-top:0.5px solid var(--card-border); padding-top:10px;">
-          <div style="display:flex; gap:8px;">
-            <textarea id="chatInput" rows="2" placeholder="Message EdgeCoder..." style="flex:1; resize:none; max-height:200px; font-family:inherit;"></textarea>
-            <button class="primary" id="sendBtn" style="align-self:flex-end; padding:8px 16px;">Send</button>
+        <div class="chat-input-area">
+          <div class="chat-input-wrap">
+            <div style="display:flex; gap:8px;">
+              <textarea id="chatInput" rows="2" placeholder="Message EdgeCoder..." style="flex:1; resize:none; max-height:200px; font-family:inherit; font-size:15px;"></textarea>
+              <button class="primary" id="sendBtn" style="align-self:flex-end; padding:8px 16px;">Send</button>
+            </div>
+            <div class="muted" style="font-size:10px; margin-top:4px;">Enter to send, Shift+Enter for newline</div>
           </div>
-          <div class="muted" style="font-size:10px; margin-top:4px;">Enter to send, Shift+Enter for newline. Responses use swarm credits.</div>
         </div>
       </div>
     </div>
@@ -3977,18 +4188,20 @@ app.get("/portal/chat", async (_req, reply) => {
 
     function renderMessages(messages) {
       var container = document.getElementById("chatMessages");
+      var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = "<div class=\\"muted\\" style=\\"text-align:center; padding:40px 0;\\">No messages yet. Start a conversation!</div>";
+        container.innerHTML = "<div class=\\"muted\\" style=\\"padding:40px 0;\\">Start a conversation.</div>";
         return;
       }
       var html = "";
       for (var i = 0; i < messages.length; i++) {
         var m = messages[i];
         var role = m.role === "user" ? "user" : "assistant";
-        html += "<div class=\\"chat-msg " + role + "\\">" + renderMarkdown(m.content || "") + "</div>";
+        var label = m.role === "user" ? "You" : "EdgeCoder";
+        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-role\\">" + label + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div></div>";
       }
       container.innerHTML = html;
-      container.scrollTop = container.scrollHeight;
+      scrollParent.scrollTop = scrollParent.scrollHeight;
     }
 
     async function loadConversations() {
@@ -4015,8 +4228,8 @@ app.get("/portal/chat", async (_req, reply) => {
       activeConvId = convId;
       renderConversations();
       var conv = conversations.find(function(c) { return c.conversationId === convId; });
-      document.getElementById("chatTitle").textContent = (conv && conv.title) || "New chat";
-      document.getElementById("chatMeta").textContent = conv ? new Date(conv.updatedAt || conv.createdAt).toLocaleString() : "";
+      var titleEl = document.getElementById("chatTitle");
+      if (titleEl) titleEl.textContent = (conv && conv.title) || "New chat";
       await loadMessages(convId);
     }
 
@@ -4056,15 +4269,16 @@ app.get("/portal/chat", async (_req, reply) => {
         }
       }
 
-      // Append user message bubble immediately
+      // Append user message immediately
       var chatMessages = document.getElementById("chatMessages");
+      var scrollParent = chatMessages.parentElement;
       var emptyMsg = chatMessages.querySelector(".muted");
       if (emptyMsg) emptyMsg.remove();
       var userBubble = document.createElement("div");
       userBubble.className = "chat-msg user";
-      userBubble.innerHTML = renderMarkdown(text);
+      userBubble.innerHTML = "<div class=\\"msg-role\\">You</div><div class=\\"msg-body\\">" + renderMarkdown(text) + "</div>";
       chatMessages.appendChild(userBubble);
-      chatMessages.scrollTop = chatMessages.scrollHeight;
+      scrollParent.scrollTop = scrollParent.scrollHeight;
 
       // Start streaming
       isStreaming = true;
@@ -4075,11 +4289,12 @@ app.get("/portal/chat", async (_req, reply) => {
       var startTime = Date.now();
       var tokenCount = 0;
 
-      // Create assistant bubble
+      // Create assistant message block
       var assistantBubble = document.createElement("div");
       assistantBubble.className = "chat-msg assistant";
-      assistantBubble.innerHTML = "";
+      assistantBubble.innerHTML = "<div class=\\"msg-role\\">EdgeCoder</div><div class=\\"msg-body\\"></div>";
       chatMessages.appendChild(assistantBubble);
+      var assistantBody = assistantBubble.querySelector(".msg-body");
 
       var fullContent = "";
       abortController = new AbortController();
@@ -4120,8 +4335,8 @@ app.get("/portal/chat", async (_req, reply) => {
               if (parsed.content) {
                 fullContent += parsed.content;
                 tokenCount++;
-                assistantBubble.innerHTML = renderMarkdown(fullContent);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                assistantBody.innerHTML = renderMarkdown(fullContent);
+                scrollParent.scrollTop = scrollParent.scrollHeight;
                 var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                 document.getElementById("streamStatus").textContent = "Streaming...";
                 document.getElementById("streamTokens").textContent = tokenCount + " chunks, " + elapsed + "s";
@@ -4146,7 +4361,8 @@ app.get("/portal/chat", async (_req, reply) => {
       indicator.classList.add("hidden");
 
       // Auto-rename if title is still "New chat"
-      var currentTitle = document.getElementById("chatTitle").textContent;
+      var conv = conversations.find(function(c) { return c.conversationId === activeConvId; });
+      var currentTitle = (conv && conv.title) || "New chat";
       if (currentTitle === "New chat" && text.length > 0) {
         var newTitle = text.length > 40 ? text.substring(0, 40) + "..." : text;
         try {
@@ -4154,7 +4370,8 @@ app.get("/portal/chat", async (_req, reply) => {
             method: "PATCH",
             body: JSON.stringify({ title: newTitle })
           });
-          document.getElementById("chatTitle").textContent = newTitle;
+          var titleEl = document.getElementById("chatTitle");
+          if (titleEl) titleEl.textContent = newTitle;
           await loadConversations();
         } catch (renameErr) {
           // non-critical, ignore
@@ -4244,6 +4461,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       <h3 style="margin-top:0;">Quick actions</h3>
       <div class="row">
         <a href="/portal/chat"><button class="primary">Open Chat</button></a>
+        <a href="/portal/reviews"><button>Code Reviews</button></a>
         <a href="/portal/wallet"><button>Open wallet</button></a>
         <a href="/portal/settings"><button>Account settings</button></a>
       </div>
@@ -5025,7 +5243,7 @@ app.get("/portal/settings", async (_req, reply) => {
     async function bootstrapSettings() {
       const me = await requireAuth();
       const user = me.user || {};
-      currentUserTheme = user.uiTheme || "warm";
+      currentUserTheme = "warm";
       document.getElementById("accountLine").textContent = (user.email || "unknown") + " | user ID: " + (user.userId || "n/a");
       document.getElementById("themeSelect").value = currentUserTheme;
     }
@@ -5301,6 +5519,307 @@ app.get("/portal/download", async (req, reply) => {
   }));
 });
 
+/* ───────────────── Reviews page — Cloud Review Diff UI ───────────────── */
+app.get("/portal/reviews", async (_req, reply) => {
+  const content = `
+    <style>
+      .reviews-layout { display:flex; gap:12px; min-height:calc(100vh - 120px); }
+      .reviews-list { width:320px; min-width:280px; flex-shrink:0; }
+      .reviews-detail { flex:1; min-width:0; }
+      .review-item {
+        padding:10px 12px; border-radius:6px; cursor:pointer; margin:4px 0;
+        border:1px solid var(--card-border); background:var(--card);
+        transition:border-color 0.15s;
+      }
+      .review-item:hover { border-color:var(--brand); }
+      .review-item.active { border-color:var(--brand); background:var(--bg-surface); }
+      .review-item .ri-task { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .review-item .ri-meta { font-size:11px; color:var(--muted); margin-top:2px; }
+      .diff-container {
+        display:grid; grid-template-columns:1fr 1fr; gap:0;
+        border:1px solid var(--card-border); border-radius:8px; overflow:hidden;
+        font-family:var(--font-mono); font-size:12px; line-height:1.6;
+        background:var(--bg);
+      }
+      .diff-pane { overflow-x:auto; }
+      .diff-pane-header {
+        padding:8px 12px; font-size:11px; font-weight:700; text-transform:uppercase;
+        letter-spacing:0.06em; color:var(--muted);
+        border-bottom:1px solid var(--card-border);
+        background:var(--bg-soft);
+      }
+      .diff-pane-left .diff-pane-header { border-right:1px solid var(--card-border); }
+      .diff-line {
+        display:flex; padding:0 12px; min-height:22px; white-space:pre;
+      }
+      .diff-line-num {
+        width:40px; min-width:40px; text-align:right; padding-right:10px;
+        color:var(--muted); user-select:none; flex-shrink:0;
+      }
+      .diff-line-content { flex:1; min-width:0; }
+      .diff-line.removed {
+        background:rgba(248, 113, 113, 0.1);
+        border-left:3px solid var(--danger);
+      }
+      .diff-line.added {
+        background:rgba(74, 222, 128, 0.1);
+        border-left:3px solid var(--ok);
+      }
+      .diff-line.unchanged {
+        border-left:3px solid transparent;
+      }
+      .diff-pane-left { border-right:1px solid var(--card-border); }
+      .review-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+      .review-actions button { padding:8px 16px; font-size:13px; font-weight:600; border-radius:6px; }
+      .btn-accept {
+        background:linear-gradient(140deg, #16a34a, #22c55e);
+        border-color:rgba(34, 197, 94, 0.7); color:white;
+      }
+      .btn-accept:hover { filter:brightness(1.1); }
+      .btn-reject {
+        background:linear-gradient(140deg, #dc2626, #ef4444);
+        border-color:rgba(239, 68, 68, 0.7); color:white;
+      }
+      .btn-reject:hover { filter:brightness(1.1); }
+      .btn-edit {
+        background:linear-gradient(140deg, var(--brand), var(--brand-2));
+        border-color:rgba(193, 120, 80, 0.7); color:white;
+      }
+      .btn-edit:hover { filter:brightness(1.1); }
+      .edit-area {
+        width:100%; min-height:300px; margin-top:10px;
+        font-family:var(--font-mono); font-size:12px; line-height:1.6;
+        padding:10px; border:1px solid var(--brand);
+        border-radius:6px; background:var(--bg-input); color:var(--text);
+        resize:vertical;
+      }
+      .notes-section {
+        margin-top:12px; padding:10px 14px;
+        border:1px solid var(--card-border); border-radius:6px;
+        background:var(--bg-soft); font-size:13px; color:var(--text-secondary);
+      }
+      .notes-section strong { color:var(--text); }
+      .empty-state {
+        text-align:center; padding:48px 20px; color:var(--muted);
+      }
+      .empty-state h3 { color:var(--text-secondary); margin-bottom:6px; }
+      .success-banner {
+        padding:14px 18px; border-radius:8px; text-align:center;
+        background:rgba(34, 197, 94, 0.12); border:1px solid rgba(34, 197, 94, 0.4);
+        color:var(--ok); font-weight:600; font-size:14px; margin-bottom:12px;
+      }
+      @media (max-width:800px) {
+        .reviews-layout { flex-direction:column; }
+        .reviews-list { width:100%; }
+        .diff-container { grid-template-columns:1fr; }
+      }
+    </style>
+    <div class="reviews-layout">
+      <div class="reviews-list">
+        <div class="card">
+          <h3 style="margin-top:0;">Pending Reviews</h3>
+          <div id="reviewsList"><div class="muted">Loading reviews...</div></div>
+        </div>
+      </div>
+      <div class="reviews-detail">
+        <div id="reviewDetail">
+          <div class="card empty-state">
+            <h3>No review selected</h3>
+            <p>Select a review from the list to view the code diff and make a decision.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const script = `
+    var reviews = [];
+    var activeTaskId = null;
+    var editMode = false;
+
+    async function loadReviews() {
+      try {
+        var res = await api("/portal/api/reviews");
+        reviews = res.reviews || [];
+        renderReviewList();
+      } catch (err) {
+        document.getElementById("reviewsList").innerHTML =
+          '<div class="muted">Could not load reviews: ' + String(err.message || err) + '</div>';
+      }
+    }
+
+    function renderReviewList() {
+      var container = document.getElementById("reviewsList");
+      if (reviews.length === 0) {
+        container.innerHTML = '<div class="muted">No pending reviews. When agents escalate tasks, they will appear here.</div>';
+        return;
+      }
+      var html = "";
+      for (var i = 0; i < reviews.length; i++) {
+        var r = reviews[i];
+        var active = r.taskId === activeTaskId ? " active" : "";
+        var statusTone = r.status === "completed" ? "ok" : r.status === "failed" ? "danger" : "warn";
+        html += '<div class="review-item' + active + '" onclick="selectReview(\\'' + r.taskId + '\\')">';
+        html += '<div class="ri-task">' + escapeHtml(r.task || r.taskId) + '</div>';
+        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' &middot; ' + escapeHtml(r.language || "unknown") + '</div>';
+        html += '</div>';
+      }
+      container.innerHTML = html;
+    }
+
+    function escapeHtml(str) {
+      var div = document.createElement("div");
+      div.appendChild(document.createTextNode(str));
+      return div.innerHTML;
+    }
+
+    function computeDiff(oldCode, newCode) {
+      var oldLines = (oldCode || "").split("\\n");
+      var newLines = (newCode || "").split("\\n");
+      var maxLen = Math.max(oldLines.length, newLines.length);
+      var leftHtml = "";
+      var rightHtml = "";
+
+      for (var i = 0; i < maxLen; i++) {
+        var oldLine = i < oldLines.length ? oldLines[i] : null;
+        var newLine = i < newLines.length ? newLines[i] : null;
+
+        if (oldLine !== null && newLine !== null && oldLine === newLine) {
+          leftHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">' + escapeHtml(oldLine) + '</span></div>';
+          rightHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">' + escapeHtml(newLine) + '</span></div>';
+        } else {
+          if (oldLine !== null) {
+            leftHtml += '<div class="diff-line removed"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">- ' + escapeHtml(oldLine) + '</span></div>';
+          } else {
+            leftHtml += '<div class="diff-line unchanged"><span class="diff-line-num"></span><span class="diff-line-content"></span></div>';
+          }
+          if (newLine !== null) {
+            rightHtml += '<div class="diff-line added"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">+ ' + escapeHtml(newLine) + '</span></div>';
+          } else {
+            rightHtml += '<div class="diff-line unchanged"><span class="diff-line-num"></span><span class="diff-line-content"></span></div>';
+          }
+        }
+      }
+      return { leftHtml: leftHtml, rightHtml: rightHtml };
+    }
+
+    async function selectReview(taskId) {
+      activeTaskId = taskId;
+      editMode = false;
+      renderReviewList();
+
+      var detail = document.getElementById("reviewDetail");
+      detail.innerHTML = '<div class="card"><div class="muted">Loading review details...</div></div>';
+
+      try {
+        var res = await api("/portal/api/reviews/" + encodeURIComponent(taskId));
+        renderReviewDetail(res);
+      } catch (err) {
+        detail.innerHTML = '<div class="card"><div class="muted">Failed to load review: ' + String(err.message || err) + '</div></div>';
+      }
+    }
+
+    var currentReview = null;
+
+    function renderReviewDetail(data) {
+      currentReview = data;
+      var detail = document.getElementById("reviewDetail");
+      var diff = computeDiff(data.failedCode, data.improvedCode);
+
+      var html = '';
+      html += '<div class="card">';
+      html += '<h2 style="margin-top:0;">Task</h2>';
+      html += '<p style="color:var(--text-secondary);margin:0;">' + escapeHtml(data.task || "No task description") + '</p>';
+      if (data.language) {
+        html += '<div style="margin-top:6px;">' + statusBadge(data.language, "neutral") + '</div>';
+      }
+      html += '</div>';
+
+      html += '<div class="card" style="padding:0;overflow:hidden;">';
+      html += '<div class="diff-container">';
+      html += '<div class="diff-pane diff-pane-left">';
+      html += '<div class="diff-pane-header">Original (failed)</div>';
+      html += diff.leftHtml;
+      html += '</div>';
+      html += '<div class="diff-pane diff-pane-right">';
+      html += '<div class="diff-pane-header">Improved</div>';
+      html += diff.rightHtml;
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+
+      if (data.explanation) {
+        html += '<div class="notes-section"><strong>Cloud Model Notes:</strong> ' + escapeHtml(data.explanation) + '</div>';
+      }
+      if (data.resolvedByModel) {
+        html += '<div class="notes-section"><strong>Resolved by:</strong> ' + escapeHtml(data.resolvedByModel) + '</div>';
+      }
+
+      html += '<div id="editArea"></div>';
+
+      html += '<div class="review-actions" id="reviewActions">';
+      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">Accept</button>';
+      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">Reject</button>';
+      html += '<button class="btn-edit" onclick="toggleEdit()">Edit &amp; Accept</button>';
+      html += '</div>';
+
+      detail.innerHTML = html;
+    }
+
+    function toggleEdit() {
+      editMode = !editMode;
+      var editArea = document.getElementById("editArea");
+      if (editMode && currentReview) {
+        editArea.innerHTML = '<label style="font-size:12px;color:var(--muted);text-transform:uppercase;">Edit improved code before accepting</label>'
+          + '<textarea class="edit-area" id="editTextarea">' + escapeHtml(currentReview.improvedCode || "") + '</textarea>';
+        document.getElementById("editTextarea").focus();
+      } else {
+        editArea.innerHTML = "";
+      }
+    }
+
+    async function submitDecision(decision) {
+      if (!activeTaskId) return;
+      var body = { decision: decision };
+      if (decision === "edit" || (editMode && decision === "accept")) {
+        var ta = document.getElementById("editTextarea");
+        if (ta) {
+          body.decision = "edit";
+          body.editedCode = ta.value;
+        }
+      }
+
+      try {
+        await api("/portal/api/reviews/" + encodeURIComponent(activeTaskId) + "/decision", {
+          method: "POST",
+          body: JSON.stringify(body)
+        });
+        var detail = document.getElementById("reviewDetail");
+        var decisionLabel = body.decision === "accept" ? "accepted" : body.decision === "reject" ? "rejected" : "edited and accepted";
+        detail.innerHTML = '<div class="success-banner">Review ' + escapeHtml(decisionLabel) + ' successfully.</div>'
+          + '<div class="card empty-state"><h3>Decision submitted</h3><p>Select another review from the list or wait for new escalations.</p></div>';
+        activeTaskId = null;
+        loadReviews();
+      } catch (err) {
+        showToast("Failed to submit decision: " + String(err.message || err), true);
+      }
+    }
+
+    requireAuth().then(function() {
+      loadReviews();
+    });
+  `;
+
+  return reply.type("text/html").send(portalAuthedPageHtml({
+    title: "EdgeCoder Portal | Reviews",
+    activeTab: "reviews",
+    heading: "Code Reviews",
+    subtitle: "Review escalated code from the cloud model.",
+    content,
+    script
+  }));
+});
+
 app.post("/internal/nodes/validate", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
@@ -5419,6 +5938,104 @@ app.get("/internal/nodes/pending", async (req, reply) => {
       updatedAtMs: n.updatedAtMs
     }))
   });
+});
+
+// ---------------------------------------------------------------------------
+// Human Escalation API — surfaces tasks that exhausted all automated
+// resolvers and need human operator input.
+// ---------------------------------------------------------------------------
+
+import {
+  getHumanEscalation,
+  listHumanEscalations,
+  updateHumanEscalation,
+  countPendingHumanEscalations,
+} from "../escalation/human-store.js";
+import type { HumanEscalationResponse } from "../escalation/types.js";
+
+/**
+ * GET /portal/api/escalations — list pending human escalations.
+ */
+app.get("/portal/api/escalations", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const pending = listHumanEscalations("pending_human");
+  return reply.send({ escalations: pending });
+});
+
+/**
+ * GET /portal/api/escalations/pending-count — lightweight polling endpoint
+ * that returns the number of escalations awaiting human input.
+ */
+app.get("/portal/api/escalations/pending-count", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  return reply.send({ count: countPendingHumanEscalations() });
+});
+
+/**
+ * GET /portal/api/escalations/:id — get full details for a single escalation.
+ */
+app.get("/portal/api/escalations/:id", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const { id } = req.params as { id: string };
+  const entry = getHumanEscalation(id);
+  if (!entry) return reply.code(404).send({ error: "escalation_not_found" });
+  return reply.send({ escalation: entry });
+});
+
+/**
+ * POST /portal/api/escalations/:id/respond — submit a human response.
+ *
+ * Body: { action: "provide_context" | "edit_code" | "abandon", context?: string, editedCode?: string }
+ */
+app.post("/portal/api/escalations/:id/respond", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const { id } = req.params as { id: string };
+  const entry = getHumanEscalation(id);
+  if (!entry) return reply.code(404).send({ error: "escalation_not_found" });
+  if (entry.status !== "pending_human") {
+    return reply.code(409).send({ error: "escalation_not_pending" });
+  }
+
+  const body = z.object({
+    action: z.enum(["provide_context", "edit_code", "abandon"]),
+    context: z.string().optional(),
+    editedCode: z.string().optional(),
+  }).parse(req.body) as HumanEscalationResponse;
+
+  if (body.action === "abandon") {
+    updateHumanEscalation(id, {
+      status: "abandoned",
+      respondedByUserId: user.userId,
+    });
+    return reply.send({ ok: true, status: "abandoned" });
+  }
+
+  if (body.action === "edit_code") {
+    if (!body.editedCode) {
+      return reply.code(400).send({ error: "editedCode_required_for_edit_code_action" });
+    }
+    updateHumanEscalation(id, {
+      status: "resolved",
+      humanEditedCode: body.editedCode,
+      respondedByUserId: user.userId,
+    });
+    return reply.send({ ok: true, status: "resolved", improvedCode: body.editedCode });
+  }
+
+  // action === "provide_context"
+  if (!body.context) {
+    return reply.code(400).send({ error: "context_required_for_provide_context_action" });
+  }
+  updateHumanEscalation(id, {
+    status: "human_responded",
+    humanContext: body.context,
+    respondedByUserId: user.userId,
+  });
+  return reply.send({ ok: true, status: "human_responded", humanContext: body.context });
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {

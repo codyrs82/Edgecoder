@@ -48,6 +48,11 @@ if [[ -f "$PAYLOAD_DIR/bin/edgecoder-configure.ps1" ]]; then
   cp "$PAYLOAD_DIR/bin/edgecoder-configure.ps1" "$BUILD_DIR/msi-stage/bin/edgecoder-configure.ps1"
 fi
 
+# Copy Ollama install script
+if [[ -f "$PAYLOAD_DIR/bin/edgecoder-install-ollama.ps1" ]]; then
+  cp "$PAYLOAD_DIR/bin/edgecoder-install-ollama.ps1" "$BUILD_DIR/msi-stage/bin/edgecoder-install-ollama.ps1"
+fi
+
 # Copy WiX manifest into build directory with version substituted
 sed "s/{{VERSION}}/${VERSION}/g" "$WXS_FILE" > "$BUILD_DIR/edgecoder.wxs"
 
