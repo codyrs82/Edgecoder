@@ -209,9 +209,9 @@ registerRobotRoutes(app, robotQueue);
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROBOT_COORDINATOR_FEE_BPS` | `200` | Fee rate for robot tasks (basis points) |
-| `ROBOT_SWEEP_INTERVAL_MS` | `86400000` | Sweep payout interval (24h) |
-| `ROBOT_MIN_SWEEP_SATS` | `10000` | Minimum accrued sats before sweep |
-| `ROBOT_TASK_DEFAULT_TIMEOUT_MS` | `3600000` | Default task timeout (1h) |
-| `ROBOT_AUTO_SETTLE_DELAY_MS` | `86400000` | Auto-settle window if client doesn't dispute (24h) |
+| `ROBOT_COORDINATOR_FEE_BPS` | `[env-configured]` | Fee rate for robot tasks (basis points) |
+| `ROBOT_SWEEP_INTERVAL_MS` | `[env-configured]` | Sweep payout interval |
+| `ROBOT_MIN_SWEEP_SATS` | `[env-configured]` | Minimum accrued sats before sweep |
+| `ROBOT_TASK_DEFAULT_TIMEOUT_MS` | `[env-configured]` | Default task timeout |
+| `ROBOT_AUTO_SETTLE_DELAY_MS` | `[env-configured]` | Auto-settle window if client doesn't dispute |
 | `ROBOT_QUEUE_ENABLED` | `false` | Feature flag to enable robot routes |

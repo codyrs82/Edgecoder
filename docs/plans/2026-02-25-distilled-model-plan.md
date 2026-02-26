@@ -319,37 +319,15 @@ Training data must include examples of all four formats. The `decomposePrompt` f
 
 ### 7.1 Compute Estimate
 
-| Phase | Task | GPU Hours (A100 80GB) | Cost Estimate (at $2/hr) |
-|-------|------|-----------------------|--------------------------|
-| Data generation | Teacher inference on 50K prompts (Qwen 7B) | 100 | $200 |
-| Data filtering | AST validation + executor runs | 20 (CPU) | $40 |
-| Stage 1 KD | Pre-training distillation (500M student, ~1M samples, 3 epochs) | 400 | $800 |
-| Stage 2 KD | Task-specific fine-tuning (500M student, ~50K samples, 5 epochs) | 50 | $100 |
-| Quantization | GGUF + MLX + ONNX + TFLite + CoreML export | 10 | $20 |
-| Evaluation | HumanEval + MBPP + EdgeCoder-Eval + latency | 20 | $40 |
-| Iteration buffer | Re-runs, hyperparameter sweeps, debugging | 200 | $400 |
-| **Total** | | **~800 GPU-hours** | **~$1,600** |
-
-Cloud options: Lambda Labs, RunPod, or vast.ai for A100 spot instances. If using 4x A100 node, wall-clock time for training is roughly 100-120 hours (~5 days).
+*[Internal cost estimates redacted for public release]*
 
 ### 7.2 Timeline
 
-| Week | Milestone | Deliverable |
-|------|-----------|-------------|
-| **1-2** | Data pipeline | AST filter integrated into data pipeline. Teacher inference running. Filtered dataset v1 ready. |
-| **3-4** | Stage 1 distillation | 500M student pre-trained with KD. Initial HumanEval and subset compliance numbers. |
-| **5** | Stage 2 fine-tuning | Task-specific fine-tuning complete. EdgeCoder-Eval baseline established. |
-| **6** | Quantization and export | GGUF, MLX, ONNX variants produced. Latency benchmarks on target devices. |
-| **7** | Integration | `EdgeCoderLocalProvider` updated with real inference. Dual-mode flag working. Ollama modelfile registered. |
-| **8** | Evaluation and iteration | Full benchmark suite run. Identify weak spots. One round of data augmentation and re-training if needed. |
-| **9-10** | Cross-OS validation | Validate on macOS (MLX + GGUF), Linux/Windows (ONNX + GGUF), iOS (CoreML), Android (TFLite). |
-| **11-12** | Polish and release | Default flip to distilled model. Documentation. Model published to approved source per `LocalModelManifest` flow. |
+*[Internal timeline redacted for public release]*
 
 ### 7.3 Staffing
 
-- **1 ML engineer** (full-time): Distillation pipeline, training, quantization, evaluation.
-- **1 platform engineer** (part-time weeks 7-10): Runtime wrappers, provider integration, cross-OS testing.
-- **1 QA engineer** (part-time weeks 9-12): Cross-OS validation, benchmark automation.
+*[Internal staffing details redacted for public release]*
 
 ---
 

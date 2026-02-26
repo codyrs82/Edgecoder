@@ -303,26 +303,7 @@ The same **conductor + queue + policy** pattern applies to **GPU fleets** (e.g. 
 
 ## 12. Marketability: Positioning, Trust, Distribution, Monetization
 
-**Positioning and proof points**:
-- **Hardware targets**: e.g. “Runs on 4GB RAM, no GPU,” “First token &lt;500ms on iPhone 14 / M1,” “&lt;5% battery for 10-min session.” Publish minimum spec.
-- **On-device share**: Instrument “X% of tasks completed fully on-device”; use in marketing (“90% of edits never leave your machine”).
-- **Public benchmark**: EdgeCoder-Eval (executor-safe subset + plan/code/test); leaderboard or report for “best-in-class sub-1B on-device.”
-- **Use cases**: “Code on a plane,” “Fix a bug from your phone,” “Enterprise: code stays inside the firewall.”
-
-**Trust and compliance**:
-- **Privacy-by-design**: “No code leaves the device unless you queue for cloud review”; “cloud receives only minimal snippets you approve.” Document in Privacy; UI: “This task will be sent to cloud – include only what you’re comfortable with.”
-- **Compliance**: SOC 2 (if cloud/SaaS), GDPR (minimization, deletion); enterprise **air-gapped / on-prem** (handshake disabled or to customer cluster).
-- **Attestation**: Device attestation and optional verifiable execution in handshake for regulated industries.
-
-**Distribution**:
-- **App store**: First-class app (EdgeCoder for Mac, EdgeCoder Mobile); value prop: offline, privacy, no subscription for core use.
-- **IDE extension/SDK**: VS Code, Cursor, JetBrains — “local agent” option when offline or when you don’t want code in the cloud.
-- **OEM / EdgeCoder Runtime**: Licensable runtime (model + executor + minimal loop) for OEMs/ISVs (in-app coding, internal tools, kiosks).
-
-**Monetization**:
-- **Tiers**: **Free** — on-device only, N cloud reviews/month; **Pro** — more cloud reviews, priority queue, optional sync; **Enterprise** — on-prem handshake, SSO, attestation, SLA.
-- **OEM/B2B**: Per-device or per-app licensing.
-- **Developer API**: Optional “run plan→code→test on this snippet” for other apps.
+*[Internal business strategy redacted for public release]*
 
 ---
 
