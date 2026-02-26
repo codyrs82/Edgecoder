@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-DEFAULT_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:1.5b}"
+DEFAULT_MODEL="${OLLAMA_MODEL:-qwen2.5:7b}"
 OLLAMA_SERVICE="edgecoder-ollama"
 OLLAMA_SERVICE_FILE="/etc/systemd/system/${OLLAMA_SERVICE}.service"
 OLLAMA_SERVICE_SRC="/usr/lib/edgecoder/edgecoder-ollama.service"

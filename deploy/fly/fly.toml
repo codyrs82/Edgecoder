@@ -14,7 +14,7 @@ primary_region = "ord"
   CONTROL_PLANE_URL = "https://control.edgecoder.io"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
-  OLLAMA_MODEL = "qwen2.5-coder:latest"
+  OLLAMA_MODEL = "qwen2.5:7b"
 
 [http_service]
   internal_port = 4301

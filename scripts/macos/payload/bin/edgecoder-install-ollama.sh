@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-DEFAULT_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:1.5b}"
+DEFAULT_MODEL="${OLLAMA_MODEL:-qwen2.5:7b}"
 
 ollama_bin() {
   local candidate

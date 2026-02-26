@@ -186,7 +186,7 @@ app.post("/decompose", async (req, reply) => {
   metrics.decomposeRequests++;
   const parsed = decomposeSchema.parse(req.body);
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5:7b";
 
   const prompt = decomposePrompt(parsed.prompt);
 
@@ -235,7 +235,7 @@ app.post("/escalate", async (req, reply) => {
   metrics.escalateRequests++;
   const body = escalateSchema.parse(req.body);
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5:7b";
 
   const errorContext = body.errorHistory.length > 0
     ? body.errorHistory.join("\n")
@@ -277,7 +277,7 @@ app.get("/health", async () => ({ ok: true }));
 app.get("/metrics", async () => ({ ...metrics }));
 
 const modelSwapState = {
-  activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest",
+  activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5:7b",
   activeModelParamSize: 0,
 };
 buildModelSwapRoutes(app, modelSwapState);

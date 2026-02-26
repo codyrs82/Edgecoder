@@ -21,7 +21,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$DefaultModel   = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'qwen2.5-coder:1.5b' }
+$DefaultModel   = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'qwen2.5:7b' }
 $OllamaExeName  = 'ollama.exe'
 $InstallerUrl    = 'https://ollama.com/download/OllamaSetup.exe'
 $InstallerPath   = Join-Path $env:TEMP 'OllamaSetup.exe'

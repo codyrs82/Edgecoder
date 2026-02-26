@@ -14,7 +14,7 @@ primary_region = "ord"
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
-  OLLAMA_MODEL = "qwen2.5-coder:latest"
+  OLLAMA_MODEL = "qwen2.5:7b"
 
 [http_service]
   internal_port = 4301

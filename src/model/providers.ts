@@ -125,7 +125,7 @@ export class OllamaLocalProvider implements ModelProvider {
   constructor(
     private readonly endpoint = process.env.OLLAMA_GENERATE_ENDPOINT ??
       "http://127.0.0.1:11434/api/generate",
-    model = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest"
+    model = process.env.OLLAMA_MODEL ?? "qwen2.5:7b"
   ) {
     this.model = model;
   }
@@ -159,8 +159,8 @@ export class OllamaLocalProvider implements ModelProvider {
   }
 }
 
-const DEFAULT_EDGE_MODEL = process.env.OLLAMA_EDGE_MODEL ?? "qwen2.5-coder:1.5b";
-const DEFAULT_COORDINATOR_MODEL = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5-coder:latest";
+const DEFAULT_EDGE_MODEL = process.env.OLLAMA_EDGE_MODEL ?? "qwen2.5:7b";
+const DEFAULT_COORDINATOR_MODEL = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5:7b";
 
 export class ProviderRegistry {
   private active: ModelProvider;

@@ -37,7 +37,7 @@ const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "w
 const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
   | "edgecoder-local"
   | "ollama-local";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5-coder:latest";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
 let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";

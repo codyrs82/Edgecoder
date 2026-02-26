@@ -136,7 +136,50 @@ final class LocalModelManager: ObservableObject {
     private var downloadTask: URLSessionDownloadTask?
 
     /// Curated catalog of models available for download on iOS.
+    /// General-purpose models listed first as recommended defaults.
     let availableCatalog: [CatalogModel] = [
+        // General-purpose (recommended for chat)
+        CatalogModel(
+            modelId: "qwen2.5-0.5b-q4",
+            displayName: "Qwen 2.5 0.5B (Q4_K_M)",
+            paramSize: 0.5,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 397_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 512
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-1.5b-q4",
+            displayName: "Qwen 2.5 1.5B (Q4_K_M)",
+            paramSize: 1.5,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 1_050_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 1024
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-3b-q4",
+            displayName: "Qwen 2.5 3B (Q4_K_M)",
+            paramSize: 3.0,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 2_000_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 2048
+        ),
+        CatalogModel(
+            modelId: "qwen2.5-7b-q4",
+            displayName: "Qwen 2.5 7B (Q4_K_M)",
+            paramSize: 7.0,
+            quantization: "Q4_K_M",
+            fileSizeBytes: 4_680_000_000,
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "",
+            minMemoryMB: 4096
+        ),
+        // Code-specialized
         CatalogModel(
             modelId: "qwen2.5-coder-0.5b-q4",
             displayName: "Qwen 2.5 Coder 0.5B (Q4_K_M)",
