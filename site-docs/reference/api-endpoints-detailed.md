@@ -90,12 +90,88 @@ Authentication and payload specifics should be validated against runtime code an
 | POST | `/model/swap` | swap active model |
 | GET | `/model/status` | current model and health |
 | GET | `/model/list` | installed and available models |
+| GET | `/model/pull/progress` | active model download progress |
+
+## Models
+
+Mesh-token authentication required.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/models/available` | aggregated model availability from capability gossip |
+
+### `GET /models/available`
+
+Returns an array of models currently available across the mesh, assembled from coordinator capability gossip summaries.
+
+**Auth:** mesh token (`MESH_AUTH_TOKEN` or `COORDINATOR_MESH_TOKEN`)
+
+**Response:**
+
+```json
+[
+  {
+    "model": "qwen2.5:7b",
+    "paramSize": 7,
+    "agentCount": 12,
+    "avgLoad": 0.34
+  }
+]
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | string | Model tag (e.g. `qwen2.5:7b`) |
+| `paramSize` | number | Parameter size in billions |
+| `agentCount` | number | Number of agents currently serving this model |
+| `avgLoad` | number | Average load across serving agents (0.0 -- 1.0) |
 
 ## IDE Provider
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | model discovery for IDE integration |
+| GET | `/model/pull/progress` | active model download progress |
+
+## Coordinator (public, no auth)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/portal/chat` | streaming chat completion for portal/desktop (system prompt injected server-side) |
+| GET | `/model/pull/progress` | active model download progress |
+
+### `GET /model/pull/progress`
+
+Returns the current state of an active Ollama model download, or `{"status":"idle"}` when no download is in progress. Available on the coordinator (`:4301`), inference service (`:4302`), and IDE provider (`:4304`).
+
+**Response (download in progress):**
+
+```json
+{
+  "model": "qwen2.5:7b",
+  "status": "pulling",
+  "progressPct": 42,
+  "completed": 1887436800,
+  "total": 4494627840,
+  "startedAtMs": 1708900000000
+}
+```
+
+**Response (idle):**
+
+```json
+{ "status": "idle" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | string | Model tag being downloaded |
+| `status` | string | `"pulling"`, `"error"`, or `"idle"` |
+| `progressPct` | number | Download progress 0--100 |
+| `completed` | number | Bytes downloaded so far |
+| `total` | number | Total bytes expected |
+| `startedAtMs` | number | Unix timestamp (ms) when download started |
+| `error` | string? | Error message if status is `"error"` |
 
 ## Cross-reference
 
