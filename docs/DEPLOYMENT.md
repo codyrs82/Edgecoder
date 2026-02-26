@@ -199,7 +199,7 @@ sudo bash deploy/linux/bootstrap-host.sh <role> <repo_url> [branch] [install_dir
 **Example:**
 
 ```bash
-sudo bash deploy/linux/bootstrap-host.sh agent https://github.com/your-org/Edgecoder.git main /opt/edgecoder/app
+sudo bash deploy/linux/bootstrap-host.sh agent https://github.com/codyrs82/Edgecoder.git main /opt/edgecoder/app
 ```
 
 This script:
@@ -588,7 +588,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DOCS_SITE_URL` | `http://127.0.0.1:5173` | External docs URL in portal nav |
-| `GITHUB_REPO_URL` | `https://github.com/your-org/Edgecoder` | Repo URL in portal nav |
+| `GITHUB_REPO_URL` | `https://github.com/codyrs82/Edgecoder` | Repo URL in portal nav |
 
 ### Admin Emails
 

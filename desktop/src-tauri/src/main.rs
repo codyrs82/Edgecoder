@@ -1,7 +1,11 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 use std::net::TcpStream;
 use std::process::{Command, Child};
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_deep_link::DeepLinkExt;
 use sysinfo::{System, Disks};
 use serde::Serialize;
 
@@ -71,10 +75,29 @@ fn start_agent() -> Option<Child> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![get_system_metrics])
         .setup(|app| {
             let child = start_agent();
             app.manage(AgentProcess(Mutex::new(child)));
+
+            // Listen for deep link events (edgecoder://oauth-callback?...)
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                let urls = event.urls();
+                if let Some(url) = urls.first() {
+                    let url_str = url.to_string();
+                    eprintln!("[deep-link] received: {}", url_str);
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.eval(&format!(
+                            "window.__handleDeepLink({})",
+                            serde_json::to_string(&url_str).unwrap_or_default()
+                        ));
+                    }
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {

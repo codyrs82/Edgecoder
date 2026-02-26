@@ -149,7 +149,8 @@ export async function getSystemMetrics(): Promise<SystemMetrics | null> {
 // Portal auth
 // ---------------------------------------------------------------------------
 
-const PORTAL_BASE = import.meta.env.DEV ? "/portal" : "http://localhost:4305";
+const PORTAL_BASE = import.meta.env.DEV ? "/portal" : "http://localhost:4310";
+const PORTAL_PUBLIC = import.meta.env.DEV ? "/portal" : "https://edgecoder-portal.fly.dev";
 
 export interface AuthUser {
   userId: string;
@@ -343,7 +344,20 @@ export async function logout(): Promise<void> {
 }
 
 export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
-  return `${PORTAL_BASE}/auth/oauth/${provider}/start`;
+  const redirect = encodeURIComponent("edgecoder://oauth-callback");
+  return `${PORTAL_PUBLIC}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
+}
+
+export async function completeOAuthWithToken(mobileToken: string): Promise<AuthUser> {
+  const res = await fetch(`${PORTAL_PUBLIC}/auth/oauth/mobile/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ token: mobileToken }),
+  });
+  if (!res.ok) throw new Error("OAuth sign-in failed");
+  const data = await res.json();
+  return data.user;
 }
 
 // ---------------------------------------------------------------------------

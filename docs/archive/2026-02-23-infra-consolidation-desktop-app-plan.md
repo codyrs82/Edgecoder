@@ -248,7 +248,7 @@ if [[ "${ROLE}" != "agent" && "${ROLE}" != "coordinator" && "${ROLE}" != "seed" 
 
 Update the usage block to show the `seed` role option:
 ```
-  sudo bash deploy/linux/bootstrap-host.sh seed https://github.com/your-org/Edgecoder.git main /opt/edgecoder/app
+  sudo bash deploy/linux/bootstrap-host.sh seed https://github.com/codyrs82/Edgecoder.git main /opt/edgecoder/app
 ```
 
 For the `seed` role, the systemd install step should map to the existing coordinator service but set `EDGE_RUNTIME_MODE=all-in-one` in the env file. Add a note in the "Next steps" output:

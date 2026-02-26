@@ -87,7 +87,7 @@ const PASSKEY_ALLOWED_ORIGINS = (() => {
   if (normalized.size === 0) normalized.add(PASSKEY_ORIGIN);
   return [...normalized];
 })();
-const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL ?? "https://github.com/your-org/Edgecoder";
+const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL ?? "https://github.com/codyrs82/Edgecoder";
 const DOCS_SITE_URL = process.env.DOCS_SITE_URL ?? "http://127.0.0.1:5173";
 const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") as "bitcoin" | "testnet" | "signet";
 const NODE_ENV = process.env.NODE_ENV ?? "development";

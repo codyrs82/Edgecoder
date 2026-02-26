@@ -29,11 +29,11 @@ The portal website reads these environment variables:
 Defaults:
 
 - `DOCS_SITE_URL=http://127.0.0.1:5173`
-- `GITHUB_REPO_URL=https://github.com/your-org/Edgecoder`
+- `GITHUB_REPO_URL=https://github.com/codyrs82/Edgecoder`
 
 Example:
 
 ```bash
 DOCS_SITE_URL=https://docs.edgecoder.io
-GITHUB_REPO_URL=https://github.com/your-org/Edgecoder
+GITHUB_REPO_URL=https://github.com/codyrs82/Edgecoder
 ```

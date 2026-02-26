@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { login, getOAuthStartUrl } from "../lib/api";
+  import { login, getOAuthStartUrl, completeOAuthWithToken } from "../lib/api";
   import type { AuthUser } from "../lib/api";
+  import { open } from "@tauri-apps/plugin-shell";
 
   interface Props {
     onLogin: (user: AuthUser) => void;
@@ -31,10 +32,38 @@
     if (e.key === "Enter") handleSubmit();
   }
 
-  function handleOAuth(provider: "google" | "microsoft") {
+  async function handleOAuth(provider: "google" | "microsoft") {
+    error = "";
     const url = getOAuthStartUrl(provider);
-    window.open(url, "_blank");
+    try {
+      await open(url);
+    } catch (err) {
+      error = "Could not open browser for sign-in";
+    }
   }
+
+  // Handle deep link callback from OAuth (edgecoder://oauth-callback?mobile_token=...)
+  (window as any).__handleDeepLink = async (urlStr: string) => {
+    try {
+      const raw = typeof urlStr === "string" ? urlStr : String(urlStr);
+      // Deep link payload may be JSON-encoded or a raw URL
+      const cleaned = raw.startsWith('"') ? JSON.parse(raw) : raw;
+      const url = new URL(cleaned);
+      const token = url.searchParams.get("mobile_token");
+      const status = url.searchParams.get("status");
+      if (status !== "ok" || !token) {
+        error = "OAuth sign-in was not completed";
+        return;
+      }
+      submitting = true;
+      const user = await completeOAuthWithToken(token);
+      onLogin(user);
+    } catch (err) {
+      error = (err as Error).message || "OAuth sign-in failed";
+    } finally {
+      submitting = false;
+    }
+  };
 </script>
 
 <div class="login-screen">
@@ -72,10 +101,10 @@
     </div>
 
     <div class="oauth-buttons">
-      <button class="btn-oauth" onclick={() => handleOAuth("microsoft")}>
+      <button class="btn-oauth" onclick={() => handleOAuth("microsoft")} disabled={submitting}>
         Microsoft 365
       </button>
-      <button class="btn-oauth" onclick={() => handleOAuth("google")}>
+      <button class="btn-oauth" onclick={() => handleOAuth("google")} disabled={submitting}>
         Google
       </button>
     </div>
@@ -180,9 +209,13 @@
     cursor: pointer;
     transition: all 0.15s;
   }
-  .btn-oauth:hover {
+  .btn-oauth:hover:not(:disabled) {
     border-color: var(--accent);
     color: var(--text-primary);
+  }
+  .btn-oauth:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
   .signup-link {
     margin-top: 24px;
