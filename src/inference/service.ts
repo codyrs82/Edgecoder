@@ -275,6 +275,86 @@ app.post("/escalate", async (req, reply) => {
   }
 });
 
+// Chat completion — streams Ollama /api/chat response as SSE for portal web chat
+const chatSchema = z.object({
+  messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
+  model: z.string().optional(),
+  temperature: z.number().optional(),
+  max_tokens: z.number().optional()
+});
+
+app.post("/chat", async (req, reply) => {
+  const body = chatSchema.parse(req.body);
+  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  let chatModel = body.model ?? process.env.OLLAMA_COORDINATOR_MODEL ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+
+  // Auto-detect available model if configured one isn't available
+  try {
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", headersTimeout: 5_000 });
+    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string }> };
+      const available = tags.models?.map((m) => m.name) ?? [];
+      if (available.length > 0 && !available.some((m) => m === chatModel || m.startsWith(chatModel + ":"))) {
+        chatModel = available[0];
+      }
+    }
+  } catch {
+    // proceed with configured model
+  }
+
+  let ollamaRes;
+  try {
+    ollamaRes = await request(`${ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: chatModel,
+        messages: body.messages,
+        stream: true,
+        options: {
+          temperature: body.temperature ?? 0.7,
+          num_predict: body.max_tokens ?? 4096
+        }
+      }),
+      headersTimeout: 120_000,
+      bodyTimeout: 0
+    });
+  } catch (error) {
+    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: String(error) });
+  }
+
+  if (ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
+    const errText = await ollamaRes.body.text().catch(() => "");
+    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: errText });
+  }
+
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  for await (const chunk of ollamaRes.body) {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+        if (parsed.message?.content) {
+          reply.raw.write(`data: ${JSON.stringify({ content: parsed.message.content })}\n\n`);
+        }
+        if (parsed.done) {
+          reply.raw.write("data: [DONE]\n\n");
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
+
+  reply.raw.end();
+});
+
 app.get("/health", async () => ({ ok: true }));
 
 app.get("/metrics", async () => ({ ...metrics }));

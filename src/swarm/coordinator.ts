@@ -3282,6 +3282,50 @@ app.get("/stats/projections/summary", async (req, reply) => {
     earnings: earnings ?? []
   };
 });
+app.get("/stats/network/summary", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  let portalCounts: { users: { total: number; verified: number }; nodes: { total: number; approved: number; active: number; agents: number; coordinators: number } } | null = null;
+  if (PORTAL_SERVICE_URL) {
+    try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      const res = await request(`${PORTAL_SERVICE_URL}/internal/stats/counts`, {
+        method: "GET",
+        headers,
+        headersTimeout: 5_000,
+        bodyTimeout: 5_000
+      });
+      if (res.statusCode === 200) {
+        portalCounts = (await res.body.json()) as { users: { total: number; verified: number }; nodes: { total: number; approved: number; active: number; agents: number; coordinators: number } };
+      }
+    } catch (err) {
+      app.log.warn({ err }, "stats_network_summary_portal_unreachable");
+    }
+  }
+  const allModels = new Set<string>();
+  for (const cap of agentCapabilities.values()) {
+    for (const m of cap.localModelCatalog) allModels.add(m);
+  }
+  return {
+    timestamp: Date.now(),
+    users: portalCounts?.users ?? null,
+    nodes: portalCounts
+      ? {
+          enrolled: portalCounts.nodes.total,
+          approved: portalCounts.nodes.approved,
+          active: portalCounts.nodes.active,
+          agents: portalCounts.nodes.agents,
+          coordinators: portalCounts.nodes.coordinators
+        }
+      : null,
+    live: {
+      agentsConnected: agentCapabilities.size,
+      queueDepth: [...directWorkById.values()].filter((w) => w.status === "offered").length,
+      activeTunnels: activeTunnels.size,
+      modelsAvailable: allModels.size
+    }
+  };
+});
 app.get("/mesh/reputation", async () => ({
   peers: mesh.listPeers().map((p) => ({ peerId: p.peerId, score: peerScore.get(p.peerId) ?? 100 }))
 }));
@@ -3984,13 +4028,15 @@ app.post("/portal/chat", async (req, reply) => {
     max_tokens: z.number().optional()
   }).parse(req.body);
 
-  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
 
-  // Auto-detect available model if configured one isn't available
+  // Check if local Ollama is reachable; if not, forward to inference service
+  let ollamaReachable = false;
   try {
-    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", headersTimeout: 3_000 });
     if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      ollamaReachable = true;
       const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string }> };
       const available = tags.models?.map((m) => m.name) ?? [];
       if (available.length > 0 && !available.some((m) => m === chatModel || m.startsWith(chatModel + ":"))) {
@@ -3998,24 +4044,72 @@ app.post("/portal/chat", async (req, reply) => {
       }
     }
   } catch {
-    // proceed with configured model
+    // Ollama not reachable locally
   }
 
-  const ollamaRes = await request(`${ollamaHost}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: chatModel,
-      messages: body.messages,
-      stream: true,
-      options: {
-        temperature: body.temperature ?? 0.7,
-        num_predict: body.max_tokens ?? 4096
-      }
-    }),
-    headersTimeout: 120_000, // LLM cold start can take 30-60s on CPU
-    bodyTimeout: 0
-  });
+  // If Ollama is not available locally, forward to the inference service
+  if (!ollamaReachable) {
+    const inferenceHeaders: Record<string, string> = { "content-type": "application/json" };
+    if (INFERENCE_AUTH_TOKEN) inferenceHeaders["x-inference-token"] = INFERENCE_AUTH_TOKEN;
+
+    let inferenceRes;
+    try {
+      inferenceRes = await request(`${INFERENCE_URL}/chat`, {
+        method: "POST",
+        headers: inferenceHeaders,
+        body: JSON.stringify({
+          messages: body.messages,
+          model: body.model,
+          temperature: body.temperature,
+          max_tokens: body.max_tokens
+        }),
+        headersTimeout: 120_000,
+        bodyTimeout: 0
+      });
+    } catch (err) {
+      return reply.code(502).send({ error: "inference_unavailable", detail: String(err) });
+    }
+
+    if (inferenceRes.statusCode < 200 || inferenceRes.statusCode >= 300) {
+      const errBody = await inferenceRes.body.text().catch(() => "");
+      return reply.code(502).send({ error: "inference_error", detail: errBody });
+    }
+
+    // Stream SSE from inference service to client
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    });
+
+    for await (const chunk of inferenceRes.body) {
+      reply.raw.write(typeof chunk === "string" ? chunk : chunk);
+    }
+    reply.raw.end();
+    return;
+  }
+
+  // Local Ollama is available — call it directly
+  let ollamaRes;
+  try {
+    ollamaRes = await request(`${ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: chatModel,
+        messages: body.messages,
+        stream: true,
+        options: {
+          temperature: body.temperature ?? 0.7,
+          num_predict: body.max_tokens ?? 4096
+        }
+      }),
+      headersTimeout: 120_000,
+      bodyTimeout: 0
+    });
+  } catch (err) {
+    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: String(err) });
+  }
 
   if (ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
     const errText = await ollamaRes.body.text().catch(() => "");
