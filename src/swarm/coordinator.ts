@@ -2978,9 +2978,22 @@ async function handleMeshIngest(
     }).safeParse(message.payload);
 
     if (payload.success && payload.data.claimedByCoordinator !== identity.peerId) {
-      const removed = queue.markRemoteClaimed(payload.data.subtaskId);
-      if (removed) {
-        app.log.info({ subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator }, "task_claim_remote");
+      // Only remove from our queue if we don't have alive local agents who
+      // could claim it.  When we *do* have agents (e.g. iPhone connected via
+      // WS), keep the task so local agents can still race for it via /pull.
+      const aliveLocalAgents = [...agentCapabilities.values()].filter(
+        a => a.lastSeenMs > Date.now() - 30_000
+      );
+      if (aliveLocalAgents.length === 0) {
+        const removed = queue.markRemoteClaimed(payload.data.subtaskId);
+        if (removed) {
+          app.log.info({ subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator }, "task_claim_remote");
+        }
+      } else {
+        app.log.info(
+          { subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator, localAgents: aliveLocalAgents.length },
+          "task_claim_remote_kept_for_local"
+        );
       }
     }
     return { ok: true };

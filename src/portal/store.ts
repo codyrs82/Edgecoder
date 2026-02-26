@@ -5,6 +5,7 @@ export type PortalUser = {
   email: string;
   emailVerified: boolean;
   uiTheme: "warm" | "midnight" | "emerald";
+  role: "user" | "admin";
   passwordHash?: string;
   displayName?: string;
   createdAtMs: number;
@@ -204,6 +205,7 @@ export class PortalStore {
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'warm'`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
@@ -219,7 +221,7 @@ export class PortalStore {
 
   async getUserByEmail(email: string): Promise<PortalUser | null> {
     const result = await this.pool.query(
-      `SELECT user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
+      `SELECT user_id, email, email_verified, ui_theme, role, password_hash, display_name, created_at_ms, verified_at_ms
        FROM portal_users WHERE lower(email) = lower($1)`,
       [email]
     );
@@ -230,6 +232,7 @@ export class PortalStore {
       email: row.email,
       emailVerified: Boolean(row.email_verified),
       uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
+      role: (row.role ?? "user") as "user" | "admin",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -239,7 +242,7 @@ export class PortalStore {
 
   async getUserById(userId: string): Promise<PortalUser | null> {
     const result = await this.pool.query(
-      `SELECT user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
+      `SELECT user_id, email, email_verified, ui_theme, role, password_hash, display_name, created_at_ms, verified_at_ms
        FROM portal_users WHERE user_id = $1`,
       [userId]
     );
@@ -250,6 +253,7 @@ export class PortalStore {
       email: row.email,
       emailVerified: Boolean(row.email_verified),
       uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
+      role: (row.role ?? "user") as "user" | "admin",
       passwordHash: row.password_hash ?? undefined,
       displayName: row.display_name ?? undefined,
       createdAtMs: Number(row.created_at_ms),
@@ -286,6 +290,7 @@ export class PortalStore {
       email: input.email,
       emailVerified: input.emailVerified,
       uiTheme: input.uiTheme ?? "warm",
+      role: "user",
       passwordHash: input.passwordHash,
       displayName: input.displayName,
       createdAtMs: now,
@@ -295,6 +300,46 @@ export class PortalStore {
 
   async setUserTheme(userId: string, theme: "warm" | "midnight" | "emerald"): Promise<void> {
     await this.pool.query(`UPDATE portal_users SET ui_theme = $2 WHERE user_id = $1`, [userId, theme]);
+  }
+
+  async setUserRole(userId: string, role: "user" | "admin"): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET role = $2 WHERE user_id = $1`, [userId, role]);
+  }
+
+  async listAdminUsers(): Promise<PortalUser[]> {
+    const result = await this.pool.query(
+      `SELECT user_id, email, email_verified, ui_theme, role, password_hash, display_name, created_at_ms, verified_at_ms
+       FROM portal_users WHERE role = 'admin' ORDER BY created_at_ms`
+    );
+    return result.rows.map((row) => ({
+      userId: row.user_id,
+      email: row.email,
+      emailVerified: Boolean(row.email_verified),
+      uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
+      role: (row.role ?? "user") as "user" | "admin",
+      passwordHash: row.password_hash ?? undefined,
+      displayName: row.display_name ?? undefined,
+      createdAtMs: Number(row.created_at_ms),
+      verifiedAtMs: row.verified_at_ms ? Number(row.verified_at_ms) : undefined
+    }));
+  }
+
+  async listAllUsers(): Promise<PortalUser[]> {
+    const result = await this.pool.query(
+      `SELECT user_id, email, email_verified, ui_theme, role, password_hash, display_name, created_at_ms, verified_at_ms
+       FROM portal_users ORDER BY created_at_ms`
+    );
+    return result.rows.map((row) => ({
+      userId: row.user_id,
+      email: row.email,
+      emailVerified: Boolean(row.email_verified),
+      uiTheme: (row.ui_theme ?? "warm") as "warm" | "midnight" | "emerald",
+      role: (row.role ?? "user") as "user" | "admin",
+      passwordHash: row.password_hash ?? undefined,
+      displayName: row.display_name ?? undefined,
+      createdAtMs: Number(row.created_at_ms),
+      verifiedAtMs: row.verified_at_ms ? Number(row.verified_at_ms) : undefined
+    }));
   }
 
   async markUserEmailVerified(userId: string): Promise<void> {

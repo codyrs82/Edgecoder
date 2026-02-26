@@ -9,11 +9,12 @@ NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 usage() {
   cat <<'EOF'
 Usage:
-  sudo bash scripts/linux/systemd/install-systemd.sh <agent|coordinator> [repo_root]
+  sudo bash scripts/linux/systemd/install-systemd.sh <agent|coordinator|seed> [repo_root]
 
 Examples:
   sudo bash scripts/linux/systemd/install-systemd.sh agent /opt/edgecoder/app
   sudo bash scripts/linux/systemd/install-systemd.sh coordinator /opt/edgecoder/app
+  sudo bash scripts/linux/systemd/install-systemd.sh seed /opt/edgecoder/app
 
 Environment overrides:
   NODE_BIN=/usr/bin/node
@@ -55,7 +56,7 @@ if [[ ! -f "${REPO_ROOT}/package.json" ]]; then
   exit 1
 fi
 
-if [[ ! -f "${REPO_ROOT}/dist/swarm/worker-runner.js" || ! -f "${REPO_ROOT}/dist/swarm/coordinator.js" ]]; then
+if [[ ! -f "${REPO_ROOT}/dist/swarm/worker-runner.js" || ! -f "${REPO_ROOT}/dist/swarm/coordinator.js" || ! -f "${REPO_ROOT}/dist/index.js" ]]; then
   echo "error: build artifacts missing. Run 'npm install && npm run build' in ${REPO_ROOT} first." >&2
   exit 1
 fi
@@ -82,8 +83,15 @@ case "${ROLE}" in
     DST_ENV="/etc/edgecoder/coordinator.env"
     UNIT_NAME="io.edgecoder.coordinator.service"
     ;;
+  seed)
+    SRC_UNIT="${REPO_ROOT}/scripts/linux/systemd/edgecoder-seed.service"
+    DST_UNIT="/etc/systemd/system/io.edgecoder.seed.service"
+    SRC_ENV="${REPO_ROOT}/scripts/linux/systemd/seed.env.example"
+    DST_ENV="/etc/edgecoder/seed.env"
+    UNIT_NAME="io.edgecoder.seed.service"
+    ;;
   *)
-    echo "error: role must be 'agent' or 'coordinator'." >&2
+    echo "error: role must be 'agent', 'coordinator', or 'seed'." >&2
     usage
     exit 1
     ;;

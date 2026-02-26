@@ -24,6 +24,8 @@ export class SwarmQueue {
   private readonly results: SubtaskResult[] = [];
   private readonly agents = new Map<string, AgentState>();
   private readonly projectCompleted = new Map<string, number>();
+  /** Tracks how many tasks each agent has claimed, for round-robin fairness. */
+  private readonly agentClaimCount = new Map<string, number>();
 
   registerAgent(
     agentId: string,
@@ -120,6 +122,7 @@ export class SwarmQueue {
     if (!item) return undefined;
     item.claimedBy = agentId;
     item.claimedAt = Date.now();
+    this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
     void this.store?.markSubtaskClaimed(item.subtask.id, agentId, item.claimedAt).catch(() => undefined);
     return item.subtask;
   }
@@ -160,6 +163,10 @@ export class SwarmQueue {
       }
     }
     return count;
+  }
+
+  agentClaims(agentId: string): number {
+    return this.agentClaimCount.get(agentId) ?? 0;
   }
 
   status(): { queued: number; agents: number; results: number } {

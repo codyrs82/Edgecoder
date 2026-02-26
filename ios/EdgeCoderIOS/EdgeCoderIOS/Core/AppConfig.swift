@@ -17,8 +17,8 @@ struct AppConfig {
     static let production = AppConfig(
         environment: .production,
         portalBaseURL: URL(string: "https://edgecoder.io")!,
-        controlPlaneBaseURL: URL(string: "https://control.edgecoder.io")!,
-        coordinatorBootstrapURL: URL(string: "https://coordinator.edgecoder.io")!,
+        controlPlaneBaseURL: URL(string: "https://edgecoder-seed.fly.dev")!,
+        coordinatorBootstrapURL: URL(string: "https://edgecoder-seed.fly.dev")!,
         relyingPartyId: "edgecoder.io",
         passkeyOrigin: "https://edgecoder.io"
     )
@@ -26,8 +26,8 @@ struct AppConfig {
     static let staging = AppConfig(
         environment: .staging,
         portalBaseURL: URL(string: "https://edgecoder-portal.fly.dev")!,
-        controlPlaneBaseURL: URL(string: "https://edgecoder-control-plane.fly.dev")!,
-        coordinatorBootstrapURL: URL(string: "https://edgecoder-coordinator.fly.dev")!,
+        controlPlaneBaseURL: URL(string: "https://edgecoder-seed.fly.dev")!,
+        coordinatorBootstrapURL: URL(string: "https://edgecoder-seed.fly.dev")!,
         relyingPartyId: "edgecoder-portal.fly.dev",
         passkeyOrigin: "https://edgecoder-portal.fly.dev"
     )

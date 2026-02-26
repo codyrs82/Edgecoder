@@ -2,7 +2,7 @@ app = "edgecoder-seed"
 primary_region = "ord"
 
 [processes]
-  app = "sh -lc 'ollama serve >/tmp/ollama.log 2>&1 & node dist/index.js'"
+  app = "node dist/index.js"
 
 [build]
   dockerfile = "../../Dockerfile"
@@ -15,6 +15,7 @@ primary_region = "ord"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
   OLLAMA_MODEL = "qwen2.5:7b"
+  DISABLE_SELF_AGENT = "1"
 
 [http_service]
   internal_port = 4301
@@ -32,6 +33,15 @@ primary_region = "ord"
 [mounts]
   source = "ollama_data"
   destination = "/root/.ollama"
+
+[checks]
+  [checks.seed_health]
+    type = "http"
+    port = 4301
+    path = "/health/runtime"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
 
 [[vm]]
   memory = "8192mb"

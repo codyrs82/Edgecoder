@@ -16,9 +16,10 @@ RUN npm run build
 
 EXPOSE 4301 4302 4303 4304 4305
 
-# Entrypoint: start ollama serve in the background, wait up to 30s for it
-# to be ready, then exec the main command (preserving PID 1 / signal handling).
-RUN printf '#!/bin/sh\nset -e\nollama serve &\nfor i in $(seq 1 30); do\n  curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && echo "[entrypoint] ollama ready after ${i}s" && break\n  sleep 1\ndone\nexec "$@"\n' > /usr/local/bin/docker-entrypoint.sh && \
+# Entrypoint: if SKIP_OLLAMA=true, skip Ollama entirely (for portal,
+# standalone coordinator).  Otherwise start Ollama in the background and
+# exec the main command immediately (no blocking wait).
+RUN printf '#!/bin/sh\nset -e\nif [ "$SKIP_OLLAMA" != "true" ]; then\n  ollama serve &\n  echo "[entrypoint] ollama started in background"\nfi\nexec "$@"\n' > /usr/local/bin/docker-entrypoint.sh && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

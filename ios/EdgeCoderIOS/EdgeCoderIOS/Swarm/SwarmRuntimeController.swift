@@ -96,7 +96,19 @@ final class SwarmRuntimeController: ObservableObject {
         registrationToken = UserDefaults.standard.string(forKey: DefaultsKey.registrationToken) ?? ""
         meshToken = UserDefaults.standard.string(forKey: DefaultsKey.meshToken) ?? ""
         if let value = UserDefaults.standard.string(forKey: DefaultsKey.coordinatorURL), !value.isEmpty {
-            selectedCoordinatorURL = value
+            // Migrate away from defunct coordinator URLs that no longer resolve.
+            let defunct = [
+                "coordinator.edgecoder.io",
+                "control.edgecoder.io"
+            ]
+            if defunct.contains(where: { value.contains($0) }) {
+                selectedCoordinatorURL = AppConfig.current.coordinatorBootstrapURL.absoluteString
+                // Tokens from the old coordinator are invalid on the new one.
+                registrationToken = ""
+                meshToken = ""
+            } else {
+                selectedCoordinatorURL = value
+            }
         }
         runOnlyWhileCharging = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
@@ -175,6 +187,7 @@ final class SwarmRuntimeController: ObservableObject {
         }
         // Model activation is handled separately via LocalModelManager.activate(modelId:)
         persistRuntimeSettings()
+        appendEvent("Starting runtime → coordinator: \(selectedCoordinatorURL), token: \(registrationToken.isEmpty ? "empty" : "present"), meshToken: \(meshToken.isEmpty ? "empty" : "present")")
         runtimeTask?.cancel()
         runtimeTask = Task { [weak self] in
             await self?.runtimeLoop()
@@ -250,6 +263,7 @@ final class SwarmRuntimeController: ObservableObject {
         appendEvent("Manual re-register started for \(currentAgentId).")
         meshToken = ""
         registrationToken = ""
+        selectedCoordinatorURL = AppConfig.current.coordinatorBootstrapURL.absoluteString
         persistRuntimeSettings()
 
         await ensureEnrollment(force: true)

@@ -494,9 +494,10 @@ type PortalAccessContext = {
   canManageCoordinatorOps: boolean;
 };
 
-async function buildAccessContext(user: { userId: string; email: string }): Promise<PortalAccessContext> {
+async function buildAccessContext(user: { userId: string; email: string; role?: "user" | "admin" }): Promise<PortalAccessContext> {
   const normalizedEmail = normalizeEmail(user.email);
-  const isSystemAdmin = SYSTEM_ADMIN_EMAILS.has(normalizedEmail);
+  const dbAdmin = user.role === "admin";
+  const isSystemAdmin = dbAdmin || SYSTEM_ADMIN_EMAILS.has(normalizedEmail);
   const isCoordinatorAdmin = isSystemAdmin || COORDINATOR_ADMIN_EMAILS.has(normalizedEmail);
   const nodes = await store?.listNodesByOwner(user.userId);
   const ownsCoordinatorNode = Boolean(nodes?.some((node) => node.nodeKind === "coordinator"));
@@ -1886,6 +1887,7 @@ app.get("/me", async (req, reply) => {
       emailVerified: user.emailVerified,
       uiTheme: user.uiTheme,
       displayName: user.displayName,
+      role: user.role,
       roles: {
         isSystemAdmin: access.isSystemAdmin,
         isCoordinatorAdmin: access.isCoordinatorAdmin
@@ -1908,6 +1910,38 @@ app.post("/me/theme", async (req, reply) => {
   const body = z.object({ theme: z.enum(["warm", "midnight", "emerald"]) }).parse(req.body);
   await store.setUserTheme(user.userId, body.theme);
   return reply.send({ ok: true, theme: body.theme });
+});
+
+app.get("/portal/api/admin/users", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const access = await buildAccessContext(user);
+  if (!access.isSystemAdmin) return reply.code(403).send({ error: "admin_only" });
+  const users = await store.listAllUsers();
+  return reply.send({
+    users: users.map((u) => ({
+      userId: u.userId,
+      email: u.email,
+      role: u.role,
+      emailVerified: u.emailVerified,
+      createdAtMs: u.createdAtMs
+    }))
+  });
+});
+
+app.post("/portal/api/admin/users/:userId/role", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  const access = await buildAccessContext(user);
+  if (!access.isSystemAdmin) return reply.code(403).send({ error: "admin_only" });
+  const { userId } = req.params as { userId: string };
+  const body = z.object({ role: z.enum(["user", "admin"]) }).parse(req.body);
+  const target = await store.getUserById(userId);
+  if (!target) return reply.code(404).send({ error: "user_not_found" });
+  await store.setUserRole(userId, body.role);
+  return reply.send({ ok: true, userId, role: body.role });
 });
 
 app.post("/nodes/enroll", async (req, reply) => {
@@ -4785,6 +4819,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       </div>
     </div>
     <!-- Account Overview KPIs -->
+    <div id="adminOpsSection" class="hidden">
     <div class="card">
       <h2 style="margin-top:0;">Account overview</h2>
       <div id="accountMeta" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
@@ -4794,6 +4829,16 @@ app.get("/portal/dashboard", async (_req, reply) => {
         <div class="kpi"><div class="label">Enrolled nodes</div><div class="value" id="nodeCountValue">--</div></div>
         <div class="kpi"><div class="label">Tasks today</div><div class="value" id="tasksToday">--</div></div>
       </div>
+    </div>
+    </div>
+    <div id="userMgmtSection" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0;">User Management</h2>
+      <table>
+        <thead><tr><th>Email</th><th>Role</th><th>Email verified</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody id="userMgmtBody"></tbody>
+      </table>
+    </div>
     </div>
     <div id="emailVerifyCard" class="card hidden" style="border-color: rgba(245, 158, 11, 0.55); background: rgba(120, 53, 15, 0.22);">
       <h3 style="margin-top:0;">&#9888; Email verification required</h3>
@@ -4881,6 +4926,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
         </table>
       </div>
     </div>
+    <div id="adminNodeApprovalSection" class="hidden">
     <div class="card">
       <h3 style="margin-top:0;">Coordinator enrollment requests</h3>
       <div class="row">
@@ -4927,6 +4973,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
         <thead><tr><th>Agent</th><th>Provider</th><th>Model catalog</th><th>Capacity</th></tr></thead>
         <tbody id="modelMeshBody"></tbody>
       </table>
+    </div>
     </div>
   `;
   const script = `
@@ -5165,6 +5212,42 @@ app.get("/portal/dashboard", async (_req, reply) => {
       }
     });
 
+    /* ── User management (admin only) ── */
+    async function loadUserManagement() {
+      try {
+        const data = await api("/portal/api/admin/users", { method: "GET", headers: {} });
+        const body = document.getElementById("userMgmtBody");
+        const rows = (data.users || []).map(function(u) {
+          const roleBtn = u.role === "admin"
+            ? "<button class='userRoleBtn' data-uid='" + encodeAttr(u.userId) + "' data-role='user'>Remove Admin</button>"
+            : "<button class='userRoleBtn primary' data-uid='" + encodeAttr(u.userId) + "' data-role='admin'>Make Admin</button>";
+          return "<tr><td>" + escapeHtml(u.email) + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
+            boolBadge(Boolean(u.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
+            fmtTime(u.createdAtMs) + "</td><td>" + roleBtn + "</td></tr>";
+        });
+        body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='5'>No users found.</td></tr>";
+      } catch (err) {
+        document.getElementById("userMgmtBody").innerHTML = "<tr><td colspan='5'>Failed to load users.</td></tr>";
+      }
+    }
+    document.getElementById("userMgmtBody").addEventListener("click", async function(event) {
+      var target = event.target;
+      if (!target || !target.classList || !target.classList.contains("userRoleBtn")) return;
+      var uid = target.getAttribute("data-uid");
+      var role = target.getAttribute("data-role");
+      if (!uid || !role) return;
+      try {
+        await api("/portal/api/admin/users/" + encodeURIComponent(uid) + "/role", {
+          method: "POST",
+          body: JSON.stringify({ role: role })
+        });
+        showToast("User role updated to " + role);
+        await loadUserManagement();
+      } catch (err) {
+        showToast("Role update failed: " + String(err.message || err), true);
+      }
+    });
+
     /* ── Dashboard main load ── */
     function timeAgo(ms) {
       if (!ms) return "";
@@ -5209,6 +5292,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       document.getElementById("welcomeHeading").textContent = greeting + ", " + displayName;
       document.getElementById("welcomeSub").textContent =
         "Signed in as " + (user.email || "unknown") + (emailVerified ? "" : " (unverified)");
+      const isAdmin = Boolean(user.roles && user.roles.isSystemAdmin);
       document.getElementById("accountMeta").textContent =
         (user.email || "unknown") + " | email verified: " + String(emailVerified);
       const credits = (summary.walletSnapshot || {}).credits;
@@ -5228,6 +5312,14 @@ app.get("/portal/dashboard", async (_req, reply) => {
       document.getElementById("tasksToday").textContent = String(tasksToday);
       /* Populate activity feed */
       renderActivityFeed(creditHistory);
+
+      /* show admin-only sections */
+      if (isAdmin) {
+        document.getElementById("adminOpsSection").classList.remove("hidden");
+        document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
+        document.getElementById("userMgmtSection").classList.remove("hidden");
+        loadUserManagement();
+      }
 
       /* populate nodes table from the same summary */
       allNodes = summary.nodes || [];

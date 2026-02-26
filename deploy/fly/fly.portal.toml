@@ -9,6 +9,7 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
+  SKIP_OLLAMA = "true"
   PORTAL_PUBLIC_URL = "https://edgecoder.io"
   PASSKEY_RP_ID = "edgecoder.io"
   PASSKEY_ORIGIN = "https://edgecoder.io"
@@ -22,6 +23,15 @@ primary_region = "ord"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
+
+[checks]
+  [checks.portal_health]
+    type = "http"
+    port = 4310
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
 
 [[vm]]
   memory = "1024mb"

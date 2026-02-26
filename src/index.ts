@@ -80,7 +80,13 @@ async function boot(): Promise<void> {
   await initCoordinator();
 
   // Start embedded worker — every node contributes compute to the mesh
-  startWorkerProcess();
+  // Set DISABLE_SELF_AGENT=1 to run coordinator-only (e.g. when the self-agent
+  // can't execute tasks because Docker/sandbox isn't available on this host).
+  if (process.env.DISABLE_SELF_AGENT === "1") {
+    console.log("[unified-agent] self-agent disabled (DISABLE_SELF_AGENT=1)");
+  } else {
+    startWorkerProcess();
+  }
 }
 
 boot().catch((error) => {
