@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { sign, verify } from "node:crypto";
 
 export const ALLOWED_MODEL_EXTENSIONS = [".gguf", ".bin", ".safetensors"];

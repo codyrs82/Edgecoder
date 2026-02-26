@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { networkInterfaces } from "node:os";
 
 /** Return the first non-internal IPv4 address (typically the WiFi/LAN IP). */

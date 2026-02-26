@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { request } from "undici";
 import { BlacklistRecord } from "../common/types.js";
 import { verifyPayload } from "../mesh/peer.js";

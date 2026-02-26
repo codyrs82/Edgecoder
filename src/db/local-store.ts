@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { SQLiteStore } from "./sqlite-store.js";
 import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";

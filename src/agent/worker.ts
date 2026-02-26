@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { AgentBase, AgentOptions } from "./base.js";
 import { Language, Subtask, SubtaskResult } from "../common/types.js";
 import { ModelProvider } from "../model/providers.js";

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { createHash } from "node:crypto";
 import { BlacklistReasonCode } from "../common/types.js";
 import { verifyPayload } from "../mesh/peer.js";

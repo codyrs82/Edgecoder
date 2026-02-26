@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import Fastify from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";

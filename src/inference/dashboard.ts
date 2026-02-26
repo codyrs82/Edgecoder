@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import type { FastifyInstance } from "fastify";
 import type { ModelSwapState } from "../model/swap-routes.js";
 

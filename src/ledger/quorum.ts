@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { createHash, randomUUID } from "node:crypto";
 import { QuorumLedgerRecord } from "../common/types.js";
 import { signPayload, verifyPayload } from "../mesh/peer.js";

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { randomUUID } from "node:crypto";
 import { MeshMessage, MeshMessageType } from "../common/types.js";
 import { canonicalizeMessage, signPayload, verifyPayload } from "./peer.js";

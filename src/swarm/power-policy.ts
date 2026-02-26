@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 export interface AgentPowerTelemetry {
   // iOS fields (backward compatible)
   onExternalPower?: boolean;

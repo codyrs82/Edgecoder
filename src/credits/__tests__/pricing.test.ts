@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { describe, it, expect } from "vitest";
 import { modelCostCredits } from "../pricing.js";
 

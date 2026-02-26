@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { runCode } from "../executor/run.js";
 import { Language, RunResult, IterationRecord, AgentExecution } from "../common/types.js";
 import { ModelProvider } from "../model/providers.js";

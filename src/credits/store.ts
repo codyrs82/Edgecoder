@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { randomUUID } from "node:crypto";
 import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";

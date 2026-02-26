@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 export const log = {
   info(message: string, meta?: unknown): void {
     console.log(JSON.stringify({ level: "info", message, meta, ts: Date.now() }));

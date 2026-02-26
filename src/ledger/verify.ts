@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { QueueEventRecord } from "../common/types.js";
 import { verifyPayload } from "../mesh/peer.js";
 import { hashRecordPayload } from "./record.js";

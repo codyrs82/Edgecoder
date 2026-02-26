@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { platform, totalmem, freemem, cpus } from "node:os";

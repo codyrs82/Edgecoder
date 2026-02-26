@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { BLECreditTransaction } from "../../common/types.js";
 import type { SQLiteStore } from "../../db/sqlite-store.js";
 

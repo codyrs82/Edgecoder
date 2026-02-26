@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { generateKeyPairSync, randomUUID, sign, verify } from "node:crypto";
 import { MeshPeerIdentity, MeshMessage, NetworkMode } from "../common/types.js";
 

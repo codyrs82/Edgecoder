@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { KeyBundle } from "./key-storage.js";
 

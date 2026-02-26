@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16
     environment:
-      - POSTGRES_USER=edgecoder
-      - POSTGRES_PASSWORD=edgecoder
-      - POSTGRES_DB=edgecoder
+      - POSTGRES_USER=${POSTGRES_USER:-edgecoder}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-edgecoder}
     ports:
       - "5432:5432"
     volumes:
@@ -15,7 +15,7 @@ services:
     command: ["node", "dist/index.js"]
     environment:
       - EDGE_RUNTIME_MODE=all-in-one
-      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-edgecoder}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edgecoder}
       - LOCAL_MODEL_PROVIDER=ollama-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen2.5-coder:latest

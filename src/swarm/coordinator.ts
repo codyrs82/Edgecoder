@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";

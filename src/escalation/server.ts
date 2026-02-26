@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 /**
  * EscalationResolver — processes escalation requests through a resolution
  * waterfall when a local agent or swarm cannot handle a task.

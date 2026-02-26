@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { Language } from "../common/types.js";
 import { validatePythonAst } from "./ast-python.js";
 import { validateJavaScriptAst } from "./ast-javascript.js";

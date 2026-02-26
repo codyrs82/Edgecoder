@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 const STALE_THRESHOLD_MS = 90_000;
 
 export interface ModelSeeder {

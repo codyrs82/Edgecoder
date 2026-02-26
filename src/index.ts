@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { inferenceService } from "./inference/service.js";
 import { coordinatorServer, initCoordinator } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";

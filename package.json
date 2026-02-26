@@ -34,7 +34,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "BUSL-1.1",
   "type": "module",
   "dependencies": {
     "@abandonware/bleno": "^0.6.2",

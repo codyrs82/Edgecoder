@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import type { SandboxMode } from "../common/types.js";
 import { isDockerAvailable } from "../executor/docker-sandbox.js";
 

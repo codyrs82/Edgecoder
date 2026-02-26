@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { randomUUID, createHash } from "node:crypto";
 import { BLETaskRequest, BLETaskResponse, BLECreditTransaction } from "../../common/types.js";
 import { baseRatePerSecond } from "../../credits/pricing.js";

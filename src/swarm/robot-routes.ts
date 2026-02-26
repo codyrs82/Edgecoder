@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { RobotQueue } from "./robot-queue.js";

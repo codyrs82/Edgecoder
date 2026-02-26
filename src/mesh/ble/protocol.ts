@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 export const BLE_SERVICE_UUID = "e0d6ec00-0001-4c3a-9b5e-00ed6ec0de00";
 export const BLE_CHAR_PEER_IDENTITY = "e0d6ec00-0002-4c3a-9b5e-00ed6ec0de00";
 export const BLE_CHAR_CAPABILITIES = "e0d6ec00-0003-4c3a-9b5e-00ed6ec0de00";

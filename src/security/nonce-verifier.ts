@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 export interface NonceStore {
   exists(nonce: string): Promise<boolean>;
   insert(nonce: string, sourceId: string, expiresAtMs: number): Promise<void>;

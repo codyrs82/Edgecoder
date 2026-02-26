@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import { spawn } from "node:child_process";
 import vm from "node:vm";
 import { Language, RunResult } from "../common/types.js";

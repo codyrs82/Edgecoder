@@ -1,3 +1,6 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
 import Fastify, { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { MeshPeer } from "./mesh-peer.js";
