@@ -152,7 +152,7 @@ Environment for seed-node:
 
 ```yaml
 - EDGE_RUNTIME_MODE=all-in-one
-- DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+- DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 - LOCAL_MODEL_PROVIDER=ollama-local
 - OLLAMA_AUTO_INSTALL=false
 - OLLAMA_MODEL=qwen2.5-coder:latest

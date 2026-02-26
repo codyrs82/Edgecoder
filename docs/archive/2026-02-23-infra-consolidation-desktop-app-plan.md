@@ -104,7 +104,7 @@ Replace:
     command: ["node", "dist/swarm/coordinator.js"]
     environment:
       - NODE_ENV=development
-      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen2.5-coder:latest
@@ -125,7 +125,7 @@ Replace:
     build: .
     command: ["node", "dist/control-plane/server.js"]
     environment:
-      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - COORDINATOR_URL=http://coordinator:4301
     ports:
       - "4303:4303"
@@ -144,7 +144,7 @@ With:
     environment:
       - NODE_ENV=development
       - EDGE_RUNTIME_MODE=all-in-one
-      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen2.5-coder:latest
@@ -1585,7 +1585,7 @@ services:
     environment:
       - NODE_ENV=production
       - EDGE_RUNTIME_MODE=all-in-one
-      - DATABASE_URL=postgresql://edgecoder:edgecoder@postgres:5432/edgecoder
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen2.5-coder:latest
