@@ -4454,6 +4454,137 @@ export async function initCoordinator(): Promise<void> {
   await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
 }
 
+/* ── Admin dashboard (token-gated) ── */
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN ?? "";
+
+function authorizeAdmin(req: any, reply: any): boolean {
+  if (!ADMIN_API_TOKEN) {
+    reply.code(503).send({ error: "admin_dashboard_not_configured" });
+    return false;
+  }
+  const headerToken = readHeaderValue(req.headers, "x-admin-token");
+  const queryToken = (req.query as Record<string, string>)?.token ?? "";
+  if (!safeTokenEqual(headerToken || queryToken, ADMIN_API_TOKEN)) {
+    reply.code(401).send({ error: "invalid_admin_token" });
+    return false;
+  }
+  return true;
+}
+
+app.get("/admin/dashboard", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  const status = queue.status();
+  const agentList = [...agentCapabilities.entries()].map(([agentId, info]) => ({
+    agentId,
+    os: info.os,
+    provider: info.localModelProvider,
+    maxConcurrentTasks: info.maxConcurrentTasks,
+    modelCatalog: info.localModelCatalog
+  }));
+  return reply.type("text/html").send(adminDashboardHtml(status, agentList));
+});
+
+app.get("/admin/dashboard/api/overview", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  const status = queue.status();
+  const agentList = [...agentCapabilities.entries()].map(([agentId, info]) => ({
+    agentId,
+    os: info.os,
+    provider: info.localModelProvider,
+    maxConcurrentTasks: info.maxConcurrentTasks,
+    modelCatalog: info.localModelCatalog
+  }));
+  return reply.send({
+    coordinator: { queued: status.queued, agents: status.agents, results: status.results },
+    agents: agentList,
+    uptimeSeconds: Math.floor(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage.rss() / 1_048_576),
+    meshPeers: mesh.listPeers().length
+  });
+});
+
+function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>): string {
+  const agentRows = agentList.map((a) =>
+    `<tr><td>${esc(a.agentId)}</td><td>${esc(a.os ?? "-")}</td><td>${esc(a.provider ?? "-")}</td><td>${esc((a.modelCatalog ?? []).join(", ") || "-")}</td><td>${a.maxConcurrentTasks ?? 0}</td></tr>`
+  ).join("");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeCoder Coordinator Admin</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  header { margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 12px; }
+  .stat { font-size: 28px; font-weight: 700; }
+  .stat-label { font-size: 13px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  #refresh-timer { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>EdgeCoder Coordinator Admin</h1>
+    <span id="refresh-timer">Auto-refresh: 10s</span>
+  </header>
+  <div class="grid">
+    <div class="card"><h2>Connected Agents</h2><div class="stat" id="v-agents">${status.agents}</div></div>
+    <div class="card"><h2>Queue Depth</h2><div class="stat" id="v-queued">${status.queued}</div></div>
+    <div class="card"><h2>Results</h2><div class="stat" id="v-results">${status.results}</div></div>
+    <div class="card"><h2>Uptime</h2><div class="stat" id="v-uptime">${Math.floor(process.uptime())}s</div></div>
+    <div class="card"><h2>Memory</h2><div class="stat" id="v-mem">${Math.round(process.memoryUsage.rss() / 1_048_576)} MB</div></div>
+    <div class="card"><h2>Mesh Peers</h2><div class="stat" id="v-peers">${mesh.listPeers().length}</div></div>
+  </div>
+  <div class="card" style="margin-bottom:24px;">
+    <h2>Connected Agents</h2>
+    <table>
+      <thead><tr><th>Agent</th><th>OS</th><th>Provider</th><th>Models</th><th>Capacity</th></tr></thead>
+      <tbody id="agent-body">${agentRows || "<tr><td colspan='5'>No agents connected.</td></tr>"}</tbody>
+    </table>
+  </div>
+</div>
+<script>
+const token = new URLSearchParams(window.location.search).get("token") || "";
+async function refresh() {
+  try {
+    const res = await fetch("/admin/dashboard/api/overview?token=" + encodeURIComponent(token));
+    const d = await res.json();
+    document.getElementById("v-agents").textContent = d.coordinator.agents;
+    document.getElementById("v-queued").textContent = d.coordinator.queued;
+    document.getElementById("v-results").textContent = d.coordinator.results;
+    document.getElementById("v-uptime").textContent = d.uptimeSeconds + "s";
+    document.getElementById("v-mem").textContent = d.memoryMB + " MB";
+    document.getElementById("v-peers").textContent = d.meshPeers;
+    const body = document.getElementById("agent-body");
+    if (d.agents.length === 0) {
+      body.innerHTML = "<tr><td colspan='5'>No agents connected.</td></tr>";
+    } else {
+      body.innerHTML = d.agents.map(function(a) {
+        return "<tr><td>" + (a.agentId||"-") + "</td><td>" + (a.os||"-") + "</td><td>" + (a.provider||"-") + "</td><td>" + ((a.modelCatalog||[]).join(", ")||"-") + "</td><td>" + (a.maxConcurrentTasks||0) + "</td></tr>";
+      }).join("");
+    }
+  } catch(e) { console.error("refresh failed", e); }
+}
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>`;
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     await app.listen({ port: 4301, host: "0.0.0.0" });
