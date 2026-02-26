@@ -199,7 +199,7 @@ export function detectShell(overrides?: PlatformOverrides): Shell {
   if (shellEnv.endsWith("/bash") || shellEnv.endsWith("/bash.exe")) return "bash";
 
   // Fallback: bash on unix-likes, cmd on windows
-  return os === "windows" ? "cmd" : "bash";
+  return (os as string) === "windows" ? "cmd" : "bash";
 }
 
 // ---------------------------------------------------------------------------

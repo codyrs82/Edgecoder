@@ -2902,6 +2902,7 @@ async function handleMeshIngest(
             connectedPeers: new Set<string>(),
             activeModel: payload.models[0],
             activeModelParamSize: 0,
+            sandboxMode: "none" as SandboxMode,
             lastSeenMs: Date.now(),
           });
         }
