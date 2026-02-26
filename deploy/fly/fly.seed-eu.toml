@@ -1,0 +1,39 @@
+app = "edgecoder-seed-eu"
+primary_region = "cdg"
+
+[processes]
+  app = "sh -lc 'ollama serve >/tmp/ollama.log 2>&1 & node dist/index.js'"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  EDGE_RUNTIME_MODE = "all-in-one"
+  NETWORK_MODE = "public_mesh"
+  COORDINATOR_PUBLIC_URL = "https://edgecoder-seed-eu.fly.dev"
+  LOCAL_MODEL_PROVIDER = "ollama-local"
+  OLLAMA_AUTO_INSTALL = "false"
+  OLLAMA_MODEL = "qwen2.5-coder:latest"
+
+[http_service]
+  internal_port = 4301
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 150
+
+[mounts]
+  source = "ollama_data_eu"
+  destination = "/root/.ollama"
+
+[[vm]]
+  memory = "8192mb"
+  cpu_kind = "performance"
+  cpus = 2

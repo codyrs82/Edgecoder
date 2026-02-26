@@ -8,6 +8,8 @@ final class RealLlamaContext: LlamaContextProtocol {
     private var modelPath: String?
     private(set) var isLoaded = false
 
+    private static let systemPrompt = "You are a helpful coding assistant running locally on the user's device via EdgeCoder. Answer questions clearly and concisely. When asked about code, provide working examples. For general questions, give a direct, helpful response."
+
     func loadModel(path: String) throws {
         unloadModel()
 
@@ -37,7 +39,10 @@ final class RealLlamaContext: LlamaContextProtocol {
             throw LocalModelError.noModelLoaded
         }
 
-        let messages = [LlamaChatMessage(role: .user, content: prompt)]
+        let messages = [
+            LlamaChatMessage(role: .system, content: Self.systemPrompt),
+            LlamaChatMessage(role: .user, content: prompt),
+        ]
         let samplingConfig = LlamaSamplingConfig(
             temperature: 0.7,
             seed: UInt32.random(in: 0...UInt32.max)
@@ -60,7 +65,10 @@ final class RealLlamaContext: LlamaContextProtocol {
 
             Task {
                 do {
-                    let messages = [LlamaChatMessage(role: .user, content: prompt)]
+                    let messages = [
+                        LlamaChatMessage(role: .system, content: Self.systemPrompt),
+                        LlamaChatMessage(role: .user, content: prompt),
+                    ]
                     let samplingConfig = LlamaSamplingConfig(
                         temperature: 0.7,
                         seed: UInt32.random(in: 0...UInt32.max)
