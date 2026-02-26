@@ -352,7 +352,6 @@ export async function completeOAuthWithToken(mobileToken: string): Promise<AuthU
   const res = await fetch(`${PORTAL_PUBLIC}/auth/oauth/mobile/complete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    credentials: "include",
     body: JSON.stringify({ token: mobileToken }),
   });
   if (!res.ok) throw new Error("OAuth sign-in failed");
