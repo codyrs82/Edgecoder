@@ -12,10 +12,14 @@ import {
   formatOpenAiStreamChunk,
   formatOpenAiModelsResponse,
 } from "./openai-compat.js";
+import { buildChatSystemPrompt, type SystemPromptContext } from "../../model/system-prompt.js";
+import { ollamaTags } from "../../model/swap.js";
+import { PullTracker } from "../../model/pull-tracker.js";
 
 const app = Fastify({ logger: true });
 const providers = new ProviderRegistry();
 const router = new IntelligentRouter();
+const idePullTracker = new PullTracker();
 
 // --- OpenAI-compatible endpoints ---
 
@@ -38,7 +42,60 @@ app.post("/v1/chat/completions", async (req, reply) => {
   const body = chatRequestSchema.parse(req.body);
   const requestId = `chatcmpl-${randomUUID()}`;
 
-  const result = await router.routeChat(body.messages, {
+  // Build system prompt from live state
+  let systemPromptMsg: { role: string; content: string } | null = null;
+  try {
+    let ollamaHealthy = true;
+    let installedModels: Array<{ name: string; paramSize: number }> = [];
+    let activeModelParamSize = 0;
+    let activeModelQuantization: string | undefined;
+    const activeModel = body.model !== "edgecoder-local" ? body.model : (process.env.OLLAMA_MODEL ?? "qwen2.5:7b");
+
+    try {
+      const tags = await ollamaTags();
+      installedModels = tags.models.map((m) => ({
+        name: m.name,
+        paramSize: parseFloat(m.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0"),
+      }));
+      const entry = tags.models.find((m) => m.name === activeModel);
+      if (entry) {
+        activeModelParamSize = parseFloat(entry.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0");
+        activeModelQuantization = entry.details.quantization_level;
+      }
+    } catch {
+      ollamaHealthy = false;
+    }
+
+    const routerStatus = router.status();
+    const pullProgress = idePullTracker.getProgress();
+
+    const ctx: SystemPromptContext = {
+      activeModel,
+      activeModelParamSize,
+      activeModelQuantization,
+      installedModels,
+      swarmModels: [],
+      ollamaHealthy,
+      queueDepth: 0,
+      connectedAgents: 0,
+      pullInProgress: pullProgress ? { model: pullProgress.model, progressPct: pullProgress.progressPct } : undefined,
+      routeUsed: undefined,
+    };
+    systemPromptMsg = { role: "system", content: buildChatSystemPrompt(ctx) };
+  } catch {
+    // Non-critical — proceed without system prompt
+  }
+
+  // Merge: our system prompt first, then preserve client file-context system messages, then user/assistant
+  const clientFileContextMsgs = body.messages.filter((m) => m.role === "system");
+  const nonSystemMsgs = body.messages.filter((m) => m.role !== "system");
+  const messagesWithSystem = [
+    ...(systemPromptMsg ? [systemPromptMsg] : []),
+    ...clientFileContextMsgs,
+    ...nonSystemMsgs,
+  ];
+
+  const result = await router.routeChat(messagesWithSystem, {
     stream: body.stream,
     temperature: body.temperature,
     maxTokens: body.max_tokens,
@@ -143,6 +200,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
 app.get("/v1/router/status", async () => {
   return router.status();
+});
+
+// --- Pull progress endpoint ---
+
+app.get("/model/pull/progress", async (_req, reply) => {
+  const progress = idePullTracker.getProgress();
+  return reply.send(progress ?? { status: "idle" });
 });
 
 // --- Legacy endpoints (backward compat) ---

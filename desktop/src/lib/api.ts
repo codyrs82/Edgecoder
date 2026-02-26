@@ -138,6 +138,45 @@ export const pullModel = (model: string) =>
   post<unknown>(INFERENCE_BASE, "/model/pull", { model });
 
 // ---------------------------------------------------------------------------
+// Pull progress — try coordinator first, fall back to inference service
+// ---------------------------------------------------------------------------
+
+export interface ModelPullProgress {
+  model: string;
+  status: string;
+  progressPct: number;
+  completed: number;
+  total: number;
+  startedAtMs: number;
+  error?: string;
+}
+
+export async function getModelPullProgress(): Promise<ModelPullProgress | null> {
+  try {
+    const res = await fetch(`${agentBase()}/model/pull/progress`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status === "idle") return null;
+    return data as ModelPullProgress;
+  } catch {
+    // Coordinator not available, try inference service
+    try {
+      const res = await fetch(`${INFERENCE_BASE}/model/pull/progress`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.status === "idle") return null;
+      return data as ModelPullProgress;
+    } catch {
+      return null;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Ollama (:11434)
 // ---------------------------------------------------------------------------
 

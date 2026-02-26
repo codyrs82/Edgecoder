@@ -9,6 +9,7 @@ import { verifyPayload } from "../mesh/peer.js";
 import { extractCode } from "../model/extract.js";
 import { decomposePrompt, reflectPrompt } from "../model/prompts.js";
 import { buildModelSwapRoutes } from "../model/swap-routes.js";
+import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 
 const app = Fastify({ logger: true });
@@ -282,6 +283,7 @@ app.get("/metrics", async () => ({ ...metrics }));
 const modelSwapState = {
   activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5:7b",
   activeModelParamSize: 0,
+  pullTracker: new PullTracker(),
 };
 buildModelSwapRoutes(app, modelSwapState);
 buildDashboardRoutes(app, modelSwapState, metrics);

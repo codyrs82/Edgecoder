@@ -54,9 +54,16 @@ describe("swapModel", () => {
         { name: "qwen2.5-coder:1.5b", size: 1_500_000_000 },
       ]),
     });
+    // Mock streaming pull response with a readable body
+    const pullStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"status":"pulling manifest"}\n'));
+        controller.close();
+      },
+    });
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ status: "success" }),
+      body: pullStream,
     });
 
     const result = await swapModel("qwen2.5-coder:7b", "qwen2.5-coder:1.5b");
