@@ -12,10 +12,36 @@ import type {
   TaskSubmission,
 } from "./types";
 
-const AGENT_BASE = import.meta.env.DEV ? "/api" : "http://localhost:4301";
-const INFERENCE_BASE = import.meta.env.DEV
-  ? "/inference"
-  : "http://localhost:4302";
+// ---------------------------------------------------------------------------
+// Backend detection: try local first, fall back to remote Fly URLs
+// ---------------------------------------------------------------------------
+
+let useRemote = false;
+
+async function detectBackend(): Promise<void> {
+  try {
+    const res = await fetch("http://localhost:4301/health/runtime", {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (res.ok) { useRemote = false; return; }
+  } catch { /* local not available */ }
+  useRemote = true;
+}
+
+// Run detection on load, re-check every 30s
+detectBackend();
+setInterval(detectBackend, 30_000);
+
+function agentBase(): string {
+  if (import.meta.env.DEV) return "/api";
+  return useRemote ? "https://edgecoder-seed.fly.dev" : "http://localhost:4301";
+}
+
+function portalBase(): string {
+  if (import.meta.env.DEV) return "/portal";
+  return useRemote ? "https://edgecoder-portal.fly.dev" : "http://localhost:4310";
+}
+
 const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
 
 // ---------------------------------------------------------------------------
@@ -57,26 +83,26 @@ async function del<T>(base: string, path: string, body?: unknown): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export const getHealth = () =>
-  get<HealthRuntime>(AGENT_BASE, "/health/runtime");
+  get<HealthRuntime>(agentBase(), "/health/runtime");
 
 export const getStatus = () =>
-  get<CoordinatorStatus>(AGENT_BASE, "/status");
+  get<CoordinatorStatus>(agentBase(), "/status");
 
 export const getMeshPeers = () =>
-  get<{ peers: MeshPeer[] }>(AGENT_BASE, "/mesh/peers");
+  get<{ peers: MeshPeer[] }>(agentBase(), "/mesh/peers");
 
 export const getMeshReputation = () =>
-  get<{ peers: PeerReputation[] }>(AGENT_BASE, "/mesh/reputation");
+  get<{ peers: PeerReputation[] }>(agentBase(), "/mesh/reputation");
 
 export const getIdentity = () =>
-  get<NodeIdentity>(AGENT_BASE, "/identity");
+  get<NodeIdentity>(agentBase(), "/identity");
 
 export const submitTask = (task: TaskSubmission) =>
-  post<{ taskId: string }>(AGENT_BASE, "/submit", task);
+  post<{ taskId: string }>(agentBase(), "/submit", task);
 
 export async function testMeshToken(token: string): Promise<boolean> {
   try {
-    const res = await fetch(`${AGENT_BASE}/security/blacklist`, {
+    const res = await fetch(`${agentBase()}/security/blacklist`, {
       headers: { "x-mesh-token": token },
     });
     return res.ok;
@@ -86,8 +112,12 @@ export async function testMeshToken(token: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Inference service (:4302)
+// Inference service — only available locally (:4302), not exposed on Fly
 // ---------------------------------------------------------------------------
+
+const INFERENCE_BASE = import.meta.env.DEV
+  ? "/inference"
+  : "http://localhost:4302";
 
 export const getInferenceHealth = () =>
   get<{ ok: boolean }>(INFERENCE_BASE, "/health");
@@ -149,9 +179,6 @@ export async function getSystemMetrics(): Promise<SystemMetrics | null> {
 // Portal auth
 // ---------------------------------------------------------------------------
 
-const PORTAL_BASE = import.meta.env.DEV ? "/portal" : "http://localhost:4310";
-const PORTAL_PUBLIC = import.meta.env.DEV ? "/portal" : "https://edgecoder-portal.fly.dev";
-
 export interface AuthUser {
   userId: string;
   email: string;
@@ -160,7 +187,7 @@ export interface AuthUser {
 }
 
 export async function login(email: string, password: string): Promise<AuthUser> {
-  const res = await fetch(`${PORTAL_BASE}/auth/login`, {
+  const res = await fetch(`${portalBase()}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
@@ -174,7 +201,7 @@ export async function login(email: string, password: string): Promise<AuthUser> 
 }
 
 export async function getMe(): Promise<AuthUser> {
-  const res = await fetch(`${PORTAL_BASE}/me`, { credentials: "include" });
+  const res = await fetch(`${portalBase()}/me`, { credentials: "include" });
   if (!res.ok) throw new Error("Not authenticated");
   return res.json();
 }
@@ -202,7 +229,7 @@ export interface PortalMessage {
 }
 
 export async function portalListConversations(): Promise<PortalConversation[]> {
-  const res = await fetch(`${PORTAL_BASE}/portal/api/conversations`, {
+  const res = await fetch(`${portalBase()}/portal/api/conversations`, {
     credentials: "include",
   });
   if (!res.ok) throw new Error(`List conversations failed: ${res.status}`);
@@ -213,7 +240,7 @@ export async function portalListConversations(): Promise<PortalConversation[]> {
 export async function portalCreateConversation(
   title?: string,
 ): Promise<string> {
-  const res = await fetch(`${PORTAL_BASE}/portal/api/conversations`, {
+  const res = await fetch(`${portalBase()}/portal/api/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -228,7 +255,7 @@ export async function portalGetMessages(
   conversationId: string,
 ): Promise<PortalMessage[]> {
   const res = await fetch(
-    `${PORTAL_BASE}/portal/api/conversations/${conversationId}/messages`,
+    `${portalBase()}/portal/api/conversations/${conversationId}/messages`,
     { credentials: "include" },
   );
   if (!res.ok) throw new Error(`Get messages failed: ${res.status}`);
@@ -241,7 +268,7 @@ export async function portalRenameConversation(
   title: string,
 ): Promise<void> {
   const res = await fetch(
-    `${PORTAL_BASE}/portal/api/conversations/${conversationId}`,
+    `${portalBase()}/portal/api/conversations/${conversationId}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -256,7 +283,7 @@ export async function portalDeleteConversation(
   conversationId: string,
 ): Promise<void> {
   const res = await fetch(
-    `${PORTAL_BASE}/portal/api/conversations/${conversationId}`,
+    `${portalBase()}/portal/api/conversations/${conversationId}`,
     {
       method: "DELETE",
       credentials: "include",
@@ -281,7 +308,7 @@ export async function streamPortalChat(
   const streamStart = Date.now();
   let tokenCount = 0;
 
-  const res = await fetch(`${PORTAL_BASE}/portal/api/chat`, {
+  const res = await fetch(`${portalBase()}/portal/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ conversationId, message }),
@@ -337,7 +364,7 @@ export async function streamPortalChat(
 }
 
 export async function logout(): Promise<void> {
-  await fetch(`${PORTAL_BASE}/auth/logout`, {
+  await fetch(`${portalBase()}/auth/logout`, {
     method: "POST",
     credentials: "include",
   });
@@ -345,11 +372,11 @@ export async function logout(): Promise<void> {
 
 export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
   const redirect = encodeURIComponent("edgecoder://oauth-callback");
-  return `${PORTAL_PUBLIC}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
+  return `${portalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
 }
 
 export async function completeOAuthWithToken(mobileToken: string): Promise<AuthUser> {
-  const res = await fetch(`${PORTAL_PUBLIC}/auth/oauth/mobile/complete`, {
+  const res = await fetch(`${portalBase()}/auth/oauth/mobile/complete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token: mobileToken }),
@@ -363,7 +390,10 @@ export async function completeOAuthWithToken(mobileToken: string): Promise<AuthU
 // IDE chat provider (:4304)
 // ---------------------------------------------------------------------------
 
-const CHAT_BASE = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+function chatBase(): string {
+  if (import.meta.env.DEV) return "/chat";
+  return useRemote ? `${portalBase()}/portal/api` : "http://localhost:4304";
+}
 
 export interface StreamRouteInfo {
   route: string;
@@ -390,7 +420,7 @@ export async function streamChat(
   let tokenCount = 0;
   let routeInfo: StreamRouteInfo | undefined;
 
-  const res = await fetch(`${CHAT_BASE}/v1/chat/completions`, {
+  const res = await fetch(`${chatBase()}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -482,7 +512,7 @@ export interface CapacityResponse {
 }
 
 export const getCapacity = () =>
-  get<CapacityResponse>(AGENT_BASE, "/capacity");
+  get<CapacityResponse>(agentBase(), "/capacity");
 
 // ---------------------------------------------------------------------------
 // Swarm model availability
@@ -496,4 +526,4 @@ export interface SwarmModelInfo {
 }
 
 export const getAvailableModels = () =>
-  get<SwarmModelInfo[]>(AGENT_BASE, "/models/available");
+  get<SwarmModelInfo[]>(agentBase(), "/models/available");

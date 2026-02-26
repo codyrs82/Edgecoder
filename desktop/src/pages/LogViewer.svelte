@@ -13,11 +13,15 @@
   let filter: "all" | "info" | "warn" | "error" = $state("all");
   let autoScroll = $state(true);
   let prevResults = $state(-1);
+  let visibleLimit = $state(100);
+  let lastErrorMsg = $state("");
 
-  // Derived filtered logs
-  let filteredLogs = $derived(
+  // Derived filtered logs — capped at visibleLimit for DOM perf
+  let allFilteredLogs = $derived(
     filter === "all" ? logs : logs.filter((e) => e.level === filter)
   );
+  let filteredLogs = $derived(allFilteredLogs.slice(0, visibleLimit));
+  let hasMore = $derived(allFilteredLogs.length > visibleLimit);
 
   // Reference for the scroll container
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
@@ -31,12 +35,18 @@
   }
 
   function addEntry(level: LogEntry["level"], message: string) {
+    // Deduplicate consecutive identical errors
+    if (level === "error" && message === lastErrorMsg) return;
+    if (level === "error") lastErrorMsg = message;
+    else lastErrorMsg = "";
     logs = [{ timestamp: now(), level, message }, ...logs].slice(0, 500);
   }
 
   function clearLogs() {
     logs = [];
     prevResults = -1;
+    visibleLimit = 100;
+    lastErrorMsg = "";
   }
 
   // Auto-scroll effect: scroll to top when new entries are prepended (newest-first)
@@ -127,11 +137,16 @@
           <span class="msg">{entry.message}</span>
         </div>
       {/each}
+      {#if hasMore}
+        <button class="btn-show-more" onclick={() => (visibleLimit += 100)}>
+          Show more ({allFilteredLogs.length - visibleLimit} remaining)
+        </button>
+      {/if}
     {/if}
   </div>
 
   <div class="footer">
-    <span class="entry-count">{logs.length} entries (showing {filteredLogs.length})</span>
+    <span class="entry-count">{logs.length} entries (showing {filteredLogs.length} of {allFilteredLogs.length})</span>
   </div>
 </div>
 
@@ -245,6 +260,7 @@
     font-size: 0.78rem;
     line-height: 1.7;
     min-height: 300px;
+    contain: content;
   }
 
   .empty {
@@ -303,6 +319,26 @@
   .msg {
     flex: 1;
     word-break: break-word;
+  }
+
+  .btn-show-more {
+    display: block;
+    width: 100%;
+    margin-top: 0.5rem;
+    padding: 0.4rem;
+    background: var(--bg-surface, #1a1a2e);
+    color: var(--accent, #3b82f6);
+    border: 1px solid var(--border, #1e1e3f);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-align: center;
+    transition: background 0.15s;
+  }
+
+  .btn-show-more:hover {
+    background: #1e1e4f;
   }
 
   /* Footer */

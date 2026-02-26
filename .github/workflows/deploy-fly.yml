@@ -1,0 +1,43 @@
+name: Deploy to Fly.io
+on:
+  push:
+    branches: [main]
+    paths: [src/**, package.json, package-lock.json, Dockerfile, deploy/fly/**]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  deploy-portal:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --config deploy/fly/fly.portal.toml --remote-only
+        env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
+
+  deploy-coordinator:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --config deploy/fly/fly.toml --remote-only
+        env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
+
+  deploy-seed:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --config deploy/fly/fly.seed-node.toml --remote-only
+        env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
