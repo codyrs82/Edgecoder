@@ -47,7 +47,7 @@ echo "[4/6] Submitting test task to seed node..."
 TASK_RESULT=$(curl -sf -X POST "${SEED_URL}/pull" \
   -H "Content-Type: application/json" \
   -H "x-mesh-token: ${MESH_TOKEN}" \
-  -d '{"agentId":"wan-test-agent","model":"qwen2.5-coder:latest","os":"linux"}' \
+  -d '{"agentId":"wan-test-agent","model":"qwen2.5:7b","os":"linux"}' \
   || echo "FAIL")
 if [[ "${TASK_RESULT}" == "FAIL" ]]; then
   echo "  WARN: Pull returned no task (queue may be empty — expected)"

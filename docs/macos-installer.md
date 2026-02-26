@@ -123,8 +123,8 @@ Where values come from:
   - `ollama-local`: choose only if using local Ollama on that machine
   - if unsure, keep `edgecoder-local`
 - `OLLAMA_MODEL` (only when `LOCAL_MODEL_PROVIDER=ollama-local`):
-  - model tag for Ollama to run/pull (for example `qwen2.5-coder:latest`)
-  - common options: `qwen2.5-coder:latest`, `llama3.1:8b`, `codellama:13b`
+  - model tag for Ollama to run/pull (for example `qwen2.5:7b`)
+  - common options: `qwen2.5:7b`, `llama3.1:8b`, `deepseek-coder-v2:16b`
   - larger models generally improve quality but need more RAM/CPU/GPU
 - `OLLAMA_HOST` (only when `LOCAL_MODEL_PROVIDER=ollama-local`):
   - blank = local default `http://127.0.0.1:11434`

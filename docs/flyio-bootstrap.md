@@ -94,7 +94,7 @@ fly secrets set MESH_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-coordinator
 Enable coordinator-local Ollama on Fly:
 
 ```bash
-fly secrets set LOCAL_MODEL_PROVIDER="ollama-local" OLLAMA_AUTO_INSTALL="false" OLLAMA_MODEL="qwen2.5-coder:latest" -a edgecoder-coordinator
+fly secrets set LOCAL_MODEL_PROVIDER="ollama-local" OLLAMA_AUTO_INSTALL="false" OLLAMA_MODEL="qwen2.5:7b" -a edgecoder-coordinator
 fly secrets set OLLAMA_HOST="http://127.0.0.1:11434" -a edgecoder-coordinator
 fly deploy -c deploy/fly/fly.toml
 ```
@@ -105,7 +105,7 @@ Notes:
 - Production recommendation is `OLLAMA_AUTO_INSTALL=false`; pre-pull models explicitly:
 
 ```bash
-fly ssh console -a edgecoder-coordinator -C "sh -lc 'OLLAMA_NOPROGRESS=1 ollama pull qwen2.5-coder:latest && ollama list'"
+fly ssh console -a edgecoder-coordinator -C "sh -lc 'OLLAMA_NOPROGRESS=1 ollama pull qwen2.5:7b && ollama list'"
 ```
 
 - Keep coordinator VM at or above performance 2x / 8GB for stable local Ollama operation.

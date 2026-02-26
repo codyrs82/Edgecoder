@@ -220,7 +220,7 @@
         class="pull-input"
         type="text"
         bind:value={pullTarget}
-        placeholder="e.g. qwen2.5-coder:3b"
+        placeholder="e.g. qwen2.5:7b"
         disabled={pulling}
         onkeydown={(e: KeyboardEvent) => {
           if (e.key === "Enter") handlePull();
