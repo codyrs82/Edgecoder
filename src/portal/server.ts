@@ -3448,6 +3448,19 @@ function portalAuthedPageHtml(input: {
   script: string;
 }): string {
 
+  const navItems = [
+    { key: "dashboard", href: "/portal/dashboard", label: "Dashboard", icon: "&#9632;" },
+    { key: "chat", href: "/portal/chat", label: "Chat", icon: "&#9993;" },
+    { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "&#9998;", hasBadge: true },
+    { key: "wallet", href: "/portal/wallet", label: "Wallet", icon: "&#9733;" },
+    { key: "settings", href: "/portal/settings", label: "Settings", icon: "&#9881;" },
+  ];
+  const navHtml = navItems.map((item) => {
+    const active = item.key === input.activeTab ? " topbar-nav-active" : "";
+    const badge = item.hasBadge ? `<span class="nav-badge" id="reviewsBadge" style="display:none;">0</span>` : "";
+    return `<a class="topbar-nav-link${active}" href="${item.href}" title="${item.label}"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span>${badge}</a>`;
+  }).join("");
+
   return `<!doctype html>
   <html>
     <head>
@@ -3473,6 +3486,11 @@ function portalAuthedPageHtml(input: {
           --danger: #f87171;
           --yellow: #fbbf24;
           --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+          --transition-fast: 0.15s ease;
+          --transition-med: 0.25s ease;
+          --radius-sm: 6px;
+          --radius-md: 10px;
+          --radius-lg: 14px;
         }
         * { box-sizing: border-box; }
         body {
@@ -3486,34 +3504,68 @@ function portalAuthedPageHtml(input: {
           -webkit-font-smoothing: antialiased;
         }
         .shell { max-width: 1360px; margin: 0 auto; padding: 0 14px; }
+        /* ── Topbar ── */
         .topbar {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 8px 12px;
-          border-bottom: 0.5px solid var(--card-border);
+          padding: 6px 16px;
+          border-bottom: 1px solid var(--card-border);
           background: var(--bg-soft);
+          position: sticky;
+          top: 0;
+          z-index: 50;
+          backdrop-filter: blur(12px);
         }
         .topbar-left { display: flex; align-items: center; gap: 10px; }
         .topbar-left a { text-decoration: none; color: var(--text); display: flex; align-items: center; gap: 8px; }
+        .topbar-nav { display: flex; align-items: center; gap: 2px; margin-left: 16px; }
+        .topbar-nav-link {
+          display: inline-flex; align-items: center; gap: 5px;
+          padding: 6px 12px; border-radius: var(--radius-sm);
+          font-size: 13px; font-weight: 500; color: var(--muted);
+          text-decoration: none; transition: all var(--transition-fast);
+          position: relative; border: 1px solid transparent;
+        }
+        .topbar-nav-link:hover { color: var(--text); background: var(--bg-surface); }
+        .topbar-nav-link.topbar-nav-active {
+          color: var(--brand); background: rgba(193, 120, 80, 0.1);
+          border-color: rgba(193, 120, 80, 0.25);
+        }
+        .topbar-nav-link .nav-icon { font-size: 14px; }
+        .nav-badge {
+          position: absolute; top: -4px; right: -2px;
+          background: var(--danger); color: #fff; font-size: 9px;
+          font-weight: 700; min-width: 16px; height: 16px;
+          border-radius: 999px; display: inline-flex;
+          align-items: center; justify-content: center;
+          padding: 0 4px; line-height: 1;
+        }
         .topbar-right { display: flex; align-items: center; gap: 10px; }
         .topbar-credits {
           font-family: var(--font-mono);
           font-size: 12px;
           color: var(--muted);
-          padding: 3px 8px;
-          border: 0.5px solid var(--card-border);
-          border-radius: 6px;
+          padding: 4px 10px;
+          border: 1px solid var(--card-border);
+          border-radius: var(--radius-sm);
           background: var(--bg);
+          transition: border-color var(--transition-fast);
         }
+        .topbar-credits:hover { border-color: var(--brand); }
         .topbar-icon {
           width: 32px; height: 32px;
           display: inline-flex; align-items: center; justify-content: center;
-          border-radius: 6px; border: 0.5px solid var(--card-border);
+          border-radius: var(--radius-sm); border: 1px solid var(--card-border);
           background: var(--bg); color: var(--muted); text-decoration: none;
-          font-size: 16px; cursor: pointer; transition: background 0.15s;
+          font-size: 16px; cursor: pointer; transition: all var(--transition-fast);
         }
-        .topbar-icon:hover { background: var(--card); color: var(--text); }
+        .topbar-icon:hover { background: var(--card); color: var(--text); border-color: var(--brand); }
+        /* ── Hamburger (mobile) ── */
+        .hamburger-btn {
+          display: none; background: none; border: none; color: var(--text);
+          font-size: 22px; cursor: pointer; padding: 4px 6px; line-height: 1;
+        }
         .main { min-width: 0; }
         .brand { display: inline-flex; align-items: center; gap: 10px; }
         .mark {
@@ -3529,52 +3581,70 @@ function portalAuthedPageHtml(input: {
         }
         .topbar-title { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
         .muted { color: var(--muted); font-size: 11px; }
+        /* ── Cards ── */
         .card {
           background: var(--card);
           border: 1px solid var(--card-border);
-          border-radius: 8px;
-          padding: 11px;
-          margin-bottom: 8px;
+          border-radius: var(--radius-md);
+          padding: 14px;
+          margin-bottom: 10px;
           backdrop-filter: blur(10px);
           box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+          transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+          animation: fadeSlideIn 0.3s ease both;
+        }
+        @keyframes fadeSlideIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
         }
         .content-stack { margin-top: 0; }
         .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+        /* ── Buttons ── */
         button {
-          padding: 6px 9px;
-          border-radius: 6px;
+          padding: 7px 12px;
+          border-radius: var(--radius-sm);
           border: 1px solid var(--card-border);
           background: var(--bg-soft);
           color: var(--text);
           cursor: pointer;
           font-size: 12px;
+          font-weight: 500;
+          transition: all var(--transition-fast);
         }
+        button:hover { border-color: var(--border-strong); background: var(--bg-surface); transform: translateY(-1px); }
+        button:active { transform: translateY(0); }
         button.primary {
           background: linear-gradient(140deg, var(--brand), var(--brand-2));
           border-color: rgba(193, 120, 80, 0.75);
           color: white;
         }
+        button.primary:hover { filter: brightness(1.1); box-shadow: 0 2px 12px rgba(193, 120, 80, 0.3); }
+        /* ── Inputs ── */
         input, select, textarea {
           width: 100%;
-          padding: 7px 8px;
+          padding: 8px 10px;
           border: 1px solid var(--card-border);
-          border-radius: 6px;
+          border-radius: var(--radius-sm);
           background: var(--bg-input);
           color: var(--text);
           font-size: 13px;
           font-family: inherit;
+          transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
         }
         input:focus, select:focus, textarea:focus {
           outline: none;
           border-color: var(--brand);
+          box-shadow: 0 0 0 2px rgba(193, 120, 80, 0.15);
         }
+        input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.7; }
         label {
           display: block;
-          margin: 6px 0 3px;
+          margin: 8px 0 4px;
           font-size: 10px;
           color: var(--muted);
           text-transform: uppercase;
           letter-spacing: 0.06em;
+          font-weight: 600;
         }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
         th, td {
@@ -3591,9 +3661,14 @@ function portalAuthedPageHtml(input: {
           text-transform: uppercase;
           letter-spacing: 0.05em;
         }
-        .grid2 { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 8px; }
+        .grid2 { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 10px; }
         .kpis { display: grid; grid-template-columns: repeat(3, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
-        .kpi { border: 1px solid var(--card-border); border-radius: 6px; padding: 7px; background: var(--card); }
+        .kpi {
+          border: 1px solid var(--card-border); border-radius: var(--radius-sm);
+          padding: 10px; background: var(--card);
+          transition: border-color var(--transition-fast), transform var(--transition-fast);
+        }
+        .kpi:hover { border-color: rgba(193, 120, 80, 0.25); transform: translateY(-1px); }
         .kpi .label {
           color: var(--muted);
           font-size: 10px;
@@ -3646,13 +3721,30 @@ function portalAuthedPageHtml(input: {
         }
         .token-box {
           border: 1px dashed rgba(193, 120, 80, 0.42);
-          border-radius: 6px;
+          border-radius: var(--radius-sm);
           padding: 8px;
           background: var(--bg-soft);
           word-break: break-all;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px;
         }
+        /* ── Loading spinner ── */
+        .loading-spinner {
+          width: 20px; height: 20px;
+          border: 2px solid var(--card-border);
+          border-top-color: var(--brand);
+          border-radius: 50%;
+          animation: spin 0.7s linear infinite;
+          display: inline-block;
+        }
+        .loading-spinner.sm { width: 14px; height: 14px; border-width: 2px; }
+        .loading-spinner.lg { width: 32px; height: 32px; border-width: 3px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-state {
+          display: flex; align-items: center; gap: 8px;
+          color: var(--muted); font-size: 12px; padding: 12px 0;
+        }
+        /* ── Toast ── */
         #toast {
           position: fixed;
           top: 12px;
@@ -3660,26 +3752,57 @@ function portalAuthedPageHtml(input: {
           width: min(420px, calc(100vw - 32px));
           z-index: 100;
           margin: 0;
+          animation: slideInRight 0.3s ease;
         }
-        .hidden { display: none; }
+        @keyframes slideInRight {
+          from { opacity: 0; transform: translateX(40px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        .hidden { display: none !important; }
+        /* ── Mobile responsive ── */
         @media (max-width: 920px) {
           .grid2 { grid-template-columns: 1fr; }
+          .kpis { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 680px) {
           .kpis { grid-template-columns: 1fr; }
+          .topbar-nav { display: none; }
+          .topbar-nav.mobile-open {
+            display: flex; flex-direction: column;
+            position: absolute; top: 100%; left: 0; right: 0;
+            background: var(--bg-soft); border-bottom: 1px solid var(--card-border);
+            padding: 8px 16px; gap: 2px; z-index: 49;
+            animation: fadeSlideIn 0.2s ease;
+          }
+          .topbar-nav.mobile-open .topbar-nav-link {
+            padding: 10px 12px; width: 100%; border-radius: var(--radius-sm);
+          }
+          .hamburger-btn { display: block; }
+          .topbar-nav-link .nav-label { display: inline; }
+          .topbar-right .topbar-credits { font-size: 10px; padding: 3px 6px; }
+        }
+        @media (min-width: 681px) {
+          .topbar-nav-link .nav-label { display: none; }
+        }
+        @media (min-width: 900px) {
+          .topbar-nav-link .nav-label { display: inline; }
         }
       </style>
     </head>
     <body>
       <div class="topbar">
         <div class="topbar-left">
-          <a href="/portal/chat">
+          <a href="/portal/dashboard">
             <div class="mark">E</div>
             <span class="topbar-title">EdgeCoder</span>
           </a>
+          <button class="hamburger-btn" id="hamburgerBtn" aria-label="Menu">&#9776;</button>
+          <nav class="topbar-nav" id="topbarNav">
+            ${navHtml}
+          </nav>
         </div>
         <div class="topbar-right">
-          <span class="topbar-credits" id="topTickerCredits" title="Credits">-</span>
-          <a class="topbar-icon" href="/portal/reviews" title="Reviews" style="font-size:14px;">&#9998;</a>
-          <a class="topbar-icon" href="/portal/settings" title="Settings">&#9881;</a>
+          <span class="topbar-credits" id="topTickerCredits" title="Credits"><span class="loading-spinner sm"></span></span>
           <a class="topbar-icon" id="logoutBtn" href="#" title="Sign out">&#10140;</a>
         </div>
       </div>
@@ -3734,16 +3857,43 @@ function portalAuthedPageHtml(input: {
         function boolBadge(value, trueLabel = "YES", falseLabel = "NO") {
           return value ? statusBadge(trueLabel, "ok") : statusBadge(falseLabel, "warn");
         }
+        /* ── Hamburger toggle ── */
+        (function() {
+          var btn = document.getElementById("hamburgerBtn");
+          var nav = document.getElementById("topbarNav");
+          if (btn && nav) {
+            btn.addEventListener("click", function() {
+              nav.classList.toggle("mobile-open");
+            });
+            document.addEventListener("click", function(e) {
+              if (!btn.contains(e.target) && !nav.contains(e.target)) {
+                nav.classList.remove("mobile-open");
+              }
+            });
+          }
+        })();
+        /* ── Top ticker and reviews badge ── */
         async function loadTopTicker() {
           try {
             await requireAuth();
-            const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
-            const credits = (summary.walletSnapshot || {}).credits;
-            const creditVal = credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
+            var summary = await api("/dashboard/summary", { method: "GET", headers: {} });
+            var credits = (summary.walletSnapshot || {}).credits;
+            var creditVal = credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
             document.getElementById("topTickerCredits").textContent = creditVal + " credits";
           } catch {
-            // noop on pages that redirect unauthenticated users
+            document.getElementById("topTickerCredits").textContent = "-";
           }
+        }
+        async function loadReviewsBadge() {
+          try {
+            var res = await api("/portal/api/reviews");
+            var reviews = res.reviews || [];
+            var badge = document.getElementById("reviewsBadge");
+            if (badge && reviews.length > 0) {
+              badge.textContent = String(reviews.length);
+              badge.style.display = "inline-flex";
+            }
+          } catch { /* noop */ }
         }
         document.getElementById("logoutBtn").addEventListener("click", async (e) => {
           e.preventDefault();
@@ -3754,6 +3904,7 @@ function portalAuthedPageHtml(input: {
           }
         });
         loadTopTicker();
+        loadReviewsBadge();
       </script>
       <script>
         ${input.script}
@@ -4082,55 +4233,141 @@ app.get("/portal/chat", async (_req, reply) => {
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
       .chat-layout { display:flex; height:calc(100vh - 52px); }
-      .conv-sidebar { width:260px; min-width:260px; border-right:0.5px solid var(--card-border); background:var(--bg-soft); display:flex; flex-direction:column; padding:12px; }
+      .conv-sidebar {
+        width:280px; min-width:260px; border-right:1px solid var(--card-border);
+        background:var(--bg-soft); display:flex; flex-direction:column; padding:14px;
+      }
       .conv-sidebar h3 { margin:0 0 8px 0; font-size:14px; }
-      .conv-item { padding:8px 10px; border-radius:6px; cursor:pointer; margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
-      .conv-item:hover { background:var(--bg-surface); }
-      .conv-item.active { background:var(--bg-surface); color:var(--brand); }
+      .new-chat-btn {
+        display:flex; align-items:center; justify-content:center; gap:6px;
+        width:100%; padding:10px 14px; margin-bottom:12px;
+        border-radius:var(--radius-md); font-size:13px; font-weight:600;
+        background:linear-gradient(140deg, var(--brand), var(--brand-2));
+        border:1px solid rgba(193,120,80,0.75); color:white;
+        cursor:pointer; transition:all var(--transition-fast);
+      }
+      .new-chat-btn:hover { filter:brightness(1.1); box-shadow:0 2px 12px rgba(193,120,80,0.3); transform:translateY(-1px); }
+      .conv-item {
+        padding:10px 12px; border-radius:var(--radius-sm); cursor:pointer;
+        margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden;
+        text-overflow:ellipsis; color:var(--text-secondary);
+        transition:all var(--transition-fast); border:1px solid transparent;
+      }
+      .conv-item:hover { background:var(--bg-surface); color:var(--text); }
+      .conv-item.active { background:var(--bg-surface); color:var(--brand); border-color:rgba(193,120,80,0.2); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
-      .chat-scroll { flex:1; overflow-y:auto; }
+      .chat-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
       .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
-      .chat-msg { padding:16px 0; line-height:1.6; font-size:15px; }
-      .chat-msg + .chat-msg { border-top:0.5px solid var(--card-border); }
-      .chat-msg .msg-role { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; color:var(--muted); }
+      .chat-msg { padding:18px 0; line-height:1.7; font-size:15px; animation:fadeSlideIn 0.3s ease both; }
+      .chat-msg + .chat-msg { border-top:1px solid var(--card-border); }
+      .chat-msg .msg-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+      .chat-msg .msg-role {
+        font-size:11px; font-weight:700; text-transform:uppercase;
+        letter-spacing:0.5px; color:var(--muted);
+      }
+      .chat-msg .msg-time { font-size:10px; color:var(--muted); opacity:0.7; }
       .chat-msg.user .msg-role { color:var(--brand); }
       .chat-msg .msg-body { color:var(--text); }
-      .chat-msg pre { background:rgba(0,0,0,0.3); padding:12px; border-radius:6px; overflow-x:auto; margin:8px 0; }
-      .chat-msg code { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:13px; }
-      .chat-input-area { border-top:0.5px solid var(--card-border); background:var(--bg); }
-      .chat-input-wrap { max-width:768px; margin:0 auto; padding:12px 24px 16px; }
+      .chat-msg .msg-body p { margin:0 0 8px; }
+      .chat-msg .msg-body p:last-child { margin-bottom:0; }
+      /* ── Code blocks in chat ── */
+      .chat-msg pre {
+        position:relative; background:rgba(0,0,0,0.45); padding:14px 16px;
+        border-radius:var(--radius-sm); overflow-x:auto; margin:10px 0;
+        border:1px solid rgba(255,255,255,0.06);
+      }
+      .chat-msg code {
+        font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
+        font-size:13px; line-height:1.5;
+      }
+      .chat-msg pre code { background:none; padding:0; }
+      .chat-msg code:not(pre code) {
+        background:rgba(0,0,0,0.3); padding:2px 6px;
+        border-radius:4px; font-size:12px;
+      }
+      .code-copy-btn {
+        position:absolute; top:6px; right:6px;
+        background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.1);
+        color:var(--muted); border-radius:4px; padding:3px 8px;
+        font-size:10px; cursor:pointer; transition:all var(--transition-fast);
+        font-family:inherit;
+      }
+      .code-copy-btn:hover { background:rgba(255,255,255,0.15); color:var(--text); }
+      /* ── Typing indicator ── */
+      .typing-indicator { display:flex; gap:4px; align-items:center; padding:8px 0; }
+      .typing-indicator .dot {
+        width:7px; height:7px; border-radius:50%; background:var(--muted);
+        animation:typingBounce 1.4s ease-in-out infinite;
+      }
+      .typing-indicator .dot:nth-child(2) { animation-delay:0.2s; }
+      .typing-indicator .dot:nth-child(3) { animation-delay:0.4s; }
+      @keyframes typingBounce {
+        0%,60%,100% { transform:translateY(0); opacity:0.4; }
+        30% { transform:translateY(-6px); opacity:1; }
+      }
+      .chat-input-area { border-top:1px solid var(--card-border); background:var(--bg); }
+      .chat-input-wrap { max-width:768px; margin:0 auto; padding:14px 24px 18px; }
+      .chat-input-row {
+        display:flex; gap:8px; align-items:flex-end;
+        background:var(--bg-input); border:1px solid var(--card-border);
+        border-radius:var(--radius-md); padding:6px 6px 6px 14px;
+        transition:border-color var(--transition-fast), box-shadow var(--transition-fast);
+      }
+      .chat-input-row:focus-within {
+        border-color:var(--brand); box-shadow:0 0 0 2px rgba(193,120,80,0.15);
+      }
+      .chat-input-row textarea {
+        flex:1; resize:none; max-height:200px; border:none; padding:6px 0;
+        background:transparent; font-family:inherit; font-size:15px;
+        color:var(--text); outline:none; line-height:1.5;
+      }
+      .chat-input-row textarea:focus { box-shadow:none; }
+      .chat-send-btn {
+        padding:8px 18px; border-radius:var(--radius-sm);
+        background:linear-gradient(140deg, var(--brand), var(--brand-2));
+        border:none; color:white; font-size:13px; font-weight:600;
+        cursor:pointer; transition:all var(--transition-fast);
+        white-space:nowrap;
+      }
+      .chat-send-btn:hover { filter:brightness(1.1); box-shadow:0 2px 8px rgba(193,120,80,0.3); }
+      .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
+      @media (max-width:680px) {
+        .conv-sidebar { display:none; }
+        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:52px; bottom:0; width:85vw; box-shadow:4px 0 20px rgba(0,0,0,0.3); }
+      }
     </style>
     <div class="chat-layout">
       <!-- Left: Conversation sidebar -->
-      <div class="conv-sidebar">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <h3>Conversations</h3>
-          <button class="primary" id="newChatBtn" style="padding:4px 10px; font-size:12px;">+ New</button>
-        </div>
-        <input id="convSearch" type="text" placeholder="Search..." style="margin-bottom:8px; font-size:12px;" />
+      <div class="conv-sidebar" id="convSidebar">
+        <button class="new-chat-btn" id="newChatBtn">&#10010; New Conversation</button>
+        <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:10px; font-size:12px;" />
         <div id="convList" style="flex:1; overflow-y:auto;"></div>
       </div>
       <!-- Right: Chat area -->
       <div class="chat-main">
-        <div class="chat-scroll">
+        <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
-            <div class="muted" style="padding:40px 0;">Start a conversation.</div>
+            <div style="padding:60px 0; text-align:center;">
+              <div style="font-size:36px; margin-bottom:12px;">&#9993;</div>
+              <h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2>
+              <div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
+            </div>
           </div>
         </div>
-        <div id="streamingIndicator" class="hidden" style="max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:4px 24px; color:var(--muted); font-size:12px;">
-          <span class="spinner"></span>
+        <div id="streamingIndicator" class="hidden" style="max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px;">
+          <div class="typing-indicator"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
           <span id="streamStatus">Thinking...</span>
-          <span id="streamTokens"></span>
+          <span id="streamTokens" style="margin-left:auto;"></span>
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
-            <div style="display:flex; gap:8px;">
-              <textarea id="chatInput" rows="2" placeholder="Message EdgeCoder..." style="flex:1; resize:none; max-height:200px; font-family:inherit; font-size:15px;"></textarea>
-              <button class="primary" id="sendBtn" style="align-self:flex-end; padding:8px 16px;">Send</button>
+            <div class="chat-input-row">
+              <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..."></textarea>
+              <button class="chat-send-btn" id="sendBtn">Send</button>
             </div>
-            <div class="muted" style="font-size:10px; margin-top:4px;">Enter to send, Shift+Enter for newline</div>
+            <div class="muted" style="font-size:10px; margin-top:6px; text-align:center;">Enter to send, Shift+Enter for newline</div>
           </div>
         </div>
       </div>
@@ -4153,9 +4390,10 @@ app.get("/portal/chat", async (_req, reply) => {
 
     function renderMarkdown(text) {
       var html = escapeHtml(text);
-      // Code blocks (triple backtick)
+      // Code blocks (triple backtick) with copy button
       html = html.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, function(m, code) {
-        return "<pre><code>" + code.trim() + "</code></pre>";
+        var id = "codeblock-" + Math.random().toString(36).substring(2, 8);
+        return "<pre id=\\"" + id + "\\"><button class=\\"code-copy-btn\\" onclick=\\"copyCodeBlock('" + id + "')\\">Copy</button><code>" + code.trim() + "</code></pre>";
       });
       // Inline code
       html = html.replace(/\\\`([^\\\`]+?)\\\`/g, "<code>$1</code>");
@@ -4166,6 +4404,26 @@ app.get("/portal/chat", async (_req, reply) => {
       // Newlines to br
       html = html.replace(/\\n/g, "<br>");
       return html;
+    }
+
+    function copyCodeBlock(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      var code = el.querySelector("code");
+      if (!code) return;
+      navigator.clipboard.writeText(code.textContent).then(function() {
+        var btn = el.querySelector(".code-copy-btn");
+        if (btn) { btn.textContent = "Copied!"; setTimeout(function() { btn.textContent = "Copy"; }, 2000); }
+      });
+    }
+
+    function formatMsgTime(ts) {
+      if (!ts) return "";
+      var d = new Date(ts);
+      var h = d.getHours(); var m = d.getMinutes();
+      var ampm = h >= 12 ? "PM" : "AM";
+      h = h % 12 || 12;
+      return h + ":" + (m < 10 ? "0" : "") + m + " " + ampm;
     }
 
     function renderConversations() {
@@ -4190,7 +4448,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var container = document.getElementById("chatMessages");
       var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = "<div class=\\"muted\\" style=\\"padding:40px 0;\\">Start a conversation.</div>";
+        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="font-size:36px; margin-bottom:12px;">&#9993;</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
         return;
       }
       var html = "";
@@ -4198,7 +4456,8 @@ app.get("/portal/chat", async (_req, reply) => {
         var m = messages[i];
         var role = m.role === "user" ? "user" : "assistant";
         var label = m.role === "user" ? "You" : "EdgeCoder";
-        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-role\\">" + label + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div></div>";
+        var timeStr = m.createdAt || m.timestamp ? formatMsgTime(m.createdAt || m.timestamp) : "";
+        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div></div>";
       }
       container.innerHTML = html;
       scrollParent.scrollTop = scrollParent.scrollHeight;
@@ -4276,7 +4535,8 @@ app.get("/portal/chat", async (_req, reply) => {
       if (emptyMsg) emptyMsg.remove();
       var userBubble = document.createElement("div");
       userBubble.className = "chat-msg user";
-      userBubble.innerHTML = "<div class=\\"msg-role\\">You</div><div class=\\"msg-body\\">" + renderMarkdown(text) + "</div>";
+      var nowTime = formatMsgTime(Date.now());
+      userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\">" + renderMarkdown(text) + "</div>";
       chatMessages.appendChild(userBubble);
       scrollParent.scrollTop = scrollParent.scrollHeight;
 
@@ -4292,7 +4552,7 @@ app.get("/portal/chat", async (_req, reply) => {
       // Create assistant message block
       var assistantBubble = document.createElement("div");
       assistantBubble.className = "chat-msg assistant";
-      assistantBubble.innerHTML = "<div class=\\"msg-role\\">EdgeCoder</div><div class=\\"msg-body\\"></div>";
+      assistantBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">EdgeCoder</div><div class=\\"msg-time\\">" + formatMsgTime(Date.now()) + "</div></div><div class=\\"msg-body\\"></div>";
       chatMessages.appendChild(assistantBubble);
       var assistantBody = assistantBubble.querySelector(".msg-body");
 
@@ -4431,39 +4691,156 @@ app.get("/portal/chat", async (_req, reply) => {
 
 app.get("/portal/dashboard", async (_req, reply) => {
   const content = `
-    <div class="card">
-      <h2 style="margin-top:0;">Account overview</h2>
-      <div id="accountMeta" class="muted">Loading account...</div>
-      <div class="kpis">
-        <div class="kpi"><div class="label">Current credits</div><div class="value" id="creditsValue">-</div></div>
-        <div class="kpi"><div class="label">Estimated sats</div><div class="value" id="creditsSatsValue">-</div></div>
-        <div class="kpi"><div class="label">Enrolled nodes</div><div class="value" id="nodeCountValue">-</div></div>
+    <style>
+      .welcome-section {
+        padding: 20px 0 12px;
+      }
+      .welcome-section h1 {
+        margin: 0 0 4px; font-size: 22px; font-weight: 700;
+        background: linear-gradient(135deg, var(--text), var(--brand));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      .welcome-section .welcome-sub { color: var(--muted); font-size: 13px; margin: 0; }
+      .quick-actions-grid {
+        display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px;
+      }
+      .quick-action-card {
+        display: flex; flex-direction: column; align-items: center; gap: 8px;
+        padding: 18px 12px; text-align: center; text-decoration: none;
+        background: var(--card); border: 1px solid var(--card-border);
+        border-radius: var(--radius-md); color: var(--text);
+        transition: all var(--transition-fast); cursor: pointer;
+      }
+      .quick-action-card:hover {
+        border-color: var(--brand); transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+      }
+      .quick-action-card .qa-icon {
+        font-size: 24px; width: 44px; height: 44px;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 10px; background: rgba(193, 120, 80, 0.1);
+      }
+      .quick-action-card .qa-label { font-size: 13px; font-weight: 600; }
+      .quick-action-card .qa-desc { font-size: 11px; color: var(--muted); line-height: 1.4; }
+      .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+      .status-card {
+        display: flex; align-items: center; gap: 10px;
+        padding: 12px 14px; background: var(--card);
+        border: 1px solid var(--card-border); border-radius: var(--radius-md);
+        transition: border-color var(--transition-fast);
+      }
+      .status-dot {
+        width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+        animation: pulse 2s ease-in-out infinite;
+      }
+      .status-dot.green { background: var(--ok); box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
+      .status-dot.yellow { background: var(--yellow); box-shadow: 0 0 6px rgba(251, 191, 36, 0.4); }
+      .status-dot.red { background: var(--danger); box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
+      .status-dot.gray { background: var(--muted); animation: none; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+      .status-card .sc-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+      .status-card .sc-value { font-size: 13px; font-weight: 600; }
+      .activity-feed { list-style: none; margin: 0; padding: 0; }
+      .activity-feed li {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 10px 0; border-bottom: 1px solid var(--card-border);
+        font-size: 12px; animation: fadeSlideIn 0.3s ease both;
+      }
+      .activity-feed li:last-child { border-bottom: none; }
+      .activity-feed .af-icon {
+        width: 28px; height: 28px; border-radius: 6px;
+        display: flex; align-items: center; justify-content: center;
+        background: var(--bg-surface); font-size: 14px; flex-shrink: 0;
+      }
+      .activity-feed .af-text { flex: 1; color: var(--text-secondary); line-height: 1.5; }
+      .activity-feed .af-text strong { color: var(--text); }
+      .activity-feed .af-time { color: var(--muted); font-size: 10px; white-space: nowrap; }
+      @media (max-width: 920px) {
+        .quick-actions-grid { grid-template-columns: repeat(2, 1fr); }
+        .status-grid { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 480px) {
+        .quick-actions-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+    <!-- Welcome Section -->
+    <div class="welcome-section">
+      <h1 id="welcomeHeading">Welcome back</h1>
+      <p class="welcome-sub" id="welcomeSub">Loading your dashboard...</p>
+    </div>
+    <!-- System Status Indicators -->
+    <div class="status-grid" id="statusGrid">
+      <div class="status-card">
+        <div class="status-dot gray" id="statusCoordinator"></div>
+        <div><div class="sc-label">Coordinator</div><div class="sc-value" id="statusCoordinatorText">Checking...</div></div>
+      </div>
+      <div class="status-card">
+        <div class="status-dot gray" id="statusInference"></div>
+        <div><div class="sc-label">Inference</div><div class="sc-value" id="statusInferenceText">Checking...</div></div>
+      </div>
+      <div class="status-card">
+        <div class="status-dot gray" id="statusAgents"></div>
+        <div><div class="sc-label">Connected Agents</div><div class="sc-value" id="statusAgentsText">--</div></div>
       </div>
     </div>
+    <!-- Account Overview KPIs -->
     <div class="card">
-      <h2 style="margin-top:0;">Coordinator Operations</h2>
-      <div id="opsAccountLine" class="muted">Loading operator session...</div>
-      <div id="opsFinalityLine" class="muted">Loading finality state...</div>
+      <h2 style="margin-top:0;">Account overview</h2>
+      <div id="accountMeta" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
       <div class="kpis">
-        <div class="kpi"><div class="label">Connected agents</div><div class="value" id="opsAgentsValue">-</div></div>
-        <div class="kpi"><div class="label">Queue depth</div><div class="value" id="opsQueueValue">-</div></div>
-        <div class="kpi"><div class="label">Results</div><div class="value" id="opsResultsValue">-</div></div>
+        <div class="kpi"><div class="label">Current credits</div><div class="value" id="creditsValue">--</div></div>
+        <div class="kpi"><div class="label">Estimated sats</div><div class="value" id="creditsSatsValue">--</div></div>
+        <div class="kpi"><div class="label">Enrolled nodes</div><div class="value" id="nodeCountValue">--</div></div>
+        <div class="kpi"><div class="label">Tasks today</div><div class="value" id="tasksToday">--</div></div>
       </div>
     </div>
     <div id="emailVerifyCard" class="card hidden" style="border-color: rgba(245, 158, 11, 0.55); background: rgba(120, 53, 15, 0.22);">
-      <h3 style="margin-top:0;">Email verification required</h3>
+      <h3 style="margin-top:0;">&#9888; Email verification required</h3>
       <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
       <div class="row" style="margin-top:10px;">
         <button class="primary" id="emailVerifyNowBtn">Send verification email</button>
       </div>
     </div>
+    <!-- Quick Actions -->
+    <div class="quick-actions-grid">
+      <a href="/portal/chat" class="quick-action-card">
+        <div class="qa-icon">&#9993;</div>
+        <div class="qa-label">Open Chat</div>
+        <div class="qa-desc">Talk to your AI assistant</div>
+      </a>
+      <a href="/portal/reviews" class="quick-action-card">
+        <div class="qa-icon">&#9998;</div>
+        <div class="qa-label">Code Reviews</div>
+        <div class="qa-desc">Review escalated diffs</div>
+      </a>
+      <a href="/portal/wallet" class="quick-action-card">
+        <div class="qa-icon">&#9733;</div>
+        <div class="qa-label">Wallet</div>
+        <div class="qa-desc">Credits, deposits, sends</div>
+      </a>
+      <a href="/portal/settings" class="quick-action-card">
+        <div class="qa-icon">&#9881;</div>
+        <div class="qa-label">Settings</div>
+        <div class="qa-desc">Account and preferences</div>
+      </a>
+    </div>
+    <!-- Recent Activity Feed -->
     <div class="card">
-      <h3 style="margin-top:0;">Quick actions</h3>
-      <div class="row">
-        <a href="/portal/chat"><button class="primary">Open Chat</button></a>
-        <a href="/portal/reviews"><button>Code Reviews</button></a>
-        <a href="/portal/wallet"><button>Open wallet</button></a>
-        <a href="/portal/settings"><button>Account settings</button></a>
+      <h3 style="margin-top:0;">&#9200; Recent Activity</h3>
+      <ul class="activity-feed" id="activityFeed">
+        <li><div class="af-icon">&#8987;</div><div class="af-text">Loading recent activity...</div></li>
+      </ul>
+    </div>
+    <!-- Coordinator Operations -->
+    <div class="card">
+      <h2 style="margin-top:0;">Coordinator Operations</h2>
+      <div id="opsAccountLine" class="muted"><span class="loading-spinner sm"></span> Loading operator session...</div>
+      <div id="opsFinalityLine" class="muted">Loading finality state...</div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Connected agents</div><div class="value" id="opsAgentsValue">--</div></div>
+        <div class="kpi"><div class="label">Queue depth</div><div class="value" id="opsQueueValue">--</div></div>
+        <div class="kpi"><div class="label">Results</div><div class="value" id="opsResultsValue">--</div></div>
       </div>
     </div>
     <div class="grid2">
@@ -4706,7 +5083,8 @@ app.get("/portal/dashboard", async (_req, reply) => {
       const me = await requireAuth();
       const user = me.user || {};
       const data = await api("/coordinator/ops/summary", { method: "GET", headers: {} });
-      document.getElementById("opsAgentsValue").textContent = String((data.status && data.status.agents) || 0);
+      var agentCount = (data.status && data.status.agents) || 0;
+      document.getElementById("opsAgentsValue").textContent = String(agentCount);
       document.getElementById("opsQueueValue").textContent = String((data.status && data.status.queued) || 0);
       document.getElementById("opsResultsValue").textContent = String((data.status && data.status.results) || 0);
       cachedPending = data.pendingNodes || [];
@@ -4732,6 +5110,28 @@ app.get("/portal/dashboard", async (_req, reply) => {
         (user.email || "unknown") + " | coordinator operations access | " + scopeText + " | " + federationState;
       document.getElementById("opsFinalityLine").textContent =
         "Stats ledger finality: " + finalityLabel + " | anchor tx: " + anchorTxRef;
+      /* Update status indicators */
+      var coordDot = document.getElementById("statusCoordinator");
+      var coordText = document.getElementById("statusCoordinatorText");
+      if (!data.federation || data.federation.stale) {
+        coordDot.className = "status-dot yellow";
+        coordText.textContent = "Degraded";
+      } else {
+        coordDot.className = "status-dot green";
+        coordText.textContent = "Online";
+      }
+      var infDot = document.getElementById("statusInference");
+      var infText = document.getElementById("statusInferenceText");
+      if (agentCount > 0) {
+        infDot.className = "status-dot green";
+        infText.textContent = "Healthy";
+      } else {
+        infDot.className = "status-dot yellow";
+        infText.textContent = "No agents";
+      }
+      var agDot = document.getElementById("statusAgents");
+      document.getElementById("statusAgentsText").textContent = String(agentCount);
+      agDot.className = agentCount > 0 ? "status-dot green" : "status-dot gray";
       renderPending();
       renderApproved();
     }
@@ -4766,12 +5166,49 @@ app.get("/portal/dashboard", async (_req, reply) => {
     });
 
     /* ── Dashboard main load ── */
+    function timeAgo(ms) {
+      if (!ms) return "";
+      var diff = Date.now() - ms;
+      if (diff < 60000) return "just now";
+      if (diff < 3600000) return Math.floor(diff / 60000) + "m ago";
+      if (diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
+      return Math.floor(diff / 86400000) + "d ago";
+    }
+    function renderActivityFeed(history) {
+      var feed = document.getElementById("activityFeed");
+      var items = (history || []).slice(0, 5);
+      if (items.length === 0) {
+        feed.innerHTML = '<li><div class="af-icon">&#128203;</div><div class="af-text" style="color:var(--muted);">No recent activity. Start a chat or enroll a node to get going.</div></li>';
+        return;
+      }
+      var html = "";
+      for (var i = 0; i < items.length; i++) {
+        var tx = items[i];
+        var icon = tx.type === "earn" ? "&#9889;" : tx.type === "spend" ? "&#9733;" : "&#9654;";
+        var desc = tx.reason === "compute_contribution" ? "<strong>Compute contribution</strong> earned" :
+                   tx.reason === "task_completion" ? "<strong>Task completed</strong>" :
+                   tx.reason === "credit_purchase" ? "<strong>Credits purchased</strong>" :
+                   "<strong>" + escapeHtml(tx.reason || "Activity") + "</strong>";
+        var amount = tx.credits ? " <strong>" + (tx.type === "earn" ? "+" : "-") + String(tx.credits) + "</strong> credits" : "";
+        var time = timeAgo(tx.createdAtMs || tx.timestamp);
+        html += '<li><div class="af-icon">' + icon + '</div><div class="af-text">' + desc + amount + '</div><div class="af-time">' + time + '</div></li>';
+      }
+      feed.innerHTML = html;
+    }
     (async () => {
       const me = await requireAuth();
       const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
       const insights = await api("/dashboard/network-insights", { method: "GET", headers: {} });
       const user = me.user || {};
       const emailVerified = Boolean(user.emailVerified);
+      /* Welcome section */
+      var displayName = user.displayName || user.email || "there";
+      if (displayName.includes("@")) displayName = displayName.split("@")[0];
+      var hour = new Date().getHours();
+      var greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+      document.getElementById("welcomeHeading").textContent = greeting + ", " + displayName;
+      document.getElementById("welcomeSub").textContent =
+        "Signed in as " + (user.email || "unknown") + (emailVerified ? "" : " (unverified)");
       document.getElementById("accountMeta").textContent =
         (user.email || "unknown") + " | email verified: " + String(emailVerified);
       const credits = (summary.walletSnapshot || {}).credits;
@@ -4781,6 +5218,16 @@ app.get("/portal/dashboard", async (_req, reply) => {
       document.getElementById("creditsSatsValue").textContent =
         quote && typeof quote.estimatedSats !== "undefined" ? String(quote.estimatedSats) : "n/a";
       document.getElementById("nodeCountValue").textContent = String((summary.nodes || []).length);
+      /* Tasks today */
+      var creditHistory = ((summary.walletSnapshot || {}).creditHistory || []);
+      var todayStart = new Date(); todayStart.setHours(0,0,0,0);
+      var todayMs = todayStart.getTime();
+      var tasksToday = creditHistory.filter(function(tx) {
+        return (tx.reason === "compute_contribution" || tx.reason === "task_completion") && Number(tx.createdAtMs || tx.timestamp || 0) >= todayMs;
+      }).length;
+      document.getElementById("tasksToday").textContent = String(tasksToday);
+      /* Populate activity feed */
+      renderActivityFeed(creditHistory);
 
       /* populate nodes table from the same summary */
       allNodes = summary.nodes || [];
@@ -5183,43 +5630,69 @@ app.get("/portal/wallet", async (_req, reply) => {
 
 app.get("/portal/settings", async (_req, reply) => {
   const content = `
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
-      <a href="/portal/dashboard" class="card" style="text-decoration:none; color:var(--text);">
-        <h3 style="margin:0 0 4px;">Dashboard</h3>
-        <div class="muted">Account overview, nodes, and network stats</div>
+    <style>
+      .settings-nav-grid {
+        display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:12px;
+      }
+      .settings-nav-card {
+        display:flex; flex-direction:column; align-items:center; gap:6px;
+        padding:18px 12px; text-align:center; text-decoration:none;
+        background:var(--card); border:1px solid var(--card-border);
+        border-radius:var(--radius-md); color:var(--text);
+        transition:all var(--transition-fast);
+      }
+      .settings-nav-card:hover {
+        border-color:var(--brand); transform:translateY(-2px);
+        box-shadow:0 4px 16px rgba(0,0,0,0.2);
+      }
+      .settings-nav-card .snc-icon { font-size:22px; margin-bottom:2px; }
+      .settings-nav-card h3 { margin:0; font-size:13px; font-weight:600; }
+      .settings-nav-card .muted { font-size:11px; }
+      @media (max-width:680px) {
+        .settings-nav-grid { grid-template-columns:1fr 1fr; }
+      }
+    </style>
+    <div class="settings-nav-grid">
+      <a href="/portal/dashboard" class="settings-nav-card">
+        <div class="snc-icon">&#9632;</div>
+        <h3>Dashboard</h3>
+        <div class="muted">Account and network overview</div>
       </a>
-      <a href="/portal/wallet" class="card" style="text-decoration:none; color:var(--text);">
-        <h3 style="margin:0 0 4px;">Wallet & Credits</h3>
-        <div class="muted">Manage credits, seeds, and send tokens</div>
+      <a href="/portal/wallet" class="settings-nav-card">
+        <div class="snc-icon">&#9733;</div>
+        <h3>Wallet & Credits</h3>
+        <div class="muted">Manage credits and seeds</div>
       </a>
-      <a href="/portal/download" class="card" style="text-decoration:none; color:var(--text);">
-        <h3 style="margin:0 0 4px;">Get EdgeCoder</h3>
-        <div class="muted">Download installers for all platforms</div>
+      <a href="/portal/download" class="settings-nav-card">
+        <div class="snc-icon">&#11015;</div>
+        <h3>Get EdgeCoder</h3>
+        <div class="muted">Download for all platforms</div>
       </a>
-      <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer" class="card" style="text-decoration:none; color:var(--text);">
-        <h3 style="margin:0 0 4px;">Documentation</h3>
-        <div class="muted">Guides, API reference, and setup help</div>
+      <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer" class="settings-nav-card">
+        <div class="snc-icon">&#128214;</div>
+        <h3>Documentation</h3>
+        <div class="muted">Guides and API reference</div>
       </a>
     </div>
     <div class="grid2">
       <div class="card">
-        <h2 style="margin-top:0;">Account</h2>
-        <div id="accountLine" class="muted">Loading account...</div>
+        <h2 style="margin-top:0;">&#128100; Account</h2>
+        <div id="accountLine" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
         <label>Theme</label>
         <select id="themeSelect" style="max-width:220px;">
           <option value="warm">Warm</option>
           <option value="midnight">Midnight</option>
           <option value="emerald">Emerald</option>
         </select>
-        <div class="row">
+        <div class="row" style="margin-top:10px;">
           <button class="primary" id="saveThemeBtn">Save theme</button>
         </div>
       </div>
       <div class="card">
-        <h2 style="margin-top:0;">Passkey</h2>
-        <p class="muted">Enroll a passkey while logged in for passwordless sign-in.</p>
+        <h2 style="margin-top:0;">&#128272; Passkey</h2>
+        <p class="muted" style="margin-bottom:12px;">Enroll a passkey while logged in for passwordless sign-in on future visits.</p>
         <div class="row">
-          <button id="passkeyEnrollBtn">Enroll passkey</button>
+          <button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>
         </div>
       </div>
     </div>
@@ -5527,86 +6000,120 @@ app.get("/portal/reviews", async (_req, reply) => {
       .reviews-list { width:320px; min-width:280px; flex-shrink:0; }
       .reviews-detail { flex:1; min-width:0; }
       .review-item {
-        padding:10px 12px; border-radius:6px; cursor:pointer; margin:4px 0;
+        padding:12px 14px; border-radius:var(--radius-sm); cursor:pointer; margin:4px 0;
         border:1px solid var(--card-border); background:var(--card);
-        transition:border-color 0.15s;
+        transition:all var(--transition-fast);
       }
-      .review-item:hover { border-color:var(--brand); }
-      .review-item.active { border-color:var(--brand); background:var(--bg-surface); }
+      .review-item:hover { border-color:var(--brand); transform:translateX(2px); }
+      .review-item.active { border-color:var(--brand); background:var(--bg-surface); border-left:3px solid var(--brand); }
       .review-item .ri-task { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .review-item .ri-meta { font-size:11px; color:var(--muted); margin-top:2px; }
+      .review-item .ri-meta { font-size:11px; color:var(--muted); margin-top:4px; display:flex; align-items:center; gap:6px; }
+      /* ── Diff view (GitHub-style) ── */
       .diff-container {
         display:grid; grid-template-columns:1fr 1fr; gap:0;
-        border:1px solid var(--card-border); border-radius:8px; overflow:hidden;
-        font-family:var(--font-mono); font-size:12px; line-height:1.6;
-        background:var(--bg);
+        border:1px solid var(--card-border); border-radius:var(--radius-md); overflow:hidden;
+        font-family:var(--font-mono); font-size:12px; line-height:1.7;
+        background:#0d1117;
       }
       .diff-pane { overflow-x:auto; }
       .diff-pane-header {
-        padding:8px 12px; font-size:11px; font-weight:700; text-transform:uppercase;
-        letter-spacing:0.06em; color:var(--muted);
-        border-bottom:1px solid var(--card-border);
-        background:var(--bg-soft);
+        padding:10px 14px; font-size:11px; font-weight:700;
+        letter-spacing:0.04em; color:var(--muted);
+        border-bottom:1px solid rgba(255,255,255,0.06);
+        background:rgba(255,255,255,0.03);
+        display:flex; align-items:center; gap:8px;
       }
-      .diff-pane-left .diff-pane-header { border-right:1px solid var(--card-border); }
+      .diff-pane-header .diff-file-icon { opacity:0.5; }
+      .diff-pane-left .diff-pane-header { border-right:1px solid rgba(255,255,255,0.06); }
       .diff-line {
-        display:flex; padding:0 12px; min-height:22px; white-space:pre;
+        display:flex; padding:0; min-height:22px; white-space:pre;
+        border-bottom:1px solid rgba(255,255,255,0.02);
       }
       .diff-line-num {
-        width:40px; min-width:40px; text-align:right; padding-right:10px;
-        color:var(--muted); user-select:none; flex-shrink:0;
+        width:48px; min-width:48px; text-align:right; padding:0 10px 0 8px;
+        color:rgba(255,255,255,0.25); user-select:none; flex-shrink:0;
+        font-size:11px; border-right:1px solid rgba(255,255,255,0.04);
+        background:rgba(255,255,255,0.01);
       }
-      .diff-line-content { flex:1; min-width:0; }
+      .diff-line-content { flex:1; min-width:0; padding:0 12px; }
       .diff-line.removed {
-        background:rgba(248, 113, 113, 0.1);
-        border-left:3px solid var(--danger);
+        background:rgba(248, 81, 73, 0.12);
+        border-left:3px solid #f85149;
       }
+      .diff-line.removed .diff-line-num { background:rgba(248, 81, 73, 0.15); color:rgba(248, 81, 73, 0.7); }
       .diff-line.added {
-        background:rgba(74, 222, 128, 0.1);
-        border-left:3px solid var(--ok);
+        background:rgba(63, 185, 80, 0.12);
+        border-left:3px solid #3fb950;
       }
+      .diff-line.added .diff-line-num { background:rgba(63, 185, 80, 0.15); color:rgba(63, 185, 80, 0.7); }
       .diff-line.unchanged {
         border-left:3px solid transparent;
       }
-      .diff-pane-left { border-right:1px solid var(--card-border); }
-      .review-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-      .review-actions button { padding:8px 16px; font-size:13px; font-weight:600; border-radius:6px; }
+      .diff-pane-left { border-right:1px solid rgba(255,255,255,0.06); }
+      /* ── Syntax highlighting hints ── */
+      .syntax-keyword { color:#ff7b72; }
+      .syntax-string { color:#a5d6ff; }
+      .syntax-comment { color:#8b949e; font-style:italic; }
+      .syntax-number { color:#79c0ff; }
+      .syntax-function { color:#d2a8ff; }
+      .syntax-builtin { color:#ffa657; }
+      .diff-stats {
+        display:flex; gap:12px; padding:8px 14px; font-size:11px;
+        color:var(--muted); border-top:1px solid rgba(255,255,255,0.06);
+        background:rgba(255,255,255,0.02);
+      }
+      .diff-stats .added-count { color:#3fb950; }
+      .diff-stats .removed-count { color:#f85149; }
+      /* ── Decision buttons ── */
+      .review-actions { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
+      .review-actions button {
+        padding:12px 28px; font-size:14px; font-weight:700;
+        border-radius:var(--radius-md); letter-spacing:0.02em;
+        transition:all var(--transition-fast);
+      }
       .btn-accept {
         background:linear-gradient(140deg, #16a34a, #22c55e);
-        border-color:rgba(34, 197, 94, 0.7); color:white;
+        border:2px solid rgba(34, 197, 94, 0.7); color:white;
+        box-shadow:0 2px 8px rgba(34, 197, 94, 0.2);
       }
-      .btn-accept:hover { filter:brightness(1.1); }
+      .btn-accept:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(34, 197, 94, 0.35); transform:translateY(-2px); }
       .btn-reject {
         background:linear-gradient(140deg, #dc2626, #ef4444);
-        border-color:rgba(239, 68, 68, 0.7); color:white;
+        border:2px solid rgba(239, 68, 68, 0.7); color:white;
+        box-shadow:0 2px 8px rgba(239, 68, 68, 0.2);
       }
-      .btn-reject:hover { filter:brightness(1.1); }
+      .btn-reject:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(239, 68, 68, 0.35); transform:translateY(-2px); }
       .btn-edit {
         background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border-color:rgba(193, 120, 80, 0.7); color:white;
+        border:2px solid rgba(193, 120, 80, 0.7); color:white;
+        box-shadow:0 2px 8px rgba(193, 120, 80, 0.2);
       }
-      .btn-edit:hover { filter:brightness(1.1); }
+      .btn-edit:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(193, 120, 80, 0.35); transform:translateY(-2px); }
       .edit-area {
         width:100%; min-height:300px; margin-top:10px;
-        font-family:var(--font-mono); font-size:12px; line-height:1.6;
-        padding:10px; border:1px solid var(--brand);
-        border-radius:6px; background:var(--bg-input); color:var(--text);
+        font-family:var(--font-mono); font-size:12px; line-height:1.7;
+        padding:12px; border:2px solid var(--brand);
+        border-radius:var(--radius-sm); background:#0d1117; color:var(--text);
         resize:vertical;
       }
       .notes-section {
-        margin-top:12px; padding:10px 14px;
-        border:1px solid var(--card-border); border-radius:6px;
+        margin-top:12px; padding:12px 16px;
+        border:1px solid var(--card-border); border-radius:var(--radius-sm);
         background:var(--bg-soft); font-size:13px; color:var(--text-secondary);
+        line-height:1.6;
       }
       .notes-section strong { color:var(--text); }
       .empty-state {
-        text-align:center; padding:48px 20px; color:var(--muted);
+        text-align:center; padding:60px 20px; color:var(--muted);
       }
-      .empty-state h3 { color:var(--text-secondary); margin-bottom:6px; }
+      .empty-state .empty-icon { font-size:42px; margin-bottom:12px; opacity:0.5; }
+      .empty-state h3 { color:var(--text-secondary); margin:0 0 8px; font-size:16px; }
+      .empty-state p { margin:0; font-size:13px; line-height:1.6; max-width:360px; display:inline-block; }
       .success-banner {
-        padding:14px 18px; border-radius:8px; text-align:center;
+        padding:16px 20px; border-radius:var(--radius-md); text-align:center;
         background:rgba(34, 197, 94, 0.12); border:1px solid rgba(34, 197, 94, 0.4);
         color:var(--ok); font-weight:600; font-size:14px; margin-bottom:12px;
+        animation:fadeSlideIn 0.3s ease;
       }
       @media (max-width:800px) {
         .reviews-layout { flex-direction:column; }
@@ -5617,13 +6124,17 @@ app.get("/portal/reviews", async (_req, reply) => {
     <div class="reviews-layout">
       <div class="reviews-list">
         <div class="card">
-          <h3 style="margin-top:0;">Pending Reviews</h3>
-          <div id="reviewsList"><div class="muted">Loading reviews...</div></div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h3 style="margin:0;">Pending Reviews</h3>
+            <span class="status-badge" id="reviewCountBadge" style="font-size:10px;">--</span>
+          </div>
+          <div id="reviewsList"><div class="loading-state"><span class="loading-spinner sm"></span> Loading reviews...</div></div>
         </div>
       </div>
       <div class="reviews-detail">
         <div id="reviewDetail">
           <div class="card empty-state">
+            <div class="empty-icon">&#9998;</div>
             <h3>No review selected</h3>
             <p>Select a review from the list to view the code diff and make a decision.</p>
           </div>
@@ -5650,8 +6161,13 @@ app.get("/portal/reviews", async (_req, reply) => {
 
     function renderReviewList() {
       var container = document.getElementById("reviewsList");
+      var badge = document.getElementById("reviewCountBadge");
+      if (badge) {
+        badge.textContent = String(reviews.length);
+        badge.className = reviews.length > 0 ? "status-badge warn" : "status-badge ok";
+      }
       if (reviews.length === 0) {
-        container.innerHTML = '<div class="muted">No pending reviews. When agents escalate tasks, they will appear here.</div>';
+        container.innerHTML = '<div class="empty-state" style="padding:32px 12px;"><div class="empty-icon">&#10003;</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
         return;
       }
       var html = "";
@@ -5661,7 +6177,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         var statusTone = r.status === "completed" ? "ok" : r.status === "failed" ? "danger" : "warn";
         html += '<div class="review-item' + active + '" onclick="selectReview(\\'' + r.taskId + '\\')">';
         html += '<div class="ri-task">' + escapeHtml(r.task || r.taskId) + '</div>';
-        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' &middot; ' + escapeHtml(r.language || "unknown") + '</div>';
+        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span style="color:var(--muted);">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
         html += '</div>';
       }
       container.innerHTML = html;
@@ -5673,34 +6189,58 @@ app.get("/portal/reviews", async (_req, reply) => {
       return div.innerHTML;
     }
 
+    function syntaxHighlight(text) {
+      var s = escapeHtml(text);
+      // Comments (single-line: // or #)
+      s = s.replace(/(\\/\\/.*$|#.*$)/gm, '<span class="syntax-comment">$1</span>');
+      // Strings (double and single quotes)
+      s = s.replace(/(&quot;[^&]*?&quot;|&#039;[^&]*?&#039;)/g, '<span class="syntax-string">$1</span>');
+      // Numbers
+      s = s.replace(/\\b(\\d+\\.?\\d*)\\b/g, '<span class="syntax-number">$1</span>');
+      // Keywords (JS/TS/Python)
+      s = s.replace(/\\b(function|return|const|let|var|if|else|for|while|class|import|from|export|default|async|await|try|catch|throw|new|this|def|self|yield|with|as|in|not|and|or|True|False|None|true|false|null|undefined|typeof|instanceof)\\b/g, '<span class="syntax-keyword">$1</span>');
+      // Built-in functions
+      s = s.replace(/\\b(console|print|len|range|map|filter|reduce|parseInt|parseFloat|Math|JSON|Object|Array|String|Number|Promise|setTimeout|require)\\b/g, '<span class="syntax-builtin">$1</span>');
+      // Function calls
+      s = s.replace(/\\b([a-zA-Z_]\\w*)\\s*\\(/g, '<span class="syntax-function">$1</span>(');
+      return s;
+    }
+
     function computeDiff(oldCode, newCode) {
       var oldLines = (oldCode || "").split("\\n");
       var newLines = (newCode || "").split("\\n");
       var maxLen = Math.max(oldLines.length, newLines.length);
       var leftHtml = "";
       var rightHtml = "";
+      var addedCount = 0;
+      var removedCount = 0;
+      var leftLineNum = 0;
+      var rightLineNum = 0;
 
       for (var i = 0; i < maxLen; i++) {
         var oldLine = i < oldLines.length ? oldLines[i] : null;
         var newLine = i < newLines.length ? newLines[i] : null;
 
         if (oldLine !== null && newLine !== null && oldLine === newLine) {
-          leftHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">' + escapeHtml(oldLine) + '</span></div>';
-          rightHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">' + escapeHtml(newLine) + '</span></div>';
+          leftLineNum++; rightLineNum++;
+          leftHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + leftLineNum + '</span><span class="diff-line-content">' + syntaxHighlight(oldLine) + '</span></div>';
+          rightHtml += '<div class="diff-line unchanged"><span class="diff-line-num">' + rightLineNum + '</span><span class="diff-line-content">' + syntaxHighlight(newLine) + '</span></div>';
         } else {
           if (oldLine !== null) {
-            leftHtml += '<div class="diff-line removed"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">- ' + escapeHtml(oldLine) + '</span></div>';
+            leftLineNum++; removedCount++;
+            leftHtml += '<div class="diff-line removed"><span class="diff-line-num">' + leftLineNum + '</span><span class="diff-line-content">' + syntaxHighlight(oldLine) + '</span></div>';
           } else {
             leftHtml += '<div class="diff-line unchanged"><span class="diff-line-num"></span><span class="diff-line-content"></span></div>';
           }
           if (newLine !== null) {
-            rightHtml += '<div class="diff-line added"><span class="diff-line-num">' + (i + 1) + '</span><span class="diff-line-content">+ ' + escapeHtml(newLine) + '</span></div>';
+            rightLineNum++; addedCount++;
+            rightHtml += '<div class="diff-line added"><span class="diff-line-num">' + rightLineNum + '</span><span class="diff-line-content">' + syntaxHighlight(newLine) + '</span></div>';
           } else {
             rightHtml += '<div class="diff-line unchanged"><span class="diff-line-num"></span><span class="diff-line-content"></span></div>';
           }
         }
       }
-      return { leftHtml: leftHtml, rightHtml: rightHtml };
+      return { leftHtml: leftHtml, rightHtml: rightHtml, addedCount: addedCount, removedCount: removedCount };
     }
 
     async function selectReview(taskId) {
@@ -5729,38 +6269,39 @@ app.get("/portal/reviews", async (_req, reply) => {
       var html = '';
       html += '<div class="card">';
       html += '<h2 style="margin-top:0;">Task</h2>';
-      html += '<p style="color:var(--text-secondary);margin:0;">' + escapeHtml(data.task || "No task description") + '</p>';
+      html += '<p style="color:var(--text-secondary);margin:0;font-size:14px;line-height:1.6;">' + escapeHtml(data.task || "No task description") + '</p>';
       if (data.language) {
-        html += '<div style="margin-top:6px;">' + statusBadge(data.language, "neutral") + '</div>';
+        html += '<div style="margin-top:8px;">' + statusBadge(data.language, "neutral") + '</div>';
       }
       html += '</div>';
 
       html += '<div class="card" style="padding:0;overflow:hidden;">';
       html += '<div class="diff-container">';
       html += '<div class="diff-pane diff-pane-left">';
-      html += '<div class="diff-pane-header">Original (failed)</div>';
+      html += '<div class="diff-pane-header"><span class="diff-file-icon">&#128196;</span> Original (failed)</div>';
       html += diff.leftHtml;
       html += '</div>';
       html += '<div class="diff-pane diff-pane-right">';
-      html += '<div class="diff-pane-header">Improved</div>';
+      html += '<div class="diff-pane-header"><span class="diff-file-icon">&#128196;</span> Improved</div>';
       html += diff.rightHtml;
       html += '</div>';
       html += '</div>';
+      html += '<div class="diff-stats"><span class="added-count">+' + diff.addedCount + ' added</span><span class="removed-count">-' + diff.removedCount + ' removed</span></div>';
       html += '</div>';
 
       if (data.explanation) {
-        html += '<div class="notes-section"><strong>Cloud Model Notes:</strong> ' + escapeHtml(data.explanation) + '</div>';
+        html += '<div class="notes-section"><strong>&#128172; Cloud Model Notes:</strong><br>' + escapeHtml(data.explanation) + '</div>';
       }
       if (data.resolvedByModel) {
-        html += '<div class="notes-section"><strong>Resolved by:</strong> ' + escapeHtml(data.resolvedByModel) + '</div>';
+        html += '<div class="notes-section"><strong>&#9881; Resolved by:</strong> ' + escapeHtml(data.resolvedByModel) + '</div>';
       }
 
       html += '<div id="editArea"></div>';
 
       html += '<div class="review-actions" id="reviewActions">';
-      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">Accept</button>';
-      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">Reject</button>';
-      html += '<button class="btn-edit" onclick="toggleEdit()">Edit &amp; Accept</button>';
+      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">&#10003; Accept Changes</button>';
+      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">&#10007; Reject</button>';
+      html += '<button class="btn-edit" onclick="toggleEdit()">&#9998; Edit &amp; Accept</button>';
       html += '</div>';
 
       detail.innerHTML = html;
