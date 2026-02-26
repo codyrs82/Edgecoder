@@ -39,6 +39,7 @@ Authentication and payload specifics should be validated against runtime code an
 | POST | `/economy/issuance/reconcile` | reconcile issuance state |
 | GET | `/economy/issuance/current` | current issuance state |
 | GET | `/economy/issuance/history` | issuance history |
+| GET | `/stats/network/summary` | network-wide user, node, and live agent counts |
 | GET | `/stats/projections/summary` | federated stats summary |
 | POST | `/stats/anchors/anchor-latest` | update latest stats anchor |
 | GET | `/stats/anchors/verify` | verify stats anchor/finality |
@@ -96,6 +97,35 @@ Authentication and payload specifics should be validated against runtime code an
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | model discovery for IDE integration |
+
+## Response Schemas
+
+### `GET /stats/network/summary`
+
+Requires `x-mesh-token` header. Returns aggregate counts from the portal database combined with live coordinator state.
+
+```json
+{
+  "timestamp": 1708900000000,
+  "users": { "total": 5, "verified": 3 },
+  "nodes": {
+    "enrolled": 8,
+    "approved": 6,
+    "active": 2,
+    "agents": 5,
+    "coordinators": 3
+  },
+  "live": {
+    "agentsConnected": 1,
+    "queueDepth": 0,
+    "activeTunnels": 0,
+    "modelsAvailable": 2
+  }
+}
+```
+
+- `users` and `nodes` are `null` when the portal is unreachable.
+- `live` is always present and derived from in-memory coordinator state.
 
 ## Cross-reference
 

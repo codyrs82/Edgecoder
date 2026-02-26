@@ -7013,6 +7013,13 @@ app.get("/internal/nodes/pending", async (req, reply) => {
   });
 });
 
+app.get("/internal/stats/counts", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  if (!requireInternalToken(req as any, reply)) return;
+  const counts = await store.getStatsCounts();
+  return reply.send(counts);
+});
+
 // ---------------------------------------------------------------------------
 // Human Escalation API — surfaces tasks that exhausted all automated
 // resolvers and need human operator input.
