@@ -532,6 +532,10 @@ app.addHook("onRequest", async (req, reply) => {
   // portal enrollment token and returns mesh auth material in the response.
   const reqPath = (req as any).url as string | undefined;
   if (reqPath === "/register") return;
+  // Health check must be unauthenticated for Fly health probes
+  if (reqPath === "/health/runtime") return;
+  // Admin dashboard has its own token auth
+  if (reqPath?.startsWith("/admin/dashboard")) return;
   // WebSocket upgrade: auth handled inside the WS handler via query params
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
