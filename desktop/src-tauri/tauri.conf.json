@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "dmg",
       "appimage",
@@ -45,6 +46,12 @@
       "desktop": {
         "schemes": ["edgecoder"]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAyMjJGNjdGREI1Rjc0MjEKUldRaGRGL2JmL1lpQWxjUm03TzNkeVU3R21obkF0WlBwVm5xK0crQ1IyZGIxc1lhRUd5ZUJpeSsK",
+      "endpoints": [
+        "https://github.com/codyrs82/Edgecoder/releases/latest/download/latest.json"
+      ]
     }
   }
 }
