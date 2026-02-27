@@ -49,6 +49,26 @@ function portalBase(): string {
   return "https://edgecoder-portal.fly.dev";
 }
 
+// ---------------------------------------------------------------------------
+// Session token persistence (desktop — HttpOnly cookies don't survive restarts)
+// ---------------------------------------------------------------------------
+
+const SESSION_TOKEN_KEY = "edgecoder_session_token";
+
+function saveSessionToken(token: string): void {
+  try { localStorage.setItem(SESSION_TOKEN_KEY, token); } catch {}
+}
+function loadSessionToken(): string | null {
+  try { return localStorage.getItem(SESSION_TOKEN_KEY); } catch { return null; }
+}
+export function clearSessionToken(): void {
+  try { localStorage.removeItem(SESSION_TOKEN_KEY); } catch {}
+}
+function authHeaders(): Record<string, string> {
+  const token = loadSessionToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
 
 export async function checkOllamaAvailable(): Promise<boolean> {
@@ -250,7 +270,7 @@ export interface AuthUser {
 export async function login(email: string, password: string): Promise<AuthUser> {
   const res = await fetch(`${portalBase()}/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ email, password }),
     credentials: "include",
   });
@@ -258,12 +278,20 @@ export async function login(email: string, password: string): Promise<AuthUser> 
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `Login failed: ${res.status}`);
   }
-  return res.json();
+  const data = await res.json();
+  if (data.sessionToken) saveSessionToken(data.sessionToken);
+  return data.user;
 }
 
 export async function getMe(): Promise<AuthUser> {
-  const res = await fetch(`${portalBase()}/me`, { credentials: "include" });
-  if (!res.ok) throw new Error("Not authenticated");
+  const res = await fetch(`${portalBase()}/me`, {
+    headers: { ...authHeaders() },
+    credentials: "include",
+  });
+  if (!res.ok) {
+    clearSessionToken();
+    throw new Error("Not authenticated");
+  }
   return res.json();
 }
 
@@ -291,6 +319,7 @@ export interface PortalMessage {
 
 export async function portalListConversations(): Promise<PortalConversation[]> {
   const res = await fetch(`${portalBase()}/portal/api/conversations`, {
+    headers: { ...authHeaders() },
     credentials: "include",
   });
   if (!res.ok) throw new Error(`List conversations failed: ${res.status}`);
@@ -303,7 +332,7 @@ export async function portalCreateConversation(
 ): Promise<string> {
   const res = await fetch(`${portalBase()}/portal/api/conversations`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ title }),
     credentials: "include",
   });
@@ -317,7 +346,7 @@ export async function portalGetMessages(
 ): Promise<PortalMessage[]> {
   const res = await fetch(
     `${portalBase()}/portal/api/conversations/${conversationId}/messages`,
-    { credentials: "include" },
+    { headers: { ...authHeaders() }, credentials: "include" },
   );
   if (!res.ok) throw new Error(`Get messages failed: ${res.status}`);
   const body = await res.json();
@@ -332,7 +361,7 @@ export async function portalRenameConversation(
     `${portalBase()}/portal/api/conversations/${conversationId}`,
     {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ title }),
       credentials: "include",
     },
@@ -347,6 +376,7 @@ export async function portalDeleteConversation(
     `${portalBase()}/portal/api/conversations/${conversationId}`,
     {
       method: "DELETE",
+      headers: { ...authHeaders() },
       credentials: "include",
     },
   );
@@ -371,7 +401,7 @@ export async function streamPortalChat(
 
   const res = await fetch(`${portalBase()}/portal/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ conversationId, message }),
     signal,
     credentials: "include",
@@ -427,8 +457,10 @@ export async function streamPortalChat(
 export async function logout(): Promise<void> {
   await fetch(`${portalBase()}/auth/logout`, {
     method: "POST",
+    headers: { ...authHeaders() },
     credentials: "include",
   });
+  clearSessionToken();
 }
 
 /** OAuth always routes through the remote portal — local has no portal server,
@@ -451,6 +483,7 @@ export async function completeOAuthWithToken(mobileToken: string): Promise<AuthU
   });
   if (!res.ok) throw new Error("OAuth sign-in failed");
   const data = await res.json();
+  if (data.sessionToken) saveSessionToken(data.sessionToken);
   return data.user;
 }
 
@@ -487,6 +520,7 @@ export interface WalletSendRequest {
 export async function getWalletOnboarding(): Promise<WalletOnboarding | null> {
   try {
     const res = await fetch(`${portalBase()}/wallet/onboarding`, {
+      headers: { ...authHeaders() },
       credentials: "include",
     });
     if (res.status === 404) return null;
@@ -500,7 +534,7 @@ export async function getWalletOnboarding(): Promise<WalletOnboarding | null> {
 export async function setupWalletSeed(): Promise<WalletSeedSetup> {
   const res = await fetch(`${portalBase()}/wallet/onboarding/setup-seed`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders() },
     credentials: "include",
     body: JSON.stringify({}),
   });
@@ -511,7 +545,7 @@ export async function setupWalletSeed(): Promise<WalletSeedSetup> {
 export async function acknowledgeWalletSeed(): Promise<void> {
   const res = await fetch(`${portalBase()}/wallet/onboarding/acknowledge`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders() },
     credentials: "include",
     body: JSON.stringify({}),
   });
@@ -520,6 +554,7 @@ export async function acknowledgeWalletSeed(): Promise<void> {
 
 export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {
   const res = await fetch(`${portalBase()}/wallet/send/requests`, {
+    headers: { ...authHeaders() },
     credentials: "include",
   });
   if (!res.ok) return [];

@@ -302,7 +302,12 @@ async function sendWalletSendMfaCodeEmail(input: {
 async function getCurrentUser(req: { headers: Record<string, unknown> }) {
   if (!store) return null;
   const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
-  const sessionToken = cookies.edgecoder_portal_session;
+  let sessionToken = cookies.edgecoder_portal_session;
+  // Fall back to Bearer token (for desktop app persistence)
+  if (!sessionToken) {
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    if (auth.startsWith("Bearer ")) sessionToken = auth.slice(7);
+  }
   if (!sessionToken) return null;
   const session = await store.getSessionByTokenHash(sha256Hex(sessionToken));
   if (!session) return null;
@@ -473,7 +478,7 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
   };
 }
 
-async function createSessionForUser(userId: string, reply: any): Promise<void> {
+async function createSessionForUser(userId: string, reply: any): Promise<string> {
   const sessionToken = randomUUID();
   await store?.createSession({
     sessionId: randomUUID(),
@@ -482,6 +487,7 @@ async function createSessionForUser(userId: string, reply: any): Promise<void> {
     expiresAtMs: Date.now() + SESSION_TTL_MS
   });
   reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+  return sessionToken;
 }
 
 async function loadIosNetworkSummary(): Promise<unknown> {
@@ -1733,8 +1739,8 @@ app.post("/auth/login", async (req, reply) => {
     return reply.code(401).send({ error: "invalid_credentials" });
   }
 
-  await createSessionForUser(user.userId, reply);
-  return reply.send({ ok: true, user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified } });
+  const sessionToken = await createSessionForUser(user.userId, reply);
+  return reply.send({ ok: true, sessionToken, user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified } });
 });
 
 app.post("/auth/logout", async (req, reply) => {
@@ -1951,9 +1957,10 @@ app.post("/auth/oauth/mobile/complete", async (req, reply) => {
   const user = await store.getUserById(resolved.userId);
   if (!user) return reply.code(400).send({ error: "user_not_found" });
   // Create a session so subsequent portal API calls are authenticated
-  await createSessionForUser(user.userId, reply);
+  const sessionToken = await createSessionForUser(user.userId, reply);
   return reply.send({
     ok: true,
+    sessionToken,
     user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified, displayName: user.displayName ?? null, role: user.role }
   });
 });

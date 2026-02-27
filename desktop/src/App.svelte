@@ -8,7 +8,7 @@
   import LoginScreen from "./pages/LoginScreen.svelte";
   import OllamaSetup from "./components/OllamaSetup.svelte";
   import type { AuthUser } from "./lib/api";
-  import { getMe, checkOllamaAvailable } from "./lib/api";
+  import { getMe, checkOllamaAvailable, clearSessionToken } from "./lib/api";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -166,7 +166,7 @@
       <SettingsOverlay
         onClose={() => settingsOpen = false}
         user={user!}
-        onLogout={() => { user = null; settingsOpen = false; }}
+        onLogout={() => { clearSessionToken(); user = null; settingsOpen = false; }}
       />
     {/if}
 
