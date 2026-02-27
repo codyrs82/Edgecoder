@@ -549,33 +549,42 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
     return { credits: null, creditHistory: [], wallets: [], paymentIntents: [] };
   }
   const accountId = `acct-${userId}`;
+  const cpTimeout = { headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS };
   try {
-    const [creditRes, historyRes, walletRes, quoteRes] = await Promise.all([
+    const [creditResult, historyResult, walletResult, quoteResult] = await Promise.allSettled([
       request(`${CONTROL_PLANE_URL}/credits/${accountId}/balance`, {
         method: "GET",
-        headers: controlPlaneHeaders()
+        headers: controlPlaneHeaders(),
+        ...cpTimeout
       }),
       request(`${CONTROL_PLANE_URL}/credits/${accountId}/history`, {
         method: "GET",
-        headers: controlPlaneHeaders()
+        headers: controlPlaneHeaders(),
+        ...cpTimeout
       }),
       request(`${CONTROL_PLANE_URL}/wallets/${accountId}`, {
         method: "GET",
-        headers: controlPlaneHeaders()
+        headers: controlPlaneHeaders(),
+        ...cpTimeout
       }),
       request(`${CONTROL_PLANE_URL}/economy/credits/${accountId}/quote`, {
         method: "GET",
-        headers: controlPlaneHeaders()
+        headers: controlPlaneHeaders(),
+        ...cpTimeout
       })
     ]);
-    const credits = creditRes.statusCode >= 200 && creditRes.statusCode < 300 ? await creditRes.body.json() : null;
-    const historyPayload = historyRes.statusCode >= 200 && historyRes.statusCode < 300
+    const creditRes = creditResult.status === "fulfilled" ? creditResult.value : null;
+    const historyRes = historyResult.status === "fulfilled" ? historyResult.value : null;
+    const walletRes = walletResult.status === "fulfilled" ? walletResult.value : null;
+    const quoteRes = quoteResult.status === "fulfilled" ? quoteResult.value : null;
+    const credits = creditRes && creditRes.statusCode >= 200 && creditRes.statusCode < 300 ? await creditRes.body.json() : null;
+    const historyPayload = historyRes && historyRes.statusCode >= 200 && historyRes.statusCode < 300
       ? ((await historyRes.body.json()) as { history?: unknown[] })
       : { history: [] };
-    const walletPayload = walletRes.statusCode >= 200 && walletRes.statusCode < 300
+    const walletPayload = walletRes && walletRes.statusCode >= 200 && walletRes.statusCode < 300
       ? ((await walletRes.body.json()) as { wallets?: unknown[]; paymentIntents?: unknown[] })
       : { wallets: [], paymentIntents: [] };
-    const quote = quoteRes.statusCode >= 200 && quoteRes.statusCode < 300 ? await quoteRes.body.json() : null;
+    const quote = quoteRes && quoteRes.statusCode >= 200 && quoteRes.statusCode < 300 ? await quoteRes.body.json() : null;
     return {
       credits,
       quote,
