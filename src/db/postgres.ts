@@ -364,9 +364,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at ON stats_ledger_records (i
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_records (issued_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_checkpoint ON stats_ledger_records (checkpoint_hash, event_type) WHERE checkpoint_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (event_type, issued_at_ms DESC) WHERE event_type = 'stats_checkpoint_commit';
-CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
-CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
 `;
 
