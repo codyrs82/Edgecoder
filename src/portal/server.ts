@@ -2412,6 +2412,21 @@ app.post("/nodes/enroll", async (req, reply) => {
       record = approved;
     }
   }
+  // Link agent ownership so credits earned by this node flow to the user's account
+  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+    const accountId = `acct-${user.userId}`;
+    await ensureCreditAccountForUser(user);
+    request(`${CONTROL_PLANE_URL}/credits/accounts/${encodeURIComponent(accountId)}/agents/link`, {
+      method: "POST",
+      headers: controlPlaneHeaders(true),
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      body: JSON.stringify({
+        agentId: body.nodeId,
+        ownerUserId: user.userId
+      })
+    }).catch(() => undefined);
+  }
   return reply.send({
     ok: true,
     nodeId: record.nodeId,
@@ -2453,6 +2468,19 @@ app.get("/dashboard/summary", async (req, reply) => {
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
   const [nodes, walletSnapshot] = await Promise.all([store.listNodesByOwner(user.userId), loadWalletSnapshotForUser(user.userId)]);
+  // Self-heal: ensure agent ownership is linked for all enrolled nodes
+  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN && nodes.length > 0) {
+    const accountId = `acct-${user.userId}`;
+    for (const node of nodes) {
+      request(`${CONTROL_PLANE_URL}/credits/accounts/${encodeURIComponent(accountId)}/agents/link`, {
+        method: "POST",
+        headers: controlPlaneHeaders(true),
+        headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+        bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+        body: JSON.stringify({ agentId: node.nodeId, ownerUserId: user.userId })
+      }).catch(() => undefined);
+    }
+  }
   return reply.send({
     user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified, uiTheme: user.uiTheme },
     nodes: nodes.map((n) => ({
