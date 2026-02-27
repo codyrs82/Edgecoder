@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { getHealth, getStatus, backendReady, isRemoteMode } from "../lib/api";
 
   // --- Types ---

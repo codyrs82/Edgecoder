@@ -83,10 +83,22 @@ fn start_agent(app: &tauri::App) -> Option<Child> {
         return None;
     }
 
+    // Generate a per-session token for local inference auth using timestamp + pid
+    let local_token = format!(
+        "local-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        std::process::id()
+    );
+
     Command::new("node")
         .arg("dist/index.js")
         .current_dir(&agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
+        .env("INFERENCE_AUTH_TOKEN", &local_token)
+        .env("ADMIN_API_TOKEN", &local_token)
         .spawn()
         .ok()
 }
