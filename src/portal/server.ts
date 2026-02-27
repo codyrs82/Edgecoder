@@ -6455,9 +6455,10 @@ app.get("/portal/download", async (req, reply) => {
 
   /* ── platform card builders ──────────────────────────────────────── */
   const macCard = wizardCard("macos", "&#127822;", "macOS", [
-    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg">Download .pkg installer</a>
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_1.0.0_aarch64.dmg">Download Desktop App (.dmg)</a>
+     <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download CLI Agent (.pkg)</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `Double-click the <strong>.pkg</strong> file and follow the prompts.`,
+    `<strong>Desktop App:</strong> Open the <strong>.dmg</strong> and drag EdgeCoder to Applications.<br><strong>CLI Agent:</strong> Double-click the <strong>.pkg</strong> file and follow the prompts.`,
     `<div class="code-block" id="mac-cmd"><code>sudo edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('mac-cmd')">Copy</button></div>`
   ], detectedOS === "macos");
 

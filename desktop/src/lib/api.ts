@@ -16,7 +16,7 @@ import type {
 // Backend detection: try local first, fall back to remote Fly URLs
 // ---------------------------------------------------------------------------
 
-let useRemote = false;
+let useRemote = true;
 
 async function detectBackend(): Promise<void> {
   try {
@@ -39,7 +39,7 @@ function agentBase(): string {
 
 function portalBase(): string {
   if (import.meta.env.DEV) return "/portal";
-  return useRemote ? "https://edgecoder-portal.fly.dev" : "http://localhost:4310";
+  return "https://edgecoder-portal.fly.dev";
 }
 
 const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
