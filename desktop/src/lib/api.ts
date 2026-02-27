@@ -409,15 +409,22 @@ export async function logout(): Promise<void> {
   });
 }
 
+/** OAuth always routes through the remote portal — local has no portal server,
+ *  and the redirect_uri registered with Microsoft is the production URL. */
+function oauthPortalBase(): string {
+  return "https://edgecoder-portal.fly.dev";
+}
+
 export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
   const redirect = encodeURIComponent("edgecoder://oauth-callback");
-  return `${portalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
+  return `${oauthPortalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
 }
 
 export async function completeOAuthWithToken(mobileToken: string): Promise<AuthUser> {
-  const res = await fetch(`${portalBase()}/auth/oauth/mobile/complete`, {
+  const res = await fetch(`${oauthPortalBase()}/auth/oauth/mobile/complete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ token: mobileToken }),
   });
   if (!res.ok) throw new Error("OAuth sign-in failed");
