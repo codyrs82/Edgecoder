@@ -633,6 +633,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/register") return;
   // Health check must be unauthenticated for Fly health probes
   if (reqPath === "/health/runtime") return;
+  // Public read-only endpoints (peer identity & model pull status)
+  if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
   // Admin dashboard has its own token auth
   if (reqPath?.startsWith("/admin/dashboard")) return;
   // WebSocket upgrade: auth handled inside the WS handler via query params

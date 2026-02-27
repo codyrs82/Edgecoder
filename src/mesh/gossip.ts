@@ -5,10 +5,13 @@ import { request } from "undici";
 import type { WebSocket } from "ws";
 import { MeshMessage, MeshPeerIdentity } from "../common/types.js";
 
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
   private wsPeers = new Map<string, WebSocket>();
   private meshToken: string | undefined;
+  private failureCounts = new Map<string, number>();
 
   setMeshToken(token: string): void {
     this.meshToken = token;
@@ -20,6 +23,7 @@ export class GossipMesh {
 
   removePeer(peerId: string): void {
     this.peers.delete(peerId);
+    this.failureCounts.delete(peerId);
   }
 
   setWebSocketForPeer(peerId: string, ws: WebSocket): void {
@@ -71,13 +75,16 @@ export class GossipMesh {
           const body = await res.body.text().catch(() => "");
           if (res.statusCode >= 200 && res.statusCode < 300) {
             delivered += 1;
+            this.failureCounts.delete(peer.peerId);
           } else {
             console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} failed: ${res.statusCode} ${body}`);
             failed += 1;
+            this.recordFailure(peer.peerId);
           }
         } catch (err) {
           console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} error: ${(err as Error).message}`);
           failed += 1;
+          this.recordFailure(peer.peerId);
         }
       })
     );
@@ -87,5 +94,15 @@ export class GossipMesh {
     }
 
     return { delivered, failed };
+  }
+
+  private recordFailure(peerId: string): void {
+    const count = (this.failureCounts.get(peerId) ?? 0) + 1;
+    this.failureCounts.set(peerId, count);
+    if (count >= MAX_CONSECUTIVE_FAILURES) {
+      console.warn(`[gossip] evicting peer ${peerId} after ${count} consecutive failures`);
+      this.peers.delete(peerId);
+      this.failureCounts.delete(peerId);
+    }
   }
 }

@@ -109,6 +109,9 @@ function coordinatorMeshHeaders(contentType = false): Record<string, string> {
   return headers;
 }
 
+// Unauthenticated health check for Fly health probes
+app.get("/health", async () => ({ ok: true }));
+
 function portalHeaders(contentType = false): Record<string, string> {
   const headers: Record<string, string> = {};
   if (contentType) headers["content-type"] = "application/json";
@@ -1534,10 +1537,22 @@ buildAdminDashboardRoutes(app, {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  Promise.resolve()
-    .then(async () => {
-      if (pgStore) await pgStore.migrate();
-    })
+  async function migrateWithRetry(maxAttempts = 5): Promise<void> {
+    if (!pgStore) return;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await pgStore.migrate();
+        return;
+      } catch (err) {
+        app.log.error(`[control-plane] migration attempt ${attempt}/${maxAttempts} failed: ${(err as Error).message}`);
+        if (attempt === maxAttempts) throw err;
+        const delayMs = Math.min(1000 * 2 ** attempt, 30_000);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+
+  migrateWithRetry()
     .then(() => app.listen({ port: 4303, host: "0.0.0.0" }))
     .catch((error) => {
       app.log.error(error);

@@ -20,6 +20,15 @@ primary_region = "ord"
   min_machines_running = 1
   processes = ["app"]
 
+[checks]
+  [checks.control_plane_health]
+    type = "http"
+    port = 4303
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
+
 [[vm]]
   memory = "1024mb"
   cpu_kind = "shared"
