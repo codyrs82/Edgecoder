@@ -362,6 +362,8 @@ CREATE TABLE IF NOT EXISTS agent_rollout_states (
 -- Performance indexes for hot-path queries
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at ON stats_ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_records (issued_at_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_stats_ledger_checkpoint ON stats_ledger_records (checkpoint_hash, event_type) WHERE checkpoint_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (event_type, issued_at_ms DESC) WHERE event_type = 'stats_checkpoint_commit';
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, created_at_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, created_at_ms DESC);
@@ -513,6 +515,39 @@ export class PostgresStore {
       hash: row.hash,
       signature: row.signature
     }));
+  }
+
+  async checkpointSignatureStatus(checkpointHash: string): Promise<{ hasCommit: boolean; signers: string[] }> {
+    const result = await this.pool.query(
+      `SELECT event_type, COALESCE(coordinator_id, actor_id) AS signer
+       FROM stats_ledger_records
+       WHERE checkpoint_hash = $1
+         AND event_type IN ('stats_checkpoint_commit', 'stats_checkpoint_signature')`,
+      [checkpointHash]
+    );
+    let hasCommit = false;
+    const signers = new Set<string>();
+    for (const row of result.rows) {
+      if (row.event_type === "stats_checkpoint_commit") hasCommit = true;
+      if (row.event_type === "stats_checkpoint_signature") signers.add(row.signer);
+    }
+    return { hasCommit, signers: [...signers] };
+  }
+
+  async latestStatsCheckpoint(): Promise<{ hash: string; height: number | null; issuedAtMs: number } | null> {
+    const result = await this.pool.query(
+      `SELECT checkpoint_hash, checkpoint_height, issued_at_ms
+       FROM stats_ledger_records
+       WHERE event_type = 'stats_checkpoint_commit' AND checkpoint_hash IS NOT NULL
+       ORDER BY issued_at_ms DESC, id DESC
+       LIMIT 1`
+    );
+    if (!result.rows[0]) return null;
+    return {
+      hash: result.rows[0].checkpoint_hash,
+      height: result.rows[0].checkpoint_height ? Number(result.rows[0].checkpoint_height) : null,
+      issuedAtMs: Number(result.rows[0].issued_at_ms),
+    };
   }
 
   async listStatsLedgerSince(sinceIssuedAtMs: number, limit = 1000): Promise<QueueEventRecord[]> {

@@ -1011,21 +1011,9 @@ async function maybeFinalizeStatsCheckpoint(): Promise<void> {
   const head = await pgStore.latestStatsLedgerHead();
   if (!head) return;
   const checkpointHash = head.hash;
-  const records = await pgStore.listStatsLedgerRecords(5000);
-  const signatures = new Set<string>();
-  let hasCommit = false;
-  let hasLocalSignature = false;
-  for (const record of records) {
-    if (record.eventType === "stats_checkpoint_commit" && record.checkpointHash === checkpointHash) {
-      hasCommit = true;
-    }
-    if (record.eventType === "stats_checkpoint_signature" && record.checkpointHash === checkpointHash) {
-      signatures.add(record.coordinatorId ?? record.actorId);
-      if ((record.coordinatorId ?? record.actorId) === identity.peerId) {
-        hasLocalSignature = true;
-      }
-    }
-  }
+  const { hasCommit, signers } = await pgStore.checkpointSignatureStatus(checkpointHash);
+  const signatures = new Set<string>(signers);
+  const hasLocalSignature = signatures.has(identity.peerId);
 
   const threshold = statsQuorumThreshold();
   if (!hasLocalSignature) {
@@ -1101,23 +1089,20 @@ async function latestStatsFinality(): Promise<{
       finalityState: "no_checkpoint"
     };
   }
-  const records = await pgStore.listStatsLedgerRecords(5000);
-  const latestCommit = [...records]
-    .reverse()
-    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
-  if (!latestCommit || !latestCommit.checkpointHash) {
+  const latestCommit = await pgStore.latestStatsCheckpoint();
+  if (!latestCommit || !latestCommit.hash) {
     return {
       softFinalized: false,
       hardFinalized: false,
       finalityState: "no_checkpoint"
     };
   }
-  const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.checkpointHash);
+  const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.hash);
   const confirmations = anchor?.status === "anchored" ? 1 : 0;
   const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
   return {
-    checkpointHash: latestCommit.checkpointHash,
-    checkpointHeight: latestCommit.checkpointHeight,
+    checkpointHash: latestCommit.hash,
+    checkpointHeight: latestCommit.height ?? undefined,
     softFinalized: true,
     hardFinalized,
     finalityState: hardFinalized ? "anchored_confirmed" : "anchored_pending",
@@ -3233,19 +3218,18 @@ app.get("/ledger/verify", async () => {
 });
 app.get("/stats/ledger/head", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const head = await pgStore?.latestStatsLedgerHead();
-  const records = (await pgStore?.listStatsLedgerRecords(5000)) ?? [];
-  const latestCommit = [...records]
-    .reverse()
-    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
+  const [head, checkpoint] = await Promise.all([
+    pgStore?.latestStatsLedgerHead(),
+    pgStore?.latestStatsCheckpoint(),
+  ]);
   return {
     coordinatorId: identity.peerId,
     head: head ?? { issuedAtMs: 0, hash: "GENESIS", count: 0 },
-    checkpoint: latestCommit
+    checkpoint: checkpoint
       ? {
-          hash: latestCommit.checkpointHash,
-          height: latestCommit.checkpointHeight ?? null,
-          issuedAtMs: latestCommit.issuedAtMs
+          hash: checkpoint.hash,
+          height: checkpoint.height,
+          issuedAtMs: checkpoint.issuedAtMs
         }
       : null,
     quorumThreshold: statsQuorumThreshold()
@@ -3347,15 +3331,15 @@ app.get("/stats/projections/summary", async (req, reply) => {
   let nodes: Array<Record<string, unknown>> | undefined;
   let earnings: unknown[] | undefined;
   let head: { issuedAtMs: number; hash: string; count: number } | null | undefined;
-  let records: QueueEventRecord[] | undefined;
+  let latestCommit: { hash: string; height: number | null; issuedAtMs: number } | null | undefined;
   if (pgStore) {
     try {
-      [nodes, earnings, head, records] = await Promise.race([
+      [nodes, earnings, head, latestCommit] = await Promise.race([
         Promise.all([
           pgStore.listNodeStatusProjection(query.ownerEmail),
           pgStore.listCoordinatorEarningsProjection(query.ownerEmail),
           pgStore.latestStatsLedgerHead(),
-          pgStore.listStatsLedgerRecords(5000)
+          pgStore.latestStatsCheckpoint()
         ]),
         timeoutReject("stats_projection_query")
       ]);
@@ -3363,9 +3347,6 @@ app.get("/stats/projections/summary", async (req, reply) => {
       app.log.warn({ error }, "stats_projection_query_skipped");
     }
   }
-  const latestCommit = [...(records ?? [])]
-    .reverse()
-    .find((record) => record.eventType === "stats_checkpoint_commit" && record.checkpointHash);
   let finality: Awaited<ReturnType<typeof latestStatsFinality>> = {
     softFinalized: false,
     hardFinalized: false,
@@ -3409,8 +3390,8 @@ app.get("/stats/projections/summary", async (req, reply) => {
     quorumThreshold: statsQuorumThreshold(),
     latestCheckpoint: latestCommit
       ? {
-          hash: latestCommit.checkpointHash,
-          height: latestCommit.checkpointHeight ?? null,
+          hash: latestCommit.hash,
+          height: latestCommit.height ?? null,
           issuedAtMs: latestCommit.issuedAtMs
         }
       : null,
