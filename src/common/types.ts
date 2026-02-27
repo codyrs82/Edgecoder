@@ -578,6 +578,7 @@ export interface SandboxPolicy {
 export interface CapabilitySummaryPayload {
   coordinatorId: string;
   agentCount: number;
+  chatEnabled?: boolean;
   modelAvailability: {
     [modelName: string]: {
       agentCount: number;

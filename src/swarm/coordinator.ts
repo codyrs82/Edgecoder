@@ -4065,55 +4065,53 @@ app.post("/portal/chat", async (req, reply) => {
     ollamaHealthy = false;
   }
 
-  // If Ollama is not available locally, forward to a peer coordinator that has Ollama
+  // ── Forward to chat-capable mesh peer when local Ollama is down ──
   if (!ollamaHealthy) {
-    const peerUrls = COORDINATOR_BOOTSTRAP_URLS.filter(
-      (u) => u !== COORDINATOR_PUBLIC_URL
-    );
-
-    for (const peerUrl of peerUrls) {
-      const peerBase = peerUrl.replace(/\/$/, "");
-      const peerHeaders: Record<string, string> = { "content-type": "application/json" };
-      if (PORTAL_SERVICE_TOKEN) peerHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
-
-      let peerRes;
-      try {
-        peerRes = await request(`${peerBase}/portal/chat`, {
-          method: "POST",
-          headers: peerHeaders,
-          body: JSON.stringify({
-            messages: body.messages,
-            model: body.model,
-            temperature: body.temperature,
-            max_tokens: body.max_tokens
-          }),
-          headersTimeout: 120_000,
-          bodyTimeout: 0
-        });
-      } catch {
-        continue; // try next peer
+    // Build candidate list from mesh peers whose capability summary has chatEnabled
+    const chatPeerUrls: string[] = [];
+    const meshPeers = mesh.listPeers();
+    for (const cap of federatedCapabilities.values()) {
+      if (!cap.chatEnabled) continue;
+      if (cap.coordinatorId === identity.peerId) continue;
+      const peer = meshPeers.find(p => p.peerId === cap.coordinatorId);
+      if (peer?.coordinatorUrl) chatPeerUrls.push(peer.coordinatorUrl);
+    }
+    // Fallback: include bootstrap URLs in case mesh hasn't converged yet
+    for (const url of COORDINATOR_BOOTSTRAP_URLS) {
+      if (url !== COORDINATOR_PUBLIC_URL && !chatPeerUrls.includes(url)) {
+        chatPeerUrls.push(url);
       }
-
-      if (peerRes.statusCode < 200 || peerRes.statusCode >= 300) {
-        await peerRes.body.text().catch(() => ""); // drain body
-        continue; // try next peer
-      }
-
-      // Stream SSE from peer coordinator to client
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-      });
-
-      for await (const chunk of peerRes.body) {
-        reply.raw.write(typeof chunk === "string" ? chunk : chunk);
-      }
-      reply.raw.end();
-      return;
     }
 
-    return reply.code(502).send({ error: "no_ollama_peers_available" });
+    for (const peerUrl of chatPeerUrls) {
+      try {
+        const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
+        if (PORTAL_SERVICE_TOKEN) fwdHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+        const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
+          method: "POST",
+          headers: fwdHeaders,
+          body: JSON.stringify(body),
+          headersTimeout: 120_000,
+          bodyTimeout: 0,
+        });
+        if (peerRes.statusCode >= 200 && peerRes.statusCode < 300) {
+          reply.raw.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          });
+          for await (const chunk of peerRes.body) {
+            reply.raw.write(chunk);
+          }
+          reply.raw.end();
+          return;
+        }
+        await peerRes.body.text().catch(() => "");
+      } catch {
+        // peer unreachable, try next
+      }
+    }
+    return reply.code(502).send({ error: "ollama_unavailable", detail: "no local Ollama and no chat-capable mesh peers reachable" });
   }
 
   // Build swarm model list from agent capabilities
@@ -4559,7 +4557,19 @@ export async function initCoordinator(): Promise<void> {
               currentLoad: 0,
             })
           );
+          // Quick Ollama probe to advertise chatEnabled to mesh peers
+          let ollamaChatReady = false;
+          try {
+            const r = await request(`${OLLAMA_HOST ?? "http://127.0.0.1:11434"}/api/tags`, {
+              method: "GET",
+              headersTimeout: 2_000,
+            });
+            if (r.statusCode >= 200 && r.statusCode < 300) ollamaChatReady = true;
+            else await r.body.text().catch(() => "");
+          } catch { /* not reachable */ }
+
           const summary = buildCapabilitySummary(identity.peerId, agents);
+          summary.chatEnabled = ollamaChatReady;
           const msg = protocol.createMessage(
             "capability_summary",
             identity.peerId,
