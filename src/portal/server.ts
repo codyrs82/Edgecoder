@@ -1933,7 +1933,8 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
 
 // CORS preflight for native app token exchange
 app.options("/auth/oauth/mobile/complete", async (_req, reply) => {
-  reply.header("Access-Control-Allow-Origin", "*");
+  reply.header("Access-Control-Allow-Origin", "tauri://localhost");
+  reply.header("Access-Control-Allow-Credentials", "true");
   reply.header("Access-Control-Allow-Methods", "POST, OPTIONS");
   reply.header("Access-Control-Allow-Headers", "content-type");
   reply.header("Access-Control-Max-Age", "86400");
@@ -1941,15 +1942,19 @@ app.options("/auth/oauth/mobile/complete", async (_req, reply) => {
 });
 
 app.post("/auth/oauth/mobile/complete", async (req, reply) => {
-  reply.header("Access-Control-Allow-Origin", "*");
+  reply.header("Access-Control-Allow-Origin", "tauri://localhost");
+  reply.header("Access-Control-Allow-Credentials", "true");
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const body = z.object({ token: z.string().min(24) }).parse(req.body);
   const resolved = consumeMobileOauthSessionToken(body.token);
   if (!resolved) return reply.code(400).send({ error: "oauth_mobile_token_invalid" });
   const user = await store.getUserById(resolved.userId);
+  if (!user) return reply.code(400).send({ error: "user_not_found" });
+  // Create a session so subsequent portal API calls are authenticated
+  await createSessionForUser(user.userId, reply);
   return reply.send({
     ok: true,
-    user: user ? { userId: user.userId, email: user.email, emailVerified: user.emailVerified, displayName: user.displayName ?? null, role: user.role } : null
+    user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified, displayName: user.displayName ?? null, role: user.role }
   });
 });
 
