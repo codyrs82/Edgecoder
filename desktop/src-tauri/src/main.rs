@@ -56,14 +56,32 @@ fn agent_already_running() -> bool {
     TcpStream::connect("127.0.0.1:4301").is_ok()
 }
 
-fn start_agent() -> Option<Child> {
+fn start_agent(app: &tauri::App) -> Option<Child> {
     if agent_already_running() {
         eprintln!("EdgeCoder agent already running on :4301 — skipping spawn");
         return None;
     }
 
-    let agent_dir = std::env::var("EDGECODER_INSTALL_DIR")
-        .unwrap_or_else(|_| "/opt/edgecoder/app".to_string());
+    // Try bundled agent in Tauri resource directory first
+    let agent_dir = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|p| p.join("agent"))
+        .filter(|p| p.join("dist/index.js").exists())
+        // Fall back to system install path
+        .unwrap_or_else(|| {
+            std::env::var("EDGECODER_INSTALL_DIR")
+                .unwrap_or_else(|_| "/opt/edgecoder/app".to_string())
+                .into()
+        });
+
+    eprintln!("Starting agent from: {:?}", agent_dir);
+
+    if !agent_dir.join("dist/index.js").exists() {
+        eprintln!("Agent not found at {:?} — skipping", agent_dir);
+        return None;
+    }
 
     Command::new("node")
         .arg("dist/index.js")
@@ -79,7 +97,7 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![get_system_metrics])
         .setup(|app| {
-            let child = start_agent();
+            let child = start_agent(app);
             app.manage(AgentProcess(Mutex::new(child)));
 
             // Listen for deep link events (edgecoder://oauth-callback?...)
