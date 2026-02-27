@@ -10,6 +10,7 @@ use sysinfo::{System, Disks};
 use serde::Serialize;
 
 struct AgentProcess(Mutex<Option<Child>>);
+struct LocalToken(String);
 
 #[derive(Serialize)]
 struct SystemMetrics {
@@ -52,11 +53,16 @@ fn get_system_metrics() -> SystemMetrics {
     }
 }
 
+#[tauri::command]
+fn get_local_token(state: tauri::State<'_, LocalToken>) -> String {
+    state.0.clone()
+}
+
 fn agent_already_running() -> bool {
     TcpStream::connect("127.0.0.1:4301").is_ok()
 }
 
-fn start_agent(app: &tauri::App) -> Option<Child> {
+fn start_agent(app: &tauri::App, local_token: &str) -> Option<Child> {
     if agent_already_running() {
         eprintln!("EdgeCoder agent already running on :4301 — skipping spawn");
         return None;
@@ -83,6 +89,17 @@ fn start_agent(app: &tauri::App) -> Option<Child> {
         return None;
     }
 
+    Command::new("node")
+        .arg("dist/index.js")
+        .current_dir(&agent_dir)
+        .env("EDGE_RUNTIME_MODE", "all-in-one")
+        .env("INFERENCE_AUTH_TOKEN", local_token)
+        .env("ADMIN_API_TOKEN", local_token)
+        .spawn()
+        .ok()
+}
+
+fn main() {
     // Generate a per-session token for local inference auth using timestamp + pid
     let local_token = format!(
         "local-{}-{}",
@@ -93,27 +110,17 @@ fn start_agent(app: &tauri::App) -> Option<Child> {
         std::process::id()
     );
 
-    Command::new("node")
-        .arg("dist/index.js")
-        .current_dir(&agent_dir)
-        .env("EDGE_RUNTIME_MODE", "all-in-one")
-        .env("INFERENCE_AUTH_TOKEN", &local_token)
-        .env("ADMIN_API_TOKEN", &local_token)
-        .spawn()
-        .ok()
-}
-
-fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![get_system_metrics])
-        .setup(|app| {
+        .manage(LocalToken(local_token.clone()))
+        .invoke_handler(tauri::generate_handler![get_system_metrics, get_local_token])
+        .setup(move |app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
-            let child = start_agent(app);
+            let child = start_agent(app, &local_token);
             app.manage(AgentProcess(Mutex::new(child)));
 
             // Listen for deep link events (edgecoder://oauth-callback?...)

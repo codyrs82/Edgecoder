@@ -10,6 +10,7 @@
 
   let loggingOut = $state(false);
 
+
   async function handleLogout() {
     loggingOut = true;
     try {

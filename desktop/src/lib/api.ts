@@ -29,7 +29,7 @@ async function detectBackend(): Promise<void> {
 }
 
 /** Resolves once the first backend detection completes. */
-export const backendReady: Promise<void> = detectBackend();
+export const backendReady: Promise<void> = Promise.all([detectBackend(), getLocalToken()]).then(() => {});
 
 /** True when no local agent is running (all agent/inference calls go remote). */
 export function isRemoteMode(): boolean {
@@ -45,7 +45,6 @@ function agentBase(): string {
 }
 
 function portalBase(): string {
-  if (import.meta.env.DEV) return "/portal";
   return "https://edgecoder-portal.fly.dev";
 }
 
@@ -71,6 +70,27 @@ function authHeaders(): Record<string, string> {
 
 const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
 
+// ---------------------------------------------------------------------------
+// Local agent token (for inference/admin auth)
+// ---------------------------------------------------------------------------
+
+let _localToken: string | null = null;
+
+async function getLocalToken(): Promise<string> {
+  if (_localToken) return _localToken;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    _localToken = await invoke<string>("get_local_token");
+  } catch {
+    _localToken = "";
+  }
+  return _localToken!;
+}
+
+function inferenceHeaders(): Record<string, string> {
+  return _localToken ? { Authorization: `Bearer ${_localToken}` } : {};
+}
+
 export async function checkOllamaAvailable(): Promise<boolean> {
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/tags`, {
@@ -86,8 +106,9 @@ export async function checkOllamaAvailable(): Promise<boolean> {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async function get<T>(base: string, path: string): Promise<T> {
+async function get<T>(base: string, path: string, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(`${base}${path}`, {
+    headers,
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`GET ${path}: ${res.status}`);
@@ -98,10 +119,11 @@ async function post<T>(
   base: string,
   path: string,
   body?: unknown,
+  headers?: Record<string, string>,
 ): Promise<T> {
   const res = await fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(10_000),
   });
@@ -162,22 +184,22 @@ const INFERENCE_BASE = import.meta.env.DEV
   : "http://localhost:4302";
 
 export const getInferenceHealth = () =>
-  get<{ ok: boolean }>(INFERENCE_BASE, "/health");
+  get<{ ok: boolean }>(INFERENCE_BASE, "/health", inferenceHeaders());
 
 export const getDashboardOverview = () =>
-  get<DashboardOverview>(INFERENCE_BASE, "/dashboard/api/overview");
+  get<DashboardOverview>(INFERENCE_BASE, "/dashboard/api/overview", inferenceHeaders());
 
 export const getModelList = () =>
-  get<ModelInfo[]>(INFERENCE_BASE, "/model/list");
+  get<ModelInfo[]>(INFERENCE_BASE, "/model/list", inferenceHeaders());
 
 export const getModelStatus = () =>
-  get<unknown>(INFERENCE_BASE, "/model/status");
+  get<unknown>(INFERENCE_BASE, "/model/status", inferenceHeaders());
 
 export const swapModel = (model: string) =>
-  post<unknown>(INFERENCE_BASE, "/model/swap", { model });
+  post<unknown>(INFERENCE_BASE, "/model/swap", { model }, inferenceHeaders());
 
 export const pullModel = (model: string) =>
-  post<unknown>(INFERENCE_BASE, "/model/pull", { model });
+  post<unknown>(INFERENCE_BASE, "/model/pull", { model }, inferenceHeaders());
 
 // ---------------------------------------------------------------------------
 // Pull progress — try coordinator first, fall back to inference service
