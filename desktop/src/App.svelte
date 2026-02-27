@@ -122,8 +122,20 @@
 
     <!-- Main Content Area — both views stay mounted, hidden via CSS -->
     <main class="content">
-      <div class="tab-panel" class:hidden={activeTab !== "chat"}>
-        <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} />
+      <div class="tab-panel chat-layout" class:hidden={activeTab !== "chat"}>
+        <div class="chat-sidebar" class:collapsed={!historyOpen}>
+          <ConversationSidebar
+            open={true}
+            onClose={() => historyOpen = false}
+            onSelectConversation={handleSelectConversation}
+            onNewChat={handleNewChatFromSidebar}
+            activeConversationId={chatView?.getConversationId() ?? null}
+            inline={true}
+          />
+        </div>
+        <div class="chat-main">
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} />
+        </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
         <EditorView bind:this={editorView} />
@@ -162,13 +174,6 @@
       <OllamaSetup onDismiss={() => showOllamaSetup = false} />
     {/if}
 
-    <ConversationSidebar
-      open={historyOpen}
-      onClose={() => historyOpen = false}
-      onSelectConversation={handleSelectConversation}
-      onNewChat={handleNewChatFromSidebar}
-      activeConversationId={chatView?.getConversationId() ?? null}
-    />
   </div>
 {/if}
 
@@ -278,6 +283,28 @@
   }
   .tab-panel.hidden {
     display: none;
+  }
+  .chat-layout {
+    flex-direction: row !important;
+  }
+  .chat-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    border-right: 0.5px solid var(--border);
+    overflow: hidden;
+    transition: width 0.2s ease, opacity 0.2s ease;
+  }
+  .chat-sidebar.collapsed {
+    width: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
   }
   /* Bottom Bar */
   .bottom-bar {

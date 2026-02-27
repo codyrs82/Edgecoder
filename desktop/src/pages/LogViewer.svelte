@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getHealth, getStatus, getDashboardOverview } from "../lib/api";
+  import { getHealth, getStatus, getDashboardOverview, backendReady, isRemoteMode } from "../lib/api";
 
   // --- Types ---
   interface LogEntry {
@@ -15,6 +15,7 @@
   let prevResults = $state(-1);
   let visibleLimit = $state(100);
   let lastErrorMsg = $state("");
+  let polling = $state(false);
 
   // Derived filtered logs — capped at visibleLimit for DOM perf
   let allFilteredLogs = $derived(
@@ -60,11 +61,12 @@
 
   // --- Polling ---
   async function poll() {
+    if (polling) return; // skip if previous poll still in-flight
+    polling = true;
     try {
-      const [health, status, _overview] = await Promise.all([
+      const [health, status] = await Promise.all([
         getHealth(),
         getStatus(),
-        getDashboardOverview().catch(() => null),
       ]);
 
       // Main health line
@@ -87,14 +89,24 @@
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Poll error";
       addEntry("error", msg);
+    } finally {
+      polling = false;
     }
   }
 
   // Mount: start polling
   $effect(() => {
     addEntry("info", "Log viewer started");
-    poll();
-    const interval = setInterval(poll, 5000);
+    backendReady.then(() => {
+      if (isRemoteMode()) {
+        addEntry("warn", "No local agent running — logs require a local agent");
+        return;
+      }
+      poll();
+    });
+    const interval = setInterval(() => {
+      if (!isRemoteMode()) poll();
+    }, 5000);
     return () => clearInterval(interval);
   });
 </script>

@@ -16,9 +16,11 @@
     onSelectConversation: (id: string) => void;
     onNewChat: () => void;
     activeConversationId: string | null;
+    /** Render as inline panel instead of fixed overlay */
+    inline?: boolean;
   }
 
-  let { open, onClose, onSelectConversation, onNewChat, activeConversationId }: Props = $props();
+  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false }: Props = $props();
 
   let conversations: Conversation[] = $state([]);
   let searchQuery = $state("");
@@ -91,7 +93,7 @@
   function handleSelect(id: string) {
     if (renamingId) return;
     onSelectConversation(id);
-    onClose();
+    if (!inline) onClose();
   }
 
   async function handleDelete(id: string) {
@@ -159,7 +161,7 @@
 
   function handleNewChat() {
     onNewChat();
-    onClose();
+    if (!inline) onClose();
   }
 
   function toggleMenu(e: MouseEvent, id: string) {
@@ -169,21 +171,23 @@
   }
 </script>
 
-{#if open}
+{#if !inline && open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="backdrop" onclick={handleBackdropClick}></div>
 {/if}
 
-<div class="sidebar" class:open>
-  <div class="sidebar-header">
-    <h2 class="sidebar-title">History</h2>
-    <button class="close-btn" onclick={onClose} title="Close">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 6L6 18M6 6l12 12"/>
-      </svg>
-    </button>
-  </div>
+<div class="sidebar" class:open class:inline>
+  {#if !inline}
+    <div class="sidebar-header">
+      <h2 class="sidebar-title">History</h2>
+      <button class="close-btn" onclick={onClose} title="Close">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 6L6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+  {/if}
 
   <div class="sidebar-actions">
     <button class="new-chat-btn" onclick={handleNewChat}>
@@ -315,6 +319,16 @@
 
   .sidebar.open {
     transform: translateX(0);
+  }
+
+  .sidebar.inline {
+    position: static;
+    transform: none;
+    width: 100%;
+    max-width: none;
+    border-left: none;
+    box-shadow: none;
+    background: var(--bg-base, #2f2f2d);
   }
 
   .sidebar-header {

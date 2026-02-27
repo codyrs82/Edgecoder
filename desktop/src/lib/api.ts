@@ -67,7 +67,9 @@ export async function checkOllamaAvailable(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 async function get<T>(base: string, path: string): Promise<T> {
-  const res = await fetch(`${base}${path}`);
+  const res = await fetch(`${base}${path}`, {
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!res.ok) throw new Error(`GET ${path}: ${res.status}`);
   return res.json();
 }
@@ -81,6 +83,7 @@ async function post<T>(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`POST ${path}: ${res.status}`);
   return res.json();
@@ -91,6 +94,7 @@ async function del<T>(base: string, path: string, body?: unknown): Promise<T> {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`DELETE ${path}: ${res.status}`);
   return res.json();
