@@ -8,7 +8,9 @@
   import LoginScreen from "./pages/LoginScreen.svelte";
   import OllamaSetup from "./components/OllamaSetup.svelte";
   import type { AuthUser } from "./lib/api";
-  import { getMe, checkOllamaAvailable } from "./lib/api";
+  import { getMe, checkOllamaAvailable, clearSessionToken } from "./lib/api";
+  import UpdateBanner from "./components/UpdateBanner.svelte";
+  import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -30,12 +32,14 @@
         emailVerified: true,
       };
       authChecked = true;
-      return;
+      startPeriodicCheck();
+      return () => stopPeriodicCheck();
     }
     getMe()
-      .then((u) => { user = u; })
+      .then((u) => { user = u; startPeriodicCheck(); })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
+    return () => stopPeriodicCheck();
   });
 
   $effect(() => {
@@ -94,6 +98,7 @@
   <LoginScreen onLogin={handleLogin} />
 {:else}
   <div class="app-shell">
+    <UpdateBanner />
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
       <button class="header-btn" title="New chat" onclick={() => {
@@ -166,7 +171,7 @@
       <SettingsOverlay
         onClose={() => settingsOpen = false}
         user={user!}
-        onLogout={() => { user = null; settingsOpen = false; }}
+        onLogout={() => { clearSessionToken(); user = null; settingsOpen = false; }}
       />
     {/if}
 

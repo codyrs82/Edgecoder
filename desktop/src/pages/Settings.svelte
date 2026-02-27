@@ -1,6 +1,7 @@
 <script lang="ts">
   import { testMeshToken, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
+  import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
 
   // App version
@@ -13,6 +14,21 @@
       appVersion = "dev";
     }
   })();
+
+  // Update state
+  let updateStatus: UpdateStatus = $state({ state: "idle" });
+
+  $effect(() => {
+    return onUpdateStatus((s) => { updateStatus = s; });
+  });
+
+  function handleCheckUpdate() {
+    checkForUpdate();
+  }
+
+  function handleInstallUpdate() {
+    downloadAndInstall();
+  }
 
   // Local model info
   let activeModel = $state("—");
@@ -251,6 +267,35 @@
       <span class="about-label">App Version</span>
       <span class="about-value mono">{appVersion}</span>
     </div>
+    <div class="about-row">
+      <span class="about-label">Updates</span>
+      <span class="about-value">
+        {#if updateStatus.state === "checking"}
+          <span class="update-checking">Checking...</span>
+        {:else if updateStatus.state === "up-to-date"}
+          <span class="update-ok">Up to date</span>
+        {:else if updateStatus.state === "available"}
+          <span class="update-available">v{updateStatus.update.version} available</span>
+          <button class="btn-sm" onclick={handleInstallUpdate}>Update Now</button>
+        {:else if updateStatus.state === "downloading"}
+          <span class="update-checking">Downloading... {updateStatus.progress}%</span>
+        {:else if updateStatus.state === "installing"}
+          <span class="update-checking">Installing...</span>
+        {:else if updateStatus.state === "error"}
+          <span class="update-error">{updateStatus.message}</span>
+        {:else}
+          <button class="btn-sm" onclick={handleCheckUpdate}>Check for Updates</button>
+        {/if}
+      </span>
+    </div>
+    {#if updateStatus.state !== "checking" && updateStatus.state !== "downloading" && updateStatus.state !== "installing" && updateStatus.state !== "available"}
+      <div class="about-row" style="margin-top: 0.5rem;">
+        <span></span>
+        <button class="btn-check-update" onclick={handleCheckUpdate}>
+          {updateStatus.state === "error" ? "Retry" : "Check for Updates"}
+        </button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -492,7 +537,6 @@
 
   .about-section {
     margin-top: 1.5rem;
-    opacity: 0.7;
   }
   .about-row {
     display: flex;
@@ -518,5 +562,35 @@
   }
   .status-err {
     color: var(--red, #f87171);
+  }
+  .update-ok {
+    color: var(--green, #4ade80);
+    font-weight: 600;
+  }
+  .update-available {
+    color: var(--accent-secondary, #4a90d9);
+    font-weight: 600;
+  }
+  .update-checking {
+    color: var(--text-muted, #94a3b8);
+  }
+  .update-error {
+    color: var(--red, #f87171);
+    font-size: 0.8rem;
+  }
+  .btn-check-update {
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-elevated, #454542);
+    color: var(--text-secondary, #b8b0a4);
+    border: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: all 0.15s;
+  }
+  .btn-check-update:hover {
+    background: var(--bg-surface, #3a3a37);
+    color: var(--text-primary, #f7f5f0);
   }
 </style>
