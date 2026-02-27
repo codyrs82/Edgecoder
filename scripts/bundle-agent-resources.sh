@@ -25,7 +25,7 @@ cp "$ROOT_DIR/package-lock.json" "$RESOURCE_DIR/package-lock.json"
 
 # Install production dependencies only
 echo "Installing production dependencies..."
-npm ci --omit=dev --prefix "$RESOURCE_DIR"
+npm ci --omit=dev --ignore-scripts --prefix "$RESOURCE_DIR"
 
 echo "Agent bundled to: $RESOURCE_DIR"
 du -sh "$RESOURCE_DIR"
