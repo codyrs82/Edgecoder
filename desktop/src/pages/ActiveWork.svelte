@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getStatus, getCapacity, getMeshPeers } from "../lib/api";
+  import { getStatus, getCapacity, getMeshPeers, backendReady, isRemoteMode } from "../lib/api";
   import type { CoordinatorStatus, MeshPeer } from "../lib/types";
   import type { AgentCapacity, CapacityResponse } from "../lib/api";
   import { timeAgo } from "../lib/format";
@@ -11,8 +11,16 @@
   let peers: MeshPeer[] = $state([]);
   let error = $state("");
   let loading = $state(true);
+  let noLocalAgent = $state(false);
 
   async function fetchAll() {
+    await backendReady;
+    if (isRemoteMode()) {
+      noLocalAgent = true;
+      loading = false;
+      return;
+    }
+    noLocalAgent = false;
     error = "";
     try {
       const [s, c, p] = await Promise.all([
@@ -48,7 +56,9 @@
 <div class="active-work">
   <h1>Active Work</h1>
 
-  {#if error}
+  {#if noLocalAgent}
+    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see active work.</div>
+  {:else if error}
     <ErrorBanner message={error} onRetry={fetchAll} />
   {/if}
 
@@ -242,4 +252,5 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>

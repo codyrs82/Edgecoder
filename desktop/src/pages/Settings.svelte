@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { testMeshToken, getIdentity } from "../lib/api";
+  import { testMeshToken, getIdentity, backendReady, isRemoteMode } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import type { NodeIdentity } from "../lib/types";
 
@@ -42,14 +42,20 @@
     cpuCapPercent = s.cpuCapPercent;
     idleOnly = s.idleOnly;
 
-    getIdentity()
-      .then((id) => {
-        identity = id;
-        identityError = "";
-      })
-      .catch((e) => {
-        identityError = e instanceof Error ? e.message : "Failed to load identity";
-      });
+    backendReady.then(() => {
+      if (isRemoteMode()) {
+        identityError = "No local agent running — identity requires a running agent.";
+        return;
+      }
+      getIdentity()
+        .then((id) => {
+          identity = id;
+          identityError = "";
+        })
+        .catch((e) => {
+          identityError = e instanceof Error ? e.message : "Failed to load identity";
+        });
+    });
   });
 
   // Test mesh token

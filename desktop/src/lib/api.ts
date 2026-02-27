@@ -28,8 +28,15 @@ async function detectBackend(): Promise<void> {
   useRemote = true;
 }
 
-// Run detection on load, re-check every 30s
-detectBackend();
+/** Resolves once the first backend detection completes. */
+export const backendReady: Promise<void> = detectBackend();
+
+/** True when no local agent is running (all agent/inference calls go remote). */
+export function isRemoteMode(): boolean {
+  return useRemote;
+}
+
+// Re-check every 30s
 setInterval(detectBackend, 30_000);
 
 function agentBase(): string {

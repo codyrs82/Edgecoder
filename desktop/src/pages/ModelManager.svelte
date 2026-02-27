@@ -6,6 +6,8 @@
     pullModelStream,
     deleteOllamaModel,
     swapModel,
+    backendReady,
+    isRemoteMode,
   } from "../lib/api";
   import { formatBytes, formatParamSize } from "../lib/format";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
@@ -85,8 +87,17 @@
     pullTotal > 0 ? Math.round((pullCompleted / pullTotal) * 100) : 0,
   );
 
+  let noLocalAgent = $state(false);
+
   // ---- Data fetching ----
   async function refresh() {
+    await backendReady;
+    if (isRemoteMode()) {
+      noLocalAgent = true;
+      loading = false;
+      return;
+    }
+    noLocalAgent = false;
     try {
       const [list, tags, ps] = await Promise.all([
         getModelList(),
@@ -208,7 +219,9 @@
 <div class="model-manager">
   <h1 class="page-title">Model Manager</h1>
 
-  {#if error}
+  {#if noLocalAgent}
+    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to manage models.</div>
+  {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
 
@@ -638,4 +651,5 @@
     from { opacity: 0.85; }
     to { opacity: 1; }
   }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getMeshPeers, getMeshReputation, getIdentity } from "../lib/api";
+  import { getMeshPeers, getMeshReputation, getIdentity, backendReady, isRemoteMode } from "../lib/api";
   import type { MeshPeer, PeerReputation, NodeIdentity } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import EmptyState from "../components/EmptyState.svelte";
@@ -41,7 +41,16 @@
   // Data fetching
   // ---------------------------------------------------------------------------
 
+  let noLocalAgent = $state(false);
+
   async function refresh(): Promise<void> {
+    await backendReady;
+    if (isRemoteMode()) {
+      noLocalAgent = true;
+      loading = false;
+      return;
+    }
+    noLocalAgent = false;
     try {
       const [peersRes, repRes, idRes] = await Promise.all([
         getMeshPeers(),
@@ -92,7 +101,9 @@
     <p class="subtitle">{peerCount} {peerCount === 1 ? "peer" : "peers"} discovered</p>
   </header>
 
-  {#if error}
+  {#if noLocalAgent}
+    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see mesh topology.</div>
+  {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
 
@@ -384,4 +395,5 @@
     color: var(--text-secondary, #94a3b8);
     opacity: 0.6;
   }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>

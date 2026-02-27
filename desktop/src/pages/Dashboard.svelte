@@ -4,6 +4,8 @@
     getStatus,
     getDashboardOverview,
     getSystemMetrics,
+    backendReady,
+    isRemoteMode,
   } from "../lib/api";
   import { formatUptime } from "../lib/format";
   import StatCard from "../components/StatCard.svelte";
@@ -109,7 +111,16 @@
   // Data fetching
   // ---------------------------------------------------------------------------
 
+  let noLocalAgent = $state(false);
+
   async function refreshCoreData() {
+    await backendReady;
+    if (isRemoteMode()) {
+      noLocalAgent = true;
+      loading = false;
+      return;
+    }
+    noLocalAgent = false;
     try {
       const [h, s, o] = await Promise.all([
         getHealth(),
@@ -164,11 +175,13 @@
 <div class="dashboard">
   <h1 class="page-title">Dashboard</h1>
 
-  {#if error}
+  {#if noLocalAgent}
+    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see dashboard metrics.</div>
+  {:else if error}
     <ErrorBanner message={error} onRetry={refreshCoreData} />
   {/if}
 
-  {#if loading}
+  {#if loading && !noLocalAgent}
     <!-- Loading skeleton -->
     <section class="section">
       <h2 class="section-title">Connection & Status</h2>
@@ -389,4 +402,5 @@
     color: var(--text-secondary, #94a3b8);
     font-size: 0.9rem;
   }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getStatus, submitTask } from "../lib/api";
+  import { getStatus, submitTask, backendReady, isRemoteMode } from "../lib/api";
   import type { TaskSubmission } from "../lib/types";
   import StatCard from "../components/StatCard.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
@@ -31,8 +31,17 @@
     return ((newest.value - oldest.value) / elapsed) * 60;
   });
 
+  let noLocalAgent = $state(false);
+
   // ── polling ─────────────────────────────────────────────────────────
   async function refresh() {
+    await backendReady;
+    if (isRemoteMode()) {
+      noLocalAgent = true;
+      loading = false;
+      return;
+    }
+    noLocalAgent = false;
     try {
       const data = await getStatus();
       queued  = data.queued;
@@ -114,7 +123,9 @@
 <div class="task-queue">
   <h1>Task Queue</h1>
 
-  {#if error}
+  {#if noLocalAgent}
+    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to view the task queue.</div>
+  {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
 
@@ -340,4 +351,5 @@
   .empty p {
     margin: 0;
   }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>
