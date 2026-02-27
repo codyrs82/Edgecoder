@@ -1740,7 +1740,7 @@ app.post("/auth/login", async (req, reply) => {
   }
 
   const sessionToken = await createSessionForUser(user.userId, reply);
-  return reply.send({ ok: true, sessionToken, user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified } });
+  return reply.send({ ok: true, sessionToken, user: { userId: user.userId, email: user.email, displayName: user.displayName ?? null, emailVerified: user.emailVerified } });
 });
 
 app.post("/auth/logout", async (req, reply) => {

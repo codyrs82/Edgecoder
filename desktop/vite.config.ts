@@ -29,8 +29,9 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/chat/, ""),
       },
       "/portal": {
-        target: "http://localhost:4305",
+        target: "https://edgecoder-portal.fly.dev",
         changeOrigin: true,
+        secure: true,
         rewrite: (path) => path.replace(/^\/portal/, ""),
       },
     },

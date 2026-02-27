@@ -23,18 +23,6 @@
   let showOllamaSetup = $state(false);
 
   $effect(() => {
-    if (import.meta.env.DEV) {
-      // Dev mode: skip auth, use mock user
-      user = {
-        userId: "dev-user",
-        email: "dev@edgecoder.local",
-        displayName: "Dev User",
-        emailVerified: true,
-      };
-      authChecked = true;
-      startPeriodicCheck();
-      return () => stopPeriodicCheck();
-    }
     getMe()
       .then((u) => { user = u; startPeriodicCheck(); })
       .catch(() => { user = null; })
@@ -43,7 +31,7 @@
   });
 
   $effect(() => {
-    if (user && !import.meta.env.DEV) {
+    if (user) {
       checkOllamaAvailable().then((ok) => {
         if (!ok) showOllamaSetup = true;
       });
@@ -52,6 +40,8 @@
 
   function handleLogin(u: AuthUser) {
     user = u;
+    // Refresh with full profile from /me (includes displayName, role, etc.)
+    getMe().then((full) => { user = full; }).catch(() => {});
   }
 
   function handleOpenInEditor(code: string, language: string) {

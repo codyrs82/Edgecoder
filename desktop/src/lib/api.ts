@@ -292,7 +292,8 @@ export async function getMe(): Promise<AuthUser> {
     clearSessionToken();
     throw new Error("Not authenticated");
   }
-  return res.json();
+  const data = await res.json();
+  return data.user;
 }
 
 // ---------------------------------------------------------------------------
