@@ -8,6 +8,8 @@
     portalCreateConversation,
     portalRenameConversation,
     getModelPullProgress,
+    isRemoteMode,
+    backendReady,
   } from "../lib/api";
   import type { StreamProgress, ModelPullProgress } from "../lib/api";
   import {
@@ -47,18 +49,10 @@
 
   // Restore last chat conversation on mount
   onMount(async () => {
-    // Detect if portal chat is available (server-side conversations)
-    try {
-      const res = await fetch(
-        (import.meta.env.DEV ? "/portal" : "http://localhost:4305") +
-          "/portal/api/conversations",
-        { credentials: "include" },
-      );
-      if (res.ok) {
-        usePortalChat = true;
-      }
-    } catch {
-      // Portal not available — use local IDE provider
+    // Use portal chat when no local agent is running
+    await backendReady;
+    if (isRemoteMode()) {
+      usePortalChat = true;
     }
 
     const lastId = localStorage.getItem("edgecoder-last-chat-id");

@@ -3,7 +3,7 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import ModelPicker from "./ModelPicker.svelte";
-  import { streamChat, getModelPullProgress } from "../lib/api";
+  import { streamChat, streamPortalChat, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress } from "../lib/api";
   import {
     createConversation,
@@ -30,11 +30,20 @@
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
 
+  /** Whether to stream via the portal API when no local agent is available */
+  let usePortalChat = $state(false);
+
   /** Active model download progress */
   let pullProgress: ModelPullProgress | null = $state(null);
   let pullPollTimer: ReturnType<typeof setInterval> | undefined;
 
   onMount(async () => {
+    // Detect if we need to use portal chat (no local agent)
+    await backendReady;
+    if (isRemoteMode()) {
+      usePortalChat = true;
+    }
+
     // Restore last editor conversation
     const lastId = localStorage.getItem("edgecoder-last-editor-id");
     if (lastId) {
@@ -79,6 +88,21 @@
     }
   }
 
+  /**
+   * Ensure the conversation has a portal-side conversation ID.
+   * Creates one on the portal server if needed.
+   */
+  async function ensurePortalConversation(): Promise<string> {
+    if (conversation.portalConversationId) {
+      return conversation.portalConversationId;
+    }
+    const portalId = await portalCreateConversation(conversation.title || "Editor chat");
+    conversation.portalConversationId = portalId;
+    conversation = conversation;
+    await saveConversation(conversation);
+    return portalId;
+  }
+
   export async function sendMessage(text: string) {
     if (isStreaming) return;
 
@@ -90,29 +114,47 @@
     streamProgress = undefined;
     abortController = new AbortController();
 
-    const fileContext = getFileContext?.();
-    const systemMessages = fileContext
-      ? [{ role: "system", content: `The user is editing ${fileContext.path} (${fileContext.language}). Current file content:\n\`\`\`${fileContext.language}\n${fileContext.content}\n\`\`\`` }]
-      : [];
-
-    const apiMessages = [
-      ...systemMessages,
-      ...conversation.messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
-
     try {
-      await streamChat(
-        apiMessages,
-        (chunk) => {
-          streamingContent += chunk;
-          scrollToBottom();
-        },
-        abortController.signal,
-        (progress) => {
-          streamProgress = progress;
-        },
-        conversation.selectedModel,
-      );
+      if (usePortalChat) {
+        // Stream through portal API (no local agent available)
+        const portalConvId = await ensurePortalConversation();
+        await streamPortalChat(
+          portalConvId,
+          text,
+          (chunk) => {
+            streamingContent += chunk;
+            scrollToBottom();
+          },
+          abortController.signal,
+          (progress) => {
+            streamProgress = progress;
+          },
+        );
+      } else {
+        // Stream through local IDE provider (OpenAI-compatible format)
+        const fileContext = getFileContext?.();
+        const systemMessages = fileContext
+          ? [{ role: "system", content: `The user is editing ${fileContext.path} (${fileContext.language}). Current file content:\n\`\`\`${fileContext.language}\n${fileContext.content}\n\`\`\`` }]
+          : [];
+
+        const apiMessages = [
+          ...systemMessages,
+          ...conversation.messages.map((m) => ({ role: m.role, content: m.content })),
+        ];
+
+        await streamChat(
+          apiMessages,
+          (chunk) => {
+            streamingContent += chunk;
+            scrollToBottom();
+          },
+          abortController.signal,
+          (progress) => {
+            streamProgress = progress;
+          },
+          conversation.selectedModel,
+        );
+      }
       addMessage(conversation, "assistant", streamingContent);
       conversation = conversation;
       await saveConversation(conversation);
