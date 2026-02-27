@@ -68,7 +68,7 @@ struct EdgeCoderIOSApp: App {
     static func scheduleBackgroundBLETask() {
         let request = BGProcessingTaskRequest(identifier: "io.edgecoder.ble-mesh")
         request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
+        request.requiresExternalPower = true
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60) // 1 minute
         do {
             try BGTaskScheduler.shared.submit(request)

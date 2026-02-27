@@ -99,7 +99,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     static func scheduleProcessingTask() {
         let request = BGProcessingTaskRequest(identifier: bgProcessingTaskId)
         request.requiresNetworkConnectivity = false  // also runs in BT Local mode
-        request.requiresExternalPower = false
+        request.requiresExternalPower = true
         request.earliestBeginDate = Date(timeIntervalSinceNow: 1)
         try? BGTaskScheduler.shared.submit(request)
     }
