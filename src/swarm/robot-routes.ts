@@ -119,7 +119,10 @@ export function registerRobotRoutes(
   });
 
   /* ---- Get single task ---- */
-  app.get("/robot/tasks/:taskId", async (req, _reply) => {
+  app.get("/robot/tasks/:taskId", async (req, reply) => {
+    if (!deps.hasMeshToken(req.headers as Record<string, unknown>)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
     const { taskId } = req.params as { taskId: string };
     const task = queue.getTask(taskId);
     if (!task) return { ok: false, error: "task_not_found" };

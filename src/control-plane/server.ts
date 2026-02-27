@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { request } from "undici";
 import { z } from "zod";
 import { AgentMode, LocalModelManifest, NetworkMode, RolloutPolicy, RolloutStage, AgentRolloutState } from "../common/types.js";
@@ -11,10 +12,19 @@ import { defaultDeploymentPlan } from "./deployment.js";
 import { pgStore } from "../db/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { buildAdminDashboardRoutes } from "./dashboard.js";
+import { safeTokenEqual } from "../common/crypto-utils.js";
 
 const app = Fastify({ logger: true });
+await app.register(cors, {
+  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  credentials: true,
+});
 const coordinatorUrl = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN ?? "";
+if (!process.env.ADMIN_API_TOKEN) {
+  console.error("[control-plane] FATAL: ADMIN_API_TOKEN must be set");
+  process.exit(1);
+}
+const ADMIN_API_TOKEN: string = process.env.ADMIN_API_TOKEN;
 const COORDINATOR_MESH_TOKEN = process.env.COORDINATOR_MESH_TOKEN ?? process.env.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
@@ -72,12 +82,10 @@ function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string }, r
       return false;
     }
   }
-  if (ADMIN_API_TOKEN) {
-    const token = extractAdminToken(req.headers);
-    if (token !== ADMIN_API_TOKEN) {
-      reply.code(401).send({ error: "admin_token_required" });
-      return false;
-    }
+  const token = extractAdminToken(req.headers);
+  if (!token || !safeTokenEqual(token, ADMIN_API_TOKEN)) {
+    reply.code(401).send({ error: "admin_token_required" });
+    return false;
   }
   return true;
 }

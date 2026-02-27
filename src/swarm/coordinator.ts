@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -98,6 +99,10 @@ import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system
 import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ logger: true });
+await app.register(cors, {
+  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  credentials: true,
+});
 await app.register(websocket);
 const queue = new SwarmQueue(pgStore);
 const protocol = new MeshProtocol();
@@ -4535,13 +4540,17 @@ app.post("/credits/ble-sync", async (req, reply) => {
 });
 
 // ── Debug: direct enqueue for E2E testing (no inference decomposition) ──
+const debugEnqueueSchema = z.object({
+  input: z.string().min(1).max(10_000),
+  language: z.string().optional(),
+  taskId: z.string().uuid().optional(),
+});
+
 app.post("/debug/enqueue", async (req, reply) => {
-  const body = req.body as {
-    input: string;
-    language?: string;
-    taskId?: string;
-  };
-  if (!body.input) return reply.code(400).send({ error: "input required" });
+  if (!authorizeAdmin(req, reply)) return;
+  const parsed = debugEnqueueSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_input", detail: parsed.error.message });
+  const body = parsed.data;
   const taskId = body.taskId ?? randomUUID();
   const hasPeers = mesh.listPeers().length > 0;
   const subtask = queue.enqueueSubtask({
@@ -4757,8 +4766,7 @@ function authorizeAdmin(req: any, reply: any): boolean {
     return false;
   }
   const headerToken = readHeaderValue(req.headers, "x-admin-token");
-  const queryToken = (req.query as Record<string, string>)?.token ?? "";
-  if (!safeTokenEqual(headerToken || queryToken, ADMIN_API_TOKEN)) {
+  if (!headerToken || !safeTokenEqual(headerToken, ADMIN_API_TOKEN)) {
     reply.code(401).send({ error: "invalid_admin_token" });
     return false;
   }

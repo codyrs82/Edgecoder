@@ -1,4 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Set required env var before module loads (vi.hoisted runs before all imports)
+vi.hoisted(() => {
+  process.env.INFERENCE_AUTH_TOKEN = "test-token";
+});
+
 import { parseDecomposition } from "../../src/inference/service.js";
 
 // Mock undici before importing the service (which uses `request` at module scope in route handlers)
@@ -24,6 +30,8 @@ vi.mock("../../src/inference/dashboard.js", () => ({
 
 // Import the app after mocks are set up
 const { inferenceService: app } = await import("../../src/inference/service.js");
+
+const AUTH_HEADER = { "x-inference-token": "test-token" };
 
 // Helper to create a mock Ollama response
 function ollamaResponse(response: string) {
@@ -147,6 +155,7 @@ describe("POST /decompose", () => {
     const res = await app.inject({
       method: "POST",
       url: "/decompose",
+      headers: AUTH_HEADER,
       payload: {
         taskId: "t1",
         prompt: "Build a calculator",
@@ -169,6 +178,7 @@ describe("POST /decompose", () => {
     const res = await app.inject({
       method: "POST",
       url: "/decompose",
+      headers: AUTH_HEADER,
       payload: {
         taskId: "t2",
         prompt: "Handle error",
@@ -189,6 +199,7 @@ describe("POST /decompose", () => {
     const res = await app.inject({
       method: "POST",
       url: "/decompose",
+      headers: AUTH_HEADER,
       payload: { taskId: "t3" }, // missing prompt and snapshotRef
     });
 
@@ -208,6 +219,7 @@ describe("POST /escalate", () => {
     const res = await app.inject({
       method: "POST",
       url: "/escalate",
+      headers: AUTH_HEADER,
       payload: {
         task: "Implement add function",
         failedCode: "def add(a, b): return a - b",
@@ -228,6 +240,7 @@ describe("POST /escalate", () => {
     const res = await app.inject({
       method: "POST",
       url: "/escalate",
+      headers: AUTH_HEADER,
       payload: {
         task: "Fix bug",
         failedCode: "x = 1/0",
@@ -252,6 +265,7 @@ describe("POST /escalate", () => {
     const res = await app.inject({
       method: "POST",
       url: "/escalate",
+      headers: AUTH_HEADER,
       payload: {
         task: "Print hello",
         failedCode: "prnt('hello')",
@@ -297,6 +311,7 @@ describe("GET /metrics", () => {
     await app.inject({
       method: "POST",
       url: "/decompose",
+      headers: AUTH_HEADER,
       payload: {
         taskId: "m1",
         prompt: "Test metrics",
@@ -310,6 +325,7 @@ describe("GET /metrics", () => {
     await app.inject({
       method: "POST",
       url: "/escalate",
+      headers: AUTH_HEADER,
       payload: {
         task: "Metric test",
         failedCode: "x",

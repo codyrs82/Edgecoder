@@ -2133,7 +2133,6 @@ app.post("/wallet/onboarding/setup-seed", async (req, reply) => {
     ok: true,
     accountId: setup.accountId,
     network: setup.network,
-    seedPhrase: setup.seedPhrase,
     derivedAddress: setup.derivedAddress,
     guidance: setup.guidance
   });
@@ -3119,7 +3118,7 @@ app.post("/portal/api/chat", async (req, reply) => {
       method: "POST",
       headers: chatHeaders,
       body: JSON.stringify({ messages }),
-      headersTimeout: 60_000, // LLM inference can take 30s+ on cold start
+      headersTimeout: 180_000, // larger models can take 60s+ on cold start
       bodyTimeout: 0 // no body timeout for streaming
     });
   } catch (err) {

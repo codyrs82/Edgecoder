@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
@@ -13,7 +14,15 @@ import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 
 const app = Fastify({ logger: true });
-const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
+await app.register(cors, {
+  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  credentials: true,
+});
+if (!process.env.INFERENCE_AUTH_TOKEN) {
+  console.error("[inference] FATAL: INFERENCE_AUTH_TOKEN must be set");
+  process.exit(1);
+}
+const INFERENCE_AUTH_TOKEN: string = process.env.INFERENCE_AUTH_TOKEN;
 const INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS =
   process.env.INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS === "true";
 const INFERENCE_MAX_SIGNATURE_SKEW_MS = Number(process.env.INFERENCE_MAX_SIGNATURE_SKEW_MS ?? "120000");
@@ -107,11 +116,9 @@ const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
   if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard")) return;
-  if (INFERENCE_AUTH_TOKEN) {
-    const token = req.headers["x-inference-token"];
-    if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
-      return reply.code(401).send({ error: "inference_unauthorized" });
-    }
+  const token = req.headers["x-inference-token"];
+  if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
+    return reply.code(401).send({ error: "inference_unauthorized" });
   }
 
   const signatureRequired = INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS || trustedCoordinatorKeys.size > 0;
