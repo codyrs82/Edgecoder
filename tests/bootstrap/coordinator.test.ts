@@ -113,7 +113,7 @@ describe("coordinator bootstrap", () => {
     expect(opts).toMatchObject({
       enabled: false, // default provider is "edgecoder-local", not "ollama-local"
       autoInstall: false, // OLLAMA_AUTO_INSTALL not set
-      model: "qwen2.5-coder:latest",
+      model: "qwen2.5:7b",
       role: "coordinator",
       platform: "macos"
     });
