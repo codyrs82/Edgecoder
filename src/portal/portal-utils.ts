@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { createHash, randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
+import { mnemonicToSeedSync } from "bip39";
+import { HDKey } from "@scure/bip32";
+import { bech32 } from "@scure/base";
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -152,4 +155,29 @@ export function deriveCredentialIdFromVerifyBody(body: {
     normalizeBase64UrlString(response.rawId) ??
     normalizeBase64UrlString(response.credentialId)
   );
+}
+
+/**
+ * Derive a native SegWit (bech32, bc1q…) Bitcoin address from a BIP39 seed phrase.
+ * Uses BIP84 derivation path: m/84'/0'/0'/0/0 (first receiving address).
+ * For testnet/signet, uses m/84'/1'/0'/0/0 with "tb" prefix.
+ */
+export function deriveBitcoinAddress(
+  seedPhrase: string,
+  network: "bitcoin" | "testnet" | "signet" = "bitcoin"
+): string {
+  const seed = mnemonicToSeedSync(seedPhrase);
+  const master = HDKey.fromMasterSeed(seed);
+  const coinType = network === "bitcoin" ? 0 : 1;
+  const child = master.derive(`m/84'/${coinType}'/0'/0/0`);
+  if (!child.publicKey) throw new Error("failed to derive public key");
+
+  // P2WPKH: HASH160(pubkey) = RIPEMD160(SHA256(pubkey))
+  const sha = createHash("sha256").update(child.publicKey).digest();
+  const hash160 = createHash("ripemd160").update(sha).digest();
+
+  // Bech32 encode: witness version 0 + 20-byte key hash
+  const prefix = network === "bitcoin" ? "bc" : "tb";
+  const words = bech32.toWords(hash160);
+  return bech32.encode(prefix, [0, ...words]);
 }

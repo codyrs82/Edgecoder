@@ -457,7 +457,9 @@ export type BlacklistReasonCode =
   | "credential_abuse"
   | "dos_behavior"
   | "forged_results"
-  | "manual_review";
+  | "manual_review"
+  | "tampered_binary"
+  | "behavioral_anomaly";
 
 export interface PaymentReceipt {
   intentId: string;

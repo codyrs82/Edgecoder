@@ -29,6 +29,7 @@ import {
   bufferFromBase64Url,
   normalizeBase64UrlString,
   deriveWalletSecretRef,
+  deriveBitcoinAddress,
   generateSixDigitCode,
   deriveIosDeviceIdFromNodeId,
   normalizePasskeyResponsePayload,
@@ -356,6 +357,7 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
   created: boolean;
   accountId: string;
   network: "bitcoin" | "testnet" | "signet";
+  derivedAddress?: string;
   seedPhrase?: string;
   guidance?: { title: string; steps: string[] };
 }> {
@@ -367,12 +369,14 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
 
   const seedPhrase = generateMnemonic(128);
   const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
+  const derivedAddress = deriveBitcoinAddress(seedPhrase, WALLET_DEFAULT_NETWORK);
   await store?.createWalletOnboarding({
     userId: user.userId,
     accountId,
     network: WALLET_DEFAULT_NETWORK,
     seedPhraseHash: sha256Hex(seedPhrase),
-    encryptedPrivateKeyRef
+    encryptedPrivateKeyRef,
+    derivedAddress
   });
 
   if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
@@ -386,7 +390,8 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
         accountId,
         walletType: "lightning",
         network: WALLET_DEFAULT_NETWORK,
-        encryptedSecretRef: encryptedPrivateKeyRef
+        encryptedSecretRef: encryptedPrivateKeyRef,
+        payoutAddress: derivedAddress
       })
     }).catch(() => undefined);
   }
@@ -396,6 +401,7 @@ async function ensureStarterWalletForUser(user: { userId: string; email: string 
     accountId,
     network: WALLET_DEFAULT_NETWORK,
     seedPhrase,
+    derivedAddress,
     guidance: {
       title: "Protect your recovery seed and private key",
       steps: [
@@ -413,6 +419,7 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
   accountId: string;
   network: "bitcoin" | "testnet" | "signet";
   seedPhrase: string;
+  derivedAddress: string;
   guidance: { title: string; steps: string[] };
 }> {
   const existing = await store?.getWalletOnboardingByUserId(user.userId);
@@ -420,13 +427,15 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
   const network = (existing?.network as "bitcoin" | "testnet" | "signet" | undefined) ?? WALLET_DEFAULT_NETWORK;
   const seedPhrase = generateMnemonic(128);
   const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
+  const derivedAddress = deriveBitcoinAddress(seedPhrase, network);
 
   await store?.upsertWalletOnboardingSeed({
     userId: user.userId,
     accountId,
     network,
     seedPhraseHash: sha256Hex(seedPhrase),
-    encryptedPrivateKeyRef
+    encryptedPrivateKeyRef,
+    derivedAddress
   });
 
   if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
@@ -440,7 +449,8 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
         accountId,
         walletType: "lightning",
         network,
-        encryptedSecretRef: encryptedPrivateKeyRef
+        encryptedSecretRef: encryptedPrivateKeyRef,
+        payoutAddress: derivedAddress
       })
     }).catch(() => undefined);
   }
@@ -449,6 +459,7 @@ async function setupWalletSeedForUser(user: { userId: string; email: string }): 
     accountId,
     network,
     seedPhrase,
+    derivedAddress,
     guidance: {
       title: "Protect your recovery seed and private key",
       steps: [
@@ -2101,6 +2112,7 @@ app.get("/wallet/onboarding", async (req, reply) => {
   return reply.send({
     accountId: onboarding.accountId,
     network: onboarding.network,
+    derivedAddress: onboarding.derivedAddress,
     createdAtMs: onboarding.createdAtMs,
     acknowledgedAtMs: onboarding.acknowledgedAtMs
   });
@@ -2117,6 +2129,7 @@ app.post("/wallet/onboarding/setup-seed", async (req, reply) => {
     accountId: setup.accountId,
     network: setup.network,
     seedPhrase: setup.seedPhrase,
+    derivedAddress: setup.derivedAddress,
     guidance: setup.guidance
   });
 });
@@ -3748,8 +3761,9 @@ app.get("/portal-legacy", async (_req, reply) => {
             const status = onboarding.acknowledgedAtMs
               ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
               : "Backup not yet confirmed. Please secure your seed phrase offline.";
+            var addressInfo = onboarding.derivedAddress ? " | Address: " + onboarding.derivedAddress : "";
             document.getElementById("walletOnboardingMeta").textContent =
-              "Network: " + onboarding.network + " | Account: " + onboarding.accountId + " | " + status;
+              "Network: " + onboarding.network + " | Account: " + onboarding.accountId + addressInfo + " | " + status;
           } catch {
             document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
           }
@@ -5936,6 +5950,10 @@ app.get("/portal/wallet", async (_req, reply) => {
           Record this seed phrase now. It is shown only for this setup action and cannot be recovered later.
         </p>
         <div id="seedPhraseValue" class="token-box"></div>
+        <div id="derivedAddressWrap" class="hidden" style="margin-top:10px;">
+          <strong>Your Bitcoin address (BIP84 native SegWit):</strong>
+          <div id="derivedAddressValue" class="token-box" style="margin-top:4px;word-break:break-all;"></div>
+        </div>
         <div id="seedGuidance" class="muted" style="margin-top:8px;"></div>
       </div>
     </div>
@@ -6123,8 +6141,12 @@ app.get("/portal/wallet", async (_req, reply) => {
         const status = onboarding.acknowledgedAtMs
           ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
           : "Backup not yet confirmed. Generate and record your seed phrase now.";
+        var addressInfo = onboarding.derivedAddress ? " | Address: " + onboarding.derivedAddress : "";
         document.getElementById("walletOnboardingMeta").textContent =
-          "Network: " + onboarding.network + " | Account: " + onboarding.accountId + " | " + status;
+          "Network: " + onboarding.network + " | Account: " + onboarding.accountId + addressInfo + " | " + status;
+        if (onboarding.derivedAddress) {
+          document.getElementById("depositAddressValue").textContent = onboarding.derivedAddress;
+        }
       } catch {
         document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
       }
@@ -6140,6 +6162,10 @@ app.get("/portal/wallet", async (_req, reply) => {
         const setup = await api("/wallet/onboarding/setup-seed", { method: "POST", body: JSON.stringify({}) });
         document.getElementById("seedPhraseWrap").classList.remove("hidden");
         document.getElementById("seedPhraseValue").textContent = setup.seedPhrase;
+        if (setup.derivedAddress) {
+          document.getElementById("derivedAddressWrap").classList.remove("hidden");
+          document.getElementById("derivedAddressValue").textContent = setup.derivedAddress;
+        }
         renderSeedGuidance(setup.guidance);
         await loadWalletView();
         showToast("New recovery seed phrase generated. Record it before leaving this page.");

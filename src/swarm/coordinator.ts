@@ -87,6 +87,11 @@ import { InMemoryNonceStore, verifyNonce } from "../security/nonce-verifier.js";
 import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
 import { SecurityEventLogger, type SecurityEventType } from "../audit/security-events.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
+import { AgentBehaviorTracker } from "../security/behavior-tracker.js";
+import { AnomalyDetector } from "../security/anomaly-detector.js";
+import { AutoBlacklister, type BlacklistAction } from "../security/auto-blacklister.js";
+import { verifyBinaryIntegrity, type VerificationStatus, type BinaryIntegrityPayload } from "../security/release-verifier.js";
+import { ReleaseManifestCache } from "../security/release-manifest-cache.js";
 import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { PullTracker } from "../model/pull-tracker.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
@@ -288,6 +293,85 @@ const blacklistByAgent = new Map<string, BlacklistRecord>();
 const blacklistAuditLog: BlacklistRecord[] = [];
 let blacklistVersion = 0;
 let lastBlacklistEventHash = "BLACKLIST_GENESIS";
+
+// ── Behavioral monitoring ──
+const behaviorTracker = new AgentBehaviorTracker();
+const anomalyDetector = new AnomalyDetector();
+const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
+  const now = Date.now();
+  const eventId = randomUUID();
+  const evidenceSignatureVerified = false;
+  const prevEventHash = lastBlacklistEventHash;
+  const eventHash = buildBlacklistEventHash({
+    eventId,
+    agentId: action.agentId,
+    reasonCode: action.reasonCode,
+    reason: action.reason,
+    evidenceHashSha256: action.evidenceHashSha256,
+    reporterId: identity.peerId,
+    sourceCoordinatorId: identity.peerId,
+    timestampMs: now,
+    prevEventHash,
+    evidenceSignatureVerified,
+  });
+  const coordinatorSignature = signPayload(eventHash, coordinatorKeys.privateKeyPem);
+  const record: BlacklistRecord = {
+    eventId,
+    agentId: action.agentId,
+    reasonCode: action.reasonCode,
+    reason: action.reason,
+    evidenceHashSha256: action.evidenceHashSha256,
+    reporterId: identity.peerId,
+    evidenceSignatureVerified,
+    sourceCoordinatorId: identity.peerId,
+    reportedBy: "behavioral_monitoring",
+    timestampMs: now,
+    prevEventHash,
+    eventHash,
+    coordinatorSignature,
+  };
+  appendBlacklistRecord(record);
+  securityLog.log({
+    level: "CRITICAL",
+    event: "auto_blacklist_triggered",
+    source: { type: "system", id: identity.peerId },
+    details: { agentId: action.agentId, reasonCode: action.reasonCode, reason: action.reason, rules: action.anomalyEvents.map(e => e.ruleId) },
+    action: "agent_blacklisted",
+    coordinatorId: identity.peerId,
+  });
+  const gossipMessage = protocol.createMessage(
+    "blacklist_update",
+    identity.peerId,
+    record as unknown as Record<string, unknown>,
+    coordinatorKeys.privateKeyPem
+  );
+  void mesh.broadcast(gossipMessage);
+});
+
+function evaluateAndEnforce(agentId: string): void {
+  const stats = behaviorTracker.getStats(agentId);
+  if (!stats) return;
+  const anomalies = anomalyDetector.evaluate(stats);
+  if (anomalies.length > 0) {
+    for (const anomaly of anomalies) {
+      securityLog.log({
+        level: anomaly.severity,
+        event: "behavioral_anomaly_detected",
+        source: { type: "agent", id: agentId },
+        details: { ruleId: anomaly.ruleId, ruleName: anomaly.ruleName, ...anomaly.stats },
+        action: "anomaly_recorded",
+        coordinatorId: identity.peerId,
+      });
+    }
+    autoBlacklister.processAnomalies(agentId, anomalies);
+  }
+}
+
+// ── Release manifest cache for code signing verification ──
+const releaseManifestCache = new ReleaseManifestCache();
+releaseManifestCache.start();
+const REQUIRE_VERIFIED_AGENTS = process.env.REQUIRE_VERIFIED_AGENTS === "true";
+
 const relayWindowByAgent = new Map<string, { windowMs: number; count: number }>();
 const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>();
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
@@ -397,6 +481,7 @@ async function verifyAgentRequest(
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
+    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
     return "rejected";
   }
 
@@ -436,6 +521,7 @@ async function verifyAgentRequest(
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
+    behaviorTracker.recordProtocolViolation(agentId, sigResult.reason === "timestamp_skew" ? "replay_attempt" : "signature_failure");
     return "rejected";
   }
 
@@ -457,6 +543,7 @@ async function verifyAgentRequest(
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
+    behaviorTracker.recordProtocolViolation(agentId, "replay_attempt");
     return "rejected";
   }
 
@@ -1441,7 +1528,15 @@ const registerSchema = z.object({
     .optional(),
   publicKeyPem: z.string().optional(),
   x25519PublicKey: z.string().optional(),
-  sandboxMode: z.enum(["none", "docker", "vm"]).default("none")
+  sandboxMode: z.enum(["none", "docker", "vm"]).default("none"),
+  binaryIntegrity: z
+    .object({
+      distHash: z.string(),
+      releaseVersion: z.string(),
+      releaseSignature: z.string(),
+      distributionChannel: z.string(),
+    })
+    .optional()
 });
 
 const heartbeatSchema = z.object({
@@ -1564,6 +1659,38 @@ app.post("/register", async (req, reply) => {
     sandboxMode: body.sandboxMode as SandboxMode,
     lastSeenMs: now
   });
+  // ── Binary integrity verification ──
+  let verificationStatus: VerificationStatus = "unverified";
+  if (body.binaryIntegrity) {
+    const result = verifyBinaryIntegrity(
+      body.binaryIntegrity as BinaryIntegrityPayload,
+      releaseManifestCache.getAllManifests(),
+      now
+    );
+    verificationStatus = result.status;
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) {
+      (existing as any).verificationStatus = verificationStatus;
+      agentCapabilities.set(body.agentId, existing);
+    }
+    if (result.status === "signature_mismatch" || result.status === "hash_mismatch") {
+      securityLog.log({
+        level: securityLog.severity("binary_integrity_failure"),
+        event: "binary_integrity_failure",
+        source: { type: "agent", id: body.agentId },
+        details: { status: result.status, details: result.details, version: body.binaryIntegrity.releaseVersion, channel: body.binaryIntegrity.distributionChannel },
+        action: "integrity_flag",
+        coordinatorId: identity.peerId,
+      });
+      if (REQUIRE_VERIFIED_AGENTS) {
+        return reply.code(403).send({ error: "binary_integrity_failed", status: result.status });
+      }
+    }
+    app.log.info({ agentId: body.agentId, verificationStatus, version: body.binaryIntegrity.releaseVersion }, "binary_integrity_check");
+  }
+
+  behaviorTracker.recordRegistration(body.agentId, now);
+  evaluateAndEnforce(body.agentId);
   const approvalRecord = ordering.append({
     eventType: "node_approval",
     taskId: `agent:${body.agentId}`,
@@ -1622,6 +1749,7 @@ app.post("/heartbeat", async (req, reply) => {
     });
   }
   queue.heartbeat(body.agentId);
+  behaviorTracker.recordHeartbeat(body.agentId);
   if (body.powerTelemetry) {
     const existing = agentCapabilities.get(body.agentId);
     if (existing) {
@@ -1933,6 +2061,7 @@ app.post("/pull", async (req, reply) => {
     }
 
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
+    behaviorTracker.recordTaskClaim(body.agentId);
     const claimRecord = ordering.append({
       eventType: "task_claim",
       taskId: task.taskId,
@@ -2009,6 +2138,10 @@ app.post("/result", async (req, reply) => {
   }
   const subtask = queue.getSubtask(body.subtaskId);
   queue.complete(body);
+
+  // ── Behavioral monitoring ──
+  behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
+  evaluateAndEnforce(body.agentId);
 
   // ── Dependency tracking: store output and release dependent subtasks ──
   const released = depTracker.recordCompletionAndRelease(
@@ -4670,6 +4803,18 @@ app.get("/admin/dashboard/api/overview", async (req, reply) => {
     memoryMB: Math.round(process.memoryUsage.rss() / 1_048_576),
     meshPeers: mesh.listPeers().length
   });
+});
+
+app.get("/admin/agents/:agentId/behavior", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const params = z.object({ agentId: z.string() }).parse(req.params);
+  const stats = behaviorTracker.getStats(params.agentId);
+  if (!stats) {
+    return reply.code(404).send({ error: "agent_not_found", agentId: params.agentId });
+  }
+  const anomalies = anomalyDetector.evaluate(stats);
+  const strikeCount = autoBlacklister.getStrikeCount(params.agentId);
+  return reply.send({ agentId: params.agentId, stats, anomalies, strikeCount });
 });
 
 function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>): string {

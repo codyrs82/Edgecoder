@@ -17,7 +17,10 @@ export type SecurityEventType =
   | "key_expired"
   | "ast_validation_rejection"
   | "sandbox_timeout"
-  | "sandbox_seccomp_violation";
+  | "sandbox_seccomp_violation"
+  | "binary_integrity_failure"
+  | "behavioral_anomaly_detected"
+  | "auto_blacklist_triggered";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -44,6 +47,9 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   ast_validation_rejection: "INFO",
   sandbox_timeout: "WARN",
   sandbox_seccomp_violation: "HIGH",
+  binary_integrity_failure: "HIGH",
+  behavioral_anomaly_detected: "WARN",
+  auto_blacklist_triggered: "CRITICAL",
 };
 
 export class SecurityEventLogger {

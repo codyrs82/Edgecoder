@@ -121,6 +121,28 @@ jobs:
           name: windows-msi
           path: release-assets/
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build for signing
+        run: npm run build
+
+      - name: Sign release
+        run: bash scripts/sign-release.sh
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+          BUILD_DIR: release-assets
+
+      - name: Copy manifest into release assets
+        run: |
+          cp release-manifest.json release-assets/
+          cp release-manifest.sig release-assets/
+
       - name: List release assets
         run: ls -lh release-assets/
 

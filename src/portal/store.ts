@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS portal_wallet_onboarding (
   network TEXT NOT NULL,
   seed_phrase_hash TEXT NOT NULL,
   encrypted_private_key_ref TEXT NOT NULL,
+  derived_address TEXT,
   created_at_ms BIGINT NOT NULL,
   acknowledged_at_ms BIGINT
 );
@@ -809,11 +810,12 @@ export class PortalStore {
     network: string;
     seedPhraseHash: string;
     encryptedPrivateKeyRef: string;
+    derivedAddress?: string;
     createdAtMs: number;
     acknowledgedAtMs?: number;
   } | null> {
     const result = await this.pool.query(
-      `SELECT user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, created_at_ms, acknowledged_at_ms
+      `SELECT user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms, acknowledged_at_ms
        FROM portal_wallet_onboarding
        WHERE user_id = $1`,
       [userId]
@@ -826,6 +828,7 @@ export class PortalStore {
       network: row.network,
       seedPhraseHash: row.seed_phrase_hash,
       encryptedPrivateKeyRef: row.encrypted_private_key_ref,
+      derivedAddress: row.derived_address ?? undefined,
       createdAtMs: Number(row.created_at_ms),
       acknowledgedAtMs: row.acknowledged_at_ms ? Number(row.acknowledged_at_ms) : undefined
     };
@@ -837,11 +840,12 @@ export class PortalStore {
     network: string;
     seedPhraseHash: string;
     encryptedPrivateKeyRef: string;
+    derivedAddress?: string;
   }): Promise<void> {
     await this.pool.query(
       `INSERT INTO portal_wallet_onboarding (
-        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, created_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6)
+        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT (user_id) DO NOTHING`,
       [
         input.userId,
@@ -849,6 +853,7 @@ export class PortalStore {
         input.network,
         input.seedPhraseHash,
         input.encryptedPrivateKeyRef,
+        input.derivedAddress ?? null,
         Date.now()
       ]
     );
@@ -860,20 +865,22 @@ export class PortalStore {
     network: string;
     seedPhraseHash: string;
     encryptedPrivateKeyRef: string;
+    derivedAddress?: string;
   }): Promise<void> {
     const now = Date.now();
     await this.pool.query(
       `INSERT INTO portal_wallet_onboarding (
-        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, created_at_ms, acknowledged_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,NULL)
+        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms, acknowledged_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)
       ON CONFLICT (user_id) DO UPDATE SET
         account_id = EXCLUDED.account_id,
         network = EXCLUDED.network,
         seed_phrase_hash = EXCLUDED.seed_phrase_hash,
         encrypted_private_key_ref = EXCLUDED.encrypted_private_key_ref,
+        derived_address = EXCLUDED.derived_address,
         created_at_ms = EXCLUDED.created_at_ms,
         acknowledged_at_ms = NULL`,
-      [input.userId, input.accountId, input.network, input.seedPhraseHash, input.encryptedPrivateKeyRef, now]
+      [input.userId, input.accountId, input.network, input.seedPhraseHash, input.encryptedPrivateKeyRef, input.derivedAddress ?? null, now]
     );
   }
 

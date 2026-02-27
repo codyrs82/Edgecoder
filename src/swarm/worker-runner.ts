@@ -23,6 +23,7 @@ import { getLocalIpAddress } from "../mesh/network-utils.js";
 import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
+import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
@@ -575,6 +576,24 @@ async function loop(): Promise<void> {
       bleTransport = null;
     }
   }
+  // ── Binary integrity self-check ──
+  let binaryIntegrity: { distHash: string; releaseVersion: string; releaseSignature: string; distributionChannel: string } | undefined;
+  try {
+    const distDir = new URL("../../dist", import.meta.url).pathname;
+    const distHash = await computeDistHash(distDir);
+    const signed = await loadReleaseManifest(distDir);
+    const distributionChannel = detectDistributionChannel();
+    binaryIntegrity = {
+      distHash,
+      releaseVersion: signed?.manifest.version ?? "unknown",
+      releaseSignature: signed?.signature ?? "",
+      distributionChannel,
+    };
+    console.log(`[agent:${AGENT_ID}] binary integrity: dist=${distHash.slice(0, 12)}... channel=${distributionChannel}`);
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] binary integrity check failed (non-fatal): ${String(e)}`);
+  }
+
   let bleTaskTestDone = false;
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -604,7 +623,8 @@ async function loop(): Promise<void> {
           sandboxMode: SANDBOX_MODE,
           powerTelemetry,
           publicKeyPem: keys.publicKeyPem,
-          x25519PublicKey: envelopeKeys.publicKey.toString("base64")
+          x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+          ...(binaryIntegrity ? { binaryIntegrity } : {})
         };
         const registerResponse = (await post("/register", registerBody, {
           extraHeaders: signedHeaders("/register", registerBody),

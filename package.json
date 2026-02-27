@@ -41,6 +41,8 @@
     "@abandonware/noble": "^1.9.2-26",
     "@fastify/cors": "^11.2.0",
     "@fastify/websocket": "^11.2.0",
+    "@scure/base": "^2.0.0",
+    "@scure/bip32": "^2.0.1",
     "@simplewebauthn/server": "^13.2.2",
     "acorn": "^8.16.0",
     "better-sqlite3": "^12.6.2",
