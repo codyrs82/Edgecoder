@@ -45,6 +45,7 @@
   // ---- Pull state ----
   let pullTarget = $state("");
   let pulling = $state(false);
+  let pullingModelId = $state<string | null>(null);
   let pullStatus = $state("");
   let pullCompleted = $state(0);
   let pullTotal = $state(0);
@@ -111,7 +112,7 @@
   );
 
   // ---- Non-catalog installed models (shown in separate table) ----
-  let catalogModelIds = new Set(MODEL_CATALOG.map((cm) => cm.modelId));
+  const catalogModelIds = new Set(MODEL_CATALOG.map((cm) => cm.modelId));
   let nonCatalogModels = $derived(
     models.filter((m) => !catalogModelIds.has(m.modelId))
   );
@@ -158,6 +159,7 @@
     if (!name) return;
 
     pulling = true;
+    pullingModelId = name;
     pullStatus = "Starting pull...";
     pullCompleted = 0;
     pullTotal = 0;
@@ -207,6 +209,7 @@
       error = e instanceof Error ? e.message : "Pull failed";
     } finally {
       pulling = false;
+      pullingModelId = null;
       pullStatus = "";
       pullCompleted = 0;
       pullTotal = 0;
@@ -334,7 +337,7 @@
                   onclick={() => { pullTarget = model.modelId; handlePull(); }}
                   disabled={pulling}
                 >
-                  {pulling && pullTarget === model.modelId ? "Installing..." : "Install"}
+                  {pullingModelId === model.modelId ? "Installing..." : "Install"}
                 </button>
               {/if}
             </div>
