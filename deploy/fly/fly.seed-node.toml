@@ -14,7 +14,7 @@ primary_region = "ord"
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
-  OLLAMA_MODEL = "qwen2.5:3b"
+  OLLAMA_MODEL = "qwen2.5:14b"
   DISABLE_SELF_AGENT = "1"
 
 [http_service]
@@ -44,6 +44,6 @@ primary_region = "ord"
     grace_period = "15s"
 
 [[vm]]
-  memory = "8192mb"
+  memory = "16384mb"
   cpu_kind = "performance"
   cpus = 2

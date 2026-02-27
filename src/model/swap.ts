@@ -204,13 +204,21 @@ export async function listModels(
     return [];
   }
 
+  // If configured activeModel isn't among installed tags, resolve to the best match
+  const names = tags.models.map((m) => m.name);
+  const base = activeModel.split(":")[0];
+  const exactMatch = names.includes(activeModel);
+  const latestMatch = !exactMatch && names.find((n) => n === `${base}:latest`);
+  const prefixMatch = !exactMatch && !latestMatch && names.find((n) => n.startsWith(base + ":"));
+  const resolvedActive = exactMatch ? activeModel : (latestMatch ?? prefixMatch ?? names[0] ?? activeModel);
+
   return tags.models.map((m) => ({
     modelId: m.name,
     paramSize: parseParamSize(m.details.parameter_size)
       || paramSizeFromBytes(m.size),
     quantization: m.details.quantization_level,
     installed: true,
-    active: m.name === activeModel,
+    active: m.name === resolvedActive,
     source: "ollama" as const,
   }));
 }

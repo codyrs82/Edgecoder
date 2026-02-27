@@ -92,15 +92,34 @@
     running: boolean;
   }
 
+  /** Get the base name before the colon (e.g. "qwen2.5-coder" from "qwen2.5-coder:7b") */
+  function modelBase(id: string): string {
+    return id.split(":")[0];
+  }
+
+  /** Check if an Ollama tag matches a catalog model ID.
+   *  Exact match, or treat ":latest" as matching any variant of the same base. */
+  function tagMatchesCatalog(tagName: string, catalogId: string): boolean {
+    if (tagName === catalogId) return true;
+    // "qwen2.5-coder:latest" matches catalog "qwen2.5-coder:7b" (latest = default size)
+    const tagSuffix = tagName.split(":")[1] ?? "";
+    const catSuffix = catalogId.split(":")[1] ?? "";
+    if (modelBase(tagName) === modelBase(catalogId) && (tagSuffix === "latest" || catSuffix === "latest")) {
+      return true;
+    }
+    // Exact size match with different base won't happen, but be safe
+    return false;
+  }
+
   let catalogModels: CatalogEntry[] = $derived.by(() => {
-    const tagSet = new Set(ollamaTags.map((t) => t.name));
     const activeModel = modelList.find((m) => m.active)?.modelId ?? "";
-    const runningSet = new Set(runningModels.map((r) => r.name));
+    const runningNames = runningModels.map((r) => r.name);
+    const tagNames = ollamaTags.map((t) => t.name);
     return MODEL_CATALOG.map((cm) => ({
       ...cm,
-      installed: tagSet.has(cm.modelId),
-      active: cm.modelId === activeModel,
-      running: runningSet.has(cm.modelId),
+      installed: tagNames.some((t) => tagMatchesCatalog(t, cm.modelId)),
+      active: activeModel ? tagMatchesCatalog(activeModel, cm.modelId) : false,
+      running: runningNames.some((r) => tagMatchesCatalog(r, cm.modelId)),
     }));
   });
 
@@ -112,9 +131,8 @@
   );
 
   // ---- Non-catalog installed models (shown in separate table) ----
-  const catalogModelIds = new Set(MODEL_CATALOG.map((cm) => cm.modelId));
   let nonCatalogModels = $derived(
-    models.filter((m) => !catalogModelIds.has(m.modelId))
+    models.filter((m) => !MODEL_CATALOG.some((cm) => tagMatchesCatalog(m.modelId, cm.modelId)))
   );
 
   let pullPercent = $derived(
@@ -307,9 +325,14 @@
       <!-- Catalog grid -->
       <div class="catalog-grid">
         {#each filteredCatalog as model (model.modelId)}
-          <div class="catalog-card" class:installed={model.installed}>
+          <div class="catalog-card" class:installed={model.installed} class:active-model={model.active}>
             <div class="card-header">
               <span class="card-name">{model.name}</span>
+              {#if model.active}
+                <span class="badge-status badge-active-status">Active</span>
+              {:else if model.installed}
+                <span class="badge-status badge-installed-status">Installed</span>
+              {/if}
               {#if model.recommended}
                 <span class="badge-rec">Recommended</span>
               {/if}
@@ -521,6 +544,10 @@
   .catalog-card.installed {
     border-left: 3px solid rgba(34, 197, 94, 0.5);
   }
+  .catalog-card.active-model {
+    border-left: 3px solid var(--accent, #3b82f6);
+    background: rgba(59, 130, 246, 0.06);
+  }
 
   .card-header {
     display: flex;
@@ -532,6 +559,26 @@
     font-weight: 600;
     font-size: 0.95rem;
     color: var(--text-primary, #e2e8f0);
+  }
+
+  .badge-status {
+    font-size: 0.6rem;
+    font-weight: 700;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-sm, 4px);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .badge-active-status {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+  }
+
+  .badge-installed-status {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
   }
 
   .badge-rec {

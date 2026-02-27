@@ -4,6 +4,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:app:default",
     "shell:allow-open",
     "deep-link:default"
   ]

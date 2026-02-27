@@ -1,7 +1,23 @@
 <script lang="ts">
-  import { testMeshToken, getIdentity, backendReady, isRemoteMode } from "../lib/api";
+  import { testMeshToken, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import type { NodeIdentity } from "../lib/types";
+
+  // App version
+  let appVersion = $state("—");
+  (async () => {
+    try {
+      const { getVersion } = await import("@tauri-apps/api/app");
+      appVersion = await getVersion();
+    } catch {
+      appVersion = "dev";
+    }
+  })();
+
+  // Local model info
+  let activeModel = $state("—");
+  let ollamaStatus = $state("Checking...");
+  let installedModels = $state<string[]>([]);
 
   // --- Reactive state ---
   let meshToken = $state("");
@@ -45,6 +61,7 @@
     backendReady.then(() => {
       if (isRemoteMode()) {
         identityError = "No local agent running — identity requires a running agent.";
+        ollamaStatus = "No local agent";
         return;
       }
       getIdentity()
@@ -55,6 +72,19 @@
         .catch((e) => {
           identityError = e instanceof Error ? e.message : "Failed to load identity";
         });
+      getDashboardOverview()
+        .then((o) => {
+          activeModel = o.activeModel || "None";
+          ollamaStatus = o.ollamaHealthy ? "Running" : "Not running";
+        })
+        .catch(() => {
+          ollamaStatus = "Unreachable";
+        });
+      getModelList()
+        .then((models) => {
+          installedModels = models.filter((m: any) => m.installed).map((m: any) => m.modelId);
+        })
+        .catch(() => {});
     });
   });
 
@@ -193,6 +223,34 @@
     {#if showSaved}
       <span class="saved-toast">Saved!</span>
     {/if}
+  </div>
+
+  <!-- Local Model -->
+  <div class="section">
+    <h2>Local Model</h2>
+    <div class="about-row">
+      <span class="about-label">Active Model</span>
+      <span class="about-value mono">{activeModel}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">Ollama</span>
+      <span class="about-value" class:status-ok={ollamaStatus === "Running"} class:status-err={ollamaStatus !== "Running" && ollamaStatus !== "Checking..."}>{ollamaStatus}</span>
+    </div>
+    {#if installedModels.length > 0}
+      <div class="about-row">
+        <span class="about-label">Installed</span>
+        <span class="about-value mono">{installedModels.join(", ")}</span>
+      </div>
+    {/if}
+  </div>
+
+  <!-- About -->
+  <div class="section about-section">
+    <h2>About</h2>
+    <div class="about-row">
+      <span class="about-label">App Version</span>
+      <span class="about-value mono">{appVersion}</span>
+    </div>
   </div>
 </div>
 
@@ -430,5 +488,35 @@
     15% { opacity: 1; transform: translateX(0); }
     80% { opacity: 1; }
     100% { opacity: 0; }
+  }
+
+  .about-section {
+    margin-top: 1.5rem;
+    opacity: 0.7;
+  }
+  .about-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+    margin-bottom: 0.4rem;
+  }
+  .about-row:last-child {
+    margin-bottom: 0;
+  }
+  .about-label {
+    color: var(--text-muted, #94a3b8);
+  }
+  .about-value {
+    color: var(--text-primary, #e2e8f0);
+    text-align: right;
+    max-width: 60%;
+    word-break: break-word;
+  }
+  .status-ok {
+    color: var(--green, #4ade80);
+  }
+  .status-err {
+    color: var(--red, #f87171);
   }
 </style>

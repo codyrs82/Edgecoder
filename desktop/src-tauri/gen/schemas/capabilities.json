@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for EdgeCoder desktop","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open","deep-link:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for EdgeCoder desktop","local":true,"windows":["main"],"permissions":["core:default","core:app:default","shell:allow-open","deep-link:default"]}}

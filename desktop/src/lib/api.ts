@@ -529,7 +529,7 @@ export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {
 
 function chatBase(): string {
   if (import.meta.env.DEV) return "/chat";
-  return useRemote ? `${portalBase()}/portal/api` : "http://localhost:4304";
+  return useRemote ? `${portalBase()}/portal/api` : "http://localhost:11434";
 }
 
 export interface StreamRouteInfo {
