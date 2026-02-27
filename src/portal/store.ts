@@ -1251,5 +1251,36 @@ export class PortalStore {
       [conversationId]
     );
   }
+
+  async getStatsCounts(): Promise<{
+    users: { total: number; verified: number };
+    nodes: { total: number; approved: number; active: number; agents: number; coordinators: number };
+  }> {
+    const [usersResult, nodesResult] = await Promise.all([
+      this.pool.query(
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE email_verified) AS verified FROM portal_users`
+      ),
+      this.pool.query(
+        `SELECT COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE node_approved) AS approved,
+                COUNT(*) FILTER (WHERE active) AS active,
+                COUNT(*) FILTER (WHERE node_kind = 'agent') AS agents,
+                COUNT(*) FILTER (WHERE node_kind = 'coordinator') AS coordinators
+         FROM portal_node_enrollments`
+      )
+    ]);
+    const u = usersResult.rows[0];
+    const n = nodesResult.rows[0];
+    return {
+      users: { total: Number(u.total), verified: Number(u.verified) },
+      nodes: {
+        total: Number(n.total),
+        approved: Number(n.approved),
+        active: Number(n.active),
+        agents: Number(n.agents),
+        coordinators: Number(n.coordinators)
+      }
+    };
+  }
 }
 

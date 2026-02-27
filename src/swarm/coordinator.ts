@@ -3286,6 +3286,50 @@ app.get("/stats/projections/summary", async (req, reply) => {
     earnings: earnings ?? []
   };
 });
+app.get("/stats/network/summary", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  let portalCounts: { users: { total: number; verified: number }; nodes: { total: number; approved: number; active: number; agents: number; coordinators: number } } | null = null;
+  if (PORTAL_SERVICE_URL) {
+    try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      const res = await request(`${PORTAL_SERVICE_URL}/internal/stats/counts`, {
+        method: "GET",
+        headers,
+        headersTimeout: 5_000,
+        bodyTimeout: 5_000
+      });
+      if (res.statusCode === 200) {
+        portalCounts = (await res.body.json()) as { users: { total: number; verified: number }; nodes: { total: number; approved: number; active: number; agents: number; coordinators: number } };
+      }
+    } catch (err) {
+      app.log.warn({ err }, "stats_network_summary_portal_unreachable");
+    }
+  }
+  const allModels = new Set<string>();
+  for (const cap of agentCapabilities.values()) {
+    for (const m of cap.localModelCatalog) allModels.add(m);
+  }
+  return {
+    timestamp: Date.now(),
+    users: portalCounts?.users ?? null,
+    nodes: portalCounts
+      ? {
+          enrolled: portalCounts.nodes.total,
+          approved: portalCounts.nodes.approved,
+          active: portalCounts.nodes.active,
+          agents: portalCounts.nodes.agents,
+          coordinators: portalCounts.nodes.coordinators
+        }
+      : null,
+    live: {
+      agentsConnected: agentCapabilities.size,
+      queueDepth: [...directWorkById.values()].filter((w) => w.status === "offered").length,
+      activeTunnels: activeTunnels.size,
+      modelsAvailable: allModels.size
+    }
+  };
+});
 app.get("/mesh/reputation", async () => ({
   peers: mesh.listPeers().map((p) => ({ peerId: p.peerId, score: peerScore.get(p.peerId) ?? 100 }))
 }));
@@ -3988,7 +4032,7 @@ app.post("/portal/chat", async (req, reply) => {
     max_tokens: z.number().optional()
   }).parse(req.body);
 
-  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
 
   // Auto-detect available model if configured one isn't available
@@ -3997,7 +4041,7 @@ app.post("/portal/chat", async (req, reply) => {
   let activeModelQuantization: string | undefined;
   let activeModelParamSize = 0;
   try {
-    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", headersTimeout: 3_000 });
     if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
       const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string; size: number; details: { parameter_size: string; quantization_level: string } }> };
       const available = tags.models ?? [];
@@ -4019,6 +4063,57 @@ app.post("/portal/chat", async (req, reply) => {
     }
   } catch {
     ollamaHealthy = false;
+  }
+
+  // If Ollama is not available locally, forward to a peer coordinator that has Ollama
+  if (!ollamaHealthy) {
+    const peerUrls = COORDINATOR_BOOTSTRAP_URLS.filter(
+      (u) => u !== COORDINATOR_PUBLIC_URL
+    );
+
+    for (const peerUrl of peerUrls) {
+      const peerBase = peerUrl.replace(/\/$/, "");
+      const peerHeaders: Record<string, string> = { "content-type": "application/json" };
+      if (PORTAL_SERVICE_TOKEN) peerHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+      let peerRes;
+      try {
+        peerRes = await request(`${peerBase}/portal/chat`, {
+          method: "POST",
+          headers: peerHeaders,
+          body: JSON.stringify({
+            messages: body.messages,
+            model: body.model,
+            temperature: body.temperature,
+            max_tokens: body.max_tokens
+          }),
+          headersTimeout: 120_000,
+          bodyTimeout: 0
+        });
+      } catch {
+        continue; // try next peer
+      }
+
+      if (peerRes.statusCode < 200 || peerRes.statusCode >= 300) {
+        await peerRes.body.text().catch(() => ""); // drain body
+        continue; // try next peer
+      }
+
+      // Stream SSE from peer coordinator to client
+      reply.raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      });
+
+      for await (const chunk of peerRes.body) {
+        reply.raw.write(typeof chunk === "string" ? chunk : chunk);
+      }
+      reply.raw.end();
+      return;
+    }
+
+    return reply.code(502).send({ error: "no_ollama_peers_available" });
   }
 
   // Build swarm model list from agent capabilities
@@ -4051,6 +4146,7 @@ app.post("/portal/chat", async (req, reply) => {
     ...body.messages.filter((m) => m.role !== "system"),
   ];
 
+  // Local Ollama is available — call it directly
   const ollamaRes = await request(`${ollamaHost}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4063,7 +4159,7 @@ app.post("/portal/chat", async (req, reply) => {
         num_predict: body.max_tokens ?? 4096
       }
     }),
-    headersTimeout: 120_000, // LLM cold start can take 30-60s on CPU
+    headersTimeout: 120_000,
     bodyTimeout: 0
   });
 
