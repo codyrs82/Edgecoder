@@ -7,8 +7,9 @@
     streamPortalChat,
     portalCreateConversation,
     portalRenameConversation,
+    getModelPullProgress,
   } from "../lib/api";
-  import type { StreamProgress } from "../lib/api";
+  import type { StreamProgress, ModelPullProgress } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -32,6 +33,10 @@
 
   /** Whether we should stream via the portal API (server-side conversations) */
   let usePortalChat = $state(false);
+
+  /** Active model download progress */
+  let pullProgress: ModelPullProgress | null = $state(null);
+  let pullPollTimer: ReturnType<typeof setInterval> | undefined;
 
   const quickActions = [
     { label: "Fix a bug", prompt: "Help me fix a bug in my code" },
@@ -61,19 +66,26 @@
       const loaded = await loadConversationFromDb(lastId);
       if (loaded) {
         conversation = loaded;
-        return;
       }
     }
-    // Fallback: load most recent chat conversation
-    const recent = await listConversationsBySource("chat");
-    if (recent.length > 0) {
-      const loaded = await loadConversationFromDb(recent[0].id);
-      if (loaded) conversation = loaded;
+    if (!conversation.messages.length) {
+      // Fallback: load most recent chat conversation
+      const recent = await listConversationsBySource("chat");
+      if (recent.length > 0) {
+        const loaded = await loadConversationFromDb(recent[0].id);
+        if (loaded) conversation = loaded;
+      }
     }
+
+    // Poll for model download progress
+    pullPollTimer = setInterval(async () => {
+      pullProgress = await getModelPullProgress();
+    }, 3000);
   });
 
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
+    if (pullPollTimer) clearInterval(pullPollTimer);
     if (conversation.messages.length > 0) {
       localStorage.setItem("edgecoder-last-chat-id", conversation.id);
       saveConversation(conversation);
@@ -238,6 +250,16 @@
     {/if}
   </div>
 
+  {#if pullProgress}
+    <div class="pull-banner">
+      <span class="pull-label">Downloading {pullProgress.model}</span>
+      <div class="pull-bar-track">
+        <div class="pull-bar-fill" style="width: {pullProgress.progressPct}%"></div>
+      </div>
+      <span class="pull-pct">{pullProgress.progressPct}%</span>
+    </div>
+  {/if}
+
   {#if conversation.messages.length === 0 && !isStreaming}
     <div class="empty-state">
       <h2>What would you like to build?</h2>
@@ -340,5 +362,40 @@
     width: 100%;
     margin: 0 auto;
     padding: 16px 0;
+  }
+  .pull-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: var(--bg-surface);
+    border-bottom: 0.5px solid var(--border);
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .pull-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+  .pull-bar-track {
+    flex: 1;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .pull-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  .pull-pct {
+    min-width: 32px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 </style>

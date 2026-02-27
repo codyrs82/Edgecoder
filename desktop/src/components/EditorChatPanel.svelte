@@ -3,8 +3,8 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import ModelPicker from "./ModelPicker.svelte";
-  import { streamChat } from "../lib/api";
-  import type { StreamProgress } from "../lib/api";
+  import { streamChat, getModelPullProgress } from "../lib/api";
+  import type { StreamProgress, ModelPullProgress } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -30,6 +30,10 @@
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
 
+  /** Active model download progress */
+  let pullProgress: ModelPullProgress | null = $state(null);
+  let pullPollTimer: ReturnType<typeof setInterval> | undefined;
+
   onMount(async () => {
     // Restore last editor conversation
     const lastId = localStorage.getItem("edgecoder-last-editor-id");
@@ -47,10 +51,16 @@
       }
     }
     recentConversations = await listConversationsBySource("editor");
+
+    // Poll for model download progress
+    pullPollTimer = setInterval(async () => {
+      pullProgress = await getModelPullProgress();
+    }, 3000);
   });
 
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
+    if (pullPollTimer) clearInterval(pullPollTimer);
     if (conversation.messages.length > 0) {
       localStorage.setItem("edgecoder-last-editor-id", conversation.id);
       saveConversation(conversation);
@@ -203,6 +213,16 @@
           </button>
         {/each}
       {/if}
+    </div>
+  {/if}
+
+  {#if pullProgress}
+    <div class="pull-banner">
+      <span class="pull-label">Downloading {pullProgress.model}</span>
+      <div class="pull-bar-track">
+        <div class="pull-bar-fill" style="width: {pullProgress.progressPct}%"></div>
+      </div>
+      <span class="pull-pct">{pullProgress.progressPct}%</span>
     </div>
   {/if}
 
@@ -391,5 +411,40 @@
     border-top: 0.5px solid var(--border);
     padding: 8px;
     flex-shrink: 0;
+  }
+  .pull-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--bg-surface);
+    border-bottom: 0.5px solid var(--border);
+    font-size: 11px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .pull-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .pull-bar-track {
+    flex: 1;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .pull-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  .pull-pct {
+    min-width: 28px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 </style>

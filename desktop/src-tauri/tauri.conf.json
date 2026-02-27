@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420 blob:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* https://edgecoder-portal.fly.dev https://accounts.google.com https://login.microsoftonline.com https://graph.microsoft.com https://oauth2.googleapis.com; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420 blob:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* https://edgecoder-portal.fly.dev https://edgecoder-seed.fly.dev https://accounts.google.com https://login.microsoftonline.com https://graph.microsoft.com https://oauth2.googleapis.com; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
     }
   },
   "bundle": {

@@ -19,7 +19,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-edgecoder}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edgecoder}
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
-      - OLLAMA_MODEL=qwen2.5-coder:latest
+      - OLLAMA_MODEL=qwen2.5:7b
     ports:
       - "4301:4301"
     depends_on:
@@ -40,7 +40,7 @@ services:
       - AGENT_MODE=swarm-only
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
-      - OLLAMA_MODEL=qwen2.5-coder:latest
+      - OLLAMA_MODEL=qwen2.5:7b
     depends_on:
       seed-node:
         condition: service_healthy

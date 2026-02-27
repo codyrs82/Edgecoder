@@ -88,6 +88,9 @@ import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
 import { SecurityEventLogger, type SecurityEventType } from "../audit/security-events.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
 import { isValidSnapshotRef } from "./snapshot-resolver.js";
+import { PullTracker } from "../model/pull-tracker.js";
+import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
+import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -111,6 +114,7 @@ const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordina
 const BITCOIN_NETWORK = (process.env.BITCOIN_NETWORK ?? "testnet") as "bitcoin" | "testnet" | "signet";
 const ROBOT_QUEUE_ENABLED = process.env.ROBOT_QUEUE_ENABLED === "true";
 const ROBOT_COORDINATOR_FEE_BPS = Number(process.env.ROBOT_COORDINATOR_FEE_BPS ?? "200");
+const coordinatorPullTracker = new PullTracker();
 const ROBOT_SWEEP_INTERVAL_MS = Number(process.env.ROBOT_SWEEP_INTERVAL_MS ?? "86400000");
 const ROBOT_MIN_SWEEP_SATS = Number(process.env.ROBOT_MIN_SWEEP_SATS ?? "10000");
 const ROBOT_TASK_DEFAULT_TIMEOUT_MS = Number(process.env.ROBOT_TASK_DEFAULT_TIMEOUT_MS ?? "3600000");
@@ -4031,24 +4035,38 @@ app.post("/portal/chat", async (req, reply) => {
   const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
 
-  // Check if local Ollama is reachable; if not, forward to inference service
-  let ollamaReachable = false;
+  // Auto-detect available model if configured one isn't available
+  let ollamaHealthy = true;
+  let installedModels: Array<{ name: string; paramSize: number }> = [];
+  let activeModelQuantization: string | undefined;
+  let activeModelParamSize = 0;
   try {
     const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", headersTimeout: 3_000 });
     if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
-      ollamaReachable = true;
-      const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string }> };
-      const available = tags.models?.map((m) => m.name) ?? [];
-      if (available.length > 0 && !available.some((m) => m === chatModel || m.startsWith(chatModel + ":"))) {
-        chatModel = available[0];
+      const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string; size: number; details: { parameter_size: string; quantization_level: string } }> };
+      const available = tags.models ?? [];
+      installedModels = available.map((m) => ({
+        name: m.name,
+        paramSize: parseFloat(m.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0"),
+      }));
+      const activeEntry = available.find((m) => m.name === chatModel);
+      if (activeEntry) {
+        activeModelParamSize = parseFloat(activeEntry.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0");
+        activeModelQuantization = activeEntry.details.quantization_level;
+      }
+      if (available.length > 0 && !available.some((m) => m.name === chatModel || m.name.startsWith(chatModel + ":"))) {
+        chatModel = available[0].name;
+        const fallback = available[0];
+        activeModelParamSize = parseFloat(fallback.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0");
+        activeModelQuantization = fallback.details.quantization_level;
       }
     }
   } catch {
-    // Ollama not reachable locally
+    ollamaHealthy = false;
   }
 
   // If Ollama is not available locally, forward to a peer coordinator that has Ollama
-  if (!ollamaReachable) {
+  if (!ollamaHealthy) {
     const peerUrls = COORDINATOR_BOOTSTRAP_URLS.filter(
       (u) => u !== COORDINATOR_PUBLIC_URL
     );
@@ -4098,27 +4116,52 @@ app.post("/portal/chat", async (req, reply) => {
     return reply.code(502).send({ error: "no_ollama_peers_available" });
   }
 
-  // Local Ollama is available — call it directly
-  let ollamaRes;
-  try {
-    ollamaRes = await request(`${ollamaHost}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: chatModel,
-        messages: body.messages,
-        stream: true,
-        options: {
-          temperature: body.temperature ?? 0.7,
-          num_predict: body.max_tokens ?? 4096
-        }
-      }),
-      headersTimeout: 120_000,
-      bodyTimeout: 0
-    });
-  } catch (err) {
-    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: String(err) });
+  // Build swarm model list from agent capabilities
+  const swarmModelMap: Record<string, number> = {};
+  for (const [, cap] of agentCapabilities) {
+    if (cap.activeModel) {
+      swarmModelMap[cap.activeModel] = (swarmModelMap[cap.activeModel] ?? 0) + 1;
+    }
   }
+  const swarmModels = Object.entries(swarmModelMap).map(([model, agentCount]) => ({ model, agentCount }));
+
+  const queueStatus = queue.status();
+  const pullProgress = coordinatorPullTracker.getProgress();
+
+  const systemPromptCtx: SystemPromptContext = {
+    activeModel: chatModel,
+    activeModelParamSize,
+    activeModelQuantization,
+    installedModels,
+    swarmModels,
+    ollamaHealthy,
+    queueDepth: queueStatus.queued,
+    connectedAgents: agentCapabilities.size,
+    pullInProgress: pullProgress ? { model: pullProgress.model, progressPct: pullProgress.progressPct } : undefined,
+  };
+
+  const systemPrompt = buildChatSystemPrompt(systemPromptCtx);
+  const messagesWithSystem = [
+    { role: "system", content: systemPrompt },
+    ...body.messages.filter((m) => m.role !== "system"),
+  ];
+
+  // Local Ollama is available — call it directly
+  const ollamaRes = await request(`${ollamaHost}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: chatModel,
+      messages: messagesWithSystem,
+      stream: true,
+      options: {
+        temperature: body.temperature ?? 0.7,
+        num_predict: body.max_tokens ?? 4096
+      }
+    }),
+    headersTimeout: 120_000,
+    bodyTimeout: 0
+  });
 
   if (ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
     const errText = await ollamaRes.body.text().catch(() => "");
@@ -4150,6 +4193,12 @@ app.post("/portal/chat", async (req, reply) => {
   }
 
   reply.raw.end();
+});
+
+// Pull progress endpoint on the coordinator
+app.get("/model/pull/progress", async (_req, reply) => {
+  const progress = coordinatorPullTracker.getProgress();
+  return reply.send(progress ?? { status: "idle" });
 });
 
 app.post("/escalate", async (req, reply) => {

@@ -6,6 +6,7 @@ import type {
   ModelStatusResponse,
   ModelListEntry,
 } from "../common/types.js";
+import type { PullTracker } from "./pull-tracker.js";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
 
@@ -32,7 +33,7 @@ function paramSizeFromBytes(sizeBytes: number): number {
   return Math.round((sizeBytes / 1e9) * 10) / 10;
 }
 
-async function ollamaTags(): Promise<OllamaTagsResponse> {
+export async function ollamaTags(): Promise<OllamaTagsResponse> {
   const res = await fetch(`${OLLAMA_HOST}/api/tags`);
   if (!res.ok) throw new Error(`ollama_tags_failed: ${res.status}`);
   return res.json() as Promise<OllamaTagsResponse>;
@@ -41,6 +42,7 @@ async function ollamaTags(): Promise<OllamaTagsResponse> {
 export async function swapModel(
   targetModel: string,
   currentModel: string,
+  tracker?: PullTracker,
 ): Promise<ModelSwapResponse> {
   let tags: OllamaTagsResponse;
   try {
@@ -67,14 +69,33 @@ export async function swapModel(
     };
   }
 
-  // Model not installed — trigger pull
+  // Model not installed — trigger streaming pull
+  tracker?.startPull(targetModel);
+
   try {
-    await fetch(`${OLLAMA_HOST}/api/pull`, {
+    const res = await fetch(`${OLLAMA_HOST}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: targetModel, stream: false }),
+      body: JSON.stringify({ name: targetModel, stream: true }),
+    });
+
+    if (!res.ok || !res.body) {
+      tracker?.failPull("pull_request_failed");
+      return {
+        previous: currentModel,
+        active: currentModel,
+        status: "error",
+        paramSize: 0,
+        error: "pull_failed",
+      };
+    }
+
+    // Process streaming NDJSON in background — don't block the response
+    processStreamingPull(res.body, tracker).catch(() => {
+      tracker?.failPull("stream_read_error");
     });
   } catch {
+    tracker?.failPull("pull_fetch_error");
     return {
       previous: currentModel,
       active: currentModel,
@@ -91,6 +112,54 @@ export async function swapModel(
     paramSize: 0,
     progress: 0,
   };
+}
+
+async function processStreamingPull(
+  body: ReadableStream<Uint8Array>,
+  tracker?: PullTracker,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as {
+            status?: string;
+            completed?: number;
+            total?: number;
+            error?: string;
+          };
+          if (parsed.error) {
+            tracker?.failPull(parsed.error);
+            return;
+          }
+          if (parsed.status) {
+            tracker?.updateProgress(
+              parsed.status,
+              parsed.completed ?? 0,
+              parsed.total ?? 0,
+            );
+          }
+        } catch {
+          // skip malformed JSON
+        }
+      }
+    }
+    tracker?.completePull();
+  } catch {
+    tracker?.failPull("stream_interrupted");
+  }
 }
 
 export async function getModelStatus(

@@ -3,11 +3,13 @@
 
 import type { FastifyInstance } from "fastify";
 import { swapModel, getModelStatus, listModels } from "./swap.js";
+import { PullTracker } from "./pull-tracker.js";
 
 export interface ModelSwapState {
   activeModel: string;
   activeModelParamSize: number;
   onModelChanged?: (model: string, paramSize: number) => void;
+  pullTracker: PullTracker;
 }
 
 export function buildModelSwapRoutes(
@@ -20,7 +22,7 @@ export function buildModelSwapRoutes(
       return reply.code(400).send({ error: "model_required" });
     }
 
-    const result = await swapModel(model, state.activeModel);
+    const result = await swapModel(model, state.activeModel, state.pullTracker);
 
     if (result.status === "ready") {
       state.activeModel = result.active;
@@ -39,5 +41,10 @@ export function buildModelSwapRoutes(
   app.get("/model/list", async (_req, reply) => {
     const result = await listModels(state.activeModel);
     return reply.send(result);
+  });
+
+  app.get("/model/pull/progress", async (_req, reply) => {
+    const progress = state.pullTracker.getProgress();
+    return reply.send(progress ?? { status: "idle" });
   });
 }

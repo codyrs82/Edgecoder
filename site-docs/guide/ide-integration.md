@@ -265,6 +265,20 @@ The response includes an `edgecoder` field with `route` and `latencyMs` so you c
 
 ---
 
+## System-aware chat
+
+All chat requests (both portal and IDE provider) receive a server-injected system prompt that makes the chatbot aware of its own model, installed models, swarm state, routing behavior, and download progress. You can ask "What model are you running?" or "What models are on the network?" and get accurate, real-time answers.
+
+For the IDE provider path, any file-context system messages sent by the editor (e.g. "The user is editing main.py") are preserved and merged after the EdgeCoder system prompt. See the [Model Management guide](/guide/model-management#system-aware-chat-dynamic-system-prompt) for details.
+
+## Download progress
+
+When a model download is in progress, the desktop app displays a slim progress banner in both the Chat and Editor panels. The banner shows the model name, a progress bar, and percentage. You can also query the progress programmatically:
+
+```bash
+curl http://127.0.0.1:4301/model/pull/progress
+```
+
 ## Routing behaviour
 
 ### When does traffic go to swarm?

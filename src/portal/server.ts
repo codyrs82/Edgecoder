@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
@@ -35,6 +36,12 @@ import {
 } from "./portal-utils.js";
 
 const app = Fastify({ logger: true });
+
+await app.register(cors, {
+  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  credentials: true,
+});
+
 const store = PortalStore.fromEnv();
 
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";

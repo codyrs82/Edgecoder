@@ -14,7 +14,7 @@ COPY tests ./tests
 
 RUN npm run build
 
-EXPOSE 4301 4302 4303 4304 4305
+EXPOSE 4301 4302 4303 4304 4310
 
 # Entrypoint: if SKIP_OLLAMA=true, skip Ollama entirely (for portal,
 # standalone coordinator).  Otherwise start Ollama in the background and

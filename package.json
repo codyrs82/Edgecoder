@@ -39,6 +39,7 @@
   "dependencies": {
     "@abandonware/bleno": "^0.6.2",
     "@abandonware/noble": "^1.9.2-26",
+    "@fastify/cors": "^11.2.0",
     "@fastify/websocket": "^11.2.0",
     "@simplewebauthn/server": "^13.2.2",
     "acorn": "^8.16.0",
