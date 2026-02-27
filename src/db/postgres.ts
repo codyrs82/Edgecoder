@@ -358,6 +358,14 @@ CREATE TABLE IF NOT EXISTS agent_rollout_states (
   error TEXT,
   PRIMARY KEY (rollout_id, agent_id)
 );
+
+-- Performance indexes for hot-path queries
+CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at ON stats_ledger_records (issued_at_ms ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_records (issued_at_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
 `;
 
 export class PostgresStore {
@@ -541,18 +549,19 @@ export class PostgresStore {
     hash: string;
     count: number;
   } | null> {
-    const latestResult = await this.pool.query(
-      `SELECT issued_at_ms, hash
-       FROM stats_ledger_records
-       ORDER BY issued_at_ms DESC, id DESC
+    const result = await this.pool.query(
+      `SELECT s.issued_at_ms, s.hash, c.reltuples::BIGINT AS count
+       FROM stats_ledger_records s,
+            pg_class c
+       WHERE c.relname = 'stats_ledger_records'
+       ORDER BY s.issued_at_ms DESC, s.id DESC
        LIMIT 1`
     );
-    if (!latestResult.rows[0]) return null;
-    const countResult = await this.pool.query(`SELECT COUNT(*)::BIGINT AS count FROM stats_ledger_records`);
+    if (!result.rows[0]) return null;
     return {
-      issuedAtMs: Number(latestResult.rows[0].issued_at_ms),
-      hash: latestResult.rows[0].hash,
-      count: Number(countResult.rows[0]?.count ?? 0)
+      issuedAtMs: Number(result.rows[0].issued_at_ms),
+      hash: result.rows[0].hash,
+      count: Number(result.rows[0]?.count ?? 0)
     };
   }
 
