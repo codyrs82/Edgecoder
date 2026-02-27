@@ -1138,11 +1138,17 @@ async function ingestStatsLedgerRecords(records: QueueEventRecord[]): Promise<{ 
 async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinatorUrl: string }): Promise<void> {
   if (!pgStore) return;
   try {
+    const meshHeaders = MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined;
     const headRes = await request(`${peer.coordinatorUrl}/stats/ledger/head`, {
       method: "GET",
-      headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
+      headers: meshHeaders,
+      headersTimeout: 8_000,
+      bodyTimeout: 8_000,
     });
-    if (headRes.statusCode < 200 || headRes.statusCode >= 300) return;
+    if (headRes.statusCode < 200 || headRes.statusCode >= 300) {
+      await headRes.body.text().catch(() => "");
+      return;
+    }
     const remoteHead = (await headRes.body.json()) as { issuedAtMs?: number };
     if (!remoteHead.issuedAtMs) return;
     const localHead = await pgStore.latestStatsLedgerHead();
@@ -1152,10 +1158,15 @@ async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinatorUrl: s
       `${peer.coordinatorUrl}/stats/ledger/range?sinceIssuedAtMs=${encodeURIComponent(String(sinceIssuedAtMs))}&limit=1000`,
       {
         method: "GET",
-        headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
+        headers: meshHeaders,
+        headersTimeout: 15_000,
+        bodyTimeout: 15_000,
       }
     );
-    if (rangeRes.statusCode < 200 || rangeRes.statusCode >= 300) return;
+    if (rangeRes.statusCode < 200 || rangeRes.statusCode >= 300) {
+      await rangeRes.body.text().catch(() => "");
+      return;
+    }
     const payload = (await rangeRes.body.json()) as { records?: QueueEventRecord[] };
     if (!Array.isArray(payload.records) || payload.records.length === 0) return;
     await ingestStatsLedgerRecords(payload.records);
