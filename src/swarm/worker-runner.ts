@@ -249,11 +249,17 @@ async function post(
       const rawText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
       if (res.statusCode < 200 || res.statusCode >= 300) {
         const payloadText = rawText && rawText !== "{}" ? rawText : "<empty>";
-        throw new Error(`POST ${path} failed (${res.statusCode}): ${payloadText}`);
+        const err = new Error(`POST ${path} failed (${res.statusCode}): ${payloadText}`);
+        (err as any).statusCode = res.statusCode;
+        throw err;
       }
       return parsed;
     } catch (error) {
       lastError = error;
+      // Don't retry on 403 (blacklisted/rejected) or 401 (auth) — retrying wastes
+      // budget and can trigger DOS detection from rapid registration attempts.
+      const code = (error as any).statusCode;
+      if (code === 401 || code === 403) break;
       if (attempt >= retries) break;
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     }
@@ -334,9 +340,16 @@ function connectMeshWebSocket(
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
+    // Wait for a valid mesh token before connecting — connecting without one
+    // triggers rapid 4001 close → reconnect loops that trip DOS detection.
+    if (!meshAuthToken) {
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      return;
+    }
     // Build URL on each connect so it picks up the latest meshAuthToken
     // (token may be provisioned from coordinator after initial registration)
-    const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken || "")}&peerId=${encodeURIComponent(AGENT_ID)}`;
+    const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken)}&peerId=${encodeURIComponent(AGENT_ID)}`;
     const ws = new WebSocket(fullUrl);
 
     // Track which coordinator peerId this WS is registered against
