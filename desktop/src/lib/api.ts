@@ -51,6 +51,17 @@ function portalBase(): string {
 
 const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
 
+export async function checkOllamaAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/tags`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------

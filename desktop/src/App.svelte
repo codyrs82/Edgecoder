@@ -6,8 +6,9 @@
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
+  import OllamaSetup from "./components/OllamaSetup.svelte";
   import type { AuthUser } from "./lib/api";
-  import { getMe } from "./lib/api";
+  import { getMe, checkOllamaAvailable } from "./lib/api";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -17,6 +18,7 @@
 
   let user: AuthUser | null = $state(null);
   let authChecked = $state(false);
+  let showOllamaSetup = $state(false);
 
   $effect(() => {
     if (import.meta.env.DEV) {
@@ -34,6 +36,14 @@
       .then((u) => { user = u; })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
+  });
+
+  $effect(() => {
+    if (user && !import.meta.env.DEV) {
+      checkOllamaAvailable().then((ok) => {
+        if (!ok) showOllamaSetup = true;
+      });
+    }
   });
 
   function handleLogin(u: AuthUser) {
@@ -146,6 +156,10 @@
         user={user!}
         onLogout={() => { user = null; settingsOpen = false; }}
       />
+    {/if}
+
+    {#if showOllamaSetup}
+      <OllamaSetup onDismiss={() => showOllamaSetup = false} />
     {/if}
 
     <ConversationSidebar
