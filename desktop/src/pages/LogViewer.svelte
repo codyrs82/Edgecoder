@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { getHealth, getStatus, getDashboardOverview, backendReady, isRemoteMode } from "../lib/api";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import { getHealth, getStatus, backendReady, isRemoteMode } from "../lib/api";
 
   // --- Types ---
   interface LogEntry {
@@ -15,7 +16,8 @@
   let prevResults = $state(-1);
   let visibleLimit = $state(100);
   let lastErrorMsg = $state("");
-  let polling = $state(false);
+  let polling = false;
+  let pollInterval: ReturnType<typeof setInterval> | undefined;
 
   // Derived filtered logs — capped at visibleLimit for DOM perf
   let allFilteredLogs = $derived(
@@ -94,8 +96,8 @@
     }
   }
 
-  // Mount: start polling
-  $effect(() => {
+  // Mount: start polling (use onMount to avoid $effect reactivity loops)
+  onMount(() => {
     addEntry("info", "Log viewer started");
     backendReady.then(() => {
       if (isRemoteMode()) {
@@ -104,10 +106,13 @@
       }
       poll();
     });
-    const interval = setInterval(() => {
+    pollInterval = setInterval(() => {
       if (!isRemoteMode()) poll();
     }, 5000);
-    return () => clearInterval(interval);
+  });
+
+  onDestroy(() => {
+    if (pollInterval) clearInterval(pollInterval);
   });
 </script>
 
