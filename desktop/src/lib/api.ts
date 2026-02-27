@@ -450,6 +450,79 @@ export async function completeOAuthWithToken(mobileToken: string): Promise<AuthU
 }
 
 // ---------------------------------------------------------------------------
+// Wallet API (portal)
+// ---------------------------------------------------------------------------
+
+export interface WalletOnboarding {
+  accountId: string;
+  network: string;
+  derivedAddress: string | null;
+  createdAtMs: number;
+  acknowledgedAtMs: number | null;
+}
+
+export interface WalletSeedSetup {
+  ok: boolean;
+  accountId: string;
+  network: string;
+  seedPhrase: string;
+  derivedAddress: string | null;
+  guidance: { title: string; steps: string[] };
+}
+
+export interface WalletSendRequest {
+  requestId: string;
+  destination: string;
+  amountSats: number;
+  note: string | null;
+  status: string;
+  createdAtMs: number;
+}
+
+export async function getWalletOnboarding(): Promise<WalletOnboarding | null> {
+  try {
+    const res = await fetch(`${portalBase()}/wallet/onboarding`, {
+      credentials: "include",
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Wallet status: ${res.status}`);
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function setupWalletSeed(): Promise<WalletSeedSetup> {
+  const res = await fetch(`${portalBase()}/wallet/onboarding/setup-seed`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error("Failed to generate seed phrase");
+  return res.json();
+}
+
+export async function acknowledgeWalletSeed(): Promise<void> {
+  const res = await fetch(`${portalBase()}/wallet/onboarding/acknowledge`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error("Failed to acknowledge seed backup");
+}
+
+export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {
+  const res = await fetch(`${portalBase()}/wallet/send/requests`, {
+    credentials: "include",
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.requests ?? [];
+}
+
+// ---------------------------------------------------------------------------
 // IDE chat provider (:4304)
 // ---------------------------------------------------------------------------
 
