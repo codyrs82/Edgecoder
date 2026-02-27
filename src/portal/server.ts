@@ -4766,11 +4766,19 @@ app.get("/portal/chat", async (_req, reply) => {
       }
       .new-chat-btn:hover { filter:brightness(1.1); box-shadow:0 2px 12px rgba(193,120,80,0.3); transform:translateY(-1px); }
       .conv-item {
-        padding:10px 12px; border-radius:var(--radius-sm); cursor:pointer;
+        position:relative; padding:10px 30px 10px 12px; border-radius:var(--radius-sm); cursor:pointer;
         margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden;
         text-overflow:ellipsis; color:var(--text-secondary);
         transition:all var(--transition-fast); border:1px solid transparent;
       }
+      .conv-delete {
+        position:absolute; right:8px; top:50%; transform:translateY(-50%);
+        opacity:0; background:none; border:none; cursor:pointer;
+        color:var(--text-secondary); font-size:14px; padding:2px 4px;
+        transition:opacity var(--transition-fast), color var(--transition-fast);
+      }
+      .conv-item:hover .conv-delete { opacity:0.6; }
+      .conv-delete:hover { opacity:1 !important; color:#e74c3c; }
       .conv-item:hover { background:var(--bg-surface); color:var(--text); }
       .conv-item.active { background:var(--bg-surface); color:var(--brand); border-color:rgba(193,120,80,0.2); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
@@ -4954,7 +4962,7 @@ app.get("/portal/chat", async (_req, reply) => {
       for (var i = 0; i < filtered.length; i++) {
         var c = filtered[i];
         var cls = "conv-item" + (c.conversationId === activeConvId ? " active" : "");
-        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "</div>";
+        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&#128465;</button></div>";
       }
       if (filtered.length === 0) {
         html = "<div class=\\"muted\\" style=\\"padding:8px; font-size:12px;\\">No conversations yet</div>";
@@ -5020,6 +5028,22 @@ app.get("/portal/chat", async (_req, reply) => {
         }
       } catch (err) {
         showToast("Could not create conversation: " + String(err.message || err), true);
+      }
+    }
+
+    async function deleteConversation(convId) {
+      if (!confirm("Delete this conversation? This cannot be undone.")) return;
+      try {
+        await api("/portal/api/conversations/" + convId, { method: "DELETE" });
+        conversations = conversations.filter(function(c) { return c.conversationId !== convId; });
+        if (activeConvId === convId) {
+          activeConvId = conversations.length > 0 ? conversations[0].conversationId : null;
+          if (activeConvId) await loadMessages(activeConvId);
+          else renderMessages([]);
+        }
+        renderConversations();
+      } catch (err) {
+        showToast("Could not delete conversation: " + String(err.message || err), true);
       }
     }
 
@@ -5174,6 +5198,12 @@ app.get("/portal/chat", async (_req, reply) => {
     });
 
     document.getElementById("convList").addEventListener("click", function(e) {
+      var delBtn = e.target.closest(".conv-delete");
+      if (delBtn && delBtn.dataset.deleteId) {
+        e.stopPropagation();
+        deleteConversation(delBtn.dataset.deleteId);
+        return;
+      }
       var item = e.target.closest(".conv-item");
       if (item && item.dataset.id) {
         selectConversation(item.dataset.id);
