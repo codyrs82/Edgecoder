@@ -446,7 +446,7 @@
           class="pull-input"
           type="text"
           bind:value={pullTarget}
-          placeholder="e.g. qwen2.5:7b"
+          placeholder="e.g. qwen3.5:9b"
           disabled={pulling}
           onkeydown={(e: KeyboardEvent) => {
             if (e.key === "Enter") handlePull();

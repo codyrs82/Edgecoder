@@ -331,7 +331,7 @@ export class IntelligentRouter {
   // -------------------------------------------------------------------------
 
   private readonly ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  private readonly ollamaChatModel = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  private readonly ollamaChatModel = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 
   async routeChat(
     messages: ChatMessage[],

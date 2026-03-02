@@ -14,12 +14,12 @@ export interface CatalogModel {
 export const MODEL_CATALOG: CatalogModel[] = [
   // ---- Coding ----
   {
-    modelId: "qwen2.5-coder:7b",
-    name: "Qwen 2.5 Coder",
-    paramSize: "7B",
-    diskSize: "4.7 GB",
+    modelId: "qwen3.5:35b",
+    name: "Qwen 3.5 35B MoE",
+    paramSize: "35B (3B active)",
+    diskSize: "24 GB",
     description:
-      "State-of-the-art code generation and completion with strong multi-language support.",
+      "Top-tier MoE coding model with 256K context, native tool use, and Apache 2.0 license.",
     category: "coding",
     recommended: true,
   },
@@ -33,16 +33,26 @@ export const MODEL_CATALOG: CatalogModel[] = [
     category: "coding",
   },
   {
-    modelId: "codellama:7b",
-    name: "Code Llama",
-    paramSize: "7B",
-    diskSize: "3.8 GB",
+    modelId: "qwen3.5:4b",
+    name: "Qwen 3.5 4B",
+    paramSize: "4B",
+    diskSize: "3.4 GB",
     description:
-      "Meta's code-specialised Llama model with infilling and instruction-following support.",
+      "Compact Qwen 3.5 coding variant with strong multi-language support on modest hardware.",
     category: "coding",
   },
 
   // ---- General Purpose ----
+  {
+    modelId: "qwen3.5:9b",
+    name: "Qwen 3.5 9B",
+    paramSize: "9B",
+    diskSize: "6.6 GB",
+    description:
+      "Balanced general-purpose model with 256K context, multimodal input, and agentic capabilities.",
+    category: "general",
+    recommended: true,
+  },
   {
     modelId: "llama3.1:8b",
     name: "Llama 3.1",
@@ -51,45 +61,35 @@ export const MODEL_CATALOG: CatalogModel[] = [
     description:
       "Meta's versatile open model with strong instruction-following and reasoning abilities.",
     category: "general",
-    recommended: true,
   },
   {
-    modelId: "mistral:7b",
-    name: "Mistral",
-    paramSize: "7B",
-    diskSize: "4.1 GB",
+    modelId: "qwen3.5:27b",
+    name: "Qwen 3.5 27B",
+    paramSize: "27B",
+    diskSize: "17 GB",
     description:
-      "Efficient general-purpose model with sliding-window attention and solid performance.",
-    category: "general",
-  },
-  {
-    modelId: "gemma2:9b",
-    name: "Gemma 2",
-    paramSize: "9B",
-    diskSize: "5.4 GB",
-    description:
-      "Google's lightweight open model optimised for helpfulness and safety.",
+      "High-capacity Qwen 3.5 dense model for demanding general-purpose workloads.",
     category: "general",
   },
 
   // ---- Small & Fast ----
   {
-    modelId: "qwen2.5:0.5b",
-    name: "Qwen 2.5 Tiny",
-    paramSize: "0.5B",
-    diskSize: "0.4 GB",
+    modelId: "qwen3.5:2b",
+    name: "Qwen 3.5 2B",
+    paramSize: "2B",
+    diskSize: "2.7 GB",
     description:
-      "Ultra-light model for quick prototyping and low-resource environments.",
+      "Lightweight Qwen 3.5 for quick prototyping and resource-constrained environments.",
     category: "small",
     recommended: true,
   },
   {
-    modelId: "phi3:mini",
-    name: "Phi-3 Mini",
-    paramSize: "3.8B",
-    diskSize: "2.3 GB",
+    modelId: "qwen3.5:0.8b",
+    name: "Qwen 3.5 0.8B",
+    paramSize: "0.8B",
+    diskSize: "1.0 GB",
     description:
-      "Microsoft's compact model with surprisingly strong reasoning for its size.",
+      "Ultra-small Qwen 3.5 for edge devices and minimal-footprint deployments.",
     category: "small",
   },
   {

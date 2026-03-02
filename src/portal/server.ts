@@ -2952,7 +2952,7 @@ app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
   const body = z
     .object({
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
-      model: z.string().default("qwen2.5:7b"),
+      model: z.string().default("qwen3.5:9b"),
       autoInstall: z.boolean().default(true)
     })
     .parse(req.body);
@@ -2982,7 +2982,7 @@ app.post("/coordinator/ops/agents-model", async (req, reply) => {
     .object({
       agentIds: z.array(z.string().min(3)).min(1).max(250),
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
-      model: z.string().default("qwen2.5:7b"),
+      model: z.string().default("qwen3.5:9b"),
       autoInstall: z.boolean().default(true)
     })
     .parse(req.body);

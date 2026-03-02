@@ -13,7 +13,7 @@ async function bootstrapCoordinator(): Promise<void> {
     | "edgecoder-local"
     | "ollama-local";
   const autoInstall = process.env.OLLAMA_AUTO_INSTALL === "true";
-  const model = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  const model = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
   const agentOs = (process.env.AGENT_OS ?? "macos") as
     | "macos" | "debian" | "ubuntu" | "windows" | "ios";
 

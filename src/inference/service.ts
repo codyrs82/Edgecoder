@@ -17,6 +17,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
+  allowedHeaders: ["Content-Type", "x-inference-token", "Authorization"],
 });
 if (!process.env.INFERENCE_AUTH_TOKEN) {
   console.error("[inference] FATAL: INFERENCE_AUTH_TOKEN must be set");
@@ -197,7 +198,7 @@ app.post("/decompose", async (req, reply) => {
   metrics.decomposeRequests++;
   const parsed = decomposeSchema.parse(req.body);
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5:7b";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
 
   const prompt = decomposePrompt(parsed.prompt);
 
@@ -246,7 +247,7 @@ app.post("/escalate", async (req, reply) => {
   metrics.escalateRequests++;
   const body = escalateSchema.parse(req.body);
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen2.5:7b";
+  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
 
   const errorContext = body.errorHistory.length > 0
     ? body.errorHistory.join("\n")
@@ -294,7 +295,7 @@ const chatSchema = z.object({
 app.post("/chat", async (req, reply) => {
   const body = chatSchema.parse(req.body);
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  let chatModel = body.model ?? process.env.OLLAMA_COORDINATOR_MODEL ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  let chatModel = body.model ?? process.env.OLLAMA_COORDINATOR_MODEL ?? process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 
   // Auto-detect available model if configured one isn't available
   try {
@@ -368,7 +369,7 @@ app.get("/health", async () => ({ ok: true }));
 app.get("/metrics", async () => ({ ...metrics }));
 
 const modelSwapState = {
-  activeModel: process.env.OLLAMA_MODEL ?? "qwen2.5:7b",
+  activeModel: process.env.OLLAMA_MODEL ?? "qwen3.5:9b",
   activeModelParamSize: 0,
   pullTracker: new PullTracker(),
 };

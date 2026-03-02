@@ -664,7 +664,7 @@ app.post("/orchestration/install-model", async (req, reply) => {
       target: z.enum(["coordinator", "agent"]),
       agentId: z.string().optional(),
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
-      model: z.string().default("qwen2.5:7b"),
+      model: z.string().default("qwen3.5:9b"),
       autoInstall: z.boolean().default(true),
       requestedBy: z.string().default("admin-api")
     })
@@ -1203,7 +1203,7 @@ app.post("/bootstrap/coordinator", async (_req, reply) => {
     | "edgecoder-local"
     | "ollama-local";
   const autoInstall = process.env.OLLAMA_AUTO_INSTALL === "true";
-  const model = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  const model = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
   try {
     if (pgStore) {
       await pgStore.migrate();
@@ -1351,7 +1351,7 @@ app.post("/ops/coordinator-ollama", async (req, reply) => {
   const body = z
     .object({
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
-      model: z.string().default("qwen2.5:7b"),
+      model: z.string().default("qwen3.5:9b"),
       autoInstall: z.boolean().default(true)
     })
     .parse(req.body);

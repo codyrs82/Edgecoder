@@ -49,7 +49,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     let installedModels: Array<{ name: string; paramSize: number }> = [];
     let activeModelParamSize = 0;
     let activeModelQuantization: string | undefined;
-    const activeModel = body.model !== "edgecoder-local" ? body.model : (process.env.OLLAMA_MODEL ?? "qwen2.5:7b");
+    const activeModel = body.model !== "edgecoder-local" ? body.model : (process.env.OLLAMA_MODEL ?? "qwen3.5:9b");
 
     try {
       const tags = await ollamaTags();

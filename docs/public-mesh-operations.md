@@ -169,11 +169,11 @@ Yes. When `LOCAL_MODEL_PROVIDER=ollama-local` and `OLLAMA_AUTO_INSTALL=true`, ea
 
 | Platform | Default model (env) | Typical download size |
 |----------|--------------------|------------------------|
-| **iOS** | `qwen2.5:0.5b` (`IOS_OLLAMA_MODEL` / ios-agent) | ~400 MB (0.5B instruct) |
-| **Workstations / laptops** (macOS, Linux, Windows) | `qwen2.5-coder:latest` (`OLLAMA_MODEL`) | ~4.7 GB (7B variant) |
-| **Coordinator server** | `qwen2.5-coder:latest` | ~4.7 GB (7B variant) |
+| **iOS** | `qwen3.5:0.8b` (`IOS_OLLAMA_MODEL` / ios-agent) | ~1.0 GB (0.8B instruct) |
+| **Workstations / laptops** (macOS, Linux, Windows) | `qwen3.5:9b` (`OLLAMA_MODEL`) | ~6.6 GB (9B variant) |
+| **Coordinator server** | `qwen3.5:9b` | ~6.6 GB (9B variant) |
 
-- iOS agents default to a small model (`qwen2.5:0.5b`) for on-device constraints; desktop and coordinator default to `qwen2.5-coder:latest` (effectively the 7B coding model). You can override with `OLLAMA_MODEL` (or `IOS_OLLAMA_MODEL` for iOS) and choose other tags (e.g. `qwen2.5-coder:1.5b`, ~1 GB; `qwen2.5-coder:32b`, ~20 GB). Exact sizes depend on the tag and quantization; see Ollama library pages for each model.
+- iOS agents default to a small model (`qwen3.5:0.8b`) for on-device constraints; desktop and coordinator default to `qwen3.5:9b` (9B general-purpose model with 256K context). You can override with `OLLAMA_MODEL` (or `IOS_OLLAMA_MODEL` for iOS) and choose other tags (e.g. `qwen3.5:2b`, ~2.7 GB; `qwen3.5:27b`, ~17 GB). Exact sizes depend on the tag and quantization; see Ollama library pages for each model.
 
 Model access boundary:
 

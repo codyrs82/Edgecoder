@@ -163,7 +163,7 @@ docker compose down
 - `OLLAMA_AUTO_INSTALL=true` attempts model pull on startup and can delay startup/health
 - `OLLAMA_MODEL=<model>` selects model to pull/use
 - `OLLAMA_HOST=<url>` supports remote Ollama host
-- `IOS_OLLAMA_MODEL=<model>` optional default model for `npm run dev:worker:ios` (defaults to `qwen2.5:0.5b`)
+- `IOS_OLLAMA_MODEL=<model>` optional default model for `npm run dev:worker:ios` (defaults to `qwen3.5:0.8b`)
 - `IOS_ON_EXTERNAL_POWER=<true|false>` reports iOS charging state to coordinator (used for scheduling)
 - `IOS_BATTERY_LEVEL_PCT=<0-100>` reports iOS battery percentage to coordinator
 - `IOS_LOW_POWER_MODE=<true|false>` reports iOS low power mode and pauses assignment when true

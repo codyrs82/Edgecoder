@@ -259,9 +259,9 @@ echo "   Choose ollama-local only if Ollama is installed and you want Ollama mod
 LOCAL_MODEL_PROVIDER="$(prompt_choice "LOCAL_MODEL_PROVIDER" "edgecoder-local" edgecoder-local ollama-local)"
 if [[ "$LOCAL_MODEL_PROVIDER" == "ollama-local" ]]; then
   echo "   OLLAMA_MODEL is the model tag Ollama should run/pull."
-  echo "   Common examples: qwen2.5:7b | llama3.1:8b | deepseek-coder-v2:16b"
+  echo "   Common examples: qwen3.5:9b | llama3.1:8b | deepseek-coder-v2:16b"
   echo "   Model availability depends on your Ollama catalog and machine resources."
-  OLLAMA_MODEL="$(prompt_text "OLLAMA_MODEL" "qwen2.5:7b")"
+  OLLAMA_MODEL="$(prompt_text "OLLAMA_MODEL" "qwen3.5:9b")"
   echo "   OLLAMA_HOST options:"
   echo "   - blank: default local host (http://127.0.0.1:11434)"
   echo "   - http://127.0.0.1:11434 : explicit local host"
@@ -271,7 +271,7 @@ if [[ "$LOCAL_MODEL_PROVIDER" == "ollama-local" ]]; then
 else
   echo "   Using edgecoder-local; Ollama-specific settings will be kept at defaults."
   OLLAMA_AUTO_INSTALL="false"
-  OLLAMA_MODEL="qwen2.5:7b"
+  OLLAMA_MODEL="qwen3.5:9b"
   OLLAMA_HOST=""
 fi
 

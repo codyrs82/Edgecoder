@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-const DEFAULT_IOS_MODEL = process.env.IOS_OLLAMA_MODEL ?? "qwen2.5:0.5b";
+const DEFAULT_IOS_MODEL = process.env.IOS_OLLAMA_MODEL ?? "qwen3.5:0.8b";
 
 // iOS agents are intentionally headless contributors in this build.
 process.env.AGENT_OS = "ios";

@@ -206,7 +206,7 @@ const networkMode: NetworkMode =
 const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
   | "edgecoder-local"
   | "ollama-local";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
 const INFERENCE_URL = process.env.INFERENCE_URL ?? "http://127.0.0.1:4302";
@@ -4165,7 +4165,7 @@ app.post("/portal/chat", async (req, reply) => {
   }).parse(req.body);
 
   const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  let chatModel = body.model ?? process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 
   // Auto-detect available model if configured one isn't available
   let ollamaHealthy = true;
@@ -4342,7 +4342,7 @@ app.post("/escalate", async (req, reply) => {
   });
 
   const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const coordinatorModel = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  const coordinatorModel = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
   const useLocalOllama = process.env.LOCAL_MODEL_PROVIDER === "ollama-local";
 
   const errorContext = body.errorHistory.length > 0
