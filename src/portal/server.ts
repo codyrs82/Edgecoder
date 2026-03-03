@@ -35,7 +35,7 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord } from "./dns-manager.js";
+import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
 const app = Fastify({ logger: true });
 
@@ -7295,6 +7295,34 @@ app.post("/internal/nodes/validate", async (req, reply) => {
   const refreshed = await store.getNodeEnrollment(node.nodeId);
   if (!refreshed) return reply.code(404).send({ allowed: false, reason: "node_missing_after_touch" });
 
+  // Sync DNS for coordinator nodes (fire-and-forget)
+  if (
+    refreshed.nodeKind === "coordinator" &&
+    refreshed.active &&
+    body.sourceIp &&
+    isDnsConfigured() &&
+    store
+  ) {
+    syncCoordinatorDns({
+      nodeId: refreshed.nodeId,
+      sourceIp: body.sourceIp,
+      currentDnsIp: refreshed.dnsIp ?? null,
+      dnsLastUpdatedMs: refreshed.dnsLastUpdatedMs ?? null,
+    })
+      .then(async (result) => {
+        const hostname = refreshed.dnsHostname || getCoordinatorHostname(refreshed.nodeId);
+        await store.updateNodeDns({
+          nodeId: refreshed.nodeId,
+          dnsHostname: hostname,
+          dnsStatus: result.dnsStatus,
+          dnsIp: result.dnsIp,
+        });
+      })
+      .catch((err) =>
+        console.error(`[portal] DNS sync failed for ${refreshed.nodeId}:`, err)
+      );
+  }
+
   const reason = !refreshed.emailVerified
     ? "email_unverified"
     : !refreshed.nodeApproved
@@ -7328,6 +7356,27 @@ app.post("/internal/nodes/:nodeId/approval", async (req, reply) => {
   const body = z.object({ approved: z.boolean() }).parse(req.body);
   const updated = await store.setNodeApproval(params.nodeId, body.approved);
   if (!updated) return reply.code(404).send({ error: "node_not_found" });
+
+  // If coordinator is being deactivated, remove DNS record
+  if (
+    updated &&
+    updated.nodeKind === "coordinator" &&
+    !body.approved &&
+    updated.dnsHostname
+  ) {
+    deleteDnsRecord(updated.nodeId).catch((err) =>
+      console.error(`[portal] DNS delete failed for ${updated.nodeId}:`, err)
+    );
+    if (store) {
+      await store.updateNodeDns({
+        nodeId: updated.nodeId,
+        dnsHostname: updated.dnsHostname,
+        dnsStatus: "pending",
+        dnsIp: null,
+      });
+    }
+  }
+
   return reply.send({ ok: true, node: updated });
 });
 
