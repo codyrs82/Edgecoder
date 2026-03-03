@@ -144,11 +144,26 @@
   // ---- Data fetching ----
   async function refresh() {
     await backendReady;
+
+    // Double-check agent availability — it may have started after initial detection
     if (isRemoteMode()) {
-      noLocalAgent = true;
-      loading = false;
-      return;
+      try {
+        const res = await fetch("http://localhost:4301/health/runtime", {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!res.ok) {
+          noLocalAgent = true;
+          loading = false;
+          return;
+        }
+        // Agent came online after initial detection — proceed
+      } catch {
+        noLocalAgent = true;
+        loading = false;
+        return;
+      }
     }
+
     noLocalAgent = false;
     try {
       const [list, tags, ps] = await Promise.all([
@@ -161,7 +176,27 @@
       runningModels = ps.models;
       error = null;
     } catch (e) {
-      error = e instanceof Error ? e.message : "Failed to load model data";
+      const msg = e instanceof Error ? e.message : "Failed to load model data";
+      // On 401, the token may not have loaded yet — retry once
+      if (msg.includes("401")) {
+        try {
+          await new Promise((r) => setTimeout(r, 1000));
+          const [list, tags, ps] = await Promise.all([
+            getModelList(),
+            getOllamaTags(),
+            getOllamaPs(),
+          ]);
+          modelList = list;
+          ollamaTags = tags.models;
+          runningModels = ps.models;
+          error = null;
+          return;
+        } catch (retryErr) {
+          error = retryErr instanceof Error ? retryErr.message : msg;
+        }
+      } else {
+        error = msg;
+      }
     } finally {
       loading = false;
     }

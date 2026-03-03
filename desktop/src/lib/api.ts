@@ -114,13 +114,19 @@ let _localToken: string | null = null;
 
 async function getLocalToken(): Promise<string> {
   if (_localToken) return _localToken;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    _localToken = await invoke<string>("get_local_token");
-  } catch {
-    _localToken = "";
+  // Retry a few times — Tauri invoke may not be ready immediately
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      _localToken = await invoke<string>("get_local_token");
+      if (_localToken) return _localToken;
+    } catch {
+      // Tauri not ready yet
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
   }
-  return _localToken!;
+  _localToken = _localToken || "";
+  return _localToken;
 }
 
 async function inferenceHeaders(): Promise<Record<string, string>> {

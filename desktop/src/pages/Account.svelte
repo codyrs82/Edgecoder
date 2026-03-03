@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { logout } from "../lib/api";
+  import { logout, getMe } from "../lib/api";
   import type { AuthUser } from "../lib/api";
 
   interface Props {
@@ -8,8 +8,22 @@
   }
   let { user, onLogout }: Props = $props();
 
-  let loggingOut = $state(false);
+  let profile: AuthUser | null = $state(null);
+  let loading = $state(true);
 
+  // Fetch fresh profile every time Account mounts
+  $effect(() => {
+    loading = true;
+    getMe()
+      .then((fresh) => { profile = fresh; })
+      .catch(() => { profile = null; })
+      .finally(() => { loading = false; });
+  });
+
+  // Use fetched profile, fall back to prop
+  let display = $derived(profile ?? user);
+
+  let loggingOut = $state(false);
 
   async function handleLogout() {
     loggingOut = true;
@@ -27,22 +41,26 @@
 
   <div class="section">
     <h2>Profile</h2>
-    <div class="field-grid">
-      <span class="field-label">Email</span>
-      <span class="field-value">{user.email}</span>
+    {#if loading}
+      <p class="loading-text">Loading profile...</p>
+    {:else}
+      <div class="field-grid">
+        <span class="field-label">Email</span>
+        <span class="field-value">{display.email || "\u2014"}</span>
 
-      <span class="field-label">Display Name</span>
-      <span class="field-value">{user.displayName ?? "\u2014"}</span>
+        <span class="field-label">Display Name</span>
+        <span class="field-value">{display.displayName ?? "\u2014"}</span>
 
-      <span class="field-label">Email Verified</span>
-      <span class="field-value">
-        {#if user.emailVerified}
-          <span class="badge verified">Verified</span>
-        {:else}
-          <span class="badge unverified">Not verified</span>
-        {/if}
-      </span>
-    </div>
+        <span class="field-label">Email Verified</span>
+        <span class="field-value">
+          {#if display.emailVerified}
+            <span class="badge verified">Verified</span>
+          {:else}
+            <span class="badge unverified">Not verified</span>
+          {/if}
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="section">
@@ -79,6 +97,7 @@
     gap: 0.5rem 1rem;
     font-size: 0.85rem;
   }
+  .loading-text { color: var(--text-muted); font-size: 0.85rem; }
   .field-label { color: var(--text-muted); }
   .field-value { color: var(--text-primary); }
   .badge {
