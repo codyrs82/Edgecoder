@@ -1,0 +1,4 @@
+logs/
+test-context.json
+test-results/
+playwright-report/
