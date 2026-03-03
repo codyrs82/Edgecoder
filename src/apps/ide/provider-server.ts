@@ -231,6 +231,10 @@ const projectBodySchema = z.object({
 
 app.post("/v1/ide/project", async (req, reply) => {
   const body = projectBodySchema.parse(req.body);
+  const { existsSync: fsExists, statSync } = await import("node:fs");
+  if (!fsExists(body.projectRoot) || !statSync(body.projectRoot).isDirectory()) {
+    return reply.status(400).send({ error: "Not a valid directory" });
+  }
   activeProjectRoot = body.projectRoot;
   return reply.send({ ok: true, projectRoot: activeProjectRoot });
 });
@@ -327,7 +331,18 @@ app.post("/v1/ide/chat", async (req, reply) => {
     Connection: "keep-alive",
   });
 
+  let clientDisconnected = false;
+  req.raw.on("close", () => {
+    clientDisconnected = true;
+    // Clean up any pending approvals for this request
+    for (const [id, entry] of pendingApprovals) {
+      entry.resolve(false);
+      pendingApprovals.delete(id);
+    }
+  });
+
   function sendEvent(event: IdeStreamEvent): void {
+    if (clientDisconnected) return;
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
@@ -340,6 +355,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   const MAX_ITERATIONS = 20;
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    if (clientDisconnected) break;
     // Call Ollama (non-streaming to parse full response)
     let assistantContent: string;
     try {
@@ -484,16 +500,23 @@ app.post("/v1/ide/chat", async (req, reply) => {
 
       // If write tool — wait for approval
       if (requiresApproval) {
-        const approved = await new Promise<boolean>((resolve) => {
-          pendingApprovals.set(callId, { resolve, tool: toolName, args: toolArgs });
-
+        const approved = await new Promise<boolean>((resolveApproval) => {
           // 5-minute timeout — auto-reject
-          setTimeout(() => {
+          const timer = setTimeout(() => {
             if (pendingApprovals.has(callId)) {
               pendingApprovals.delete(callId);
-              resolve(false);
+              resolveApproval(false);
             }
           }, 5 * 60 * 1000);
+
+          pendingApprovals.set(callId, {
+            resolve: (val: boolean) => {
+              clearTimeout(timer);
+              resolveApproval(val);
+            },
+            tool: toolName,
+            args: toolArgs,
+          });
         });
 
         if (!approved) {

@@ -10,7 +10,8 @@
 import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname } from "node:path";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
 
 // ---------------------------------------------------------------------------
@@ -44,8 +45,15 @@ export class ToolExecutor {
   private resolvePath(relativePath: string): string {
     const abs = resolve(this.root, relativePath);
     const rel = relative(this.root, abs);
-    if (rel.startsWith("..") || resolve(abs) !== abs && rel.startsWith("..")) {
+    if (rel.startsWith("..")) {
       throw new Error(`Path escapes project root: ${relativePath}`);
+    }
+    // If the path exists, verify the real (symlink-resolved) path is also within root
+    if (existsSync(abs)) {
+      const real = realpathSync(abs);
+      if (!real.startsWith(this.root)) {
+        throw new Error(`Symlink escapes project root: ${relativePath}`);
+      }
     }
     return abs;
   }
@@ -320,7 +328,7 @@ export class ToolExecutor {
 
   private gitStatus(): ToolResult {
     try {
-      const out = execSync("git status --porcelain", {
+      const out = execFileSync("git", ["status", "--porcelain"], {
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -341,12 +349,12 @@ export class ToolExecutor {
     const ref = typeof args.ref === "string" ? args.ref : "";
     const filePath = typeof args.path === "string" ? args.path : "";
 
-    const parts = ["git", "diff"];
-    if (ref) parts.push(ref);
-    if (filePath) parts.push("--", filePath);
+    const gitArgs = ["diff"];
+    if (ref) gitArgs.push(ref);
+    if (filePath) gitArgs.push("--", filePath);
 
     try {
-      const out = execSync(parts.join(" "), {
+      const out = execFileSync("git", gitArgs, {
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -368,11 +376,11 @@ export class ToolExecutor {
       typeof args.count === "number" ? args.count : 10;
     const ref = typeof args.ref === "string" ? args.ref : "";
 
-    const parts = ["git", "log", "--oneline", `-n`, `${count}`];
-    if (ref) parts.push(ref);
+    const gitArgs = ["log", "--oneline", "-n", `${count}`];
+    if (ref) gitArgs.push(ref);
 
     try {
-      const out = execSync(parts.join(" "), {
+      const out = execFileSync("git", gitArgs, {
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -398,22 +406,20 @@ export class ToolExecutor {
     }
 
     try {
-      // Stage files
-      execSync(`git add ${files}`, {
+      // Stage files — split on whitespace to pass as separate arguments
+      const fileList = files.split(/\s+/).filter(Boolean);
+      execFileSync("git", ["add", ...fileList], {
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
       });
 
-      // Commit — use array form to avoid shell escaping issues with message
-      const out = execSync(
-        `git commit -m ${JSON.stringify(message)}`,
-        {
-          cwd: this.root,
-          encoding: "utf-8",
-          timeout: 10_000,
-        },
-      );
+      // Commit — execFileSync passes message as argument, no shell interpolation
+      const out = execFileSync("git", ["commit", "-m", message], {
+        cwd: this.root,
+        encoding: "utf-8",
+        timeout: 10_000,
+      });
       return { result: out.trimEnd() };
     } catch (err) {
       return {
@@ -433,7 +439,7 @@ export class ToolExecutor {
     try {
       if (!name) {
         // List branches
-        const out = execSync("git branch", {
+        const out = execFileSync("git", ["branch"], {
           cwd: this.root,
           encoding: "utf-8",
           timeout: 10_000,
@@ -441,11 +447,11 @@ export class ToolExecutor {
         return { result: out.trimEnd() };
       }
 
-      const cmd = create
-        ? `git checkout -b ${name}`
-        : `git checkout ${name}`;
+      const gitArgs = create
+        ? ["checkout", "-b", name]
+        : ["checkout", name];
 
-      const out = execSync(cmd, {
+      const out = execFileSync("git", gitArgs, {
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,

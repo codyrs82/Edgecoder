@@ -38,7 +38,7 @@
           {:else if step.status === "in_progress"}
             <span class="icon play">&#9654;</span>
           {:else}
-            <span class="step-number">{step.index}</span>
+            <span class="step-number">{step.index + 1}</span>
           {/if}
         </span>
         <span class="step-description">{step.description}</span>

@@ -28,12 +28,11 @@
 
   const readTools = [
     "read_file",
-    "glob",
-    "grep",
-    "search",
-    "list_files",
-    "find",
-    "cat",
+    "list_directory",
+    "search_files",
+    "git_status",
+    "git_diff",
+    "git_log",
   ];
 
   let borderColor = $derived.by(() => {
@@ -41,9 +40,9 @@
     if (status === "completed") return "var(--green, #4ade80)";
     if (status === "pending" && requiresApproval)
       return "var(--yellow, #fbbf24)";
-    if (readTools.some((t) => tool.toLowerCase().includes(t)))
+    if (readTools.includes(tool))
       return "var(--accent-secondary, #4a90d9)";
-    return "var(--accent-secondary, #4a90d9)";
+    return "var(--amber, #f59e0b)";
   });
 
   let mainArg = $derived.by(() => {
