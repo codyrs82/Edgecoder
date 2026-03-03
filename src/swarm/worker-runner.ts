@@ -56,6 +56,7 @@ const SANDBOX_MODE: SandboxMode = (process.env.SANDBOX_MODE ?? (
 )) as SandboxMode;
 const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
+const PORTAL_URL = process.env.PORTAL_URL ?? "";
 const AGENT_DEVICE_ID = (() => {
   const explicit = (process.env.AGENT_DEVICE_ID ?? process.env.IOS_DEVICE_ID ?? "").trim();
   if (explicit) return explicit;
@@ -68,7 +69,40 @@ const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
 const lastOfferAtByPeer = new Map<string, number>();
 let peerWorkCursor = 0;
+async function discoverCoordinatorFromPortal(): Promise<string | null> {
+  if (!PORTAL_URL || !AGENT_REGISTRATION_TOKEN) return null;
+  try {
+    const res = await request(`${PORTAL_URL.replace(/\/$/, "")}/nodes/discover-coordinator`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${AGENT_REGISTRATION_TOKEN}`,
+      },
+      headersTimeout: 10_000,
+      bodyTimeout: 10_000,
+    });
+    if (res.statusCode !== 200) return null;
+    const body = (await res.body.json()) as { coordinatorUrl?: string | null };
+    return body.coordinatorUrl ?? null;
+  } catch (err) {
+    console.warn("[worker] Portal coordinator discovery failed:", err);
+    return null;
+  }
+}
+
 let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
+
+// Attempt portal-based coordinator discovery at startup
+(async () => {
+  if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
+    const discovered = await discoverCoordinatorFromPortal();
+    if (discovered) {
+      console.log(`[worker] Discovered coordinator from portal: ${discovered}`);
+      activeCoordinatorUrl = discovered;
+    } else {
+      console.log(`[worker] Portal discovery returned no coordinator, using ${COORDINATOR_BOOTSTRAP_URL}`);
+    }
+  }
+})();
 
 // ── Offline resilience state ──────────────────────────────────
 let consecutiveFailures = 0;
