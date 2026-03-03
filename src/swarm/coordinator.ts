@@ -3178,8 +3178,76 @@ app.post("/mesh/ingest", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const message = meshIngestSchema.parse(req.body);
   const result = await handleMeshIngest(message);
+  if (result.ok) {
+    // Fan-out: relay the message to WS-connected peers that haven't seen it.
+    // This ensures NATed peers receive gossip even when the sender can't
+    // reach them directly.
+    relayToWsPeers(message);
+  }
   return reply.code(result.statusCode ?? (result.ok ? 200 : 400)).send(result);
 });
+
+// ── Gossip relay for NATed peers ──
+// When a peer can't reach another peer via HTTP (NAT/firewall), it asks a
+// coordinator that has a WS connection to that peer to forward the message.
+app.post("/mesh/relay-gossip", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const body = z.object({
+    targetPeerId: z.string(),
+    message: z.string(),
+  }).parse(req.body);
+
+  if (!mesh.hasWebSocket(body.targetPeerId)) {
+    return reply.code(404).send({ ok: false, error: "no_ws_for_target" });
+  }
+
+  // Parse and validate the inner message before relaying
+  try {
+    const innerMsg = meshIngestSchema.parse(JSON.parse(body.message));
+    // Validate it through normal ingest path first
+    const result = await handleMeshIngest(innerMsg);
+    if (!result.ok) {
+      return reply.code(result.statusCode ?? 400).send(result);
+    }
+  } catch {
+    return reply.code(400).send({ ok: false, error: "invalid_relay_message" });
+  }
+
+  // Push to the target peer's WS connection
+  try {
+    const ws = (mesh as any).wsPeers?.get(body.targetPeerId);
+    if (ws && ws.readyState === 1) {
+      ws.send(body.message);
+      return reply.send({ ok: true, relayed: true });
+    }
+    return reply.code(404).send({ ok: false, error: "ws_not_open" });
+  } catch (err) {
+    return reply.code(500).send({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * Relay a gossip message to all WS-connected peers except the sender.
+ * This is the key mechanism for NAT traversal: when a coordinator receives
+ * gossip, it pushes it to all WS-connected agents/peers, ensuring NATed
+ * nodes stay in sync even when they can't be reached via HTTP.
+ */
+function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
+  const serialized = JSON.stringify(message);
+  const wsConnected = mesh.getWsConnectedPeerIds();
+  for (const peerId of wsConnected) {
+    if (peerId === message.fromPeerId) continue; // don't echo back to sender
+    if (peerId === identity.peerId) continue;     // don't send to self
+    try {
+      const ws = (mesh as any).wsPeers?.get(peerId);
+      if (ws && ws.readyState === 1) {
+        ws.send(serialized);
+      }
+    } catch {
+      // Non-fatal — peer may have disconnected
+    }
+  }
+}
 
 // ── WebSocket endpoint for NAT traversal ──
 // Agents behind NAT open an outbound WebSocket to this endpoint.
@@ -3199,7 +3267,10 @@ app.get("/mesh/ws", { websocket: true }, (socket, req) => {
   socket.on("message", async (data) => {
     try {
       const message = meshIngestSchema.parse(JSON.parse(data.toString()));
-      await handleMeshIngest(message);
+      const result = await handleMeshIngest(message);
+      // Fan-out WS-received gossip to other WS-connected peers.
+      // This lets NATed agents gossip to each other through the coordinator.
+      if (result.ok) relayToWsPeers(message);
     } catch (err) {
       console.warn(`[ws] ingest error from ${peerId}: ${(err as Error).message}`);
     }

@@ -6686,26 +6686,25 @@ app.get("/portal/download", async (req, reply) => {
 
   /* ── platform card builders ──────────────────────────────────────── */
   const macCard = wizardCard("macos", "&#127822;", "macOS", [
-    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_1.0.0_aarch64.dmg">Download Desktop App (.dmg)</a>
-     <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-macos-installer.pkg" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download CLI Agent (.pkg)</a>
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_aarch64.dmg">Download Desktop App (.dmg)</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `<strong>Desktop App:</strong> Open the <strong>.dmg</strong> and drag EdgeCoder to Applications.<br><strong>CLI Agent:</strong> Double-click the <strong>.pkg</strong> file and follow the prompts.`,
-    `<div class="code-block" id="mac-cmd"><code>sudo edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('mac-cmd')">Copy</button></div>`
+    `Open the <strong>.dmg</strong> and drag EdgeCoder to Applications. The app bundles the agent — no separate install needed.`,
+    `Sign in with your EdgeCoder account. The app auto-discovers local models and connects to the mesh.`
   ], detectedOS === "macos");
 
   const winCard = wizardCard("windows", "&#128187;", "Windows", [
-    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-windows-x64.msi">Download .msi installer</a>
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_x64-setup.exe">Download installer (.exe)</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `Run the <strong>.msi</strong> file. Click Next. Allow admin access.`,
-    `<div class="code-block" id="win-cmd"><code>edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('win-cmd')">Copy</button></div>
-     <span style="font-size:10px;color:var(--muted);">Run in PowerShell as Administrator</span>`
+    `Run the installer. Allow admin access if prompted.`,
+    `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "windows");
 
   const linuxCard = wizardCard("linux", "&#128039;", "Linux (Debian / Ubuntu)", [
-    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder-1.0.0-linux-amd64.deb">Download .deb package</a>
+    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.deb">Download .deb package</a>
+     <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.AppImage" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download AppImage</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder-1.0.0-linux-amd64.deb</code><button class="copy-btn" onclick="copyCmd('linux-install')">Copy</button></div>`,
-    `<div class="code-block" id="linux-cmd"><code>sudo edgecoder --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('linux-cmd')">Copy</button></div>`
+    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" onclick="copyCmd('linux-install')">Copy</button></div>`,
+    `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "linux");
 
   const iosCard = wizardCard("ios", "&#128241;", "iOS (iPhone / iPad)", [

@@ -38,10 +38,15 @@
     }
   });
 
-  function handleLogin(u: AuthUser) {
-    user = u;
-    // Refresh with full profile from /me (includes displayName, role, etc.)
-    getMe().then((full) => { user = full; }).catch(() => {});
+  async function handleLogin(u: AuthUser) {
+    // Always fetch full profile from /me — login/OAuth responses have limited fields
+    try {
+      const full = await getMe();
+      user = full;
+    } catch {
+      // Fall back to the login response if /me fails
+      user = u;
+    }
   }
 
   function handleOpenInEditor(code: string, language: string) {
