@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { TOOL_DEFINITIONS } from "../apps/ide/tool-types.js";
+
 export interface SystemPromptContext {
   activeModel: string;
   activeModelParamSize: number;
@@ -64,4 +66,75 @@ export function buildChatSystemPrompt(ctx: SystemPromptContext): string {
   }
 
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// IDE Agent system prompt — extends the base chat prompt with tool-use
+// instructions for the agentic coding loop.
+// ---------------------------------------------------------------------------
+
+export function buildIdeAgentSystemPrompt(
+  ctx: SystemPromptContext,
+  projectRoot: string,
+): string {
+  const base = buildChatSystemPrompt(ctx);
+
+  const toolDocs = TOOL_DEFINITIONS.map((t) => {
+    const params = Object.entries(t.parameters);
+    const paramLines =
+      params.length === 0
+        ? "  (no parameters)"
+        : params
+            .map(
+              ([name, p]) =>
+                `  - ${name} (${p.type}${p.required ? ", required" : ""}): ${p.description}`,
+            )
+            .join("\n");
+    return `### ${t.name}\n${t.description}\n${paramLines}`;
+  }).join("\n\n");
+
+  const agentSection = `
+
+--- IDE Agent Mode ---
+
+Project root: ${projectRoot}
+
+You are an autonomous coding agent operating inside the user's IDE. You have access to the following tools to read, edit, and manage files in the project.
+
+## Available Tools
+
+${toolDocs}
+
+## Tool Call Format
+
+To invoke a tool, emit a fenced code block with the language tag \`tool_call\`:
+
+\`\`\`tool_call
+{"tool": "<tool_name>", "args": { ... }}
+\`\`\`
+
+You may include multiple tool_call blocks in a single response. Each will be executed in order.
+
+## Plan Format
+
+To propose a multi-step plan before executing, emit a fenced code block with the language tag \`plan\`:
+
+\`\`\`plan
+[
+  {"index": 0, "description": "Read the existing file to understand structure", "status": "pending"},
+  {"index": 1, "description": "Edit the function to fix the bug", "status": "pending"}
+]
+\`\`\`
+
+## Rules
+
+1. **Read before edit** — always read a file before modifying it so you understand the current content.
+2. **Prefer edit_file over write_file** — use edit_file for modifications to existing files; only use write_file for creating new files.
+3. **Run tests after changes** — after editing code, run the relevant test suite to verify correctness.
+4. **Explain your reasoning** — briefly describe what you are doing and why before each tool call.
+5. **No destructive operations without explicit request** — do not delete files, force-push, reset branches, or run destructive shell commands unless the user explicitly asks.
+6. **Stay within the project** — all file paths must be within the project root.
+7. **Be concise** — keep explanations short and focused; let the code speak for itself.`;
+
+  return base + agentSection;
 }
