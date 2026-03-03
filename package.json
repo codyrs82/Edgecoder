@@ -30,7 +30,8 @@
     "model:list": "tsx bin/swap-model.ts list",
     "model:swap": "tsx bin/swap-model.ts swap",
     "model:status": "tsx bin/swap-model.ts status",
-    "model:pull": "tsx bin/swap-model.ts pull"
+    "model:pull": "tsx bin/swap-model.ts pull",
+    "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts"
   },
   "keywords": [],
   "author": "",
@@ -53,6 +54,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.2.3",
     "@types/pg": "^8.16.0",
