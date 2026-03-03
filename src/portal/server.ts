@@ -6652,8 +6652,8 @@ export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "io
 }
 
 app.get("/portal/download", async (req, reply) => {
-  const GH_RELEASE_BASE = "https://github.com/edgecoder-io/edgecoder/releases/latest/download";
-  const GH_RELEASES_PAGE = "https://github.com/edgecoder-io/edgecoder/releases/latest";
+  const GH_RELEASE_BASE = "https://github.com/codyrs82/Edgecoder/releases/latest/download";
+  const GH_RELEASES_PAGE = "https://github.com/codyrs82/Edgecoder/releases/latest";
   const userAgent = req.headers["user-agent"] || "";
   const detectedOS = detectOS(userAgent);
   const queryToken = ((req.query as Record<string, string>)?.token || "").trim();

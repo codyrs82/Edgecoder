@@ -209,21 +209,23 @@ Native Swift BLE proxy + WebView in `ios/`. Acts as a swarm worker with BLE mesh
 
 ### Fly.io
 
-Each service has a Fly.io configuration in `deploy/fly/`:
+Fly.io configurations in `deploy/fly/`:
 
-| Config | App | Internal Port |
-|--------|-----|---------------|
-| `fly.seed-node.toml` | `edgecoder-seed` | 4301 |
-| `fly.seed-eu.toml` | EU seed node | 4301 |
-| `fly.portal.toml` | `edgecoder-portal` | 4310 |
-| `fly.control-plane.toml` | `edgecoder-control-plane` | 4303 |
-| `fly.inference.toml` | `edgecoder-inference` | 4302 |
-| `fly.toml` | `edgecoder-coordinator` | 4301 |
+| Config | App | Description |
+|--------|-----|-------------|
+| `fly.seed-node.toml` | `edgecoder-seed` | US all-in-one node (coordinator + inference + control-plane) |
+| `fly.seed-eu.toml` | `edgecoder-seed-eu` | EU all-in-one node |
+| `fly.portal.toml` | `edgecoder-portal` | Centralized portal (web UI, auth, wallet) |
+| `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | Bitcoin anchoring proxy |
+| `fly.docs.toml` | `edgecoder-docs` | Documentation site |
+
+Each seed node runs coordinator, inference, and control-plane in a single process via `EDGE_RUNTIME_MODE=all-in-one`. The portal is the only centralized service; everything else is decentralized.
 
 Deploy with:
 
 ```bash
-fly deploy -c deploy/fly/fly.seed-node.toml
+fly deploy -c deploy/fly/fly.seed-node.toml   # US seed node
+fly deploy -c deploy/fly/fly.portal.toml       # portal
 ```
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Fly.io, Docker, systemd, and self-hosted instructions.
