@@ -1,7 +1,12 @@
 <script lang="ts">
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import StreamingIndicator from "./StreamingIndicator.svelte";
+  import ToolCallBlock from "./ToolCallBlock.svelte";
+  import ShellBlock from "./ShellBlock.svelte";
+  import DiffBlock from "./DiffBlock.svelte";
+  import PlanBlock from "./PlanBlock.svelte";
   import type { StreamProgress } from "../lib/api";
+  import type { ToolEvent } from "../lib/types";
 
   interface Props {
     role: "user" | "assistant";
@@ -9,8 +14,10 @@
     streaming?: boolean;
     streamProgress?: StreamProgress;
     onOpenInEditor?: (code: string, language: string) => void;
+    toolEvents?: ToolEvent[];
+    onToolApproval?: (id: string, approved: boolean) => void;
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -19,6 +26,46 @@
   {:else}
     <div class="bubble assistant-bubble">
       <MarkdownRenderer source={content} {onOpenInEditor} />
+      {#if toolEvents && toolEvents.length > 0}
+        <div class="tool-events">
+          {#each toolEvents as evt}
+            {#if evt.type === "tool_call"}
+              <ToolCallBlock
+                id={evt.id ?? ""}
+                tool={evt.tool ?? "unknown"}
+                args={evt.args ?? {}}
+                requiresApproval={evt.requires_approval ?? false}
+                result={evt.result}
+                error={evt.error}
+                status={evt.error ? "completed" : evt.result !== undefined ? "completed" : evt.approval_status === "rejected" ? "rejected" : evt.approval_status === "pending" ? "pending" : "executing"}
+                onApprove={(id) => onToolApproval?.(id, true)}
+                onReject={(id) => onToolApproval?.(id, false)}
+              />
+            {:else if evt.type === "shell_output"}
+              <ShellBlock
+                id={evt.id ?? ""}
+                command={evt.command}
+                stdout={evt.stdout}
+                stderr={evt.stderr}
+                exitCode={evt.exit_code}
+                status="completed"
+              />
+            {:else if evt.type === "diff"}
+              <DiffBlock
+                id={evt.id ?? ""}
+                file={evt.file ?? "unknown"}
+                hunks={evt.hunks ?? []}
+                status="accepted"
+              />
+            {:else if evt.type === "plan"}
+              <PlanBlock
+                steps={(evt.steps ?? []).map(s => ({ ...s, status: s.status as "pending" | "in_progress" | "completed" | "failed" }))}
+                planStatus={(evt.plan_status ?? "proposed") as "proposed" | "approved" | "executing"}
+              />
+            {/if}
+          {/each}
+        </div>
+      {/if}
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
       {/if}
@@ -52,6 +99,9 @@
   }
   .assistant-bubble {
     color: var(--text-primary);
+  }
+  .tool-events {
+    margin-top: 8px;
   }
   .message:hover {
     opacity: 1;

@@ -2,16 +2,21 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ModelPicker from "../components/ModelPicker.svelte";
+  import ProjectBar from "../components/ProjectBar.svelte";
   import {
     streamChat,
     streamPortalChat,
+    streamIdeChat,
+    ideSetProject,
+    ideGetProject,
+    ideSendToolApproval,
     portalCreateConversation,
     portalRenameConversation,
     getModelPullProgress,
     isRemoteMode,
     backendReady,
   } from "../lib/api";
-  import type { StreamProgress, ModelPullProgress } from "../lib/api";
+  import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -19,7 +24,7 @@
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
   } from "../lib/chat-store";
-  import type { Conversation } from "../lib/types";
+  import type { Conversation, ToolEvent } from "../lib/types";
 
   interface Props {
     onOpenInEditor?: (code: string, language: string) => void;
@@ -36,6 +41,11 @@
 
   /** Whether we should stream via the portal API (server-side conversations) */
   let usePortalChat = $state(false);
+
+  /** IDE agent project state */
+  let projectRoot: string | null = $state(null);
+  let gitBranch: string | null = $state(null);
+  let streamingToolEvents: ToolEvent[] = $state([]);
 
   /** Active model download progress */
   let pullProgress: ModelPullProgress | null = $state(null);
@@ -72,6 +82,9 @@
       }
     }
 
+    // Check for an existing IDE project
+    ideGetProject().then(p => { if (p) projectRoot = p; });
+
     // Poll for model download progress
     pullPollTimer = setInterval(async () => {
       pullProgress = await getModelPullProgress();
@@ -102,6 +115,29 @@
     return portalId;
   }
 
+  async function openProject() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, title: "Open Project" });
+      if (selected && typeof selected === "string") {
+        projectRoot = selected;
+        await ideSetProject(selected);
+        // Git branch detection not yet available — leave null
+      }
+    } catch (err) {
+      console.warn("Failed to open project dialog:", err);
+    }
+  }
+
+  function handleToolApproval(id: string, approved: boolean) {
+    ideSendToolApproval(id, approved);
+    const evt = streamingToolEvents.find(e => e.id === id);
+    if (evt) {
+      evt.approval_status = approved ? "approved" : "rejected";
+      streamingToolEvents = [...streamingToolEvents];
+    }
+  }
+
   export async function sendMessage(text: string) {
     if (isStreaming) return;
 
@@ -115,7 +151,74 @@
     abortController = new AbortController();
 
     try {
-      if (usePortalChat) {
+      if (projectRoot && !usePortalChat) {
+        // IDE agent mode — stream with tool events
+        const apiMessages = conversation.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        streamingToolEvents = [];
+
+        await streamIdeChat(
+          apiMessages,
+          projectRoot,
+          (event: IdeStreamEvent) => {
+            switch (event.type) {
+              case "text":
+                streamingContent += event.content as string;
+                scrollToBottom();
+                break;
+              case "status":
+                break;
+              case "tool_call":
+                streamingToolEvents = [...streamingToolEvents, {
+                  type: "tool_call",
+                  id: event.id as string,
+                  tool: event.tool as string,
+                  args: event.args as Record<string, unknown>,
+                  requires_approval: event.requires_approval as boolean,
+                  approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
+                }];
+                scrollToBottom();
+                break;
+              case "tool_result": {
+                const idx = streamingToolEvents.findIndex(e => e.id === event.id);
+                if (idx >= 0) {
+                  streamingToolEvents[idx] = {
+                    ...streamingToolEvents[idx],
+                    result: event.result as string | undefined,
+                    error: event.error as string | undefined,
+                  };
+                  streamingToolEvents = [...streamingToolEvents];
+                }
+                break;
+              }
+              case "shell_output":
+                streamingToolEvents = [...streamingToolEvents, {
+                  type: "shell_output",
+                  id: event.id as string,
+                  stdout: event.stdout as string,
+                  stderr: event.stderr as string,
+                  exit_code: event.exit_code as number,
+                }];
+                scrollToBottom();
+                break;
+              case "plan":
+                streamingToolEvents = [...streamingToolEvents, {
+                  type: "plan",
+                  steps: event.steps as ToolEvent["steps"],
+                  plan_status: event.status as string,
+                }];
+                scrollToBottom();
+                break;
+              case "done":
+                break;
+            }
+          },
+          abortController.signal,
+          conversation.selectedModel,
+        );
+      } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
         const portalConvId = await ensurePortalConversation();
 
@@ -154,6 +257,13 @@
       }
 
       addMessage(conversation, "assistant", streamingContent);
+      // Attach tool events to the last assistant message if any
+      if (streamingToolEvents.length > 0) {
+        const lastMsg = conversation.messages[conversation.messages.length - 1];
+        if (lastMsg) {
+          lastMsg.toolEvents = [...streamingToolEvents];
+        }
+      }
       conversation = conversation;
       await saveConversation(conversation);
       localStorage.setItem("edgecoder-last-chat-id", conversation.id);
@@ -180,6 +290,7 @@
       streamingContent = "";
       isStreaming = false;
       streamProgress = undefined;
+      streamingToolEvents = [];
       abortController = null;
     }
   }
@@ -234,6 +345,7 @@
 </script>
 
 <div class="chat-view" bind:this={scrollContainer}>
+  <ProjectBar {projectRoot} {gitBranch} onOpenProject={openProject} />
   <div class="chat-header">
     <ModelPicker
       selectedModel={conversation.selectedModel}
@@ -279,10 +391,10 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} {onOpenInEditor} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
-      {#if isStreaming && streamingContent}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} {onOpenInEditor} />
+      {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/if}
     </div>
   {/if}

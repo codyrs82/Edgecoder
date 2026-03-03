@@ -111,12 +111,34 @@ export interface TaskSubmission {
   priority?: number;
 }
 
+// IDE agent tool event (rendered inline in assistant messages)
+export interface ToolEvent {
+  type: "tool_call" | "tool_result" | "shell_request" | "shell_output" | "diff" | "plan" | "status";
+  id?: string;
+  tool?: string;
+  args?: Record<string, unknown>;
+  requires_approval?: boolean;
+  result?: string;
+  error?: string;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  exit_code?: number;
+  file?: string;
+  hunks?: Array<{ content: string }>;
+  steps?: Array<{ index: number; description: string; status: string }>;
+  plan_status?: string;
+  message?: string;
+  approval_status?: "pending" | "approved" | "rejected";
+}
+
 // Chat message types (OpenAI-compatible, matching IDE provider-server)
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  toolEvents?: ToolEvent[];
 }
 
 export interface Conversation {
