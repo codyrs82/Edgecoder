@@ -3235,7 +3235,7 @@ app.post("/portal/api/chat", async (req, reply) => {
         method: "POST",
         headers: chatHeaders,
         body: JSON.stringify(chatPayload),
-        headersTimeout: 60_000, // reduced per-attempt — fail faster to try next
+        headersTimeout: 120_000, // allow time for cold model loads (~70s)
         bodyTimeout: 0, // no body timeout for streaming
       });
       if (coordinatorRes.statusCode >= 200 && coordinatorRes.statusCode < 300) {
