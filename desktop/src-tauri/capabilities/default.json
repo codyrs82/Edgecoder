@@ -8,6 +8,7 @@
     "shell:allow-open",
     "deep-link:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "dialog:default"
   ]
 }
