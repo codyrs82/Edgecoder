@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const COMPOSE_FILE = resolve(__dirname, "../docker-compose.e2e.yml");
 const CONTEXT_FILE = resolve(__dirname, "../test-context.json");
-const PORTAL_URL = "http://localhost:4310";
-const COORDINATOR_URL = "http://localhost:4301";
+const PORTAL_URL = "http://localhost:14310";
+const COORDINATOR_URL = "http://localhost:14301";
 const OLLAMA_URL = "http://localhost:11434";
 
 function run(cmd: string, label: string): void {
@@ -15,12 +15,12 @@ function run(cmd: string, label: string): void {
   execSync(cmd, { stdio: "inherit" });
 }
 
-async function waitForHealth(url: string, label: string, timeoutMs = 120_000): Promise<void> {
+async function waitForHealth(url: string, label: string, headers?: Record<string, string>, timeoutMs = 120_000): Promise<void> {
   console.log(`[e2e-setup] Waiting for ${label} at ${url}...`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, headers ? { headers } : undefined);
       if (res.ok) {
         console.log(`[e2e-setup] ${label} is ready.`);
         return;
@@ -118,15 +118,28 @@ export default async function globalSetup(): Promise<void> {
 
   // Wait for services to be healthy
   await waitForHealth(`${PORTAL_URL}/health`, "Portal");
-  await waitForHealth(`${COORDINATOR_URL}/status`, "Coordinator");
+  await waitForHealth(`${COORDINATOR_URL}/status`, "Coordinator", { "x-mesh-token": "e2e-mesh-token" });
   await waitForHealth(`${OLLAMA_URL}/api/tags`, "Ollama");
 
   // Pull tinyllama model (cached in named volume across runs)
-  console.log("[e2e-setup] Ensuring tinyllama model is available...");
-  execSync(
-    `docker compose -f "${COMPOSE_FILE}" exec -T ollama ollama pull tinyllama`,
-    { stdio: "inherit", timeout: 300_000 }
-  );
+  console.log("[e2e-setup] Checking if tinyllama model is available...");
+  try {
+    const tags = execSync(
+      `docker compose -f "${COMPOSE_FILE}" exec -T ollama ollama list`,
+      { encoding: "utf8", timeout: 30_000 }
+    );
+    if (tags.includes("tinyllama")) {
+      console.log("[e2e-setup] tinyllama already available, skipping pull.");
+    } else {
+      throw new Error("not found");
+    }
+  } catch {
+    console.log("[e2e-setup] Pulling tinyllama model (this may take a few minutes)...");
+    execSync(
+      `docker compose -f "${COMPOSE_FILE}" exec -T ollama ollama pull tinyllama`,
+      { stdio: "inherit", timeout: 600_000 }
+    );
+  }
 
   // Create logs directory
   mkdirSync(resolve(__dirname, "../logs"), { recursive: true });

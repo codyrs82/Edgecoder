@@ -25,7 +25,7 @@ export default async function globalTeardown(): Promise<void> {
 
   console.log("[e2e-teardown] Tearing down E2E stack...");
   try {
-    execSync(`docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans`, {
+    execSync(`docker compose -f "${COMPOSE_FILE}" down --remove-orphans`, {
       stdio: "inherit",
       timeout: 60_000,
     });

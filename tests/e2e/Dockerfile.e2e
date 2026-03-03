@@ -1,0 +1,24 @@
+FROM node:20-bookworm-slim AS base
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zstd python3 make g++ bluetooth bluez libbluetooth-dev libudev-dev && rm -rf /var/lib/apt/lists/*
+
+# Skip Ollama install — E2E services that need inference use the separate ollama container
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json vitest.config.ts ./
+COPY src ./src
+COPY tests ./tests
+
+RUN npm run build
+
+EXPOSE 4301 4302 4303 4304 4310
+
+RUN printf '#!/bin/sh\nset -e\nexec "$@"\n' > /usr/local/bin/docker-entrypoint.sh && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["node", "dist/index.js"]

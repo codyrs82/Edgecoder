@@ -11,7 +11,7 @@ export default defineConfig({
   globalTeardown: "./setup/global-teardown.ts",
   timeout: 120_000,
   use: {
-    baseURL: "http://localhost:4310",
+    baseURL: "http://localhost:14310",
     trace: "retain-on-failure",
   },
   projects: [

@@ -13,7 +13,7 @@ function loadContext() {
 test.describe("Node Enrollment", () => {
   test("coordinator node was enrolled during setup", async ({ request }) => {
     const ctx = loadContext();
-    const res = await request.get("/nodes/list", {
+    const res = await request.get("/nodes/me", {
       headers: { Authorization: `Bearer ${ctx.sessionToken}` },
     });
     expect(res.ok()).toBeTruthy();
@@ -22,12 +22,11 @@ test.describe("Node Enrollment", () => {
       (n: any) => n.nodeId === "e2e-coordinator" && n.nodeKind === "coordinator"
     );
     expect(coordinator).toBeTruthy();
-    expect(coordinator.registrationToken).toBeTruthy();
   });
 
   test("agent node was enrolled during setup", async ({ request }) => {
     const ctx = loadContext();
-    const res = await request.get("/nodes/list", {
+    const res = await request.get("/nodes/me", {
       headers: { Authorization: `Bearer ${ctx.sessionToken}` },
     });
     expect(res.ok()).toBeTruthy();

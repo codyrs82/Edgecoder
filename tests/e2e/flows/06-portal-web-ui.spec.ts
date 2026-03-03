@@ -18,10 +18,12 @@ test.describe("Portal Web UI", () => {
   });
 
   test("portal login page renders", async ({ page }) => {
-    await page.goto("/login");
-    // Should have email and password fields
-    const emailInput = page.locator('input[type="email"], input[name="email"]');
-    const passwordInput = page.locator('input[type="password"], input[name="password"]');
+    await page.goto("/portal");
+    // Should have email and password fields (SPA renders inline login form)
+    const emailInput = page.locator('input[type="email"], input[name="email"], input[id="email"]');
+    const passwordInput = page.locator('input[type="password"], input[name="password"], input[id="password"]');
+    // Wait for the SPA to render
+    await page.waitForLoadState("networkidle");
     // At least one of these patterns should exist
     const hasForm = (await emailInput.count()) > 0 || (await passwordInput.count()) > 0;
     expect(hasForm).toBe(true);

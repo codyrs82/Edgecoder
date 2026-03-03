@@ -6,7 +6,7 @@ services:
       - POSTGRES_PASSWORD=e2e-test-password
       - POSTGRES_DB=edgecoder
     ports:
-      - "5432:5432"
+      - "15432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U edgecoder"]
       interval: 3s
@@ -16,7 +16,7 @@ services:
   portal:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: tests/e2e/Dockerfile.e2e
     command: ["node", "dist/portal/server.js"]
     environment:
       - NODE_ENV=test
@@ -26,7 +26,7 @@ services:
       - RESEND_API_KEY=
       - WALLET_SECRET_PEPPER=e2e-test-pepper
     ports:
-      - "4310:4310"
+      - "14310:4310"
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,7 +39,7 @@ services:
   coordinator:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: tests/e2e/Dockerfile.e2e
     command: ["node", "dist/index.js"]
     environment:
       - NODE_ENV=test
@@ -57,14 +57,14 @@ services:
       - OLLAMA_MODEL=tinyllama
       - INFERENCE_AUTH_TOKEN=e2e-inference-token
     ports:
-      - "4301:4301"
-      - "4302:4302"
-      - "4303:4303"
+      - "14301:4301"
+      - "14302:4302"
+      - "14303:4303"
     depends_on:
       portal:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status',{headers:{'x-mesh-token':'e2e-mesh-token'}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 5s
       retries: 15
@@ -84,7 +84,7 @@ services:
   agent:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: tests/e2e/Dockerfile.e2e
     command: ["node", "dist/swarm/worker-runner.js"]
     environment:
       - NODE_ENV=test

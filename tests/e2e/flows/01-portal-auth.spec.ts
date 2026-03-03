@@ -49,9 +49,9 @@ test.describe("Portal Authentication", () => {
     expect(res.status()).toBe(401);
   });
 
-  test("authenticated request to /auth/me returns user info", async ({ request }) => {
+  test("authenticated request to /me returns user info", async ({ request }) => {
     const ctx = loadContext();
-    const res = await request.get("/auth/me", {
+    const res = await request.get("/me", {
       headers: { Authorization: `Bearer ${ctx.sessionToken}` },
     });
     expect(res.ok()).toBeTruthy();

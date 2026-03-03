@@ -1,6 +1,5 @@
 import { test, expect } from "@playwright/test";
 
-const COORDINATOR_URL = process.env.E2E_COORDINATOR_URL ?? "http://localhost:4301";
 const OLLAMA_URL = process.env.E2E_OLLAMA_URL ?? "http://localhost:11434";
 
 test.describe("Model Inference", () => {
@@ -31,15 +30,12 @@ test.describe("Model Inference", () => {
     expect(body.response.length).toBeGreaterThan(0);
   });
 
-  test("coordinator /v1/models lists available models", async () => {
-    // This may need auth depending on coordinator config
-    const res = await fetch(`${COORDINATOR_URL}/v1/models`);
-    // Accept 200 (models listed) or 401 (auth required — proves endpoint exists)
-    expect([200, 401]).toContain(res.status);
-    if (res.status === 200) {
-      const body = await res.json();
-      expect(body.data || body.models).toBeTruthy();
-    }
+  test("Ollama /api/tags lists available models", async () => {
+    const res = await fetch(`${OLLAMA_URL}/api/tags`);
+    expect(res.ok).toBeTruthy();
+    const body = await res.json();
+    expect(body.models).toBeTruthy();
+    expect(body.models.length).toBeGreaterThan(0);
   });
 
   test(

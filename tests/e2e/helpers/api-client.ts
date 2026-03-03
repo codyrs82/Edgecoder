@@ -1,5 +1,6 @@
-const PORTAL_URL = process.env.E2E_PORTAL_URL ?? "http://localhost:4310";
-const COORDINATOR_URL = process.env.E2E_COORDINATOR_URL ?? "http://localhost:4301";
+const PORTAL_URL = process.env.E2E_PORTAL_URL ?? "http://localhost:14310";
+const COORDINATOR_URL = process.env.E2E_COORDINATOR_URL ?? "http://localhost:14301";
+const MESH_TOKEN = process.env.E2E_MESH_TOKEN ?? "e2e-mesh-token";
 
 export interface TestContext {
   userId: string;
@@ -67,14 +68,16 @@ export async function enrollNode(
 }
 
 export async function getCoordinatorStatus() {
-  const res = await fetch(`${COORDINATOR_URL}/status`);
+  const res = await fetch(`${COORDINATOR_URL}/status`, {
+    headers: { "x-mesh-token": MESH_TOKEN },
+  });
   if (!res.ok) throw new Error(`coordinator status failed: ${res.status}`);
   return res.json();
 }
 
 export async function getModelList(authToken: string) {
   const res = await fetch(`${COORDINATOR_URL}/v1/models`, {
-    headers: { Authorization: `Bearer ${authToken}` },
+    headers: { Authorization: `Bearer ${authToken}`, "x-mesh-token": MESH_TOKEN },
   });
   return { status: res.status, data: await res.json() };
 }
@@ -89,6 +92,7 @@ export async function sendChatCompletion(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${authToken}`,
+      "x-mesh-token": MESH_TOKEN,
     },
     body: JSON.stringify({ model, messages, stream: false }),
   });
