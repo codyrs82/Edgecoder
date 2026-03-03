@@ -116,7 +116,7 @@ function loadTrustedCoordinatorKeys(): Map<string, string> {
 const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard")) return;
+  if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
   const token = req.headers["x-inference-token"];
   if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
     return reply.code(401).send({ error: "inference_unauthorized" });

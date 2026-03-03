@@ -24,8 +24,10 @@ async function tryLocalHealth(): Promise<boolean> {
     const res = await fetch("http://localhost:4301/health/runtime", {
       signal: AbortSignal.timeout(2000),
     });
+    console.log("[api] tryLocalHealth:", res.ok, res.status);
     return res.ok;
-  } catch {
+  } catch (e) {
+    console.warn("[api] tryLocalHealth failed:", (e as Error).message);
     return false;
   }
 }
@@ -68,7 +70,9 @@ function schedulePoll(): void {
 }
 
 /** Resolves once the first backend detection completes. */
-export const backendReady: Promise<void> = Promise.all([detectBackend(), getLocalToken()]).then(() => {});
+export const backendReady: Promise<void> = Promise.all([detectBackend(), getLocalToken()]).then(() => {
+  console.log("[api] backendReady resolved — useRemote:", useRemote);
+});
 
 /** True when no local agent is running (all agent/inference calls go remote). */
 export function isRemoteMode(): boolean {
@@ -119,9 +123,10 @@ async function getLocalToken(): Promise<string> {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       _localToken = await invoke<string>("get_local_token");
+      console.log("[api] getLocalToken attempt", attempt, "got token:", !!_localToken);
       if (_localToken) return _localToken;
-    } catch {
-      // Tauri not ready yet
+    } catch (e) {
+      console.warn("[api] getLocalToken attempt", attempt, "failed:", (e as Error).message);
     }
     if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
   }
