@@ -2516,6 +2516,31 @@ app.delete("/nodes/:nodeId", async (req, reply) => {
   return reply.send({ ok: true, deletedNodeId: params.nodeId });
 });
 
+app.get("/nodes/discover-coordinator", async (req, reply) => {
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+
+  // Authenticate via registration token in Authorization header
+  const authHeader = req.headers.authorization ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!token) {
+    return reply.code(401).send({ error: "registration_token_required" });
+  }
+
+  // Token is accepted as proof of enrollment — coordinator will re-validate
+  const coordinators = await store.listActiveCoordinators();
+  if (coordinators.length === 0) {
+    return reply.send({ coordinatorUrl: null, reason: "no_public_coordinators" });
+  }
+
+  // Simple selection: first active coordinator (ordered by most recently seen)
+  const selected = coordinators[0];
+  return reply.send({
+    coordinatorUrl: `https://${selected.dnsHostname}`,
+    coordinatorNodeId: selected.nodeId,
+    dnsStatus: selected.dnsStatus,
+  });
+});
+
 app.get("/nodes/me", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
