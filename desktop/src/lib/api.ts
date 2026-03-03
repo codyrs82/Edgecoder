@@ -69,10 +69,19 @@ function schedulePoll(): void {
   }, interval);
 }
 
-/** Resolves once the first backend detection completes. */
-export const backendReady: Promise<void> = Promise.all([detectBackend(), getLocalToken()]).then(() => {
-  console.log("[api] backendReady resolved — useRemote:", useRemote);
-});
+/** Resolves once the first backend detection completes or after 20s timeout. */
+export const backendReady: Promise<void> = Promise.race([
+  Promise.all([detectBackend(), getLocalToken()]).then(() => {
+    console.log("[api] backendReady resolved — useRemote:", useRemote);
+  }),
+  new Promise<void>((resolve) => {
+    setTimeout(() => {
+      console.warn("[api] backendReady timed out after 20s — proceeding with useRemote:", useRemote);
+      initialDetectDone = true;
+      resolve();
+    }, 20_000);
+  }),
+]);
 
 /** True when no local agent is running (all agent/inference calls go remote). */
 export function isRemoteMode(): boolean {

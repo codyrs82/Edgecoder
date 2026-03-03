@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
@@ -4275,6 +4275,61 @@ app.get("/portal/models", async (_req, reply) => {
   return reply.send({ local, swarm });
 });
 
+// ── Mesh-peer chat failover helper ──
+// Tries chat-capable mesh peers (from federatedCapabilities + bootstrap URLs).
+// Streams the first successful response through `reply` and returns true.
+// Returns false if all peers fail so the caller can send its own error.
+async function tryMeshPeerChat(
+  chatBody: { messages: Array<{ role: string; content: string }>; model?: string; temperature?: number; max_tokens?: number },
+  reply: FastifyReply,
+): Promise<boolean> {
+  const chatPeerUrls: string[] = [];
+  const meshPeers = mesh.listPeers();
+  for (const cap of federatedCapabilities.values()) {
+    if (!cap.chatEnabled) continue;
+    if (cap.coordinatorId === identity.peerId) continue;
+    const peer = meshPeers.find(p => p.peerId === cap.coordinatorId);
+    if (peer?.coordinatorUrl) chatPeerUrls.push(peer.coordinatorUrl);
+  }
+  // Fallback: include bootstrap URLs in case mesh hasn't converged yet
+  for (const url of COORDINATOR_BOOTSTRAP_URLS) {
+    if (url !== COORDINATOR_PUBLIC_URL && !chatPeerUrls.includes(url)) {
+      chatPeerUrls.push(url);
+    }
+  }
+
+  for (const peerUrl of chatPeerUrls) {
+    try {
+      const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
+      if (PORTAL_SERVICE_TOKEN) fwdHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
+        method: "POST",
+        headers: fwdHeaders,
+        body: JSON.stringify(chatBody),
+        headersTimeout: 120_000,
+        bodyTimeout: 0,
+      });
+      if (peerRes.statusCode >= 200 && peerRes.statusCode < 300) {
+        reply.raw.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        });
+        for await (const chunk of peerRes.body) {
+          reply.raw.write(chunk);
+        }
+        reply.raw.end();
+        return true;
+      }
+      await peerRes.body.text().catch(() => "");
+    } catch {
+      // peer unreachable, try next
+    }
+  }
+
+  return false;
+}
+
 // Portal chat completion — streams Ollama response for portal web chat
 app.post("/portal/chat", async (req, reply) => {
   const body = z.object({
@@ -4320,52 +4375,8 @@ app.post("/portal/chat", async (req, reply) => {
   // ── Forward to mesh peer when local Ollama is down ──
   if (!ollamaHealthy) {
     app.log.warn("Local Ollama unavailable — failing over to mesh network");
-
-    // Build candidate list from all mesh peers (excluding self)
-    const chatPeerUrls: string[] = [];
-    const meshPeers = mesh.listPeers();
-    for (const cap of federatedCapabilities.values()) {
-      if (cap.coordinatorId === identity.peerId) continue;
-      const peer = meshPeers.find(p => p.peerId === cap.coordinatorId);
-      if (peer?.coordinatorUrl) chatPeerUrls.push(peer.coordinatorUrl);
-    }
-    // Fallback: include bootstrap URLs in case mesh hasn't converged yet
-    for (const url of COORDINATOR_BOOTSTRAP_URLS) {
-      if (url !== COORDINATOR_PUBLIC_URL && !chatPeerUrls.includes(url)) {
-        chatPeerUrls.push(url);
-      }
-    }
-
-    for (const peerUrl of chatPeerUrls) {
-      try {
-        const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
-        if (PORTAL_SERVICE_TOKEN) fwdHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
-        const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
-          method: "POST",
-          headers: fwdHeaders,
-          body: JSON.stringify(body),
-          headersTimeout: 120_000,
-          bodyTimeout: 0,
-        });
-        if (peerRes.statusCode >= 200 && peerRes.statusCode < 300) {
-          reply.raw.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-          });
-          // Send a warning so the UI can display it
-          reply.raw.write(`data: ${JSON.stringify({ warning: "Local model unavailable — routed through EdgeCoder mesh network" })}\n\n`);
-          for await (const chunk of peerRes.body) {
-            reply.raw.write(chunk);
-          }
-          reply.raw.end();
-          return;
-        }
-        await peerRes.body.text().catch(() => "");
-      } catch {
-        // peer unreachable, try next
-      }
-    }
+    const handled = await tryMeshPeerChat(body, reply);
+    if (handled) return;
     return reply.code(502).send({
       error: "no_models_available",
       detail: "No local Ollama running and no mesh peers with available models. Start Ollama locally or ensure at least one peer in the network has a model loaded."
@@ -4402,26 +4413,35 @@ app.post("/portal/chat", async (req, reply) => {
     ...body.messages.filter((m) => m.role !== "system"),
   ];
 
-  // Local Ollama is available — call it directly
-  const ollamaRes = await request(`${ollamaHost}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: chatModel,
-      messages: messagesWithSystem,
-      stream: true,
-      options: {
-        temperature: body.temperature ?? 0.7,
-        num_predict: body.max_tokens ?? 4096
-      }
-    }),
-    headersTimeout: 120_000,
-    bodyTimeout: 0
-  });
+  // Local Ollama is available — try calling it directly
+  let ollamaRes;
+  try {
+    ollamaRes = await request(`${ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: chatModel,
+        messages: messagesWithSystem,
+        stream: true,
+        options: {
+          temperature: body.temperature ?? 0.7,
+          num_predict: body.max_tokens ?? 4096
+        }
+      }),
+      headersTimeout: 120_000,
+      bodyTimeout: 0
+    });
+  } catch (localErr) {
+    app.log.warn({ err: localErr }, "Local Ollama chat failed — falling over to mesh");
+    ollamaRes = null;
+  }
 
-  if (ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
-    const errText = await ollamaRes.body.text().catch(() => "");
-    return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: errText });
+  if (!ollamaRes || ollamaRes.statusCode < 200 || ollamaRes.statusCode >= 300) {
+    // Consume error body if present
+    if (ollamaRes) await ollamaRes.body.text().catch(() => "");
+    const handled = await tryMeshPeerChat(body, reply);
+    if (handled) return;
+    return reply.code(502).send({ error: "no_models_available", model: chatModel });
   }
 
   reply.raw.writeHead(200, {

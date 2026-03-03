@@ -3166,12 +3166,11 @@ app.post("/portal/api/chat", async (req, reply) => {
   const history = await store.getConversationMessages(body.conversationId);
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
 
-  // Discover a coordinator
+  // Discover coordinators
   const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
   if (coordinatorUrls.length === 0) {
     return reply.code(502).send({ error: "no_coordinators_available" });
   }
-  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
 
   // Call coordinator's portal chat endpoint (streams Ollama via SSE)
   const chatHeaders: Record<string, string> = { "content-type": "application/json" };
@@ -3180,22 +3179,37 @@ app.post("/portal/api/chat", async (req, reply) => {
   const chatPayload: Record<string, unknown> = { messages };
   if (body.model) chatPayload.model = body.model;
 
+  // Try each coordinator until one responds with 2xx
   let coordinatorRes;
-  try {
-    coordinatorRes = await request(`${coordinatorUrl}/portal/chat`, {
-      method: "POST",
-      headers: chatHeaders,
-      body: JSON.stringify(chatPayload),
-      headersTimeout: 180_000, // larger models can take 60s+ on cold start
-      bodyTimeout: 0 // no body timeout for streaming
-    });
-  } catch (err) {
-    return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+  let lastError = "";
+  for (const rawUrl of coordinatorUrls) {
+    const coordinatorUrl = rawUrl.replace(/\/$/, "");
+    try {
+      coordinatorRes = await request(`${coordinatorUrl}/portal/chat`, {
+        method: "POST",
+        headers: chatHeaders,
+        body: JSON.stringify(chatPayload),
+        headersTimeout: 60_000, // reduced per-attempt — fail faster to try next
+        bodyTimeout: 0, // no body timeout for streaming
+      });
+      if (coordinatorRes.statusCode >= 200 && coordinatorRes.statusCode < 300) {
+        break; // success — stream this response
+      }
+      // Non-2xx: consume body, try next coordinator
+      lastError = await coordinatorRes.body.text().catch(() => "");
+      coordinatorRes = null;
+    } catch (err) {
+      lastError = String(err);
+      coordinatorRes = null;
+    }
   }
 
-  if (coordinatorRes.statusCode < 200 || coordinatorRes.statusCode >= 300) {
-    const errBody = await coordinatorRes.body.text();
-    return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+  if (!coordinatorRes) {
+    return reply.code(502).send({
+      error: "all_coordinators_failed",
+      detail: lastError,
+      triedCount: coordinatorUrls.length,
+    });
   }
 
   // Stream SSE response from coordinator to browser
