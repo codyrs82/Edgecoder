@@ -35,6 +35,7 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
+import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord } from "./dns-manager.js";
 
 const app = Fastify({ logger: true });
 
@@ -2467,6 +2468,18 @@ app.post("/nodes/enroll", async (req, reply) => {
       })
     }).catch(() => undefined);
   }
+  // Assign DNS hostname for coordinator nodes
+  let dnsHostname: string | undefined;
+  if (body.nodeKind === "coordinator" && store) {
+    dnsHostname = getCoordinatorHostname(body.nodeId);
+    await store.updateNodeDns({
+      nodeId: record.nodeId,
+      dnsHostname,
+      dnsStatus: "pending",
+      dnsIp: null,
+    });
+  }
+
   return reply.send({
     ok: true,
     nodeId: record.nodeId,
@@ -2475,7 +2488,8 @@ app.post("/nodes/enroll", async (req, reply) => {
     emailVerified: record.emailVerified,
     nodeApproved: record.nodeApproved,
     active: record.active,
-    registrationToken
+    registrationToken,
+    ...(dnsHostname ? { dnsHostname } : {}),
   });
 });
 
@@ -2490,6 +2504,13 @@ app.delete("/nodes/:nodeId", async (req, reply) => {
   if (!access.isSystemAdmin && existing.ownerUserId !== user.userId) {
     return reply.code(403).send({ error: "node_delete_forbidden" });
   }
+  // Clean up DNS record for coordinator nodes
+  if (existing.nodeKind === "coordinator" && existing.dnsHostname) {
+    deleteDnsRecord(existing.nodeId).catch((err) =>
+      console.error(`[portal] Failed to delete DNS for ${existing.nodeId}:`, err)
+    );
+  }
+
   const ok = await store.deleteNodeEnrollment(params.nodeId);
   if (!ok) return reply.code(404).send({ error: "node_not_found" });
   return reply.send({ ok: true, deletedNodeId: params.nodeId });
