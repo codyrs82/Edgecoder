@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=edgecoder
+      - POSTGRES_PASSWORD=e2e-test-password
+      - POSTGRES_DB=edgecoder
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edgecoder"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  portal:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["node", "dist/portal/server.js"]
+    environment:
+      - NODE_ENV=test
+      - SKIP_OLLAMA=true
+      - PORTAL_DATABASE_URL=postgresql://edgecoder:e2e-test-password@postgres:5432/edgecoder
+      - PORTAL_SERVICE_TOKEN=e2e-portal-service-token
+      - RESEND_API_KEY=
+      - WALLET_SECRET_PEPPER=e2e-test-pepper
+    ports:
+      - "4310:4310"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["node", "dist/index.js"]
+    environment:
+      - NODE_ENV=test
+      - EDGE_RUNTIME_MODE=all-in-one
+      - SKIP_OLLAMA=true
+      - DATABASE_URL=postgresql://edgecoder:e2e-test-password@postgres:5432/edgecoder
+      - PORTAL_SERVICE_URL=http://portal:4310
+      - PORTAL_SERVICE_TOKEN=e2e-portal-service-token
+      - MESH_AUTH_TOKEN=e2e-mesh-token
+      - ADMIN_API_TOKEN=e2e-admin-token
+      - COORDINATOR_PUBLIC_URL=http://coordinator:4301
+      - LOCAL_MODEL_PROVIDER=ollama-local
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_AUTO_INSTALL=false
+      - OLLAMA_MODEL=tinyllama
+      - INFERENCE_AUTH_TOKEN=e2e-inference-token
+    ports:
+      - "4301:4301"
+      - "4302:4302"
+      - "4303:4303"
+    depends_on:
+      portal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - e2e-ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:11434/api/tags"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["node", "dist/swarm/worker-runner.js"]
+    environment:
+      - NODE_ENV=test
+      - SKIP_OLLAMA=true
+      - COORDINATOR_URL=http://coordinator:4301
+      - AGENT_ID=e2e-agent-1
+      - AGENT_MODE=swarm-only
+      - LOCAL_MODEL_PROVIDER=ollama-local
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_AUTO_INSTALL=false
+      - OLLAMA_MODEL=tinyllama
+      - MESH_AUTH_TOKEN=e2e-mesh-token
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+volumes:
+  e2e-ollama-data:
