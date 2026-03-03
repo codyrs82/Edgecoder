@@ -793,3 +793,82 @@ export interface SwarmModelInfo {
 
 export const getAvailableModels = () =>
   get<SwarmModelInfo[]>(agentBase(), "/models/available");
+
+// ---------------------------------------------------------------------------
+// IDE Agent (:4304)
+// ---------------------------------------------------------------------------
+
+export async function ideSetProject(projectRoot: string): Promise<void> {
+  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+  await post(base, "/v1/ide/project", { projectRoot });
+}
+
+export async function ideGetProject(): Promise<string | null> {
+  try {
+    const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+    const data = await get<{ projectRoot: string | null }>(base, "/v1/ide/project");
+    return data.projectRoot;
+  } catch {
+    return null;
+  }
+}
+
+export async function ideSendToolApproval(id: string, approved: boolean): Promise<void> {
+  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+  await post(base, "/v1/ide/tool-approval", { id, approved });
+}
+
+export interface IdeStreamEvent {
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "done";
+  [key: string]: unknown;
+}
+
+export async function streamIdeChat(
+  messages: Array<{ role: string; content: string }>,
+  projectRoot: string,
+  onEvent: (event: IdeStreamEvent) => void,
+  signal?: AbortSignal,
+  requestedModel?: string,
+): Promise<void> {
+  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+  const res = await fetch(`${base}/v1/ide/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages,
+      model: requestedModel,
+      projectRoot,
+    }),
+    signal,
+  });
+
+  if (!res.ok) throw new Error(`IDE chat request failed: ${res.status}`);
+  if (!res.body) throw new Error("No response body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+
+      try {
+        const event = JSON.parse(data) as IdeStreamEvent;
+        onEvent(event);
+      } catch {
+        // Skip malformed events
+      }
+    }
+  }
+}
