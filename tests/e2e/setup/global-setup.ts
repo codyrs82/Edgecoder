@@ -1,7 +1,9 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const COMPOSE_FILE = resolve(__dirname, "../docker-compose.e2e.yml");
 const CONTEXT_FILE = resolve(__dirname, "../test-context.json");
 const PORTAL_URL = "http://localhost:4310";
