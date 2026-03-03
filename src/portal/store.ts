@@ -29,6 +29,10 @@ export type NodeEnrollment = {
   lastIp?: string;
   lastCountryCode?: string;
   lastVpnDetected?: boolean;
+  dnsHostname?: string;
+  dnsStatus?: "pending" | "active" | "nat" | "error" | "stale";
+  dnsIp?: string;
+  dnsLastUpdatedMs?: number;
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -111,6 +115,10 @@ CREATE TABLE IF NOT EXISTS portal_node_enrollments (
   last_ip TEXT,
   last_country_code TEXT,
   last_vpn_detected BOOLEAN,
+  dns_hostname TEXT,
+  dns_status TEXT,
+  dns_ip TEXT,
+  dns_last_updated_ms BIGINT,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
@@ -217,10 +225,38 @@ export class PortalStore {
        WHERE device_id IS NULL
          AND node_id ~* '^(ios-|iphone-)'`
     );
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_hostname TEXT`);
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_status TEXT`);
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
   }
 
   async close(): Promise<void> {
     await this.pool.end();
+  }
+
+  private mapNodeRow(row: any): NodeEnrollment {
+    return {
+      nodeId: row.node_id,
+      deviceId: row.device_id ?? undefined,
+      nodeKind: row.node_kind,
+      ownerUserId: row.owner_user_id,
+      ownerEmail: row.owner_email,
+      registrationTokenHash: row.registration_token_hash,
+      emailVerified: Boolean(row.email_verified),
+      nodeApproved: Boolean(row.node_approved),
+      active: Boolean(row.active),
+      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
+      lastIp: row.last_ip ?? undefined,
+      lastCountryCode: row.last_country_code ?? undefined,
+      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
+      dnsHostname: row.dns_hostname ?? undefined,
+      dnsStatus: row.dns_status ?? undefined,
+      dnsIp: row.dns_ip ?? undefined,
+      dnsLastUpdatedMs: row.dns_last_updated_ms ? Number(row.dns_last_updated_ms) : undefined,
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms),
+    };
   }
 
   async getUserByEmail(email: string): Promise<PortalUser | null> {
@@ -516,7 +552,8 @@ export class PortalStore {
       RETURNING
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms`,
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms`,
       [
         targetNodeId,
         normalizedDeviceId ?? null,
@@ -529,23 +566,7 @@ export class PortalStore {
       ]
     );
     const row = result.rows[0];
-    return {
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    };
+    return this.mapNodeRow(row);
   }
 
   async getNodeEnrollment(nodeId: string): Promise<NodeEnrollment | null> {
@@ -553,30 +574,15 @@ export class PortalStore {
       `SELECT
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        WHERE node_id = $1`,
       [nodeId]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    };
+    return this.mapNodeRow(row);
   }
 
   async listNodesByOwner(userId: string): Promise<NodeEnrollment[]> {
@@ -584,29 +590,14 @@ export class PortalStore {
       `SELECT
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        WHERE owner_user_id = $1
        ORDER BY updated_at_ms DESC`,
       [userId]
     );
-    return result.rows.map((row) => ({
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    }));
+    return result.rows.map((row: any) => this.mapNodeRow(row));
   }
 
   async listPendingNodes(options?: {
@@ -629,30 +620,15 @@ export class PortalStore {
       `SELECT
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        ${where}
        ORDER BY updated_at_ms DESC
        LIMIT $1`,
       args
     );
-    return result.rows.map((row) => ({
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    }));
+    return result.rows.map((row: any) => this.mapNodeRow(row));
   }
 
   async listApprovedNodes(options?: {
@@ -680,30 +656,15 @@ export class PortalStore {
       `SELECT
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        ${where}
        ORDER BY updated_at_ms DESC
        LIMIT $1`,
       args
     );
-    return result.rows.map((row) => ({
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    }));
+    return result.rows.map((row: any) => this.mapNodeRow(row));
   }
 
   async deleteNodeEnrollment(nodeId: string): Promise<boolean> {
@@ -722,28 +683,13 @@ export class PortalStore {
        RETURNING
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
          email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-         last_vpn_detected, created_at_ms, updated_at_ms`,
+         last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+         created_at_ms, updated_at_ms`,
       [nodeId, approved, now]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    };
+    return this.mapNodeRow(row);
   }
 
   async touchNodeValidation(input: {
@@ -771,7 +717,8 @@ export class PortalStore {
       `SELECT
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, created_at_ms, updated_at_ms
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        WHERE device_id IS NOT NULL
          AND (
@@ -785,23 +732,55 @@ export class PortalStore {
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      nodeId: row.node_id,
-      deviceId: row.device_id ?? undefined,
-      nodeKind: row.node_kind,
-      ownerUserId: row.owner_user_id,
-      ownerEmail: row.owner_email,
-      registrationTokenHash: row.registration_token_hash,
-      emailVerified: Boolean(row.email_verified),
-      nodeApproved: Boolean(row.node_approved),
-      active: Boolean(row.active),
-      lastSeenMs: row.last_seen_ms ? Number(row.last_seen_ms) : undefined,
-      lastIp: row.last_ip ?? undefined,
-      lastCountryCode: row.last_country_code ?? undefined,
-      lastVpnDetected: row.last_vpn_detected === null ? undefined : Boolean(row.last_vpn_detected),
-      createdAtMs: Number(row.created_at_ms),
-      updatedAtMs: Number(row.updated_at_ms)
-    };
+    return this.mapNodeRow(row);
+  }
+
+  async updateNodeDns(input: {
+    nodeId: string;
+    dnsHostname: string;
+    dnsStatus: "pending" | "active" | "nat" | "error" | "stale";
+    dnsIp: string | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `UPDATE portal_node_enrollments
+       SET dns_hostname = $2,
+           dns_status = $3,
+           dns_ip = $4,
+           dns_last_updated_ms = $5,
+           updated_at_ms = $5
+       WHERE node_id = $1`,
+      [input.nodeId, input.dnsHostname, input.dnsStatus, input.dnsIp, Date.now()]
+    );
+  }
+
+  async listActiveCoordinators(): Promise<NodeEnrollment[]> {
+    const result = await this.pool.query(
+      `SELECT
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
+       FROM portal_node_enrollments
+       WHERE node_kind = 'coordinator'
+         AND active = TRUE
+         AND dns_status = 'active'
+         AND dns_ip IS NOT NULL
+       ORDER BY last_seen_ms DESC NULLS LAST`
+    );
+    return result.rows.map((row: any) => this.mapNodeRow(row));
+  }
+
+  async markStaleCoordinatorDns(staleThresholdMs: number): Promise<number> {
+    const cutoff = Date.now() - staleThresholdMs;
+    const result = await this.pool.query(
+      `UPDATE portal_node_enrollments
+       SET dns_status = 'stale', dns_ip = NULL, updated_at_ms = $2
+       WHERE node_kind = 'coordinator'
+         AND dns_status = 'active'
+         AND last_seen_ms < $1`,
+      [cutoff, Date.now()]
+    );
+    return Number(result.rowCount ?? 0);
   }
 
   async getWalletOnboardingByUserId(userId: string): Promise<{
