@@ -4155,6 +4155,55 @@ const escalationRequestSchema = z.object({
   iterationsAttempted: z.number().int().min(1)
 });
 
+// Portal model discovery — returns local Ollama models + swarm models
+app.get("/portal/models", async (_req, reply) => {
+  const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  let local: Array<{ name: string; parameterSize: string; quantization: string; running: boolean }> = [];
+  let runningNames: Set<string> = new Set();
+
+  // Get running models
+  try {
+    const psRes = await request(`${ollamaHost}/api/ps`, { method: "GET", headersTimeout: 3_000 });
+    if (psRes.statusCode >= 200 && psRes.statusCode < 300) {
+      const ps = (await psRes.body.json()) as { models?: Array<{ name: string }> };
+      for (const m of ps.models ?? []) runningNames.add(m.name);
+    } else {
+      await psRes.body.text().catch(() => "");
+    }
+  } catch { /* ignore */ }
+
+  // Get installed models
+  try {
+    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", headersTimeout: 3_000 });
+    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      const tags = (await tagsRes.body.json()) as { models?: Array<{ name: string; details: { parameter_size: string; quantization_level: string } }> };
+      local = (tags.models ?? []).map((m) => ({
+        name: m.name,
+        parameterSize: m.details.parameter_size ?? "",
+        quantization: m.details.quantization_level ?? "",
+        running: runningNames.has(m.name),
+      }));
+    } else {
+      await tagsRes.body.text().catch(() => "");
+    }
+  } catch { /* Ollama not reachable */ }
+
+  // Build swarm model list from agent capabilities
+  const swarmModelMap: Record<string, number> = {};
+  for (const [, cap] of agentCapabilities) {
+    if (cap.activeModel) {
+      swarmModelMap[cap.activeModel] = (swarmModelMap[cap.activeModel] ?? 0) + 1;
+    }
+  }
+  const swarm = Object.entries(swarmModelMap).map(([model, agentCount]) => ({
+    model,
+    paramSize: 0,
+    agentCount,
+  }));
+
+  return reply.send({ local, swarm });
+});
+
 // Portal chat completion — streams Ollama response for portal web chat
 app.post("/portal/chat", async (req, reply) => {
   const body = z.object({
@@ -4197,13 +4246,14 @@ app.post("/portal/chat", async (req, reply) => {
     ollamaHealthy = false;
   }
 
-  // ── Forward to chat-capable mesh peer when local Ollama is down ──
+  // ── Forward to mesh peer when local Ollama is down ──
   if (!ollamaHealthy) {
-    // Build candidate list from mesh peers whose capability summary has chatEnabled
+    app.log.warn("Local Ollama unavailable — failing over to mesh network");
+
+    // Build candidate list from all mesh peers (excluding self)
     const chatPeerUrls: string[] = [];
     const meshPeers = mesh.listPeers();
     for (const cap of federatedCapabilities.values()) {
-      if (!cap.chatEnabled) continue;
       if (cap.coordinatorId === identity.peerId) continue;
       const peer = meshPeers.find(p => p.peerId === cap.coordinatorId);
       if (peer?.coordinatorUrl) chatPeerUrls.push(peer.coordinatorUrl);
@@ -4232,6 +4282,8 @@ app.post("/portal/chat", async (req, reply) => {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
           });
+          // Send a warning so the UI can display it
+          reply.raw.write(`data: ${JSON.stringify({ warning: "Local model unavailable — routed through EdgeCoder mesh network" })}\n\n`);
           for await (const chunk of peerRes.body) {
             reply.raw.write(chunk);
           }
@@ -4243,7 +4295,10 @@ app.post("/portal/chat", async (req, reply) => {
         // peer unreachable, try next
       }
     }
-    return reply.code(502).send({ error: "ollama_unavailable", detail: "no local Ollama and no chat-capable mesh peers reachable" });
+    return reply.code(502).send({
+      error: "no_models_available",
+      detail: "No local Ollama running and no mesh peers with available models. Start Ollama locally or ensure at least one peer in the network has a model loaded."
+    });
   }
 
   // Build swarm model list from agent capabilities
@@ -4693,19 +4748,10 @@ export async function initCoordinator(): Promise<void> {
               currentLoad: 0,
             })
           );
-          // Quick Ollama probe to advertise chatEnabled to mesh peers
-          let ollamaChatReady = false;
-          try {
-            const r = await request(`${OLLAMA_HOST ?? "http://127.0.0.1:11434"}/api/tags`, {
-              method: "GET",
-              headersTimeout: 2_000,
-            });
-            if (r.statusCode >= 200 && r.statusCode < 300) ollamaChatReady = true;
-            else await r.body.text().catch(() => "");
-          } catch { /* not reachable */ }
-
           const summary = buildCapabilitySummary(identity.peerId, agents);
-          summary.chatEnabled = ollamaChatReady;
+          // All mesh peers advertise chat capability — when local Ollama is down
+          // the coordinator will failover to other mesh peers with available models
+          summary.chatEnabled = true;
           const msg = protocol.createMessage(
             "capability_summary",
             identity.peerId,

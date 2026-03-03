@@ -30,6 +30,7 @@
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let streamProgress: StreamProgress | undefined = $state(undefined);
+  let meshWarning: string | null = $state(null);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
 
@@ -110,6 +111,7 @@
     isStreaming = true;
     streamingContent = "";
     streamProgress = undefined;
+    meshWarning = null;
     abortController = new AbortController();
 
     try {
@@ -127,6 +129,7 @@
           abortController.signal,
           (progress) => {
             streamProgress = progress;
+            if (progress.warning) meshWarning = progress.warning;
           },
         );
       } else {
@@ -244,6 +247,13 @@
     {/if}
   </div>
 
+  {#if meshWarning}
+    <div class="mesh-warning">
+      <span class="mesh-warning-icon">&#9888;</span>
+      <span>{meshWarning}</span>
+    </div>
+  {/if}
+
   {#if pullProgress}
     <div class="pull-banner">
       <span class="pull-label">Downloading {pullProgress.model}</span>
@@ -356,6 +366,20 @@
     width: 100%;
     margin: 0 auto;
     padding: 16px 0;
+  }
+  .mesh-warning {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(251, 191, 36, 0.08);
+    border-bottom: 0.5px solid rgba(251, 191, 36, 0.2);
+    font-size: 12px;
+    color: var(--yellow);
+    flex-shrink: 0;
+  }
+  .mesh-warning-icon {
+    flex-shrink: 0;
   }
   .pull-banner {
     display: flex;

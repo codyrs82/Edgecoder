@@ -35,7 +35,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | Variable | Values / Example | Description |
 |---|---|---|
 | `LOCAL_MODEL_PROVIDER` | `edgecoder-local` \| `ollama-local` | Inference backend. Use `ollama-local` when Ollama is installed. |
-| `OLLAMA_MODEL` | `qwen2.5-coder:latest` | Model tag to use/pull when provider is `ollama-local`. |
+| `OLLAMA_MODEL` | `qwen3.5:9b` | Model tag to use/pull when provider is `ollama-local`. |
 | `OLLAMA_AUTO_INSTALL` | `true` \| `false` | Auto-pull the Ollama model on startup if not present. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama daemon URL. Blank = default local host. |
 
@@ -162,7 +162,7 @@ DATABASE_URL=<postgres>
 
 # 4) Local Ollama inference
 LOCAL_MODEL_PROVIDER=ollama-local
-OLLAMA_MODEL=qwen2.5-coder:latest
+OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_AUTO_INSTALL=true
 ```
 

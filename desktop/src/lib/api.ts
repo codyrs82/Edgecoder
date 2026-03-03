@@ -17,15 +17,54 @@ import type {
 // ---------------------------------------------------------------------------
 
 let useRemote = true;
+let initialDetectDone = false;
 
-async function detectBackend(): Promise<void> {
+async function tryLocalHealth(): Promise<boolean> {
   try {
     const res = await fetch("http://localhost:4301/health/runtime", {
       signal: AbortSignal.timeout(2000),
     });
-    if (res.ok) { useRemote = false; return; }
-  } catch { /* local not available */ }
-  useRemote = true;
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function detectBackend(): Promise<void> {
+  if (!initialDetectDone) {
+    // First call: retry with exponential backoff while agent boots
+    const delays = [500, 1000, 2000, 2000, 2000, 2000, 2000, 2000];
+    for (const delay of delays) {
+      if (await tryLocalHealth()) {
+        useRemote = false;
+        initialDetectDone = true;
+        schedulePoll();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    // Final attempt after last delay
+    useRemote = !(await tryLocalHealth());
+    initialDetectDone = true;
+    schedulePoll();
+    return;
+  }
+
+  // Subsequent calls: single attempt
+  const wasRemote = useRemote;
+  useRemote = !(await tryLocalHealth());
+  if (useRemote !== wasRemote) schedulePoll();
+}
+
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePoll(): void {
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  const interval = useRemote ? 5_000 : 30_000;
+  pollTimer = setTimeout(async () => {
+    await detectBackend();
+    schedulePoll();
+  }, interval);
 }
 
 /** Resolves once the first backend detection completes. */
@@ -35,9 +74,6 @@ export const backendReady: Promise<void> = Promise.all([detectBackend(), getLoca
 export function isRemoteMode(): boolean {
   return useRemote;
 }
-
-// Re-check every 30s
-setInterval(detectBackend, 30_000);
 
 function agentBase(): string {
   if (import.meta.env.DEV) return "/api";
@@ -87,8 +123,9 @@ async function getLocalToken(): Promise<string> {
   return _localToken!;
 }
 
-function inferenceHeaders(): Record<string, string> {
-  return _localToken ? { Authorization: `Bearer ${_localToken}` } : {};
+async function inferenceHeaders(): Promise<Record<string, string>> {
+  const token = await getLocalToken();
+  return token ? { "x-inference-token": token } : {};
 }
 
 export async function checkOllamaAvailable(): Promise<boolean> {
@@ -183,23 +220,23 @@ const INFERENCE_BASE = import.meta.env.DEV
   ? "/inference"
   : "http://localhost:4302";
 
-export const getInferenceHealth = () =>
-  get<{ ok: boolean }>(INFERENCE_BASE, "/health", inferenceHeaders());
+export const getInferenceHealth = async () =>
+  get<{ ok: boolean }>(INFERENCE_BASE, "/health", await inferenceHeaders());
 
-export const getDashboardOverview = () =>
-  get<DashboardOverview>(INFERENCE_BASE, "/dashboard/api/overview", inferenceHeaders());
+export const getDashboardOverview = async () =>
+  get<DashboardOverview>(INFERENCE_BASE, "/dashboard/api/overview", await inferenceHeaders());
 
-export const getModelList = () =>
-  get<ModelInfo[]>(INFERENCE_BASE, "/model/list", inferenceHeaders());
+export const getModelList = async () =>
+  get<ModelInfo[]>(INFERENCE_BASE, "/model/list", await inferenceHeaders());
 
-export const getModelStatus = () =>
-  get<unknown>(INFERENCE_BASE, "/model/status", inferenceHeaders());
+export const getModelStatus = async () =>
+  get<unknown>(INFERENCE_BASE, "/model/status", await inferenceHeaders());
 
-export const swapModel = (model: string) =>
-  post<unknown>(INFERENCE_BASE, "/model/swap", { model }, inferenceHeaders());
+export const swapModel = async (model: string) =>
+  post<unknown>(INFERENCE_BASE, "/model/swap", { model }, await inferenceHeaders());
 
-export const pullModel = (model: string) =>
-  post<unknown>(INFERENCE_BASE, "/model/pull", { model }, inferenceHeaders());
+export const pullModel = async (model: string) =>
+  post<unknown>(INFERENCE_BASE, "/model/pull", { model }, await inferenceHeaders());
 
 // ---------------------------------------------------------------------------
 // Pull progress — try coordinator first, fall back to inference service
@@ -228,6 +265,7 @@ export async function getModelPullProgress(): Promise<ModelPullProgress | null> 
     // Coordinator not available, try inference service
     try {
       const res = await fetch(`${INFERENCE_BASE}/model/pull/progress`, {
+        headers: await inferenceHeaders(),
         signal: AbortSignal.timeout(2000),
       });
       if (!res.ok) return null;
@@ -459,6 +497,14 @@ export async function streamPortalChat(
           throw new Error(`Stream error: ${chunk.error}`);
         }
 
+        if (chunk.warning) {
+          onProgress?.({
+            tokenCount,
+            elapsedMs: Date.now() - streamStart,
+            warning: chunk.warning,
+          });
+        }
+
         if (chunk.content) {
           tokenCount++;
           onChunk(chunk.content);
@@ -606,6 +652,7 @@ export interface StreamProgress {
   tokenCount: number;
   elapsedMs: number;
   routeInfo?: StreamRouteInfo;
+  warning?: string;
 }
 
 export async function streamChat(

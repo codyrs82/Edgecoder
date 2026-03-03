@@ -110,7 +110,7 @@ Key environment variables (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the 
 | `CONTROL_PLANE_PORT` | `4303` | Control plane listen port |
 | `MESH_AUTH_TOKEN` | | Shared secret for coordinator mesh authentication |
 | `LOCAL_MODEL_PROVIDER` | `edgecoder-local` | Model backend (`edgecoder-local` or `ollama-local`) |
-| `OLLAMA_MODEL` | `qwen2.5-coder:latest` | Ollama model name |
+| `OLLAMA_MODEL` | `qwen3.5:9b` | Ollama model name |
 | `OLLAMA_AUTO_INSTALL` | `false` | Auto-install Ollama if missing |
 | `AGENT_ID` | `worker-1` | Unique agent identifier |
 | `AGENT_MODE` | `swarm-only` | Agent mode (`swarm-only` or `ide-enabled`) |

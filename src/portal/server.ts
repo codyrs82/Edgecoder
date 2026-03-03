@@ -3089,12 +3089,70 @@ app.delete("/portal/api/conversations/:id", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+app.get("/portal/api/models", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+
+  const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+  if (coordinatorUrls.length === 0) {
+    return reply.send({ local: [], swarm: [] });
+  }
+  const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
+  const hdrs: Record<string, string> = {};
+  if (PORTAL_SERVICE_TOKEN) hdrs["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+
+  let local: Array<{ name: string; parameterSize: string; quantization: string; running: boolean }> = [];
+  let swarm: Array<{ model: string; paramSize: number; agentCount: number }> = [];
+
+  // Fetch Ollama tags via coordinator proxy
+  try {
+    const tagsRes = await request(`${coordinatorUrl}/portal/models`, {
+      method: "GET",
+      headers: hdrs,
+      headersTimeout: 5_000,
+    });
+    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+      const data = (await tagsRes.body.json()) as { local?: typeof local; swarm?: typeof swarm };
+      local = data.local ?? [];
+      swarm = data.swarm ?? [];
+    } else {
+      await tagsRes.body.text().catch(() => "");
+    }
+  } catch {
+    // coordinator unreachable
+  }
+
+  // Fallback: try swarm models directly if coordinator didn't return them
+  if (swarm.length === 0) {
+    try {
+      const swarmRes = await request(`${coordinatorUrl}/models/available`, {
+        method: "GET",
+        headers: hdrs,
+        headersTimeout: 5_000,
+      });
+      if (swarmRes.statusCode >= 200 && swarmRes.statusCode < 300) {
+        swarm = (await swarmRes.body.json()) as typeof swarm;
+      } else {
+        await swarmRes.body.text().catch(() => "");
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return reply.send({ local, swarm });
+});
+
 app.post("/portal/api/chat", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const user = await getCurrentUser(req as any);
   if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
-  const body = z.object({ conversationId: z.string().min(1), message: z.string().min(1) }).parse(req.body);
+  const body = z.object({
+    conversationId: z.string().min(1),
+    message: z.string().min(1),
+    model: z.string().optional(),
+  }).parse(req.body);
 
   // Save user message
   await store.addMessage({
@@ -3119,12 +3177,15 @@ app.post("/portal/api/chat", async (req, reply) => {
   const chatHeaders: Record<string, string> = { "content-type": "application/json" };
   if (PORTAL_SERVICE_TOKEN) chatHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
 
+  const chatPayload: Record<string, unknown> = { messages };
+  if (body.model) chatPayload.model = body.model;
+
   let coordinatorRes;
   try {
     coordinatorRes = await request(`${coordinatorUrl}/portal/chat`, {
       method: "POST",
       headers: chatHeaders,
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify(chatPayload),
       headersTimeout: 180_000, // larger models can take 60s+ on cold start
       bodyTimeout: 0 // no body timeout for streaming
     });
@@ -3153,7 +3214,10 @@ app.post("/portal/api/chat", async (req, reply) => {
         if (!trimmed) continue;
         if (trimmed === "[DONE]") break;
         try {
-          const parsed = JSON.parse(trimmed) as { content?: string };
+          const parsed = JSON.parse(trimmed) as { content?: string; warning?: string };
+          if (parsed.warning) {
+            reply.raw.write(`data: ${JSON.stringify({ warning: parsed.warning })}\n\n`);
+          }
           if (parsed.content) {
             fullContent += parsed.content;
             reply.raw.write(`data: ${JSON.stringify({ content: parsed.content })}\n\n`);
@@ -4882,6 +4946,41 @@ app.get("/portal/chat", async (_req, reply) => {
       }
       .chat-send-btn:hover { filter:brightness(1.1); box-shadow:0 2px 8px rgba(193,120,80,0.3); }
       .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
+      /* ── Model picker ── */
+      .model-picker-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+      .model-picker-wrap { position:relative; }
+      .model-trigger {
+        display:flex; align-items:center; gap:4px;
+        padding:4px 10px; border:1px solid var(--card-border);
+        background:var(--bg-input); color:var(--text-secondary);
+        border-radius:var(--radius-sm); font-size:12px;
+        cursor:pointer; transition:all 0.15s;
+      }
+      .model-trigger:hover { border-color:var(--brand); color:var(--text); }
+      .model-trigger .running-dot { width:6px; height:6px; border-radius:50%; background:var(--brand); display:inline-block; }
+      .model-trigger svg { transition:transform 0.15s; }
+      .model-trigger.open svg { transform:rotate(180deg); }
+      .model-dropdown {
+        position:absolute; bottom:calc(100% + 4px); left:0;
+        min-width:260px; max-height:320px; overflow-y:auto;
+        background:var(--bg-surface); border:1px solid var(--card-border);
+        border-radius:var(--radius-md); box-shadow:0 -4px 20px rgba(0,0,0,0.4);
+        z-index:100; padding:4px;
+      }
+      .model-dropdown .section-label {
+        padding:8px 10px 4px; font-size:11px; color:var(--muted);
+        text-transform:uppercase; letter-spacing:0.5px;
+      }
+      .model-option {
+        display:flex; flex-direction:column; gap:1px; width:100%;
+        padding:8px 10px; border:none; background:none;
+        color:var(--text); cursor:pointer; border-radius:var(--radius-sm);
+        text-align:left; font-size:13px; transition:background 0.1s;
+      }
+      .model-option:hover { background:rgba(255,255,255,0.05); }
+      .model-option.active { border-left:2px solid var(--brand); padding-left:8px; }
+      .model-option .opt-name { display:flex; align-items:center; gap:6px; }
+      .model-option .opt-meta { font-size:11px; color:var(--muted); }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
       @media (max-width:680px) {
@@ -4914,6 +5013,15 @@ app.get("/portal/chat", async (_req, reply) => {
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
+            <div class="model-picker-row">
+              <div class="model-picker-wrap" id="modelPickerWrap">
+                <button class="model-trigger" id="modelTrigger">
+                  <span id="modelLabel">Auto</span>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="model-dropdown hidden" id="modelDropdown"></div>
+              </div>
+            </div>
             <div class="chat-input-row">
               <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..."></textarea>
               <button class="chat-send-btn" id="sendBtn">Send</button>
@@ -4929,6 +5037,9 @@ app.get("/portal/chat", async (_req, reply) => {
     var conversations = [];
     var abortController = null;
     var isStreaming = false;
+    var selectedModel = null;
+    var modelPickerOpen = false;
+    var portalModels = { local: [], swarm: [] };
 
     function escapeHtml(s) {
       return String(s)
@@ -5127,10 +5238,12 @@ app.get("/portal/chat", async (_req, reply) => {
       abortController = new AbortController();
 
       try {
+        var chatBody = { conversationId: activeConvId, message: text };
+        if (selectedModel) chatBody.model = selectedModel;
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversationId: activeConvId, message: text }),
+          body: JSON.stringify(chatBody),
           signal: abortController.signal,
           credentials: "same-origin"
         });
@@ -5159,6 +5272,12 @@ app.get("/portal/chat", async (_req, reply) => {
             if (payload === "[DONE]") continue;
             try {
               var parsed = JSON.parse(payload);
+              if (parsed.warning) {
+                var warnBanner = document.createElement("div");
+                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);border-radius:6px;margin-bottom:8px;";
+                warnBanner.textContent = parsed.warning;
+                assistantBubble.insertBefore(warnBanner, assistantBody);
+              }
               if (parsed.content) {
                 fullContent += parsed.content;
                 tokenCount++;
@@ -5205,6 +5324,107 @@ app.get("/portal/chat", async (_req, reply) => {
         }
       }
     }
+
+    // ── Model picker ──
+    function displayModelName(name) {
+      if (!name) return "Auto";
+      var parts = name.split(":");
+      var tag = (parts[1] || "").split("-")[0];
+      return tag ? parts[0] + ":" + tag : parts[0];
+    }
+
+    function updateModelLabel() {
+      document.getElementById("modelLabel").textContent = displayModelName(selectedModel);
+    }
+
+    function renderModelDropdown() {
+      var html = '<button class="model-option' + (!selectedModel ? ' active' : '') + '" data-model="">';
+      html += '<span class="opt-name">Auto</span>';
+      html += '<span class="opt-meta">Best available route</span></button>';
+
+      if (portalModels.local && portalModels.local.length > 0) {
+        html += '<div class="section-label">Local Models</div>';
+        for (var i = 0; i < portalModels.local.length; i++) {
+          var m = portalModels.local[i];
+          var isActive = selectedModel === m.name;
+          html += '<button class="model-option' + (isActive ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">';
+          html += '<span class="opt-name">' + escapeHtml(displayModelName(m.name));
+          if (m.running) html += ' <span class="running-dot" style="width:6px;height:6px;border-radius:50%;background:var(--brand);display:inline-block;"></span>';
+          html += '</span>';
+          var meta = [];
+          if (m.parameterSize) meta.push(m.parameterSize);
+          if (m.quantization) meta.push(m.quantization);
+          meta.push("Free");
+          html += '<span class="opt-meta">' + meta.join(" \\u00B7 ") + '</span></button>';
+        }
+      }
+
+      if (portalModels.swarm && portalModels.swarm.length > 0) {
+        html += '<div class="section-label">Swarm Network</div>';
+        for (var j = 0; j < portalModels.swarm.length; j++) {
+          var s = portalModels.swarm[j];
+          var isSwarmActive = selectedModel === s.model;
+          var disabled = s.agentCount === 0;
+          html += '<button class="model-option' + (isSwarmActive ? ' active' : '') + '"' + (disabled ? ' disabled style="opacity:0.4;cursor:default;"' : '') + ' data-model="' + escapeHtml(s.model) + '">';
+          html += '<span class="opt-name">' + escapeHtml(displayModelName(s.model)) + '</span>';
+          html += '<span class="opt-meta">' + s.agentCount + ' agent' + (s.agentCount === 1 ? '' : 's') + '</span></button>';
+        }
+      }
+
+      if ((!portalModels.local || portalModels.local.length === 0) && (!portalModels.swarm || portalModels.swarm.length === 0)) {
+        html += '<div class="opt-meta" style="padding:12px 10px; text-align:center;">No models discovered</div>';
+      }
+
+      document.getElementById("modelDropdown").innerHTML = html;
+    }
+
+    async function refreshModels() {
+      try {
+        portalModels = await api("/portal/api/models");
+      } catch {
+        portalModels = { local: [], swarm: [] };
+      }
+      renderModelDropdown();
+    }
+
+    function toggleModelPicker() {
+      modelPickerOpen = !modelPickerOpen;
+      var dropdown = document.getElementById("modelDropdown");
+      var trigger = document.getElementById("modelTrigger");
+      if (modelPickerOpen) {
+        dropdown.classList.remove("hidden");
+        trigger.classList.add("open");
+        refreshModels();
+      } else {
+        dropdown.classList.add("hidden");
+        trigger.classList.remove("open");
+      }
+    }
+
+    function closeModelPicker() {
+      modelPickerOpen = false;
+      document.getElementById("modelDropdown").classList.add("hidden");
+      document.getElementById("modelTrigger").classList.remove("open");
+    }
+
+    document.getElementById("modelTrigger").addEventListener("click", function(e) {
+      e.stopPropagation();
+      toggleModelPicker();
+    });
+
+    document.getElementById("modelDropdown").addEventListener("click", function(e) {
+      var opt = e.target.closest(".model-option");
+      if (!opt || opt.disabled) return;
+      selectedModel = opt.dataset.model || null;
+      updateModelLabel();
+      closeModelPicker();
+    });
+
+    document.addEventListener("click", function(e) {
+      if (modelPickerOpen && !document.getElementById("modelPickerWrap").contains(e.target)) {
+        closeModelPicker();
+      }
+    });
 
     // Event listeners
     document.getElementById("newChatBtn").addEventListener("click", createNewChat);

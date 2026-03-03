@@ -14,7 +14,7 @@
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
-  let historyOpen = $state(false);
+  let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
   let editorView: EditorView | undefined = $state(undefined);
 
@@ -102,7 +102,7 @@
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
-      <button class="header-btn" title="History" onclick={() => {
+      <button class="header-btn" title={activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : "Toggle chat"} onclick={() => {
         if (activeTab === "chat") {
           historyOpen = !historyOpen;
         } else {
@@ -110,7 +110,8 @@
         }
       }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M9 3v18"/>
         </svg>
       </button>
     </header>

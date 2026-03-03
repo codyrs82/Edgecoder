@@ -97,7 +97,7 @@ The seed node TOML (`fly.seed-node.toml`) sets these environment variables:
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "false"
-  OLLAMA_MODEL = "qwen2.5-coder:latest"
+  OLLAMA_MODEL = "qwen3.5:9b"
 ```
 
 It mounts persistent storage for Ollama model data:
@@ -155,7 +155,7 @@ Environment for seed-node:
 - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 - LOCAL_MODEL_PROVIDER=ollama-local
 - OLLAMA_AUTO_INSTALL=false
-- OLLAMA_MODEL=qwen2.5-coder:latest
+- OLLAMA_MODEL=qwen3.5:9b
 ```
 
 ### Building the Docker Image
@@ -410,8 +410,8 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LOCAL_MODEL_PROVIDER` | `edgecoder-local` | Model provider: `edgecoder-local` or `ollama-local` |
-| `OLLAMA_MODEL` | `qwen2.5-coder:latest` | Ollama model name |
-| `OLLAMA_COORDINATOR_MODEL` | `qwen2.5-coder:latest` | Model for coordinator inference calls |
+| `OLLAMA_MODEL` | `qwen3.5:9b` | Ollama model name |
+| `OLLAMA_COORDINATOR_MODEL` | `qwen3.5:9b` | Model for coordinator inference calls |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API host |
 | `OLLAMA_AUTO_INSTALL` | `false` | Auto-install Ollama if missing |
 
