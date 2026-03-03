@@ -7558,6 +7558,28 @@ app.post("/portal/api/escalations/:id/respond", async (req, reply) => {
   return reply.send({ ok: true, status: "human_responded", humanContext: body.context });
 });
 
+// ── DNS staleness sweep ──────────────────────────────────────────
+const DNS_STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const DNS_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+
+async function runDnsStaleSweep(): Promise<void> {
+  if (!store || !isDnsConfigured()) return;
+  try {
+    const count = await store.markStaleCoordinatorDns(DNS_STALE_THRESHOLD_MS);
+    if (count > 0) {
+      console.log(`[portal] DNS stale sweep: marked ${count} coordinator(s) as stale`);
+    }
+  } catch (err) {
+    console.error("[portal] DNS stale sweep failed:", err);
+  }
+}
+
+if (isDnsConfigured()) {
+  setInterval(runDnsStaleSweep, DNS_SWEEP_INTERVAL_MS);
+  // Run once at startup after a short delay
+  setTimeout(runDnsStaleSweep, 30_000);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
     .then(async () => {
