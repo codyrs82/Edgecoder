@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { request } from "undici";
+import { isIPv6 } from "node:net";
 
 // ── Config ──────────────────────────────────────────────────────
 const GODADDY_API_KEY = process.env.GODADDY_API_KEY ?? "";
@@ -51,7 +52,7 @@ function isPrivateIpv4(ip: string): boolean {
 function isPrivateIpv6(ip: string): boolean {
   const lower = ip.toLowerCase();
   if (lower === "::1") return true;
-  if (lower.startsWith("fe80:") || lower.startsWith("fe80::")) return true;
+  if (lower.startsWith("fe80:")) return true;
   if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
   return false;
 }
@@ -66,8 +67,8 @@ export function isPublicIp(ip: string): boolean {
     return !isPrivateIpv4(trimmed);
   }
 
-  // IPv6 — must contain a colon
-  if (trimmed.includes(":")) {
+  // IPv6 — validate with Node's built-in checker
+  if (trimmed.includes(":") && isIPv6(trimmed)) {
     return !isPrivateIpv6(trimmed);
   }
 
