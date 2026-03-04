@@ -8,7 +8,7 @@
   import LoginScreen from "./pages/LoginScreen.svelte";
   import OllamaSetup from "./components/OllamaSetup.svelte";
   import type { AuthUser } from "./lib/api";
-  import { getMe, checkOllamaAvailable, clearSessionToken } from "./lib/api";
+  import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
@@ -22,6 +22,10 @@
   let authChecked = $state(false);
   let showOllamaSetup = $state(false);
 
+  /** IDE agent project state — shared across tabs */
+  let projectRoot: string | null = $state(null);
+  let gitBranch: string | null = $state(null);
+
   $effect(() => {
     getMe()
       .then((u) => { user = u; startPeriodicCheck(); })
@@ -30,12 +34,51 @@
     return () => stopPeriodicCheck();
   });
 
+  // Restore existing IDE project on startup
+  $effect(() => {
+    if (user) {
+      backendReady.then(() => {
+        ideGetProject().then(p => { if (p) projectRoot = p; });
+      });
+    }
+  });
+
   $effect(() => {
     if (user) {
       checkOllamaAvailable().then((ok) => {
         if (!ok) showOllamaSetup = true;
       });
     }
+  });
+
+  // Handle deep-link callback when user is already logged in (e.g. GitHub OAuth)
+  $effect(() => {
+    if (!user) return;
+    (window as any).__handleDeepLink = async (urlStr: string) => {
+      try {
+        const raw = typeof urlStr === "string" ? urlStr : String(urlStr);
+        const cleaned = raw.startsWith('"') ? JSON.parse(raw) : raw;
+        const url = new URL(cleaned);
+        const provider = url.searchParams.get("provider");
+        const token = url.searchParams.get("mobile_token");
+        const status = url.searchParams.get("status");
+
+        if (status !== "ok" || !token) return;
+
+        if (provider === "github") {
+          // GitHub OAuth completed — the portal already saved the token during callback.
+          // Exchange mobile token so session stays valid, then notify Integrations page.
+          await completeOAuthWithToken(token);
+          window.dispatchEvent(new CustomEvent("edgecoder:github-connected"));
+        } else {
+          // Other providers — complete login flow
+          const u = await completeOAuthWithToken(token);
+          handleLogin(u);
+        }
+      } catch {
+        // Silently ignore — LoginScreen handler is fallback
+      }
+    };
   });
 
   async function handleLogin(u: AuthUser) {
@@ -76,6 +119,19 @@
   function handleNewChatFromSidebar() {
     activeTab = "chat";
     chatView?.newChat();
+  }
+
+  async function openProject() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, title: "Open Project" });
+      if (selected && typeof selected === "string") {
+        projectRoot = selected;
+        await ideSetProject(selected);
+      }
+    } catch (err) {
+      console.warn("Failed to open project dialog:", err);
+    }
   }
 
   function handleSend(message: string) {
@@ -135,11 +191,11 @@
           />
         </div>
         <div class="chat-main">
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} />
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} />
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
-        <EditorView bind:this={editorView} />
+        <EditorView bind:this={editorView} {projectRoot} {gitBranch} onOpenProject={openProject} />
       </div>
     </main>
 

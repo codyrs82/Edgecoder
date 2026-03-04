@@ -120,7 +120,7 @@ const COORDINATOR_ADMIN_EMAILS = new Set(
     .filter(Boolean)
 );
 
-type ProviderName = "google" | "microsoft";
+type ProviderName = "google" | "microsoft" | "github";
 const IOS_OAUTH_CALLBACK_PREFIX = process.env.IOS_OAUTH_CALLBACK_PREFIX ?? "edgecoder://oauth-callback";
 const MOBILE_OAUTH_TOKEN_TTL_MS = Number(process.env.MOBILE_OAUTH_TOKEN_TTL_MS ?? "300000");
 const oauthNativeRedirectByState = new Map<string, string>();
@@ -155,7 +155,15 @@ const oauthProviders: Record<ProviderName, OauthProviderConfig> = {
       "https://login.microsoftonline.com/common/oauth2/v2.0/token",
     userinfoUrl: process.env.OAUTH_MICROSOFT_USERINFO_URL ?? "https://graph.microsoft.com/oidc/userinfo",
     scopes: "openid email profile"
-  }
+  },
+  github: {
+    clientId: process.env.OAUTH_GITHUB_CLIENT_ID ?? "",
+    clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET ?? "",
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    tokenUrl: "https://github.com/login/oauth/access_token",
+    userinfoUrl: "https://api.github.com/user",
+    scopes: "repo user",
+  },
 };
 
 function validatePortalSecurityConfig(): void {
@@ -1806,7 +1814,7 @@ app.post("/auth/oauth/apple/callback", async (_req, reply) => {
 
 app.get("/auth/oauth/:provider/start", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
+  const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
   const query = z.object({ appRedirect: z.string().optional() }).parse(req.query);
   const provider = oauthProviders[params.provider];
   if (!provider.clientId || !provider.clientSecret) {
@@ -1838,14 +1846,14 @@ app.get("/auth/oauth/:provider/start", async (req, reply) => {
 
 app.get("/auth/oauth/:provider/callback", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
+  const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
   const query = z.object({ code: z.string(), state: z.string() }).parse(req.query);
   return handleOauthCallback(params.provider, query.code, query.state, reply);
 });
 
 app.post("/auth/oauth/:provider/callback", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-  const params = z.object({ provider: z.enum(["google", "microsoft"]) }).parse(req.params);
+  const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
   const body = z.object({ code: z.string(), state: z.string() }).parse(req.body);
   return handleOauthCallback(params.provider, body.code, body.state, reply);
 });
@@ -1859,9 +1867,16 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
   const nativeRedirect = oauthNativeRedirectByState.get(stateId);
   if (nativeRedirect) oauthNativeRedirectByState.delete(stateId);
 
+  const tokenExchangeHeaders: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  // GitHub requires Accept: application/json to return JSON instead of form-encoded
+  if (providerName === "github") {
+    tokenExchangeHeaders["accept"] = "application/json";
+  }
   const tokenRes = await request(provider.tokenUrl, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: tokenExchangeHeaders,
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -1881,17 +1896,55 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
   let subject = claimsFromIdToken?.sub;
   let email = claimsFromIdToken?.email;
   let emailVerified = claimIsTrue(claimsFromIdToken?.email_verified);
+  let ghLogin: string | undefined;
+  let ghAvatarUrl: string | undefined;
 
   if (provider.userinfoUrl && tokenPayload.access_token) {
     const userRes = await request(provider.userinfoUrl, {
       method: "GET",
-      headers: { authorization: `Bearer ${tokenPayload.access_token}` }
+      headers: {
+        authorization: `Bearer ${tokenPayload.access_token}`,
+        accept: "application/json",
+        "user-agent": "EdgeCoder-Portal",
+      },
     });
     if (userRes.statusCode >= 200 && userRes.statusCode < 300) {
-      const userInfo = (await userRes.body.json()) as { sub?: string; email?: string; email_verified?: boolean | string | number };
-      subject = subject ?? userInfo.sub;
-      email = email ?? userInfo.email;
-      emailVerified = emailVerified || claimIsTrue(userInfo.email_verified);
+      const userInfo = (await userRes.body.json()) as {
+        sub?: string; email?: string; email_verified?: boolean | string | number;
+        id?: number; login?: string; avatar_url?: string;
+      };
+
+      if (providerName === "github") {
+        // GitHub returns { id, login, email, avatar_url } — not OIDC format
+        subject = subject ?? (userInfo.id != null ? String(userInfo.id) : undefined);
+        ghLogin = userInfo.login;
+        ghAvatarUrl = userInfo.avatar_url;
+        email = email ?? userInfo.email ?? undefined;
+        // If email is null, fetch from /user/emails and pick primary verified
+        if (!email && tokenPayload.access_token) {
+          const emailsRes = await request("https://api.github.com/user/emails", {
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${tokenPayload.access_token}`,
+              accept: "application/json",
+              "user-agent": "EdgeCoder-Portal",
+            },
+          });
+          if (emailsRes.statusCode >= 200 && emailsRes.statusCode < 300) {
+            const emails = (await emailsRes.body.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
+            const primary = emails.find((e) => e.primary && e.verified) ?? emails.find((e) => e.verified);
+            if (primary) {
+              email = primary.email;
+              emailVerified = true;
+            }
+          }
+        }
+        if (email) emailVerified = true;
+      } else {
+        subject = subject ?? userInfo.sub;
+        email = email ?? userInfo.email;
+        emailVerified = emailVerified || claimIsTrue(userInfo.email_verified);
+      }
     }
   }
 
@@ -1924,6 +1977,15 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
     userId: user.userId,
     emailSnapshot: email
   });
+  if (providerName === "github" && tokenPayload.access_token) {
+    await portalStore.saveGitHubToken({
+      userId: user.userId,
+      accessToken: tokenPayload.access_token,
+      githubLogin: ghLogin,
+      githubAvatarUrl: ghAvatarUrl,
+      scopes: provider.scopes,
+    });
+  }
   if (user.emailVerified) await ensureCreditAccountForUser(user);
 
   await createSessionForUser(user.userId, reply);
@@ -1937,6 +1999,34 @@ async function handleOauthCallback(providerName: ProviderName, code: string, sta
   }
   return reply.redirect("/portal/dashboard");
 }
+
+// --- GitHub integration API endpoints ---
+
+app.get("/portal/api/github/status", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const token = await store.getGitHubToken(user.userId);
+  if (!token) return reply.send({ connected: false });
+  return reply.send({ connected: true, login: token.githubLogin, avatarUrl: token.githubAvatarUrl });
+});
+
+app.get("/portal/api/github/token", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  const token = await store.getGitHubToken(user.userId);
+  if (!token) return reply.code(404).send({ error: "github_not_connected" });
+  return reply.send({ accessToken: token.accessToken });
+});
+
+app.delete("/portal/api/github/disconnect", async (req, reply) => {
+  const user = await getCurrentUser(req as any);
+  if (!user) return reply.code(401).send({ error: "not_authenticated" });
+  if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  await store.deleteGitHubToken(user.userId);
+  return reply.send({ ok: true });
+});
 
 // CORS preflight for native app token exchange
 app.options("/auth/oauth/mobile/complete", async (_req, reply) => {

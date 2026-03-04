@@ -29,9 +29,11 @@ export interface ToolResult {
 
 export class ToolExecutor {
   private readonly root: string;
+  private readonly githubToken: string | null;
 
-  constructor(projectRoot: string) {
+  constructor(projectRoot: string, githubToken?: string | null) {
     this.root = resolve(projectRoot);
+    this.githubToken = githubToken ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -90,6 +92,18 @@ export class ToolExecutor {
           return this.gitCommit(args);
         case "git_branch":
           return this.gitBranch(args);
+        case "git_fetch":
+          return this.gitFetch(args);
+        case "git_push":
+          return this.gitPush(args);
+        case "git_pull":
+          return this.gitPull(args);
+        case "github_create_pr":
+          return await this.githubCreatePr(args);
+        case "github_list_prs":
+          return await this.githubListPrs(args);
+        case "github_list_issues":
+          return await this.githubListIssues(args);
         default: {
           const _exhaustive: never = tool;
           return { error: `Unknown tool: ${_exhaustive}` };
@@ -461,6 +475,209 @@ export class ToolExecutor {
       return {
         error: err instanceof Error ? err.message : "git branch failed",
       };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Git credential helper for authenticated remote ops
+  // -----------------------------------------------------------------------
+
+  private execGitAuth(gitArgs: string[], timeoutMs = 60_000): string {
+    const args: string[] = [];
+    if (this.githubToken) {
+      // Inject a one-shot credential helper that echoes the token as HTTPS password
+      const helper = `!f() { echo "protocol=https"; echo "host=github.com"; echo "username=x-access-token"; echo "password=${this.githubToken}"; }; f`;
+      args.push("-c", `credential.helper=${helper}`);
+    }
+    args.push(...gitArgs);
+    return execFileSync("git", args, {
+      cwd: this.root,
+      encoding: "utf-8",
+      timeout: timeoutMs,
+    }).trimEnd();
+  }
+
+  // -----------------------------------------------------------------------
+  // git_fetch
+  // -----------------------------------------------------------------------
+
+  private gitFetch(args: Record<string, unknown>): ToolResult {
+    const remote = typeof args.remote === "string" ? args.remote : "origin";
+    try {
+      const out = this.execGitAuth(["fetch", remote]);
+      return { result: out || `Fetched from ${remote}` };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "git fetch failed" };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // git_push
+  // -----------------------------------------------------------------------
+
+  private gitPush(args: Record<string, unknown>): ToolResult {
+    const remote = typeof args.remote === "string" ? args.remote : "origin";
+    const branch = typeof args.branch === "string" ? args.branch : "";
+    const setUpstream = args.setUpstream === true;
+
+    const gitArgs = ["push"];
+    if (setUpstream) gitArgs.push("--set-upstream");
+    gitArgs.push(remote);
+    if (branch) gitArgs.push(branch);
+
+    try {
+      const out = this.execGitAuth(gitArgs);
+      return { result: out || `Pushed to ${remote}${branch ? ` ${branch}` : ""}` };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "git push failed" };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // git_pull
+  // -----------------------------------------------------------------------
+
+  private gitPull(args: Record<string, unknown>): ToolResult {
+    const remote = typeof args.remote === "string" ? args.remote : "origin";
+    const branch = typeof args.branch === "string" ? args.branch : "";
+
+    const gitArgs = ["pull", remote];
+    if (branch) gitArgs.push(branch);
+
+    try {
+      const out = this.execGitAuth(gitArgs);
+      return { result: out || `Pulled from ${remote}${branch ? ` ${branch}` : ""}` };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "git pull failed" };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // GitHub API helpers
+  // -----------------------------------------------------------------------
+
+  private getGitHubRepo(): { owner: string; repo: string } {
+    const url = execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd: this.root,
+      encoding: "utf-8",
+      timeout: 5_000,
+    }).trim();
+
+    // HTTPS: https://github.com/owner/repo.git
+    const httpsMatch = url.match(/github\.com\/([^/]+)\/([^/.]+)/);
+    if (httpsMatch) return { owner: httpsMatch[1], repo: httpsMatch[2] };
+
+    // SSH: git@github.com:owner/repo.git
+    const sshMatch = url.match(/github\.com:([^/]+)\/([^/.]+)/);
+    if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
+
+    throw new Error(`Could not parse GitHub owner/repo from remote URL: ${url}`);
+  }
+
+  private async githubApiFetch(
+    path: string,
+    options: { method?: string; body?: unknown } = {},
+  ): Promise<unknown> {
+    if (!this.githubToken) {
+      throw new Error("GitHub not connected. Connect GitHub in Settings > Integrations.");
+    }
+    const { request: httpRequest } = await import("undici");
+    const res = await httpRequest(`https://api.github.com${path}`, {
+      method: (options.method ?? "GET") as any,
+      headers: {
+        authorization: `Bearer ${this.githubToken}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "EdgeCoder-IDE",
+        "x-github-api-version": "2022-11-28",
+        ...(options.body ? { "content-type": "application/json" } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const data = await res.body.json();
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const msg = (data as any)?.message ?? `HTTP ${res.statusCode}`;
+      throw new Error(`GitHub API error: ${msg}`);
+    }
+    return data;
+  }
+
+  // -----------------------------------------------------------------------
+  // github_create_pr
+  // -----------------------------------------------------------------------
+
+  private async githubCreatePr(args: Record<string, unknown>): Promise<ToolResult> {
+    const title = String(args.title ?? "");
+    if (!title) return { error: "title is required" };
+
+    const body = typeof args.body === "string" ? args.body : "";
+    const base = typeof args.base === "string" ? args.base : "main";
+    let head = typeof args.head === "string" ? args.head : "";
+
+    if (!head) {
+      head = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: this.root,
+        encoding: "utf-8",
+        timeout: 5_000,
+      }).trim();
+    }
+
+    try {
+      const { owner, repo } = this.getGitHubRepo();
+      const pr = (await this.githubApiFetch(`/repos/${owner}/${repo}/pulls`, {
+        method: "POST",
+        body: { title, body, head, base },
+      })) as { number: number; html_url: string; title: string };
+      return { result: `Created PR #${pr.number}: ${pr.title}\n${pr.html_url}` };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "github_create_pr failed" };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // github_list_prs
+  // -----------------------------------------------------------------------
+
+  private async githubListPrs(args: Record<string, unknown>): Promise<ToolResult> {
+    const state = typeof args.state === "string" ? args.state : "open";
+    try {
+      const { owner, repo } = this.getGitHubRepo();
+      const prs = (await this.githubApiFetch(
+        `/repos/${owner}/${repo}/pulls?state=${encodeURIComponent(state)}&per_page=30`,
+      )) as Array<{ number: number; title: string; state: string; user: { login: string }; html_url: string }>;
+      if (prs.length === 0) return { result: `No ${state} pull requests.` };
+      const lines = prs.map(
+        (pr) => `#${pr.number} [${pr.state}] ${pr.title} (by @${pr.user.login}) — ${pr.html_url}`,
+      );
+      return { result: lines.join("\n") };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "github_list_prs failed" };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // github_list_issues
+  // -----------------------------------------------------------------------
+
+  private async githubListIssues(args: Record<string, unknown>): Promise<ToolResult> {
+    const state = typeof args.state === "string" ? args.state : "open";
+    const labels = typeof args.labels === "string" ? args.labels : "";
+    try {
+      const { owner, repo } = this.getGitHubRepo();
+      let url = `/repos/${owner}/${repo}/issues?state=${encodeURIComponent(state)}&per_page=30`;
+      if (labels) url += `&labels=${encodeURIComponent(labels)}`;
+      const items = (await this.githubApiFetch(url)) as Array<{
+        number: number; title: string; state: string; user: { login: string };
+        html_url: string; pull_request?: unknown;
+      }>;
+      // GitHub API returns PRs as issues — filter them out
+      const issues = items.filter((i) => !i.pull_request);
+      if (issues.length === 0) return { result: `No ${state} issues.` };
+      const lines = issues.map(
+        (i) => `#${i.number} [${i.state}] ${i.title} (by @${i.user.login}) — ${i.html_url}`,
+      );
+      return { result: lines.join("\n") };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "github_list_issues failed" };
     }
   }
 }

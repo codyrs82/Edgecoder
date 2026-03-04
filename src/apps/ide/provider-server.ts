@@ -265,6 +265,7 @@ const ideChatSchema = z.object({
     .min(1),
   model: z.string().optional(),
   projectRoot: z.string().optional(),
+  githubToken: z.string().optional(),
 });
 
 app.post("/v1/ide/chat", async (req, reply) => {
@@ -277,7 +278,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
     });
   }
 
-  const executor = new ToolExecutor(projectRoot);
+  const executor = new ToolExecutor(projectRoot, body.githubToken);
   const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
   const chatModel =
     body.model || process.env.OLLAMA_MODEL || "qwen2.5:7b";

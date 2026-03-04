@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS portal_oauth_states (
   created_at_ms BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS portal_github_tokens (
+  user_id TEXT PRIMARY KEY REFERENCES portal_users(user_id),
+  access_token TEXT NOT NULL,
+  github_login TEXT,
+  github_avatar_url TEXT,
+  scopes TEXT,
+  updated_at_ms BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS portal_node_enrollments (
   node_id TEXT PRIMARY KEY,
   device_id TEXT,
@@ -399,7 +408,7 @@ export class PortalStore {
   }
 
   async linkOauthIdentity(input: {
-    provider: "google" | "apple" | "microsoft";
+    provider: "google" | "apple" | "microsoft" | "github";
     providerSubject: string;
     userId: string;
     emailSnapshot?: string;
@@ -490,7 +499,7 @@ export class PortalStore {
 
   async createOauthState(input: {
     stateId: string;
-    provider: "google" | "apple" | "microsoft";
+    provider: "google" | "apple" | "microsoft" | "github";
     redirectUri: string;
     expiresAtMs: number;
   }): Promise<void> {
@@ -1236,6 +1245,44 @@ export class PortalStore {
       `DELETE FROM portal_conversations WHERE conversation_id = $1`,
       [conversationId]
     );
+  }
+
+  async saveGitHubToken(input: {
+    userId: string;
+    accessToken: string;
+    githubLogin?: string;
+    githubAvatarUrl?: string;
+    scopes?: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_github_tokens (user_id, access_token, github_login, github_avatar_url, scopes, updated_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (user_id) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         github_login = EXCLUDED.github_login,
+         github_avatar_url = EXCLUDED.github_avatar_url,
+         scopes = EXCLUDED.scopes,
+         updated_at_ms = EXCLUDED.updated_at_ms`,
+      [input.userId, input.accessToken, input.githubLogin ?? null, input.githubAvatarUrl ?? null, input.scopes ?? null, Date.now()]
+    );
+  }
+
+  async getGitHubToken(userId: string): Promise<{ accessToken: string; githubLogin: string | null; githubAvatarUrl: string | null } | null> {
+    const result = await this.pool.query(
+      `SELECT access_token, github_login, github_avatar_url FROM portal_github_tokens WHERE user_id = $1`,
+      [userId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      accessToken: row.access_token,
+      githubLogin: row.github_login ?? null,
+      githubAvatarUrl: row.github_avatar_url ?? null,
+    };
+  }
+
+  async deleteGitHubToken(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_github_tokens WHERE user_id = $1`, [userId]);
   }
 
   async getStatsCounts(): Promise<{

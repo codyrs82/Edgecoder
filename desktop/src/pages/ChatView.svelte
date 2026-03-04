@@ -2,19 +2,17 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ModelPicker from "../components/ModelPicker.svelte";
-  import ProjectBar from "../components/ProjectBar.svelte";
   import {
     streamChat,
     streamPortalChat,
     streamIdeChat,
-    ideSetProject,
-    ideGetProject,
     ideSendToolApproval,
     portalCreateConversation,
     portalRenameConversation,
     getModelPullProgress,
     isRemoteMode,
     backendReady,
+    getGitHubToken,
   } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import {
@@ -28,8 +26,9 @@
 
   interface Props {
     onOpenInEditor?: (code: string, language: string) => void;
+    projectRoot?: string | null;
   }
-  let { onOpenInEditor }: Props = $props();
+  let { onOpenInEditor, projectRoot = null }: Props = $props();
 
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
@@ -42,10 +41,19 @@
   /** Whether we should stream via the portal API (server-side conversations) */
   let usePortalChat = $state(false);
 
-  /** IDE agent project state */
-  let projectRoot: string | null = $state(null);
-  let gitBranch: string | null = $state(null);
+  /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
+
+  /** Cached GitHub token for IDE agent remote operations */
+  let cachedGitHubToken: string | null = $state(null);
+
+  $effect(() => {
+    getGitHubToken().then((t) => { cachedGitHubToken = t; }).catch(() => {});
+    // Re-fetch when GitHub is connected via settings
+    const handler = () => { getGitHubToken().then((t) => { cachedGitHubToken = t; }).catch(() => {}); };
+    window.addEventListener("edgecoder:github-connected", handler);
+    return () => window.removeEventListener("edgecoder:github-connected", handler);
+  });
 
   /** Active model download progress */
   let pullProgress: ModelPullProgress | null = $state(null);
@@ -82,9 +90,6 @@
       }
     }
 
-    // Check for an existing IDE project
-    ideGetProject().then(p => { if (p) projectRoot = p; });
-
     // Poll for model download progress
     pullPollTimer = setInterval(async () => {
       pullProgress = await getModelPullProgress();
@@ -113,20 +118,6 @@
     conversation = conversation;
     await saveConversation(conversation);
     return portalId;
-  }
-
-  async function openProject() {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ directory: true, title: "Open Project" });
-      if (selected && typeof selected === "string") {
-        projectRoot = selected;
-        await ideSetProject(selected);
-        // Git branch detection not yet available — leave null
-      }
-    } catch (err) {
-      console.warn("Failed to open project dialog:", err);
-    }
   }
 
   function handleToolApproval(id: string, approved: boolean) {
@@ -217,6 +208,7 @@
           },
           abortController.signal,
           conversation.selectedModel,
+          cachedGitHubToken,
         );
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
@@ -345,7 +337,6 @@
 </script>
 
 <div class="chat-view" bind:this={scrollContainer}>
-  <ProjectBar {projectRoot} {gitBranch} onOpenProject={openProject} />
   <div class="chat-header">
     <ModelPicker
       selectedModel={conversation.selectedModel}

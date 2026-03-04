@@ -33,6 +33,9 @@
     "git_status",
     "git_diff",
     "git_log",
+    "git_fetch",
+    "github_list_prs",
+    "github_list_issues",
   ];
 
   let borderColor = $derived.by(() => {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import Account from "../pages/Account.svelte";
+  import Integrations from "../pages/Integrations.svelte";
   import ActiveWork from "../pages/ActiveWork.svelte";
   import Dashboard from "../pages/Dashboard.svelte";
   import MeshTopology from "../pages/MeshTopology.svelte";
@@ -19,6 +20,7 @@
 
   const sections = [
     { id: "account", label: "Account", component: Account },
+    { id: "integrations", label: "Integrations", component: Integrations },
     { id: "active-work", label: "Active Work", component: ActiveWork },
     { id: "dashboard", label: "Dashboard", component: Dashboard },
     { id: "mesh", label: "Mesh", component: MeshTopology },

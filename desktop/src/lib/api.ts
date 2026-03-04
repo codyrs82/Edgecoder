@@ -558,7 +558,7 @@ function oauthPortalBase(): string {
   return "https://edgecoder-portal.fly.dev";
 }
 
-export function getOAuthStartUrl(provider: "google" | "microsoft"): string {
+export function getOAuthStartUrl(provider: "google" | "microsoft" | "github"): string {
   const redirect = encodeURIComponent("edgecoder://oauth-callback");
   return `${oauthPortalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
 }
@@ -574,6 +574,37 @@ export async function completeOAuthWithToken(mobileToken: string): Promise<AuthU
   const data = await res.json();
   if (data.sessionToken) saveSessionToken(data.sessionToken);
   return data.user;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub integration API (portal)
+// ---------------------------------------------------------------------------
+
+export async function getGitHubStatus(): Promise<{ connected: boolean; login?: string; avatarUrl?: string }> {
+  const res = await fetch(`${portalBase()}/portal/api/github/status`, {
+    headers: authHeaders(),
+    credentials: "include",
+  });
+  if (!res.ok) return { connected: false };
+  return res.json();
+}
+
+export async function getGitHubToken(): Promise<string | null> {
+  const res = await fetch(`${portalBase()}/portal/api/github/token`, {
+    headers: authHeaders(),
+    credentials: "include",
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.accessToken ?? null;
+}
+
+export async function disconnectGitHub(): Promise<void> {
+  await fetch(`${portalBase()}/portal/api/github/disconnect`, {
+    method: "DELETE",
+    headers: authHeaders(),
+    credentials: "include",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +860,7 @@ export async function streamIdeChat(
   onEvent: (event: IdeStreamEvent) => void,
   signal?: AbortSignal,
   requestedModel?: string,
+  githubToken?: string | null,
 ): Promise<void> {
   const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
   const res = await fetch(`${base}/v1/ide/chat`, {
@@ -838,6 +870,7 @@ export async function streamIdeChat(
       messages,
       model: requestedModel,
       projectRoot,
+      ...(githubToken ? { githubToken } : {}),
     }),
     signal,
   });

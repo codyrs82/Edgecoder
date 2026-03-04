@@ -19,7 +19,13 @@ export type ToolName =
   | "git_diff"
   | "git_log"
   | "git_commit"
-  | "git_branch";
+  | "git_branch"
+  | "git_push"
+  | "git_pull"
+  | "git_fetch"
+  | "github_create_pr"
+  | "github_list_prs"
+  | "github_list_issues";
 
 /** Tools that only observe the workspace (no approval needed). */
 export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -29,6 +35,9 @@ export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "git_status",
   "git_diff",
   "git_log",
+  "git_fetch",
+  "github_list_prs",
+  "github_list_issues",
 ]);
 
 /** Tools that mutate the workspace or execute arbitrary commands. */
@@ -38,6 +47,9 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "run_shell",
   "git_commit",
   "git_branch",
+  "git_push",
+  "git_pull",
+  "github_create_pr",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -298,6 +310,103 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         type: "boolean",
         description:
           "If true, create a new branch with the given name. Defaults to false.",
+      },
+    },
+  },
+
+  // -- Remote git + GitHub tools ----------------------------------------------
+  {
+    name: "git_fetch",
+    description:
+      "Fetch refs and objects from a remote repository.",
+    parameters: {
+      remote: {
+        type: "string",
+        description: "Remote name to fetch from. Defaults to 'origin'.",
+      },
+    },
+  },
+  {
+    name: "git_push",
+    description:
+      "Push local commits to a remote repository. Requires GitHub to be connected.",
+    parameters: {
+      remote: {
+        type: "string",
+        description: "Remote name. Defaults to 'origin'.",
+      },
+      branch: {
+        type: "string",
+        description: "Branch to push. Defaults to current branch.",
+      },
+      setUpstream: {
+        type: "boolean",
+        description: "If true, set upstream tracking (--set-upstream). Defaults to false.",
+      },
+    },
+  },
+  {
+    name: "git_pull",
+    description:
+      "Pull changes from a remote repository. Requires GitHub to be connected.",
+    parameters: {
+      remote: {
+        type: "string",
+        description: "Remote name. Defaults to 'origin'.",
+      },
+      branch: {
+        type: "string",
+        description: "Branch to pull. Omit to pull current tracking branch.",
+      },
+    },
+  },
+  {
+    name: "github_create_pr",
+    description:
+      "Create a pull request on GitHub. Requires GitHub to be connected.",
+    parameters: {
+      title: {
+        type: "string",
+        description: "Pull request title.",
+        required: true,
+      },
+      body: {
+        type: "string",
+        description: "Pull request body/description.",
+      },
+      head: {
+        type: "string",
+        description: "The branch containing the changes. Defaults to current branch.",
+      },
+      base: {
+        type: "string",
+        description: "The branch to merge into. Defaults to 'main'.",
+      },
+    },
+  },
+  {
+    name: "github_list_prs",
+    description:
+      "List pull requests on the GitHub repository. Requires GitHub to be connected.",
+    parameters: {
+      state: {
+        type: "string",
+        description: "Filter by state: 'open', 'closed', or 'all'. Defaults to 'open'.",
+      },
+    },
+  },
+  {
+    name: "github_list_issues",
+    description:
+      "List issues on the GitHub repository. Requires GitHub to be connected.",
+    parameters: {
+      state: {
+        type: "string",
+        description: "Filter by state: 'open', 'closed', or 'all'. Defaults to 'open'.",
+      },
+      labels: {
+        type: "string",
+        description: "Comma-separated list of label names to filter by.",
       },
     },
   },
