@@ -94,7 +94,7 @@ function agentBase(): string {
 }
 
 function portalBase(): string {
-  return "https://edgecoder-portal.fly.dev";
+  return "https://edgecoder.io";
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +555,7 @@ export async function logout(): Promise<void> {
 /** OAuth always routes through the remote portal — local has no portal server,
  *  and the redirect_uri registered with Microsoft is the production URL. */
 function oauthPortalBase(): string {
-  return "https://edgecoder-portal.fly.dev";
+  return "https://edgecoder.io";
 }
 
 export function getOAuthStartUrl(provider: "google" | "microsoft" | "github"): string {
