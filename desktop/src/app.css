@@ -1,0 +1,9 @@
+/* #23: Tailwind v4 + shared design tokens.
+   Preflight is intentionally NOT imported yet (it would reset existing
+   component styles); components migrate to utilities incrementally. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "@edgecoder/tokens/tokens.css";
+@import "@edgecoder/tokens/theme.css";
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));

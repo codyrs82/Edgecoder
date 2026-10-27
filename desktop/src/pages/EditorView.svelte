@@ -3,6 +3,7 @@
   import FileExplorer from "../components/FileExplorer.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, type EditorFile } from "../lib/editor-store";
+  import { onThemeChange, resolvedTheme } from "../lib/theme";
 
   let editorContainer: HTMLDivElement | undefined = $state(undefined);
   let editor: any = $state(null);
@@ -20,6 +21,8 @@
   let editorChatPanel: EditorChatPanel | undefined = $state(undefined);
 
   let activeFile = $derived(files.find((f) => f.path === activeFilePath) ?? null);
+
+  let offTheme: (() => void) | undefined;
 
   onMount(async () => {
     // Restore chat panel state from localStorage
@@ -48,11 +51,28 @@
       },
     });
 
+    // #23: light counterpart; switched live with the app theme.
+    mon.editor.defineTheme("edgecoder-light", {
+      base: "vs",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.background": "#ffffff",
+        "editor.foreground": "#1f1f1d",
+        "editorLineNumber.foreground": "#6b665c",
+        "editorLineNumber.activeForeground": "#57524a",
+        "editor.selectionBackground": "#f0d9c8",
+        "editor.lineHighlightBackground": "#f7f5f0",
+        "editorCursor.foreground": "#a65a33",
+      },
+    });
+    offTheme = onThemeChange((t) => mon.editor.setTheme(`edgecoder-${t}`));
+
     if (editorContainer) {
       editor = mon.editor.create(editorContainer, {
         value: activeFile?.content ?? "",
         language: activeFile?.language ?? "plaintext",
-        theme: "edgecoder-dark",
+        theme: `edgecoder-${resolvedTheme()}`,
         minimap: { enabled: false },
         fontSize: 14,
         fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace",
@@ -74,6 +94,7 @@
   });
 
   onDestroy(() => {
+    offTheme?.();
     editor?.dispose();
   });
 

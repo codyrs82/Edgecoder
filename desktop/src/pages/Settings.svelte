@@ -4,6 +4,7 @@
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
+  import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
 
   // App version
   let appVersion = $state("—");
@@ -163,10 +164,30 @@
     if (savedTimeout) clearTimeout(savedTimeout);
     savedTimeout = setTimeout(() => { showSaved = false; }, 2000);
   }
+  let themePref = $state<ThemePreference>(getThemePreference());
 </script>
 
 <div class="settings">
   <h1>Settings</h1>
+
+  <!-- #23: Appearance -->
+  <div class="section">
+    <h2>Appearance</h2>
+    <label>
+      <span class="label-text">Theme</span>
+      <div class="input-row">
+        <select
+          aria-label="Theme"
+          value={themePref}
+          onchange={(e) => { themePref = e.currentTarget.value as ThemePreference; setTheme(themePref); }}
+        >
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </label>
+  </div>
 
   <!-- Mesh Configuration -->
   <div class="section">
