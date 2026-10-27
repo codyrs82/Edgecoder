@@ -107,6 +107,26 @@ fn get_local_token(state: tauri::State<'_, LocalToken>) -> String {
     state.0.clone()
 }
 
+/// Path of the IDE provider token written by the IDE server (#4): ~/.edgecoder/ide-token.
+fn ide_token_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".edgecoder").join("ide-token"))
+}
+
+/// Read the IDE provider token so the webview can call the IDE server (:4304).
+/// The file is the single source of truth; the desktop never generates or logs it.
+#[tauri::command]
+fn get_ide_token() -> Result<String, String> {
+    let path = ide_token_path().ok_or_else(|| "home directory not found".to_string())?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|_| "IDE token not found; start the IDE provider server once to create ~/.edgecoder/ide-token".to_string())?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return Err("IDE token file is empty".to_string());
+    }
+    Ok(token)
+}
+
 #[tauri::command]
 fn set_project_root(path: String, state: tauri::State<'_, ProjectRoot>) -> Result<String, String> {
     let pb = PathBuf::from(&path);
@@ -632,6 +652,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_system_metrics,
             get_local_token,
+            get_ide_token,
             set_project_root,
             get_project_root,
             project_read_file,

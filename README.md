@@ -88,9 +88,19 @@ AGENT_ID=iphone-1 AGENT_REGISTRATION_TOKEN=<token> npm run dev:worker:ios
 | Coordinator | `http://localhost:4301` |
 | Inference | `http://localhost:4302` |
 | Control Plane | `http://localhost:4303` |
-| IDE Provider | `http://localhost:4304` |
+| IDE Provider | `http://localhost:4304` (bearer token: `~/.edgecoder/ide-token`) |
 | Portal | `http://localhost:4310` |
 | Docs (VitePress) | `http://localhost:5173` (`npm run docs:dev`) |
+
+### Using EdgeCoder from Cursor, Zed and other IDEs
+
+The IDE provider server needs a bearer token on every route except `/health`.
+
+- In Cursor, Zed, Continue, JetBrains and other OpenAI-compatible clients, set the base URL to `http://127.0.0.1:4304/v1`.
+- Paste the contents of `~/.edgecoder/ide-token` into the **API key** field. The server creates this file on first start; if `IDE_PROVIDER_TOKEN` is set, use that value instead.
+- Any other API key gets 401.
+
+See [IDE Integration](site-docs/guide/ide-integration.md).
 
 ### Full Local Stack with Docker
 

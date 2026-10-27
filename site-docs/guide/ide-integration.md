@@ -124,6 +124,8 @@ The provider server can read and write your project and run commands, so it is l
 - **Browser and DNS-rebinding protection.** Requests carrying a web `Origin` (`http(s)://…`) get 403. When the server is bound to loopback, so do requests whose `Host` is not `127.0.0.1:4304`, `localhost:4304` or `[::1]:4304`.
   - The desktop webview origins (`tauri://localhost`, `http(s)://tauri.localhost`) are allowed.
   - Add more origins with `IDE_ALLOWED_ORIGINS` (comma-separated).
+  - **Desktop in Vite dev mode** runs at `http://localhost:1420`, so start the IDE server with `IDE_ALLOWED_ORIGINS=http://localhost:1420 npm run dev:ide`.
+  - The desktop app reads `~/.edgecoder/ide-token` through the Tauri command `get_ide_token`, so the token file is the single source of truth.
 - **`run_shell`.** Every shell command needs your approval in the IDE.
   - Commands are parsed into argv and run with `shell: false`, with variables like `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY` and `*_PRIVATE_KEY` stripped from the environment.
   - Shell syntax (`;`, `&&`, `|`, backticks, `$(`, redirects) is refused unless approved.

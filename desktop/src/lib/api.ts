@@ -686,6 +686,42 @@ export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {
 // IDE chat provider (:4304)
 // ---------------------------------------------------------------------------
 
+// The IDE provider server requires `Authorization: Bearer <token>` (#4). The
+// token lives in ~/.edgecoder/ide-token and is read via the Tauri command
+// `get_ide_token`. It is only ever sent to the local IDE server, never to the portal.
+let _ideToken: string | null = null;
+
+async function getIdeToken(): Promise<string> {
+  if (_ideToken) return _ideToken;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    _ideToken = (await invoke<string>("get_ide_token")) || null;
+  } catch (e) {
+    console.warn("[api] get_ide_token failed:", (e as Error).message ?? String(e));
+    _ideToken = null;
+  }
+  return _ideToken ?? "";
+}
+
+/** Forget the cached token (e.g. after a 401 when the server created a new file). */
+function resetIdeToken(): void {
+  _ideToken = null;
+}
+
+async function ideHeaders(): Promise<Record<string, string>> {
+  const token = await getIdeToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function ideBase(): string {
+  return import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+}
+
+async function ideCheck(res: Response): Promise<Response> {
+  if (res.status === 401) resetIdeToken();
+  return res;
+}
+
 function chatBase(): string {
   if (import.meta.env.DEV) return "/chat";
   return useRemote ? `${portalBase()}/portal/api` : "http://localhost:4304";
@@ -717,9 +753,10 @@ export async function streamChat(
   let tokenCount = 0;
   let routeInfo: StreamRouteInfo | undefined;
 
+  const toLocalIde = !(useRemote && !import.meta.env.DEV);
   const res = await fetch(`${chatBase()}/v1/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(toLocalIde ? await ideHeaders() : {}) },
     body: JSON.stringify({
       model: requestedModel ?? "edgecoder-local",
       messages,
@@ -830,14 +867,17 @@ export const getAvailableModels = () =>
 // ---------------------------------------------------------------------------
 
 export async function ideSetProject(projectRoot: string): Promise<void> {
-  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
-  await post(base, "/v1/ide/project", { projectRoot });
+  try {
+    await post(ideBase(), "/v1/ide/project", { projectRoot }, await ideHeaders());
+  } catch (e) {
+    if (String(e).includes(": 401")) resetIdeToken();
+    throw e;
+  }
 }
 
 export async function ideGetProject(): Promise<string | null> {
   try {
-    const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
-    const data = await get<{ projectRoot: string | null }>(base, "/v1/ide/project");
+    const data = await get<{ projectRoot: string | null }>(ideBase(), "/v1/ide/project", await ideHeaders());
     return data.projectRoot;
   } catch {
     return null;
@@ -845,8 +885,12 @@ export async function ideGetProject(): Promise<string | null> {
 }
 
 export async function ideSendToolApproval(id: string, approved: boolean): Promise<void> {
-  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
-  await post(base, "/v1/ide/tool-approval", { id, approved });
+  try {
+    await post(ideBase(), "/v1/ide/tool-approval", { id, approved }, await ideHeaders());
+  } catch (e) {
+    if (String(e).includes(": 401")) resetIdeToken();
+    throw e;
+  }
 }
 
 export interface IdeStreamEvent {
@@ -862,10 +906,10 @@ export async function streamIdeChat(
   requestedModel?: string,
   githubToken?: string | null,
 ): Promise<void> {
-  const base = import.meta.env.DEV ? "/chat" : "http://localhost:4304";
-  const res = await fetch(`${base}/v1/ide/chat`, {
+  const base = ideBase();
+  const res = await ideCheck(await fetch(`${base}/v1/ide/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await ideHeaders()) },
     body: JSON.stringify({
       messages,
       model: requestedModel,
@@ -873,7 +917,7 @@ export async function streamIdeChat(
       ...(githubToken ? { githubToken } : {}),
     }),
     signal,
-  });
+  }));
 
   if (!res.ok) throw new Error(`IDE chat request failed: ${res.status}`);
   if (!res.body) throw new Error("No response body");
