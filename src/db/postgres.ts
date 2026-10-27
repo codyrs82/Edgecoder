@@ -848,13 +848,14 @@ export class PostgresStore {
     sourceAgentId: string;
     reliabilityScore: number;
     weightedContribution: number;
-  }): Promise<void> {
-    await this.pool.query(
+  }): Promise<boolean> {
+    const result = await this.pool.query(
       `INSERT INTO compute_contribution_reports (
         report_id, account_id, source_agent_id, task_id, resource_class, cpu_seconds, gpu_seconds,
         quality_score, reliability_score, weighted_contribution, timestamp_ms
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      ON CONFLICT (report_id) DO NOTHING`,
+      ON CONFLICT (report_id) DO NOTHING
+      RETURNING report_id`,
       [
         input.report.reportId,
         input.accountId,
@@ -869,6 +870,7 @@ export class PostgresStore {
         input.report.timestampMs
       ]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async rollingContributionShares(windowStartMs: number, windowEndMs: number): Promise<RollingContributionShare[]> {

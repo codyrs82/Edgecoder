@@ -9,10 +9,14 @@ import { pgStore } from "../db/store.js";
 
 export const creditEngine = new CreditEngine();
 
+/**
+ * Accrue credits for a contribution report. Idempotent on `report.reportId`
+ * (#44): returns null when the report was already recorded.
+ */
 export async function accrueCredits(
   report: ComputeContributionReport,
   load: LoadSnapshot
-) {
+): Promise<CreditTransaction | null> {
   if (pgStore) {
     const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
     const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
@@ -30,18 +34,24 @@ export async function accrueCredits(
       relatedTaskId: report.taskId,
       timestampMs: Date.now()
     };
-    await pgStore.persistCreditTransaction(tx);
-    await pgStore.persistComputeContributionReport({
+    // Insert the report first; ON CONFLICT (report_id) DO NOTHING tells us if it already existed.
+    const inserted = await pgStore.persistComputeContributionReport({
       report,
       accountId: report.agentId,
       sourceAgentId: report.sourceAgentId ?? report.agentId,
       reliabilityScore,
       weightedContribution
     });
+    if (!inserted) return null;
+    await pgStore.persistCreditTransaction(tx);
     return tx;
   }
-  const tx = creditEngine.accrue(report, load);
-  return tx;
+  try {
+    return creditEngine.accrue(report, load);
+  } catch (error) {
+    if (error instanceof Error && error.message === "duplicate_contribution_report") return null;
+    throw error;
+  }
 }
 
 export async function rewardAccountForAgent(agentId: string): Promise<string> {

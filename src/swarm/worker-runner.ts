@@ -354,7 +354,8 @@ async function flushOfflineLedger(): Promise<void> {
       requesterSignature: row.requesterSig,
       providerSignature: row.providerSig,
     }));
-    await post("/credits/ble-sync", { transactions });
+    const bleSyncBody = { transactions };
+    await post("/credits/ble-sync", bleSyncBody, { extraHeaders: signedHeaders("/credits/ble-sync", bleSyncBody) });
     localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
     console.log(`[agent:${AGENT_ID}] BLE credits synced`);
   } catch (e) {
@@ -859,11 +860,13 @@ async function loop(): Promise<void> {
             if (SNAPSHOT_ENFORCEMENT === "strict") {
               console.error(`[agent:${AGENT_ID}] snapshot enforcement STRICT: refusing subtask ${st.id} — invalid snapshotRef: "${st.snapshotRef ?? ""}"`);
               try {
-                await post("/result", {
+                // Sign exactly the body that is posted (the signature covers the body hash).
+                const snapshotRejection = {
                   subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
                   ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
                   durationMs: 0,
-                }, { extraHeaders: signedHeaders("/result", { subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: "snapshot_invalid", durationMs: 0 }) });
+                };
+                await post("/result", snapshotRejection, { extraHeaders: signedHeaders("/result", snapshotRejection) });
               } catch { /* best effort */ }
               continue;
             }

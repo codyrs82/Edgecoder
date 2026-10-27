@@ -141,6 +141,12 @@ export class SwarmQueue {
     }
   }
 
+  /** #44: current claim record for a queued subtask (undefined once completed/removed). */
+  getClaim(subtaskId: string): { subtask: Subtask; claimedBy?: string; claimedAt?: number } | undefined {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    return item && { subtask: item.subtask, claimedBy: item.claimedBy, claimedAt: item.claimedAt };
+  }
+
   getSubtask(subtaskId: string): Subtask | undefined {
     const item = this.tasks.find((task) => task.subtask.id === subtaskId);
     return item?.subtask;
