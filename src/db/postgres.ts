@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import {
   AccountMembership,
@@ -365,6 +366,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_recor
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_checkpoint ON stats_ledger_records (checkpoint_hash, event_type) WHERE checkpoint_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (event_type, issued_at_ms DESC) WHERE event_type = 'stats_checkpoint_commit';
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, timestamp_ms DESC);
+-- #42: payment hash proof per intent (additive migration)
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_intents_payment_hash ON payment_intents (payment_hash) WHERE payment_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
@@ -1626,12 +1630,14 @@ export class PostgresStore {
       `INSERT INTO payment_intents (
         intent_id, account_id, coordinator_id, wallet_type, network, invoice_ref, amount_sats,
         coordinator_fee_bps, coordinator_fee_sats, net_sats, quoted_credits, status, created_at_ms,
-        settled_at_ms, tx_ref
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        settled_at_ms, tx_ref, payment_hash
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       ON CONFLICT (intent_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        settled_at_ms = EXCLUDED.settled_at_ms,
-        tx_ref = EXCLUDED.tx_ref`,
+        -- never move a settled intent back (settlement goes through settlePaymentIntentAtomic)
+        status = CASE WHEN payment_intents.status = 'settled' THEN payment_intents.status ELSE EXCLUDED.status END,
+        settled_at_ms = COALESCE(payment_intents.settled_at_ms, EXCLUDED.settled_at_ms),
+        tx_ref = COALESCE(payment_intents.tx_ref, EXCLUDED.tx_ref),
+        payment_hash = COALESCE(payment_intents.payment_hash, EXCLUDED.payment_hash)`,
       [
         intent.intentId,
         intent.accountId,
@@ -1647,16 +1653,61 @@ export class PostgresStore {
         intent.status,
         intent.createdAtMs,
         intent.settledAtMs ?? null,
-        intent.txRef ?? null
+        intent.txRef ?? null,
+        intent.paymentHash ?? null
       ]
     );
+  }
+
+  /**
+   * #42: atomic settle. Status CAS (created -> settled) and the
+   * `credit_purchase:<intentId>` credit row are written in one transaction, so
+   * concurrent webhook/reconcile/confirm calls (or a replay after restart)
+   * credit at most once.
+   */
+  async settlePaymentIntentAtomic(
+    intentId: string,
+    txRef: string,
+    accountId: string,
+    credits: number,
+    paymentHash?: string
+  ): Promise<{ status: "settled" | "already"; intent?: PaymentIntent }> {
+    const client = await this.pool.connect();
+    const now = Date.now();
+    try {
+      await client.query("BEGIN");
+      const upd = await client.query(
+        `UPDATE payment_intents
+            SET status = 'settled', settled_at_ms = $2, tx_ref = $3, payment_hash = COALESCE(payment_hash, $4)
+          WHERE intent_id = $1 AND status = 'created'
+          RETURNING intent_id`,
+        [intentId, now, txRef, paymentHash ?? null]
+      );
+      if ((upd.rowCount ?? 0) === 0) {
+        await client.query("COMMIT");
+        return { status: "already", intent: (await this.getPaymentIntent(intentId)) ?? undefined };
+      }
+      await client.query(
+        `INSERT INTO credit_transactions (
+           tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
+         ) VALUES ($1,$2,'earn',$3,$4,NULL,$5)`,
+        [randomUUID(), accountId, credits, `credit_purchase:${intentId}`, now]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { status: "settled", intent: (await this.getPaymentIntent(intentId)) ?? undefined };
   }
 
   async getPaymentIntent(intentId: string): Promise<PaymentIntent | null> {
     const result = await this.pool.query(
       `SELECT intent_id, account_id, coordinator_id, wallet_type, network, invoice_ref, amount_sats,
               coordinator_fee_bps, coordinator_fee_sats, net_sats, quoted_credits, status, created_at_ms,
-              settled_at_ms, tx_ref
+              settled_at_ms, tx_ref, payment_hash
        FROM payment_intents WHERE intent_id = $1`,
       [intentId]
     );
@@ -1677,7 +1728,8 @@ export class PostgresStore {
       status: row.status,
       createdAtMs: Number(row.created_at_ms),
       settledAtMs: row.settled_at_ms ? Number(row.settled_at_ms) : undefined,
-      txRef: row.tx_ref ?? undefined
+      txRef: row.tx_ref ?? undefined,
+      paymentHash: row.payment_hash ?? undefined
     };
   }
 

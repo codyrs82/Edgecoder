@@ -70,6 +70,11 @@ import {
   smoothLoadIndex
 } from "../economy/issuance.js";
 import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
+import {
+  assertPaymentWebhookSecret,
+  createPaymentSettler,
+  verifyPaymentWebhookSignature
+} from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import { AgentPowerTelemetry, evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
@@ -149,6 +154,8 @@ const ISSUANCE_COORDINATOR_SHARE = Number(process.env.ISSUANCE_COORDINATOR_SHARE
 const ISSUANCE_RESERVE_SHARE = Number(process.env.ISSUANCE_RESERVE_SHARE ?? "0.05");
 const ANCHOR_INTERVAL_MS = Number(process.env.ANCHOR_INTERVAL_MS ?? String(2 * 60 * 60 * 1000));
 const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET ?? "";
+// #42: production must verify webhook HMACs.
+assertPaymentWebhookSecret();
 const IOS_BATTERY_PULL_MIN_INTERVAL_MS = Number(process.env.IOS_BATTERY_PULL_MIN_INTERVAL_MS ?? "45000");
 const IOS_BATTERY_TASK_STOP_LEVEL_PCT = Number(process.env.IOS_BATTERY_TASK_STOP_LEVEL_PCT ?? "20");
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
@@ -403,7 +410,6 @@ app.addHook("onRequest", async (req, reply) => {
 });
 let treasuryPolicy: TreasuryPolicy | null = null;
 const keyCustodyEvents: KeyCustodyEvent[] = [];
-const settledTxRefs = new Set<string>();
 let smoothedLoadIndex: number | null = null;
 const diagnosticsByAgentId = new Map<string, Array<{ eventAtMs: number; message: string }>>();
 function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Date.now()): void {
@@ -1470,20 +1476,7 @@ async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePay
   return payoutEvents;
 }
 
-async function settleIntent(intent: PaymentIntent, txRef: string): Promise<{ intent: PaymentIntent; feeEvent: CoordinatorFeeEvent }> {
-  if (settledTxRefs.has(txRef)) {
-    throw new Error("duplicate_tx_ref_rejected");
-  }
-  settledTxRefs.add(txRef);
-  await adjustCredits(intent.accountId, intent.quotedCredits, `credit_purchase:${intent.intentId}`);
-  const settled: PaymentIntent = {
-    ...intent,
-    status: "settled",
-    settledAtMs: Date.now(),
-    txRef
-  };
-  paymentIntents.set(settled.intentId, settled);
-  await pgStore?.upsertPaymentIntent(settled);
+async function recordIntentSettlementSideEffects(settled: PaymentIntent): Promise<CoordinatorFeeEvent> {
   const feeEvent: CoordinatorFeeEvent = {
     eventId: randomUUID(),
     coordinatorId: identity.peerId,
@@ -1494,7 +1487,31 @@ async function settleIntent(intent: PaymentIntent, txRef: string): Promise<{ int
   };
   await pgStore?.persistCoordinatorFeeEvent(feeEvent);
   await allocateIntentPayouts(settled);
-  return { intent: settled, feeEvent };
+  return feeEvent;
+}
+
+// #42: the only settlement path. Always asks the Lightning node; never trusts caller-supplied
+// txRef/settled flags. Postgres mode uses an atomic CAS + credit insert; in-memory mode uses a
+// per-intent mutex and a status check.
+const settleIfPaid = createPaymentSettler({
+  provider: lightningProvider,
+  store: pgStore,
+  getIntent: (intentId) => paymentIntents.get(intentId),
+  saveIntent: (intent) => {
+    paymentIntents.set(intent.intentId, intent);
+  },
+  grantCredits: (accountId, credits, reason) => adjustCredits(accountId, credits, reason),
+  onSettled: async (intent) => {
+    await recordIntentSettlementSideEffects(intent);
+  }
+});
+
+async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
+  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS) return false;
+  const expired: PaymentIntent = { ...intent, status: "expired" };
+  paymentIntents.set(expired.intentId, expired);
+  await pgStore?.upsertPaymentIntent(expired);
+  return true;
 }
 
 function cleanupStaleTunnels(): number {
@@ -2602,6 +2619,7 @@ app.post("/economy/payments/intents", async (req, reply) => {
     walletType: body.walletType as WalletType,
     network: BITCOIN_NETWORK,
     invoiceRef: invoice.invoiceRef,
+    paymentHash: invoice.paymentHash,
     amountSats: body.amountSats,
     coordinatorFeeBps: COORDINATOR_FEE_BPS,
     coordinatorFeeSats: feeSats,
@@ -2625,45 +2643,56 @@ app.get("/economy/payments/intents/:intentId", async (req, reply) => {
   return { intent };
 });
 
+// #42: admin-only; caller-supplied txRef is ignored and the node is always asked.
 app.post("/economy/payments/intents/:intentId/confirm", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return;
   const params = z.object({ intentId: z.string() }).parse(req.params);
-  const body = z.object({ txRef: z.string().min(4) }).parse(req.body);
   const intent = paymentIntents.get(params.intentId) ?? (await pgStore?.getPaymentIntent(params.intentId));
   if (!intent) return reply.code(404).send({ error: "intent_not_found" });
   if (intent.status === "settled") return { ok: true, intent };
   if (intent.status === "expired") return reply.code(409).send({ error: "intent_expired" });
-
-  const { intent: settled, feeEvent } = await settleIntent(intent, body.txRef);
-  return { ok: true, intent: settled, feeEvent };
+  const outcome = await settleIfPaid(intent);
+  if (outcome.status === "unpaid") return reply.code(402).send({ error: "invoice_unpaid", status: "unpaid" });
+  return { ok: true, status: outcome.status, intent: outcome.intent };
 });
 
-app.post("/economy/payments/webhook", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  if (PAYMENT_WEBHOOK_SECRET) {
-    const provided = (req.headers as Record<string, unknown>)["x-payment-webhook-secret"];
-    if (typeof provided !== "string" || !safeTokenEqual(provided, PAYMENT_WEBHOOK_SECRET)) {
+// #42: the webhook body is a hint only. Authenticity is an HMAC of the raw body
+// (`x-payment-signature: sha256=<hex>`); settlement is decided by the Lightning node.
+app.register(async (scope) => {
+  scope.removeContentTypeParser("application/json");
+  scope.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    (req as unknown as { rawBody?: string }).rawBody = body as string;
+    try {
+      done(null, (body as string).length > 0 ? JSON.parse(body as string) : {});
+    } catch (error) {
+      (error as { statusCode?: number }).statusCode = 400;
+      done(error as Error, undefined);
+    }
+  });
+  scope.post("/economy/payments/webhook", async (req, reply) => {
+    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!PAYMENT_WEBHOOK_SECRET) {
+      return reply.code(503).send({ error: "payment_webhook_not_configured" });
+    }
+    const rawBody = (req as unknown as { rawBody?: string }).rawBody;
+    const signature = (req.headers as Record<string, unknown>)["x-payment-signature"];
+    if (!verifyPaymentWebhookSignature(rawBody, signature, PAYMENT_WEBHOOK_SECRET)) {
       return reply.code(401).send({ error: "webhook_signature_required" });
     }
-  }
-  const body = z
-    .object({
-      invoiceRef: z.string().min(8),
-      settled: z.boolean(),
-      txRef: z.string().optional()
-    })
-    .parse(req.body);
-  const match =
-    [...paymentIntents.values()].find((intent) => intent.invoiceRef === body.invoiceRef) ??
-    (await (async () => {
-      const pending = await pgStore?.listPendingPaymentIntents(500);
-      return (pending ?? []).find((intent) => intent.invoiceRef === body.invoiceRef);
-    })());
-  if (!match) return reply.code(404).send({ error: "intent_not_found" });
-  if (!body.settled) return reply.send({ ok: true, ignored: true });
-  if (match.status === "settled") return reply.send({ ok: true, alreadySettled: true });
-  const settled = await settleIntent(match, body.txRef ?? `webhook:${randomUUID()}`);
-  return reply.send({ ok: true, intent: settled.intent, feeEvent: settled.feeEvent });
+    const body = z.object({ invoiceRef: z.string().min(8) }).passthrough().parse(req.body);
+    const match =
+      [...paymentIntents.values()].find((intent) => intent.invoiceRef === body.invoiceRef) ??
+      (await (async () => {
+        const pending = await pgStore?.listPendingPaymentIntents(500);
+        return (pending ?? []).find((intent) => intent.invoiceRef === body.invoiceRef);
+      })());
+    if (!match) return reply.code(404).send({ error: "intent_not_found" });
+    if (match.status === "settled") return reply.send({ ok: true, alreadySettled: true });
+    const outcome = await settleIfPaid(match);
+    if (outcome.status === "unpaid") return reply.send({ ok: true, ignored: true, status: "unpaid" });
+    if (outcome.status === "already") return reply.send({ ok: true, alreadySettled: true });
+    return reply.send({ ok: true, intent: outcome.intent });
+  });
 });
 
 app.post("/economy/payments/reconcile", async (req, reply) => {
@@ -2673,23 +2702,12 @@ app.post("/economy/payments/reconcile", async (req, reply) => {
   let expiredCount = 0;
   for (const intent of pending) {
     if (intent.status !== "created") continue;
-    const tooOld = Date.now() - intent.createdAtMs > PAYMENT_INTENT_TTL_MS;
-    if (tooOld) {
-      const expired: PaymentIntent = {
-        ...intent,
-        status: "expired"
-      };
-      paymentIntents.set(expired.intentId, expired);
-      await pgStore?.upsertPaymentIntent(expired);
+    if (await expireIntentIfStale(intent)) {
       expiredCount += 1;
       continue;
     }
-    const settlement = await lightningProvider.checkSettlement(intent.invoiceRef).catch(() => ({ settled: false }));
-    if (settlement.settled) {
-      const txRef = "txRef" in settlement ? settlement.txRef : undefined;
-      await settleIntent(intent, txRef ?? `reconcile:${randomUUID()}`);
-      settledCount += 1;
-    }
+    const outcome = await settleIfPaid(intent);
+    if (outcome.status === "settled") settledCount += 1;
   }
   return reply.send({ ok: true, scanned: pending.length, settledCount, expiredCount });
 });
@@ -4794,20 +4812,8 @@ export async function initCoordinator(): Promise<void> {
           const pending = pgStore ? await pgStore.listPendingPaymentIntents(500) : [...paymentIntents.values()];
           for (const intent of pending) {
             if (intent.status !== "created") continue;
-            const tooOld = Date.now() - intent.createdAtMs > PAYMENT_INTENT_TTL_MS;
-            if (tooOld) {
-              const expired: PaymentIntent = { ...intent, status: "expired" };
-              paymentIntents.set(expired.intentId, expired);
-              await pgStore?.upsertPaymentIntent(expired);
-              continue;
-            }
-            const settlement = await lightningProvider
-              .checkSettlement(intent.invoiceRef)
-              .catch(() => ({ settled: false }));
-            if (settlement.settled) {
-              const txRef = "txRef" in settlement ? settlement.txRef : undefined;
-              await settleIntent(intent, txRef ?? `poller:${randomUUID()}`);
-            }
+            if (await expireIntentIfStale(intent)) continue;
+            await settleIfPaid(intent);
           }
         } catch (error) {
           app.log.warn({ error }, "payment_reconcile_tick_failed");
