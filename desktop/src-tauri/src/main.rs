@@ -15,8 +15,19 @@ use sysinfo::{System, Disks};
 use serde::Serialize;
 use glob::glob;
 
+mod token;
+use token::generate_local_token;
+
 struct AgentProcess(Arc<Mutex<Option<Child>>>);
 struct LocalToken(String);
+
+/// Per-launch secrets handed to the spawned agent (#6). Separate values so a
+/// leaked inference token (exposed to the webview) does not grant admin access.
+#[derive(Clone)]
+struct AgentTokens {
+    inference: String,
+    admin: String,
+}
 struct ProjectRoot(Arc<Mutex<Option<PathBuf>>>);
 
 #[derive(Serialize)]
@@ -487,13 +498,13 @@ fn agent_already_running() -> bool {
     TcpStream::connect("127.0.0.1:4301").is_ok()
 }
 
-fn spawn_agent_process(agent_dir: &PathBuf, local_token: &str) -> Option<Child> {
+fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
     Command::new("node")
         .arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
-        .env("INFERENCE_AUTH_TOKEN", local_token)
-        .env("ADMIN_API_TOKEN", local_token)
+        .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
+        .env("ADMIN_API_TOKEN", &tokens.admin)
         .spawn()
         .ok()
 }
@@ -521,7 +532,7 @@ fn resolve_agent_dir(app: &tauri::App) -> Option<PathBuf> {
     Some(agent_dir)
 }
 
-fn start_agent(app: &tauri::App, local_token: &str) -> (Option<Child>, Option<PathBuf>) {
+fn start_agent(app: &tauri::App, tokens: &AgentTokens) -> (Option<Child>, Option<PathBuf>) {
     if agent_already_running() {
         eprintln!("EdgeCoder agent already running on :4301 — skipping spawn");
         return (None, None);
@@ -532,14 +543,14 @@ fn start_agent(app: &tauri::App, local_token: &str) -> (Option<Child>, Option<Pa
         None => return (None, None),
     };
 
-    let child = spawn_agent_process(&agent_dir, local_token);
+    let child = spawn_agent_process(&agent_dir, tokens);
     (child, Some(agent_dir))
 }
 
 fn monitor_agent(
     agent_mutex: Arc<Mutex<Option<Child>>>,
     agent_dir: PathBuf,
-    local_token: String,
+    tokens: AgentTokens,
 ) {
     thread::spawn(move || {
         let mut restarts = 0u32;
@@ -591,7 +602,7 @@ fn monitor_agent(
                     continue;
                 }
 
-                let new_child = spawn_agent_process(&agent_dir, &local_token);
+                let new_child = spawn_agent_process(&agent_dir, &tokens);
                 if let Ok(mut guard) = agent_mutex.lock() {
                     *guard = new_child;
                 }
@@ -602,15 +613,14 @@ fn monitor_agent(
 }
 
 fn main() {
-    // Generate a per-session token for local inference auth using timestamp + pid
-    let local_token = format!(
-        "local-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        std::process::id()
-    );
+    // #6: per-launch tokens from the OS CSPRNG (never logged). The webview only
+    // receives the inference token via get_local_token; the admin token stays
+    // with the spawned agent process.
+    let tokens = AgentTokens {
+        inference: generate_local_token(),
+        admin: generate_local_token(),
+    };
+    let local_token = tokens.inference.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -639,12 +649,12 @@ fn main() {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
-            let (child, agent_dir) = start_agent(app, &local_token);
+            let (child, agent_dir) = start_agent(app, &tokens);
             let agent_mutex = Arc::new(Mutex::new(child));
             app.manage(AgentProcess(Arc::clone(&agent_mutex)));
 
             if let Some(dir) = agent_dir {
-                monitor_agent(Arc::clone(&agent_mutex), dir, local_token.clone());
+                monitor_agent(Arc::clone(&agent_mutex), dir, tokens.clone());
             }
 
             // Listen for deep link events (edgecoder://oauth-callback?...)

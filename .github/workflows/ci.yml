@@ -35,3 +35,17 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+  desktop-token-test:
+    # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
+    # crate needs webkit system libraries, so build just the token module).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test token module
+        run: |
+          mkdir -p /tmp/token-test/src
+          cp desktop/src-tauri/src/token.rs /tmp/token-test/src/lib.rs
+          printf '[package]\nname = "token-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\ngetrandom = "0.2"\nhex = "0.4"\n' > /tmp/token-test/Cargo.toml
+          cargo test --manifest-path /tmp/token-test/Cargo.toml
