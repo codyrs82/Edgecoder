@@ -32,7 +32,7 @@ describe("Docker images (#9)", () => {
   });
 
   it("fly configs point at existing Dockerfiles", () => {
-    for (const toml of ["fly.portal.toml", "fly.seed-node.toml", "fly.seed-eu.toml", "fly.anchor-proxy.toml", "fly.docs.toml"]) {
+    for (const toml of ["fly.portal.toml", "fly.seed-node.toml", "fly.seed-eu.toml", "fly.anchor-proxy.toml"]) {
       const p = `deploy/fly/${toml}`;
       const m = read(p).match(/dockerfile\s*=\s*"([^"]+)"/);
       expect(m, p).toBeTruthy();

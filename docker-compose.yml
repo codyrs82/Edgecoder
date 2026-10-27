@@ -39,6 +39,8 @@ services:
       context: .
       dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/apps/ide/provider-server.js"]
+    environment:
+      - SKIP_OLLAMA=true # #9: the IDE provider doesn't use Ollama
     ports:
       - "4304:4304"
     depends_on:

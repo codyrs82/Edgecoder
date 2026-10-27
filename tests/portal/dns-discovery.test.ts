@@ -144,4 +144,25 @@ describe("portal coordinator discovery config (#35)", () => {
     const pick = createCoordinatorPicker({ urls: ["https://a.example"], probe: async () => false });
     expect(await pick()).toBeNull();
   });
+
+  it("caches a none-healthy result for 15 s and shares one in-flight probe", async () => {
+    let t = 0;
+    let probes = 0;
+    const pick = createCoordinatorPicker({
+      urls: ["https://a.example", "https://b.example"],
+      probe: async () => {
+        probes++;
+        return false;
+      },
+      now: () => t,
+    });
+    await Promise.all([pick(), pick(), pick()]);
+    expect(probes).toBe(2);
+    t = 14_000;
+    expect(await pick()).toBeNull();
+    expect(probes).toBe(2);
+    t = 16_000;
+    await pick();
+    expect(probes).toBe(4);
+  });
 });

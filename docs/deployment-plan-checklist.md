@@ -10,7 +10,7 @@ What is already configured vs. what else needs to be deployed for the simplified
 | **Inference service** | `deploy/fly/fly.inference.toml` | `edgecoder-inference`, region `ord` |
 | **Control plane** | `deploy/fly/fly.control-plane.toml` | `edgecoder-control-plane`, region `ord` |
 | **User portal** | `deploy/fly/fly.portal.toml` | `edgecoder-portal`, region `ord` |
-| **Docs site** | `deploy/fly/fly.docs.toml` | `edgecoder-docs`, region `ord` |
+| **Docs site** | GitHub Pages (`.github/workflows/deploy-docs.yml`) | The Fly docs app was dropped (#33) |
 | **Coordinator/control-plane DB** | Fly Postgres | `edgecoder-postgres` |
 | **Portal DB** | Fly Postgres | `edgecoder-portal-postgres` |
 | **Linux agent/coordinator** | `deploy/linux/bootstrap-host.sh`, `scripts/linux/systemd/` | systemd units + env examples |
