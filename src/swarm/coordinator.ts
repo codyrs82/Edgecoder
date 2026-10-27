@@ -693,7 +693,9 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/health/runtime") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
-  // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token
+  // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
+  // WARNING: register /admin/* routes ONLY inside the admin plugin below — a route added with
+  // app.get("/admin/...") outside it would get no auth at all because of this skip.
   if (reqPath?.startsWith("/admin/")) return;
   // #40: blacklist writes are admin-only (route checks authorizeAdmin)
   if (reqPath === "/security/blacklist" && (req as any).method === "POST") return;
@@ -5084,10 +5086,17 @@ function adminDashboardHtml(status: { queued: number; agents: number; results: n
   </div>
 </div>
 <script>
-const token = new URLSearchParams(window.location.search).get("token") || "";
+// #40 review: the admin token is sent only in the x-admin-token header, never in the URL.
+const TOKEN_KEY = "edgecoder_admin_token";
+let token = sessionStorage.getItem(TOKEN_KEY) || "";
+if (!token) {
+  token = window.prompt("Admin token") || "";
+  if (token) sessionStorage.setItem(TOKEN_KEY, token);
+}
 async function refresh() {
   try {
-    const res = await fetch("/admin/dashboard/api/overview?token=" + encodeURIComponent(token));
+    const res = await fetch("/admin/dashboard/api/overview", { headers: { "x-admin-token": token } });
+    if (res.status === 401) { sessionStorage.removeItem(TOKEN_KEY); return; }
     const d = await res.json();
     document.getElementById("v-agents").textContent = d.coordinator.agents;
     document.getElementById("v-queued").textContent = d.coordinator.queued;

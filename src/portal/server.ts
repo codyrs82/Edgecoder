@@ -7568,11 +7568,12 @@ internal.get("/internal/stats/counts", async (req, reply) => {
   return reply.send(counts);
 });
 
+}); // end /internal plugin (#40)
+
 // ---------------------------------------------------------------------------
 // Human Escalation API — surfaces tasks that exhausted all automated
 // resolvers and need human operator input.
 // ---------------------------------------------------------------------------
-});
 
 import {
   getHumanEscalation,
