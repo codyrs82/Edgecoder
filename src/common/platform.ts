@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -85,6 +85,14 @@ function _commandExists(cmd: string, overrides?: PlatformOverrides): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Join path segments with the separator of the *target* OS (not the host), so
+ * e.g. Linux paths computed on a Windows host still use "/".
+ */
+function _join(overrides: PlatformOverrides | undefined, ...parts: string[]): string {
+  return detectOS(overrides) === "windows" ? win32.join(...parts) : posix.join(...parts);
 }
 
 function _homeDir(overrides?: PlatformOverrides): string {
@@ -224,15 +232,15 @@ export function getConfigDir(overrides?: PlatformOverrides): string {
   switch (os) {
     case "linux":
     case "android": {
-      const xdg = env.XDG_CONFIG_HOME ?? join(home, ".config");
-      return join(xdg, "edgecoder");
+      const xdg = env.XDG_CONFIG_HOME ?? _join(overrides, home, ".config");
+      return _join(overrides, xdg, "edgecoder");
     }
     case "macos":
     case "ios":
-      return join(home, "Library", "Application Support", "EdgeCoder");
+      return _join(overrides, home, "Library", "Application Support", "EdgeCoder");
     case "windows": {
-      const appdata = env.APPDATA ?? join(home, "AppData", "Roaming");
-      return join(appdata, "EdgeCoder");
+      const appdata = env.APPDATA ?? _join(overrides, home, "AppData", "Roaming");
+      return _join(overrides, appdata, "EdgeCoder");
     }
   }
 }
@@ -252,15 +260,15 @@ export function getLogDir(overrides?: PlatformOverrides): string {
   switch (os) {
     case "linux":
     case "android": {
-      const xdgState = env.XDG_STATE_HOME ?? join(home, ".local", "state");
-      return join(xdgState, "edgecoder", "logs");
+      const xdgState = env.XDG_STATE_HOME ?? _join(overrides, home, ".local", "state");
+      return _join(overrides, xdgState, "edgecoder", "logs");
     }
     case "macos":
     case "ios":
-      return join(home, "Library", "Logs", "EdgeCoder");
+      return _join(overrides, home, "Library", "Logs", "EdgeCoder");
     case "windows": {
-      const localAppdata = env.LOCALAPPDATA ?? join(home, "AppData", "Local");
-      return join(localAppdata, "EdgeCoder", "logs");
+      const localAppdata = env.LOCALAPPDATA ?? _join(overrides, home, "AppData", "Local");
+      return _join(overrides, localAppdata, "EdgeCoder", "logs");
     }
   }
 }
@@ -280,15 +288,15 @@ export function getDataDir(overrides?: PlatformOverrides): string {
   switch (os) {
     case "linux":
     case "android": {
-      const xdgData = env.XDG_DATA_HOME ?? join(home, ".local", "share");
-      return join(xdgData, "edgecoder");
+      const xdgData = env.XDG_DATA_HOME ?? _join(overrides, home, ".local", "share");
+      return _join(overrides, xdgData, "edgecoder");
     }
     case "macos":
     case "ios":
-      return join(home, "Library", "Application Support", "EdgeCoder", "data");
+      return _join(overrides, home, "Library", "Application Support", "EdgeCoder", "data");
     case "windows": {
-      const localAppdata = env.LOCALAPPDATA ?? join(home, "AppData", "Local");
-      return join(localAppdata, "EdgeCoder", "data");
+      const localAppdata = env.LOCALAPPDATA ?? _join(overrides, home, "AppData", "Local");
+      return _join(overrides, localAppdata, "EdgeCoder", "data");
     }
   }
 }
