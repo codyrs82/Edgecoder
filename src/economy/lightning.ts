@@ -138,6 +138,15 @@ class ClnRestProvider implements LightningProvider {
   }
 }
 
+/**
+ * ECONOMY_PAYMENTS_ENABLED switch. Default on; "0", "false", "off" or "no"
+ * (case-insensitive, trimmed) turn payments off.
+ */
+export function economyPaymentsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.ECONOMY_PAYMENTS_ENABLED ?? "").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
 export function createLightningProviderFromEnv(): LightningProvider {
   const raw = process.env.LIGHTNING_PROVIDER?.trim().toLowerCase() || undefined;
   const isProd = process.env.NODE_ENV === "production";
