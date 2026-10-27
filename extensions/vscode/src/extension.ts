@@ -23,7 +23,9 @@ import * as path from "path";
 interface RunResult {
   plan: string;
   generatedCode: string;
-  runResult: { stdout: string; stderr: string; exitCode: number };
+  runResult: { stdout: string; stderr: string; exitCode: number | null };
+  /** false when the code was not executed locally (e.g. swarm results). */
+  ran?: boolean;
   route: "bluetooth-local" | "ollama-local" | "swarm" | "edgecoder-local";
   latencyMs: number;
   creditsSpent?: number;
@@ -221,6 +223,7 @@ ${showRoute ? `<span class="badge">${result.route}</span>` : ""}
   <button onclick="applyCode()">Apply to Editor</button>
 </div>
 
+${result.ran === false ? `<div class="section"><h3>Not executed</h3><pre>This result came from the swarm and was not run or tested locally.</pre></div>` : ""}
 ${result.runResult?.stdout ? `<div class="section"><h3>Output</h3><pre>${escapeHtml(result.runResult.stdout)}</pre></div>` : ""}
 ${result.runResult?.stderr ? `<div class="section"><h3>Stderr</h3><pre>${escapeHtml(result.runResult.stderr)}</pre></div>` : ""}
 ${result.routeError ? `<div class="section"><h3>Route Warning</h3><pre>${escapeHtml(result.routeError)}</pre></div>` : ""}
@@ -319,7 +322,11 @@ async function runEdgeCoder(
           `${baseUrl}${endpoint}`,
           { task, language, maxTokens: 1024 },
           90_000
-        ) as RunResult;
+        ) as RunResult & { error?: string; message?: string };
+        if (result.error) {
+          vscode.window.showErrorMessage(`EdgeCoder: ${result.message ?? result.error}`);
+          return;
+        }
         const routeMsg = result.route ? ` via ${result.route}` : "";
         progress.report({ message: `Done${routeMsg} (${result.latencyMs}ms)` });
         showResultPanel(context, result, task);

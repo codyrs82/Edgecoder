@@ -53,10 +53,34 @@ describe("IDE extension ↔ provider server contract (#36)", () => {
     for (const r of IDE_ROUTES) expect(app.hasRoute({ method: r.method, url: r.path }), `${r.method} ${r.path}`).toBe(true);
   });
 
+  for (const r of IDE_ROUTES.filter((x) => x.auth)) {
+    it(`${r.method} ${r.path} without a token → 401`, async () => {
+      const res = await app.inject({ method: r.method, url: r.path, headers: { host: "127.0.0.1:4304" }, payload: r.method === "POST" ? {} : undefined });
+      expect(res.statusCode).toBe(401);
+    });
+    it(`${r.method} ${r.path} with a wrong token → 401`, async () => {
+      const res = await app.inject({
+        method: r.method,
+        url: r.path,
+        headers: { host: "127.0.0.1:4304", authorization: "Bearer nope" },
+        payload: r.method === "POST" ? {} : undefined
+      });
+      expect(res.statusCode).toBe(401);
+    });
+  }
+
+  it("auth:false routes are reachable without a token", async () => {
+    for (const r of IDE_ROUTES.filter((x) => !x.auth)) {
+      const res = await app.inject({ method: r.method, url: r.path, headers: { host: "127.0.0.1:4304" } });
+      expect(res.statusCode, r.path).toBe(200);
+    }
+  });
+
   it("GET /health → 200 {ok:true} without a token", async () => {
     const res = await app.inject({ method: "GET", url: "/health", headers: { host: "127.0.0.1:4304" } });
     expect(res.statusCode).toBe(200);
     expect(res.json().ok).toBe(true);
+    expect(typeof res.json().version).toBe("string");
   });
 
   it("GET /status → 200 router status", async () => {
@@ -79,6 +103,7 @@ describe("IDE extension ↔ provider server contract (#36)", () => {
     expect(typeof body.plan).toBe("string");
     expect(typeof body.generatedCode).toBe("string");
     expect(body.runResult).toHaveProperty("exitCode");
+    expect(body.ran).toBe(true);
   }, 30_000);
 
   it("POST /run/swarm without mesh config → 503 swarm_unavailable", async () => {

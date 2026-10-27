@@ -3,6 +3,7 @@
 
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { ProviderRegistry } from "../../model/providers.js";
 import { InteractiveAgent } from "../../agent/interactive.js";
@@ -36,12 +37,22 @@ app.addHook(
   })
 );
 
-app.get("/health", async () => ({ ok: true, service: "ide-provider" }));
+const PKG_VERSION = (() => {
+  try {
+    // src/apps/ide or dist/apps/ide -> repo root package.json
+    return (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version?: string }).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
+app.get("/health", async () => ({ ok: true, service: "ide-provider", version: PKG_VERSION }));
+
+const providers = new ProviderRegistry();
+const router = new IntelligentRouter();
 
 // #36: the VS Code extension polls /status; alias of /v1/router/status.
 app.get("/status", async () => router.status());
-const providers = new ProviderRegistry();
-const router = new IntelligentRouter();
 const idePullTracker = new PullTracker();
 
 // --- IDE Agent state ---
@@ -639,7 +650,7 @@ app.get("/models", async () => ({
   providers: providers.availableProviders()
 }));
 
-async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown }, reply: any) {
+async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown; log?: any }, reply: any) {
   const parsed = runSchema.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
   const body = parsed.data;
@@ -654,14 +665,18 @@ async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown 
       return reply.send({
         plan: "",
         generatedCode: res.text,
-        runResult: { stdout: "", stderr: "", exitCode: 0 },
+        // Nothing ran locally: don't present swarm output as an executed, passing run.
+        runResult: { stdout: "", stderr: "", exitCode: null },
+        ran: false,
         route: "swarm",
         latencyMs: res.latencyMs,
         creditsSpent: res.creditsSpent,
         swarmTaskId: res.swarmTaskId
       });
     } catch (error) {
-      return reply.code(502).send({ error: "swarm_failed", message: String(error) });
+      // Log details server-side; don't echo coordinator URLs/responses to the client.
+      req.log?.error?.({ err: error }, "ide /run/swarm failed");
+      return reply.code(502).send({ error: "swarm_failed", message: "The swarm request failed. See the provider server log for details." });
     }
   }
 
@@ -669,7 +684,7 @@ async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown 
   providers.use(provider);
   const agent = new InteractiveAgent(providers.current());
   const output = await agent.run(body.task, body.language);
-  return reply.send({ ...output, route: provider, latencyMs: Date.now() - started });
+  return reply.send({ ...output, ran: true, route: provider, latencyMs: Date.now() - started });
 }
 
 app.post("/run", (req, reply) => handleRun("auto", req, reply));
