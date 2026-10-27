@@ -10,7 +10,7 @@ This guide covers how to install your own EdgeCoder agents and how to add additi
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - Valid portal account with verified email
 - Access to control-plane admin token for approval workflows
 - Mesh token (`MESH_AUTH_TOKEN`) for coordinator/agent runtime auth

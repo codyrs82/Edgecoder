@@ -63,7 +63,7 @@ docker compose up ide-provider
 - **Logs**: `/var/log/edgecoder/runtime.log`
 - **Restart**: `sudo launchctl kickstart -k system/io.edgecoder.runtime`
 - **Arch**: Apple Silicon (arm64) + Intel (x86_64)
-- **Requires**: Node.js 20+
+- **Requires**: Node.js 22+
 
 ### Linux agent (Debian/Ubuntu)
 
@@ -73,7 +73,7 @@ docker compose up ide-provider
 - **Logs**: `journalctl -u edgecoder -f`
 - **Restart**: `sudo systemctl restart edgecoder`
 - **Arch**: amd64
-- **Requires**: Node.js 20+
+- **Requires**: Node.js 22+
 
 ### iOS agent
 
@@ -88,7 +88,7 @@ docker compose up ide-provider
 
 - **Image**: `ghcr.io/codyrs82/Edgecoder:latest`
 - **Default mode**: `all-in-one` (unified agent)
-- **Includes**: Node.js 20, Ollama support
+- **Includes**: Node.js 22, Ollama support
 
 ## Scaled Deployment (Multi-Coordinator Federation)
 

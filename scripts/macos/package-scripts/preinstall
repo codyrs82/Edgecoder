@@ -38,14 +38,14 @@ resolve_node_bin() {
 
 NODE_BIN="$(resolve_node_bin || true)"
 if [[ -z "${NODE_BIN}" ]]; then
-  echo "EdgeCoder installer requires Node.js 20+."
+  echo "EdgeCoder installer requires Node.js 22+."
   echo "Install Node.js in a system-visible path (or Homebrew) and retry."
   exit 1
 fi
 
 NODE_MAJOR="$("$NODE_BIN" -p "process.versions.node.split('.')[0]")"
-if [[ "$NODE_MAJOR" -lt 20 ]]; then
-  echo "Detected Node.js $("$NODE_BIN" -v). EdgeCoder requires Node.js 20+."
+if [[ "$NODE_MAJOR" -lt 22 ]]; then
+  echo "Detected Node.js $("$NODE_BIN" -v). EdgeCoder requires Node.js 22+."
   exit 1
 fi
 

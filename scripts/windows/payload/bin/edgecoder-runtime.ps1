@@ -81,7 +81,7 @@ function Resolve-NodeBin {
 
 $NodeBin = Resolve-NodeBin
 if (-not $NodeBin) {
-    Write-Error "node binary not found. Install Node.js 20+ and set NODE_BIN in $EnvFile."
+    Write-Error "node binary not found. Install Node.js 22+ and set NODE_BIN in $EnvFile."
     exit 1
 }
 
