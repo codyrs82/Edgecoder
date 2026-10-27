@@ -43,6 +43,8 @@
   "type": "module",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/rate-limit": "^11.2.1",
     "@fastify/websocket": "^11.2.0",
     "@scure/base": "^2.0.0",
     "@scure/bip32": "^2.0.1",
