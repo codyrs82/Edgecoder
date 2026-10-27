@@ -100,6 +100,7 @@ jobs:
           # Worker chunks run in their own (worker) context; check every other chunk.
           main=$(ls dist/assets/*.js | grep -v -E '\.worker-|worker-[A-Za-z0-9_-]+\.js$' || true)
           echo "$main"
+          [ -n "$main" ] || { echo "::error::no main-thread chunks found in dist/assets"; exit 1; }
           if grep -l -E 'new Function\(|[^A-Za-z0-9_.$]eval\(' $main; then
             echo "::error::eval/new Function found in a main-thread bundle (blocked by script-src 'self')"
             exit 1

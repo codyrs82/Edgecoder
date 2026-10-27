@@ -9,7 +9,10 @@ const sec = conf.app.security;
 describe("desktop CSP (#11)", () => {
   it("production csp is a directive map", () => {
     expect(typeof sec.csp).toBe("object");
-    expect(sec.dangerousDisableAssetCspModification).toBe(false);
+    // Tauri keeps injecting nonces for scripts but leaves style-src alone, so 'unsafe-inline'
+    // (Monaco <style> tags, Svelte style="") isn't ignored because of an injected nonce.
+    expect(sec.dangerousDisableAssetCspModification).toEqual(["style-src"]);
+    expect(String(sec.csp["style-src"])).toContain("'unsafe-inline'");
   });
 
   it("production script-src has no unsafe-eval, unsafe-inline or localhost", () => {
@@ -34,6 +37,7 @@ describe("desktop CSP (#11)", () => {
     }
     expect(connect).toContain("ipc:");
     expect(connect).toContain("https://edgecoder.io");
+    for (const h of ["127.0.0.1", "localhost"]) for (const p of [4301, 4302, 4304]) expect(connect).toContain(`ws://${h}:${p}`);
   });
 
   it("devCsp keeps the dev conveniences", () => {

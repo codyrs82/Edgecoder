@@ -43,6 +43,7 @@ URLs must be `https://`. `http://` is accepted only for `127.0.0.1` and `localho
 
 `src-tauri/tauri.conf.json` has two policies:
 - **`csp`** for release builds: `script-src 'self'` (no `unsafe-eval`, no `unsafe-inline`, no dev origins). `connect-src` covers only the local services (`4301`, `4302`, `4304`, `11434` on `127.0.0.1` and `localhost`), `https://edgecoder.io`, `https://*.edgecoder.io` and the default coordinator.
+- `dangerousDisableAssetCspModification: ["style-src"]`: Tauri still adds nonces to `script-src` but leaves `style-src` alone. A nonce in `style-src` would make browsers ignore `'unsafe-inline'` and break Monaco's and Svelte's inline styles. `connect-src` also allows `ws://` on `127.0.0.1` and `localhost` for `4301`, `4302` and `4304`.
 - **`devCsp`** for `tauri dev`: allows the Vite dev server and HMR.
 
 Monaco's workers are bundled with Vite (`src/lib/monaco-setup.ts`), so the editor doesn't need `eval`. CI (`desktop-web-build`) fails if a main-thread chunk contains `eval(` or `new Function(`.
