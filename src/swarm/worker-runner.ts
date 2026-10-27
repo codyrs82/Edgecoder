@@ -501,6 +501,8 @@ async function loop(): Promise<void> {
       if (meshClaimedTasks.has(p.subtaskId)) return;
       // Don't accept tasks we originated
       if (p.originCoordinatorId === AGENT_ID) return;
+      // #45 review: a node without a sandbox never drains this queue, so don't fill it.
+      if (!SWARM_EXECUTION_ENABLED) return;
       meshTaskQueue.push({
         subtask: {
           id: p.subtaskId,
