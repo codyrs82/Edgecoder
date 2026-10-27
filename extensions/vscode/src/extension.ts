@@ -12,6 +12,9 @@
 
 import * as vscode from "vscode";
 import * as http from "http";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 // ---------------------------------------------------------------------------
 // Types mirroring provider-server responses
@@ -42,6 +45,23 @@ interface RouterStatus {
 // HTTP helper (no external deps, uses built-in node http)
 // ---------------------------------------------------------------------------
 
+// #4: the provider server requires a bearer token on every route except /health.
+// Uses the edgecoder.providerToken setting, else ~/.edgecoder/ide-token (written by the server).
+function providerToken(): string {
+  const configured = vscode.workspace.getConfiguration("edgecoder").get<string>("providerToken", "").trim();
+  if (configured) return configured;
+  try {
+    return fs.readFileSync(path.join(os.homedir(), ".edgecoder", "ide-token"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = providerToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 function postJson(url: string, body: object, timeoutMs = 90_000): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -53,7 +73,8 @@ function postJson(url: string, body: object, timeoutMs = 90_000): Promise<unknow
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload)
+        "Content-Length": Buffer.byteLength(payload),
+        ...authHeaders()
       },
       timeout: timeoutMs
     };
@@ -80,6 +101,7 @@ function getJson(url: string, timeoutMs = 5_000): Promise<unknown> {
       port: parsed.port || 80,
       path: parsed.pathname,
       method: "GET",
+      headers: authHeaders(),
       timeout: timeoutMs
     };
     const req = http.request(options, (res) => {

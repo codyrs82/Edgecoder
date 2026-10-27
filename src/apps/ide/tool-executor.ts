@@ -27,6 +27,96 @@ export interface ToolResult {
 // ToolExecutor
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// #4: run_shell policy
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SHELL_ALLOW = [
+  "npm", "npx", "node", "python3", "python", "pytest", "git", "ls", "cat", "rg",
+  "grep", "head", "tail", "wc", "pwd", "echo", "tsc", "vitest", "jest", "cargo", "go",
+];
+const GIT_READONLY_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote",
+]);
+const SHELL_METACHAR = /[;&|`<>\n\r]|\$\(/;
+
+export function shellAllowlist(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const raw = env.IDE_SHELL_ALLOW?.trim();
+  const list = raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_SHELL_ALLOW;
+  return new Set(list);
+}
+
+/** Minimal POSIX-ish argv parser: whitespace split with '' and "" quoting. */
+export function parseArgv(command: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: "'" | '"' | null = null;
+  let has = false;
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has || cur) out.push(cur);
+      cur = "";
+      has = false;
+    } else {
+      cur += ch;
+      has = true;
+    }
+  }
+  if (quote) throw new Error("unterminated quote");
+  if (has || cur) out.push(cur);
+  return out;
+}
+
+export type ShellDecision =
+  | { allowed: true; argv: string[]; useShell: boolean }
+  | { allowed: false; reason: string };
+
+export function evaluateShellCommand(
+  command: string,
+  opts: { approved?: boolean; env?: NodeJS.ProcessEnv } = {},
+): ShellDecision {
+  const approved = opts.approved === true;
+  const trimmed = command.trim();
+  if (!trimmed) return { allowed: false, reason: "empty command" };
+  if (SHELL_METACHAR.test(trimmed)) {
+    if (!approved) return { allowed: false, reason: "shell metacharacters require explicit approval" };
+    return { allowed: true, argv: [], useShell: true };
+  }
+  let argv: string[];
+  try {
+    argv = parseArgv(trimmed);
+  } catch (e) {
+    return { allowed: false, reason: String((e as Error).message) };
+  }
+  if (argv.length === 0) return { allowed: false, reason: "empty command" };
+  if (!approved) {
+    const bin = argv[0];
+    if (!shellAllowlist(opts.env).has(bin)) {
+      return { allowed: false, reason: `'${bin}' is not in the allowlist (IDE_SHELL_ALLOW); approval required` };
+    }
+    if (bin === "git" && !GIT_READONLY_SUBCOMMANDS.has(argv[1] ?? "")) {
+      return { allowed: false, reason: `git ${argv[1] ?? ""} is not read-only; approval required` };
+    }
+  }
+  return { allowed: true, argv, useShell: false };
+}
+
+/** Drop secrets from the environment handed to shell commands. */
+export function scrubShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (/(_TOKEN|_SECRET|_PASSWORD|_API_KEY|_PRIVATE_KEY)$/i.test(k) || /^(TOKEN|SECRET|PASSWORD)$/i.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export class ToolExecutor {
   private readonly root: string;
   private readonly githubToken: string | null;
@@ -67,6 +157,7 @@ export class ToolExecutor {
   async execute(
     tool: ToolName,
     args: Record<string, unknown>,
+    opts: { approved?: boolean } = {},
   ): Promise<ToolResult> {
     try {
       switch (tool) {
@@ -81,7 +172,7 @@ export class ToolExecutor {
         case "edit_file":
           return await this.editFile(args);
         case "run_shell":
-          return await this.runShell(args);
+          return await this.runShell(args, opts.approved === true);
         case "git_status":
           return this.gitStatus();
         case "git_diff":
@@ -295,34 +386,63 @@ export class ToolExecutor {
   // run_shell
   // -----------------------------------------------------------------------
 
-  private async runShell(args: Record<string, unknown>): Promise<ToolResult> {
+  private async runShell(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
     const command = String(args.command ?? "");
     const timeout =
       typeof args.timeout === "number" ? args.timeout : 30_000;
 
+    // #4: policy check before anything is spawned.
+    const decision = evaluateShellCommand(command, { approved });
+    if (!decision.allowed) {
+      return { error: `run_shell rejected: ${decision.reason}` };
+    }
+
     return new Promise<ToolResult>((resolvePromise) => {
-      const proc = spawn("sh", ["-c", command], {
-        cwd: this.root,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      // Default: no shell, parsed argv. Only an explicitly approved command that
+      // needs shell syntax (pipes, &&, …) is run through sh -c.
+      const [cmd, cmdArgs] = decision.useShell
+        ? ["sh", ["-c", command]]
+        : [decision.argv[0], decision.argv.slice(1)];
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn(cmd, cmdArgs, {
+          cwd: this.root,
+          shell: false,
+          env: scrubShellEnv(process.env),
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        resolvePromise({ error: `run_shell failed: ${String(error)}` });
+        return;
+      }
 
       let stdout = "";
       let stderr = "";
       let killed = false;
+      let settled = false;
 
       const timer = setTimeout(() => {
         killed = true;
         proc.kill("SIGKILL");
       }, timeout);
 
-      proc.stdout.on("data", (chunk: Buffer) => {
+      proc.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString("utf-8");
       });
-      proc.stderr.on("data", (chunk: Buffer) => {
+      proc.stderr?.on("data", (chunk: Buffer) => {
         stderr += chunk.toString("utf-8");
       });
 
+      proc.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolvePromise({ error: `run_shell failed: ${error.message}` });
+      });
+
       proc.on("close", (code) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         const exitCode = killed ? 137 : (code ?? 1);
         resolvePromise({

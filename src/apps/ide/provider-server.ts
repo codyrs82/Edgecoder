@@ -17,8 +17,23 @@ import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
+import { createIdeAuthHook, isLoopbackHost, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 const app = Fastify({ logger: true });
+
+// #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
+const listenOptions = resolveListenOptions();
+const IDE_TOKEN = resolveIdeToken();
+app.addHook(
+  "onRequest",
+  createIdeAuthHook({
+    token: IDE_TOKEN,
+    port: listenOptions.port,
+    enforceLoopbackHost: isLoopbackHost(listenOptions.host),
+  })
+);
+
+app.get("/health", async () => ({ ok: true }));
 const providers = new ProviderRegistry();
 const router = new IntelligentRouter();
 const idePullTracker = new PullTracker();
@@ -489,7 +504,10 @@ app.post("/v1/ide/chat", async (req, reply) => {
       }
 
       const callId = `tc_${randomUUID().slice(0, 8)}`;
-      const requiresApproval = !READ_TOOLS.has(toolName);
+      // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
+      // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
+      const shellAutoApprove = toolName === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
+      const requiresApproval = !READ_TOOLS.has(toolName) && !shellAutoApprove;
 
       sendEvent({
         type: "tool_call",
@@ -533,7 +551,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
       }
 
       // Execute the tool
-      const result = await executor.execute(toolName, toolArgs);
+      const result = await executor.execute(toolName, toolArgs, { approved: requiresApproval });
 
       // For run_shell results, parse and send as shell_output
       if (toolName === "run_shell" && result.result) {
@@ -621,7 +639,7 @@ app.post("/run", async (req, reply) => {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  app.listen({ port: 4304, host: "0.0.0.0" }).catch((error) => {
+  app.listen(listenOptions).catch((error) => {
     app.log.error(error);
     process.exit(1);
   });

@@ -99,6 +99,16 @@ npm run build:ble-proxy
 | `PEER_OFFER_COOLDOWN_MS` | `20000` | Cooldown between peer-direct offers while idle (ms). Lower = more aggressive. |
 | `DOCKER_PROBE_TIMEOUT_MS` | `3000` | Timeout for the `docker info` availability probe; a hung daemon counts as unavailable. Result cached 30 s. |
 
+## IDE provider server (port 4304)
+
+| Variable | Default | Description |
+|---|---|---|
+| `IDE_PROVIDER_HOST` | `127.0.0.1` | Bind address. A non-loopback value requires `IDE_PROVIDER_TOKEN`. |
+| `IDE_PROVIDER_TOKEN` | *(from `~/.edgecoder/ide-token`)* | Bearer token required on all routes except `/health`. If unset, the token file is created on first start (0600). |
+| `IDE_ALLOWED_ORIGINS` | *(Tauri origins)* | Extra browser origins allowed; any other web `Origin` gets 403. |
+| `IDE_SHELL_ALLOW` | `npm,npx,node,python3,…` | Comma-separated binaries `run_shell` may run. |
+| `IDE_SHELL_AUTO_APPROVE` | unset | `1` skips the approval prompt for allowlisted shell commands (local opt-in). |
+
 ## iOS power telemetry (reported by iOS agents)
 
 | Variable | Description |

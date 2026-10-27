@@ -80,6 +80,11 @@
           "default": "http://127.0.0.1:4304",
           "description": "URL of the local EdgeCoder provider server"
         },
+        "edgecoder.providerToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for the provider server. Leave empty to read ~/.edgecoder/ide-token (created by the server on first start)."
+        },
         "edgecoder.defaultLanguage": {
           "type": "string",
           "enum": [
