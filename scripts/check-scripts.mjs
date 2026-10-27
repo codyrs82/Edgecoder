@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // #12: fail if a package.json script references a src/, tests/, scripts/ or bin/
 // file (or directory) that does not exist.
 import { existsSync, readFileSync } from "node:fs";
