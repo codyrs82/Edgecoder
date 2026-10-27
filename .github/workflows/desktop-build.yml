@@ -43,6 +43,10 @@ jobs:
       - name: tauri build --debug
         working-directory: desktop
         shell: bash
+        # The vite build of the Monaco chunk hits Node's default heap limit on the
+        # macOS runner (OOM, abort trap 6), so give it more headroom.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         # createUpdaterArtifacts needs the updater signing key; turn it off for CI debug builds.
         run: npx tauri build --debug --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Upload bundle
