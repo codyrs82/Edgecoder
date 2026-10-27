@@ -23,4 +23,6 @@ RUN printf '#!/bin/sh\nset -e\nif [ "$SKIP_OLLAMA" != "true" ]; then\n  ollama s
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# #5: services default to 127.0.0.1; containers must listen on all interfaces.
+ENV HOST=0.0.0.0
 CMD ["node", "dist/index.js"]

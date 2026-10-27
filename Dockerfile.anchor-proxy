@@ -14,4 +14,6 @@ RUN npm run build && npm prune --omit=dev
 
 EXPOSE 4311
 
+# #5: services default to 127.0.0.1; containers must listen on all interfaces.
+ENV HOST=0.0.0.0
 CMD ["node", "dist/economy/anchor-proxy-service.js"]

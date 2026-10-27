@@ -6,6 +6,7 @@ import cors from "@fastify/cors";
 import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
+import { checkSharedToken, LISTEN_HOST } from "../common/env-guard.js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -180,6 +181,8 @@ function validatePortalSecurityConfig(): void {
 
   const missing: string[] = [];
   if (!PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
+  if (!WALLET_SECRET_PEPPER) missing.push("WALLET_SECRET_PEPPER");
+  if (!RESEND_API_KEY) missing.push("RESEND_API_KEY");
   if (!CONTROL_PLANE_URL && !COORDINATOR_DISCOVERY_URL) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URL");
   if (CONTROL_PLANE_URL && !CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
   if (!PASSKEY_RP_ID) missing.push("PASSKEY_RP_ID");
@@ -326,9 +329,13 @@ async function getCurrentUser(req: { headers: Record<string, unknown> }) {
 }
 
 function requireInternalToken(req: { headers: Record<string, unknown> }, reply: any): boolean {
-  if (!PORTAL_SERVICE_TOKEN) return true;
-  const token = req.headers["x-portal-service-token"];
-  if (typeof token === "string" && token === PORTAL_SERVICE_TOKEN) return true;
+  // #5: empty token is open only outside production; constant-time compare.
+  const result = checkSharedToken(PORTAL_SERVICE_TOKEN, req.headers["x-portal-service-token"], NODE_ENV === "production");
+  if (result === "ok") return true;
+  if (result === "not_configured") {
+    reply.code(503).send({ error: "internal_auth_not_configured" });
+    return false;
+  }
   reply.code(401).send({ error: "portal_service_token_required" });
   return false;
 }
@@ -7677,7 +7684,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       if (!store) throw new Error("PORTAL_DATABASE_URL is required for portal service.");
       await store.migrate();
     })
-    .then(() => app.listen({ port: 4310, host: "0.0.0.0" }))
+    .then(() => app.listen({ port: 4310, host: LISTEN_HOST }))
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

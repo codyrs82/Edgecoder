@@ -12,6 +12,7 @@ import { decomposePrompt, reflectPrompt } from "../model/prompts.js";
 import { buildModelSwapRoutes } from "../model/swap-routes.js";
 import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
+import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, {
@@ -19,6 +20,7 @@ await app.register(cors, {
   credentials: true,
   allowedHeaders: ["Content-Type", "x-inference-token", "Authorization"],
 });
+requireProdEnv("inference", ["INFERENCE_AUTH_TOKEN"]);
 if (!process.env.INFERENCE_AUTH_TOKEN) {
   console.error("[inference] FATAL: INFERENCE_AUTH_TOKEN must be set");
   process.exit(1);
@@ -377,7 +379,7 @@ buildModelSwapRoutes(app, modelSwapState);
 buildDashboardRoutes(app, modelSwapState, metrics);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  app.listen({ port: 4302, host: "0.0.0.0" }).catch((error) => {
+  app.listen({ port: 4302, host: LISTEN_HOST }).catch((error) => {
     app.log.error(error);
     process.exit(1);
   });

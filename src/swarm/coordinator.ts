@@ -69,6 +69,7 @@ import {
   IssuancePoolConfig,
   smoothLoadIndex
 } from "../economy/issuance.js";
+import { checkSharedToken, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
 import {
   checkResultClaim,
@@ -168,6 +169,17 @@ const ISSUANCE_COORDINATOR_SHARE = Number(process.env.ISSUANCE_COORDINATOR_SHARE
 const ISSUANCE_RESERVE_SHARE = Number(process.env.ISSUANCE_RESERVE_SHARE ?? "0.05");
 const ANCHOR_INTERVAL_MS = Number(process.env.ANCHOR_INTERVAL_MS ?? String(2 * 60 * 60 * 1000));
 const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET ?? "";
+// #5: fail fast in production instead of silently running with auth disabled.
+// LIGHTNING_PROVIDER is only required while payments are enabled (see #43 ECONOMY_PAYMENTS_ENABLED).
+requireProdEnv("coordinator", [
+  "MESH_AUTH_TOKEN",
+  "PORTAL_SERVICE_URL",
+  "PORTAL_SERVICE_TOKEN",
+  "ADMIN_API_TOKEN",
+  "PAYMENT_WEBHOOK_SECRET",
+  ...((process.env.ECONOMY_PAYMENTS_ENABLED ?? "true").toLowerCase() !== "false" ? ["LIGHTNING_PROVIDER"] : [])
+]);
+const IS_PROD = isProduction();
 // #42: production must verify webhook HMACs.
 assertPaymentWebhookSecret();
 const IOS_BATTERY_PULL_MIN_INTERVAL_MS = Number(process.env.IOS_BATTERY_PULL_MIN_INTERVAL_MS ?? "45000");
@@ -440,24 +452,20 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
 import { SubtaskDepTracker } from "./subtask-deps.js";
 const depTracker = new SubtaskDepTracker();
 
+// #5: an empty token means "open" only outside production; in production it is 503/denied.
 function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
-  if (!MESH_AUTH_TOKEN) return true;
-  const token = req.headers["x-mesh-token"];
-  if (typeof token === "string" && safeTokenEqual(token, MESH_AUTH_TOKEN)) return true;
-  reply.code(401);
+  const result = checkSharedToken(MESH_AUTH_TOKEN, req.headers["x-mesh-token"], IS_PROD);
+  if (result === "ok") return true;
+  reply.code(result === "not_configured" ? 503 : 401);
   return false;
 }
 
 function hasMeshToken(headers: Record<string, unknown>): boolean {
-  if (!MESH_AUTH_TOKEN) return true;
-  const token = headers["x-mesh-token"];
-  return typeof token === "string" && safeTokenEqual(token, MESH_AUTH_TOKEN);
+  return checkSharedToken(MESH_AUTH_TOKEN, headers["x-mesh-token"], IS_PROD) === "ok";
 }
 
 function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
-  if (!PORTAL_SERVICE_TOKEN) return true;
-  const token = headers["x-portal-service-token"];
-  return typeof token === "string" && safeTokenEqual(token, PORTAL_SERVICE_TOKEN);
+  return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
 }
 
 const robotQueue = ROBOT_QUEUE_ENABLED
@@ -5080,7 +5088,7 @@ function esc(s: string): string {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
-    await app.listen({ port: 4301, host: "0.0.0.0" });
+    await app.listen({ port: 4301, host: LISTEN_HOST });
     await initCoordinator();
   })().catch((error) => {
     app.log.error(error);

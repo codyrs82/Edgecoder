@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
+import { LISTEN_HOST } from "../common/env-guard.js";
 
 /* ------------------------------------------------------------------ */
 /*  Bitcoin Anchor Proxy Service                                       */
@@ -150,7 +151,7 @@ app.get("/health/detailed", async (req, reply) => {
 });
 
 /* ---- start ---- */
-app.listen({ port: PORT, host: "0.0.0.0" }).then((address) => {
+app.listen({ port: PORT, host: LISTEN_HOST }).then((address) => {
   console.log(`[anchor-proxy] listening on ${address}`);
   console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${BITCOIND_RPC_URL} wallet=${BITCOIND_WALLET_NAME}`);
 }).catch((err) => {

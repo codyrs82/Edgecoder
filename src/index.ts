@@ -8,6 +8,7 @@ import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
+import { LISTEN_HOST } from "./common/env-guard.js";
 
 const INFERENCE_PORT = Number(process.env.INFERENCE_PORT) || 4302;
 const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT) || 4301;
@@ -65,9 +66,9 @@ function startWorkerProcess(): void {
 async function boot(): Promise<void> {
   try {
     await Promise.all([
-      inferenceService.listen({ port: INFERENCE_PORT, host: "0.0.0.0" }),
-      coordinatorServer.listen({ port: COORDINATOR_PORT, host: "0.0.0.0" }),
-      controlPlaneServer.listen({ port: CONTROL_PLANE_PORT, host: "0.0.0.0" })
+      inferenceService.listen({ port: INFERENCE_PORT, host: LISTEN_HOST }),
+      coordinatorServer.listen({ port: COORDINATOR_PORT, host: LISTEN_HOST }),
+      controlPlaneServer.listen({ port: CONTROL_PLANE_PORT, host: LISTEN_HOST })
     ]);
   } catch (err) {
     if (isEaddrInUse(err)) {
