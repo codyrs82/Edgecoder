@@ -34,17 +34,18 @@ export async function accrueCredits(
       relatedTaskId: report.taskId,
       timestampMs: Date.now()
     };
-    // Insert the report first; ON CONFLICT (report_id) DO NOTHING tells us if it already existed.
-    const inserted = await pgStore.persistComputeContributionReport({
-      report,
-      accountId: report.agentId,
-      sourceAgentId: report.sourceAgentId ?? report.agentId,
-      reliabilityScore,
-      weightedContribution
-    });
-    if (!inserted) return null;
-    await pgStore.persistCreditTransaction(tx);
-    return tx;
+    // Report + credit atomically; false => report id already recorded (idempotent re-post).
+    const inserted = await pgStore.persistContributionWithCredit(
+      {
+        report,
+        accountId: report.agentId,
+        sourceAgentId: report.sourceAgentId ?? report.agentId,
+        reliabilityScore,
+        weightedContribution
+      },
+      tx
+    );
+    return inserted ? tx : null;
   }
   try {
     return creditEngine.accrue(report, load);

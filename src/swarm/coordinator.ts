@@ -2217,7 +2217,9 @@ app.post("/result", async (req, reply) => {
   // and dependency release only; no credits are accrued here.
   const resultAuth = classifyResultAuth({
     verified,
-    hasLocalClaim: Boolean(claim),
+    // #44 review: "locally owned" only if a local agent actually claimed it; an unclaimed
+    // queued copy of a gossiped subtask must still accept the relayed result.
+    hasLocalClaim: Boolean(claim?.claimedBy),
     meshTokenConfigured: MESH_AUTH_TOKEN !== "",
     meshTokenValid: hasMeshToken((req as any).headers ?? {}),
     requireSigned: REQUIRE_SIGNED_AGENT_REQUESTS
@@ -2233,9 +2235,11 @@ app.post("/result", async (req, reply) => {
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
   queue.complete(body);
 
-  // ── Behavioral monitoring ──
-  behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
-  evaluateAndEnforce(body.agentId);
+  // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
+  if (!isPeerForward) {
+    behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
+    evaluateAndEnforce(body.agentId);
+  }
 
   // ── Dependency tracking: store output and release dependent subtasks ──
   const released = depTracker.recordCompletionAndRelease(

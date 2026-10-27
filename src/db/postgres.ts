@@ -893,6 +893,64 @@ export class PostgresStore {
     return (result.rowCount ?? 0) > 0;
   }
 
+  /**
+   * #44 review: report row and its credit row in ONE transaction. Returns false (and writes
+   * nothing) when the report id already exists, so a retry can never lose or double a credit.
+   */
+  async persistContributionWithCredit(
+    input: {
+      report: ComputeContributionReport;
+      accountId: string;
+      sourceAgentId: string;
+      reliabilityScore: number;
+      weightedContribution: number;
+    },
+    tx: CreditTransaction
+  ): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `INSERT INTO compute_contribution_reports (
+        report_id, account_id, source_agent_id, task_id, resource_class, cpu_seconds, gpu_seconds,
+        quality_score, reliability_score, weighted_contribution, timestamp_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT (report_id) DO NOTHING
+      RETURNING report_id`,
+        [
+          input.report.reportId,
+          input.accountId,
+          input.sourceAgentId,
+          input.report.taskId,
+          input.report.resourceClass,
+          input.report.cpuSeconds,
+          input.report.gpuSeconds,
+          input.report.qualityScore,
+          input.reliabilityScore,
+          input.weightedContribution,
+          input.report.timestampMs
+        ]
+      );
+      if ((result.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query(
+        `INSERT INTO credit_transactions (
+           tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
+      );
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async rollingContributionShares(windowStartMs: number, windowEndMs: number): Promise<RollingContributionShare[]> {
     const result = await this.pool.query(
       `SELECT
