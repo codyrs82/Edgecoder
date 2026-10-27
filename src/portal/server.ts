@@ -37,11 +37,11 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity } from "./security.js";
+import { parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
 // #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
-const app = Fastify({ logger: true, trustProxy: Number(process.env.PORTAL_TRUST_PROXY_HOPS ?? 1) });
+const app = Fastify({ logger: true, trustProxy: trustProxyHops(process.env.PORTAL_TRUST_PROXY_HOPS) });
 
 const DESKTOP_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"];
 await app.register(cors, {
