@@ -69,17 +69,13 @@ import {
   IssuancePoolConfig,
   smoothLoadIndex
 } from "../economy/issuance.js";
-<<<<<<< child
-import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
+import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
 import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
   reconcilePaymentIntent,
   verifyPaymentWebhookSignature
 } from "../economy/payment-settlement.js";
-=======
-import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
->>>>>>> parent
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import { AgentPowerTelemetry, evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
