@@ -39,6 +39,8 @@ describe("desktop endpoints (#35)", () => {
     expect(coordinatorUrl(mem({ [COORDINATOR_KEY]: "https://mine.example" }), env)).toBe("https://mine.example");
     expect(coordinatorUrl(mem({ [LEGACY_SEED_KEY]: "https://legacy.example" }), env)).toBe("https://legacy.example");
     expect(portalUrl(mem({ [PORTAL_KEY]: "http://127.0.0.1:4310" }), {})).toBe("http://127.0.0.1:4310");
+    // The dead pre-#35 default saved in the legacy field doesn't override the new default.
+    expect(coordinatorUrl(mem({ [LEGACY_SEED_KEY]: "https://" + "edgecoder-seed" + ".fly.dev/" }), {})).toBe(FALLBACK_COORDINATOR_URL);
   });
 
   it("rejects invalid schemes and ignores invalid stored values", () => {
@@ -57,6 +59,11 @@ describe("desktop endpoints (#35)", () => {
     setEndpoint("portal", "https://b.example", s);
     resetEndpoints(s);
     expect(s.m.size).toBe(0);
+  });
+
+  it("the release CSP allows the default coordinator", () => {
+    const conf = readFileSync(resolve(__dirname, "../src-tauri/tauri.conf.json"), "utf8");
+    expect(conf).toContain(FALLBACK_COORDINATOR_URL);
   });
 
   it("desktop/src has no hard-coded edgecoder-seed.fly.dev", () => {

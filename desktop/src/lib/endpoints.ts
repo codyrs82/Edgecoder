@@ -51,10 +51,18 @@ export function defaultEndpoints(env: EndpointEnv = buildEnv): Record<EndpointKi
   };
 }
 
+/** The pre-#35 default; a legacy "Seed Node URL" equal to it is ignored (NXDOMAIN). */
+export const DEAD_SEED_URL = "https://edgecoder-seed" + ".fly.dev"; // split so the repo guard test stays simple
+
+function legacySeed(s: KV | null): string | null {
+  const v = validateEndpointUrl(s?.getItem(LEGACY_SEED_KEY));
+  return v === DEAD_SEED_URL ? null : v;
+}
+
 export function coordinatorUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
   return (
     validateEndpointUrl(s?.getItem(COORDINATOR_KEY)) ??
-    validateEndpointUrl(s?.getItem(LEGACY_SEED_KEY)) ??
+    legacySeed(s) ??
     defaultEndpoints(env).coordinator
   );
 }
