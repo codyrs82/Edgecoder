@@ -11,7 +11,8 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { FastifyReply, FastifyRequest } from "fastify";
+import cors from "@fastify/cors";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 export const IDE_PROVIDER_DEFAULT_PORT = 4304;
 
@@ -126,6 +127,17 @@ export function createIdeAuthHook(opts: IdeAuthOptions) {
       const host = String(req.headers.host ?? "").toLowerCase();
       if (!allowedHosts.has(host)) return reply.code(403).send({ error: "forbidden_host" });
     }
+    // #77: browsers never send Authorization on a CORS preflight. Let a preflight from an
+    // allowed desktop origin through (after the origin and Host checks above) so
+    // @fastify/cors can answer it; every actual request still needs the token.
+    if (
+      req.method === "OPTIONS" &&
+      typeof origin === "string" &&
+      origins.has(origin.trim().toLowerCase()) &&
+      typeof req.headers["access-control-request-method"] === "string"
+    ) {
+      return;
+    }
     const path = req.url.split("?")[0];
     if (publicPaths.has(path)) return;
     const h = req.headers.authorization ?? "";
@@ -135,4 +147,19 @@ export function createIdeAuthHook(opts: IdeAuthOptions) {
       return reply.code(401).send({ error: "unauthorized" });
     }
   };
+}
+
+/**
+ * #77: CORS for the packaged desktop app (tauri://localhost, http(s)://tauri.localhost, plus
+ * IDE_ALLOWED_ORIGINS). Exact origins only: no wildcard, no reflection of other origins,
+ * no credentials. Register AFTER the auth hook so disallowed origins get 403 first.
+ */
+export async function registerIdeCors(app: FastifyInstance, origins: Set<string> = allowedOrigins()): Promise<void> {
+  await app.register(cors, {
+    origin: (origin, cb) => cb(null, typeof origin === "string" && origins.has(origin.trim().toLowerCase())),
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type"],
+    credentials: false,
+    maxAge: 600,
+  });
 }
