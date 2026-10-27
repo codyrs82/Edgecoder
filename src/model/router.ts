@@ -186,6 +186,19 @@ export class IntelligentRouter {
     return { text: res.text, route: "edgecoder-local", latencyMs: Date.now() - started };
   }
 
+  /** True when swarm routing is configured (a mesh token is set). */
+  get swarmEnabled(): boolean {
+    return !!this.cfg.meshAuthToken;
+  }
+
+  /** #36: explicit swarm route for the IDE /run/swarm endpoint. Throws if swarm is not configured. */
+  async routeSwarm(prompt: string): Promise<RouterResult> {
+    if (!this.cfg.meshAuthToken) throw new Error("swarm_unavailable");
+    const started = Date.now();
+    const result = await this.runViaSwarm(prompt);
+    return { ...result, route: "swarm", latencyMs: Date.now() - started };
+  }
+
   // -------------------------------------------------------------------------
   // Decision helpers
   // -------------------------------------------------------------------------
