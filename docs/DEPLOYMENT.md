@@ -175,7 +175,17 @@ docker run -p 4301:4301 -p 4302:4302 -p 4303:4303 edgecoder-agent
 
 The root `Dockerfile` has been removed. `Dockerfile.anchor-proxy` and `Dockerfile.docs` are unchanged.
 
-**Volumes.** Fly volumes created by the old root image are owned by root, so the `node` user can't write to them. Before the first deploy of the new image, run `chown -R 1000:1000 /data/ollama` once, using `fly ssh console`. The seed mounts moved from `/root/.ollama` to `/data/ollama`.
+**Volumes (after the first deploy).** Fly volumes are root-owned, and the volume mount hides the image's own `chown`, so the `node` user (uid 1000) can't write to `/data/ollama` at first. The seed mounts moved from `/root/.ollama` to `/data/ollama`, so that path only exists *after* the new image is deployed. The correct sequence is:
+
+1. Deploy the new image.
+2. `fly ssh console` (runs as root), then `chown -R 1000:1000 /data/ollama`.
+3. Restart the machine, then smoke-test the portal.
+
+`scripts/fly-post-deploy.sh <toml>` does steps 2 and 3. The deploy workflow runs it after each seed deploy. Like the deploy, it refuses to run unless `DEPLOY_ENABLED=true` (deploys are disabled until #31). If the models dir isn't writable, the entrypoint logs a clear error and doesn't start Ollama.
+
+**Bluetooth.** Running the agent image as non-root on hardware with a Bluetooth radio needs `--cap-add=NET_RAW --cap-add=NET_ADMIN` (and `--net=host`) for raw HCI sockets. This doesn't matter on Fly, which has no radio.
+
+**Architecture.** The agent image is amd64-only (pinned `ollama-linux-amd64` tarball).
 
 ### Docker Sandbox Images
 

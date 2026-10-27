@@ -12,6 +12,8 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ollama
+# amd64 only (Fly): the pinned tarball and checksum are for linux-amd64. An arm64 build
+# needs ollama-linux-arm64.tar.zst and its own sha256, otherwise sha256sum -c fails.
 # Pinned Ollama release; bump both values together (sha256 from the release's sha256sum.txt).
 ARG OLLAMA_VERSION=0.40.12
 ARG OLLAMA_SHA256=f8adcb7e08d272283a4bd3abc18cf581afe37e64b2aee04fda4f407f215485ba

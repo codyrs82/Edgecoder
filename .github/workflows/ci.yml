@@ -81,6 +81,14 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      # Throwaway database for the portal smoke test (the portal requires PORTAL_DATABASE_URL).
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: smoke, POSTGRES_PASSWORD: smoke, POSTGRES_DB: portal }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U smoke" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Build server image
@@ -118,10 +126,32 @@ jobs:
             sleep 2
           done
           docker logs smoke; docker rm -f smoke; exit 1
-      - name: Vulnerability scan (non-blocking)
+      - name: Smoke test portal entry on the server image
+        run: |
+          set -eu
+          t() { openssl rand -hex 16; }
+          # The portal is what ships on this image (fly.portal.toml runs dist/portal/server.js).
+          docker run -d --name portal-smoke --network host -e NODE_ENV=development -e HOST=127.0.0.1 \
+            -e PORTAL_DATABASE_URL=postgresql://smoke:smoke@127.0.0.1:5432/portal \
+            -e PORTAL_SERVICE_TOKEN="$(t)" -e INFERENCE_AUTH_TOKEN="$(t)" -e MESH_AUTH_TOKEN="$(t)" \
+            edgecoder-server:ci node dist/portal/server.js
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4310/health; then echo; docker rm -f portal-smoke; exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' portal-smoke)" != "true" ]; then break; fi
+            sleep 2
+          done
+          docker logs portal-smoke; docker rm -f portal-smoke; exit 1
+      - name: "Vulnerability scan - server image (non-blocking)"
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: edgecoder-server:ci
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+      - name: "Vulnerability scan - agent image (non-blocking)"
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: edgecoder-agent:ci
           severity: CRITICAL,HIGH
           exit-code: "0"
