@@ -1,0 +1,54 @@
+name: desktop-debug-build
+# Part of #70: build the packaged desktop app (tauri build --debug) on macOS and Windows,
+# and upload the bundles as artifacts. These artifacts are what the packaged-app QA
+# (desktop/README.md checklist, #11 CSP, #77 CORS) is run against. Unsigned debug builds
+# only; no signing or updater keys are used, and nothing is published.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tauri-debug:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, bundles: app, artifact: "desktop/src-tauri/target/debug/bundle/macos/*.app" }
+          - { os: windows-latest, bundles: nsis, artifact: "desktop/src-tauri/target/debug/bundle/nsis/*.exe" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop/src-tauri
+      # Root deps: the beforeBuildCommand (npm run bundle-agent) builds the agent runtime.
+      - run: npm ci
+      - run: npm ci
+        working-directory: desktop
+      - name: tauri build --debug
+        working-directory: desktop
+        shell: bash
+        # createUpdaterArtifacts needs the updater signing key; turn it off for CI debug builds.
+        run: npx tauri build --debug --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgecoder-desktop-debug-${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
