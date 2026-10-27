@@ -366,6 +366,14 @@ CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_recor
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_checkpoint ON stats_ledger_records (checkpoint_hash, event_type) WHERE checkpoint_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (event_type, issued_at_ms DESC) WHERE event_type = 'stats_checkpoint_commit';
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, timestamp_ms DESC);
+-- #41: persistent dedupe for /credits/ble-sync
+CREATE TABLE IF NOT EXISTS ble_synced_tx (
+  tx_id TEXT PRIMARY KEY,
+  requester_account_id TEXT NOT NULL,
+  provider_account_id TEXT NOT NULL,
+  credits NUMERIC NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_intents_payment_hash ON payment_intents (payment_hash) WHERE payment_hash IS NOT NULL;
@@ -738,6 +746,54 @@ export class PostgresStore {
        ON CONFLICT (tx_id) DO NOTHING`,
       [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
     );
+  }
+
+  /**
+   * #41: atomic BLE transfer. Dedupe row, balance check and the spend/earn pair
+   * commit together; a per-requester advisory lock serialises concurrent debits.
+   */
+  async applyBleTransfer(tx: {
+    txId: string;
+    requesterAccountId: string;
+    providerAccountId: string;
+    credits: number;
+  }): Promise<"applied" | "duplicate" | "insufficient"> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [tx.requesterAccountId]);
+      const ins = await client.query(
+        `INSERT INTO ble_synced_tx (tx_id, requester_account_id, provider_account_id, credits)
+         VALUES ($1,$2,$3,$4) ON CONFLICT (tx_id) DO NOTHING RETURNING tx_id`,
+        [tx.txId, tx.requesterAccountId, tx.providerAccountId, tx.credits]
+      );
+      if ((ins.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return "duplicate";
+      }
+      const bal = await client.query(
+        `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance
+         FROM credit_transactions WHERE account_id = $1`,
+        [tx.requesterAccountId]
+      );
+      if (Number(bal.rows[0]?.balance ?? 0) < tx.credits) {
+        await client.query("ROLLBACK");
+        return "insufficient";
+      }
+      const now = Date.now();
+      await client.query(
+        `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms)
+         VALUES ($1,$2,'spend',$3,'ble_compute',$4,$5), ($6,$7,'earn',$3,'ble_compute',$4,$5)`,
+        [randomUUID(), tx.requesterAccountId, tx.credits, `ble:${tx.txId}`, now, randomUUID(), tx.providerAccountId]
+      );
+      await client.query("COMMIT");
+      return "applied";
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async creditBalance(accountId: string): Promise<number> {

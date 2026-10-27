@@ -71,6 +71,13 @@ import {
 } from "../economy/issuance.js";
 import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
 import {
+  applyBleSyncBatch,
+  bleSyncAllowV1,
+  createBleSyncSchema,
+  createInMemoryBleTransfer,
+  isBleSyncAuthorized
+} from "../credits/ble-sync.js";
+import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
   verifyPaymentWebhookSignature
@@ -4666,60 +4673,30 @@ app.post("/escalate/:taskId/result", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
-const bleSyncSchema = z.object({
-  transactions: z.array(z.object({
-    txId: z.string(),
-    requesterId: z.string(),
-    providerId: z.string(),
-    requesterAccountId: z.string(),
-    providerAccountId: z.string(),
-    credits: z.number().min(0),
-    cpuSeconds: z.number().min(0),
-    taskHash: z.string(),
-    timestamp: z.number(),
-    requesterSignature: z.string(),
-    providerSignature: z.string()
-  }))
-});
-
-const syncedBLETxIds = new Set<string>();
+// #41: authenticated, double-signed, balance-checked, persistently deduped BLE settlement.
+const bleSyncSchema = createBleSyncSchema();
+const syncedBLETxIds = new Set<string>(); // non-PG mode only
+const inMemoryBleTransfer = createInMemoryBleTransfer(creditEngine, syncedBLETxIds);
 
 app.post("/credits/ble-sync", async (req, reply) => {
-  const body = bleSyncSchema.parse(req.body);
-  const applied: string[] = [];
-  const skipped: string[] = [];
-
-  for (const tx of body.transactions) {
-    if (syncedBLETxIds.has(tx.txId)) {
-      skipped.push(tx.txId);
-      continue;
-    }
-    // Verify ed25519 signatures when both key and signature are present
-    const requesterCap = agentCapabilities.get(tx.requesterId);
-    const providerCap = agentCapabilities.get(tx.providerId);
-    if (requesterCap?.publicKeyPem && tx.requesterSignature) {
-      const requesterPayload = JSON.stringify({ requesterId: tx.requesterId, taskHash: tx.taskHash });
-      if (!verifyPayload(requesterPayload, tx.requesterSignature, requesterCap.publicKeyPem)) {
-        skipped.push(tx.txId);
-        continue;
-      }
-    }
-    if (providerCap?.publicKeyPem && tx.providerSignature) {
-      const providerPayload = JSON.stringify({ providerId: tx.providerId, status: "completed", cpuSeconds: tx.cpuSeconds, taskHash: tx.taskHash });
-      if (!verifyPayload(providerPayload, tx.providerSignature, providerCap.publicKeyPem)) {
-        skipped.push(tx.txId);
-        continue;
-      }
-    }
-    // Settle credits: credit provider, debit requester
-    const providerAccountId = await rewardAccountForAgent(tx.providerId);
-    await adjustCredits(providerAccountId, tx.credits, "ble_compute");
-    await adjustCredits(tx.requesterAccountId, -tx.credits, "ble_compute");
-
-    syncedBLETxIds.add(tx.txId);
-    applied.push(tx.txId);
+  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip);
+  if (!isBleSyncAuthorized(verified, MESH_AUTH_TOKEN !== "", hasMeshToken(req.headers as any))) {
+    return reply.code(401).send({ error: "unauthorized" });
   }
-
+  const parsed = bleSyncSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return reply.code(400).send({ error: "invalid_ble_sync_body", detail: parsed.error.message });
+  }
+  const body = parsed.data;
+  const { applied, skipped } = await applyBleSyncBatch(body.transactions, {
+    getPublicKeyPem: (agentId) => agentCapabilities.get(agentId)?.publicKeyPem,
+    rewardAccountForAgent,
+    allowV1: bleSyncAllowV1(),
+    transfer: (tx, requesterAccountId, providerAccountId) =>
+      pgStore
+        ? pgStore.applyBleTransfer({ txId: tx.txId, requesterAccountId, providerAccountId, credits: tx.credits })
+        : inMemoryBleTransfer(tx, requesterAccountId, providerAccountId)
+  });
   return reply.send({ applied, skipped, total: body.transactions.length });
 });
 

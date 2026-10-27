@@ -3,6 +3,26 @@
 
 import { BLECreditTransaction } from "../../common/types.js";
 import type { SQLiteStore } from "../../db/sqlite-store.js";
+import { bleTxSignedPayloadV2 } from "../../credits/ble-sync.js";
+import { signPayload } from "../peer.js";
+
+/**
+ * #41: BLE credit payload v2. Requester AND provider must each sign this exact
+ * payload (it binds txId, requester account and credits); the coordinator
+ * rejects transactions missing either signature.
+ */
+export function bleTransactionSigningPayload(
+  tx: Pick<BLECreditTransaction, "txId" | "requesterId" | "requesterAccountId" | "providerId" | "taskHash" | "cpuSeconds" | "credits">
+): string {
+  return bleTxSignedPayloadV2(tx);
+}
+
+export function signBleTransactionV2(
+  tx: Pick<BLECreditTransaction, "txId" | "requesterId" | "requesterAccountId" | "providerId" | "taskHash" | "cpuSeconds" | "credits">,
+  privateKeyPem: string
+): string {
+  return signPayload(bleTxSignedPayloadV2(tx), privateKeyPem);
+}
 
 export class OfflineLedger {
   private readonly store: SQLiteStore | null;
