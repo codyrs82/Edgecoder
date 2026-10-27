@@ -17,21 +17,31 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/oauth\/[^/]+\/callback$/,
   /^\/auth\/oauth\/mobile\/complete$/,
 ];
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\//];
+// Only the send-code start and confirm steps (POST). GET /wallet/send/requests (the wallet
+// page's list) must not share this bucket.
+const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/];
 
 /**
- * Cross-site POSTs that are legitimate. Apple's OAuth uses response_mode=form_post, so
- * appleid.apple.com POSTs the callback, and other providers may do the same. These are
- * protected by the single-use OAuth `state`.
+ * The only legitimate cross-site POST: Apple's OAuth uses response_mode=form_post, so
+ * appleid.apple.com POSTs the callback (currently disabled; kept for when Apple returns).
+ * Google, Microsoft and GitHub return by GET redirect, so the generic
+ * /auth/oauth/:provider/callback is NOT exempt (that would allow login CSRF).
  */
-export const CSRF_EXEMPT_ROUTES = new Set(["/auth/oauth/apple/callback", "/auth/oauth/:provider/callback"]);
+export const CSRF_EXEMPT_ROUTES = new Set(["/auth/oauth/apple/callback"]);
 
 const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export function rateLimitFor(url: string): { max: number; timeWindow: string } | undefined {
-  if (WALLET_ROUTES.some((r) => r.test(url))) return WALLET_RATE_LIMIT;
+export function rateLimitFor(url: string, method: string | string[] = "POST"): { max: number; timeWindow: string } | undefined {
+  const methods = (Array.isArray(method) ? method : [method]).map((m) => m.toUpperCase());
+  if (methods.includes("POST") && WALLET_ROUTES.some((r) => r.test(url))) return WALLET_RATE_LIMIT;
   if (AUTH_ROUTES.some((r) => r.test(url))) return AUTH_RATE_LIMIT;
   return undefined;
+}
+
+/** PORTAL_TRUST_PROXY_HOPS: a positive integer, else 1 (Fly). */
+export function trustProxyHops(raw: string | undefined): number {
+  const n = Number(raw ?? 1);
+  return Number.isInteger(n) && n > 0 ? n : 1;
 }
 
 export function parseOriginList(raw: string | undefined): string[] {
@@ -70,7 +80,7 @@ export interface PortalSecurityOptions {
 export async function registerPortalSecurity(app: FastifyInstance, opts: PortalSecurityOptions): Promise<void> {
   // Runs before @fastify/rate-limit's own onRoute hook (registered next), so the config is seen.
   app.addHook("onRoute", (route) => {
-    const limit = rateLimitFor(route.url ?? route.path ?? "");
+    const limit = rateLimitFor(route.url ?? route.path ?? "", route.method);
     if (limit && !(route.config as { rateLimit?: unknown } | undefined)?.rateLimit) {
       route.config = { ...(route.config ?? {}), rateLimit: limit } as typeof route.config;
     }

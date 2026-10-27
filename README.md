@@ -227,7 +227,6 @@ Fly.io configurations in `deploy/fly/`:
 | `fly.seed-eu.toml` | `edgecoder-seed-eu` | EU all-in-one node |
 | `fly.portal.toml` | `edgecoder-portal` | Centralized portal (web UI, auth, wallet) |
 | `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | Bitcoin anchoring proxy |
-| `fly.docs.toml` | `edgecoder-docs` | Documentation site |
 
 Each seed node runs coordinator, inference, and control-plane in a single process via `EDGE_RUNTIME_MODE=all-in-one`. The portal is the only centralized service; everything else is decentralized.
 

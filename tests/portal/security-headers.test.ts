@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import { registerPortalSecurity, rateLimitFor } from "../../src/portal/security.js";
+import { registerPortalSecurity, rateLimitFor, trustProxyHops } from "../../src/portal/security.js";
 import { clearCookies, cookieName, encodeCookie, readCookie } from "../../src/portal/portal-utils.js";
 
 // #10: security headers, CSRF origin check, rate limits and cookie hardening.
@@ -15,6 +15,8 @@ async function buildApp() {
   app.post("/wallet/send/mfa/start", async () => ({ ok: true }));
   app.post("/me/theme", async () => ({ ok: true }));
   app.post("/auth/oauth/apple/callback", async () => ({ ok: true }));
+  app.post("/auth/oauth/:provider/callback", async () => ({ ok: true }));
+  app.get("/wallet/send/requests", async () => ({ requests: [] }));
   await app.ready();
   return app;
 }
@@ -38,6 +40,9 @@ describe("portal rate limits (#10)", () => {
     expect(rateLimitFor("/auth/passkey/login/verify")?.max).toBe(10);
     expect(rateLimitFor("/auth/oauth/:provider/callback")?.max).toBe(10);
     expect(rateLimitFor("/wallet/send/mfa/confirm")?.max).toBe(5);
+    expect(rateLimitFor("/wallet/send/mfa/start")?.max).toBe(5);
+    expect(rateLimitFor("/wallet/send/requests", "GET")).toBeUndefined();
+    expect(rateLimitFor("/wallet/send/mfa/start", "GET")).toBeUndefined();
     expect(rateLimitFor("/me/theme")).toBeUndefined();
   });
 
@@ -47,6 +52,13 @@ describe("portal rate limits (#10)", () => {
     for (let i = 0; i < 10; i++) expect((await hit("10.0.0.1")).statusCode).toBe(200);
     expect((await hit("10.0.0.1")).statusCode).toBe(429);
     expect((await hit("10.0.0.2")).statusCode).toBe(200);
+  });
+
+  it("GET /wallet/send/requests is not rate-limited", async () => {
+    const app = await buildApp();
+    for (let i = 0; i < 12; i++) {
+      expect((await app.inject({ method: "GET", url: "/wallet/send/requests", remoteAddress: "10.0.0.4" })).statusCode).toBe(200);
+    }
   });
 
   it("6th wallet send/MFA request gets 429", async () => {
@@ -76,6 +88,18 @@ describe("portal CSRF origin check (#10)", () => {
     ]) {
       expect((await app.inject({ method: "POST", url: "/me/theme", headers, payload: {} })).statusCode).toBe(200);
     }
+  });
+
+  it("does NOT exempt the generic OAuth callback (login CSRF)", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/auth/oauth/google/callback", headers: { origin: "https://evil.example" }, payload: {} });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("PORTAL_TRUST_PROXY_HOPS falls back to 1 on bad values", () => {
+    expect(trustProxyHops(undefined)).toBe(1);
+    expect(trustProxyHops("2")).toBe(2);
+    for (const bad of ["true", "0", "-1", "1.5", "abc"]) expect(trustProxyHops(bad), bad).toBe(1);
   });
 
   it("exempts the Apple form_post OAuth callback", async () => {
