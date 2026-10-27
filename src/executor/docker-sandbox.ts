@@ -10,17 +10,41 @@ const DOCKER_IMAGES: Record<Language, string> = {
 };
 
 let dockerProbeCache: { value: boolean; at: number } | undefined;
+let dockerProbeInFlight: Promise<boolean> | undefined;
 const DOCKER_PROBE_TTL_MS = 30_000;
+/** Negative results expire sooner so a cold-starting daemon is picked up quickly. */
+const DOCKER_PROBE_NEGATIVE_TTL_MS = 5_000;
+const DEFAULT_DOCKER_PROBE_TIMEOUT_MS = 3_000;
+
+/** DOCKER_PROBE_TIMEOUT_MS, falling back to 3 s when unset, empty, non-numeric or <= 0. */
+export function dockerProbeTimeoutMs(raw: string | undefined = process.env.DOCKER_PROBE_TIMEOUT_MS): number {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? n : DEFAULT_DOCKER_PROBE_TIMEOUT_MS;
+}
 
 /**
  * #32: probe the Docker daemon with a hard timeout (kills a hung `docker info`),
  * caching the answer for 30 s so per-loop callers stay cheap.
  */
 export async function isDockerAvailable(
-  timeoutMs = Number(process.env.DOCKER_PROBE_TIMEOUT_MS ?? 3000)
+  timeoutMs: number = dockerProbeTimeoutMs()
 ): Promise<boolean> {
-  if (dockerProbeCache && Date.now() - dockerProbeCache.at < DOCKER_PROBE_TTL_MS) return dockerProbeCache.value;
-  const value = await new Promise<boolean>((resolve) => {
+  if (dockerProbeCache) {
+    const ttl = dockerProbeCache.value ? DOCKER_PROBE_TTL_MS : DOCKER_PROBE_NEGATIVE_TTL_MS;
+    if (Date.now() - dockerProbeCache.at < ttl) return dockerProbeCache.value;
+  }
+  // Concurrent callers share one `docker info` process.
+  if (dockerProbeInFlight) return dockerProbeInFlight;
+  dockerProbeInFlight = probeDocker(timeoutMs).then((value) => {
+    dockerProbeCache = { value, at: Date.now() };
+    dockerProbeInFlight = undefined;
+    return value;
+  });
+  return dockerProbeInFlight;
+}
+
+function probeDocker(timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     let done = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (v: boolean) => {
@@ -48,13 +72,12 @@ export async function isDockerAvailable(
     proc.on("close", (code) => finish(code === 0));
     proc.on("error", () => finish(false));
   });
-  dockerProbeCache = { value, at: Date.now() };
-  return value;
 }
 
 /** Test hook: forget the cached probe result. */
 export function __resetDockerProbeCache(): void {
   dockerProbeCache = undefined;
+  dockerProbeInFlight = undefined;
 }
 
 export interface DockerSandboxOptions {
