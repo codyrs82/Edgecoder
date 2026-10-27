@@ -47,7 +47,12 @@ export class NobleBLETransport implements BLETransport {
       );
       this.noble = nobleModule.default ?? nobleModule;
     } catch (e) {
-      console.warn("[BLE] noble not available, scanning disabled:", String(e));
+      console.warn(
+        "[BLE] WARNING: @abandonware/noble is not installed (it is an optionalDependency and its native build " +
+          "may have failed). BLE scanning is DISABLED. Reinstall with build tools (python3, make, a C++ compiler, " +
+          "libbluetooth-dev on Linux) to enable it.",
+        String(e)
+      );
     }
 
     try {
@@ -57,7 +62,9 @@ export class NobleBLETransport implements BLETransport {
       this.bleno = blenoModule.default ?? blenoModule;
     } catch (e) {
       console.warn(
-        "[BLE] bleno not available, advertising disabled:",
+        "[BLE] WARNING: @abandonware/bleno is not installed (it is an optionalDependency and its native build " +
+          "may have failed). BLE advertising is DISABLED. Reinstall with build tools (python3, make, a C++ compiler, " +
+          "libbluetooth-dev on Linux) to enable it.",
         String(e)
       );
     }

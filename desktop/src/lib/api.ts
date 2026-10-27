@@ -717,9 +717,34 @@ function ideBase(): string {
   return import.meta.env.DEV ? "/chat" : "http://localhost:4304";
 }
 
-async function ideCheck(res: Response): Promise<Response> {
-  if (res.status === 401) resetIdeToken();
+function isUnauthorized(e: unknown): boolean {
+  return String(e).includes(": 401");
+}
+
+/**
+ * fetch() against the local IDE server with the cached token. On 401 the token
+ * file may have been regenerated, so drop the cached value, reread it and retry once.
+ */
+async function ideFetch(url: string, init: RequestInit): Promise<Response> {
+  const send = async () =>
+    fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(await ideHeaders()) } });
+  let res = await send();
+  if (res.status === 401) {
+    resetIdeToken();
+    res = await send();
+  }
   return res;
+}
+
+/** Same stale-token handling for the get()/post() helpers, which throw on non-2xx. */
+async function withIdeRetry<T>(call: (headers: Record<string, string>) => Promise<T>): Promise<T> {
+  try {
+    return await call(await ideHeaders());
+  } catch (e) {
+    if (!isUnauthorized(e)) throw e;
+    resetIdeToken();
+    return call(await ideHeaders());
+  }
 }
 
 function chatBase(): string {
@@ -754,9 +779,9 @@ export async function streamChat(
   let routeInfo: StreamRouteInfo | undefined;
 
   const toLocalIde = !(useRemote && !import.meta.env.DEV);
-  const res = await fetch(`${chatBase()}/v1/chat/completions`, {
+  const res = await (toLocalIde ? ideFetch : fetch)(`${chatBase()}/v1/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(toLocalIde ? await ideHeaders() : {}) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: requestedModel ?? "edgecoder-local",
       messages,
@@ -867,17 +892,12 @@ export const getAvailableModels = () =>
 // ---------------------------------------------------------------------------
 
 export async function ideSetProject(projectRoot: string): Promise<void> {
-  try {
-    await post(ideBase(), "/v1/ide/project", { projectRoot }, await ideHeaders());
-  } catch (e) {
-    if (String(e).includes(": 401")) resetIdeToken();
-    throw e;
-  }
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/project", { projectRoot }, h));
 }
 
 export async function ideGetProject(): Promise<string | null> {
   try {
-    const data = await get<{ projectRoot: string | null }>(ideBase(), "/v1/ide/project", await ideHeaders());
+    const data = await withIdeRetry((h) => get<{ projectRoot: string | null }>(ideBase(), "/v1/ide/project", h));
     return data.projectRoot;
   } catch {
     return null;
@@ -885,12 +905,7 @@ export async function ideGetProject(): Promise<string | null> {
 }
 
 export async function ideSendToolApproval(id: string, approved: boolean): Promise<void> {
-  try {
-    await post(ideBase(), "/v1/ide/tool-approval", { id, approved }, await ideHeaders());
-  } catch (e) {
-    if (String(e).includes(": 401")) resetIdeToken();
-    throw e;
-  }
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved }, h));
 }
 
 export interface IdeStreamEvent {
@@ -907,9 +922,9 @@ export async function streamIdeChat(
   githubToken?: string | null,
 ): Promise<void> {
   const base = ideBase();
-  const res = await ideCheck(await fetch(`${base}/v1/ide/chat`, {
+  const res = await ideFetch(`${base}/v1/ide/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await ideHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages,
       model: requestedModel,
@@ -917,7 +932,7 @@ export async function streamIdeChat(
       ...(githubToken ? { githubToken } : {}),
     }),
     signal,
-  }));
+  });
 
   if (!res.ok) throw new Error(`IDE chat request failed: ${res.status}`);
   if (!res.body) throw new Error("No response body");

@@ -109,7 +109,13 @@ fn get_local_token(state: tauri::State<'_, LocalToken>) -> String {
 
 /// Path of the IDE provider token written by the IDE server (#4): ~/.edgecoder/ide-token.
 fn ide_token_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    // Match Node's os.homedir(), which the IDE server uses to write the token:
+    // USERPROFILE on Windows (Git Bash/MSYS often set HOME elsewhere), HOME elsewhere.
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    }?;
     Some(PathBuf::from(home).join(".edgecoder").join("ide-token"))
 }
 
