@@ -34,7 +34,8 @@
     "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts",
     "test:e2e:up": "docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build",
     "test:e2e:down": "docker compose -f tests/e2e/docker-compose.e2e.yml down -v",
-    "check:scripts": "node scripts/check-scripts.mjs"
+    "check:scripts": "node scripts/check-scripts.mjs",
+    "check:fly-configs": "node scripts/check-fly-configs.mjs"
   },
   "keywords": [],
   "author": "",
