@@ -4,6 +4,7 @@ import type { LightningProvider, SettlementResult } from "../../src/economy/ligh
 import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
+  reconcilePaymentIntent,
   signPaymentWebhookBody,
   verifyPaymentWebhookSignature,
   type AtomicSettleStore
@@ -159,5 +160,43 @@ describe("payment settlement (#42)", () => {
     expect(() => assertPaymentWebhookSecret({ NODE_ENV: "production" })).toThrow();
     expect(() => assertPaymentWebhookSecret({ NODE_ENV: "production", PAYMENT_WEBHOOK_SECRET: "s" })).not.toThrow();
     expect(() => assertPaymentWebhookSecret({ NODE_ENV: "development" })).not.toThrow();
+  });
+
+  test("reconcile asks the node before expiring: paid-but-stale intent is settled, not expired", async () => {
+    const stale = { ...makeIntent(), createdAtMs: Date.now() - 10 * 60 * 60 * 1000 };
+    const intents = new Map([["intent-1", stale]]);
+    const { settle, granted } = memorySettler(stubProvider(true), intents);
+    let expired = 0;
+    const out = await reconcilePaymentIntent(stale, settle, async () => {
+      expired += 1;
+      return true;
+    });
+    expect(out).toBe("settled");
+    expect(expired).toBe(0);
+    expect(granted).toEqual(["credit_purchase:intent-1"]);
+  });
+
+  test("reconcile expires only unpaid intents", async () => {
+    const stale = { ...makeIntent(), createdAtMs: 0 };
+    const intents = new Map([["intent-1", stale]]);
+    const { settle } = memorySettler(stubProvider(false), intents);
+    expect(await reconcilePaymentIntent(stale, settle, async () => true)).toBe("expired");
+  });
+
+  test("provider receives the stored payment hash", async () => {
+    let seen: string | undefined;
+    const provider = {
+      async createInvoice() {
+        return { invoiceRef: "x", paymentHash: "h", expiresAtMs: 0 };
+      },
+      async checkSettlement(_ref: string, hash?: string) {
+        seen = hash;
+        return { settled: false };
+      }
+    };
+    const intent = { ...makeIntent(), paymentHash: "ab".repeat(32) };
+    const { settle } = memorySettler(provider, new Map([["intent-1", intent]]));
+    await settle(intent);
+    expect(seen).toBe("ab".repeat(32));
   });
 });

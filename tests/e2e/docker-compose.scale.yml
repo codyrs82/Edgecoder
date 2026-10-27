@@ -20,6 +20,16 @@ services:
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen3.5:9b
+      # NODE_ENV=production requires these (#5/#42/#43). PLACEHOLDERS for local scale tests only —
+      # override via .env; never reuse these values anywhere real.
+      - HOST=0.0.0.0
+      - MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-scale-test-placeholder-admin-token}
+      - PORTAL_SERVICE_URL=${PORTAL_SERVICE_URL:-http://portal.invalid:4310}
+      - PORTAL_SERVICE_TOKEN=${PORTAL_SERVICE_TOKEN:-scale-test-placeholder-portal-token}
+      - PAYMENT_WEBHOOK_SECRET=${PAYMENT_WEBHOOK_SECRET:-scale-test-placeholder-webhook-secret}
+      - INFERENCE_AUTH_TOKEN=${INFERENCE_AUTH_TOKEN:-scale-test-placeholder-inference-token}
+      - ECONOMY_PAYMENTS_ENABLED=${ECONOMY_PAYMENTS_ENABLED:-false}
     ports:
       - "4301:4301"
     depends_on:
@@ -37,6 +47,7 @@ services:
     command: ["node", "dist/swarm/worker-runner.js"]
     environment:
       - COORDINATOR_URL=http://seed-node:4301
+      - MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}
       - AGENT_MODE=swarm-only
       - LOCAL_MODEL_PROVIDER=edgecoder-local
       - OLLAMA_AUTO_INSTALL=false

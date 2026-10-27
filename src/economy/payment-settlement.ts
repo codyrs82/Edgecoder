@@ -72,7 +72,9 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
     if (!opts.store && known && known.status !== "created") return { status: "already", intent: known };
     if (intent.status !== "created" && !opts.store) return { status: "already", intent };
 
-    const s = await opts.provider.checkSettlement(intent.invoiceRef).catch(() => ({ settled: false }) as const);
+    const s = await opts.provider
+      .checkSettlement(intent.invoiceRef, intent.paymentHash ?? opts.getIntent(intent.intentId)?.paymentHash)
+      .catch(() => ({ settled: false }) as const);
     if (!s.settled) return { status: "unpaid" };
     const txRef = ("txRef" in s && s.txRef) || intent.invoiceRef;
     const paymentHash = "paymentHash" in s ? s.paymentHash : undefined;
@@ -86,7 +88,11 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
         intent.quotedCredits,
         paymentHash
       );
-      if (res.status === "already") return { status: "already", intent: res.intent };
+      if (res.status === "already") {
+        // refresh the in-memory copy so later hints don't keep asking the node
+        if (res.intent) await opts.saveIntent(res.intent);
+        return { status: "already", intent: res.intent };
+      }
       const settled: PaymentIntent = res.intent ?? {
         ...intent,
         status: "settled",
@@ -114,6 +120,21 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
     inflight.set(intent.intentId, p);
     return p;
   };
+}
+
+/**
+ * #42 review: reconcile = ask the node first; only an intent that is still unpaid
+ * (and past TTL + grace, decided by `expireIfStale`) is expired.
+ */
+export async function reconcilePaymentIntent(
+  intent: PaymentIntent,
+  settleIfPaid: (intent: PaymentIntent) => Promise<SettleOutcome>,
+  expireIfStale: (intent: PaymentIntent) => Promise<boolean>
+): Promise<"settled" | "expired" | "pending"> {
+  const outcome = await settleIfPaid(intent);
+  if (outcome.status === "settled") return "settled";
+  if (outcome.status === "already") return "pending";
+  return (await expireIfStale(intent)) ? "expired" : "pending";
 }
 
 /** `sha256=<hex>` HMAC of the raw webhook body. */
