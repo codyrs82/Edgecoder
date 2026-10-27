@@ -38,3 +38,22 @@ The desktop app resolves its remote hosts in this order:
 3. **Defaults**: `https://edgecoder-seed-eu.fly.dev` and `https://edgecoder.io`.
 
 URLs must be `https://`. `http://` is accepted only for `127.0.0.1` and `localhost`. Remote calls time out after 8 s, and the app then shows a "Coordinator/Portal unreachable at <url>" banner instead of a spinner.
+
+## Content Security Policy (#11)
+
+`src-tauri/tauri.conf.json` has two policies:
+- **`csp`** for release builds: `script-src 'self'` (no `unsafe-eval`, no `unsafe-inline`, no dev origins). `connect-src` covers only the local services (`4301`, `4302`, `4304`, `11434` on `127.0.0.1` and `localhost`), `https://edgecoder.io`, `https://*.edgecoder.io` and the default coordinator.
+- **`devCsp`** for `tauri dev`: allows the Vite dev server and HMR.
+
+Monaco's workers are bundled with Vite (`src/lib/monaco-setup.ts`), so the editor doesn't need `eval`. CI (`desktop-web-build`) fails if a main-thread chunk contains `eval(` or `new Function(`.
+
+**Custom hosts:** a coordinator or portal URL set in Settings that isn't in `connect-src` gets blocked by the release CSP. For self-hosted builds, add the host to `connect-src`.
+
+**Manual QA before release** (`npm run tauri build -- --debug` is enough):
+- open the editor;
+- check syntax highlighting;
+- check the diff view;
+- send a chat;
+- log in through the deep link;
+- connect the local agent;
+- use the IDE panel.

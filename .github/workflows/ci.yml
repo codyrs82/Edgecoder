@@ -76,6 +76,35 @@ jobs:
           printf '[package]\nname = "token-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\ngetrandom = "0.2"\nhex = "0.4"\n' > /tmp/token-test/Cargo.toml
           cargo test --manifest-path /tmp/token-test/Cargo.toml
 
+  # #11: build the desktop web bundle and make sure the production CSP holds:
+  # no eval / new Function in the main-thread JS (Monaco workers are bundled separately).
+  desktop-web-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: No eval in main-thread bundles
+        run: |
+          set -eu
+          ls dist/assets/*.js
+          # Worker chunks run in their own (worker) context; check every other chunk.
+          main=$(ls dist/assets/*.js | grep -v -E '\.worker-|worker-[A-Za-z0-9_-]+\.js$' || true)
+          echo "$main"
+          if grep -l -E 'new Function\(|[^A-Za-z0-9_.$]eval\(' $main; then
+            echo "::error::eval/new Function found in a main-thread bundle (blocked by script-src 'self')"
+            exit 1
+          fi
+
   # #9: build both images and check them: non-root, no Ollama in the slim image,
   # no tests/, server size budget, and a /health/runtime smoke test.
   docker-build:

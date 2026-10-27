@@ -28,6 +28,8 @@
     const savedWidth = localStorage.getItem("edgecoder-chat-width");
     if (savedWidth !== null) chatPanelWidth = Math.max(280, Number(savedWidth));
 
+    // #11: register bundled workers first so Monaco never needs eval/blob loaders.
+    await import("../lib/monaco-setup");
     const mon = await import("monaco-editor");
     monaco = mon;
 
