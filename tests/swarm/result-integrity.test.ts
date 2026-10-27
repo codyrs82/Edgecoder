@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { SwarmQueue } from "../../src/swarm/queue.js";
+import { PostgresStore } from "../../src/db/postgres.js";
 import { accrueCredits, creditEngine } from "../../src/credits/store.js";
 import {
   checkResultClaim,
@@ -110,5 +111,77 @@ describe("/result integrity (#44)", () => {
     expect(first).not.toBeNull();
     expect(second).toBeNull();
     expect(creditEngine.history("acct-dup")).toHaveLength(1);
+  });
+
+  test("queued but UNCLAIMED local copy + valid mesh token -> peer_forward (relayed result accepted)", () => {
+    const queue = new SwarmQueue();
+    const st = queue.enqueueSubtask({
+      taskId: "task-2",
+      kind: "single_step",
+      language: "python",
+      input: "x",
+      timeoutMs: 1000,
+      snapshotRef: "snap",
+      projectMeta: { projectId: "p", resourceClass: "cpu", priority: 1 }
+    } as any);
+    const claim = queue.getClaim(st.id);
+    expect(claim).toBeDefined();
+    expect(
+      classifyResultAuth({
+        verified: null,
+        hasLocalClaim: Boolean(claim?.claimedBy),
+        meshTokenConfigured: true,
+        meshTokenValid: true,
+        requireSigned: true
+      })
+    ).toBe("peer_forward");
+  });
+
+  describe("persistContributionWithCredit (PG, one transaction)", () => {
+    function fakeStore(reportRowCount: number, failCreditInsert = false) {
+      const calls: string[] = [];
+      const client = {
+        async query(sql: string) {
+          const first = sql.trim().split(/\s+/).slice(0, 3).join(" ");
+          calls.push(first);
+          if (sql.includes("INSERT INTO compute_contribution_reports")) return { rowCount: reportRowCount, rows: [] };
+          if (sql.includes("INSERT INTO credit_transactions") && failCreditInsert) throw new Error("boom");
+          return { rowCount: 1, rows: [] };
+        },
+        release() {
+          calls.push("release");
+        }
+      };
+      const store = new PostgresStore({ connect: async () => client } as any);
+      return { store, calls };
+    }
+    const input = {
+      report: {
+        reportId: "result:s1", agentId: "a", taskId: "t", resourceClass: "cpu" as const,
+        cpuSeconds: 1, gpuSeconds: 0, success: true, qualityScore: 1, timestampMs: 1
+      },
+      accountId: "a", sourceAgentId: "a", reliabilityScore: 1, weightedContribution: 1
+    };
+    const tx = { txId: "tx1", accountId: "a", type: "earn" as const, credits: 1, reason: "compute_contribution", timestampMs: 1 };
+
+    test("new report: BEGIN, report insert, credit insert, COMMIT", async () => {
+      const { store, calls } = fakeStore(1);
+      expect(await store.persistContributionWithCredit(input as any, tx as any)).toBe(true);
+      expect(calls).toEqual(["BEGIN", "INSERT INTO compute_contribution_reports", "INSERT INTO credit_transactions", "COMMIT", "release"]);
+    });
+
+    test("duplicate report: ROLLBACK, no credit insert", async () => {
+      const { store, calls } = fakeStore(0);
+      expect(await store.persistContributionWithCredit(input as any, tx as any)).toBe(false);
+      expect(calls).not.toContain("INSERT INTO credit_transactions");
+      expect(calls).toContain("ROLLBACK");
+    });
+
+    test("credit insert fails: ROLLBACK (report row not kept), error surfaces", async () => {
+      const { store, calls } = fakeStore(1, true);
+      await expect(store.persistContributionWithCredit(input as any, tx as any)).rejects.toThrow("boom");
+      expect(calls).toContain("ROLLBACK");
+      expect(calls).not.toContain("COMMIT");
+    });
   });
 });

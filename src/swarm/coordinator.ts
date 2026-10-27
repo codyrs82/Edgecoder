@@ -70,7 +70,7 @@ import {
   smoothLoadIndex
 } from "../economy/issuance.js";
 import { checkSharedToken, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
-import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
+import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -88,6 +88,7 @@ import {
 import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
+  reconcilePaymentIntent,
   verifyPaymentWebhookSignature
 } from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
@@ -177,7 +178,7 @@ requireProdEnv("coordinator", [
   "PORTAL_SERVICE_TOKEN",
   "ADMIN_API_TOKEN",
   "PAYMENT_WEBHOOK_SECRET",
-  ...((process.env.ECONOMY_PAYMENTS_ENABLED ?? "true").toLowerCase() !== "false" ? ["LIGHTNING_PROVIDER"] : [])
+  ...(economyPaymentsEnabled() ? ["LIGHTNING_PROVIDER"] : [])
 ]);
 const IS_PROD = isProduction();
 // #42: production must verify webhook HMACs.
@@ -417,9 +418,15 @@ const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>(
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
+/** Routes that need a Lightning provider: payment intents/webhook and robot task creation (invoices). */
+function isPaymentGatedRequest(method: string, url: string): boolean {
+  const path = url.split("?")[0];
+  if (path.startsWith("/economy/payments")) return true;
+  return method === "POST" && path === "/robot/tasks";
+}
 // ECONOMY_PAYMENTS_ENABLED=false lets a coordinator boot (including in production)
 // without a Lightning node: payment routes return 503 and no provider is created.
-const ECONOMY_PAYMENTS_ENABLED = (process.env.ECONOMY_PAYMENTS_ENABLED ?? "true").toLowerCase() !== "false";
+const ECONOMY_PAYMENTS_ENABLED = economyPaymentsEnabled();
 const disabledLightningProvider: LightningProvider = {
   async createInvoice() {
     throw new Error("economy_payments_disabled");
@@ -432,7 +439,7 @@ const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
   ? createLightningProviderFromEnv()
   : disabledLightningProvider;
 app.addHook("onRequest", async (req, reply) => {
-  if (!ECONOMY_PAYMENTS_ENABLED && req.url.startsWith("/economy/payments")) {
+  if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
   }
 });
@@ -1533,8 +1540,16 @@ const settleIfPaid = createPaymentSettler({
   }
 });
 
+// Grace on top of the TTL so a payment made just before expiry is still picked up.
+const PAYMENT_INTENT_EXPIRY_GRACE_MS = Number(process.env.PAYMENT_INTENT_EXPIRY_GRACE_MS ?? "120000");
+
+/** #42 review: always ask the node first; expire only an unpaid intent past TTL + grace. */
+function reconcileIntent(intent: PaymentIntent): Promise<"settled" | "expired" | "pending"> {
+  return reconcilePaymentIntent(intent, settleIfPaid, expireIntentIfStale);
+}
+
 async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
-  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS) return false;
+  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS) return false;
   const expired: PaymentIntent = { ...intent, status: "expired" };
   paymentIntents.set(expired.intentId, expired);
   await pgStore?.upsertPaymentIntent(expired);
@@ -2210,7 +2225,9 @@ app.post("/result", async (req, reply) => {
   // and dependency release only; no credits are accrued here.
   const resultAuth = classifyResultAuth({
     verified,
-    hasLocalClaim: Boolean(claim),
+    // #44 review: "locally owned" only if a local agent actually claimed it; an unclaimed
+    // queued copy of a gossiped subtask must still accept the relayed result.
+    hasLocalClaim: Boolean(claim?.claimedBy),
     meshTokenConfigured: MESH_AUTH_TOKEN !== "",
     meshTokenValid: hasMeshToken((req as any).headers ?? {}),
     requireSigned: REQUIRE_SIGNED_AGENT_REQUESTS
@@ -2226,9 +2243,11 @@ app.post("/result", async (req, reply) => {
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
   queue.complete(body);
 
-  // ── Behavioral monitoring ──
-  behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
-  evaluateAndEnforce(body.agentId);
+  // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
+  if (!isPeerForward) {
+    behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
+    evaluateAndEnforce(body.agentId);
+  }
 
   // ── Dependency tracking: store output and release dependent subtasks ──
   const released = depTracker.recordCompletionAndRelease(
@@ -2755,12 +2774,9 @@ app.post("/economy/payments/reconcile", async (req, reply) => {
   let expiredCount = 0;
   for (const intent of pending) {
     if (intent.status !== "created") continue;
-    if (await expireIntentIfStale(intent)) {
-      expiredCount += 1;
-      continue;
-    }
-    const outcome = await settleIfPaid(intent);
-    if (outcome.status === "settled") settledCount += 1;
+    const result = await reconcileIntent(intent);
+    if (result === "settled") settledCount += 1;
+    if (result === "expired") expiredCount += 1;
   }
   return reply.send({ ok: true, scanned: pending.length, settledCount, expiredCount });
 });
@@ -4836,8 +4852,7 @@ export async function initCoordinator(): Promise<void> {
           const pending = pgStore ? await pgStore.listPendingPaymentIntents(500) : [...paymentIntents.values()];
           for (const intent of pending) {
             if (intent.status !== "created") continue;
-            if (await expireIntentIfStale(intent)) continue;
-            await settleIfPaid(intent);
+            await reconcileIntent(intent);
           }
         } catch (error) {
           app.log.warn({ error }, "payment_reconcile_tick_failed");

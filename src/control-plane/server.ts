@@ -1118,12 +1118,13 @@ app.get("/economy/payments/intents/:intentId", async (req, reply) => {
 app.post("/economy/payments/intents/:intentId/confirm", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   const params = z.object({ intentId: z.string() }).parse(req.params);
-  const body = z.object({ txRef: z.string().min(4) }).parse(req.body);
+  // #42: the coordinator ignores caller txRef and asks the Lightning node; it requires the admin token.
+  z.object({ txRef: z.string().optional() }).passthrough().parse(req.body ?? {});
   try {
     const res = await request(`${coordinatorUrl}/economy/payments/intents/${params.intentId}/confirm`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
-      body: JSON.stringify(body)
+      headers: { ...coordinatorMeshHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
+      body: JSON.stringify({})
     });
     return reply.code(res.statusCode).send(await res.body.json());
   } catch {
