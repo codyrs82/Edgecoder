@@ -24,10 +24,16 @@ export async function runCode(
   language: Language,
   code: string,
   timeoutMs = 4_000,
-  sandbox: "host" | "docker" = "host",
-  dockerOptions?: DockerSandboxOptions
+  sandbox: "host" | "docker" = "docker",
+  dockerOptions?: DockerSandboxOptions,
+  origin: "local" | "remote" = "remote"
 ): Promise<RunResult> {
   const start = Date.now();
+  // #45: host execution is only for the local user's own code (IDE/interactive).
+  // Anything that came from the swarm, a mesh peer or BLE must run in Docker.
+  if (origin === "remote" && sandbox === "host") {
+    return { ...baseResult(language, 0), ok: false, stderr: "sandbox_required_for_remote_task" };
+  }
   const subset = await checkSubset(language, code);
   if (!subset.supported) {
     return {

@@ -9,7 +9,7 @@ import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { isDockerAvailable } from "../executor/docker-sandbox.js";
-import { enforceSandboxPolicy } from "./sandbox-enforcement.js";
+import { enforceSandboxPolicy, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
@@ -55,6 +55,9 @@ const SANDBOX_MODE: SandboxMode = (process.env.SANDBOX_MODE ?? (
   (process.env.AGENT_MODE ?? "swarm-only") === "swarm-only" ? "docker" : "none"
 )) as SandboxMode;
 const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
+// #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
+const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
+let warnedNoSandbox = false;
 const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
 const PORTAL_URL = process.env.PORTAL_URL ?? "";
 const AGENT_DEVICE_ID = (() => {
@@ -821,7 +824,13 @@ async function loop(): Promise<void> {
         }
 
         const pullBody = { agentId: AGENT_ID };
-        const pulled = (await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })) as {
+        if (!SWARM_EXECUTION_ENABLED && !warnedNoSandbox) {
+          warnedNoSandbox = true;
+          console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
+        }
+        const pulled = (SWARM_EXECUTION_ENABLED
+          ? await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })
+          : { subtask: null }) as {
           subtask: Subtask | null;
           envelope?: TaskEnvelope;
         };
@@ -933,7 +942,7 @@ async function loop(): Promise<void> {
         }
 
         // ── Mesh task execution: process tasks received via gossip ──
-        if (meshPeer && meshTaskQueue.length > 0) {
+        if (SWARM_EXECUTION_ENABLED && meshPeer && meshTaskQueue.length > 0) {
           const meshItem = meshTaskQueue.shift()!;
           const st = meshItem.subtask;
           console.log(`[agent:${AGENT_ID}] executing mesh task: ${st.id} (snapshot: ${st.snapshotRef})`);
@@ -1022,7 +1031,9 @@ async function loop(): Promise<void> {
                   priority: 10
                 }
               };
-              const result = await worker.runSubtask(peerSubtask, AGENT_ID);
+              const result = SWARM_EXECUTION_ENABLED
+                ? await worker.runSubtask(peerSubtask, AGENT_ID)
+                : { ok: false, output: "", error: "sandbox_required_for_remote_task", durationMs: 0 };
               peerResult = {
                 ok: result.ok,
                 output: result.output,
@@ -1151,7 +1162,7 @@ async function loop(): Promise<void> {
       }
 
       // ── Mesh task execution during offline mode ──
-      if (!coordinatorOnline && meshPeer && meshTaskQueue.length > 0) {
+      if (SWARM_EXECUTION_ENABLED && !coordinatorOnline && meshPeer && meshTaskQueue.length > 0) {
         const meshItem = meshTaskQueue.shift()!;
         const st = meshItem.subtask;
         console.log(`[agent:${AGENT_ID}] executing mesh task (offline): ${st.id} (snapshot: ${st.snapshotRef})`);

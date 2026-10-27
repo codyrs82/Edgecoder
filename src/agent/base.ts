@@ -11,12 +11,15 @@ import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 export interface AgentOptions {
   maxIterations?: number;
   sandbox?: "host" | "docker";
+  /** #45: "local" only for the user's own code (InteractiveAgent). Defaults to "remote". */
+  origin?: "local" | "remote";
   bleMeshManager?: BLEMeshManager;
 }
 
 export abstract class AgentBase {
   protected readonly maxIterations: number;
   protected readonly sandbox: "host" | "docker";
+  protected readonly origin: "local" | "remote";
   protected readonly bleMeshManager?: BLEMeshManager;
 
   constructor(
@@ -24,7 +27,8 @@ export abstract class AgentBase {
     options?: AgentOptions
   ) {
     this.maxIterations = options?.maxIterations ?? 3;
-    this.sandbox = options?.sandbox ?? "host";
+    this.sandbox = options?.sandbox ?? "docker";
+    this.origin = options?.origin ?? "remote";
     this.bleMeshManager = options?.bleMeshManager;
   }
 
@@ -54,7 +58,7 @@ export abstract class AgentBase {
   }
 
   protected async execute(code: string, language: Language): Promise<RunResult> {
-    return runCode(language, code, 4_000, this.sandbox);
+    return runCode(language, code, 4_000, this.sandbox, undefined, this.origin);
   }
 
   protected async runWithRetry(

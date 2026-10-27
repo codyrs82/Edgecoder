@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
@@ -2124,18 +2125,14 @@ app.post("/pull", async (req, reply) => {
       return reply.send({ subtask: null, powerDeferred: true, deferMs: powerDecisionForPull.deferMs, reason: powerDecisionForPull.reason });
     }
   }
+  // #45: every swarm task requires a sandbox; check before claim so nothing is claimed/requeued.
+  const sandboxRejection = pullSandboxRejection(capability);
+  if (sandboxRejection) {
+    app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
+    return reply.send(sandboxRejection);
+  }
   const task = queue.claim(body.agentId, capability?.activeModel);
   if (task) {
-    // ── Sandbox capability check: if task requires sandbox, verify agent supports it ──
-    const agentSandbox: SandboxMode = capability?.sandboxMode ?? "none";
-    const taskRequiresSandbox = (task.projectMeta?.tenantId && task.projectMeta.tenantId !== "")
-      || agentSandbox === "docker" || agentSandbox === "vm";
-    if (taskRequiresSandbox && agentSandbox === "none") {
-      // Agent lacks sandbox — requeue the task so another agent can pick it up
-      app.log.warn({ subtaskId: task.id, agentId: body.agentId }, "sandbox_capability_mismatch");
-      queue.requeue(task.id);
-      return reply.send({ subtask: null, sandboxRequired: true, reason: "agent_lacks_sandbox_capability" });
-    }
 
     // ── Power policy: small-tasks-only check ──
     if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
