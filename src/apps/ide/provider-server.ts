@@ -621,7 +621,8 @@ app.post("/run", async (req, reply) => {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  app.listen({ port: 4304, host: "0.0.0.0" }).catch((error) => {
+  // #45 review: InteractiveAgent runs host code (origin "local"), so the server must be local-only.
+  app.listen({ port: 4304, host: process.env.IDE_PROVIDER_HOST ?? "127.0.0.1" }).catch((error) => {
     app.log.error(error);
     process.exit(1);
   });
