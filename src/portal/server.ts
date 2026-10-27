@@ -38,6 +38,7 @@ import {
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
 import { parseOriginList, registerPortalSecurity } from "./security.js";
+import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
 // #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
@@ -73,7 +74,21 @@ const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL ?? "";
 const PORTAL_PUBLIC_URL = process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const CONTROL_PLANE_ADMIN_TOKEN = process.env.CONTROL_PLANE_ADMIN_TOKEN ?? "";
-const COORDINATOR_DISCOVERY_URL = process.env.COORDINATOR_DISCOVERY_URL ?? "";
+// #35: ordered coordinator list (COORDINATOR_DISCOVERY_URLS, legacy COORDINATOR_DISCOVERY_URL),
+// falling back to the EU seed; the first healthy one is cached for 60 s.
+const COORDINATOR_DISCOVERY_URLS = parseDiscoveryUrls();
+const pickDiscoveryCoordinator = createCoordinatorPicker({
+  urls: COORDINATOR_DISCOVERY_URLS,
+  probe: async (url) => {
+    const res = await request(`${url}/health/runtime`, {
+      method: "GET",
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    await res.body.dump();
+    return res.statusCode >= 200 && res.statusCode < 300;
+  }
+});
 const SESSION_TTL_MS = Number(process.env.PORTAL_SESSION_TTL_MS ?? `${1000 * 60 * 60 * 24 * 7}`);
 const EMAIL_VERIFY_TTL_MS = Number(process.env.PORTAL_EMAIL_VERIFY_TTL_MS ?? `${1000 * 60 * 60 * 24}`);
 const PASSKEY_CHALLENGE_TTL_MS = Number(process.env.PASSKEY_CHALLENGE_TTL_MS ?? "300000");
@@ -202,7 +217,7 @@ function validatePortalSecurityConfig(): void {
   if (!PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
   if (!WALLET_SECRET_PEPPER) missing.push("WALLET_SECRET_PEPPER");
   if (!RESEND_API_KEY) missing.push("RESEND_API_KEY");
-  if (!CONTROL_PLANE_URL && !COORDINATOR_DISCOVERY_URL) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URL");
+  if (!CONTROL_PLANE_URL && !discoveryConfigured()) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URLS");
   if (CONTROL_PLANE_URL && !CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
   if (!PASSKEY_RP_ID) missing.push("PASSKEY_RP_ID");
   if (!PASSKEY_RP_NAME) missing.push("PASSKEY_RP_NAME");
@@ -793,12 +808,10 @@ async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
     }
   }
 
-  // Fall back to COORDINATOR_DISCOVERY_URL as a direct coordinator URL
-  if (COORDINATOR_DISCOVERY_URL) {
-    return [COORDINATOR_DISCOVERY_URL.replace(/\/$/, "")];
-  }
-
-  return [];
+  // Fall back to the configured discovery list (#35): first healthy URL, else the first entry.
+  const healthy = await pickDiscoveryCoordinator();
+  if (healthy) return [healthy];
+  return COORDINATOR_DISCOVERY_URLS.slice(0, 1);
 }
 
 async function fetchCoordinatorFederatedSummary(input: {

@@ -10,6 +10,7 @@
   import type { AuthUser } from "./lib/api";
   import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
+  import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
   let activeTab: "chat" | "editor" = $state("chat");
@@ -140,6 +141,8 @@
     }
   }
 </script>
+
+<EndpointBanner />
 
 {#if !authChecked}
   <div class="loading-screen">

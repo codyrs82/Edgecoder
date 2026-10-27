@@ -1,3 +1,4 @@
+import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
   CoordinatorStatus,
@@ -88,13 +89,28 @@ export function isRemoteMode(): boolean {
   return useRemote;
 }
 
+// #35: remote hosts come from Settings / VITE_COORDINATOR_URL / VITE_PORTAL_URL (see endpoints.ts).
 function agentBase(): string {
   if (import.meta.env.DEV) return "/api";
-  return useRemote ? "https://edgecoder-seed.fly.dev" : "http://localhost:4301";
+  return useRemote ? coordinatorUrl() : "http://127.0.0.1:4301";
 }
 
 function portalBase(): string {
-  return "https://edgecoder.io";
+  return portalUrl();
+}
+
+/** Which remote endpoint a base URL is, so failures surface as "unreachable" (#35). */
+function remoteKind(base: string): EndpointKind | null {
+  if (import.meta.env.DEV) return null;
+  if (useRemote && base === coordinatorUrl()) return "coordinator";
+  if (base === portalUrl()) return "portal";
+  return null;
+}
+
+function apiFetch(base: string, path: string, init: RequestInit): Promise<Response> {
+  const kind = remoteKind(base);
+  if (kind) return fetchEndpoint(kind, base, path, init);
+  return fetch(`${base}${path}`, { ...init, signal: init.signal ?? AbortSignal.timeout(10_000) });
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +180,7 @@ export async function checkOllamaAvailable(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 async function get<T>(base: string, path: string, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch(`${base}${path}`, {
-    headers,
-    signal: AbortSignal.timeout(10_000),
-  });
+  const res = await apiFetch(base, path, { headers });
   if (!res.ok) throw new Error(`GET ${path}: ${res.status}`);
   return res.json();
 }
@@ -178,11 +191,10 @@ async function post<T>(
   body?: unknown,
   headers?: Record<string, string>,
 ): Promise<T> {
-  const res = await fetch(`${base}${path}`, {
+  const res = await apiFetch(base, path, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`POST ${path}: ${res.status}`);
   return res.json();
@@ -555,7 +567,7 @@ export async function logout(): Promise<void> {
 /** OAuth always routes through the remote portal — local has no portal server,
  *  and the redirect_uri registered with Microsoft is the production URL. */
 function oauthPortalBase(): string {
-  return "https://edgecoder.io";
+  return defaultEndpoints().portal;
 }
 
 export function getOAuthStartUrl(provider: "google" | "microsoft" | "github"): string {

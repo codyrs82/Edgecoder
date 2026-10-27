@@ -28,3 +28,13 @@ Packaged builds use the Tauri origins (`tauri://localhost`, `http(s)://tauri.loc
 ## Local auth tokens
 
 On each launch the app generates its inference and admin tokens with the OS CSPRNG (`src-tauri/src/token.rs`, #6). The webview only receives the inference token. Admin routes are intentionally not reachable from the UI.
+
+## Coordinator and portal URLs (#35)
+
+The desktop app resolves its remote hosts in this order:
+
+1. **Settings → Mesh Configuration** (Coordinator URL / Portal URL), stored in `localStorage`. Each field has **Test connection**, and **Reset to defaults** clears both. The old "Seed Node URL" setting is still read as a coordinator override.
+2. **Build-time env**: `VITE_COORDINATOR_URL` and `VITE_PORTAL_URL`, for example `VITE_COORDINATOR_URL=https://seed.example npm run tauri build`.
+3. **Defaults**: `https://edgecoder-seed-eu.fly.dev` and `https://edgecoder.io`.
+
+URLs must be `https://`. `http://` is accepted only for `127.0.0.1` and `localhost`. Remote calls time out after 8 s, and the app then shows a "Coordinator/Portal unreachable at <url>" banner instead of a spinner.
