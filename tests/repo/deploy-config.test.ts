@@ -5,7 +5,8 @@ import { checkFlyConfigs } from "../../scripts/check-fly-configs.mjs";
 
 // #33. Parsed with regexes rather than a YAML library to avoid a new dependency.
 const root = resolve(__dirname, "../..");
-const wf = readFileSync(resolve(root, ".github/workflows/deploy-fly.yml"), "utf8");
+// Normalise CRLF (Windows checkouts) so the line-anchored regexes work everywhere.
+const wf = readFileSync(resolve(root, ".github/workflows/deploy-fly.yml"), "utf8").replace(/\r\n/g, "\n");
 
 function jobs(yml: string): Map<string, string> {
   const body = yml.slice(yml.indexOf("\njobs:\n") + 7);
