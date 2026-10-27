@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const spawnMock = vi.fn();
 vi.mock("node:child_process", () => ({ spawn: (...args: unknown[]) => spawnMock(...args) }));
 
-const { isDockerAvailable, __resetDockerProbeCache } = await import("../../src/executor/docker-sandbox.js");
+const { isDockerAvailable, __resetDockerProbeCache, dockerProbeTimeoutMs } = await import("../../src/executor/docker-sandbox.js");
 
 function hangingProc() {
   const proc = new EventEmitter() as EventEmitter & { kill: ReturnType<typeof vi.fn> };
@@ -46,5 +46,25 @@ describe("isDockerAvailable probe (#32)", () => {
       return proc;
     });
     expect(await isDockerAvailable(1000)).toBe(false);
+  });
+
+  it("collapses concurrent probes into one docker process", async () => {
+    spawnMock.mockImplementation(() => {
+      const proc = hangingProc();
+      setTimeout(() => proc.emit("close", 0), 20);
+      return proc;
+    });
+    const results = await Promise.all([isDockerAvailable(1000), isDockerAvailable(1000), isDockerAvailable(1000)]);
+    expect(results).toEqual([true, true, true]);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("dockerProbeTimeoutMs", () => {
+  it("falls back to 3000 for unset, empty, garbage, zero or negative values", () => {
+    for (const raw of [undefined, "", "  ", "abc", "0", "-5", "NaN"]) expect(dockerProbeTimeoutMs(raw)).toBe(3000);
+  });
+  it("uses a valid positive value", () => {
+    expect(dockerProbeTimeoutMs("1500")).toBe(1500);
   });
 });
