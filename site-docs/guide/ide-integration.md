@@ -127,6 +127,14 @@ The provider server can read and write your project and run commands, so it is l
 - **`run_shell`.** Every shell command needs your approval in the IDE.
   - Commands are parsed into argv and run with `shell: false`, with variables like `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY` and `*_PRIVATE_KEY` stripped from the environment.
   - Shell syntax (`;`, `&&`, `|`, backticks, `$(`, redirects) is refused unless approved.
+  - Commands get an allowlisted environment only: `PATH`, `HOME`, `USER`, `SHELL`, locale, terminal and temp variables, and `LC_*`. Add names with `IDE_SHELL_ENV_PASS` (comma-separated). Everything else, including every token and secret, is dropped.
+  - Without approval, the following are refused:
+    - `node`/`python` with inline-code flags (`-e`, `-c`, `-p`, `-m`, `--eval`, …) or with no arguments (REPL)
+    - `npx`, `npm exec`, `cargo run` and `go run`
+    - binaries given as a path
+    - any path argument outside the project root (absolute, `~` or `..`)
+    - `git` subcommands that modify anything
+  - **Warning:** `IDE_SHELL_AUTO_APPROVE=1` still lets the model run allowlisted tools such as `npm test` or `node script.js`, and those run project code as you. Only enable it for projects you trust.
   - `IDE_SHELL_AUTO_APPROVE=1` (local opt-in) skips the prompt only for allowlisted binaries. The default allowlist is `npm`, `npx`, `node`, `python3`, `pytest`, `git` (read-only subcommands), `ls`, `cat`, `rg` and similar. Override it with `IDE_SHELL_ALLOW` (comma-separated).
 
 ---

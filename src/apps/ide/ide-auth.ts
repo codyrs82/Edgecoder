@@ -41,17 +41,30 @@ export function defaultIdeTokenPath(): string {
 
 /** Read ~/.edgecoder/ide-token, creating it (0600, 32 random bytes base64url) if missing. */
 export function loadOrCreateIdeToken(path = defaultIdeTokenPath()): string {
+  const readExisting = (): string => {
+    // Tighten loose permissions (e.g. 0644) on an existing file.
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      /* best effort on non-POSIX */
+    }
+    return readFileSync(path, "utf8").trim();
+  };
   if (existsSync(path)) {
-    const existing = readFileSync(path, "utf8").trim();
+    const existing = readExisting();
     if (existing) return existing;
   }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const token = randomBytes(32).toString("base64url");
-  writeFileSync(path, `${token}\n`, { mode: 0o600 });
   try {
-    chmodSync(path, 0o600);
-  } catch {
-    /* best effort on non-POSIX */
+    // "wx": fail if another process created it first; then use theirs.
+    writeFileSync(path, `${token}\n`, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const existing = readExisting();
+      if (existing) return existing;
+    }
+    throw error;
   }
   return token;
 }
@@ -87,7 +100,8 @@ export function isWebOrigin(origin: string | undefined, allowed: Set<string> = a
 }
 
 export interface IdeAuthOptions {
-  token: string;
+  /** The token, or a lazy getter (resolved on the first request that needs it). */
+  token: string | (() => string);
   port: number;
   /** When bound to loopback, only loopback Host headers are accepted (anti DNS-rebinding). */
   enforceLoopbackHost: boolean;
@@ -116,7 +130,8 @@ export function createIdeAuthHook(opts: IdeAuthOptions) {
     if (publicPaths.has(path)) return;
     const h = req.headers.authorization ?? "";
     const tok = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-    if (!tok || !safeTokenEqual(tok, opts.token)) {
+    const expected = typeof opts.token === "function" ? opts.token() : opts.token;
+    if (!tok || !expected || !safeTokenEqual(tok, expected)) {
       return reply.code(401).send({ error: "unauthorized" });
     }
   };

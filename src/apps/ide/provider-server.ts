@@ -22,14 +22,17 @@ import { createIdeAuthHook, isLoopbackHost, resolveIdeToken, resolveListenOption
 const app = Fastify({ logger: true });
 
 // #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
-const listenOptions = resolveListenOptions();
-const IDE_TOKEN = resolveIdeToken();
+// No import-time side effects: the token file is read/created on first authenticated
+// request, and the bind address is validated only when the server is started.
+const ideHost = (process.env.IDE_PROVIDER_HOST ?? "").trim() || "127.0.0.1";
+const idePort = Number(process.env.IDE_PROVIDER_PORT ?? 4304) || 4304;
+let ideToken: string | undefined;
 app.addHook(
   "onRequest",
   createIdeAuthHook({
-    token: IDE_TOKEN,
-    port: listenOptions.port,
-    enforceLoopbackHost: isLoopbackHost(listenOptions.host),
+    token: () => (ideToken ??= resolveIdeToken()),
+    port: idePort,
+    enforceLoopbackHost: isLoopbackHost(ideHost),
   })
 );
 
@@ -639,6 +642,14 @@ app.post("/run", async (req, reply) => {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  let listenOptions: { host: string; port: number };
+  try {
+    listenOptions = resolveListenOptions();
+    ideToken = resolveIdeToken();
+  } catch (error) {
+    app.log.error(error);
+    process.exit(1);
+  }
   app.listen(listenOptions).catch((error) => {
     app.log.error(error);
     process.exit(1);
