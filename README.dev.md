@@ -63,7 +63,6 @@ npm install
 - `npm run dev:ide` - IDE provider endpoint (`:4304`)
 - `npm run dev:worker` - start one worker node
 - `npm run dev:worker:ios` - start iOS swarm-only worker profile (defaults to local Ollama)
-- `npm run dev:cloudreview` - mock cloud review handshake server
 - `npm run docs:dev` - run docs site locally (`site-docs`, default `:5173`)
 - `npm run docs:build` - build static docs output
 - `npm run docs:preview` - preview built docs site
