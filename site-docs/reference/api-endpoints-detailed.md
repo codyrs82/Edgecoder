@@ -30,8 +30,9 @@ Authentication and payload specifics should be validated against runtime code an
 | POST | `/economy/price/propose` | submit price proposal |
 | POST | `/economy/price/consensus` | run consensus over proposals |
 | POST | `/economy/payments/intents` | create payment intent |
-| POST | `/economy/payments/intents/:intentId/confirm` | confirm settlement |
-| POST | `/economy/payments/reconcile` | reconcile pending intents |
+| POST | `/economy/payments/intents/:intentId/confirm` | **admin only** (`x-admin-token`): re-check settlement with the Lightning node; body `txRef` is ignored; `402 invoice_unpaid` if unpaid |
+| POST | `/economy/payments/webhook` | settlement **hint** from the Lightning node/processor; HMAC-signed (see below) |
+| POST | `/economy/payments/reconcile` | reconcile pending intents (node is checked before any intent is expired) |
 | GET | `/economy/issuance/rolling/:accountId` | rolling issuance/account view |
 | GET | `/economy/issuance/quorum/:epochId` | quorum state for issuance epoch |
 | POST | `/economy/issuance/anchor` | publish/advance issuance anchor |
@@ -207,3 +208,23 @@ Requires `x-mesh-token` header. Returns aggregate counts from the portal databas
 
 - [API Surfaces](/reference/api-surfaces)
 - [Public Mesh Operations Source](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
+
+## Payment webhook signature
+
+`POST /economy/payments/webhook` requires:
+
+- `x-mesh-token`: the coordinator mesh token (same as other coordinator routes).
+- `x-payment-signature: sha256=<hex>` — lowercase hex HMAC-SHA256 of the **raw request body bytes**, keyed with `PAYMENT_WEBHOOK_SECRET`. Compute it over the exact bytes you send (no re-serialization).
+
+Example (sender side):
+
+```bash
+body='{"invoiceRef":"lnbc1..."}'
+sig="sha256=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$PAYMENT_WEBHOOK_SECRET" -hex | sed 's/^.* //')"
+curl -X POST "$COORDINATOR/economy/payments/webhook" \
+  -H 'content-type: application/json' -H "x-mesh-token: $MESH_AUTH_TOKEN" \
+  -H "x-payment-signature: $sig" --data "$body"
+```
+
+Responses: `503 payment_webhook_not_configured` (no secret set), `401 webhook_signature_required` (missing/bad signature), `404 intent_not_found`. The body is only a hint: fields like `settled`/`txRef` are ignored and credits are granted only if the Lightning node reports the invoice as paid.
+
