@@ -11,7 +11,7 @@ services:
   seed-node:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/index.js"]
     environment:
       - NODE_ENV=production
@@ -43,7 +43,7 @@ services:
   worker:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/swarm/worker-runner.js"]
     environment:
       - COORDINATOR_URL=http://seed-node:4301

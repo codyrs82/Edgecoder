@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# #9: slim, non-root server image for the portal and other services that don't run
+# Ollama or BLE. No compilers, no tests/, prod dependencies only.
+# Build from the repo root: docker build -f deploy/docker/Dockerfile.server .
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+# BLE modules are optionalDependencies; they are not needed (and not built) here.
+RUN npm ci --omit=optional
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev --omit=optional
+
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+ENV NODE_ENV=production HOST=0.0.0.0
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./
+USER node
+EXPOSE 4301 4302 4303 4304 4310
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/index.js"]

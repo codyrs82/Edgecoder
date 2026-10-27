@@ -9,3 +9,5 @@ playwright-report
 test-results
 .DS_Store
 *.dmg
+ios
+*.md

@@ -5,7 +5,7 @@ primary_region = "ord"
   app = "node dist/index.js"
 
 [build]
-  dockerfile = "../../Dockerfile"
+  dockerfile = "../docker/Dockerfile.agent"
 
 [env]
   NODE_ENV = "production"
@@ -37,7 +37,7 @@ primary_region = "ord"
 
 [mounts]
   source = "ollama_data"
-  destination = "/root/.ollama"
+  destination = "/data/ollama" # #9: OLLAMA_MODELS; volume must be owned by uid 1000 (node)
 
 [checks]
   [checks.seed_health]

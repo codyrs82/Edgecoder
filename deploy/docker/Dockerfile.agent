@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# #9: agent / seed image: the server image plus BLE runtime libs and a pinned,
+# checksum-verified Ollama. Runs as the non-root `node` user.
+# Build from the repo root: docker build -f deploy/docker/Dockerfile.agent .
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ libbluetooth-dev libudev-dev && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ollama
+# Pinned Ollama release; bump both values together (sha256 from the release's sha256sum.txt).
+ARG OLLAMA_VERSION=0.40.12
+ARG OLLAMA_SHA256=f8adcb7e08d272283a4bd3abc18cf581afe37e64b2aee04fda4f407f215485ba
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl zstd && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSLo /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+ && echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
+ && mkdir -p /opt/ollama && tar --zstd -C /opt/ollama -xf /tmp/ollama.tar.zst && rm /tmp/ollama.tar.zst
+
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+ENV NODE_ENV=production HOST=0.0.0.0 OLLAMA_MODELS=/data/ollama
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini bluez libbluetooth3 libudev1 zstd && rm -rf /var/lib/apt/lists/*
+COPY --from=ollama /opt/ollama/ /usr/
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./
+COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN mkdir -p /data/ollama && chown -R node:node /data
+USER node
+EXPOSE 4301 4302 4303 4304 4310
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+CMD ["node", "dist/index.js"]

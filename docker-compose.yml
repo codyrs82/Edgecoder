@@ -11,7 +11,9 @@ services:
       - edgecoder-postgres:/var/lib/postgresql/data
 
   seed-node:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/index.js"]
     environment:
       - EDGE_RUNTIME_MODE=all-in-one
@@ -33,7 +35,9 @@ services:
       retries: 5
 
   ide-provider:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/apps/ide/provider-server.js"]
     ports:
       - "4304:4304"

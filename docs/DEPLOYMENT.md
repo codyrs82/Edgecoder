@@ -158,20 +158,24 @@ Environment for seed-node:
 - OLLAMA_MODEL=qwen3.5:9b
 ```
 
-### Building the Docker Image
+### Building the Docker Images
 
-The `Dockerfile` is a single-stage build based on `node:22-bookworm-slim` (pinned by digest):
+There are two multi-stage images (#9), both based on `node:22-bookworm-slim` (pinned by digest). Both run as the non-root `node` user (uid 1000), contain production dependencies only, and ship no `tests/` or compilers.
 
-- Installs system dependencies (curl, Python 3, Bluetooth libraries, build tools).
-- Installs Ollama.
-- Runs `npm ci` and `npm run build`.
-- Entrypoint starts Ollama in the background and waits for it to be ready before executing the main command.
-- Exposes ports 4301-4305.
+| Image | Used by | Contents |
+|---|---|---|
+| `deploy/docker/Dockerfile.server` | portal (`fly.portal.toml`) | Node runtime + `dist/` only. No Ollama, no BLE. |
+| `deploy/docker/Dockerfile.agent` | seeds (`fly.seed-node.toml`, `fly.seed-eu.toml`), `docker-compose.yml` | Server image plus BLE runtime libs and a pinned, sha256-verified Ollama (`OLLAMA_VERSION` / `OLLAMA_SHA256` build args). Models live in `OLLAMA_MODELS=/data/ollama`. Set `SKIP_OLLAMA=true` to skip starting Ollama. |
 
 ```bash
-docker build -t edgecoder .
-docker run -p 4301:4301 -p 4302:4302 -p 4303:4303 edgecoder
+docker build -f deploy/docker/Dockerfile.server -t edgecoder-server .
+docker build -f deploy/docker/Dockerfile.agent  -t edgecoder-agent .
+docker run -p 4301:4301 -p 4302:4302 -p 4303:4303 edgecoder-agent
 ```
+
+The root `Dockerfile` has been removed. `Dockerfile.anchor-proxy` and `Dockerfile.docs` are unchanged.
+
+**Volumes.** Fly volumes created by the old root image are owned by root, so the `node` user can't write to them. Before the first deploy of the new image, run `chown -R 1000:1000 /data/ollama` once, using `fly ssh console`. The seed mounts moved from `/root/.ollama` to `/data/ollama`.
 
 ### Docker Sandbox Images
 
