@@ -104,9 +104,16 @@ jobs:
       - name: Smoke test server image
         run: |
           set -eu
-          docker run -d --name smoke -p 4301:4301 -e NODE_ENV=development -e HOST=0.0.0.0 edgecoder-server:ci
+          # Throwaway per-run values (not secrets) for the tokens every service requires at startup.
+          t() { openssl rand -hex 16; }
+          docker run -d --name smoke -p 4301:4301 -e NODE_ENV=development -e HOST=0.0.0.0 \
+            -e MESH_AUTH_TOKEN="$(t)" -e ADMIN_API_TOKEN="$(t)" -e INFERENCE_AUTH_TOKEN="$(t)" \
+            -e PORTAL_SERVICE_TOKEN="$(t)" -e PAYMENT_WEBHOOK_SECRET="$(t)" \
+            -e LOCAL_MODEL_PROVIDER=edgecoder-local -e OLLAMA_AUTO_INSTALL=false -e ECONOMY_PAYMENTS_ENABLED=false \
+            edgecoder-server:ci
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:4301/health/runtime; then echo; docker rm -f smoke; exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then break; fi
             sleep 2
           done
           docker logs smoke; docker rm -f smoke; exit 1
