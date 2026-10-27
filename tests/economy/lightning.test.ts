@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createLightningProviderFromEnv } from "../../src/economy/lightning.js";
+import { createLightningProviderFromEnv, economyPaymentsEnabled } from "../../src/economy/lightning.js";
 
 function clearLightningEnv() {
   vi.stubEnv("LIGHTNING_PROVIDER", "");
@@ -72,5 +72,14 @@ describe("lightning provider adapter", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("LIGHTNING_PROVIDER", "bogus");
     expect(() => createLightningProviderFromEnv()).toThrow(/unknown_lightning_provider:bogus/);
+  });
+
+  test("ECONOMY_PAYMENTS_ENABLED accepts 0/false/off/no, case-insensitive", () => {
+    for (const v of ["0", "false", "FALSE", "Off", "no", " No "]) {
+      expect(economyPaymentsEnabled({ ECONOMY_PAYMENTS_ENABLED: v })).toBe(false);
+    }
+    for (const v of [undefined, "", "1", "true", "yes", "on"]) {
+      expect(economyPaymentsEnabled({ ECONOMY_PAYMENTS_ENABLED: v })).toBe(true);
+    }
   });
 });
