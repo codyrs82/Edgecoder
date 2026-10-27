@@ -73,6 +73,7 @@ import { createLightningProviderFromEnv, type LightningProvider } from "../econo
 import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
+  reconcilePaymentIntent,
   verifyPaymentWebhookSignature
 } from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
@@ -1506,8 +1507,16 @@ const settleIfPaid = createPaymentSettler({
   }
 });
 
+// Grace on top of the TTL so a payment made just before expiry is still picked up.
+const PAYMENT_INTENT_EXPIRY_GRACE_MS = Number(process.env.PAYMENT_INTENT_EXPIRY_GRACE_MS ?? "120000");
+
+/** #42 review: always ask the node first; expire only an unpaid intent past TTL + grace. */
+function reconcileIntent(intent: PaymentIntent): Promise<"settled" | "expired" | "pending"> {
+  return reconcilePaymentIntent(intent, settleIfPaid, expireIntentIfStale);
+}
+
 async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
-  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS) return false;
+  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS) return false;
   const expired: PaymentIntent = { ...intent, status: "expired" };
   paymentIntents.set(expired.intentId, expired);
   await pgStore?.upsertPaymentIntent(expired);
@@ -2702,12 +2711,9 @@ app.post("/economy/payments/reconcile", async (req, reply) => {
   let expiredCount = 0;
   for (const intent of pending) {
     if (intent.status !== "created") continue;
-    if (await expireIntentIfStale(intent)) {
-      expiredCount += 1;
-      continue;
-    }
-    const outcome = await settleIfPaid(intent);
-    if (outcome.status === "settled") settledCount += 1;
+    const result = await reconcileIntent(intent);
+    if (result === "settled") settledCount += 1;
+    if (result === "expired") expiredCount += 1;
   }
   return reply.send({ ok: true, scanned: pending.length, settledCount, expiredCount });
 });
@@ -4812,8 +4818,7 @@ export async function initCoordinator(): Promise<void> {
           const pending = pgStore ? await pgStore.listPendingPaymentIntents(500) : [...paymentIntents.values()];
           for (const intent of pending) {
             if (intent.status !== "created") continue;
-            if (await expireIntentIfStale(intent)) continue;
-            await settleIfPaid(intent);
+            await reconcileIntent(intent);
           }
         } catch (error) {
           app.log.warn({ error }, "payment_reconcile_tick_failed");

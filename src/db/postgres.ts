@@ -368,7 +368,27 @@ CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, timestamp_ms DESC);
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_intents_payment_hash ON payment_intents (payment_hash) WHERE payment_hash IS NOT NULL;
+-- Unique indexes are created only when no duplicate rows exist, so migrate() can never
+-- fail on legacy data; otherwise a WARNING is logged and the duplicates must be cleaned up.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_payment_intents_payment_hash') THEN
+    IF EXISTS (SELECT payment_hash FROM payment_intents WHERE payment_hash IS NOT NULL
+               GROUP BY payment_hash HAVING COUNT(*) > 1) THEN
+      RAISE WARNING 'idx_payment_intents_payment_hash not created: duplicate payment_hash rows exist';
+    ELSE
+      CREATE UNIQUE INDEX idx_payment_intents_payment_hash ON payment_intents (payment_hash) WHERE payment_hash IS NOT NULL;
+    END IF;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_credit_tx_credit_purchase_once') THEN
+    IF EXISTS (SELECT reason FROM credit_transactions WHERE reason LIKE 'credit_purchase:%'
+               GROUP BY reason HAVING COUNT(*) > 1) THEN
+      RAISE WARNING 'idx_credit_tx_credit_purchase_once not created: duplicate credit_purchase rows exist';
+    ELSE
+      CREATE UNIQUE INDEX idx_credit_tx_credit_purchase_once ON credit_transactions (reason) WHERE reason LIKE 'credit_purchase:%';
+    END IF;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
@@ -1823,7 +1843,7 @@ export class PostgresStore {
     const result = await this.pool.query(
       `SELECT intent_id, account_id, coordinator_id, wallet_type, network, invoice_ref, amount_sats,
               coordinator_fee_bps, coordinator_fee_sats, net_sats, quoted_credits, status, created_at_ms,
-              settled_at_ms, tx_ref
+              settled_at_ms, tx_ref, payment_hash
        FROM payment_intents
        WHERE status = 'created'
        ORDER BY created_at_ms ASC
@@ -1845,7 +1865,8 @@ export class PostgresStore {
       status: row.status,
       createdAtMs: Number(row.created_at_ms),
       settledAtMs: row.settled_at_ms ? Number(row.settled_at_ms) : undefined,
-      txRef: row.tx_ref ?? undefined
+      txRef: row.tx_ref ?? undefined,
+      paymentHash: row.payment_hash ?? undefined
     }));
   }
 
