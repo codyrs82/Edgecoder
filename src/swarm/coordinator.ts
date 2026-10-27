@@ -69,7 +69,7 @@ import {
   IssuancePoolConfig,
   smoothLoadIndex
 } from "../economy/issuance.js";
-import { checkSharedToken, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
+import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { createLightningProviderFromEnv, type LightningProvider } from "../economy/lightning.js";
 import {
   checkResultClaim,
@@ -686,8 +686,10 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/health/runtime") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
-  // Admin dashboard has its own token auth
-  if (reqPath?.startsWith("/admin/dashboard")) return;
+  // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token
+  if (reqPath?.startsWith("/admin/")) return;
+  // #40: blacklist writes are admin-only (route checks authorizeAdmin)
+  if (reqPath === "/security/blacklist" && (req as any).method === "POST") return;
   // WebSocket upgrade: auth handled inside the WS handler via query params
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
@@ -3648,7 +3650,8 @@ app.get("/agent-mesh/direct-work/audit", async (req, reply) => {
 });
 
 app.post("/security/blacklist", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  // #40: admin only (previously any mesh peer)
+  if (!authorizeAdmin(req, reply)) return;
   const body = z
     .object({
       agentId: z.string(),
@@ -4754,44 +4757,47 @@ const debugEnqueueSchema = z.object({
   taskId: z.string().uuid().optional(),
 });
 
-app.post("/debug/enqueue", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return;
-  const parsed = debugEnqueueSchema.safeParse(req.body);
-  if (!parsed.success) return reply.code(400).send({ error: "invalid_input", detail: parsed.error.message });
-  const body = parsed.data;
-  const taskId = body.taskId ?? randomUUID();
-  const hasPeers = mesh.listPeers().length > 0;
-  const subtask = queue.enqueueSubtask({
-    taskId,
-    kind: "single_step",
-    language: (body.language as "python" | "javascript") ?? "python",
-    input: body.input,
-    timeoutMs: 30_000,
-    snapshotRef: "debug",
-    projectMeta: { projectId: "debug", resourceClass: "cpu" as any, priority: 50 }
-  }, hasPeers ? { claimDelayMs: 3_000 } : undefined);
-  // Gossip task_offer to peer coordinators
-  const offerMsg = protocol.createMessage(
-    "task_offer",
-    identity.peerId,
-    {
-      subtaskId: subtask.id,
+// #40: debug routes are registered only outside production with ENABLE_DEBUG_ROUTES=1.
+if (debugRoutesEnabled()) {
+  app.post("/debug/enqueue", async (req, reply) => {
+    if (!authorizeAdmin(req, reply)) return;
+    const parsed = debugEnqueueSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_input", detail: parsed.error.message });
+    const body = parsed.data;
+    const taskId = body.taskId ?? randomUUID();
+    const hasPeers = mesh.listPeers().length > 0;
+    const subtask = queue.enqueueSubtask({
       taskId,
-      kind: subtask.kind,
-      language: subtask.language,
-      input: subtask.input,
-      timeoutMs: subtask.timeoutMs,
-      snapshotRef: subtask.snapshotRef,
-      projectMeta: subtask.projectMeta,
-      originCoordinatorId: identity.peerId,
-      originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
-    },
-    coordinatorKeys.privateKeyPem,
-    60_000
-  );
-  void mesh.broadcast(offerMsg);
-  return reply.send({ taskId, subtaskId: subtask.id, queued: true });
-});
+      kind: "single_step",
+      language: (body.language as "python" | "javascript") ?? "python",
+      input: body.input,
+      timeoutMs: 30_000,
+      snapshotRef: "debug",
+      projectMeta: { projectId: "debug", resourceClass: "cpu" as any, priority: 50 }
+    }, hasPeers ? { claimDelayMs: 3_000 } : undefined);
+    // Gossip task_offer to peer coordinators
+    const offerMsg = protocol.createMessage(
+      "task_offer",
+      identity.peerId,
+      {
+        subtaskId: subtask.id,
+        taskId,
+        kind: subtask.kind,
+        language: subtask.language,
+        input: subtask.input,
+        timeoutMs: subtask.timeoutMs,
+        snapshotRef: subtask.snapshotRef,
+        projectMeta: subtask.projectMeta,
+        originCoordinatorId: identity.peerId,
+        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+      },
+      coordinatorKeys.privateKeyPem,
+      60_000
+    );
+    void mesh.broadcast(offerMsg);
+    return reply.send({ taskId, subtaskId: subtask.id, queued: true });
+  });
+}
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -4960,7 +4966,14 @@ function authorizeAdmin(req: any, reply: any): boolean {
   return true;
 }
 
-app.get("/admin/dashboard", async (req, reply) => {
+// #40: every /admin/* route lives in this plugin behind authorizeAdmin (in addition to the
+// per-route checks), so new admin routes can't forget it.
+app.register(async (admin) => {
+admin.addHook("onRequest", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return reply;
+});
+
+admin.get("/admin/dashboard", async (req, reply) => {
   if (!authorizeAdmin(req, reply)) return;
   const status = queue.status();
   const agentList = [...agentCapabilities.entries()].map(([agentId, info]) => ({
@@ -4973,7 +4986,7 @@ app.get("/admin/dashboard", async (req, reply) => {
   return reply.type("text/html").send(adminDashboardHtml(status, agentList));
 });
 
-app.get("/admin/dashboard/api/overview", async (req, reply) => {
+admin.get("/admin/dashboard/api/overview", async (req, reply) => {
   if (!authorizeAdmin(req, reply)) return;
   const status = queue.status();
   const agentList = [...agentCapabilities.entries()].map(([agentId, info]) => ({
@@ -4992,8 +5005,8 @@ app.get("/admin/dashboard/api/overview", async (req, reply) => {
   });
 });
 
-app.get("/admin/agents/:agentId/behavior", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+admin.get("/admin/agents/:agentId/behavior", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
   const params = z.object({ agentId: z.string() }).parse(req.params);
   const stats = behaviorTracker.getStats(params.agentId);
   if (!stats) {
@@ -5002,6 +5015,7 @@ app.get("/admin/agents/:agentId/behavior", async (req, reply) => {
   const anomalies = anomalyDetector.evaluate(stats);
   const strikeCount = autoBlacklister.getStrikeCount(params.agentId);
   return reply.send({ agentId: params.agentId, stats, anomalies, strikeCount });
+});
 });
 
 function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>): string {

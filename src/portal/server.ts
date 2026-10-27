@@ -6,7 +6,7 @@ import cors from "@fastify/cors";
 import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
-import { checkSharedToken, LISTEN_HOST } from "../common/env-guard.js";
+import { checkInternalServiceToken, LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -328,9 +328,14 @@ async function getCurrentUser(req: { headers: Record<string, unknown> }) {
   return user;
 }
 
+const PORTAL_ALLOW_OPEN_INTERNAL = portalAllowOpenInternal();
+
 function requireInternalToken(req: { headers: Record<string, unknown> }, reply: any): boolean {
-  // #5: empty token is open only outside production; constant-time compare.
-  const result = checkSharedToken(PORTAL_SERVICE_TOKEN, req.headers["x-portal-service-token"], NODE_ENV === "production");
+  // #40: empty token -> 503 (open only with PORTAL_ALLOW_OPEN_INTERNAL=1 outside production);
+  // constant-time compare.
+  const result = checkInternalServiceToken(PORTAL_SERVICE_TOKEN, req.headers["x-portal-service-token"], {
+    allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL
+  });
   if (result === "ok") return true;
   if (result === "not_configured") {
     reply.code(503).send({ error: "internal_auth_not_configured" });
@@ -7381,7 +7386,13 @@ app.get("/portal/reviews", async (_req, reply) => {
   }));
 });
 
-app.post("/internal/nodes/validate", async (req, reply) => {
+// #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
+await app.register(async (internal) => {
+internal.addHook("onRequest", async (req, reply) => {
+  if (!requireInternalToken(req as any, reply)) return reply;
+});
+
+internal.post("/internal/nodes/validate", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
   const body = z
@@ -7471,7 +7482,7 @@ app.post("/internal/nodes/validate", async (req, reply) => {
   });
 });
 
-app.post("/internal/nodes/:nodeId/approval", async (req, reply) => {
+internal.post("/internal/nodes/:nodeId/approval", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
   const params = z.object({ nodeId: z.string() }).parse(req.params);
@@ -7502,7 +7513,7 @@ app.post("/internal/nodes/:nodeId/approval", async (req, reply) => {
   return reply.send({ ok: true, node: updated });
 });
 
-app.post("/internal/nodes/lookup", async (req, reply) => {
+internal.post("/internal/nodes/lookup", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
   const body = z.object({ nodeIds: z.array(z.string()).max(200) }).parse(req.body);
@@ -7523,7 +7534,7 @@ app.post("/internal/nodes/lookup", async (req, reply) => {
   });
 });
 
-app.get("/internal/nodes/pending", async (req, reply) => {
+internal.get("/internal/nodes/pending", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
   const query = z
@@ -7550,7 +7561,7 @@ app.get("/internal/nodes/pending", async (req, reply) => {
   });
 });
 
-app.get("/internal/stats/counts", async (req, reply) => {
+internal.get("/internal/stats/counts", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   if (!requireInternalToken(req as any, reply)) return;
   const counts = await store.getStatsCounts();
@@ -7561,6 +7572,7 @@ app.get("/internal/stats/counts", async (req, reply) => {
 // Human Escalation API — surfaces tasks that exhausted all automated
 // resolvers and need human operator input.
 // ---------------------------------------------------------------------------
+});
 
 import {
   getHumanEscalation,

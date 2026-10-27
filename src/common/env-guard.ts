@@ -42,3 +42,24 @@ export function checkSharedToken(
   if (!configured) return isProd ? "not_configured" : "ok";
   return typeof provided === "string" && safeTokenEqual(provided, configured) ? "ok" : "unauthorized";
 }
+
+/**
+ * #40: portal /internal/* auth. Unlike checkSharedToken, an empty token is never
+ * open unless explicitly allowed (PORTAL_ALLOW_OPEN_INTERNAL=1, non-production only).
+ */
+export function checkInternalServiceToken(
+  configured: string,
+  provided: unknown,
+  opts: { allowOpenWhenUnset: boolean }
+): SharedTokenCheck {
+  return checkSharedToken(configured, provided, !opts.allowOpenWhenUnset);
+}
+
+export function portalAllowOpenInternal(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV !== "production" && env.PORTAL_ALLOW_OPEN_INTERNAL === "1";
+}
+
+/** #40: /debug/* routes exist only outside production and only when ENABLE_DEBUG_ROUTES=1. */
+export function debugRoutesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV !== "production" && env.ENABLE_DEBUG_ROUTES === "1";
+}
