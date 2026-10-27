@@ -173,7 +173,7 @@ docker build -f deploy/docker/Dockerfile.agent  -t edgecoder-agent .
 docker run -p 4301:4301 -p 4302:4302 -p 4303:4303 edgecoder-agent
 ```
 
-The root `Dockerfile` has been removed. `Dockerfile.anchor-proxy` and `Dockerfile.docs` are unchanged.
+The root `Dockerfile` has been removed. `Dockerfile.anchor-proxy` is unchanged. The docs site is published only to GitHub Pages (`deploy-docs.yml`); the Fly docs app and `Dockerfile.docs` were dropped (#33).
 
 **Volumes (after the first deploy).** Fly volumes are root-owned, and the volume mount hides the image's own `chown`, so the `node` user (uid 1000) can't write to `/data/ollama` at first. The seed mounts moved from `/root/.ollama` to `/data/ollama`, so that path only exists *after* the new image is deployed. The correct sequence is:
 

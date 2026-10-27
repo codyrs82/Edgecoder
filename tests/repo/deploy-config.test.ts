@@ -8,6 +8,7 @@ const root = resolve(__dirname, "../..");
 // Normalise CRLF (Windows checkouts) so the line-anchored regexes work everywhere.
 const wf = readFileSync(resolve(root, ".github/workflows/deploy-fly.yml"), "utf8").replace(/\r\n/g, "\n");
 
+// Only recognises block-style jobs (`  name:` alone on its line), which is all this workflow uses.
 function jobs(yml: string): Map<string, string> {
   const body = yml.slice(yml.indexOf("\njobs:\n") + 7);
   const out = new Map<string, string>();
@@ -23,15 +24,28 @@ describe("Fly deploy config (#33)", () => {
     expect(r.unreferenced).toEqual([]);
     expect(r.referenced).toEqual([
       "deploy/fly/fly.anchor-proxy.toml",
-      "deploy/fly/fly.docs.toml",
       "deploy/fly/fly.portal.toml",
       "deploy/fly/fly.seed-eu.toml",
       "deploy/fly/fly.seed-node.toml",
     ]);
   });
 
-  it("no job references the nonexistent fly.toml", () => {
+  it("no job references the nonexistent fly.toml or the dropped Fly docs app", () => {
     expect(wf).not.toMatch(/deploy\/fly\/fly\.toml\b/);
+    expect(wf).not.toMatch(/fly\.docs\.toml|edgecoder-docs/);
+  });
+
+  it("smoke URLs match each config's Fly app name", () => {
+    for (const m of wf.matchAll(/config: (deploy\/fly\/[\w.-]+\.toml), smoke: "([^"]+)"/g)) {
+      const app = readFileSync(resolve(root, m[1]), "utf8").match(/^app = "([^"]+)"/m)![1];
+      expect(new URL(m[2]).host, m[1]).toBe(`${app}.fly.dev`);
+    }
+  });
+
+  it("the post-deploy runbook runs after seed deploys and is gated like the deploy", () => {
+    expect(wf).toMatch(/scripts\/fly-post-deploy\.sh/);
+    const script = readFileSync(resolve(root, "scripts/fly-post-deploy.sh"), "utf8");
+    expect(script).toMatch(/DEPLOY_ENABLED:-\}" != "true"/);
   });
 
   it("every deploy job needs the gate, runs on main only and stays disabled until #31", () => {
