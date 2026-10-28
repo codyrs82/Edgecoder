@@ -5,6 +5,7 @@
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
+  import { notify } from "../lib/notify";
 
   // App version
   let appVersion = $state("—");
@@ -70,13 +71,6 @@
   let identity: NodeIdentity | null = $state(null);
   let identityError = $state("");
 
-  // Save feedback
-  let showSaved = $state(false);
-  let savedTimeout: ReturnType<typeof setTimeout> | undefined = $state(undefined);
-
-  // Clipboard feedback
-  let copiedKey = $state(false);
-  let copiedTimeout: ReturnType<typeof setTimeout> | undefined = $state(undefined);
 
   // Derived: truncated public key
   let truncatedKey = $derived.by(() => {
@@ -136,11 +130,9 @@
     if (!identity?.publicKeyPem) return;
     try {
       await navigator.clipboard.writeText(identity.publicKeyPem);
-      copiedKey = true;
-      if (copiedTimeout) clearTimeout(copiedTimeout);
-      copiedTimeout = setTimeout(() => { copiedKey = false; }, 2000);
-    } catch {
-      // Clipboard API may not be available
+      notify.success("Public key copied");
+    } catch (err) {
+      notify.error("Couldn't copy the public key", err);
     }
   }
 
@@ -160,9 +152,7 @@
     saveSetting("cpuCapPercent", String(cpuCapPercent));
     saveSetting("idleOnly", String(idleOnly));
 
-    showSaved = true;
-    if (savedTimeout) clearTimeout(savedTimeout);
-    savedTimeout = setTimeout(() => { showSaved = false; }, 2000);
+    notify.success("Settings saved");
   }
   let themePref = $state<ThemePreference>(getThemePreference());
 </script>
@@ -285,9 +275,7 @@
         <span class="id-label">Public Key</span>
         <span class="id-value mono">
           {truncatedKey}&hellip;
-          <button class="btn-copy" onclick={copyPublicKey}>
-            {copiedKey ? "Copied!" : "Copy"}
-          </button>
+          <button class="btn-copy" onclick={copyPublicKey} aria-label="Copy public key">Copy</button>
         </span>
       </div>
     {:else}
@@ -298,9 +286,6 @@
   <!-- Save -->
   <div class="save-row">
     <button class="btn-save" onclick={save}>Save Settings</button>
-    {#if showSaved}
-      <span class="saved-toast">Saved!</span>
-    {/if}
   </div>
 
   <!-- Local Model -->
@@ -581,20 +566,6 @@
 
   .btn-save:hover {
     opacity: 0.9;
-  }
-
-  .saved-toast {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--green, #4ade80);
-    animation: fadeInOut 2s ease forwards;
-  }
-
-  @keyframes fadeInOut {
-    0% { opacity: 0; transform: translateX(-4px); }
-    15% { opacity: 1; transform: translateX(0); }
-    80% { opacity: 1; }
-    100% { opacity: 0; }
   }
 
   .about-section {

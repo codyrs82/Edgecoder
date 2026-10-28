@@ -11,6 +11,7 @@
   import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
+  import { Toaster } from "svelte-sonner";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
   let activeTab: "chat" | "editor" = $state("chat");
@@ -143,6 +144,8 @@
 </script>
 
 <EndpointBanner />
+<!-- #24: one accessible toast region (aria-live) for the whole app, login screen included. -->
+<Toaster position="bottom-right" theme="system" richColors closeButton />
 
 {#if !authChecked}
   <div class="loading-screen">
