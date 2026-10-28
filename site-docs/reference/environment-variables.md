@@ -106,13 +106,13 @@ The inference service checks these values at startup against `inferenceConfigSch
 
 | Variable | Default | Rule |
 |---|---|---|
-| `INFERENCE_AUTH_TOKEN` | — | **Required.** Shared token for `/model/*` writes and coordinator calls. |
-| `INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS` | `false` | `true`/`false`. When `true`, `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM` or `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON` must be set. |
+| `INFERENCE_AUTH_TOKEN` | — | **Required.** Shared token for `/model/*` writes and coordinator calls. At least 32 characters in production. Trimmed, so callers must send the trimmed value. |
+| `INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS` | `false` | `true`/`false` (also `1`/`0`, `yes`/`no`; case-insensitive). When `true`, at least one trusted key must be configured. |
 | `INFERENCE_MAX_SIGNATURE_SKEW_MS` | `120000` | Integer, 1000–3600000. |
 | `INFERENCE_NONCE_TTL_MS` | `300000` | Integer, 1000–86400000. |
-| `INFERENCE_COORDINATOR_PEER_ID` | empty | Paired with `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM`. |
+| `INFERENCE_COORDINATOR_PEER_ID` | empty | Must be set together with `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM` (both or neither). |
 | `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM` | empty | The trusted coordinator's public key. |
-| `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON` | empty | A JSON object of `peerId` → public key PEM. |
+| `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON` | empty | A JSON object of non-empty `peerId` → non-empty public key PEM. Anything else fails startup. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | An http(s) URL. |
 | `OLLAMA_MODEL` | `qwen3.5:9b` | The model that is active at startup. |
 | `OLLAMA_COORDINATOR_MODEL` | `qwen3.5:9b` (decompose and reflect); falls back to `OLLAMA_MODEL` for chat | The model used for coordinator prompts. |

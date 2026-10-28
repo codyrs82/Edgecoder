@@ -17,7 +17,10 @@ export class ConfigError extends Error {
   }
 }
 
-/** Empty or whitespace-only env values count as unset, so defaults apply. */
+/**
+ * Empty or whitespace-only env values count as unset, so defaults apply. Values are trimmed,
+ * including tokens: callers must send the trimmed token (a copy with stray whitespace gets 401).
+ */
 function normalizeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
@@ -45,11 +48,13 @@ export function loadConfigOrExit<S extends z.ZodType>(service: string, schema: S
 
 // ---- field helpers ----
 
-/** "true" | "false" (also 1/0, yes/no), defaulting when unset. */
+/** "true" | "false" (also 1/0, yes/no; case-insensitive), defaulting when unset. */
 export const envBool = (def: boolean) =>
   z
-    .enum(["true", "false", "1", "0", "yes", "no"], { message: "must be true or false" })
-    .optional()
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toLowerCase() : v),
+      z.enum(["true", "false", "1", "0", "yes", "no"], { message: "must be true or false" }).optional()
+    )
     .transform((v) => (v === undefined ? def : v === "true" || v === "1" || v === "yes"));
 
 /** Integer in [min, max], defaulting when unset. */

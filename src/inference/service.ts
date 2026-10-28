@@ -14,7 +14,7 @@ import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { loadConfigOrExit } from "../common/config.js";
-import { inferenceConfigSchema } from "./config.js";
+import { inferenceConfigSchema, trustedCoordinatorKeys as keysFromConfig } from "./config.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, {
@@ -29,9 +29,6 @@ const INFERENCE_AUTH_TOKEN: string = config.INFERENCE_AUTH_TOKEN;
 const INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS = config.INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS;
 const INFERENCE_MAX_SIGNATURE_SKEW_MS = config.INFERENCE_MAX_SIGNATURE_SKEW_MS;
 const INFERENCE_NONCE_TTL_MS = config.INFERENCE_NONCE_TTL_MS;
-const INFERENCE_COORDINATOR_PEER_ID = config.INFERENCE_COORDINATOR_PEER_ID;
-const INFERENCE_COORDINATOR_PUBLIC_KEY_PEM = config.INFERENCE_COORDINATOR_PUBLIC_KEY_PEM;
-const INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON = config.INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON;
 const seenInferenceNonces = new Map<string, number>();
 
 const metrics = {
@@ -96,25 +93,8 @@ export function parseDecomposition(
   }
 }
 
-function loadTrustedCoordinatorKeys(): Map<string, string> {
-  const out = new Map<string, string>();
-  if (INFERENCE_COORDINATOR_PEER_ID && INFERENCE_COORDINATOR_PUBLIC_KEY_PEM) {
-    out.set(INFERENCE_COORDINATOR_PEER_ID, INFERENCE_COORDINATOR_PUBLIC_KEY_PEM);
-  }
-  if (INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON) {
-    try {
-      const parsed = JSON.parse(INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON) as Record<string, string>;
-      for (const [peerId, key] of Object.entries(parsed)) {
-        if (peerId && key) out.set(peerId, key);
-      }
-    } catch {
-      app.log.warn("Invalid INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON; ignoring.");
-    }
-  }
-  return out;
-}
-
-const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
+// #127 review: keys come from the validated config (pairs and JSON shape checked at startup).
+const trustedCoordinatorKeys = keysFromConfig(config);
 
 app.addHook("preHandler", async (req, reply) => {
   if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
