@@ -37,6 +37,9 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run docs:build
+        env:
+          # Project Pages site: https://codyrs82.github.io/Edgecoder/
+          DOCS_BASE: /Edgecoder/
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:
