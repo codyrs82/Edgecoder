@@ -4,6 +4,7 @@
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import { anchorProxyHealth, rpcHostForLog } from "./anchor-proxy-health.js";
@@ -48,6 +49,7 @@ const provider = new BitcoindRpcProvider(BITCOIND_RPC_URL, BITCOIND_RPC_USER, BI
 const app = Fastify({ ...serviceLoggerOptions("anchor-proxy") });
 exposeRequestId(app);
 registerMetrics(app, "anchor-proxy");
+await registerErrorTracking(app, "anchor-proxy");
 
 /* ---- auth middleware ---- */
 function requireAuth(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }): boolean {

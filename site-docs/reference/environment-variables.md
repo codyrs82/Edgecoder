@@ -173,49 +173,35 @@ npm run build:ble-proxy
 | `LOG_LEVEL` | `info` | pino log level for every service. |
 | `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). In production, `/metrics` is not served at all unless this is set. Outside production it is open. |
 | `REQUEST_ID_FORWARD_ORIGINS` | unset | Extra comma-separated origins that receive `x-request-id` on outbound calls. The service URLs (`COORDINATOR_URL`, `CONTROL_PLANE_URL`, `INFERENCE_URL`, `PORTAL_SERVICE_URL`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_DISCOVERY_URLS`) are included automatically; third-party APIs never get it. |
+| `SENTRY_DSN` | unset | Optional error tracking. Unset: off, nothing is loaded. Set: 5xx errors go to Sentry, tagged with service, route and request id, with no request bodies, headers or cookies. Needs `@sentry/node` in the image; if it's missing, the service logs one warning and runs without it. |
+| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Sentry environment name. |
+| `SENTRY_RELEASE` | unset | Sentry release (for example the git SHA). |
 
-## Common profiles
+### Alerting on 5xx without Sentry
 
-```bash
-# 1) Standard mesh worker (most common)
-EDGE_RUNTIME_MODE=worker
-AGENT_ID=my-node-001
-AGENT_OS=macos
-AGENT_REGISTRATION_TOKEN=<from portal>
-COORDINATOR_URL=https://coordinator.edgecoder.io
+Every service exports `edgecoder_http_requests_total{service,method,route,status}`. Example Prometheus rules:
 
-# 2) Worker + IDE-capable agent
-EDGE_RUNTIME_MODE=worker
-AGENT_MODE=ide-enabled
-
-# 3) Dedicated coordinator
-EDGE_RUNTIME_MODE=coordinator
-COORDINATOR_REGISTRATION_TOKEN=<from portal>
-DATABASE_URL=<postgres>
-
-# 4) Local Ollama inference
-LOCAL_MODEL_PROVIDER=ollama-local
-OLLAMA_MODEL=qwen3.5:9b
-OLLAMA_AUTO_INSTALL=true
+```yaml
+groups:
+  - name: edgecoder-http
+    rules:
+      - alert: EdgeCoderHigh5xxRate
+        # more than 5% of requests failing with 5xx for 10 minutes, per service
+        expr: |
+          sum by (service) (rate(edgecoder_http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(edgecoder_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+      - alert: EdgeCoder5xxOnRoute
+        # any single route returning 5xx steadily (catches a broken endpoint on a busy service)
+        expr: sum by (service, route) (rate(edgecoder_http_requests_total{status=~"5.."}[5m])) > 0.1
+        for: 15m
+        labels: { severity: ticket }
+      - alert: EdgeCoderMetricsMissing
+        # the scrape itself failing usually means the service is down or METRICS_TOKEN is wrong
+        expr: up{job=~"edgecoder-.*"} == 0
+        for: 5m
+        labels: { severity: page }
 ```
 
-## Operational guidance
-
-**Production fail-fast (#5).** With `NODE_ENV=production`, services refuse to boot when required secrets are empty (an empty token no longer means "auth off"):
-- coordinator: `MESH_AUTH_TOKEN`, `PORTAL_SERVICE_URL`, `PORTAL_SERVICE_TOKEN`, `ADMIN_API_TOKEN`, `PAYMENT_WEBHOOK_SECRET`, and `LIGHTNING_PROVIDER` unless `ECONOMY_PAYMENTS_ENABLED=false`
-- portal: `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY` (plus the existing passkey/URL checks)
-- inference: `INFERENCE_AUTH_TOKEN`
-- control-plane: `ADMIN_API_TOKEN`
-
-Run a `fly secrets list` checklist against this list before any deploy.
-
-- Keep secrets in production secret stores (Fly Secrets, AWS SSM, etc.) rather than static env files.
-- On macOS, the env file is `/etc/edgecoder/edgecoder.env` (chmod 600, owned by root).
-- On Linux, same path — the systemd `EnvironmentFile=-/etc/edgecoder/edgecoder.env` directive loads it.
-- Review and rotate `MESH_AUTH_TOKEN` periodically.
-
-## Cross-links
-
-- [Deployment Topology](/operations/deployment-topology)
-- [iOS Background Execution](/operations/ios-power-scheduling)
-- [macOS env example](https://github.com/codyrs82/Edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example)
+Scrape `/metrics` (inference: `/metrics/prometheus`) with `authorization: Bearer $METRICS_TOKEN`. `route` is the route pattern, so these rules stay low-cardinality.

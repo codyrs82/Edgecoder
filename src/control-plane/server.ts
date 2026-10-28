@@ -4,6 +4,7 @@
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import { request } from "undici";
 import { z } from "zod";
@@ -20,6 +21,7 @@ import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 const app = Fastify({ ...serviceLoggerOptions("control-plane") });
 exposeRequestId(app);
 registerMetrics(app, "control-plane");
+await registerErrorTracking(app, "control-plane");
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
