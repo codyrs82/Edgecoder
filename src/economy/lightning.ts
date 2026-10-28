@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { request } from "undici";
 
 export interface CreateInvoiceInput {
@@ -19,11 +19,19 @@ export interface CreateInvoiceResult {
 export interface SettlementResult {
   settled: boolean;
   txRef?: string;
+  /** Payment hash reported by the node for the settled invoice (proof of payment). */
+  paymentHash?: string;
+  /** Preimage reported by the node, when available. */
+  preimage?: string;
 }
 
 export interface LightningProvider {
   createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult>;
-  checkSettlement(invoiceRef: string): Promise<SettlementResult>;
+  /**
+   * Ask the node whether the invoice is paid. `paymentHash` is the hash stored at
+   * invoice creation (hex); LND looks invoices up by hash, not by bolt11.
+   */
+  checkSettlement(invoiceRef: string, paymentHash?: string): Promise<SettlementResult>;
 }
 
 class MockLightningProvider implements LightningProvider {
@@ -36,12 +44,28 @@ class MockLightningProvider implements LightningProvider {
     };
   }
 
-  async checkSettlement(_invoiceRef: string): Promise<SettlementResult> {
-    return { settled: true, txRef: `mock-settlement-${randomUUID()}` };
+  async checkSettlement(invoiceRef: string): Promise<SettlementResult> {
+    return {
+      settled: true,
+      txRef: `mock-settlement-${randomUUID()}`,
+      paymentHash: createHash("sha256").update(invoiceRef).digest("hex")
+    };
   }
 }
 
-class LndRestProvider implements LightningProvider {
+/**
+ * LND REST returns `r_hash` as base64; `GET /v1/invoice/{r_hash_str}` expects hex.
+ * Accepts either encoding and returns lowercase hex (or undefined if invalid).
+ */
+export function lndHashToHex(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(v)) return v.toLowerCase();
+  const buf = Buffer.from(v.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  return buf.length === 32 ? buf.toString("hex") : undefined;
+}
+
+export class LndRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
     private readonly macaroonHex: string
@@ -67,15 +91,21 @@ class LndRestProvider implements LightningProvider {
     if (!body.payment_request || !body.r_hash) {
       throw new Error("lnd_invoice_create_invalid_response");
     }
+    const paymentHash = lndHashToHex(body.r_hash);
+    if (!paymentHash) throw new Error("lnd_invoice_create_invalid_r_hash");
     return {
       invoiceRef: body.payment_request,
-      paymentHash: body.r_hash,
+      // stored hex so settlement can look the invoice up by r_hash_str
+      paymentHash,
       expiresAtMs: Date.now() + input.expiresInSeconds * 1000
     };
   }
 
-  async checkSettlement(invoiceRef: string): Promise<SettlementResult> {
-    const res = await request(`${this.baseUrl}/v1/invoice/${encodeURIComponent(invoiceRef)}`, {
+  async checkSettlement(_invoiceRef: string, paymentHash?: string): Promise<SettlementResult> {
+    // #42 review: LND's GET /v1/invoice/{r_hash_str} takes the hex payment hash, not the bolt11.
+    const hashHex = lndHashToHex(paymentHash);
+    if (!hashHex) return { settled: false };
+    const res = await request(`${this.baseUrl}/v1/invoice/${hashHex}`, {
       method: "GET",
       headers: {
         "Grpc-Metadata-macaroon": this.macaroonHex
@@ -84,8 +114,14 @@ class LndRestProvider implements LightningProvider {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       return { settled: false };
     }
-    const body = (await res.body.json()) as { settled?: boolean };
-    return { settled: Boolean(body.settled), txRef: body.settled ? `lnd:${invoiceRef}` : undefined };
+    const body = (await res.body.json()) as { settled?: boolean; state?: string; r_hash?: string; r_preimage?: string };
+    const settled = Boolean(body.settled) || body.state === "SETTLED";
+    return {
+      settled,
+      txRef: settled ? `lnd:${hashHex}` : undefined,
+      paymentHash: settled ? hashHex : undefined,
+      preimage: settled && body.r_preimage ? Buffer.from(body.r_preimage, "base64").toString("hex") : undefined
+    };
   }
 }
 
@@ -132,9 +168,17 @@ class ClnRestProvider implements LightningProvider {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       return { settled: false };
     }
-    const body = (await res.body.json()) as { invoices?: Array<{ status?: string }> };
-    const settled = (body.invoices ?? []).some((i) => i.status === "paid");
-    return { settled, txRef: settled ? `cln:${invoiceRef}` : undefined };
+    const body = (await res.body.json()) as {
+      invoices?: Array<{ status?: string; payment_hash?: string; payment_preimage?: string }>;
+    };
+    const paid = (body.invoices ?? []).find((i) => i.status === "paid");
+    const settled = Boolean(paid);
+    return {
+      settled,
+      txRef: settled ? `cln:${paid?.payment_hash ?? invoiceRef}` : undefined,
+      paymentHash: paid?.payment_hash,
+      preimage: paid?.payment_preimage
+    };
   }
 }
 

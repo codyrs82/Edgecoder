@@ -311,6 +311,8 @@ export interface PaymentIntent {
   createdAtMs: number;
   settledAtMs?: number;
   txRef?: string;
+  /** Lightning payment hash of the invoice (unique per intent). */
+  paymentHash?: string;
 }
 
 export interface PriceEpochRecord {
