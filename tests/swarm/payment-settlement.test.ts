@@ -47,12 +47,16 @@ function makeIntent(id = "intent-1"): PaymentIntent {
 class FakeDb implements AtomicSettleStore {
   intents = new Map<string, PaymentIntent>();
   credits: Array<{ accountId: string; credits: number; reason: string }> = [];
-  async settlePaymentIntentAtomic(intentId: string, txRef: string, accountId: string, credits: number) {
+  async getPaymentIntent(intentId: string) {
+    return this.intents.get(intentId) ?? null;
+  }
+  async settlePaymentIntentAtomic(intentId: string, txRef: string) {
     const row = this.intents.get(intentId);
     if (!row || row.status !== "created") return { status: "already" as const, intent: row };
     const settled = { ...row, status: "settled" as const, settledAtMs: Date.now(), txRef };
     this.intents.set(intentId, settled);
-    this.credits.push({ accountId, credits, reason: `credit_purchase:${intentId}` });
+    // Like Postgres (#155): credit the stored row's account and amount.
+    this.credits.push({ accountId: row.accountId, credits: row.quotedCredits, reason: `credit_purchase:${intentId}` });
     return { status: "settled" as const, intent: settled };
   }
 }
@@ -198,5 +202,95 @@ describe("payment settlement (#42)", () => {
     const { settle } = memorySettler(provider, new Map([["intent-1", intent]]));
     await settle(intent);
     expect(seen).toBe("ab".repeat(32));
+  });
+});
+
+describe("settlement credits the stored intent, not the caller's copy (#155)", () => {
+  const tampered = (): PaymentIntent => ({
+    ...makeIntent(),
+    accountId: "attacker",
+    quotedCredits: 1_000_000,
+    invoiceRef: "lnbc-someone-elses-paid-invoice",
+    paymentHash: "ff".repeat(32)
+  });
+  function recordingProvider(paid: boolean) {
+    const asked: Array<{ ref: string; hash?: string }> = [];
+    const provider: LightningProvider = {
+      async createInvoice() {
+        return { invoiceRef: "x", paymentHash: "h", expiresAtMs: 0 };
+      },
+      async checkSettlement(ref: string, hash?: string): Promise<SettlementResult> {
+        asked.push({ ref, hash });
+        return paid ? { settled: true, txRef: "node-tx", paymentHash: "hash-1" } : { settled: false };
+      }
+    };
+    return { provider, asked };
+  }
+
+  test("atomic store: stored account, amount and invoice are used", async () => {
+    const db = new FakeDb();
+    db.intents.set("intent-1", makeIntent());
+    const { provider, asked } = recordingProvider(true);
+    const settle = createPaymentSettler({
+      provider,
+      store: db,
+      getIntent: () => undefined,
+      saveIntent: () => undefined,
+      grantCredits: async () => {
+        throw new Error("atomic store must insert its own credit row");
+      }
+    });
+    expect((await settle(tampered())).status).toBe("settled");
+    expect(asked).toEqual([{ ref: "lnbc-test-invoice", hash: undefined }]);
+    expect(db.credits).toEqual([{ accountId: "acct-1", credits: 32, reason: "credit_purchase:intent-1" }]);
+  });
+
+  test("in memory: stored account, amount and invoice are used", async () => {
+    const intents = new Map([["intent-1", makeIntent()]]);
+    const { provider, asked } = recordingProvider(true);
+    const grants: Array<[string, number, string]> = [];
+    const settle = createPaymentSettler({
+      provider,
+      store: null,
+      getIntent: (id) => intents.get(id),
+      saveIntent: (i) => {
+        intents.set(i.intentId, i);
+      },
+      grantCredits: async (a, c, r) => {
+        grants.push([a, c, r]);
+      }
+    });
+    expect((await settle(tampered())).status).toBe("settled");
+    expect(asked.map((a) => a.ref)).toEqual(["lnbc-test-invoice"]);
+    expect(grants).toEqual([["acct-1", 32, "credit_purchase:intent-1"]]);
+    expect(intents.get("intent-1")!.accountId).toBe("acct-1");
+  });
+
+  test("an intent that isn't stored is never settled, and the node isn't asked", async () => {
+    const { provider, asked } = recordingProvider(true);
+    const db = new FakeDb();
+    const settle = createPaymentSettler({
+      provider,
+      store: db,
+      getIntent: () => undefined,
+      saveIntent: () => undefined,
+      grantCredits: async () => undefined
+    });
+    expect((await settle({ ...tampered(), intentId: "made-up" })).status).toBe("unpaid");
+    const mem = memorySettler(provider, new Map());
+    expect((await mem.settle({ ...tampered(), intentId: "made-up" })).status).toBe("unpaid");
+    expect(asked).toEqual([]);
+    expect(db.credits).toEqual([]);
+    expect(mem.granted).toEqual([]);
+  });
+
+  test("a stale 'created' copy of an already-settled stored intent is 'already'", async () => {
+    const db = new FakeDb();
+    db.intents.set("intent-1", { ...makeIntent(), status: "settled" });
+    const { provider, asked } = recordingProvider(true);
+    const settle = createPaymentSettler({ provider, store: db, getIntent: () => undefined, saveIntent: () => undefined, grantCredits: async () => undefined });
+    expect((await settle(makeIntent())).status).toBe("already");
+    expect(asked).toEqual([]);
+    expect(db.credits).toEqual([]);
   });
 });
