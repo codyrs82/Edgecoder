@@ -61,17 +61,17 @@
   <div class="section">
     <h2>GitHub</h2>
     {#if loading}
-      <p class="loading-text">Checking connection...</p>
+      <p class="loading-text" role="status">Checking connection...</p>
     {:else if connected}
       <div class="github-connected">
         <div class="github-profile">
           {#if avatarUrl}
-            <img class="avatar" src={avatarUrl} alt="GitHub avatar" />
+            <img class="avatar" src={avatarUrl} alt="" referrerpolicy="no-referrer" />
           {/if}
           <span class="github-login">@{login ?? "unknown"}</span>
           <span class="badge connected">Connected</span>
         </div>
-        <button class="btn-danger" onclick={handleDisconnect} disabled={disconnecting}>
+        <button type="button" class="btn-danger" onclick={handleDisconnect} disabled={disconnecting}>
           {disconnecting ? "Disconnecting..." : "Disconnect"}
         </button>
       </div>
@@ -79,7 +79,7 @@
       <p class="description">
         Connect your GitHub account to push, pull, create pull requests, and manage issues directly from the IDE agent.
       </p>
-      <button class="btn-primary" onclick={handleConnect}>
+      <button type="button" class="btn-primary" onclick={handleConnect}>
         Connect GitHub
       </button>
     {/if}
@@ -138,7 +138,7 @@
     font-size: 0.75rem;
     font-weight: 600;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm, 4px);
   }
   .badge.connected {
     color: var(--green);
@@ -175,5 +175,10 @@
   .btn-danger:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
   }
 </style>
