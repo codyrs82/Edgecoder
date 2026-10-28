@@ -35,7 +35,8 @@ services:
     depends_on:
       - postgres
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      # /status requires the mesh token since #40.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status',{headers:{'x-mesh-token':process.env.MESH_AUTH_TOKEN}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10
