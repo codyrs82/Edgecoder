@@ -95,3 +95,74 @@ describe("coordinator discovery logic", () => {
     expect(result?.coordinatorNodeId).toBe("coord-1");
   });
 });
+
+// #35: configured discovery list with fallback.
+import { createCoordinatorPicker, DEFAULT_DISCOVERY_URL, discoveryConfigured, parseDiscoveryUrls } from "../../src/portal/coordinator-discovery.js";
+
+describe("portal coordinator discovery config (#35)", () => {
+  it("parses COORDINATOR_DISCOVERY_URLS in order, trimming and de-duplicating", () => {
+    expect(parseDiscoveryUrls({ COORDINATOR_DISCOVERY_URLS: " https://a.example/, https://b.example ,https://a.example" })).toEqual([
+      "https://a.example",
+      "https://b.example",
+    ]);
+  });
+
+  it("still honours the legacy single COORDINATOR_DISCOVERY_URL", () => {
+    expect(parseDiscoveryUrls({ COORDINATOR_DISCOVERY_URL: "https://legacy.example/" })).toEqual(["https://legacy.example"]);
+    expect(discoveryConfigured({ COORDINATOR_DISCOVERY_URL: "https://legacy.example" })).toBe(true);
+  });
+
+  it("falls back to the EU seed when nothing is configured", () => {
+    expect(parseDiscoveryUrls({})).toEqual([DEFAULT_DISCOVERY_URL]);
+    expect(DEFAULT_DISCOVERY_URL).toBe("https://edgecoder-seed-eu.fly.dev");
+    expect(discoveryConfigured({})).toBe(false);
+  });
+
+  it("first URL down, second healthy: picks the second and caches it for 60 s", async () => {
+    let t = 0;
+    const probed: string[] = [];
+    const pick = createCoordinatorPicker({
+      urls: ["https://down.example", "https://up.example"],
+      probe: async (u) => {
+        probed.push(u);
+        if (u.includes("down")) throw new Error("ECONNREFUSED");
+        return true;
+      },
+      now: () => t,
+    });
+    expect(await pick()).toBe("https://up.example");
+    expect(probed).toEqual(["https://down.example", "https://up.example"]);
+    t = 59_000;
+    expect(await pick()).toBe("https://up.example");
+    expect(probed).toHaveLength(2);
+    t = 61_000;
+    await pick();
+    expect(probed).toHaveLength(4);
+  });
+
+  it("returns null when none is healthy", async () => {
+    const pick = createCoordinatorPicker({ urls: ["https://a.example"], probe: async () => false });
+    expect(await pick()).toBeNull();
+  });
+
+  it("caches a none-healthy result for 15 s and shares one in-flight probe", async () => {
+    let t = 0;
+    let probes = 0;
+    const pick = createCoordinatorPicker({
+      urls: ["https://a.example", "https://b.example"],
+      probe: async () => {
+        probes++;
+        return false;
+      },
+      now: () => t,
+    });
+    await Promise.all([pick(), pick(), pick()]);
+    expect(probes).toBe(2);
+    t = 14_000;
+    expect(await pick()).toBeNull();
+    expect(probes).toBe(2);
+    t = 16_000;
+    await pick();
+    expect(probes).toBe(4);
+  });
+});

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { testMeshToken, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
+  import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
 
@@ -37,7 +38,25 @@
 
   // --- Reactive state ---
   let meshToken = $state("");
-  let seedNodeUrl = $state("");
+  // #35: coordinator / portal endpoints (endpoints.ts), with Test connection and Reset.
+  let coordinatorUrl = $state(currentCoordinatorUrl());
+  let portalUrl = $state(currentPortalUrl());
+  let endpointError = $state("");
+  let endpointTest: Record<EndpointKind, "idle" | "testing" | "ok" | "fail"> = $state({ coordinator: "idle", portal: "idle" });
+  const endpointDefaults = defaultEndpoints();
+
+  async function handleTestEndpoint(kind: EndpointKind) {
+    endpointTest[kind] = "testing";
+    endpointTest[kind] = (await testEndpoint(kind, kind === "coordinator" ? coordinatorUrl : portalUrl)) ? "ok" : "fail";
+  }
+
+  function handleResetEndpoints() {
+    resetEndpoints();
+    coordinatorUrl = currentCoordinatorUrl();
+    portalUrl = currentPortalUrl();
+    endpointError = "";
+    endpointTest = { coordinator: "idle", portal: "idle" };
+  }
   let maxConcurrentTasks = $state(1);
   let cpuCapPercent = $state(50);
   let idleOnly = $state(true);
@@ -69,7 +88,6 @@
   $effect(() => {
     const s = loadSettings();
     meshToken = s.meshToken;
-    seedNodeUrl = s.seedNodeUrl;
     maxConcurrentTasks = s.maxConcurrentTasks;
     cpuCapPercent = s.cpuCapPercent;
     idleOnly = s.idleOnly;
@@ -128,7 +146,15 @@
   // Save all settings
   function save() {
     saveSetting("meshToken", meshToken);
-    saveSetting("seedNodeUrl", seedNodeUrl);
+    endpointError = "";
+    for (const [kind, value] of [["coordinator", coordinatorUrl], ["portal", portalUrl]] as const) {
+      if (value.trim() && !validateEndpointUrl(value)) {
+        endpointError = `Invalid ${kind} URL: use https:// (http:// only for 127.0.0.1 or localhost)`;
+        return;
+      }
+    }
+    setEndpoint("coordinator", coordinatorUrl === endpointDefaults.coordinator ? "" : coordinatorUrl);
+    setEndpoint("portal", portalUrl === endpointDefaults.portal ? "" : portalUrl);
     saveSetting("maxConcurrentTasks", String(maxConcurrentTasks));
     saveSetting("cpuCapPercent", String(cpuCapPercent));
     saveSetting("idleOnly", String(idleOnly));
@@ -162,10 +188,25 @@
       </div>
     </label>
 
-    <label>
-      <span class="label-text">Seed Node URL</span>
-      <input type="text" bind:value={seedNodeUrl} placeholder="https://edgecoder-seed.fly.dev" />
-    </label>
+    {#each [["coordinator", "Coordinator URL"], ["portal", "Portal URL"]] as const as [kind, label]}
+      <label>
+        <span class="label-text">{label}</span>
+        <div class="input-row">
+          {#if kind === "coordinator"}
+            <input type="text" bind:value={coordinatorUrl} placeholder={endpointDefaults.coordinator} />
+          {:else}
+            <input type="text" bind:value={portalUrl} placeholder={endpointDefaults.portal} />
+          {/if}
+          <button class="btn-sm" onclick={() => handleTestEndpoint(kind)} disabled={endpointTest[kind] === "testing"}>
+            {endpointTest[kind] === "testing" ? "Testing..." : "Test connection"}
+          </button>
+          {#if endpointTest[kind] === "ok"}<span class="badge valid">Reachable</span>{/if}
+          {#if endpointTest[kind] === "fail"}<span class="badge invalid">Unreachable</span>{/if}
+        </div>
+      </label>
+    {/each}
+    {#if endpointError}<p class="badge invalid">{endpointError}</p>{/if}
+    <button class="btn-sm" onclick={handleResetEndpoints}>Reset to defaults</button>
   </div>
 
   <!-- Power Policy -->

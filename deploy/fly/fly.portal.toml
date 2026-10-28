@@ -15,7 +15,9 @@ primary_region = "ord"
   PASSKEY_RP_ID = "edgecoder.io"
   PASSKEY_ORIGIN = "https://edgecoder.io"
   DOCS_SITE_URL = "https://docs.edgecoder.io"
-  COORDINATOR_DISCOVERY_URL = "https://edgecoder-seed.fly.dev"
+  # #35: ordered list; the portal uses the first healthy one (cached 60 s). Reorder once #33/#31
+  # decide which seed is live (edgecoder-seed.fly.dev is NXDOMAIN today).
+  COORDINATOR_DISCOVERY_URLS = "https://edgecoder-seed-eu.fly.dev,https://edgecoder-seed.fly.dev"
 
 [http_service]
   internal_port = 4310
