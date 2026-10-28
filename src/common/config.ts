@@ -80,7 +80,34 @@ export const envInt = (def: number, opts: { min?: number; max?: number } = {}) =
       return n;
     });
 
-export const envUrl = (def?: string) => {
-  const url = z.url({ protocol: /^https?$/, message: "must be an http(s) URL" });
-  return def === undefined ? url.optional() : url.default(def);
-};
+/** Finite number (decimals allowed) in [min, max], defaulting when unset. */
+export const envNumber = (def: number, opts: { min?: number; max?: number } = {}) =>
+  z
+    .string()
+    .optional()
+    .transform((v, ctx) => {
+      if (v === undefined) return def;
+      const n = Number(v);
+      if (!Number.isFinite(n)) {
+        ctx.addIssue({ code: "custom", message: `must be a number, got "${v}"` });
+        return z.NEVER;
+      }
+      if (opts.min !== undefined && n < opts.min) {
+        ctx.addIssue({ code: "custom", message: `must be >= ${opts.min}` });
+        return z.NEVER;
+      }
+      if (opts.max !== undefined && n > opts.max) {
+        ctx.addIssue({ code: "custom", message: `must be <= ${opts.max}` });
+        return z.NEVER;
+      }
+      return n;
+    });
+
+const httpUrl = () => z.url({ protocol: /^https?$/, message: "must be an http(s) URL" });
+
+/** http(s) URL; with a default the output is always a string, without one it may be undefined. */
+export function envUrl(): z.ZodOptional<z.ZodURL>;
+export function envUrl(def: string): z.ZodDefault<z.ZodURL>;
+export function envUrl(def?: string) {
+  return def === undefined ? httpUrl().optional() : httpUrl().default(def);
+}

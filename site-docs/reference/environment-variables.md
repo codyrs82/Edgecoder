@@ -4,6 +4,8 @@ Consolidated reference for all environment controls. The primary config file on 
 
 ## Runtime mode
 
+`NODE_ENV` (default `development`): `production` turns on the production-only checks listed under [Startup validation](#startup-validation-15).
+
 | Variable | Values | Description |
 |---|---|---|
 | `EDGE_RUNTIME_MODE` | `worker` \| `coordinator` \| `ide-provider` \| `control-plane` \| `inference` \| `all-in-one` | Selects which service the daemon runs as. Required. |
@@ -182,6 +184,92 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `NODE_BIN` | Override Node.js binary path if auto-detection fails (macOS/Linux daemon). |
 | `DOCS_SITE_URL` | Documentation site URL (used in portal links). |
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
+
+## Startup validation (#15)
+
+Each service reads its environment once at startup through a zod schema. An invalid value (for example `abc` for an interval, `maybe` for a flag, or a URL without `http(s)://`) stops the service, and the error lists every problem at once. Empty values count as unset. A `docs coverage` test (`tests/common/env-docs.test.ts`) fails if a schema key is missing from this page.
+
+| Service | Schema | Production-only rules |
+|---|---|---|
+| inference | `src/inference/config.ts` | `INFERENCE_AUTH_TOKEN` at least 32 characters |
+| portal | `src/portal/config.ts` | `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY`, `DOCS_SITE_URL` required; `CONTROL_PLANE_URL` or `COORDINATOR_DISCOVERY_URLS`; `CONTROL_PLANE_ADMIN_TOKEN` when `CONTROL_PLANE_URL` is set; https for `PORTAL_PUBLIC_URL`, `DOCS_SITE_URL` and passkey origins |
+| coordinator | `src/swarm/coordinator-config.ts` | unchanged (`requireProdEnv`) |
+| control-plane | `src/control-plane/config.ts` | `ADMIN_API_TOKEN` required in every environment |
+
+### Portal: other validated settings
+
+| Variable | Type | Default |
+|---|---|---|
+| `NODE_ENV` | string | `development` |
+| `PORTAL_EXTERNAL_HTTP_TIMEOUT_MS` | integer ≥ 100 | `7000` |
+| `RESEND_FROM_EMAIL` | string | unset |
+| `CONTROL_PLANE_ADMIN_TOKEN` | string | unset |
+| `PORTAL_SESSION_TTL_MS` | integer ms, 1000 to 31 days | `604800000` |
+| `PORTAL_EMAIL_VERIFY_TTL_MS` | integer ms, 1000 to 31 days | `86400000` |
+| `WALLET_SEND_MFA_TTL_MS` | integer ms, 1000 to 31 days | `600000` |
+| `MOBILE_OAUTH_TOKEN_TTL_MS` | integer ms, 1000 to 31 days | `300000` |
+| `OAUTH_MICROSOFT_PROMPT` | string | `select_account` |
+| `PASSKEY_ALLOWED_ORIGINS` | string | unset |
+| `COORDINATOR_OPERATIONS_OWNER_EMAILS` | string | unset |
+| `SYSTEM_ADMIN_EMAILS` | string | unset |
+| `COORDINATOR_ADMIN_EMAILS` | string | unset |
+| `IOS_OAUTH_CALLBACK_PREFIX` | string | `edgecoder://oauth-callback` |
+| `OAUTH_GOOGLE_CLIENT_ID` | string | unset |
+| `OAUTH_GOOGLE_CLIENT_SECRET` | string | unset |
+| `OAUTH_GOOGLE_AUTHORIZE_URL` | http(s) URL | `https://accounts.google.com/o/oauth2/v2/auth` |
+| `OAUTH_GOOGLE_TOKEN_URL` | http(s) URL | `https://oauth2.googleapis.com/token` |
+| `OAUTH_GOOGLE_USERINFO_URL` | http(s) URL | `https://openidconnect.googleapis.com/v1/userinfo` |
+| `OAUTH_MICROSOFT_CLIENT_ID` | string | unset |
+| `OAUTH_MICROSOFT_CLIENT_SECRET` | string | unset |
+| `OAUTH_MICROSOFT_AUTHORIZE_URL` | http(s) URL | `https://login.microsoftonline.com/common/oauth2/v2.0/authorize` |
+| `OAUTH_MICROSOFT_TOKEN_URL` | http(s) URL | `https://login.microsoftonline.com/common/oauth2/v2.0/token` |
+| `OAUTH_MICROSOFT_USERINFO_URL` | http(s) URL | `https://graph.microsoft.com/oidc/userinfo` |
+| `OAUTH_GITHUB_CLIENT_ID` | string | unset |
+| `OAUTH_GITHUB_CLIENT_SECRET` | string | unset |
+
+### Coordinator: other validated settings
+
+| Variable | Type | Default |
+|---|---|---|
+| `ROBOT_COORDINATOR_FEE_BPS` | integer ≥ 0 | `200` |
+| `ROBOT_SWEEP_INTERVAL_MS` | integer ≥ 1 | `86400000` |
+| `ROBOT_MIN_SWEEP_SATS` | integer ≥ 0 | `10000` |
+| `ROBOT_TASK_DEFAULT_TIMEOUT_MS` | integer ≥ 1 | `3600000` |
+| `ROBOT_AUTO_SETTLE_DELAY_MS` | integer ≥ 1 | `86400000` |
+| `CONTRIBUTION_BURST_CREDITS` | integer ≥ 0 | `25` |
+| `MIN_CONTRIBUTION_RATIO` | number ≥ 0 | `1` |
+| `ISSUANCE_WINDOW_MS` | integer ≥ 1 | `86400000` |
+| `ISSUANCE_RECALC_MS` | integer ≥ 1 | `3600000` |
+| `ISSUANCE_BASE_DAILY_POOL_TOKENS` | integer ≥ 0 | `10000` |
+| `ISSUANCE_MIN_DAILY_POOL_TOKENS` | integer ≥ 0 | `2500` |
+| `ISSUANCE_MAX_DAILY_POOL_TOKENS` | integer ≥ 0 | `100000` |
+| `ISSUANCE_LOAD_CURVE_SLOPE` | number ≥ 0 | `0.35` |
+| `ISSUANCE_SMOOTHING_ALPHA` | number ≥ 0 | `0.35` |
+| `ISSUANCE_COORDINATOR_SHARE` | number ≥ 0 | `0.05` |
+| `ISSUANCE_RESERVE_SHARE` | number ≥ 0 | `0.05` |
+| `ANCHOR_INTERVAL_MS` | integer ≥ 1 | `7200000` |
+| `STATS_LEDGER_SYNC_INTERVAL_MS` | integer ≥ 1 | `10000` |
+| `STATS_ANCHOR_INTERVAL_MS` | integer ≥ 1 | `600000` |
+| `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `30` |
+| `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
+| `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |
+| `SECURITY_MAX_SKEW_MS` | integer ≥ 1 | `120000` |
+| `TUNNEL_IDLE_TTL_MS` | integer ≥ 1 | `90000` |
+| `TUNNEL_MAX_RELAYS_PER_MIN` | integer ≥ 0 | `120` |
+| `RELAY_RATE_LIMIT_PER_10S` | integer ≥ 0 | `80` |
+| `DIRECT_WORK_OFFERS_PER_10S` | integer ≥ 0 | `20` |
+| `AGENT_ORCHESTRATION_ONLINE_WINDOW_MS` | integer ≥ 1 | `120000` |
+| `ROBOT_QUEUE_ENABLED` | true/false | `false` |
+| `REQUIRE_VERIFIED_AGENTS` | true/false | `false` |
+| `INFERENCE_URL` | http(s) URL | `http://127.0.0.1:4302` |
+
+### Control plane: other validated settings
+
+| Variable | Type | Default |
+|---|---|---|
+| `UI_RETIRE_REDIRECT_URL` | string | unset |
+| `ALLOWED_ADMIN_IPS` | string | unset |
+| `ALLOWED_UI_IPS` | string | unset |
 
 ## Common profiles
 
