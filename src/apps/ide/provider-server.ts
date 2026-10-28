@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
@@ -20,7 +21,8 @@ import { ToolExecutor } from "./tool-executor.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("ide-provider") });
+exposeRequestId(app);
 
 // #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
 // No import-time side effects: the token file is read/created on first authenticated

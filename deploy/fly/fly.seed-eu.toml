@@ -39,6 +39,16 @@ primary_region = "cdg"
   source = "ollama_data_eu"
   destination = "/data/ollama" # #9: OLLAMA_MODELS; volume must be owned by uid 1000 (node)
 
+# #14: same health check as fly.seed-node.toml.
+[checks]
+  [checks.seed_health]
+    type = "http"
+    port = 4301
+    path = "/health/runtime"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
+
 [[vm]]
   memory = "8192mb"
   cpu_kind = "performance"

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
@@ -42,7 +43,8 @@ if (!BITCOIND_RPC_URL || !BITCOIND_RPC_USER || !BITCOIND_RPC_PASSWORD) {
 }
 
 const provider = new BitcoindRpcProvider(BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD, BITCOIND_WALLET_NAME);
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("anchor-proxy") });
+exposeRequestId(app);
 
 /* ---- auth middleware ---- */
 function requireAuth(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }): boolean {

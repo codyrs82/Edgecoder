@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import cors from "@fastify/cors";
 import { request } from "undici";
 import { z } from "zod";
@@ -15,7 +16,8 @@ import { buildAdminDashboardRoutes } from "./dashboard.js";
 import { safeTokenEqual } from "../common/crypto-utils.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("control-plane") });
+exposeRequestId(app);
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,

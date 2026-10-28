@@ -3,6 +3,7 @@
 
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
@@ -120,7 +121,8 @@ import { PullTracker } from "../model/pull-tracker.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
 import { ollamaTags, listModels } from "../model/swap.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("coordinator") });
+exposeRequestId(app);
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
