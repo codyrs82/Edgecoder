@@ -59,7 +59,7 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, adjustCredits, creditEngine, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { accrueCredits, creditEngine, grantCredits, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
@@ -1539,7 +1539,7 @@ const settleIfPaid = createPaymentSettler({
   saveIntent: (intent) => {
     paymentIntents.set(intent.intentId, intent);
   },
-  grantCredits: (accountId, credits, reason) => adjustCredits(accountId, credits, reason),
+  grantCredits: (accountId, credits, reason) => grantCredits(accountId, credits, reason),
   onSettled: async (intent) => {
     await recordIntentSettlementSideEffects(intent);
   }
@@ -1945,8 +1945,14 @@ app.post("/submit", async (req, reply) => {
     try {
       // Spend credits when using public mesh resources.
       await spendCredits(body.submitterAccountId, 1, "task_submit", body.taskId);
-    } catch {
-      return reply.code(402).send({ error: "insufficient_credits" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) {
+        return reply.code(402).send({ error: "insufficient_credits" });
+      }
+      // DB/lock failures are not "insufficient credits" (#48 review): surface and log them.
+      req.log.error({ err, taskId: body.taskId }, "task_submit_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
     }
   }
 
