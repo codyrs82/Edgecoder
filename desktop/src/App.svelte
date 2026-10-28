@@ -11,6 +11,11 @@
   import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
+  import { Toaster } from "svelte-sonner";
+  import AuthExpiredBanner from "./components/AuthExpiredBanner.svelte";
+  import CommandPalette from "./components/CommandPalette.svelte";
+  import { isMac, type PaletteCommand } from "./lib/palette";
+  import { setTheme } from "./lib/theme";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
   let activeTab: "chat" | "editor" = $state("chat");
@@ -135,6 +140,22 @@
     }
   }
 
+  // #24: Cmd/Ctrl+K command palette.
+  let paletteOpen = $state(false);
+  const paletteKey = isMac() ? "⌘K" : "Ctrl+K";
+  let paletteCommands: PaletteCommand[] = $derived([
+    { id: "go-chat", label: "Go to Chat", group: "Navigate", run: () => (activeTab = "chat") },
+    { id: "go-editor", label: "Go to Editor", group: "Navigate", keywords: ["EdgeCoder", "IDE", "code"], run: () => (activeTab = "editor") },
+    { id: "settings", label: "Open Settings", group: "Navigate", keywords: ["preferences"], run: () => (settingsOpen = true) },
+    { id: "new-chat", label: "New chat", group: "Chat", run: () => { activeTab = "chat"; chatView?.newChat(); } },
+    { id: "toggle-sidebar", label: historyOpen ? "Hide chat history" : "Show chat history", group: "Chat", keywords: ["sidebar"], when: activeTab === "chat", run: () => (historyOpen = !historyOpen) },
+    { id: "open-project", label: "Open project folder…", group: "Project", keywords: ["folder", "workspace"], run: () => { activeTab = "editor"; openProject(); } },
+    { id: "theme-system", label: "Theme: System", group: "Appearance", run: () => setTheme("system") },
+    { id: "theme-light", label: "Theme: Light", group: "Appearance", run: () => setTheme("light") },
+    { id: "theme-dark", label: "Theme: Dark", group: "Appearance", run: () => setTheme("dark") },
+    { id: "sign-out", label: "Sign out", group: "Account", keywords: ["log out", "logout"], run: () => { clearSessionToken(); user = null; settingsOpen = false; } },
+  ]);
+
   function handleSend(message: string) {
     if (activeTab === "chat" && chatView) {
       chatView.sendMessage(message);
@@ -143,6 +164,8 @@
 </script>
 
 <EndpointBanner />
+<!-- #24: one accessible toast region (aria-live) for the whole app, login screen included. -->
+<Toaster position="bottom-right" theme="system" richColors closeButton />
 
 {#if !authChecked}
   <div class="loading-screen">
@@ -153,6 +176,8 @@
 {:else}
   <div class="app-shell">
     <UpdateBanner />
+    <AuthExpiredBanner onSignIn={() => { clearSessionToken(); user = null; settingsOpen = false; }} />
+    <CommandPalette commands={paletteCommands} bind:open={paletteOpen} />
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
       <button class="header-btn" title="New chat" onclick={() => {
@@ -165,6 +190,9 @@
       </button>
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
+      <button class="header-btn" title="Command palette ({paletteKey})" aria-label="Open command palette" aria-keyshortcuts={isMac() ? "Meta+K" : "Control+K"} onclick={() => (paletteOpen = true)}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
 
       <button class="header-btn" title={activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : "Toggle chat"} onclick={() => {
         if (activeTab === "chat") {

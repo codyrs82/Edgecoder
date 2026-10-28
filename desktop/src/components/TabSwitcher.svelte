@@ -1,31 +1,36 @@
 <script lang="ts">
+  // #24: built on the bits-ui Tabs primitive (roving focus, arrow keys,
+  // role=tablist/tab, aria-selected) instead of hand-rolled buttons.
+  import { Tabs } from "bits-ui";
+
+  type Tab = "chat" | "editor";
   interface Props {
-    activeTab: "chat" | "editor";
-    onSwitch: (tab: "chat" | "editor") => void;
+    activeTab: Tab;
+    onSwitch: (tab: Tab) => void;
   }
   let { activeTab, onSwitch }: Props = $props();
 </script>
 
-<div class="tab-switcher">
-  <button
-    class="tab {activeTab === 'chat' ? 'active' : ''}"
-    onclick={() => onSwitch("chat")}
-  >Chat</button>
-  <button
-    class="tab {activeTab === 'editor' ? 'active' : ''}"
-    onclick={() => onSwitch("editor")}
-  >EdgeCoder</button>
-</div>
+<Tabs.Root
+  value={activeTab}
+  onValueChange={(v) => onSwitch(v as Tab)}
+  activationMode="automatic"
+>
+  <Tabs.List class="tab-switcher" aria-label="Workspace">
+    <Tabs.Trigger value="chat" class="tab">Chat</Tabs.Trigger>
+    <Tabs.Trigger value="editor" class="tab">EdgeCoder</Tabs.Trigger>
+  </Tabs.List>
+</Tabs.Root>
 
 <style>
-  .tab-switcher {
+  :global(.tab-switcher) {
     display: flex;
     background: var(--bg-surface);
     border-radius: 8px;
     padding: 3px;
     gap: 2px;
   }
-  .tab {
+  :global(.tab-switcher .tab) {
     padding: 6px 16px;
     border: none;
     background: none;
@@ -36,10 +41,14 @@
     border-radius: 6px;
     transition: all 0.15s;
   }
-  .tab:hover {
+  :global(.tab-switcher .tab:hover) {
     color: var(--text-primary);
   }
-  .tab.active {
+  :global(.tab-switcher .tab:focus-visible) {
+    outline: 2px solid var(--accent, currentColor);
+    outline-offset: 1px;
+  }
+  :global(.tab-switcher .tab[data-state="active"]) {
     background: var(--bg-base);
     color: var(--text-primary);
     font-weight: 600;

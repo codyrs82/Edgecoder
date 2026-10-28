@@ -13,6 +13,7 @@
   import { MODEL_CATALOG, CATEGORY_LABELS, type CatalogModel } from "../lib/models";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import { notify } from "../lib/notify";
   import Skeleton from "../components/Skeleton.svelte";
 
   interface Props {
@@ -259,7 +260,7 @@
       pullTarget = "";
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Pull failed";
+      notify.error(`Couldn't pull ${pullTarget || "the model"}`, e);
     } finally {
       pulling = false;
       pullingModelId = null;
@@ -281,7 +282,7 @@
       await deleteOllamaModel(name);
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Delete failed";
+      notify.error(`Couldn't delete ${name}`, e);
     }
   }
 
@@ -292,13 +293,12 @@
   // ---- Swap ----
   async function handleSwap(modelId: string) {
     swappingId = modelId;
-    error = null;
     try {
       await swapModel(modelId);
       await refresh();
       onModelSwapped?.(modelId);
     } catch (e) {
-      error = e instanceof Error ? e.message : "Swap failed";
+      notify.error(`Couldn't switch to ${modelId}`, e);
     } finally {
       swappingId = null;
     }
