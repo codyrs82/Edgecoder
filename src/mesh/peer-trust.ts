@@ -32,6 +32,8 @@ export function parsePeerAllowlist(raw: string | undefined): PeerAllowlist {
     const peerId = item.slice(0, idx);
     const fp = item.slice(idx + 1).toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(fp)) throw new Error(`MESH_PEER_ALLOWLIST: bad fingerprint for "${peerId}"`);
+    // #118 review: a later entry silently winning would hide a typo or a swapped key.
+    if (out.has(peerId)) throw new Error(`MESH_PEER_ALLOWLIST: duplicate peer id "${peerId}"`);
     out.set(peerId, fp);
   }
   return out;
@@ -49,12 +51,28 @@ export function isAllowlistedKey(allowlist: PeerAllowlist, peerId: string, publi
 
 // ---- registration proof of possession ----
 
-export function registrationPayload(p: { peerId: string; publicKeyPem: string; coordinatorUrl: string; issuedAtMs: number }): string {
-  return ["edgecoder-peer-register-v1", p.peerId, p.coordinatorUrl, p.issuedAtMs, createHash("sha256").update(p.publicKeyPem).digest("hex")].join("\n");
+export interface RegistrationFields {
+  peerId: string;
+  publicKeyPem: string;
+  coordinatorUrl: string;
+  networkMode?: string;
+  role?: string;
+}
+
+export function registrationPayload(p: RegistrationFields & { issuedAtMs: number }): string {
+  return [
+    "edgecoder-peer-register-v2",
+    p.peerId,
+    p.coordinatorUrl,
+    p.networkMode ?? "",
+    p.role ?? "",
+    p.issuedAtMs,
+    createHash("sha256").update(p.publicKeyPem).digest("hex")
+  ].join("\n");
 }
 
 export function signRegistration(
-  p: { peerId: string; publicKeyPem: string; coordinatorUrl: string },
+  p: RegistrationFields,
   privateKeyPem: string,
   nowMs = Date.now()
 ): { issuedAtMs: number; signature: string } {
@@ -62,7 +80,7 @@ export function signRegistration(
   return { issuedAtMs, signature: signPayload(registrationPayload({ ...p, issuedAtMs }), privateKeyPem) };
 }
 
-export type TrustDecision = { ok: true; mode: "allowlist" | "legacy_token" } | { ok: false; code: 401 | 403; error: string };
+export type TrustDecision = { ok: true; mode: "allowlist" | "legacy_token" } | { ok: false; code: 401 | 403 | 409; error: string };
 
 /**
  * Decide whether a mesh-token registration is accepted.
@@ -70,7 +88,7 @@ export type TrustDecision = { ok: true; mode: "allowlist" | "legacy_token" } | {
  * - No allowlist: rejected in production; accepted in dev (legacy shared-token behaviour).
  */
 export function checkPeerRegistration(input: {
-  body: { peerId: string; publicKeyPem: string; coordinatorUrl: string; issuedAtMs?: number; signature?: string };
+  body: RegistrationFields & { issuedAtMs?: number; signature?: string };
   allowlist: PeerAllowlist;
   production: boolean;
   nowMs?: number;
@@ -86,6 +104,46 @@ export function checkPeerRegistration(input: {
   const payload = registrationPayload({ ...body, issuedAtMs: body.issuedAtMs });
   if (!verifyPayload(payload, body.signature, body.publicKeyPem)) return { ok: false, code: 401, error: "peer_signature_invalid" };
   return { ok: true, mode: "allowlist" };
+}
+
+/** #118 review: allowlist enforcement is on whenever an allowlist is set, and always in production. */
+export function allowlistEnforced(allowlist: PeerAllowlist, production: boolean): boolean {
+  return allowlist.size > 0 || production;
+}
+
+/**
+ * #118 review: the single admission rule for the peer table, used by every path that adds a
+ * peer (registration, bootstrap discovery, peer_exchange gossip).
+ * - Enforced: only an allowlisted (peerId, key) pair is admitted. An existing entry is replaced
+ *   only if it is not itself allowlisted (a squatter), unless `authoritative` (the peer proved
+ *   possession of the key on /mesh/register-peer, so it may update its URL).
+ * - Not enforced (dev, no allowlist): legacy behaviour, first entry for an id wins.
+ */
+export function admitPeer(input: {
+  allowlist: PeerAllowlist;
+  production: boolean;
+  peer: { peerId: string; publicKeyPem: string };
+  existing?: { peerId: string; publicKeyPem: string };
+  authoritative?: boolean;
+}): boolean {
+  const { allowlist, peer, existing } = input;
+  if (!allowlistEnforced(allowlist, input.production)) return !existing || input.authoritative === true;
+  if (!isAllowlistedKey(allowlist, peer.peerId, peer.publicKeyPem)) return false;
+  if (!existing || input.authoritative) return true;
+  return !isAllowlistedKey(allowlist, existing.peerId, existing.publicKeyPem);
+}
+
+/** Seen-signature cache for forwarded results; entries expire with the signature skew window. */
+export class ReplayCache {
+  private seen = new Map<string, number>();
+  constructor(private readonly ttlMs = 2 * PEER_SIGNATURE_MAX_SKEW_MS) {}
+  /** True the first time `key` is seen within the TTL. */
+  firstSeen(key: string, nowMs = Date.now()): boolean {
+    for (const [k, exp] of this.seen) if (exp <= nowMs) this.seen.delete(k);
+    if (this.seen.has(key)) return false;
+    this.seen.set(key, nowMs + this.ttlMs);
+    return true;
+  }
 }
 
 // ---- forwarded results ----
@@ -115,6 +173,8 @@ export function verifyForwardedResult(input: {
   allowlist: PeerAllowlist;
   production: boolean;
   publicKeyFor: (peerId: string) => string | null;
+  /** #118 review: rejects a captured forwarded result replayed within the skew window. */
+  replay?: ReplayCache;
   nowMs?: number;
 }): TrustDecision & { fromPeerId?: string } {
   const h = (k: string) => {
@@ -132,6 +192,9 @@ export function verifyForwardedResult(input: {
   if (Math.abs((input.nowMs ?? Date.now()) - ts) > PEER_SIGNATURE_MAX_SKEW_MS) return { ok: false, code: 401, error: "peer_signature_stale" };
   if (!verifyPayload(forwardedResultPayload(fromPeerId, ts, input.bodyJson), sig, key)) {
     return { ok: false, code: 401, error: "peer_signature_invalid" };
+  }
+  if (input.replay && !input.replay.firstSeen(`${fromPeerId}:${ts}:${sig}`, input.nowMs)) {
+    return { ok: false, code: 409, error: "peer_signature_replayed" };
   }
   return { ok: true, mode: "allowlist", fromPeerId };
 }

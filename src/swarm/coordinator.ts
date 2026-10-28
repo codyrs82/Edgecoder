@@ -54,7 +54,18 @@ import {
   SandboxMode
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
-import { checkPeerRegistration, parsePeerAllowlist, signForwardedResult, signRegistration, verifyForwardedResult } from "../mesh/peer-trust.js";
+import {
+  admitPeer,
+  allowlistEnforced,
+  checkPeerRegistration,
+  isAllowlistedKey,
+  parsePeerAllowlist,
+  ReplayCache,
+  signForwardedResult,
+  signRegistration,
+  verifyForwardedResult,
+  type PeerAllowlist
+} from "../mesh/peer-trust.js";
 import { MeshProtocol } from "../mesh/protocol.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
@@ -122,6 +133,16 @@ import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system
 import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ logger: true });
+// #118 review: keep the exact request bytes so signed bodies (forwarded /result) are verified
+// against what was sent, not a re-serialization. Parsing itself is Fastify's default (safe) parser.
+{
+  const defaultJsonParser = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    (req as unknown as { rawBody?: string }).rawBody = body as string;
+    defaultJsonParser(req, body as string, done);
+  });
+}
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
@@ -130,6 +151,18 @@ await app.register(websocket);
 const queue = new SwarmQueue(pgStore);
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
+// #118 review: one admission rule for every way into the peer table.
+mesh.setAdmission((peer, existing, authoritative) =>
+  admitPeer({ allowlist: MESH_PEER_ALLOWLIST, production: isProduction(), peer, existing, authoritative })
+);
+mesh.onBroadcast((message) => {
+  if (message.type !== "task_offer") return;
+  const subtaskId = message.payload?.subtaskId;
+  if (typeof subtaskId !== "string") return;
+  const now = Date.now();
+  for (const [id, exp] of offeredToPeers) if (exp <= now) offeredToPeers.delete(id);
+  offeredToPeers.set(subtaskId, now + OFFERED_SUBTASK_TTL_MS);
+});
 if (process.env.MESH_AUTH_TOKEN) {
   mesh.setMeshToken(process.env.MESH_AUTH_TOKEN);
 }
@@ -141,7 +174,20 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
-const MESH_PEER_ALLOWLIST = parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
+const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
+  try {
+    return parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
+  } catch (error) {
+    // Fail closed, but say why before the process exits.
+    console.error(`[coordinator] FATAL: invalid MESH_PEER_ALLOWLIST: ${(error as Error).message}`);
+    throw error;
+  }
+})();
+const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
+/** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */
+const forwardReplayCache = new ReplayCache();
+const OFFERED_SUBTASK_TTL_MS = 24 * 60 * 60 * 1000;
+const offeredToPeers = new Map<string, number>();
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
 const COORDINATOR_FEE_BPS = Number(process.env.COORDINATOR_FEE_BPS ?? "150");
@@ -811,12 +857,20 @@ async function bootstrapPeerMesh(): Promise<void> {
       }
       // Use the actual reachable URL for gossip if the self-reported URL is different
       const gossipUrl = normalizedPeerUrl ?? effectiveUrl;
-      mesh.addPeer({
-        peerId: remote.peerId,
-        publicKeyPem: remote.publicKeyPem,
-        coordinatorUrl: gossipUrl!,
-        networkMode: remote.networkMode
-      });
+      const admitted = mesh.addPeer(
+        {
+          peerId: remote.peerId,
+          publicKeyPem: remote.publicKeyPem,
+          coordinatorUrl: gossipUrl!,
+          networkMode: remote.networkMode
+        },
+        // Dev without an allowlist keeps the old refresh-on-bootstrap behaviour.
+        { authoritative: !PEER_ALLOWLIST_ENFORCED }
+      );
+      if (!admitted) {
+        app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_not_allowlisted");
+        continue;
+      }
       peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
       discoveredForCache.add(gossipUrl!);
 
@@ -835,7 +889,7 @@ async function bootstrapPeerMesh(): Promise<void> {
           registrationToken: COORDINATOR_REGISTRATION_TOKEN,
           // #52: prove we hold the key the peer's allowlist names.
           ...signRegistration(
-            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl },
+            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl, networkMode },
             coordinatorKeys.privateKeyPem
           )
         }),
@@ -2248,14 +2302,25 @@ app.post("/result", async (req, reply) => {
     // #52: a forwarded result must be signed by an allowlisted peer coordinator.
     const fwd = verifyForwardedResult({
       headers: (req as any).headers ?? {},
-      bodyJson: JSON.stringify(rawBody),
+      // #118 review: verify the exact bytes received, not a re-serialization.
+      bodyJson: (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(rawBody),
       allowlist: MESH_PEER_ALLOWLIST,
       production: isProduction(),
-      publicKeyFor: (id) => (id === identity.peerId ? null : coordinatorPublicKeyById(id))
+      publicKeyFor: (id) => (id === identity.peerId ? null : coordinatorPublicKeyById(id)),
+      replay: forwardReplayCache
     });
     if (!fwd.ok) {
       app.log.warn({ subtaskId: body.subtaskId, error: fwd.error }, "forwarded_result_rejected");
       return reply.code(fwd.code).send({ error: fwd.error });
+    }
+    // #118 review: only results for subtasks we offered to peers, and only once each.
+    if (PEER_ALLOWLIST_ENFORCED) {
+      const exp = offeredToPeers.get(body.subtaskId);
+      if (exp === undefined || exp <= Date.now()) {
+        app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_not_offered");
+        return reply.code(403).send({ error: "subtask_not_offered" });
+      }
+      offeredToPeers.delete(body.subtaskId);
     }
   }
   if (!isPeerForward) {
@@ -2980,7 +3045,7 @@ app.post("/mesh/register-peer", async (req, reply) => {
   // Coordinators that authenticate with a valid mesh token are trusted peers —
   // skip portal validation (same pattern as loopback self-registration for agents).
   // The mesh token IS the shared secret that proves membership in this coordinator mesh.
-  const meshTokenProvided = MESH_AUTH_TOKEN && (req.headers as Record<string, string>)["x-mesh-token"] === MESH_AUTH_TOKEN;
+  const meshTokenProvided = MESH_AUTH_TOKEN !== "" && hasMeshToken((req.headers ?? {}) as Record<string, unknown>);
   let activationReason = "mesh_token_peer";
 
   if (meshTokenProvided) {
@@ -3010,7 +3075,10 @@ app.post("/mesh/register-peer", async (req, reply) => {
   }
 
   const { issuedAtMs: _issuedAtMs, signature: _signature, ...peerIdentity } = body;
-  mesh.addPeer(peerIdentity as MeshPeerIdentity);
+  // Proven key (or portal-validated): may replace a squatter or update its own URL.
+  if (!mesh.addPeer(peerIdentity as MeshPeerIdentity, { authoritative: true })) {
+    return reply.code(403).send({ error: "peer_not_allowlisted" });
+  }
   peerScore.set(body.peerId, 100);
   app.log.info({ peerId: body.peerId, reason: activationReason, url: body.coordinatorUrl }, "peer_registered");
   const approvalRecord = ordering.append({
@@ -3058,6 +3126,13 @@ async function handleMeshIngest(
   message: z.infer<typeof meshIngestSchema>
 ): Promise<{ ok: boolean; statusCode?: number; error?: string; [key: string]: unknown }> {
   const peer = mesh.listPeers().find((p) => p.peerId === message.fromPeerId);
+  // #118 review: with the allowlist enforced, only registered allowlisted peers may send gossip.
+  if (PEER_ALLOWLIST_ENFORCED) {
+    if (!MESH_PEER_ALLOWLIST.has(message.fromPeerId)) return { ok: false, statusCode: 403, error: "peer_not_allowlisted" };
+    if (!peer || !isAllowlistedKey(MESH_PEER_ALLOWLIST, peer.peerId, peer.publicKeyPem)) {
+      return { ok: false, statusCode: 404, error: "peer_unknown" };
+    }
+  }
   // Allow peer_exchange and capability_announce from unknown peers — this is how
   // new peers introduce themselves to the mesh after registering.
   if (!peer && message.type !== "peer_exchange" && message.type !== "capability_announce") {
@@ -3148,16 +3223,18 @@ async function handleMeshIngest(
     let added = 0;
     for (const p of payload.peers ?? []) {
       if (p.peerId === identity.peerId) continue;
-      const existing = mesh.listPeers().find(ep => ep.peerId === p.peerId);
-      if (!existing) {
-        mesh.addPeer({
-          peerId: p.peerId,
-          publicKeyPem: p.publicKeyPem,
-          coordinatorUrl: p.peerUrl,
-          networkMode: p.networkMode,
-        });
-        peerScore.set(p.peerId, 100);
+      // #118 review: admission (allowlist + squatter replacement) is enforced inside addPeer.
+      const admitted = mesh.addPeer({
+        peerId: p.peerId,
+        publicKeyPem: p.publicKeyPem,
+        coordinatorUrl: p.peerUrl,
+        networkMode: p.networkMode,
+      });
+      if (admitted) {
+        peerScore.set(p.peerId, peerScore.get(p.peerId) ?? 100);
         added++;
+      } else {
+        app.log.debug?.({ from: message.fromPeerId, peerId: p.peerId }, "peer_exchange_entry_dropped");
       }
     }
     if (added > 0) {

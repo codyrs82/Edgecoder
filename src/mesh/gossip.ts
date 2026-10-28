@@ -19,12 +19,29 @@ export class GossipMesh {
   /** Peers whose coordinatorUrl is unreachable (behind NAT/firewall). */
   private natPeers = new Set<string>();
 
+  /** #118 review: every addPeer goes through this rule (allowlist, squatting). */
+  private admission?: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, authoritative: boolean) => boolean;
+  /** Called for every message broadcast (the coordinator records which subtasks it offered). */
+  private broadcastListener?: (message: MeshMessage) => void;
+
+  setAdmission(fn: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, authoritative: boolean) => boolean): void {
+    this.admission = fn;
+  }
+
+  onBroadcast(fn: (message: MeshMessage) => void): void {
+    this.broadcastListener = fn;
+  }
+
   setMeshToken(token: string): void {
     this.meshToken = token;
   }
 
-  addPeer(peer: MeshPeerIdentity): void {
+  /** Returns false when the admission rule refuses the peer. `authoritative`: the peer proved key possession. */
+  addPeer(peer: MeshPeerIdentity, opts: { authoritative?: boolean } = {}): boolean {
+    const existing = this.peers.get(peer.peerId);
+    if (this.admission && !this.admission(peer, existing, opts.authoritative === true)) return false;
     this.peers.set(peer.peerId, peer);
+    return true;
   }
 
   removePeer(peerId: string): void {
@@ -70,6 +87,7 @@ export class GossipMesh {
   }
 
   async broadcast(message: MeshMessage, excludePeerId?: string): Promise<{ delivered: number; failed: number }> {
+    this.broadcastListener?.(message);
     const peers = this.listPeers().filter(p => !excludePeerId || p.peerId !== excludePeerId);
     let delivered = 0;
     let failed = 0;
