@@ -324,6 +324,12 @@ CREATE TABLE IF NOT EXISTS bitcoin_anchor_records (
   anchored_at_ms BIGINT,
   created_at_ms BIGINT NOT NULL
 );
+-- #46: real anchoring (txid, confirmation depth, block for reorg detection).
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS confirmations INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS block_hash TEXT;
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS block_height INTEGER;
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS last_checked_at_ms BIGINT;
+CREATE INDEX IF NOT EXISTS idx_anchor_records_status ON bitcoin_anchor_records (status);
 
 CREATE TABLE IF NOT EXISTS issuance_payout_events (
   payout_event_id TEXT PRIMARY KEY,
@@ -1188,12 +1194,16 @@ export class PostgresStore {
   async upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO bitcoin_anchor_records (
-        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       ON CONFLICT (anchor_id) DO UPDATE SET
         tx_ref = EXCLUDED.tx_ref,
         status = EXCLUDED.status,
-        anchored_at_ms = EXCLUDED.anchored_at_ms`,
+        anchored_at_ms = EXCLUDED.anchored_at_ms,
+        confirmations = EXCLUDED.confirmations,
+        block_hash = EXCLUDED.block_hash,
+        block_height = EXCLUDED.block_height,
+        last_checked_at_ms = EXCLUDED.last_checked_at_ms`,
       [
         record.anchorId,
         record.epochId,
@@ -1202,20 +1212,16 @@ export class PostgresStore {
         record.txRef,
         record.status,
         record.anchoredAtMs ?? null,
-        record.createdAtMs
+        record.createdAtMs,
+        record.confirmations ?? 0,
+        record.blockHash ?? null,
+        record.blockHeight ?? null,
+        record.lastCheckedAtMs ?? null
       ]
     );
   }
 
-  async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
-    const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
-       FROM bitcoin_anchor_records
-       ORDER BY created_at_ms DESC
-       LIMIT 1`
-    );
-    const row = result.rows[0];
-    if (!row) return null;
+  private anchorFromRow(row: Record<string, any>): BitcoinAnchorRecord {
     return {
       anchorId: row.anchor_id,
       epochId: row.epoch_id,
@@ -1224,33 +1230,52 @@ export class PostgresStore {
       txRef: row.tx_ref,
       status: row.status,
       anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
-      createdAtMs: Number(row.created_at_ms)
+      createdAtMs: Number(row.created_at_ms),
+      confirmations: row.confirmations !== undefined && row.confirmations !== null ? Number(row.confirmations) : 0,
+      blockHash: row.block_hash ?? undefined,
+      blockHeight: row.block_height !== undefined && row.block_height !== null ? Number(row.block_height) : undefined,
+      lastCheckedAtMs: row.last_checked_at_ms ? Number(row.last_checked_at_ms) : undefined
     };
+  }
+
+  async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+       FROM bitcoin_anchor_records
+       ORDER BY created_at_ms DESC
+       LIMIT 1`
+    );
+    const row = result.rows[0];
+    return row ? this.anchorFromRow(row) : null;
   }
 
   async listAnchors(limit = 100): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT $1`,
       [limit]
     );
-    return result.rows.map((row) => ({
-      anchorId: row.anchor_id,
-      epochId: row.epoch_id,
-      checkpointHash: row.checkpoint_hash,
-      anchorNetwork: row.anchor_network,
-      txRef: row.tx_ref,
-      status: row.status,
-      anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
-      createdAtMs: Number(row.created_at_ms)
-    }));
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
+  /** #46: anchors awaiting confirmation depth (or re-confirmation after a reorg). */
+  async listPendingAnchors(limit = 50): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+       FROM bitcoin_anchor_records
+       WHERE status = 'pending'
+       ORDER BY created_at_ms ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
   }
 
   async latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
        FROM bitcoin_anchor_records
        WHERE checkpoint_hash = $1
        ORDER BY created_at_ms DESC
@@ -1258,17 +1283,7 @@ export class PostgresStore {
       [checkpointHash]
     );
     const row = result.rows[0];
-    if (!row) return null;
-    return {
-      anchorId: row.anchor_id,
-      epochId: row.epoch_id,
-      checkpointHash: row.checkpoint_hash,
-      anchorNetwork: row.anchor_network,
-      txRef: row.tx_ref,
-      status: row.status,
-      anchoredAtMs: row.anchored_at_ms ? Number(row.anchored_at_ms) : undefined,
-      createdAtMs: Number(row.created_at_ms)
-    };
+    return row ? this.anchorFromRow(row) : null;
   }
 
   async persistIssuancePayoutEvent(event: IssuancePayoutEvent): Promise<void> {
