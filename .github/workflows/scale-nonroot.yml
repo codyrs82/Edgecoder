@@ -1,0 +1,47 @@
+name: scale-nonroot
+
+# #31 blocker: the scale e2e (seed + workers) must run under the non-root images (#9)
+# before deploys are re-enabled. Runs on PRs touching images/runtime, nightly, and on demand.
+on:
+  pull_request:
+    paths:
+      - "deploy/docker/**"
+      - "src/swarm/**"
+      - "src/index.ts"
+      - "tests/e2e/docker-compose.scale.yml"
+      - "scripts/e2e/scale-nonroot.sh"
+      - ".github/workflows/scale-nonroot.yml"
+      - "package-lock.json"
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scale-nonroot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scale-nonroot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Scale e2e as non-root (#31 blocker)"
+        env:
+          WORKERS: "3"
+        run: bash scripts/e2e/scale-nonroot.sh
+      - name: Compose logs
+        if: always()
+        run: docker compose -f tests/e2e/docker-compose.scale.yml logs --no-color > scale-nonroot.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-nonroot-logs
+          path: scale-nonroot.log
+          if-no-files-found: ignore
+      - name: Tear down
+        if: always()
+        run: docker compose -f tests/e2e/docker-compose.scale.yml down -v
