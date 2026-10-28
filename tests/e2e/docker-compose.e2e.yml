@@ -43,6 +43,7 @@ services:
     command: ["node", "dist/index.js"]
     environment:
       - NODE_ENV=test
+      - ENABLE_DEBUG_ROUTES=1
       - EDGE_RUNTIME_MODE=all-in-one
       - SKIP_OLLAMA=true
       - DATABASE_URL=postgresql://edgecoder:e2e-test-password@postgres:5432/edgecoder

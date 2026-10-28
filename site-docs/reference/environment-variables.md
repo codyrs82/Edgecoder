@@ -49,6 +49,8 @@ Consolidated reference for all environment controls. The primary config file on 
 | `INFERENCE_AUTH_TOKEN` | Auth token for the inference service API. |
 | `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. |
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
+| `ENABLE_DEBUG_ROUTES` | Set `1` to register coordinator `/debug/*` routes (dev/e2e only; never registered in production). |
+| `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
 | `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-signature`, …). Set `false` only for local dev with legacy unsigned agents. |
 
 ## Portal and passkeys

@@ -537,7 +537,8 @@ app.post("/security/blacklist", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/security/blacklist`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      // #40: coordinator blacklist writes require the admin token
+      headers: { ...coordinatorMeshHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
