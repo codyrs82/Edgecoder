@@ -18,6 +18,8 @@ interface QueueItem {
   /** If set, local agents cannot claim this task until after this timestamp.
    *  Gives gossip peers a window to send task_claim before local execution. */
   claimableAfterMs?: number;
+  /** #50: agents that may not claim this item (verification replicas go to a different agent). */
+  excludeAgents?: string[];
 }
 
 export class SwarmQueue {
@@ -70,14 +72,18 @@ export class SwarmQueue {
       .catch(() => undefined);
   }
 
-  enqueueSubtask(subtask: Omit<Subtask, "id"> & { id?: string }, opts?: { claimDelayMs?: number }): Subtask {
+  enqueueSubtask(
+    subtask: Omit<Subtask, "id"> & { id?: string },
+    opts?: { claimDelayMs?: number; excludeAgents?: string[] }
+  ): Subtask {
     const materialized: Subtask = { ...subtask, id: subtask.id ?? randomUUID() };
     // Deduplicate — prevent same subtask from being enqueued twice via mesh gossip
     if (this.tasks.some(t => t.subtask.id === materialized.id)) {
       return materialized;
     }
     const claimableAfterMs = opts?.claimDelayMs ? Date.now() + opts.claimDelayMs : undefined;
-    this.tasks.push({ subtask: materialized, claimableAfterMs });
+    const excludeAgents = opts?.excludeAgents?.length ? [...opts.excludeAgents] : undefined;
+    this.tasks.push({ subtask: materialized, claimableAfterMs, excludeAgents });
     void this.store?.persistSubtask(materialized).catch(() => undefined);
     return materialized;
   }
@@ -95,7 +101,10 @@ export class SwarmQueue {
   claim(agentId: string, agentActiveModel?: string): Subtask | undefined {
     const now = Date.now();
     const unclaimed = this.tasks.filter(
-      (task) => !task.claimedBy && (!task.claimableAfterMs || now >= task.claimableAfterMs)
+      (task) =>
+        !task.claimedBy &&
+        (!task.claimableAfterMs || now >= task.claimableAfterMs) &&
+        !task.excludeAgents?.includes(agentId)
     );
     if (unclaimed.length === 0) return undefined;
 
