@@ -79,7 +79,7 @@
     display: flex; justify-content: space-between; align-items: center; padding: 8px 10px;
     border-radius: var(--radius-sm, 6px); cursor: pointer; font-size: 14px;
   }
-  :global(.palette-item[data-selected]) { background: var(--accent, #c17850); color: #fff; }
+  :global(.palette-item[data-selected]) { background: var(--accent, #c17850); color: var(--on-accent, #1a1a18); }
   :global(.palette-item kbd) { font-family: var(--font-mono, monospace); font-size: 11px; opacity: 0.75; }
   :global(.palette-empty) { padding: 16px; text-align: center; color: var(--text-secondary, #b8b0a4); font-size: 13px; }
   .palette-hint { margin: 0; padding: 8px 14px; font-size: 11px; color: var(--text-secondary, #b8b0a4); border-top: 1px solid var(--border, rgba(214, 204, 194, 0.08)); }
