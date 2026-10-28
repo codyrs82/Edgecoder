@@ -52,4 +52,4 @@ Users interact through a chat-first desktop app (Tauri + Svelte with Monaco edit
 ## Canonical Source Documents
 
 - [GitHub Repository](https://github.com/codyrs82/Edgecoder)
-- [Developer Guide (README.dev.md)](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
+- [Developer Guide (README)](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)

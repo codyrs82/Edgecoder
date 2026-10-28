@@ -40,7 +40,7 @@ This page summarizes the economic model from `docs/public-mesh-operations.md`,
 ## Related references
 
 - [Public Mesh Operations Economy Section](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
-- [Developer Guide Economy Endpoints](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
+- [Developer Guide Economy Endpoints](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)
 
 ## Model Quality Multiplier
 

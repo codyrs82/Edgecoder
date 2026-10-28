@@ -5,7 +5,7 @@ This index links the documents this wiki synthesizes.
 ## Primary product and architecture docs
 
 - [README.md](https://github.com/codyrs82/Edgecoder/blob/main/README.md)
-- [README.dev.md](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
+- [CONTRIBUTING.md](https://github.com/codyrs82/Edgecoder/blob/main/CONTRIBUTING.md)
 
 ## Operational runbooks
 
