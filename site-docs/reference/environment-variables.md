@@ -54,6 +54,13 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
 | `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-signature`, …). Set `false` only for local dev with legacy unsigned agents. |
 
+## Result verification (#50, #106)
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation (0–1) of an agent id the coordinator has never seen. Below 1 so a caught agent can't regain full trust by re-registering; lower reputation means its results are re-executed more often. |
+| `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Max executions of a sampled subtask (original + replicas), 2–3. Values above 3 are capped. Replica earnings are newly minted, at most this minus one per sampled subtask. |
+
 ## Portal and passkeys
 
 | Variable | Example | Description |
