@@ -471,8 +471,55 @@ export class MockBitcoinAnchorProvider implements BitcoinAnchorProvider {
 /*  Factory – create provider from environment variables              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * #102: providers that can broadcast an anchor. `blockstream` only reads (confirmation lookups);
+ * its broadcastOpReturn always throws, so accepting it for anchoring made every tick fail.
+ */
+export const ANCHORING_PROVIDERS = ["anchor-proxy", "bitcoind"] as const;
+
+/** Every value the factory understands; anything else is a typo and is rejected. */
+export const KNOWN_ANCHOR_PROVIDERS = [...ANCHORING_PROVIDERS, "mock"] as const;
+
+function normalizedProvider(env: NodeJS.ProcessEnv): string {
+  return (env.BITCOIN_ANCHOR_PROVIDER ?? "").trim().toLowerCase();
+}
+
+/** Problems with the value itself, in any environment: blockstream (read-only) or a typo. */
+function providerValueProblem(provider: string): string | null {
+  if (provider === "blockstream") {
+    return "blockstream_cannot_anchor: BITCOIN_ANCHOR_PROVIDER=blockstream is read-only (confirmation lookups) and can't broadcast; use anchor-proxy or bitcoind";
+  }
+  if (provider && !(KNOWN_ANCHOR_PROVIDERS as readonly string[]).includes(provider)) {
+    return `unknown_anchor_provider: BITCOIN_ANCHOR_PROVIDER=${JSON.stringify(provider)}; expected one of ${KNOWN_ANCHOR_PROVIDERS.join(", ")}`;
+  }
+  return null;
+}
+
+/**
+ * Strict check for a production startup gate (#102): null only when BITCOIN_ANCHOR_PROVIDER is
+ * `anchor-proxy` or `bitcoind` **and** that provider's required env vars are set. Unset, `mock`,
+ * `blockstream`, typos and missing provider credentials all return the reason.
+ * Values are never echoed for the credential vars.
+ */
+export function anchorProviderProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  const provider = normalizedProvider(env);
+  if (!provider) return "anchor_provider_unset: set BITCOIN_ANCHOR_PROVIDER to anchor-proxy or bitcoind";
+  const valueProblem = providerValueProblem(provider);
+  if (valueProblem) return valueProblem;
+  if (provider === "mock") return "anchor_provider_mock: BITCOIN_ANCHOR_PROVIDER=mock produces fake transactions; use anchor-proxy or bitcoind";
+  const missing =
+    provider === "bitcoind"
+      ? ["BITCOIND_RPC_URL", "BITCOIND_RPC_USER", "BITCOIND_RPC_PASSWORD"].filter((k) => !env[k]?.trim())
+      : ["ANCHOR_PROXY_URL", "ANCHOR_PROXY_TOKEN"].filter((k) => !env[k]?.trim());
+  if (missing.length > 0) return `anchor_provider_missing_env: ${provider} needs ${missing.join(", ")}`;
+  return null;
+}
+
 export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): BitcoinAnchorProvider {
-  const provider = (process.env.BITCOIN_ANCHOR_PROVIDER ?? "mock").toLowerCase();
+  const provider = normalizedProvider(process.env) || "mock";
+  // Blockstream and typos are rejected everywhere; unset/mock stay allowed outside production.
+  const problem = providerValueProblem(provider);
+  if (problem) throw new Error(problem);
   if (provider === "bitcoind") {
     const rpcUrl = process.env.BITCOIND_RPC_URL;
     const rpcUser = process.env.BITCOIND_RPC_USER;
@@ -491,11 +538,8 @@ export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): Bit
     }
     return new AnchorProxyClientProvider(proxyUrl, proxyToken);
   }
-  if (provider === "blockstream") {
-    return new BlockstreamProvider(network);
-  }
   if (process.env.NODE_ENV === "production") {
-    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'bitcoind', 'anchor-proxy', or 'blockstream' in production (mock produces fake transactions)");
+    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
     process.exit(1);
   }
   console.warn("[bitcoin] using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");

@@ -124,7 +124,7 @@ npm run build:ble-proxy
 
 | Variable | Default | Description |
 |---|---|---|
-| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Provider type: `anchor-proxy`, `bitcoind`, `blockstream`, `mock`. |
+| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Anchoring provider: `anchor-proxy`, `bitcoind`, or `mock` (dev only). `blockstream` is rejected because it can't broadcast (#102). |
 | `BITCOIN_ANCHOR_CONFIRMATIONS` | `6` | Confirmations before an anchor counts as anchored. |
 | `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | `200000` | Daily anchoring budget: refuse a broadcast when (broadcasts in 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` exceeds it. |
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | `20000` | Absolute fee cap per anchor tx. |
