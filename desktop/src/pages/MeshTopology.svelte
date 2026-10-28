@@ -288,7 +288,7 @@
 
   .view-toggle { display: inline-flex; margin-top: 0.6rem; border: 1px solid var(--border, #1e1e3f); border-radius: var(--radius-sm, 6px); overflow: hidden; }
   .view-toggle button { background: none; border: none; color: var(--text-secondary, #94a3b8); padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.8rem; }
-  .view-toggle button[aria-pressed="true"] { background: var(--accent, #3b82f6); color: #fff; }
+  .view-toggle button[aria-pressed="true"] { background: var(--accent, #3b82f6); color: var(--on-accent, #fff); }
   .view-toggle button:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: -2px; }
 
   .graph-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 1rem; align-items: start; }
