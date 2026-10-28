@@ -56,6 +56,18 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
 | `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-signature`, …). Set `false` only for local dev with legacy unsigned agents. |
 
+## Result verification (#50, #106)
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESULT_VERIFICATION_RATE` | `0` | Base fraction of subtasks re-executed for verification. `0` = verification off (the default). |
+| `RESULT_VERIFICATION_ABANDON_PENALTY` | `0.25` | Reputation lost for claiming a verification replica and never reporting it. |
+| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` | A claimed replica with no report after this long is reassigned to an agent other than the abandoner(s). |
+| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | `1` | How many times one sampled subtask's stalled replica is reassigned (0–10). After that the subtask waits for the overall timeout. |
+| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation (0–1) of an agent id the coordinator has never seen. Below 1 so a caught agent can't regain full trust by re-registering; lower reputation means its results are re-executed more often. |
+| `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Max executions of a sampled subtask (original + replicas), 2–3. Values above 3 are capped. At most this minus one replicas run per sampled subtask; whether winning replicas are paid is set by `RESULT_VERIFICATION_MINT_REPLICA_REWARDS`. |
+| `RESULT_VERIFICATION_MINT_REPLICA_REWARDS` | `false` | Pay winning verification replicas from newly minted compute credits (`true`/`1`/`yes` to enable). Off by default: only the original execution is paid, so verification doesn't add to the credit supply. **Enabling minting requires Cody's approval.** The coordinator logs a startup warning whenever `RESULT_VERIFICATION_RATE` is above 0, saying whether replicas are paid. |
+
 ## Portal and passkeys
 
 | Variable | Example | Description |

@@ -4,6 +4,8 @@ import {
   ResultVerifier,
   resultKey,
   verificationConfigFromEnv,
+  payableWinners,
+  verificationStartupWarning,
   DEFAULT_VERIFICATION,
   type ExecutionResult,
   type ReplicaRequest
@@ -33,7 +35,7 @@ const malicious: Worker = () => ({ ok: true, output: "fake output, collect credi
 /** Mini coordinator mirroring /result: sampled results held, replicas to other agents, credits only when verified/unsampled. */
 function harness(rate: number, workers: Record<string, Worker>, random = () => 0) {
   const queue = new SwarmQueue(null, { graceMs: 1_000, livenessMs: 60_000, maxAttempts: 3 });
-  const verifier = new ResultVerifier<{ id: string }>({ rate }, random);
+  const verifier = new ResultVerifier<{ id: string }>({ rate, initialReputation: 1 }, random);
   const credits = new Map<string, number>();
   const released: Array<{ id: string; output: string }> = [];
   const earn = (r: ExecutionResult<{ id: string }>) => credits.set(r.agentId, (credits.get(r.agentId) ?? 0) + 5);
@@ -76,7 +78,7 @@ describe("ResultVerifier (#50)", () => {
   it("rate 0 never samples; rate 1 always; lower reputation samples more", () => {
     expect(new ResultVerifier({ rate: 0 }).shouldVerify("a")).toBe(false);
     expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a")).toBe(true);
-    const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5 }, () => 0);
+    const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5, initialReputation: 1 }, () => 0);
     expect(v.sampleRate("a")).toBeCloseTo(0.1);
     const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "bad", meta: null });
     const r2 = v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "b", ok: true, output: "good", meta: null });
@@ -179,6 +181,89 @@ describe("ResultVerifier (#50)", () => {
   });
 });
 
+describe("verification hardening (#106)", () => {
+  it("unknown agents start at reputation 0.5 and are sampled more", () => {
+    const v = new ResultVerifier<null>({ rate: 0.1 }, () => 0);
+    expect(v.reputation("new-agent")).toBe(0.5);
+    expect(v.sampleRate("new-agent")).toBeCloseTo(0.15);
+  });
+
+  it("a claimed-but-abandoned replica makes the result unresolved instead of paying it unverified", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "accomplice");
+    now = 1001;
+    expect(v.expire()).toMatchObject([{ status: "unresolved", winners: [], abandonedBy: ["accomplice"] }]);
+  });
+
+  it("a stalled replica claim is penalized and reassigned once, excluding the abandoner", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, abandonPenalty: 0.25 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "lazy");
+    now = 1001;
+    const { replacements, abandoned } = v.reassignStalled();
+    expect(abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy" }]);
+    expect(v.reputation("lazy")).toBeCloseTo(0.25);
+    expect(replacements).toHaveLength(1);
+    const next = replacements[0].request;
+    expect(replacements[0].replaces).toBe(r1.subtask.id);
+    expect(next.excludeAgents).toEqual(expect.arrayContaining(["a", "lazy"]));
+    // The abandoner's late report on the old id is ignored; the new replica verifies.
+    expect(v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "lazy", ok: true, output: "1", meta: null })).toBeNull();
+    expect(v.recordReplica(next.subtask.id, { subtaskId: next.subtask.id, agentId: "b", ok: true, output: "1", meta: null })).toMatchObject({ status: "verified" });
+    // Penalized once only.
+    expect(v.reputation("lazy")).toBeCloseTo(0.25);
+  });
+
+  it("maxReassignments controls how often a stalled replica is reissued (#114 review)", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, maxReassignments: 2 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "lazy1");
+    now = 1001;
+    const first = v.reassignStalled().replacements;
+    expect(first).toHaveLength(1);
+    v.markReplicaClaimed(first[0].request.subtask.id, "lazy2");
+    now = 2002;
+    const second = v.reassignStalled().replacements;
+    expect(second).toHaveLength(1);
+    expect(second[0].request.excludeAgents).toEqual(expect.arrayContaining(["a", "lazy1", "lazy2"]));
+    expect(second[0].request.subtask.id).not.toBe(first[0].request.subtask.id);
+    v.markReplicaClaimed(second[0].request.subtask.id, "lazy3");
+    now = 3003;
+    const third = v.reassignStalled();
+    expect(third.replacements).toHaveLength(0);
+    expect(third.abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy3" }]);
+
+    const zero = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, maxReassignments: 0 }, () => 0, () => now);
+    const z1 = zero.start(subtask("z", "x"), { subtaskId: "z", agentId: "a", ok: true, output: "1", meta: null });
+    zero.markReplicaClaimed(z1.subtask.id, "lazy");
+    now += 1001;
+    expect(zero.reassignStalled().replacements).toHaveLength(0);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_REASSIGNMENTS: "3" }).maxReassignments).toBe(3);
+  });
+
+  it("an unclaimed replica still times out to an unverified accept (single-node meshes)", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);
+    v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    now = 1001;
+    expect(v.expire()).toMatchObject([{ status: "timeout", output: "1" }]);
+  });
+
+  it("maxExecutions is capped at 3", () => {
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_EXECUTIONS: "7" }).maxExecutions).toBe(3);
+    const v = new ResultVerifier<null>({ rate: 1, maxExecutions: 7 }, () => 0);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    const r2 = v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "b", ok: true, output: "2", meta: null });
+    if (r2?.status !== "pending") throw new Error("expected pending");
+    const r3 = v.recordReplica(r2.next.subtask.id, { subtaskId: r2.next.subtask.id, agentId: "c", ok: true, output: "3", meta: null });
+    expect(r3).toMatchObject({ status: "unresolved" });
+  });
+});
+
 describe("malicious fake worker (#50)", () => {
   it("rate 1: the cheater earns nothing, honest agents earn, the verified output is the honest one", () => {
     const h = harness(1, { evil: malicious, h1: honest, h2: honest });
@@ -218,5 +303,41 @@ describe("malicious fake worker (#50)", () => {
     h.queue.enqueueSubtask(subtask("s1", "x"));
     h.run(["evil1", "evil2", "h1"]);
     expect(h.credits.get("h1") ?? 0).toBe(0);
+  });
+});
+
+// #114: replica rewards are minted only when explicitly enabled.
+describe("replica reward minting (#114)", () => {
+  const exec = (subtaskId: string) => ({ subtaskId, agentId: `a-${subtaskId}`, ok: true, output: "x" }) as unknown as ExecutionResult;
+  const outcome = {
+    status: "verified" as const,
+    originalSubtaskId: "s1",
+    winners: [exec("s1"), exec("s1#r1")],
+    losers: [],
+    output: "x",
+    ok: true
+  };
+
+  it("defaults the mint flag to false", () => {
+    expect(DEFAULT_VERIFICATION.mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({}).mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MINT_REPLICA_REWARDS: "0" }).mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MINT_REPLICA_REWARDS: "true" }).mintReplicaRewards).toBe(true);
+  });
+
+  it("pays only the original execution when the flag is false", () => {
+    const paid = payableWinners(outcome, verificationConfigFromEnv({}));
+    expect(paid.map((w) => w.subtaskId)).toEqual(["s1"]);
+  });
+
+  it("pays winning replicas when the flag is true", () => {
+    const paid = payableWinners(outcome, { mintReplicaRewards: true });
+    expect(paid.map((w) => w.subtaskId)).toEqual(["s1", "s1#r1"]);
+  });
+
+  it("warns at startup only when the verification rate is above 0", () => {
+    expect(verificationStartupWarning({ rate: 0, mintReplicaRewards: false })).toBeNull();
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false })).toMatch(/NOT paid/);
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: true })).toMatch(/minted/);
   });
 });

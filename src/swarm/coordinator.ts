@@ -92,7 +92,9 @@ import {
 } from "./result-integrity.js";
 import {
   ResultVerifier,
+  payableWinners,
   verificationConfigFromEnv,
+  verificationStartupWarning,
   type ExecutionResult,
   type ReplicaRequest,
   type VerificationOutcome
@@ -2210,6 +2212,8 @@ app.post("/pull", async (req, reply) => {
 
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
     behaviorTracker.recordTaskClaim(body.agentId);
+    // #106: remember who took a verification replica, so abandoning it can't force an unverified payout.
+    if (resultVerifier.isReplica(task.id)) resultVerifier.markReplicaClaimed(task.id, body.agentId);
     const claimRecord = ordering.append({
       eventType: "task_claim",
       taskId: task.taskId,
@@ -2291,7 +2295,12 @@ interface ResultMeta {
   reportedDurationMs: number;
   subtask: Subtask;
 }
-const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfigFromEnv());
+const verificationConfig = verificationConfigFromEnv();
+const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfig);
+{
+  const warning = verificationStartupWarning(verificationConfig);
+  if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards }, warning);
+}
 
 function enqueueReplica(req: ReplicaRequest): void {
   queue.enqueueSubtask(req.subtask, { excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts });
@@ -2391,7 +2400,14 @@ async function publishResult(result: SubtaskResult): Promise<void> {
  * and release dependents. Replica results are never published.
  */
 async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Promise<void> {
-  for (const w of outcome.winners) await accrueResultCredits(w);
+  // #114: winning replicas earn minted credits only when RESULT_VERIFICATION_MINT_REPLICA_REWARDS is on.
+  const payable = payableWinners(outcome, verificationConfig);
+  for (const w of payable) await accrueResultCredits(w);
+  for (const w of outcome.winners) {
+    if (!payable.includes(w)) {
+      app.log.info({ originalSubtaskId: outcome.originalSubtaskId, executedSubtaskId: w.subtaskId }, "result_verification_replica_unpaid");
+    }
+  }
   for (const l of outcome.losers) {
     securityLog.log({
       level: securityLog.severity("result_verification_mismatch"),
@@ -2414,6 +2430,16 @@ async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Pro
   }
   if (outcome.status === "unresolved") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_unresolved");
+    for (const agentId of outcome.abandonedBy ?? []) {
+      securityLog.log({
+        level: securityLog.severity("result_verification_replica_abandoned"),
+        event: "result_verification_replica_abandoned",
+        source: { type: "agent", id: agentId },
+        details: { originalSubtaskId: outcome.originalSubtaskId },
+        action: "credits_withheld",
+        coordinatorId: identity.peerId,
+      });
+    }
     // #107: the requester gets a failure, never an unverified output. Same terminal path
     // as the #51 retry cap: fail held dependents, ledger/forward/announce, refund once.
     await finalizeFailedSubtask(
@@ -5185,6 +5211,22 @@ export async function initCoordinator(): Promise<void> {
       // #50: release verifications whose replicas never reported.
       setInterval(() => {
         void (async () => {
+          // #106: penalize and (once) reassign replicas that were claimed but never reported.
+          const stalled = resultVerifier.reassignStalled();
+          for (const a of stalled.abandoned) {
+            securityLog.log({
+              level: securityLog.severity("result_verification_replica_abandoned"),
+              event: "result_verification_replica_abandoned",
+              source: { type: "agent", id: a.agentId },
+              details: { originalSubtaskId: a.originalSubtaskId, reputation: resultVerifier.reputation(a.agentId) },
+              action: "replica_reassigned",
+              coordinatorId: identity.peerId,
+            });
+          }
+          for (const r of stalled.replacements) {
+            queue.removeHeld(r.replaces); // the abandoner's late report then fails the claim check
+            enqueueReplica(r.request);
+          }
           for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
         })().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
       }, 60_000);
