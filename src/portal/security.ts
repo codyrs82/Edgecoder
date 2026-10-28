@@ -44,6 +44,19 @@ export function trustProxyHops(raw: string | undefined): number {
   return Number.isInteger(n) && n > 0 ? n : 1;
 }
 
+/**
+ * #13: Fastify >= 5.12 treats a numeric `trustProxy` as "trust nothing" (hop counts can't
+ * validate the immediate peer), and its types no longer accept a number.
+ * - PORTAL_TRUSTED_PROXIES (comma-separated IPs/CIDRs, e.g. Fly's proxy range): trust exactly those.
+ * - Otherwise: keep the previous behaviour (trust the nearest PORTAL_TRUST_PROXY_HOPS hops).
+ */
+export function trustProxySetting(env: NodeJS.ProcessEnv = process.env): string | ((addr: string, hop: number) => boolean) {
+  const cidrs = (env.PORTAL_TRUSTED_PROXIES ?? "").trim();
+  if (cidrs) return cidrs;
+  const hops = trustProxyHops(env.PORTAL_TRUST_PROXY_HOPS);
+  return (_addr: string, hop: number) => hop < hops;
+}
+
 export function parseOriginList(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")
