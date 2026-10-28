@@ -2264,7 +2264,7 @@ async function finalizeFailedSubtask(result: SubtaskResult): Promise<void> {
   const billing = taskBilling.get(result.taskId);
   if (billing && !billing.refunded) {
     billing.refunded = true;
-    await adjustCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
+    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
   }
   app.log.warn(
     { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
