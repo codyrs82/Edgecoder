@@ -25,7 +25,7 @@ import {
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
 import { extractCode } from "../model/extract.js";
-import { SwarmQueue } from "./queue.js";
+import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -51,7 +51,8 @@ import {
   PeerExchangePayload,
   CapabilityAnnouncePayload,
   MeshPeerRole,
-  SandboxMode
+  SandboxMode,
+  SubtaskResult
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -134,7 +135,13 @@ await app.register(cors, {
   credentials: true,
 });
 await app.register(websocket);
-const queue = new SwarmQueue(pgStore);
+const queue = new SwarmQueue(pgStore, leaseConfigFromEnv());
+// #51: subtasks failed at the retry cap go through finalizeFailedSubtask (declared below).
+queue.onLeaseFailure((result) => {
+  void finalizeFailedSubtask(result).catch((err) =>
+    app.log.error({ err, subtaskId: result.subtaskId }, "subtask_failure_finalize_failed")
+  );
+});
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
 if (process.env.MESH_AUTH_TOKEN) {
@@ -146,6 +153,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
+/** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
+const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
@@ -469,6 +478,7 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
 
 // ── Subtask dependency tracking ─────────────────────────────────────────────
 import { SubtaskDepTracker } from "./subtask-deps.js";
+import { lateResultRejection } from "./lease-gate.js";
 const depTracker = new SubtaskDepTracker();
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
@@ -1653,6 +1663,8 @@ const registerSchema = z.object({
 
 const heartbeatSchema = z.object({
   agentId: z.string(),
+  /** #51: renew claim leases only; don't drain tunnel invites/notices or offers. */
+  leaseOnly: z.boolean().optional(),
   powerTelemetry: z
     .object({
       onExternalPower: z.boolean().optional(),
@@ -1861,6 +1873,11 @@ app.post("/heartbeat", async (req, reply) => {
     });
   }
   queue.heartbeat(body.agentId);
+  if (body.leaseOnly) {
+    // #51: mid-task lease renewal. Signature was checked above (unsigned is rejected
+    // when REQUIRE_SIGNED_AGENT_REQUESTS is on, the production default); nothing is drained.
+    return reply.send({ ok: true, leaseOnly: true });
+  }
   behaviorTracker.recordHeartbeat(body.agentId);
   if (body.powerTelemetry) {
     const existing = agentCapabilities.get(body.agentId);
@@ -1893,7 +1910,12 @@ app.post("/heartbeat", async (req, reply) => {
       existing.sandboxMode = body.sandboxMode as SandboxMode;
     }
   }
-  const requeued = queue.requeueStale(30_000);
+  // #51: lease-based requeue (timeout + grace, renewed by heartbeat, retry cap).
+  const leaseExpiry = queue.expireLeases();
+  const requeued = leaseExpiry.requeued.length;
+  if (leaseExpiry.failed.length > 0) {
+    app.log.warn({ subtaskIds: leaseExpiry.failed }, "subtask_failed_max_attempts");
+  }
   const tunnelInvites = pendingTunnelInvites.get(body.agentId) ?? [];
   pendingTunnelInvites.set(body.agentId, []);
   const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
@@ -2038,6 +2060,9 @@ app.post("/submit", async (req, reply) => {
   });
   await pgStore?.persistLedgerRecord(enqueueRecord);
   await persistStatsLedgerRecord(enqueueRecord);
+  if (body.submitterAccountId !== "anonymous") {
+    taskBilling.set(body.taskId, { accountId: body.submitterAccountId, credits: 1, refunded: false });
+  }
 
   // If mesh peers exist, delay local claiming to give peers a chance to claim
   // via gossip first (prevents duplicate execution across coordinators).
@@ -2213,6 +2238,67 @@ app.post("/pull", async (req, reply) => {
   return reply.send({ subtask: task ?? null });
 });
 
+/**
+ * #51: terminal failure of a subtask the coordinator gave up on (retry cap). Does
+ * what /result does for a failed result, minus any accrual (nobody earns, and
+ * "coordinator" is never credited): ledger record, fail held dependents, forward
+ * to the origin coordinator, announce, and refund the requester's submit charge.
+ */
+async function finalizeFailedSubtask(result: SubtaskResult): Promise<void> {
+  const failedResults: SubtaskResult[] = [result];
+  for (const dep of depTracker.dropDependents(result.subtaskId)) {
+    const depResult: SubtaskResult = {
+      subtaskId: dep.id,
+      taskId: dep.taskId,
+      agentId: "coordinator",
+      ok: false,
+      output: "",
+      error: `dependency_failed:${result.subtaskId}`,
+      durationMs: 0
+    };
+    queue.complete(depResult);
+    failedResults.push(depResult);
+  }
+  for (const r of failedResults) {
+    const record = ordering.append({
+      eventType: "task_complete",
+      taskId: r.taskId,
+      subtaskId: r.subtaskId,
+      actorId: "coordinator",
+      payloadJson: JSON.stringify({ ok: false, error: r.error })
+    });
+    await pgStore?.persistLedgerRecord(record);
+    await persistStatsLedgerRecord(record);
+
+    const origin = taskOriginMap.get(r.subtaskId);
+    if (origin && origin.coordinatorId !== identity.peerId) {
+      taskOriginMap.delete(r.subtaskId);
+      void request(`${origin.coordinatorUrl}/result`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+        body: JSON.stringify(r)
+      }).catch((e) => app.log.warn({ subtaskId: r.subtaskId, err: String(e) }, "result_forward_failed"));
+    }
+    void mesh.broadcast(
+      protocol.createMessage(
+        "result_announce",
+        identity.peerId,
+        { taskId: r.taskId, subtaskId: r.subtaskId, ok: false },
+        coordinatorKeys.privateKeyPem
+      )
+    );
+  }
+  const billing = taskBilling.get(result.taskId);
+  if (billing && !billing.refunded) {
+    billing.refunded = true;
+    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
+  }
+  app.log.warn(
+    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
+    "task_failed_max_attempts"
+  );
+}
+
 app.post("/result", async (req, reply) => {
   // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
   // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
@@ -2252,6 +2338,9 @@ app.post("/result", async (req, reply) => {
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
   }
+  // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
+  const late = lateResultRejection(queue, body.subtaskId, body.agentId);
+  if (late) return reply.code(late.statusCode).send(late.body);
   // ── #44: claim ownership, before anything is recorded ──
   const claim = queue.getClaim(body.subtaskId);
   // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the
