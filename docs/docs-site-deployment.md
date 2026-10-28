@@ -34,6 +34,6 @@ Defaults:
 Example:
 
 ```bash
-DOCS_SITE_URL=https://docs.edgecoder.io
+DOCS_SITE_URL=https://codyrs82.github.io/Edgecoder/
 GITHUB_REPO_URL=https://github.com/codyrs82/Edgecoder
 ```
