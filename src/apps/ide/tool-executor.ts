@@ -11,7 +11,7 @@ import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, lstatSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,12 @@ function gitUnapprovedReason(args: string[]): string | null {
     if (args.slice(1).some((a) => !a.startsWith("-"))) return "git branch <name> creates a branch";
   }
   return null;
+}
+
+/** #17: `child` is `root` or inside it (no prefix confusion: /proj-evil is not inside /proj). */
+export function isWithin(root: string, child: string): boolean {
+  const rel = relative(root, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /** True if an argument names a path outside `root` (absolute, ~, or ..-escaping). */
@@ -182,8 +188,18 @@ export class ToolExecutor {
   private readonly root: string;
   private readonly githubToken: string | null;
 
+  /** #17: symlink-resolved root (e.g. /tmp -> /private/tmp on macOS), for real-path checks. */
+  private readonly rootReal: string;
+
   constructor(projectRoot: string, githubToken?: string | null) {
     this.root = resolve(projectRoot);
+    let rootReal = this.root;
+    try {
+      rootReal = realpathSync(this.root);
+    } catch {
+      // root doesn't exist yet; lexical checks still apply
+    }
+    this.rootReal = rootReal;
     this.githubToken = githubToken ?? null;
   }
 
@@ -197,16 +213,35 @@ export class ToolExecutor {
    */
   private resolvePath(relativePath: string): string {
     const abs = resolve(this.root, relativePath);
-    const rel = relative(this.root, abs);
-    if (rel.startsWith("..")) {
+    if (!isWithin(this.root, abs)) {
       throw new Error(`Path escapes project root: ${relativePath}`);
     }
-    // If the path exists, verify the real (symlink-resolved) path is also within root
-    if (existsSync(abs)) {
-      const real = realpathSync(abs);
-      if (!real.startsWith(this.root)) {
-        throw new Error(`Symlink escapes project root: ${relativePath}`);
+    // #17: check the real path of the deepest part that exists. Checking only an existing leaf
+    // let `write_file link/new.txt` (link -> /etc) or a dangling leaf symlink write outside.
+    let probe = abs;
+    for (;;) {
+      let exists = false;
+      try {
+        lstatSync(probe);
+        exists = true;
+      } catch {
+        // not there; try the parent
       }
+      if (exists) {
+        let real: string;
+        try {
+          real = realpathSync(probe);
+        } catch {
+          throw new Error(`Dangling symlink in path: ${relativePath}`);
+        }
+        if (!isWithin(this.rootReal, real) && !isWithin(this.root, real)) {
+          throw new Error(`Symlink escapes project root: ${relativePath}`);
+        }
+        break;
+      }
+      const parent = dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
     }
     return abs;
   }
