@@ -6,8 +6,8 @@ on:
   pull_request:
     paths:
       - "deploy/docker/**"
-      - "src/swarm/**"
-      - "src/index.ts"
+      - "src/**"
+      - "package.json"
       - "tests/e2e/docker-compose.scale.yml"
       - "scripts/e2e/scale-nonroot.sh"
       - ".github/workflows/scale-nonroot.yml"
@@ -38,7 +38,7 @@ jobs:
         run: bash scripts/e2e/scale-nonroot.sh
       - name: Compose logs
         if: always()
-        run: docker compose -f tests/e2e/docker-compose.scale.yml logs --no-color > scale-nonroot.log 2>&1 || true
+        run: docker compose -f tests/e2e/docker-compose.scale.yml logs --no-color > scale-nonroot.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
