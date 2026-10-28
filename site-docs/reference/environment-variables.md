@@ -47,6 +47,8 @@ Consolidated reference for all environment controls. The primary config file on 
 |---|---|
 | `MESH_AUTH_TOKEN` | Shared mesh auth secret. Auto-provisioned by coordinator on successful registration if left blank. |
 | `COORDINATOR_MESH_TOKEN` | Alias for `MESH_AUTH_TOKEN`. Keep aligned if both are set. |
+| `MESH_PEER_ALLOWLIST` | #52: comma-separated `peerId:fingerprint` pairs for the peer coordinators this coordinator trusts. `fingerprint` is the SHA-256 (hex) of the peer's SPKI public key. With the mesh token, a peer must also be on this list and sign its registration with that key. Results it forwards must be signed too. **Required in production**: without it, token-only peer registration and forwarded results are rejected. In dev an empty list keeps the old token-only behaviour. |
+| `COORDINATOR_PRIVATE_KEY_PEM` | Ed25519 private key (PKCS#8 PEM) for this coordinator's mesh identity. Set it on every coordinator that peers, since a generated key changes on each restart and would drop off its peers' allowlists. Fingerprint for `MESH_PEER_ALLOWLIST`: `node -e 'const c=require("crypto");const k=c.createPublicKey(process.env.COORDINATOR_PRIVATE_KEY_PEM);console.log(c.createHash("sha256").update(k.export({type:"spki",format:"der"})).digest("hex"))'` |
 | `INFERENCE_AUTH_TOKEN` | Auth token for the inference service API. |
 | `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. |
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |

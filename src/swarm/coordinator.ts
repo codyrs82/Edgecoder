@@ -54,6 +54,7 @@ import {
   SandboxMode
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
+import { checkPeerRegistration, parsePeerAllowlist, signForwardedResult, signRegistration, verifyForwardedResult } from "../mesh/peer-trust.js";
 import { MeshProtocol } from "../mesh/protocol.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
@@ -139,6 +140,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
+// #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
+const MESH_PEER_ALLOWLIST = parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
 const COORDINATOR_FEE_BPS = Number(process.env.COORDINATOR_FEE_BPS ?? "150");
@@ -828,7 +831,12 @@ async function bootstrapPeerMesh(): Promise<void> {
           publicKeyPem: identity.publicKeyPem,
           coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL),
           networkMode,
-          registrationToken: COORDINATOR_REGISTRATION_TOKEN
+          registrationToken: COORDINATOR_REGISTRATION_TOKEN,
+          // #52: prove we hold the key the peer's allowlist names.
+          ...signRegistration(
+            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL) },
+            coordinatorKeys.privateKeyPem
+          )
         }),
         signal: AbortSignal.timeout(8_000)
       });
@@ -2235,6 +2243,20 @@ app.post("/result", async (req, reply) => {
   });
   if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });
   const isPeerForward = resultAuth === "peer_forward";
+  if (isPeerForward) {
+    // #52: a forwarded result must be signed by an allowlisted peer coordinator.
+    const fwd = verifyForwardedResult({
+      headers: (req as any).headers ?? {},
+      bodyJson: JSON.stringify(rawBody),
+      allowlist: MESH_PEER_ALLOWLIST,
+      production: isProduction(),
+      publicKeyFor: (id) => (id === identity.peerId ? null : coordinatorPublicKeyById(id))
+    });
+    if (!fwd.ok) {
+      app.log.warn({ subtaskId: body.subtaskId, error: fwd.error }, "forwarded_result_rejected");
+      return reply.code(fwd.code).send({ error: fwd.error });
+    }
+  }
   if (!isPeerForward) {
     const claimCheck = checkResultClaim(claim, body.agentId);
     if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
@@ -2342,13 +2364,16 @@ app.post("/result", async (req, reply) => {
     void (async () => {
       try {
         const { request: httpReq } = await import("undici");
+        const forwardJson = JSON.stringify(body);
         await httpReq(`${origin.coordinatorUrl}/result`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+            // #52: the origin checks this against our allowlisted key.
+            ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson),
           },
-          body: JSON.stringify(body),
+          body: forwardJson,
         });
         app.log.info({ subtaskId: body.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin");
       } catch (e) {
@@ -2941,7 +2966,9 @@ const peerSchema = z.object({
   coordinatorUrl: z.string().url(),
   networkMode: z.enum(["public_mesh", "enterprise_overlay"]),
   role: z.enum(["coordinator", "agent", "phone"]).optional(),
-  registrationToken: z.string().optional()
+  registrationToken: z.string().optional(),
+  issuedAtMs: z.number().optional(),
+  signature: z.string().optional()
 });
 
 app.post("/mesh/register-peer", async (req, reply) => {
@@ -2954,6 +2981,16 @@ app.post("/mesh/register-peer", async (req, reply) => {
   // The mesh token IS the shared secret that proves membership in this coordinator mesh.
   const meshTokenProvided = MESH_AUTH_TOKEN && (req.headers as Record<string, string>)["x-mesh-token"] === MESH_AUTH_TOKEN;
   let activationReason = "mesh_token_peer";
+
+  if (meshTokenProvided) {
+    // #52: the shared token alone is not enough; the peer's key must be allowlisted.
+    const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction() });
+    if (!trust.ok) {
+      app.log.warn({ peerId: body.peerId, error: trust.error }, "peer_registration_rejected");
+      return reply.code(trust.code).send({ error: trust.error });
+    }
+    activationReason = trust.mode === "allowlist" ? "mesh_peer_allowlisted" : "mesh_token_peer_legacy";
+  }
 
   if (!meshTokenProvided) {
     const activation = await validatePortalNode({
@@ -2971,7 +3008,8 @@ app.post("/mesh/register-peer", async (req, reply) => {
     activationReason = activation.reason ?? "portal_validated";
   }
 
-  mesh.addPeer(body as MeshPeerIdentity);
+  const { issuedAtMs: _issuedAtMs, signature: _signature, ...peerIdentity } = body;
+  mesh.addPeer(peerIdentity as MeshPeerIdentity);
   peerScore.set(body.peerId, 100);
   app.log.info({ peerId: body.peerId, reason: activationReason, url: body.coordinatorUrl }, "peer_registered");
   const approvalRecord = ordering.append({
