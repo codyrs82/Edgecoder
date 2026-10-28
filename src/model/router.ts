@@ -192,10 +192,10 @@ export class IntelligentRouter {
   }
 
   /** #36: explicit swarm route for the IDE /run/swarm endpoint. Throws if swarm is not configured. */
-  async routeSwarm(prompt: string): Promise<RouterResult> {
+  async routeSwarm(prompt: string, maxTokens?: number): Promise<RouterResult> {
     if (!this.cfg.meshAuthToken) throw new Error("swarm_unavailable");
     const started = Date.now();
-    const result = await this.runViaSwarm(prompt);
+    const result = await this.runViaSwarm(prompt, undefined, maxTokens);
     return { ...result, route: "swarm", latencyMs: Date.now() - started };
   }
 
@@ -269,7 +269,8 @@ export class IntelligentRouter {
 
   private async runViaSwarm(
     prompt: string,
-    requestedModel?: string
+    requestedModel?: string,
+    maxTokens?: number
   ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
     const coordinatorUrl = this.cfg.coordinatorUrl.replace(/\/$/, "");
     const headers = {
@@ -290,6 +291,8 @@ export class IntelligentRouter {
         resourceClass: "cpu",
         priority: 60,
         requestedModel,
+        // #71: forwarded so the coordinator can price and limit the request.
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
         subtasks: [{ prompt, language: this.cfg.swarmLanguage ?? "python" }]
       }),
       headersTimeout: 15_000,

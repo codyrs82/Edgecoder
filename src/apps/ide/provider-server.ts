@@ -18,6 +18,7 @@ import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
+import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 const app = Fastify({ logger: true });
@@ -56,7 +57,9 @@ const providers = new ProviderRegistry();
 const router = new IntelligentRouter();
 
 // #36: the VS Code extension polls /status; alias of /v1/router/status.
-app.get("/status", async () => router.status());
+// #71: per-request / per-session swarm spend caps.
+const swarmBudget = new SwarmSpendGuard(swarmBudgetFromEnv());
+app.get("/status", async () => ({ ...router.status(), swarmBudget: swarmBudget.status() }));
 const idePullTracker = new PullTracker();
 
 // --- IDE Agent state ---
@@ -664,8 +667,22 @@ async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown;
     if (!router.swarmEnabled) {
       return reply.code(503).send({ error: "swarm_unavailable", message: "Swarm routing is not configured (MESH_AUTH_TOKEN unset)." });
     }
+    const budget = swarmBudget.reserve();
+    if (!budget.ok) {
+      return reply.code(402).send({ error: "swarm_spend_cap", reason: budget.reason, budget: swarmBudget.status() });
+    }
     try {
-      const res = await router.routeSwarm(body.task);
+      let res;
+      try {
+        res = await router.routeSwarm(body.task, body.maxTokens);
+      } catch (error) {
+        swarmBudget.release();
+        throw error;
+      }
+      const settled = swarmBudget.settle(res.creditsSpent);
+      if (settled.overPerRequestCap) {
+        req.log?.warn?.({ creditsSpent: res.creditsSpent, swarmTaskId: res.swarmTaskId }, "ide_swarm_spend_over_request_cap");
+      }
       return reply.send({
         plan: "",
         generatedCode: res.text,
