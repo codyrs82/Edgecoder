@@ -61,7 +61,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^25.2.3",
+    "@types/node": "^22.18.0",
     "@types/pg": "^8.16.0",
     "@types/web-bluetooth": "^0.0.21",
     "@types/ws": "^8.18.1",
@@ -71,5 +71,9 @@
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^4.0.18"
-  }
+  },
+  "engines": {
+    "node": ">=22.12 <25"
+  },
+  "packageManager": "npm@10.9.2"
 }

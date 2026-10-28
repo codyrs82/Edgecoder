@@ -6,7 +6,7 @@ ROLE="${1:-}"
 REPO_URL="${2:-}"
 REPO_REF="${3:-main}"
 INSTALL_DIR="${4:-/opt/edgecoder/app}"
-NODE_MAJOR="${NODE_MAJOR:-20}"
+NODE_MAJOR="${NODE_MAJOR:-22}"
 
 usage() {
   cat <<'EOF'
@@ -20,7 +20,7 @@ Examples:
 
 Notes:
   - Supports Debian/Ubuntu hosts with systemd.
-  - Installs Node.js (major version controlled by NODE_MAJOR, default 20).
+  - Installs Node.js (major version controlled by NODE_MAJOR, default 22).
   - Builds EdgeCoder and installs the selected systemd service.
 EOF
 }

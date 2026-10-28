@@ -160,7 +160,7 @@ Environment for seed-node:
 
 ### Building the Docker Image
 
-The `Dockerfile` is a single-stage build based on `node:20-bookworm-slim`:
+The `Dockerfile` is a single-stage build based on `node:22-bookworm-slim` (pinned by digest):
 
 - Installs system dependencies (curl, Python 3, Bluetooth libraries, build tools).
 - Installs Ollama.
@@ -204,7 +204,7 @@ sudo bash deploy/linux/bootstrap-host.sh agent https://github.com/codyrs82/Edgec
 
 This script:
 
-1. Installs Node.js 20 from NodeSource.
+1. Installs Node.js 22 from NodeSource.
 2. Clones (or updates) the repository.
 3. Runs `npm ci && npm run build`.
 4. Calls `scripts/linux/systemd/install-systemd.sh` to install the systemd unit.

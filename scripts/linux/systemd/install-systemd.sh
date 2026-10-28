@@ -37,7 +37,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
-  echo "error: Node.js binary not found. Install Node.js 20+ first." >&2
+  echo "error: Node.js binary not found. Install Node.js 22+ first." >&2
   exit 1
 fi
 

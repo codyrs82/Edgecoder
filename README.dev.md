@@ -42,7 +42,7 @@ Current scaffold includes:
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22+
 - npm
 - Optional: Docker (for full local stack demo)
 - Optional: Ollama CLI (when using `ollama-local`)

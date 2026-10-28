@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
       # BLE native modules (@abandonware/noble, bleno) are optionalDependencies:
       # if they can't compile on a runner, npm ci skips them instead of failing.
@@ -47,7 +47,7 @@ jobs:
         run: apt-get update && apt-get install -y curl git ca-certificates gnupg
       - name: Install Node.js
         run: |
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
           apt-get install -y nodejs
       - uses: actions/checkout@v4
       - run: npm ci

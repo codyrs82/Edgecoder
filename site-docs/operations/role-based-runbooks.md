@@ -64,7 +64,7 @@ This page gives concrete responsibilities and recurring actions by role.
 
 ## Initial setup — Linux (Debian/Ubuntu)
 
-1. Install Node.js 20+: `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs`
+1. Install Node.js 22+: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs`
 2. Download and install `.deb`: `sudo dpkg -i EdgeCoder-{version}-linux-amd64.deb`
 3. Enroll node in portal → Nodes → copy registration token.
 4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.

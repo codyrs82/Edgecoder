@@ -19,7 +19,7 @@ For full multi-node rollout (self-installed agents + additional coordinators), u
 ## Prerequisites
 
 - macOS with Xcode Command Line Tools (`pkgbuild` available)
-- Node.js 20+ installed on target machines
+- Node.js 22+ installed on target machines
 
 ## Build installer package
 
@@ -222,7 +222,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/io.edgecoder.runtime.plis
 
 - Installer fails in script phase:
   - Usually root cannot find your Node install (common with `nvm`).
-  - Ensure Node 20+ exists at a system path (for example `/opt/homebrew/bin/node`), or set:
+  - Ensure Node 22+ exists at a system path (for example `/opt/homebrew/bin/node`), or set:
     - `NODE_BIN=/opt/homebrew/bin/node` in `/etc/edgecoder/edgecoder.env`
 - Service bootstraps but worker does not run:
   - Check logs in `/var/log/edgecoder/runtime.err.log`

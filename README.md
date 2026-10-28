@@ -44,7 +44,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed walkthrough of d
 
 ### Prerequisites
 
-- **Node.js 20+** and npm
+- **Node.js 22+** and npm
 - **Ollama** (optional; auto-installed when `OLLAMA_AUTO_INSTALL=true`)
 - **Docker** (optional; required for Docker sandbox mode)
 

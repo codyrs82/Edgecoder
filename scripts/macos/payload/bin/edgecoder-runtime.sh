@@ -60,7 +60,7 @@ resolve_node_bin() {
 
 NODE_BIN="$(resolve_node_bin || true)"
 if [[ -z "$NODE_BIN" ]]; then
-  echo "node binary not found. Install Node.js 20+ and set NODE_BIN in $ENV_FILE." >&2
+  echo "node binary not found. Install Node.js 22+ and set NODE_BIN in $ENV_FILE." >&2
   exit 1
 fi
 
