@@ -7,6 +7,8 @@
   --color-bg-deep: var(--bg-deep);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
+  --color-border-control: var(--border-control);
+  --color-focus-ring: var(--focus-ring);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-secondary: var(--accent-secondary);
@@ -16,6 +18,7 @@
   --color-green: var(--green);
   --color-red: var(--red);
   --color-yellow: var(--yellow);
+  --color-on-accent: var(--on-accent);
   --color-card: var(--card);
   --spacing-1: var(--space-1);
   --spacing-2: var(--space-2);
