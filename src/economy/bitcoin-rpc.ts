@@ -396,7 +396,6 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
 
   /** #46 review: proxy/node errors propagate ("unknown"), they are not "left the chain". */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
-    {
       const result = (await this.proxyRequest(`/anchor/confirm/${txid}`)) as {
         ok: boolean;
         confirmed: boolean;
