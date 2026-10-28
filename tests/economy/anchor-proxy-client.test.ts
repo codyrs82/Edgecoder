@@ -53,5 +53,7 @@ describe("AnchorProxyClientProvider reconciliation (#103)", () => {
     await expect(p.findCheckpointTx("6a")).rejects.toThrow(/anchor_proxy_error: 502/);
     reply = [200, { ok: true }];
     await expect(p.isInMempool(TXID)).rejects.toThrow(/invalid_response/);
+    reply = [200, { done: true }];
+    await expect(p.abandonTx(TXID)).rejects.toThrow(/abandon_invalid_response/);
   });
 });

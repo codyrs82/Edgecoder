@@ -60,6 +60,8 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `GET` | `/anchor/find/:dataHex` | Bearer | Reconciliation: txid of the wallet tx whose OP_RETURN carries `dataHex`, or `null` |
 | `GET` | `/anchor/mempool/:txid` | Bearer | Reconciliation: whether an unconfirmed tx is still in the mempool |
 | `POST` | `/anchor/abandon` | Bearer | Reconciliation: `abandontransaction` for a dropped tx (`{ "txid": "..." }`) |
+
+`dataHex` is the raw OP_RETURN payload (what `/anchor/broadcast` embeds), not the full script: even-length hex, at most 160 characters (80 bytes). The three reconciliation routes share a rate limit of `MAX_RECONCILE_CALLS_PER_MINUTE` (default 30), separate from `MAX_BROADCASTS_PER_MINUTE`. A node error returns 502 with only an error code, and the detail is logged on the proxy. `/anchor/mempool` returns `inMempool: false` only for bitcoind error -5 (not in mempool). Any other node error is a 502, so the reconciler counts it as an attempt instead of treating the tx as dropped.
 | `GET` | `/health` | None | Basic node health (for Fly health checks) |
 | `GET` | `/health/detailed` | Bearer | Full node + wallet + rate limit status |
 

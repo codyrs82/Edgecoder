@@ -454,7 +454,9 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
   }
 
   async abandonTx(txid: string): Promise<void> {
-    await this.proxyRequest("/anchor/abandon", "POST", { txid });
+    // #116 review: only an explicit ok counts; anything else must not let the row become "failed".
+    const result = (await this.proxyRequest("/anchor/abandon", "POST", { txid })) as { ok?: unknown } | null;
+    if (!result || result.ok !== true) throw new Error("anchor_proxy_abandon_invalid_response");
   }
 
   /** #46 review: proxy/node errors propagate ("unknown"), they are not "left the chain". */
