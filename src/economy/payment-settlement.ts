@@ -23,14 +23,16 @@ export interface AtomicSettleStore {
    * Status CAS (created -> settled) plus the `credit_purchase:<intentId>` credit
    * insert, in one transaction. Returns "already" if the intent was not in
    * status "created" (already settled, expired, ...).
+   * #155: the account and amount credited are the ones stored on the intent row,
+   * never values supplied by the caller.
    */
   settlePaymentIntentAtomic(
     intentId: string,
     txRef: string,
-    accountId: string,
-    credits: number,
     paymentHash?: string
   ): Promise<{ status: "settled" | "already"; intent?: PaymentIntent }>;
+  /** #155: the stored intent; its invoice is what the node is asked about. */
+  getPaymentIntent(intentId: string): Promise<PaymentIntent | null>;
 }
 
 export interface PaymentSettlerOptions {
@@ -51,8 +53,8 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
   // Per-intent mutex: concurrent callers for the same intent share one in-flight settle.
   const inflight = new Map<string, Promise<SettleOutcome>>();
 
-  async function settleInMemory(intent: PaymentIntent, txRef: string, paymentHash?: string): Promise<SettleOutcome> {
-    const current = opts.getIntent(intent.intentId) ?? intent;
+  async function settleInMemory(stored: PaymentIntent, txRef: string, paymentHash?: string): Promise<SettleOutcome> {
+    const current = opts.getIntent(stored.intentId) ?? stored;
     if (current.status !== "created") return { status: "already", intent: current };
     const settled: PaymentIntent = {
       ...current,
@@ -67,13 +69,20 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
     return { status: "settled", intent: settled };
   }
 
-  async function run(intent: PaymentIntent): Promise<SettleOutcome> {
-    const known = opts.getIntent(intent.intentId);
-    if (!opts.store && known && known.status !== "created") return { status: "already", intent: known };
-    if (intent.status !== "created" && !opts.store) return { status: "already", intent };
+  async function run(hint: PaymentIntent): Promise<SettleOutcome> {
+    // #155: the caller's object is only a hint naming the intent. Every field used below
+    // (invoice, payment hash, account, amount) comes from the stored intent.
+    const known = opts.getIntent(hint.intentId);
+    const stored = opts.store ? ((await opts.store.getPaymentIntent(hint.intentId)) ?? undefined) : known;
+    if (!stored) return { status: "unpaid" };
+    if (stored.status !== "created") {
+      if (opts.store) await opts.saveIntent(stored);
+      return { status: "already", intent: stored };
+    }
+    const intent = stored;
 
     const s = await opts.provider
-      .checkSettlement(intent.invoiceRef, intent.paymentHash ?? opts.getIntent(intent.intentId)?.paymentHash)
+      .checkSettlement(intent.invoiceRef, intent.paymentHash ?? known?.paymentHash)
       .catch(() => ({ settled: false }) as const);
     if (!s.settled) return { status: "unpaid" };
     const txRef = ("txRef" in s && s.txRef) || intent.invoiceRef;
@@ -81,13 +90,7 @@ export function createPaymentSettler(opts: PaymentSettlerOptions) {
 
     let outcome: SettleOutcome;
     if (opts.store) {
-      const res = await opts.store.settlePaymentIntentAtomic(
-        intent.intentId,
-        txRef,
-        intent.accountId,
-        intent.quotedCredits,
-        paymentHash
-      );
+      const res = await opts.store.settlePaymentIntentAtomic(intent.intentId, txRef, paymentHash);
       if (res.status === "already") {
         // refresh the in-memory copy so later hints don't keep asking the node
         if (res.intent) await opts.saveIntent(res.intent);

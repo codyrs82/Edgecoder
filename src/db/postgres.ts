@@ -1876,8 +1876,6 @@ export class PostgresStore {
   async settlePaymentIntentAtomic(
     intentId: string,
     txRef: string,
-    accountId: string,
-    credits: number,
     paymentHash?: string
   ): Promise<{ status: "settled" | "already"; intent?: PaymentIntent }> {
     const client = await this.pool.connect();
@@ -1888,17 +1886,20 @@ export class PostgresStore {
         `UPDATE payment_intents
             SET status = 'settled', settled_at_ms = $2, tx_ref = $3, payment_hash = COALESCE(payment_hash, $4)
           WHERE intent_id = $1 AND status = 'created'
-          RETURNING intent_id`,
+          RETURNING account_id, quoted_credits`,
         [intentId, now, txRef, paymentHash ?? null]
       );
       if ((upd.rowCount ?? 0) === 0) {
         await client.query("COMMIT");
         return { status: "already", intent: (await this.getPaymentIntent(intentId)) ?? undefined };
       }
+      // #155: credit the account and amount stored on the intent (quoted_credits stays NUMERIC
+      // end to end), never caller-supplied values. A zero quote settles without a credit row.
+      const { account_id: accountId, quoted_credits: credits } = upd.rows[0];
       await client.query(
         `INSERT INTO credit_transactions (
            tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-         ) VALUES ($1,$2,'earn',$3,$4,NULL,$5)`,
+         ) SELECT $1,$2,'earn',$3::numeric,$4,NULL,$5 WHERE $3::numeric > 0`,
         [randomUUID(), accountId, credits, `credit_purchase:${intentId}`, now]
       );
       await client.query("COMMIT");
