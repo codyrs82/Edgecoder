@@ -51,7 +51,10 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         # createUpdaterArtifacts needs the updater signing key; turn it off for CI debug builds.
-        run: npx tauri build --debug --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        # #83: connect-src gets the VITE_COORDINATOR_URL / VITE_PORTAL_URL origins, if set.
+        run: |
+          node scripts/gen-tauri-csp.mjs
+          npx tauri build --debug --bundles ${{ matrix.bundles }} --config src-tauri/tauri.csp.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
       # upload-artifact zips files without Unix modes, which would strip the exec bit
       # from EdgeCoder.app/Contents/MacOS/*. A tarball keeps it.
       - name: Tar macOS .app (keeps the exec bit)
