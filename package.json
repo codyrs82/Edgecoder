@@ -13,7 +13,6 @@
     "dev:ide": "tsx src/apps/ide/provider-server.ts",
     "dev:worker": "tsx src/swarm/worker-runner.ts",
     "dev:worker:ios": "tsx src/swarm/ios-agent.ts",
-    "dev:cloudreview": "tsx src/handshake/mock-server.ts",
     "bootstrap:coordinator": "tsx src/bootstrap/coordinator.ts",
     "verify:blacklist-audit": "tsx src/bootstrap/verify-blacklist-audit.ts",
     "build": "tsc -p tsconfig.json",
@@ -32,7 +31,10 @@
     "model:swap": "tsx bin/swap-model.ts swap",
     "model:status": "tsx bin/swap-model.ts status",
     "model:pull": "tsx bin/swap-model.ts pull",
-    "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts"
+    "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts",
+    "test:e2e:up": "docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build",
+    "test:e2e:down": "docker compose -f tests/e2e/docker-compose.e2e.yml down -v",
+    "check:scripts": "node scripts/check-scripts.mjs"
   },
   "keywords": [],
   "author": "",
