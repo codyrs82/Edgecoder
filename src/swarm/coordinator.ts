@@ -5162,6 +5162,22 @@ export async function initCoordinator(): Promise<void> {
       // #50: release verifications whose replicas never reported.
       setInterval(() => {
         void (async () => {
+          // #106: penalize and (once) reassign replicas that were claimed but never reported.
+          const stalled = resultVerifier.reassignStalled();
+          for (const a of stalled.abandoned) {
+            securityLog.log({
+              level: securityLog.severity("result_verification_replica_abandoned"),
+              event: "result_verification_replica_abandoned",
+              source: { type: "agent", id: a.agentId },
+              details: { originalSubtaskId: a.originalSubtaskId, reputation: resultVerifier.reputation(a.agentId) },
+              action: "replica_reassigned",
+              coordinatorId: identity.peerId,
+            });
+          }
+          for (const r of stalled.replacements) {
+            queue.removeHeld(r.replaces); // the abandoner's late report then fails the claim check
+            enqueueReplica(r.request);
+          }
           for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
         })().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
       }, 60_000);

@@ -195,6 +195,26 @@ describe("verification hardening (#106)", () => {
     expect(v.expire()).toMatchObject([{ status: "unresolved", winners: [], abandonedBy: ["accomplice"] }]);
   });
 
+  it("a stalled replica claim is penalized and reassigned once, excluding the abandoner", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, abandonPenalty: 0.25 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "lazy");
+    now = 1001;
+    const { replacements, abandoned } = v.reassignStalled();
+    expect(abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy" }]);
+    expect(v.reputation("lazy")).toBeCloseTo(0.25);
+    expect(replacements).toHaveLength(1);
+    const next = replacements[0].request;
+    expect(replacements[0].replaces).toBe(r1.subtask.id);
+    expect(next.excludeAgents).toEqual(expect.arrayContaining(["a", "lazy"]));
+    // The abandoner's late report on the old id is ignored; the new replica verifies.
+    expect(v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "lazy", ok: true, output: "1", meta: null })).toBeNull();
+    expect(v.recordReplica(next.subtask.id, { subtaskId: next.subtask.id, agentId: "b", ok: true, output: "1", meta: null })).toMatchObject({ status: "verified" });
+    // Penalized once only.
+    expect(v.reputation("lazy")).toBeCloseTo(0.25);
+  });
+
   it("an unclaimed replica still times out to an unverified accept (single-node meshes)", () => {
     let now = 0;
     const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);

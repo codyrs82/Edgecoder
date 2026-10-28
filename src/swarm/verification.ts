@@ -31,12 +31,17 @@ export interface VerificationConfig {
    * can't reset to full trust by re-registering; it is sampled more until it earns trust.
    */
   initialReputation: number;
+  /** #106: reputation lost for claiming a replica and never reporting it. */
+  abandonPenalty: number;
+  /** #106: a claimed replica with no report after this long is reassigned once to another agent. */
+  replicaClaimTimeoutMs: number;
 }
 
 /**
- * #106: verification cost. Winning replicas are paid like any accepted execution, from
- * newly minted compute credits (not debited from the requester), and at most
- * maxExecutions - 1 replicas run per sampled subtask. maxExecutions is capped at 3:
+ * #106: verification cost (a known economic choice). Winning replicas are paid like any
+ * accepted execution, from newly minted compute credits (not debited from the requester),
+ * and at most maxExecutions - 1 replicas run per sampled subtask. This minting only happens
+ * when verification is on, and it is off by default (rate 0, RESULT_VERIFICATION_RATE). maxExecutions is capped at 3:
  * the rule is "the first two executions that agree win", which is only a majority at 3.
  */
 export const MAX_EXECUTIONS_CAP = 3;
@@ -49,7 +54,9 @@ export const DEFAULT_VERIFICATION: VerificationConfig = {
   mismatchPenalty: 0.25,
   matchReward: 0.02,
   timeoutMs: 15 * 60_000,
-  initialReputation: 0.5
+  initialReputation: 0.5,
+  abandonPenalty: 0.25,
+  replicaClaimTimeoutMs: 5 * 60_000
 };
 
 export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VerificationConfig {
@@ -64,6 +71,8 @@ export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
     mismatchPenalty: num("RESULT_VERIFICATION_MISMATCH_PENALTY", DEFAULT_VERIFICATION.mismatchPenalty, (n) => n >= 0 && n <= 1),
     matchReward: DEFAULT_VERIFICATION.matchReward,
     timeoutMs: num("RESULT_VERIFICATION_TIMEOUT_MS", DEFAULT_VERIFICATION.timeoutMs, (n) => n >= 10_000),
+    abandonPenalty: num("RESULT_VERIFICATION_ABANDON_PENALTY", DEFAULT_VERIFICATION.abandonPenalty, (n) => n >= 0 && n <= 1),
+    replicaClaimTimeoutMs: num("RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS", DEFAULT_VERIFICATION.replicaClaimTimeoutMs, (n) => n >= 10_000),
     initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1)
   };
 }
@@ -111,6 +120,11 @@ interface Pending<T> {
   replicaIds: Set<string>;
   /** #106: agents that claimed a replica of this subtask (abandonment detection). */
   replicaClaimants: Set<string>;
+  /** Open replica claims: replica id -> claimant and claim time. */
+  claims: Map<string, { agentId: string; atMs: number }>;
+  /** Agents already penalized for abandoning a replica of this subtask. */
+  abandoners: Set<string>;
+  reassigned: boolean;
 }
 
 export function replicaId(originalId: string, n: number): string {
@@ -158,27 +172,63 @@ export class ResultVerifier<T = unknown> {
   markReplicaClaimed(replicaSubtaskId: string, agentId: string): void {
     const originalId = this.replicaToOriginal.get(replicaSubtaskId);
     const p = originalId ? this.pending.get(originalId) : undefined;
-    p?.replicaClaimants.add(agentId);
+    if (!p) return;
+    p.replicaClaimants.add(agentId);
+    p.claims.set(replicaSubtaskId, { agentId, atMs: this.now() });
+  }
+
+  private penalizeAbandon(p: Pending<T>, agentId: string): void {
+    if (p.abandoners.has(agentId)) return;
+    p.abandoners.add(agentId);
+    this.adjust(agentId, -this.cfg.abandonPenalty);
+  }
+
+  /**
+   * #106: replicas claimed but not reported within replicaClaimTimeoutMs. The claimant is
+   * penalized, its replica id stops being accepted, and (once per subtask) a fresh replica is
+   * issued that excludes it. Returns the replacements to enqueue and who abandoned.
+   */
+  reassignStalled(): { replacements: { request: ReplicaRequest; replaces: string }[]; abandoned: { originalSubtaskId: string; agentId: string }[] } {
+    const replacements: { request: ReplicaRequest; replaces: string }[] = [];
+    const abandoned: { originalSubtaskId: string; agentId: string }[] = [];
+    const now = this.now();
+    for (const [id, p] of this.pending) {
+      for (const [rid, c] of p.claims) {
+        if (now - c.atMs <= this.cfg.replicaClaimTimeoutMs) continue;
+        p.claims.delete(rid);
+        if (p.results.some((r) => r.agentId === c.agentId)) continue;
+        this.penalizeAbandon(p, c.agentId);
+        abandoned.push({ originalSubtaskId: id, agentId: c.agentId });
+        if (p.reassigned) continue;
+        p.reassigned = true;
+        this.replicaToOriginal.delete(rid); // a late report from the abandoner is ignored
+        p.replicaIds.delete(rid);
+        const next = this.nextReplica(p, rid);
+        next.excludeAgents = [...new Set([...next.excludeAgents, ...p.abandoners])];
+        replacements.push({ request: next, replaces: rid });
+      }
+    }
+    return { replacements, abandoned };
   }
 
   isPending(originalSubtaskId: string): boolean {
     return this.pending.has(originalSubtaskId);
   }
 
-  private nextReplica(p: Pending<T>): ReplicaRequest {
-    const id = replicaId(p.original.id, p.results.length);
+  private nextReplica(p: Pending<T>, replacing?: string): ReplicaRequest {
+    const id = replacing ? `${replacing}:r` : replicaId(p.original.id, p.results.length);
     p.replicaIds.add(id);
     this.replicaToOriginal.set(id, p.original.id);
     return {
       subtask: { ...p.original, id, dependsOn: undefined },
-      excludeAgents: [...new Set(p.results.map((r) => r.agentId))],
+      excludeAgents: [...new Set([...p.results.map((r) => r.agentId), ...p.abandoners])],
       excludeAccounts: [...new Set(p.results.map(executorKey))]
     };
   }
 
   /** Hold the original result and request the first replica. */
   start(original: Subtask, first: ExecutionResult<T>): ReplicaRequest {
-    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set() };
+    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set(), claims: new Map(), abandoners: new Set(), reassigned: false };
     this.pending.set(original.id, p);
     return this.nextReplica(p);
   }
@@ -197,6 +247,7 @@ export class ResultVerifier<T = unknown> {
     // One execution per agent and per reward account: neither can vote twice.
     if (p.results.some((r) => r.agentId === result.agentId || executorKey(r) === executorKey(result))) return null;
     p.results.push(result);
+    p.claims.delete(replicaSubtaskId);
 
     const groups = new Map<string, ExecutionResult<T>[]>();
     for (const r of p.results) {
@@ -234,6 +285,7 @@ export class ResultVerifier<T = unknown> {
         const [only] = p.results;
         out.push({ status: "timeout", originalSubtaskId: id, winners: [only], losers: [], output: only.output, ok: only.ok });
       } else if (p.results.length === 1) {
+        for (const a of abandonedBy) this.penalizeAbandon(p, a);
         // #106: a replica was claimed and never reported. Paying the original now would let an
         // accomplice stall verification into an unverified payout, so nobody earns.
         out.push({ status: "unresolved", originalSubtaskId: id, winners: [], losers: [...p.results], abandonedBy });
