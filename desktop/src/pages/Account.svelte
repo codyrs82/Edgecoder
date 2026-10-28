@@ -42,29 +42,29 @@
   <div class="section">
     <h2>Profile</h2>
     {#if loading}
-      <p class="loading-text">Loading profile...</p>
+      <p class="loading-text" role="status">Loading profile...</p>
     {:else}
-      <div class="field-grid">
-        <span class="field-label">Email</span>
-        <span class="field-value">{display.email || "\u2014"}</span>
+      <dl class="field-grid">
+        <dt class="field-label">Email</dt>
+        <dd class="field-value">{display.email || "\u2014"}</dd>
 
-        <span class="field-label">Display Name</span>
-        <span class="field-value">{display.displayName ?? "\u2014"}</span>
+        <dt class="field-label">Display Name</dt>
+        <dd class="field-value">{display.displayName ?? "\u2014"}</dd>
 
-        <span class="field-label">Email Verified</span>
-        <span class="field-value">
+        <dt class="field-label">Email Verified</dt>
+        <dd class="field-value">
           {#if display.emailVerified}
             <span class="badge verified">Verified</span>
           {:else}
             <span class="badge unverified">Not verified</span>
           {/if}
-        </span>
-      </div>
+        </dd>
+      </dl>
     {/if}
   </div>
 
   <div class="section">
-    <button class="btn-danger" onclick={handleLogout} disabled={loggingOut}>
+    <button type="button" class="btn-danger" onclick={handleLogout} disabled={loggingOut}>
       {loggingOut ? "Signing out..." : "Sign Out"}
     </button>
   </div>
@@ -104,7 +104,7 @@
     font-size: 0.75rem;
     font-weight: 600;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm, 4px);
   }
   .badge.verified {
     color: var(--green);
@@ -132,4 +132,11 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  button:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
+  }
+  .field-grid { margin: 0; }
+  .field-grid dd { margin: 0; }
 </style>

@@ -56,18 +56,16 @@ describe("BLE credit settlement", () => {
     expect(engine.balance("requester")).toBe(6.5);
   });
 
-  it("allows requester to go negative (soft debit)", () => {
+  it("rejects a debit that would take the requester negative (#48: no soft debit)", () => {
     const engine = new CreditEngine();
-    // Requester has 0 balance — goes negative
-    engine.adjust("provider", 5, "ble_compute");
-    engine.adjust("requester", -5, "ble_compute");
-
-    expect(engine.balance("provider")).toBe(5);
-    expect(engine.balance("requester")).toBe(-5);
+    // Requester has 0 balance: the debit is refused and nothing is recorded for it.
+    expect(() => engine.adjust("requester", -5, "ble_compute")).toThrow(/insufficient_credits/);
+    expect(engine.balance("requester")).toBe(0);
   });
 
   it("idempotency: duplicate txIds are skipped", () => {
     const engine = new CreditEngine();
+    engine.adjust("requester", 5, "seed");
     const synced = new Set<string>();
 
     // First settlement
@@ -82,7 +80,7 @@ describe("BLE credit settlement", () => {
     }
 
     expect(engine.balance("provider")).toBe(5);
-    expect(engine.balance("requester")).toBe(-5);
+    expect(engine.balance("requester")).toBe(0);
   });
 
   it("settles multiple transactions in a batch", () => {
@@ -110,6 +108,7 @@ describe("BLE credit settlement", () => {
 
   it("transaction history records correct types for settlement", () => {
     const engine = new CreditEngine();
+    engine.adjust("requester", 7.5, "seed");
     engine.adjust("provider", 7.5, "ble_compute");
     engine.adjust("requester", -7.5, "ble_compute");
 
@@ -119,7 +118,7 @@ describe("BLE credit settlement", () => {
     expect(providerHistory[0].credits).toBe(7.5);
     expect(providerHistory[0].reason).toBe("ble_compute");
 
-    const requesterHistory = engine.history("requester");
+    const requesterHistory = engine.history("requester").filter((t) => t.reason === "ble_compute");
     expect(requesterHistory).toHaveLength(1);
     expect(requesterHistory[0].type).toBe("spend");
     expect(requesterHistory[0].credits).toBe(7.5);
