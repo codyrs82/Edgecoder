@@ -14,9 +14,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
  * callback arrives as a cross-site POST, so Apple gets its own SameSite=None cookie
  * (__Host-oauth_state_apple). Apple stays disabled until it is wired (#30).
  *
- * The HMAC key is OAUTH_STATE_SECRET. Without it, a random per-process key is used, which is
- * fine for one portal instance (states live 10 minutes) but breaks flows that start on one
- * instance and finish on another, so set it whenever the portal runs more than one machine.
+ * The HMAC key is OAUTH_STATE_SECRET (32+ chars). Production refuses to start without it
+ * (oauthStateSecretProblem). Outside production a random per-process key is used when it is
+ * unset, which only works for one portal instance.
  */
 
 export const OAUTH_STATE_TTL_SECONDS = 600;
@@ -32,6 +32,25 @@ export function oauthStateCookieName(provider: OauthStateProvider): string {
 export function oauthStateKey(env: NodeJS.ProcessEnv = process.env): Buffer {
   const configured = env.OAUTH_STATE_SECRET?.trim();
   return configured ? Buffer.from(configured, "utf8") : randomBytes(32);
+}
+
+export const OAUTH_STATE_SECRET_MIN_LENGTH = 32;
+
+/** Startup check: null when OK, else the reason the portal must not start. */
+export function oauthStateSecretProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  if ((env.NODE_ENV ?? "development") !== "production") return null;
+  const configured = env.OAUTH_STATE_SECRET?.trim() ?? "";
+  if (!configured) return "OAUTH_STATE_SECRET is required in production.";
+  if (configured.length < OAUTH_STATE_SECRET_MIN_LENGTH) {
+    return `OAUTH_STATE_SECRET must be at least ${OAUTH_STATE_SECRET_MIN_LENGTH} characters in production.`;
+  }
+  return null;
+}
+
+/** Throws oauthStateSecretProblem() at portal startup. */
+export function assertOauthStateSecret(env: NodeJS.ProcessEnv = process.env): void {
+  const problem = oauthStateSecretProblem(env);
+  if (problem) throw new Error(problem);
 }
 
 function mac(key: Buffer, provider: string, state: string): string {

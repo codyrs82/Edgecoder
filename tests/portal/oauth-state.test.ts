@@ -7,6 +7,8 @@ import {
   oauthStateClearCookie,
   oauthStateCookieMatches,
   oauthStateKey,
+  oauthStateSecretProblem,
+  assertOauthStateSecret,
   oauthStateSetCookie
 } from "../../src/portal/oauth-state-cookie.js";
 
@@ -144,5 +146,24 @@ describe("state cookie primitives (#88)", () => {
     const b = oauthStateKey({ OAUTH_STATE_SECRET: "shared".repeat(6) });
     const v = oauthStateSetCookie(a, "github", "s9").split(";")[0].split("=")[1];
     expect(oauthStateCookieMatches(b, v, "github", "s9")).toBe(true);
+  });
+});
+
+describe("OAUTH_STATE_SECRET startup check (#88)", () => {
+  it("is required in production", () => {
+    expect(oauthStateSecretProblem({ NODE_ENV: "production" })).toMatch(/required/);
+    expect(oauthStateSecretProblem({ NODE_ENV: "production", OAUTH_STATE_SECRET: "   " })).toMatch(/required/);
+  });
+  it("must be at least 32 characters in production", () => {
+    expect(oauthStateSecretProblem({ NODE_ENV: "production", OAUTH_STATE_SECRET: "k".repeat(31) })).toMatch(/32/);
+    expect(oauthStateSecretProblem({ NODE_ENV: "production", OAUTH_STATE_SECRET: "k".repeat(32) })).toBeNull();
+  });
+  it("assertOauthStateSecret throws the problem", () => {
+    expect(() => assertOauthStateSecret({ NODE_ENV: "production" })).toThrow(/OAUTH_STATE_SECRET is required/);
+    expect(() => assertOauthStateSecret({ NODE_ENV: "production", OAUTH_STATE_SECRET: "k".repeat(40) })).not.toThrow();
+  });
+  it("is optional outside production", () => {
+    expect(oauthStateSecretProblem({})).toBeNull();
+    expect(oauthStateSecretProblem({ NODE_ENV: "test" })).toBeNull();
   });
 });

@@ -3,7 +3,7 @@
 
 import Fastify from "fastify";
 import { registerPortalPages } from "./pages/index.js";
-import { appendSetCookie } from "./oauth-state-cookie.js";
+import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -249,6 +249,7 @@ function validatePortalSecurityConfig(): void {
   if (!/^https:\/\//i.test(PORTAL_PUBLIC_URL)) {
     throw new Error("PORTAL_PUBLIC_URL must use https in production.");
   }
+  assertOauthStateSecret(); // #88: every instance must share the OAuth state HMAC key
 }
 
 function normalizeNativeOauthRedirect(value: string | undefined): string | null {

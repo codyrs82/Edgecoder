@@ -64,7 +64,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `120000` | Passkey challenge expiry (ms). |
-| `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). Unset: a random key per process, which only works with one portal instance. Set the same value on every instance when the portal runs more than one machine. |
+| `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). **Required in production** (at least 32 characters; the portal refuses to start without it). Set the same value on every instance. Outside production, unset means a random key per process. |
 
 ## Key provider and rotation
 
