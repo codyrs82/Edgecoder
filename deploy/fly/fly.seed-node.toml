@@ -9,6 +9,8 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
+  # #5: services bind 127.0.0.1 unless HOST is set. Required secrets are listed in #5 / env docs.
+  HOST = "0.0.0.0"
   # #43: production requires LIGHTNING_PROVIDER=lnd|cln (+ LND_*/CLN_* via fly secrets).
   # Payments stay off until a Lightning node is configured; flip to "true" with those secrets set.
   ECONOMY_PAYMENTS_ENABLED = "false"

@@ -130,3 +130,45 @@ describe("coordinator auth guards", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #5: production with an empty MESH_AUTH_TOKEN must not be "open".
+// Uses the real shared helper the coordinator's requireMeshToken delegates to.
+// ---------------------------------------------------------------------------
+import Fastify from "fastify";
+import { checkSharedToken } from "../../src/common/env-guard.js";
+
+describe("empty mesh token in production (#5)", () => {
+  function buildApp(meshToken: string, isProd: boolean) {
+    const app = Fastify();
+    app.post("/mesh/route", async (req, reply) => {
+      const result = checkSharedToken(meshToken, req.headers["x-mesh-token"], isProd);
+      if (result !== "ok") {
+        reply.code(result === "not_configured" ? 503 : 401);
+        return reply.send({ error: "mesh_unauthorized" });
+      }
+      return { ok: true };
+    });
+    return app;
+  }
+
+  test("NODE_ENV=production + empty MESH_AUTH_TOKEN -> 503, not 200", async () => {
+    const app = buildApp("", true);
+    const res = await app.inject({ method: "POST", url: "/mesh/route", payload: {} });
+    expect(res.statusCode).toBe(503);
+  });
+
+  test("dev + empty MESH_AUTH_TOKEN -> still open (unchanged local-dev behaviour)", async () => {
+    const app = buildApp("", false);
+    const res = await app.inject({ method: "POST", url: "/mesh/route", payload: {} });
+    expect(res.statusCode).toBe(200);
+  });
+
+  test("production + configured token -> 401 without header, 200 with it", async () => {
+    const app = buildApp("mesh-secret", true);
+    expect((await app.inject({ method: "POST", url: "/mesh/route", payload: {} })).statusCode).toBe(401);
+    expect(
+      (await app.inject({ method: "POST", url: "/mesh/route", payload: {}, headers: { "x-mesh-token": "mesh-secret" } })).statusCode
+    ).toBe(200);
+  });
+});

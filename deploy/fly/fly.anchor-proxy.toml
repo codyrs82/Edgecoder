@@ -9,6 +9,8 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
+  # #5: services bind 127.0.0.1 unless HOST is set. Required secrets are listed in #5 / env docs.
+  HOST = "0.0.0.0"
   BITCOIN_NETWORK = "bitcoin"
   ANCHOR_PROXY_PORT = "4311"
   MAX_BROADCASTS_PER_MINUTE = "10"

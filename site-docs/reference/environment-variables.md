@@ -7,6 +7,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | Variable | Values | Description |
 |---|---|---|
 | `EDGE_RUNTIME_MODE` | `worker` \| `coordinator` \| `ide-provider` \| `control-plane` \| `inference` \| `all-in-one` | Selects which service the daemon runs as. Required. |
+| `HOST` | `127.0.0.1` | Listen address for all HTTP services; set `0.0.0.0` in containers/Fly or for LAN multi-machine setups. |
 
 ## Worker identity and enrollment
 
@@ -177,6 +178,14 @@ OLLAMA_AUTO_INSTALL=true
 ```
 
 ## Operational guidance
+
+**Production fail-fast (#5).** With `NODE_ENV=production`, services refuse to boot when required secrets are empty (an empty token no longer means "auth off"):
+- coordinator: `MESH_AUTH_TOKEN`, `PORTAL_SERVICE_URL`, `PORTAL_SERVICE_TOKEN`, `ADMIN_API_TOKEN`, `PAYMENT_WEBHOOK_SECRET`, and `LIGHTNING_PROVIDER` unless `ECONOMY_PAYMENTS_ENABLED=false`
+- portal: `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY` (plus the existing passkey/URL checks)
+- inference: `INFERENCE_AUTH_TOKEN`
+- control-plane: `ADMIN_API_TOKEN`
+
+Run a `fly secrets list` checklist against this list before any deploy.
 
 - Keep secrets in production secret stores (Fly Secrets, AWS SSM, etc.) rather than static env files.
 - On macOS, the env file is `/etc/edgecoder/edgecoder.env` (chmod 600, owned by root).

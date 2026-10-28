@@ -13,6 +13,7 @@ import { pgStore } from "../db/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { buildAdminDashboardRoutes } from "./dashboard.js";
 import { safeTokenEqual } from "../common/crypto-utils.js";
+import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, {
@@ -20,6 +21,7 @@ await app.register(cors, {
   credentials: true,
 });
 const coordinatorUrl = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+requireProdEnv("control-plane", ["ADMIN_API_TOKEN"]);
 if (!process.env.ADMIN_API_TOKEN) {
   console.error("[control-plane] FATAL: ADMIN_API_TOKEN must be set");
   process.exit(1);
@@ -1554,7 +1556,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   migrateWithRetry()
-    .then(() => app.listen({ port: 4303, host: "0.0.0.0" }))
+    .then(() => app.listen({ port: 4303, host: LISTEN_HOST }))
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

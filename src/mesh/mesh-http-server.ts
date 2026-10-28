@@ -4,6 +4,7 @@
 import Fastify, { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { MeshPeer } from "./mesh-peer.js";
+import { LISTEN_HOST } from "../common/env-guard.js";
 
 export interface MeshHttpServerConfig {
   port: number;
@@ -97,7 +98,7 @@ export class MeshHttpServer {
   }
 
   async start(): Promise<number> {
-    await this.app.listen({ port: this.config.port, host: this.config.host ?? "0.0.0.0" });
+    await this.app.listen({ port: this.config.port, host: this.config.host ?? LISTEN_HOST });
     const addr = this.app.server.address();
     this.actualPort = typeof addr === "object" && addr ? addr.port : this.config.port;
     return this.actualPort;

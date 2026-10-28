@@ -671,3 +671,33 @@ describe("POST /me/theme", () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #5: portal requireInternalToken with an empty PORTAL_SERVICE_TOKEN in prod.
+// Mirrors src/portal/server.ts requireInternalToken on the shared helper.
+// ---------------------------------------------------------------------------
+import { checkSharedToken } from "../../src/common/env-guard.js";
+
+describe("requireInternalToken empty token (#5)", () => {
+  function buildInternalApp(serviceToken: string, isProd: boolean) {
+    const app = Fastify();
+    app.get("/internal/stats/counts", async (req, reply) => {
+      const result = checkSharedToken(serviceToken, req.headers["x-portal-service-token"], isProd);
+      if (result === "not_configured") return reply.code(503).send({ error: "internal_auth_not_configured" });
+      if (result !== "ok") return reply.code(401).send({ error: "portal_service_token_required" });
+      return { ok: true };
+    });
+    return app;
+  }
+
+  it("prod + empty token -> 503 (never open)", async () => {
+    const res = await buildInternalApp("", true).inject({ method: "GET", url: "/internal/stats/counts" });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it("prod + configured token -> 401 wrong, 200 right", async () => {
+    const app = buildInternalApp("svc-token", true);
+    expect((await app.inject({ method: "GET", url: "/internal/stats/counts", headers: { "x-portal-service-token": "nope" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/internal/stats/counts", headers: { "x-portal-service-token": "svc-token" } })).statusCode).toBe(200);
+  });
+});
