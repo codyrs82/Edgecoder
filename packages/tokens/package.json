@@ -1,0 +1,17 @@
+{
+  "name": "@edgecoder/tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EdgeCoder design tokens (color, spacing, type, radius) shared by desktop and portal (#23).",
+  "exports": {
+    "./tokens.css": "./dist/tokens.css",
+    "./theme.css": "./src/theme.css",
+    "./tokens.json": "./src/tokens.json"
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check"
+  }
+}

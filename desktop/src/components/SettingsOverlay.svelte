@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ArrowLeft } from "@lucide/svelte"; // #23: Lucide replaces inline SVGs gradually
   import Account from "../pages/Account.svelte";
   import Integrations from "../pages/Integrations.svelte";
   import ActiveWork from "../pages/ActiveWork.svelte";
@@ -40,9 +41,7 @@
 <div class="overlay">
   <div class="overlay-header">
     <button class="back-btn" onclick={onClose}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M19 12H5M12 19l-7-7 7-7"/>
-      </svg>
+      <ArrowLeft size={16} strokeWidth={2} />
       Back
     </button>
     <h2>Settings</h2>

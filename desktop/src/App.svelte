@@ -238,45 +238,11 @@
 {/if}
 
 <style>
-  :root {
-    /* Core palette — desktop canonical names */
-    --bg-base: #2f2f2d;
-    --bg-surface: #3a3a37;
-    --bg-elevated: #454542;
-    --bg-input: #262624;
-    --bg-deep: #1a1a18;
-    --border: rgba(214, 204, 194, 0.08);
-    --border-strong: rgba(214, 204, 194, 0.15);
-    --accent: #c17850;
-    --accent-hover: #d4895f;
-    --accent-secondary: #4a90d9;
-    --text-primary: #f7f5f0;
-    --text-secondary: #b8b0a4;
-    --text-muted: #8a8478;
-    --green: #4ade80;
-    --red: #f87171;
-    --yellow: #fbbf24;
-    --radius-sm: 6px;
-    --radius-md: 8px;
-    --radius-lg: 10px;
-    --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-
-    /* Portal-compatible aliases — keeps portal-authored CSS working unchanged */
-    --bg: var(--bg-deep);
-    --bg-soft: var(--bg-base);
-    --card: rgba(58, 58, 55, 0.96);
-    --card-border: var(--border);
-    --text: var(--text-primary);
-    --muted: var(--text-muted);
-    --brand: var(--accent);
-    --brand-2: var(--accent-hover);
-    --ok: var(--green);
-    --warn: var(--yellow);
-    --danger: var(--red);
-  }
+  /* #23: palette, radius, fonts and portal aliases now come from
+     @edgecoder/tokens (packages/tokens) via src/app.css; names are unchanged. */
   :global(body) {
     margin: 0;
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
     background: var(--bg-deep);
