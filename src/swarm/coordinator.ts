@@ -60,6 +60,8 @@ import {
   checkPeerRegistration,
   isAllowlistedKey,
   parsePeerAllowlist,
+  parsePeerUrlPins,
+  type PeerUrlPins,
   ReplayCache,
   signForwardedResult,
   signRegistration,
@@ -152,8 +154,16 @@ const queue = new SwarmQueue(pgStore);
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
 // #118 review: one admission rule for every way into the peer table.
-mesh.setAdmission((peer, existing, authoritative) =>
-  admitPeer({ allowlist: MESH_PEER_ALLOWLIST, production: isProduction(), peer, existing, authoritative })
+mesh.setAdmission((peer, existing, opts) =>
+  admitPeer({
+    allowlist: MESH_PEER_ALLOWLIST,
+    pins: MESH_PEER_URL_PINS,
+    production: isProduction(),
+    peer,
+    existing,
+    authoritative: opts.authoritative,
+    source: opts.source
+  })
 );
 mesh.onBroadcast((message) => {
   if (message.type !== "task_offer") return;
@@ -183,6 +193,8 @@ const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
     throw error;
   }
 })();
+// #118 review: optional `@url` on each allowlist entry pins that peer's endpoint.
+const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(process.env.MESH_PEER_ALLOWLIST);
 const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
 /** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */
 const forwardReplayCache = new ReplayCache();
@@ -865,7 +877,7 @@ async function bootstrapPeerMesh(): Promise<void> {
           networkMode: remote.networkMode
         },
         // Dev without an allowlist keeps the old refresh-on-bootstrap behaviour.
-        { authoritative: !PEER_ALLOWLIST_ENFORCED }
+        { authoritative: !PEER_ALLOWLIST_ENFORCED, source: "bootstrap" }
       );
       if (!admitted) {
         app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_not_allowlisted");
@@ -3076,8 +3088,9 @@ app.post("/mesh/register-peer", async (req, reply) => {
 
   const { issuedAtMs: _issuedAtMs, signature: _signature, ...peerIdentity } = body;
   // Proven key (or portal-validated): may replace a squatter or update its own URL.
-  if (!mesh.addPeer(peerIdentity as MeshPeerIdentity, { authoritative: true })) {
-    return reply.code(403).send({ error: "peer_not_allowlisted" });
+  if (!mesh.addPeer(peerIdentity as MeshPeerIdentity, { authoritative: true, source: "register" })) {
+    // #118 review: also refused when the URL disagrees with the pin or no endpoint is pinned/known.
+    return reply.code(403).send({ error: "peer_not_allowlisted_or_url_unpinned" });
   }
   peerScore.set(body.peerId, 100);
   app.log.info({ peerId: body.peerId, reason: activationReason, url: body.coordinatorUrl }, "peer_registered");
@@ -3229,7 +3242,7 @@ async function handleMeshIngest(
         publicKeyPem: p.publicKeyPem,
         coordinatorUrl: p.peerUrl,
         networkMode: p.networkMode,
-      });
+      }, { source: "gossip" });
       if (admitted) {
         peerScore.set(p.peerId, peerScore.get(p.peerId) ?? 100);
         added++;

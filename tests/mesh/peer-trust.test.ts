@@ -6,6 +6,7 @@ import {
   checkPeerRegistration,
   ReplayCache,
   parsePeerAllowlist,
+  parsePeerUrlPins,
   publicKeyFingerprint,
   signForwardedResult,
   signRegistration,
@@ -99,41 +100,82 @@ describe("forwarded results (#52)", () => {
 
 describe("peer table admission (#118 review)", () => {
   const mk = (keys = A, url = "https://a.example") => ({ peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, coordinatorUrl: url, networkMode: "public_mesh" as const });
+  const fpA = publicKeyFingerprint(A.publicKeyPem);
+  const pinnedRaw = `coord-a:${fpA}@https://a.example/`;
+  const pins = parsePeerUrlPins(pinnedRaw);
 
-  function meshWith(allowlist: ReturnType<typeof parsePeerAllowlist>, production: boolean) {
+  function meshWith(allowlist: ReturnType<typeof parsePeerAllowlist>, production: boolean, urlPins = new Map<string, string>()) {
     const m = new GossipMesh();
-    m.setAdmission((peer, existing, authoritative) => admitPeer({ allowlist, production, peer, existing, authoritative }));
+    m.setAdmission((peer, existing, opts) =>
+      admitPeer({ allowlist, pins: urlPins, production, peer, existing, authoritative: opts.authoritative, source: opts.source })
+    );
     return m;
   }
 
-  it("drops a non-allowlisted peer_exchange entry", () => {
-    const m = meshWith(allow, true);
-    expect(m.addPeer(mk(createPeerKeys("coord-x")))).toBe(false);
-    expect(m.addPeer(mk(EVIL))).toBe(false); // right id, wrong key
-    expect(m.listPeers()).toEqual([]);
-    expect(m.addPeer(mk(A))).toBe(true);
+  it("parses an optional @url pin per allowlist entry", () => {
+    expect(parsePeerAllowlist(pinnedRaw)).toEqual(new Map([["coord-a", fpA]]));
+    expect(pins).toEqual(new Map([["coord-a", "https://a.example"]]));
+    expect(parsePeerUrlPins(`coord-a:${fpA}`)).toEqual(new Map());
+    expect(() => parsePeerAllowlist(`coord-a:${fpA}@ftp://x`)).toThrow(/bad url/);
+    expect(() => parsePeerAllowlist(`coord-a:${fpA}@https://u:p@x`)).toThrow(/bad url/);
   });
 
-  it("gossip can't overwrite an allowlisted entry; registration (authoritative) can update it", () => {
+  it("drops non-allowlisted entries on every path", () => {
+    const m = meshWith(allow, true, pins);
+    for (const source of ["gossip", "bootstrap", "register"] as const) {
+      expect(m.addPeer(mk(createPeerKeys("coord-x")), { source })).toBe(false);
+      expect(m.addPeer(mk(EVIL), { source, authoritative: source === "register" })).toBe(false); // right id, wrong key
+    }
+    expect(m.listPeers()).toEqual([]);
+  });
+
+  it("gossip never sets an endpoint: unpinned unknown peers are dropped", () => {
     const m = meshWith(allow, true);
-    m.addPeer(mk(A, "https://a.example"));
-    expect(m.addPeer(mk(A, "https://attacker.example"))).toBe(false);
+    expect(m.addPeer(mk(A, "https://attacker.example"), { source: "gossip" })).toBe(false);
+    expect(m.listPeers()).toEqual([]);
+  });
+
+  it("gossip of a pinned peer stores the pinned URL, not the gossiped one", () => {
+    const m = meshWith(allow, true, pins);
+    expect(m.addPeer(mk(A, "https://attacker.example"), { source: "gossip" })).toBe(true);
     expect(m.listPeers()[0].coordinatorUrl).toBe("https://a.example");
-    expect(m.addPeer(mk(A, "https://a2.example"), { authoritative: true })).toBe(true);
-    expect(m.listPeers()[0].coordinatorUrl).toBe("https://a2.example");
+  });
+
+  it("bootstrap sets the endpoint for an unpinned peer; gossip can't change it", () => {
+    const m = meshWith(allow, true);
+    expect(m.addPeer(mk(A, "https://a.example/"), { source: "bootstrap" })).toBe(true);
+    expect(m.listPeers()[0].coordinatorUrl).toBe("https://a.example");
+    expect(m.addPeer(mk(A, "https://attacker.example"), { source: "gossip" })).toBe(false);
+    expect(m.listPeers()[0].coordinatorUrl).toBe("https://a.example");
+  });
+
+  it("bootstrap and registration that disagree with the pin are refused", () => {
+    const m = meshWith(allow, true, pins);
+    expect(m.addPeer(mk(A, "https://other.example"), { source: "bootstrap" })).toBe(false);
+    expect(m.addPeer(mk(A, "https://other.example"), { source: "register", authoritative: true })).toBe(false);
+    expect(m.addPeer(mk(A, "https://a.example"), { source: "register", authoritative: true })).toBe(true);
+  });
+
+  it("unpinned registration can only confirm the bootstrap endpoint, never move it", () => {
+    const m = meshWith(allow, true);
+    expect(m.addPeer(mk(A, "https://a.example"), { source: "register", authoritative: true })).toBe(false); // unknown, unpinned
+    m.addPeer(mk(A, "https://a.example"), { source: "bootstrap" });
+    expect(m.addPeer(mk(A, "https://a2.example"), { source: "register", authoritative: true })).toBe(false);
+    expect(m.addPeer(mk(A, "https://a.example"), { source: "register", authoritative: true })).toBe(true);
+    expect(m.listPeers()[0].coordinatorUrl).toBe("https://a.example");
   });
 
   it("a squatter entry (dev legacy, then allowlist on) is replaced by the real peer", () => {
     // Squatter got in before the allowlist was configured.
-    expect(admitPeer({ allowlist: allow, production: true, peer: A, existing: EVIL })).toBe(true);
-    expect(admitPeer({ allowlist: allow, production: true, peer: EVIL, existing: A })).toBe(false);
+    expect(admitPeer({ allowlist: allow, pins, production: true, peer: mk(A), existing: mk(EVIL) })).toMatchObject({ coordinatorUrl: "https://a.example" });
+    expect(admitPeer({ allowlist: allow, pins, production: true, peer: mk(EVIL), existing: mk(A) })).toBeNull();
   });
 
   it("production without an allowlist admits nobody; dev keeps first-wins", () => {
-    expect(admitPeer({ allowlist: new Map(), production: true, peer: A })).toBe(false);
-    expect(admitPeer({ allowlist: new Map(), production: false, peer: A })).toBe(true);
-    expect(admitPeer({ allowlist: new Map(), production: false, peer: EVIL, existing: A })).toBe(false);
-    expect(admitPeer({ allowlist: new Map(), production: false, peer: EVIL, existing: A, authoritative: true })).toBe(true);
+    expect(admitPeer({ allowlist: new Map(), production: true, peer: mk(A) })).toBeNull();
+    expect(admitPeer({ allowlist: new Map(), production: false, peer: mk(A) })).not.toBeNull();
+    expect(admitPeer({ allowlist: new Map(), production: false, peer: mk(EVIL), existing: mk(A) })).toBeNull();
+    expect(admitPeer({ allowlist: new Map(), production: false, peer: mk(EVIL), existing: mk(A), authoritative: true })).not.toBeNull();
   });
 
   it("onBroadcast sees task_offer messages", async () => {

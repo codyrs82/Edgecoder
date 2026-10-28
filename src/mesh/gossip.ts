@@ -10,6 +10,12 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 /** After this many HTTP failures, mark a peer as NATed (skip HTTP, prefer WS/relay). */
 const NAT_DETECTION_THRESHOLD = 2;
 
+export interface AddPeerOptions {
+  authoritative?: boolean;
+  /** Where the entry came from; gossip ("peer_exchange") never sets an endpoint. */
+  source?: "register" | "bootstrap" | "gossip";
+}
+
 export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
   private wsPeers = new Map<string, WebSocket>();
@@ -20,11 +26,11 @@ export class GossipMesh {
   private natPeers = new Set<string>();
 
   /** #118 review: every addPeer goes through this rule (allowlist, squatting). */
-  private admission?: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, authoritative: boolean) => boolean;
+  private admission?: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null;
   /** Called for every message broadcast (the coordinator records which subtasks it offered). */
   private broadcastListener?: (message: MeshMessage) => void;
 
-  setAdmission(fn: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, authoritative: boolean) => boolean): void {
+  setAdmission(fn: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null): void {
     this.admission = fn;
   }
 
@@ -36,11 +42,15 @@ export class GossipMesh {
     this.meshToken = token;
   }
 
-  /** Returns false when the admission rule refuses the peer. `authoritative`: the peer proved key possession. */
-  addPeer(peer: MeshPeerIdentity, opts: { authoritative?: boolean } = {}): boolean {
+  /**
+   * Returns false when the admission rule refuses the peer. `authoritative`: the peer proved key
+   * possession. The admission rule may rewrite the endpoint (#118 review: URLs are pinned).
+   */
+  addPeer(peer: MeshPeerIdentity, opts: AddPeerOptions = {}): boolean {
     const existing = this.peers.get(peer.peerId);
-    if (this.admission && !this.admission(peer, existing, opts.authoritative === true)) return false;
-    this.peers.set(peer.peerId, peer);
+    const stored = this.admission ? this.admission(peer, existing, opts) : peer;
+    if (!stored) return false;
+    this.peers.set(peer.peerId, stored);
     return true;
   }
 

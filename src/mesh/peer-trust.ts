@@ -23,20 +23,57 @@ export function publicKeyFingerprint(publicKeyPem: string): string {
   return createHash("sha256").update(der).digest("hex");
 }
 
-/** `MESH_PEER_ALLOWLIST=coord-a:<sha256hex>,coord-b:<sha256hex>` */
-export function parsePeerAllowlist(raw: string | undefined): PeerAllowlist {
-  const out: PeerAllowlist = new Map();
+/**
+ * `MESH_PEER_ALLOWLIST=coord-a:<sha256hex>@https://a.example,coord-b:<sha256hex>`
+ * The optional `@url` pins the peer's endpoint (#118 review). Without a pin the endpoint can only
+ * come from bootstrap discovery (the URL we fetched the identity from); gossip never sets one.
+ */
+export type PeerUrlPins = Map<string, string>;
+
+const ALLOWLIST_ENTRY_RE = /^([^:@]+):([^:@]+)(?:@(\S+))?$/;
+
+function parseEntries(raw: string | undefined): Array<{ peerId: string; fp: string; url?: string }> {
+  const out: Array<{ peerId: string; fp: string; url?: string }> = [];
+  const seen = new Set<string>();
   for (const item of (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-    const idx = item.lastIndexOf(":");
-    if (idx <= 0) throw new Error(`MESH_PEER_ALLOWLIST: bad entry "${item}" (want peerId:sha256hex)`);
-    const peerId = item.slice(0, idx);
-    const fp = item.slice(idx + 1).toLowerCase();
+    const m = ALLOWLIST_ENTRY_RE.exec(item);
+    if (!m) throw new Error(`MESH_PEER_ALLOWLIST: bad entry "${item}" (want peerId:sha256hex[@url])`);
+    const [, peerId, fpRaw, urlRaw] = m;
+    const fp = fpRaw.toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(fp)) throw new Error(`MESH_PEER_ALLOWLIST: bad fingerprint for "${peerId}"`);
     // #118 review: a later entry silently winning would hide a typo or a swapped key.
-    if (out.has(peerId)) throw new Error(`MESH_PEER_ALLOWLIST: duplicate peer id "${peerId}"`);
-    out.set(peerId, fp);
+    if (seen.has(peerId)) throw new Error(`MESH_PEER_ALLOWLIST: duplicate peer id "${peerId}"`);
+    seen.add(peerId);
+    let url: string | undefined;
+    if (urlRaw !== undefined) {
+      const c = canonicalPeerUrl(urlRaw);
+      if (!c) throw new Error(`MESH_PEER_ALLOWLIST: bad url for "${peerId}"`);
+      url = c;
+    }
+    out.push({ peerId, fp, url });
   }
   return out;
+}
+
+export function parsePeerAllowlist(raw: string | undefined): PeerAllowlist {
+  return new Map(parseEntries(raw).map((e) => [e.peerId, e.fp]));
+}
+
+export function parsePeerUrlPins(raw: string | undefined): PeerUrlPins {
+  return new Map(parseEntries(raw).filter((e) => e.url).map((e) => [e.peerId, e.url!]));
+}
+
+/** http(s) origin + path without trailing slash, or null. */
+export function canonicalPeerUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (u.username || u.password || u.search || u.hash) return null;
+    return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
 }
 
 export function isAllowlistedKey(allowlist: PeerAllowlist, peerId: string, publicKeyPem: string): boolean {
@@ -111,26 +148,53 @@ export function allowlistEnforced(allowlist: PeerAllowlist, production: boolean)
   return allowlist.size > 0 || production;
 }
 
+export type PeerSource = "register" | "bootstrap" | "gossip";
+
 /**
  * #118 review: the single admission rule for the peer table, used by every path that adds a
- * peer (registration, bootstrap discovery, peer_exchange gossip).
- * - Enforced: only an allowlisted (peerId, key) pair is admitted. An existing entry is replaced
- *   only if it is not itself allowlisted (a squatter), unless `authoritative` (the peer proved
- *   possession of the key on /mesh/register-peer, so it may update its URL).
- * - Not enforced (dev, no allowlist): legacy behaviour, first entry for an id wins.
+ * peer (registration, bootstrap discovery, peer_exchange gossip). Returns the peer to store,
+ * with its endpoint resolved, or null when refused.
+ *
+ * Enforced (allowlist set, or production):
+ * - Only an allowlisted (peerId, key) pair is admitted.
+ * - The endpoint is pinned. It comes from the allowlist `@url` if set; otherwise from bootstrap
+ *   (the URL we reached the peer on). Registration must match a pin when one exists. Gossip never
+ *   sets an endpoint: it can only (re)admit a peer whose endpoint is pinned or already known.
+ * - An existing entry is replaced only if it is a squatter (not allowlisted) or `authoritative`.
+ * Not enforced (dev, no allowlist): legacy behaviour, first entry for an id wins.
  */
-export function admitPeer(input: {
+export function admitPeer<P extends { peerId: string; publicKeyPem: string; coordinatorUrl: string }>(input: {
   allowlist: PeerAllowlist;
+  pins?: PeerUrlPins;
   production: boolean;
-  peer: { peerId: string; publicKeyPem: string };
-  existing?: { peerId: string; publicKeyPem: string };
+  peer: P;
+  existing?: P;
   authoritative?: boolean;
-}): boolean {
+  source?: PeerSource;
+}): P | null {
   const { allowlist, peer, existing } = input;
-  if (!allowlistEnforced(allowlist, input.production)) return !existing || input.authoritative === true;
-  if (!isAllowlistedKey(allowlist, peer.peerId, peer.publicKeyPem)) return false;
-  if (!existing || input.authoritative) return true;
-  return !isAllowlistedKey(allowlist, existing.peerId, existing.publicKeyPem);
+  const source = input.source ?? (input.authoritative ? "register" : "gossip");
+  if (!allowlistEnforced(allowlist, input.production)) return !existing || input.authoritative === true ? peer : null;
+  if (!isAllowlistedKey(allowlist, peer.peerId, peer.publicKeyPem)) return null;
+  const existingTrusted = !!existing && isAllowlistedKey(allowlist, existing.peerId, existing.publicKeyPem);
+  if (existingTrusted && !input.authoritative) return null;
+  const pin = input.pins?.get(peer.peerId);
+  const claimed = canonicalPeerUrl(peer.coordinatorUrl);
+  let url: string | null;
+  if (pin) {
+    // Registration/bootstrap that disagrees with the pin is refused; gossip just gets the pin.
+    if (source !== "gossip" && claimed !== pin) return null;
+    url = pin;
+  } else if (source === "bootstrap") {
+    url = claimed;
+  } else if (source === "register") {
+    // Unpinned: a registering peer may only confirm the endpoint bootstrap already found.
+    url = existingTrusted && claimed === canonicalPeerUrl(existing!.coordinatorUrl) ? claimed : null;
+  } else {
+    url = null; // gossip never introduces an endpoint
+  }
+  if (!url) return null;
+  return { ...peer, coordinatorUrl: url };
 }
 
 /** Seen-signature cache for forwarded results; entries expire with the signature skew window. */
