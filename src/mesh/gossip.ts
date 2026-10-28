@@ -10,6 +10,12 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 /** After this many HTTP failures, mark a peer as NATed (skip HTTP, prefer WS/relay). */
 const NAT_DETECTION_THRESHOLD = 2;
 
+export interface AddPeerOptions {
+  authoritative?: boolean;
+  /** Where the entry came from; gossip ("peer_exchange") never sets an endpoint. */
+  source?: "register" | "bootstrap" | "gossip";
+}
+
 export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
   private wsPeers = new Map<string, WebSocket>();
@@ -19,12 +25,33 @@ export class GossipMesh {
   /** Peers whose coordinatorUrl is unreachable (behind NAT/firewall). */
   private natPeers = new Set<string>();
 
+  /** #118 review: every addPeer goes through this rule (allowlist, squatting). */
+  private admission?: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null;
+  /** Called for every message broadcast (the coordinator records which subtasks it offered). */
+  private broadcastListener?: (message: MeshMessage) => void;
+
+  setAdmission(fn: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null): void {
+    this.admission = fn;
+  }
+
+  onBroadcast(fn: (message: MeshMessage) => void): void {
+    this.broadcastListener = fn;
+  }
+
   setMeshToken(token: string): void {
     this.meshToken = token;
   }
 
-  addPeer(peer: MeshPeerIdentity): void {
-    this.peers.set(peer.peerId, peer);
+  /**
+   * Returns false when the admission rule refuses the peer. `authoritative`: the peer proved key
+   * possession. The admission rule may rewrite the endpoint (#118 review: URLs are pinned).
+   */
+  addPeer(peer: MeshPeerIdentity, opts: AddPeerOptions = {}): boolean {
+    const existing = this.peers.get(peer.peerId);
+    const stored = this.admission ? this.admission(peer, existing, opts) : peer;
+    if (!stored) return false;
+    this.peers.set(peer.peerId, stored);
+    return true;
   }
 
   removePeer(peerId: string): void {
@@ -70,6 +97,7 @@ export class GossipMesh {
   }
 
   async broadcast(message: MeshMessage, excludePeerId?: string): Promise<{ delivered: number; failed: number }> {
+    this.broadcastListener?.(message);
     const peers = this.listPeers().filter(p => !excludePeerId || p.peerId !== excludePeerId);
     let delivered = 0;
     let failed = 0;
