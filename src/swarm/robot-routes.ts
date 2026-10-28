@@ -64,7 +64,8 @@ export function registerRobotRoutes(
         expiresAtMs: number;
       }>;
       checkSettlement(
-        invoiceRef: string
+        invoiceRef: string,
+        paymentHash?: string
       ): Promise<{ settled: boolean; txRef?: string }>;
     };
   }
