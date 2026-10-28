@@ -106,6 +106,34 @@ jobs:
             exit 1
           fi
 
+  # #29: axe audit (fails on critical violations) and small-window overflow checks at the
+  # Tauri minimum (900x600) and default (1200x800) sizes, against the built web bundle.
+  desktop-a11y:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run test:a11y
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-report
+          path: |
+            desktop/a11y-report
+            desktop/test-results
+          retention-days: 7
+
   # #9: build both images and check them: non-root, no Ollama in the slim image,
   # no tests/, server size budget, and a /health/runtime smoke test.
   docker-build:
