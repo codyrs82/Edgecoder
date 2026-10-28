@@ -38,6 +38,21 @@ jobs:
           path: junit.xml
           if-no-files-found: ignore
 
+  # #126 review: build the iOS app so project.pbxproj / project.yml drift is caught.
+  # Non-blocking until it has run green a few times (SwiftPM resolution on hosted runners).
+  ios-build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: xcodebuild (simulator, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/EdgeCoderIOS/EdgeCoderIOS.xcodeproj -scheme EdgeCoderIOS \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build | tail -n 200
+
   debian-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 20
