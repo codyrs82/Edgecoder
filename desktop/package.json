@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "bundle-agent": "bash ../scripts/bundle-agent-resources.sh",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:a11y": "playwright test -c playwright.config.ts"
   },
   "dependencies": {
     "@edgecoder/tokens": "file:../packages/tokens",
@@ -30,6 +31,8 @@
     "tailwind-merge": "3.7.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.64.1",
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.0.0",

@@ -36,9 +36,13 @@
       <Dialog.Title class="sr-only">Command palette</Dialog.Title>
       <Command.Root label="Command palette" loop shouldFilter={false}>
         <Command.Input class="palette-input" placeholder="Type a command…" bind:value={search} />
-        <Command.List class="palette-list">
+        <!-- An empty role=listbox is an axe violation (aria-required-children), so the list is hidden
+             (but kept, for the input's aria-controls) when nothing matches; the message is a live status. -->
+        {#if groups.length === 0}
+          <p class="palette-empty" role="status">No matching commands</p>
+        {/if}
+        <Command.List class="palette-list" hidden={groups.length === 0}>
           <Command.Viewport>
-            <Command.Empty class="palette-empty">No matching commands</Command.Empty>
             {#each groups as g (g.group)}
               <Command.Group value={g.group}>
                 <Command.GroupHeading class="palette-heading">{g.group}</Command.GroupHeading>
@@ -65,7 +69,7 @@
   :global(.palette) {
     position: fixed; top: 14vh; left: 50%; transform: translateX(-50%);
     width: min(560px, calc(100vw - 32px)); max-height: 70vh; display: flex; flex-direction: column;
-    background: var(--bg-elevated, #454542); color: var(--text-primary, #f7f5f0);
+    background: var(--bg-surface, #3a3a37); color: var(--text-primary, #f7f5f0);
     border: 1px solid var(--border-strong, rgba(214, 204, 194, 0.15)); border-radius: var(--radius-lg, 10px);
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4); z-index: 901; overflow: hidden;
   }
@@ -79,9 +83,12 @@
     display: flex; justify-content: space-between; align-items: center; padding: 8px 10px;
     border-radius: var(--radius-sm, 6px); cursor: pointer; font-size: 14px;
   }
-  :global(.palette-item[data-selected]) { background: var(--accent, #c17850); color: var(--on-accent, #1a1a18); }
-  :global(.palette-item kbd) { font-family: var(--font-mono, monospace); font-size: 11px; opacity: 0.75; }
-  :global(.palette-empty) { padding: 16px; text-align: center; color: var(--text-secondary, #b8b0a4); font-size: 13px; }
+  :global(.palette-item[data-selected]) { background: var(--accent, #c17850); color: var(--on-accent, var(--palette-on-accent)); }
+  /* Fallback until --on-accent (#151) lands: dark text on the dark-theme accent, white on the light one. */
+  :global(.palette) { --palette-on-accent: #1a1a18; }
+  :global([data-theme="light"] .palette) { --palette-on-accent: #fff; }
+  :global(.palette-item kbd) { font-family: var(--font-mono, monospace); font-size: 11px; color: inherit; } /* no opacity: it dropped the hint below 4.5:1 on the accent row */
+  .palette-empty { padding: 16px; text-align: center; color: var(--text-secondary, #b8b0a4); font-size: 13px; }
   .palette-hint { margin: 0; padding: 8px 14px; font-size: 11px; color: var(--text-secondary, #b8b0a4); border-top: 1px solid var(--border, rgba(214, 204, 194, 0.08)); }
   :global(.sr-only) { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 </style>
