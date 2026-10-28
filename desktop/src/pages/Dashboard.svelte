@@ -6,7 +6,10 @@
     getSystemMetrics,
     backendReady,
     isRemoteMode,
+    localAgentStatus,
+    retryLocalAgent,
   } from "../lib/api";
+  import { agentStatusMessage } from "../lib/agent-status";
   import { formatUptime } from "../lib/format";
   import StatCard from "../components/StatCard.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
@@ -112,9 +115,18 @@
   // ---------------------------------------------------------------------------
 
   let noLocalAgent = $state(false);
+  // #72: shown when :4301 is held by a process EdgeCoder didn't start.
+  let agentPortError = $state("");
+
+  async function retryAgent() {
+    await retryLocalAgent();
+    await refreshCoreData();
+  }
 
   async function refreshCoreData() {
     await backendReady;
+    const agentStatus = await localAgentStatus();
+    agentPortError = agentStatus === "port_occupied" ? (agentStatusMessage(agentStatus) ?? "") : "";
     if (isRemoteMode()) {
       noLocalAgent = true;
       loading = false;
@@ -179,6 +191,9 @@
     <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see dashboard metrics.</div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refreshCoreData} />
+  {/if}
+  {#if agentPortError}
+    <ErrorBanner message={agentPortError} onRetry={retryAgent} />
   {/if}
 
   {#if loading && !noLocalAgent}
