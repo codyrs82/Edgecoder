@@ -6,6 +6,16 @@ on:
     paths:
       - 'site-docs/**'
       - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-docs.yml'
+  # #34: build (not deploy) on PRs so a broken docs build shows up before main.
+  pull_request:
+    paths:
+      - 'site-docs/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,7 +23,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
   cancel-in-progress: false
 
 jobs:
@@ -28,10 +38,12 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run docs:build
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: site-docs/.vitepress/dist
 
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
