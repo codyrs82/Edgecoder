@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+// @ts-expect-error plain .mjs build script, no type declarations
+import { allowedOrigin, connectSrcWithHosts, cspOverride } from "../scripts/gen-tauri-csp.mjs";
 
 // #11: production CSP has no eval, no inline scripts and no dev origins; devCsp may.
 const conf = JSON.parse(readFileSync(resolve(__dirname, "../src-tauri/tauri.conf.json"), "utf8"));
@@ -42,5 +44,46 @@ describe("desktop CSP (#11)", () => {
 
   it("devCsp keeps the dev conveniences", () => {
     expect(sec.devCsp).toContain("http://localhost:1420");
+  });
+});
+
+describe("gen-tauri-csp (#83)", () => {
+  const base = String(sec.csp["connect-src"]);
+
+  it("gives exactly today's connect-src when no VITE_* hosts are set", () => {
+    expect(cspOverride(conf, {})).toEqual({ app: { security: { csp: { "connect-src": base } } } });
+    expect(connectSrcWithHosts(base, { VITE_COORDINATOR_URL: "  ", VITE_PORTAL_URL: "" })).toBe(base);
+  });
+
+  it("adds exactly the configured origins, nothing broader", () => {
+    const out = connectSrcWithHosts(base, {
+      VITE_COORDINATOR_URL: "https://coord.example.org:8443/api/v1?x=1",
+      VITE_PORTAL_URL: "https://portal.example.org/"
+    });
+    const added = out.split(" ").filter((t: string) => !base.split(" ").includes(t));
+    expect(added).toEqual(["https://coord.example.org:8443", "https://portal.example.org"]);
+    expect(out).not.toMatch(/(^| )https:( |$)/);
+    expect(out).not.toContain("*.example.org");
+  });
+
+  it("doesn't duplicate an origin that's already allowed", () => {
+    expect(connectSrcWithHosts(base, { VITE_PORTAL_URL: "https://edgecoder.io" })).toBe(base);
+  });
+
+  it("allows http only for loopback", () => {
+    expect(allowedOrigin("X", "http://127.0.0.1:9000/x")).toBe("http://127.0.0.1:9000");
+    expect(allowedOrigin("X", "http://localhost:9000")).toBe("http://localhost:9000");
+    expect(() => allowedOrigin("X", "http://coord.example.org")).toThrow(/https/);
+  });
+
+  it("rejects other schemes, credentials and garbage", () => {
+    expect(() => allowedOrigin("X", "ws://coord.example.org")).toThrow();
+    expect(() => allowedOrigin("X", "https://user:pw@coord.example.org")).toThrow(/credentials/);
+    expect(() => allowedOrigin("X", "not a url")).toThrow(/valid URL/);
+  });
+
+  it("leaves every other directive untouched", () => {
+    const patch = cspOverride(conf, { VITE_PORTAL_URL: "https://portal.example.org" });
+    expect(Object.keys(patch.app.security.csp)).toEqual(["connect-src"]);
   });
 });

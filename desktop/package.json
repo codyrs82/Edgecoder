@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "bundle-agent": "bash ../scripts/bundle-agent-resources.sh",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "csp:gen": "node scripts/gen-tauri-csp.mjs"
   },
   "dependencies": {
     "@edgecoder/tokens": "file:../packages/tokens",
