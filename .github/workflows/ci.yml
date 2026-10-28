@@ -76,3 +76,88 @@ jobs:
           cp desktop/src-tauri/src/token.rs /tmp/token-test/src/lib.rs
           printf '[package]\nname = "token-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\ngetrandom = "0.2"\nhex = "0.4"\n' > /tmp/token-test/Cargo.toml
           cargo test --manifest-path /tmp/token-test/Cargo.toml
+
+  # #9: build both images and check them: non-root, no Ollama in the slim image,
+  # no tests/, server size budget, and a /health/runtime smoke test.
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      # Throwaway database for the portal smoke test (the portal requires PORTAL_DATABASE_URL).
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: smoke, POSTGRES_PASSWORD: smoke, POSTGRES_DB: portal }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U smoke -d portal" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build server image
+        run: docker build -f deploy/docker/Dockerfile.server -t edgecoder-server:ci .
+      - name: Build agent image
+        run: docker build -f deploy/docker/Dockerfile.agent -t edgecoder-agent:ci .
+      - name: Image assertions
+        run: |
+          set -eu
+          for img in edgecoder-server:ci edgecoder-agent:ci; do
+            uid=$(docker run --rm --entrypoint id "$img" -u)
+            echo "$img uid=$uid"; test "$uid" != "0"
+            docker run --rm --entrypoint sh "$img" -c 'test ! -d /app/tests'
+          done
+          if docker run --rm --entrypoint sh edgecoder-server:ci -c 'command -v ollama'; then
+            echo "::error::ollama found in the slim server image"; exit 1
+          fi
+          docker run --rm --entrypoint ollama edgecoder-agent:ci --version
+          # The agent image's real entrypoint must be executable as the non-root user
+          # (scale-nonroot caught exit 126 from a 0644 entrypoint).
+          docker run --rm -e SKIP_OLLAMA=true edgecoder-agent:ci node -e "process.exit(0)"
+          docker run --rm edgecoder-agent:ci sh -c 'test -x /usr/local/bin/docker-entrypoint.sh'
+          size=$(docker image inspect edgecoder-server:ci --format '{{.Size}}')
+          echo "server image size: $((size / 1024 / 1024)) MB"
+          test "$size" -lt $((300 * 1024 * 1024))
+      - name: Smoke test server image
+        run: |
+          set -eu
+          # Throwaway per-run values (not secrets) for the tokens every service requires at startup.
+          t() { openssl rand -hex 16; }
+          docker run -d --name smoke -p 4301:4301 -e NODE_ENV=development -e HOST=0.0.0.0 \
+            -e MESH_AUTH_TOKEN="$(t)" -e ADMIN_API_TOKEN="$(t)" -e INFERENCE_AUTH_TOKEN="$(t)" \
+            -e PORTAL_SERVICE_TOKEN="$(t)" -e PAYMENT_WEBHOOK_SECRET="$(t)" \
+            -e LOCAL_MODEL_PROVIDER=edgecoder-local -e OLLAMA_AUTO_INSTALL=false -e ECONOMY_PAYMENTS_ENABLED=false \
+            edgecoder-server:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4301/health/runtime; then echo; docker rm -f smoke; exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then break; fi
+            sleep 2
+          done
+          docker logs smoke; docker rm -f smoke; exit 1
+      - name: Smoke test portal entry on the server image
+        run: |
+          set -eu
+          t() { openssl rand -hex 16; }
+          # The portal is what ships on this image (fly.portal.toml runs dist/portal/server.js).
+          docker run -d --name portal-smoke --network host -e NODE_ENV=development -e HOST=127.0.0.1 \
+            -e PORTAL_DATABASE_URL=postgresql://smoke:smoke@127.0.0.1:5432/portal \
+            -e PORTAL_SERVICE_TOKEN="$(t)" -e INFERENCE_AUTH_TOKEN="$(t)" -e MESH_AUTH_TOKEN="$(t)" \
+            -e WALLET_SECRET_PEPPER="$(t)" \
+            edgecoder-server:ci node dist/portal/server.js
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4310/health; then echo; docker rm -f portal-smoke; exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' portal-smoke)" != "true" ]; then break; fi
+            sleep 2
+          done
+          docker logs portal-smoke; docker rm -f portal-smoke; exit 1
+      - name: "Vulnerability scan - server image (non-blocking)"
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: edgecoder-server:ci
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+      - name: "Vulnerability scan - agent image (non-blocking)"
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: edgecoder-agent:ci
+          severity: CRITICAL,HIGH
+          exit-code: "0"

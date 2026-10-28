@@ -1,0 +1,11 @@
+tests
+desktop
+ios
+site-docs
+docs
+assets
+node_modules
+dist
+.git
+.github
+*.md
