@@ -114,6 +114,40 @@ export async function swapModel(
   };
 }
 
+/**
+ * #37: start downloading a model without switching to it (POST /model/pull). Progress is
+ * reported through the PullTracker, same as a pull triggered by /model/swap.
+ */
+export async function pullModel(
+  model: string,
+  tracker?: PullTracker,
+): Promise<{ model: string; status: "ready" | "pulling" | "error"; error?: string }> {
+  let tags: OllamaTagsResponse;
+  try {
+    tags = await ollamaTags();
+  } catch {
+    return { model, status: "error", error: "ollama_not_running: Start Ollama with: ollama serve" };
+  }
+  if (tags.models.some((m) => m.name === model)) return { model, status: "ready" };
+  tracker?.startPull(model);
+  try {
+    const res = await fetch(`${OLLAMA_HOST}/api/pull`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: model, stream: true }),
+    });
+    if (!res.ok || !res.body) {
+      tracker?.failPull("pull_request_failed");
+      return { model, status: "error", error: "pull_failed" };
+    }
+    processStreamingPull(res.body, tracker).catch(() => tracker?.failPull("stream_read_error"));
+  } catch {
+    tracker?.failPull("pull_fetch_error");
+    return { model, status: "error", error: "pull_failed" };
+  }
+  return { model, status: "pulling" };
+}
+
 async function processStreamingPull(
   body: ReadableStream<Uint8Array>,
   tracker?: PullTracker,
