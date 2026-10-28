@@ -7,7 +7,8 @@ import { ModelProvider } from "../model/providers.js";
 
 export class InteractiveAgent extends AgentBase {
   constructor(provider: ModelProvider, options?: AgentOptions) {
-    super(provider, options);
+    // #45: interactive/IDE runs execute the local user's own code on the host.
+    super(provider, { sandbox: "host", origin: "local", ...options });
   }
 
   async run(task: string, language: Language): Promise<AgentExecution> {

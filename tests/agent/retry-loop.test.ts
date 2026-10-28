@@ -77,7 +77,8 @@ describe("InteractiveAgent retry loop", () => {
 describe("SwarmWorkerAgent retry loop", () => {
   it("retries subtask on failure (max 2)", async () => {
     const provider = new EdgeCoderLocalProvider();
-    const agent = new SwarmWorkerAgent(provider, { sandbox: "host" });
+    // Test-only opt-in: host execution needs origin "local" since #45.
+    const agent = new SwarmWorkerAgent(provider, { sandbox: "host", origin: "local" });
     const result = await agent.runSubtask({
       id: "sub-1",
       taskId: "t-1",
@@ -89,5 +90,21 @@ describe("SwarmWorkerAgent retry loop", () => {
       projectMeta: { projectId: "p-1", resourceClass: "cpu", priority: 10 }
     }, "agent-1");
     expect(result.ok).toBe(true);
+  });
+
+  it("refuses host execution for remote-origin subtasks (#45)", async () => {
+    const provider = new EdgeCoderLocalProvider();
+    const agent = new SwarmWorkerAgent(provider, { sandbox: "host" });
+    const result = await agent.runSubtask({
+      id: "sub-2",
+      taskId: "t-2",
+      kind: "single_step",
+      language: "python",
+      input: "Print hello",
+      timeoutMs: 4000,
+      snapshotRef: "test",
+      projectMeta: { projectId: "p-1", resourceClass: "cpu", priority: 10 }
+    }, "agent-1");
+    expect(result.ok).toBe(false);
   });
 });

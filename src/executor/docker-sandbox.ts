@@ -110,6 +110,17 @@ export function buildDockerArgs(
   args.push(`--memory=${memoryMB}m`);
   args.push(`--cpus=${(cpuPercent / 100).toFixed(2)}`);
   args.push("--pids-limit=50");
+  // #45: least-privilege container.
+  args.push(
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--user=65534:65534",
+    "--tmpfs=/tmp:rw,noexec,nosuid,size=64m",
+    "--ulimit=nofile=256:256"
+  );
+  if (process.env.SANDBOX_SECCOMP_PROFILE) {
+    args.push(`--security-opt=seccomp=${process.env.SANDBOX_SECCOMP_PROFILE}`);
+  }
   args.push(image);
   args.push(code);
 
