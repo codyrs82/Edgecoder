@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { join } from "node:path";
+import { win32 } from "node:path";
 import {
   detectPlatform,
   detectOS,
@@ -329,8 +329,8 @@ describe("getConfigDir", () => {
 
   it("returns APPDATA path on Windows", () => {
     const dir = getConfigDir(windowsOverrides);
-    // path.join uses host-native separators, so compare with join()
-    expect(dir).toBe(join("C:\\Users\\test\\AppData\\Roaming", "EdgeCoder"));
+    // Windows paths always use win32 separators, regardless of the host OS
+    expect(dir).toBe(win32.join("C:\\Users\\test\\AppData\\Roaming", "EdgeCoder"));
   });
 
   it("falls back to home-based APPDATA on Windows when env is unset", () => {
@@ -360,7 +360,7 @@ describe("getLogDir", () => {
 
   it("returns LOCALAPPDATA path on Windows", () => {
     const dir = getLogDir(windowsOverrides);
-    expect(dir).toBe(join("C:\\Users\\test\\AppData\\Local", "EdgeCoder", "logs"));
+    expect(dir).toBe(win32.join("C:\\Users\\test\\AppData\\Local", "EdgeCoder", "logs"));
   });
 });
 
@@ -381,6 +381,6 @@ describe("getDataDir", () => {
 
   it("returns LOCALAPPDATA path on Windows", () => {
     const dir = getDataDir(windowsOverrides);
-    expect(dir).toBe(join("C:\\Users\\test\\AppData\\Local", "EdgeCoder", "data"));
+    expect(dir).toBe(win32.join("C:\\Users\\test\\AppData\\Local", "EdgeCoder", "data"));
   });
 });
