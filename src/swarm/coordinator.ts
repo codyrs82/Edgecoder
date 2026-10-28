@@ -25,7 +25,7 @@ import {
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
 import { extractCode } from "../model/extract.js";
-import { SwarmQueue } from "./queue.js";
+import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -126,7 +126,7 @@ await app.register(cors, {
   credentials: true,
 });
 await app.register(websocket);
-const queue = new SwarmQueue(pgStore);
+const queue = new SwarmQueue(pgStore, leaseConfigFromEnv());
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
 if (process.env.MESH_AUTH_TOKEN) {
@@ -1866,7 +1866,12 @@ app.post("/heartbeat", async (req, reply) => {
       existing.sandboxMode = body.sandboxMode as SandboxMode;
     }
   }
-  const requeued = queue.requeueStale(30_000);
+  // #51: lease-based requeue (timeout + grace, renewed by heartbeat, retry cap).
+  const leaseExpiry = queue.expireLeases();
+  const requeued = leaseExpiry.requeued.length;
+  if (leaseExpiry.failed.length > 0) {
+    app.log.warn({ subtaskIds: leaseExpiry.failed }, "subtask_failed_max_attempts");
+  }
   const tunnelInvites = pendingTunnelInvites.get(body.agentId) ?? [];
   pendingTunnelInvites.set(body.agentId, []);
   const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
@@ -2218,6 +2223,10 @@ app.post("/result", async (req, reply) => {
   const blacklisted = activeBlacklistRecord(body.agentId);
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
+  }
+  // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
+  if (queue.leaseExpiredFor(body.subtaskId, body.agentId)) {
+    return reply.code(409).send({ error: "lease_expired" });
   }
   // ── #44: claim ownership, before anything is recorded ──
   const claim = queue.getClaim(body.subtaskId);
