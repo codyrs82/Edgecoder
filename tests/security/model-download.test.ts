@@ -9,7 +9,9 @@ import { signModelManifest } from "../../src/security/manifest-verifier.js";
 import {
   digestsEqual,
   downloadVerifiedModel,
+  assertPublicHttps,
   fileMatchesSha256,
+  isBlockedAddress,
   modelFileName,
   redirectTarget,
   sha256OfStream
@@ -31,6 +33,7 @@ function manifest(over: Partial<{ source: string; sha256: string; modelId: strin
   );
 }
 
+const publicDns = async () => ["93.184.216.34"];
 let agent: MockAgent;
 let dir: string;
 beforeEach(() => {
@@ -47,63 +50,96 @@ describe("downloadVerifiedModel (#148)", () => {
   it("follows an https redirect to the CDN, hashes while streaming, and names the file from signed fields", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: "https://cdn-lfs.huggingface.co/blob/abc?sig=1" } });
     agent.get("https://cdn-lfs.huggingface.co").intercept({ path: "/blob/abc?sig=1" }).reply(200, BYTES);
-    const out = await downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent });
-    expect(out.path).toBe(join(dir, "qwen-0.8b-1.0.gguf"));
+    const out = await downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns });
+    expect(out.path).toBe(join(dir, `qwen-0.8b-1.0-${SHA.slice(0, 16)}.gguf`));
     expect(out.sha256).toBe(SHA);
     expect(out.bytes).toBe(BYTES.length);
     expect(out.hops).toEqual([`${ORIGIN}${PATH}`, "https://cdn-lfs.huggingface.co/blob/abc?sig=1"]);
     expect(readFileSync(out.path)).toEqual(BYTES);
-    expect(readdirSync(dir)).toEqual(["qwen-0.8b-1.0.gguf"]);
+    expect(readdirSync(dir)).toEqual([`qwen-0.8b-1.0-${SHA.slice(0, 16)}.gguf`]);
   });
 
   it("refuses a redirect hop that downgrades to http", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: "http://cdn.example.org/x" } });
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("redirect_not_https");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("redirect_not_https");
     expect(readdirSync(dir)).toEqual([]);
   });
 
   it("refuses a redirect with credentials, without a Location, or too many hops", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: "https://u:p@cdn.example.org/x" } });
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("redirect_has_credentials");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("redirect_has_credentials");
 
     agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "");
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("redirect_without_location");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("redirect_without_location");
 
     agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: PATH } }).times(3);
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, maxRedirects: 2 })).rejects.toThrow("too_many_redirects");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns, maxRedirects: 2 })).rejects.toThrow("too_many_redirects");
+  });
+
+  it("refuses a redirect to a private or loopback address, even with a custom dispatcher", async () => {
+    agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: "https://169.254.169.254/latest/meta-data" } });
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("private_address_blocked");
+    agent.get(ORIGIN).intercept({ path: PATH }).reply(302, "", { headers: { location: "https://internal.example.org/m.gguf" } });
+    const dns = async (h: string) => (h === "internal.example.org" ? ["192.168.0.10"] : ["93.184.216.34"]);
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: dns })).rejects.toThrow("private_address_blocked");
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   it("deletes the temp file and throws on a sha256 mismatch", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(200, Buffer.from("tampered"));
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("sha256_mismatch");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("sha256_mismatch");
     expect(readdirSync(dir)).toEqual([]);
   });
 
   it("enforces maxBytes from Content-Length and while streaming", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(200, BYTES, { headers: { "content-length": "999999" } });
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, maxBytes: 10 })).rejects.toThrow("model_too_large");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns, maxBytes: 10 })).rejects.toThrow("model_too_large");
     agent.get(ORIGIN).intercept({ path: PATH }).reply(200, BYTES);
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, maxBytes: 10 })).rejects.toThrow("model_too_large");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns, maxBytes: 10 })).rejects.toThrow("model_too_large");
     expect(readdirSync(dir)).toEqual([]);
   });
 
   it("verifies the manifest before any network request", async () => {
     const tampered = { ...manifest(), source: `${ORIGIN}/attacker/other.gguf` };
-    await expect(downloadVerifiedModel(tampered, { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("manifest_invalid: invalid_signature");
-    await expect(downloadVerifiedModel(manifest(), { trust: { trustedPeerIds: [], trustedPublicKeys: {} }, destDir: dir, dispatcher: agent })).rejects.toThrow("untrusted_peer");
+    await expect(downloadVerifiedModel(tampered, { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("manifest_invalid: invalid_signature");
+    await expect(downloadVerifiedModel(manifest(), { trust: { trustedPeerIds: [], trustedPublicKeys: {} }, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("untrusted_peer");
     // disableNetConnect + no intercepts: any request would have thrown a different error
   });
 
   it("rejects a non-200 final response", async () => {
     agent.get(ORIGIN).intercept({ path: PATH }).reply(404, "nope");
-    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent })).rejects.toThrow("download_http_status: 404");
+    await expect(downloadVerifiedModel(manifest(), { trust, destDir: dir, dispatcher: agent, resolveHost: publicDns })).rejects.toThrow("download_http_status: 404");
   });
 });
 
 describe("download helpers (#148)", () => {
   it("modelFileName never takes the name from the URL and strips path tricks", () => {
-    expect(modelFileName({ modelId: "../../etc/passwd", version: "1/2", source: `${ORIGIN}/x/evil-name.GGUF` })).toBe("_.._etc_passwd-1_2.gguf");
-    expect(modelFileName({ modelId: "...", version: "v", source: `${ORIGIN}/m.safetensors` })).toBe("model-v.safetensors");
+    const p = SHA.slice(0, 16);
+    expect(modelFileName({ modelId: "../../etc/passwd", version: "1/2", source: `${ORIGIN}/x/evil-name.GGUF`, sha256: SHA })).toBe(`_.._etc_passwd-1_2-${p}.gguf`);
+    expect(modelFileName({ modelId: "...", version: "v", source: `${ORIGIN}/m.safetensors`, sha256: SHA })).toBe(`model-v-${p}.safetensors`);
+  });
+
+  it("modelFileName keeps two models that sanitize to the same id apart", () => {
+    const a = modelFileName({ modelId: "a/b", version: "1", source: `${ORIGIN}/m.gguf`, sha256: "a".repeat(64) });
+    const b = modelFileName({ modelId: "a:b", version: "1", source: `${ORIGIN}/m.gguf`, sha256: "b".repeat(64) });
+    expect(a).not.toBe(b);
+    expect(() => modelFileName({ modelId: "x", version: "1", source: `${ORIGIN}/m.gguf`, sha256: "nope" })).toThrow("invalid_sha256");
+  });
+
+  it.each(["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "not-an-ip"])(
+    "isBlockedAddress(%s) is true",
+    (a) => expect(isBlockedAddress(a)).toBe(true)
+  );
+
+  it.each(["93.184.216.34", "2606:4700::1111", "::ffff:8.8.8.8"])("isBlockedAddress(%s) is false", (a) => expect(isBlockedAddress(a)).toBe(false));
+
+  it("assertPublicHttps rejects http, private literals, and names that resolve privately", async () => {
+    await expect(assertPublicHttps("http://example.org/x", publicDns)).rejects.toThrow("hop_not_https");
+    await expect(assertPublicHttps("https://127.0.0.1/x", publicDns)).rejects.toThrow("private_address_blocked");
+    await expect(assertPublicHttps("https://[::1]/x", publicDns)).rejects.toThrow("private_address_blocked");
+    await expect(assertPublicHttps("https://evil.example.org/x", async () => ["93.184.216.34", "10.0.0.5"])).rejects.toThrow("private_address_blocked");
+    await expect(assertPublicHttps("https://none.example.org/x", async () => [])).rejects.toThrow("private_address_blocked");
+    await expect(assertPublicHttps("https://huggingface.co/x", publicDns)).resolves.toBeUndefined();
   });
 
   it("redirectTarget resolves relative locations against the current hop", () => {

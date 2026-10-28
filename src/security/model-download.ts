@@ -9,10 +9,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
+import { lookup as dnsLookup, type LookupAddress } from "node:dns";
+import { BlockList, isIP } from "node:net";
 import { join } from "node:path";
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { request, type Dispatcher } from "undici";
+import { Agent, request, type Dispatcher } from "undici";
 import {
   ALLOWED_MODEL_EXTENSIONS,
   verifyModelManifest,
@@ -37,8 +39,14 @@ export interface ModelDownloadOptions {
   maxRedirects?: number;
   /** Hard cap on bytes read (default 64 GiB). */
   maxBytes?: number;
-  /** For tests (undici MockAgent) or a proxy. */
+  /**
+   * For tests (undici MockAgent) only. The https and public-address checks below still run on
+   * every hop, but a custom dispatcher bypasses the connect-time address pin, so production
+   * callers must leave this unset.
+   */
   dispatcher?: Dispatcher;
+  /** Resolve a hostname to its addresses (default: dns.lookup all). Injectable for tests. */
+  resolveHost?: (hostname: string) => Promise<string[]>;
   headersTimeoutMs?: number;
   bodyTimeoutMs?: number;
 }
@@ -74,12 +82,71 @@ function safePart(value: string): string {
 }
 
 /** `<modelId>-<version><ext>` from the signed fields; the ext comes from the validated source path. */
-export function modelFileName(m: Pick<SignedModelManifest, "modelId" | "version" | "source">): string {
+export function modelFileName(m: Pick<SignedModelManifest, "modelId" | "version" | "source" | "sha256">): string {
   const path = decodeURIComponent(new URL(m.source).pathname).toLowerCase();
   const ext = ALLOWED_MODEL_EXTENSIONS.find((e) => path.endsWith(e));
   if (!ext) throw new ModelDownloadError("disallowed_file_extension");
-  return `${safePart(m.modelId)}-${safePart(m.version)}${ext}`;
+  // The sha256 prefix keeps two models whose ids sanitize to the same string from colliding.
+  if (!/^[0-9a-f]{64}$/.test(m.sha256)) throw new ModelDownloadError("invalid_sha256");
+  return `${safePart(m.modelId)}-${safePart(m.version)}-${m.sha256.slice(0, 16)}${ext}`;
 }
+
+// Loopback, private, link-local (incl. cloud metadata), CGNAT, multicast and reserved ranges.
+const BLOCKED = new BlockList();
+for (const [net, bits] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 3]
+] as const) BLOCKED.addSubnet(net, bits, "ipv4");
+for (const [net, bits] of [
+  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96]
+] as const) BLOCKED.addSubnet(net, bits, "ipv6");
+
+/** True for addresses a model download must never reach. IPv4-mapped IPv6 is checked as IPv4. */
+export function isBlockedAddress(address: string): boolean {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped) return BLOCKED.check(mapped[1], "ipv4");
+  const family = isIP(address);
+  if (family === 4) return BLOCKED.check(address, "ipv4");
+  if (family === 6) return BLOCKED.check(address, "ipv6");
+  return true; // not an IP at all
+}
+
+function defaultResolve(hostname: string): Promise<string[]> {
+  return new Promise((resolve, reject) =>
+    dnsLookup(hostname, { all: true }, (err, addrs: LookupAddress[]) =>
+      err ? reject(err) : resolve(addrs.map((a) => a.address))
+    )
+  );
+}
+
+/** Every hop: https only, and the host must not resolve to a private or loopback address. */
+export async function assertPublicHttps(url: string, resolveHost = defaultResolve): Promise<void> {
+  const u = new URL(url);
+  if (u.protocol !== "https:") throw new ModelDownloadError("hop_not_https", u.protocol);
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const addrs = isIP(host) ? [host] : await resolveHost(host).catch(() => {
+    throw new ModelDownloadError("dns_lookup_failed", host);
+  });
+  if (addrs.length === 0 || addrs.some(isBlockedAddress)) throw new ModelDownloadError("private_address_blocked", host);
+}
+
+// Default dispatcher: re-checks the address actually connected to, so DNS rebinding between
+// the pre-check and the connect can't reach a private host.
+const guardedAgent = new Agent({
+  connect: {
+    lookup(hostname, options, cb) {
+      dnsLookup(hostname, { ...options, all: true }, (err, addrs: LookupAddress[]) => {
+        if (err) return cb(err, "", 0);
+        const ok = addrs.filter((a) => !isBlockedAddress(a.address));
+        if (ok.length !== addrs.length || ok.length === 0) {
+          return cb(new ModelDownloadError("private_address_blocked", hostname), "", 0);
+        }
+        if ((options as { all?: boolean }).all) return (cb as unknown as (e: null, a: LookupAddress[]) => void)(null, ok);
+        cb(null, ok[0].address, ok[0].family);
+      });
+    }
+  }
+});
 
 /** Next hop for a redirect: must be absolute-resolvable, https, and carry no credentials. */
 export function redirectTarget(current: string, location: unknown): string {
@@ -112,9 +179,10 @@ export async function downloadVerifiedModel(
   const hops: string[] = [];
   for (;;) {
     hops.push(url);
+    await assertPublicHttps(url, opts.resolveHost);
     const res = await request(url, {
       method: "GET",
-      dispatcher: opts.dispatcher,
+      dispatcher: opts.dispatcher ?? guardedAgent,
       headersTimeout: opts.headersTimeoutMs ?? 30_000,
       bodyTimeout: opts.bodyTimeoutMs ?? 120_000
     });
