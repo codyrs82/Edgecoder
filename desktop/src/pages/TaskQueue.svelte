@@ -124,7 +124,7 @@
   <h1>Task Queue</h1>
 
   {#if noLocalAgent}
-    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to view the task queue.</div>
+    <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to view the task queue.</div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
@@ -140,29 +140,29 @@
     <div class="stats-grid">
       <StatCard label="Queued"        value={queued}  color="var(--yellow, #facc15)" />
       <StatCard label="Active Agents" value={agents}  color="var(--green, #4ade80)" />
-      <StatCard label="Completed"     value={results} color="var(--blue, #60a5fa)" />
+      <StatCard label="Completed"     value={results} color="var(--accent-secondary, #60a5fa)" />
       <StatCard label="Results / min" value={resultsPerMin().toFixed(1)} color="var(--accent, #3b82f6)" />
     </div>
   {/if}
 
   <!-- submit toggle -->
-  <button class="toggle-btn" onclick={() => (showSubmitForm = !showSubmitForm)}>
+  <button type="button" class="toggle-btn" aria-expanded={showSubmitForm} aria-controls="task-submit-form" onclick={() => (showSubmitForm = !showSubmitForm)}>
     {showSubmitForm ? "Hide Submit Form" : "Submit New Task"}
   </button>
 
   <!-- submit form -->
   {#if showSubmitForm}
-    <form class="submit-form" onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+    <form id="task-submit-form" class="submit-form" aria-label="Submit a task" aria-busy={submitting} onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 
       {#if submitSuccess}
-        <div class="msg success">{submitSuccess}</div>
+        <div class="msg success" role="status">{submitSuccess}</div>
       {/if}
       {#if submitError}
-        <div class="msg error">{submitError}</div>
+        <div class="msg error" role="alert">{submitError}</div>
       {/if}
 
       <label class="field">
-        <span class="field-label">Prompt <span class="req">*</span></span>
+        <span class="field-label">Prompt <span class="req" aria-hidden="true">*</span></span>
         <textarea rows="4" bind:value={prompt} placeholder="Describe the code-completion task..." required></textarea>
       </label>
 
@@ -192,7 +192,7 @@
 
         <label class="field">
           <span class="field-label">Priority: {priority}</span>
-          <input type="range" min="0" max="100" bind:value={priority} />
+          <input type="range" min="0" max="100" bind:value={priority} aria-valuetext="Priority {priority} of 100" />
         </label>
       </div>
 
@@ -235,7 +235,7 @@
     color: var(--accent, #3b82f6);
     border: 1px solid var(--accent, #3b82f6);
     padding: 0.5rem 1.2rem;
-    border-radius: 6px;
+    border-radius: var(--radius-sm, 6px);
     cursor: pointer;
     font-size: 0.9rem;
     margin-bottom: 1rem;
@@ -249,7 +249,7 @@
   .submit-form {
     background: var(--bg-surface, #1a1a2e);
     padding: 1.25rem;
-    border-radius: 8px;
+    border-radius: var(--radius-md, 8px);
     margin-bottom: 1.5rem;
     display: flex;
     flex-direction: column;
@@ -281,9 +281,9 @@
   input[type="text"],
   select {
     background: var(--bg-input, #0f0f23);
-    color: var(--fg, #e2e8f0);
-    border: 1px solid var(--border, #2d2d5f);
-    border-radius: 6px;
+    color: var(--text-primary, #e2e8f0);
+    border: 1px solid var(--border-control, #99928b);
+    border-radius: var(--radius-sm, 6px);
     padding: 0.55rem 0.7rem;
     font-size: 0.9rem;
     font-family: inherit;
@@ -306,10 +306,10 @@
   .submit-btn {
     align-self: flex-start;
     background: var(--accent, #3b82f6);
-    color: #fff;
+    color: var(--on-accent, #fff);
     border: none;
     padding: 0.55rem 1.5rem;
-    border-radius: 6px;
+    border-radius: var(--radius-sm, 6px);
     cursor: pointer;
     font-size: 0.9rem;
     font-weight: 500;
@@ -326,12 +326,12 @@
   /* ── inline messages ──────────────────────────────────────── */
   .msg {
     padding: 0.6rem 0.85rem;
-    border-radius: 6px;
+    border-radius: var(--radius-sm, 6px);
     font-size: 0.85rem;
   }
   .msg.success {
     background: rgba(74, 222, 128, 0.12);
-    color: #4ade80;
+    color: var(--green, #4ade80);
     border: 1px solid rgba(74, 222, 128, 0.25);
   }
   .msg.error {
@@ -344,12 +344,17 @@
   .empty {
     background: var(--bg-surface, #1a1a2e);
     padding: 1.2rem;
-    border-radius: 8px;
+    border-radius: var(--radius-md, 8px);
     opacity: 0.7;
     margin-top: 1rem;
   }
   .empty p {
     margin: 0;
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: var(--radius-md, 8px); margin-bottom: 1rem; font-size: 0.9rem; }
+
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
+  }
 </style>

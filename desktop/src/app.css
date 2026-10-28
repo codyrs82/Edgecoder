@@ -8,8 +8,8 @@
 @import "@edgecoder/tokens/theme.css";
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
-/* #25: one visible keyboard focus ring, on tokens, for every control (mouse clicks don't show it). */
-:where(button, [role="button"], [role="menuitem"], [role="tab"], a, input, textarea, select):focus-visible {
-  outline: 2px solid var(--accent);
+/* #29 (WCAG 2.4.7 / 1.4.11): a visible focus ring with 3:1 contrast on every surface. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }

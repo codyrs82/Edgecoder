@@ -11,6 +11,8 @@
   import StatCard from "../components/StatCard.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import Sparkline from "../components/Sparkline.svelte";
+  import { counterDeltas, pushSample } from "../lib/charts";
 
   import type {
     HealthRuntime,
@@ -44,20 +46,10 @@
 
   const MAX_HISTORY = 30;
   let resultsHistory: number[] = $state([]);
-  let deltas: number[] = $derived(
-    resultsHistory.length < 2
-      ? []
-      : resultsHistory.slice(1).map((v, i) => Math.max(0, v - resultsHistory[i]))
-  );
-
-  let polylinePoints: string = $derived.by(() => {
-    if (deltas.length === 0) return "";
-    const maxDelta = Math.max(...deltas, 1);
-    const stepX = 300 / Math.max(deltas.length - 1, 1);
-    return deltas
-      .map((d, i) => `${i * stepX},${80 - (d / maxDelta) * 70}`)
-      .join(" ");
-  });
+  let deltas: number[] = $derived(counterDeltas(resultsHistory));
+  let queueHistory: number[] = $state([]);
+  let cpuHistory: number[] = $state([]);
+  let memHistory: number[] = $state([]);
 
   // ---------------------------------------------------------------------------
   // Derived convenience values
@@ -134,7 +126,8 @@
       loading = false;
 
       // Track results history for throughput chart
-      resultsHistory = [...resultsHistory, s.results].slice(-MAX_HISTORY);
+      resultsHistory = pushSample(resultsHistory, s.results, MAX_HISTORY);
+      queueHistory = pushSample(queueHistory, s.queued, MAX_HISTORY);
     } catch (e) {
       error = e instanceof Error ? e.message : "Connection failed";
       loading = false;
@@ -147,6 +140,10 @@
       metricsSupported = false;
     } else {
       metrics = m;
+      cpuHistory = pushSample(cpuHistory, m.cpu_usage_percent, MAX_HISTORY);
+      if (m.memory_total_mb > 0) {
+        memHistory = pushSample(memHistory, (m.memory_used_mb / m.memory_total_mb) * 100, MAX_HISTORY);
+      }
     }
   }
 
@@ -172,11 +169,11 @@
   });
 </script>
 
-<div class="dashboard">
+<div class="dashboard" aria-busy={loading}>
   <h1 class="page-title">Dashboard</h1>
 
   {#if noLocalAgent}
-    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see dashboard metrics.</div>
+    <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to see dashboard metrics.</div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refreshCoreData} />
   {/if}
@@ -213,7 +210,9 @@
         />
         <StatCard label="Provider" value={providerName} />
         <StatCard label="Connected Agents" value={agentCount} />
-        <StatCard label="Queued Tasks" value={queuedTasks} />
+        <StatCard label="Queued Tasks" value={queuedTasks}>
+          {#if queueHistory.length >= 2}<Sparkline values={queueHistory} label="Queued tasks" height={28} />{/if}
+        </StatCard>
         <StatCard label="Completed Results" value={completedResults} />
       </div>
     </section>
@@ -247,12 +246,16 @@
             label="CPU"
             value="{cpuPercent.toFixed(1)}%"
             progress={cpuPercent}
-          />
+          >
+            {#if cpuHistory.length >= 2}<Sparkline values={cpuHistory} label="CPU usage" unit="%" yMax={100} />{/if}
+          </StatCard>
           <StatCard
             label="Memory"
             value="{memUsedGB} / {memTotalGB} GB"
             progress={memPercent}
-          />
+          >
+            {#if memHistory.length >= 2}<Sparkline values={memHistory} label="Memory usage" unit="%" yMax={100} />{/if}
+          </StatCard>
           <StatCard
             label="Disk"
             value="{diskUsedGB} / {diskTotalGB} GB"
@@ -275,27 +278,13 @@
       <h2 class="section-title">Throughput</h2>
       <div class="chart-card">
         {#if deltas.length >= 2}
-          <svg class="throughput-chart" viewBox="0 0 300 80" preserveAspectRatio="none">
-            <!-- grid lines -->
-            <line x1="0" y1="20" x2="300" y2="20" class="grid-line" />
-            <line x1="0" y1="40" x2="300" y2="40" class="grid-line" />
-            <line x1="0" y1="60" x2="300" y2="60" class="grid-line" />
-            <!-- data line -->
-            <polyline
-              fill="none"
-              stroke="var(--accent, #3b82f6)"
-              stroke-width="2"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-              points={polylinePoints}
-            />
-          </svg>
+          <Sparkline values={deltas} label="Completed results per 5 s interval" height={80} />
           <div class="chart-legend">
             <span class="legend-label">Results / 5s interval</span>
             <span class="legend-value">{deltas[deltas.length - 1]} latest</span>
           </div>
         {:else}
-          <div class="chart-placeholder">
+          <div class="chart-placeholder" role="status">
             <p>Collecting data&hellip; ({resultsHistory.length}/{MAX_HISTORY} samples)</p>
           </div>
         {/if}
@@ -369,18 +358,6 @@
     background: var(--bg-surface, #1a1a2e);
     padding: 1.2rem;
     border-radius: 8px;
-  }
-
-  .throughput-chart {
-    width: 100%;
-    height: 80px;
-    display: block;
-  }
-
-  .grid-line {
-    stroke: var(--border, #2d2d5f);
-    stroke-width: 0.5;
-    stroke-dasharray: 4 4;
   }
 
   .chart-legend {
