@@ -5,6 +5,7 @@
 
   // --- Types ---
   interface LogEntry {
+    seq: number;
     timestamp: string;
     level: "info" | "warn" | "error";
     message: string;
@@ -17,6 +18,7 @@
   let prevResults = $state(-1);
   let lastErrorMsg = $state("");
   let polling = false;
+  let seq = 0;
   let pollInterval: ReturnType<typeof setInterval> | undefined;
 
   // #28: the list is virtualized (only the rows in view are in the DOM), so the
@@ -52,7 +54,13 @@
     if (level === "error" && message === lastErrorMsg) return;
     if (level === "error") lastErrorMsg = message;
     else lastErrorMsg = "";
-    logs = [{ timestamp: now(), level, message }, ...logs].slice(0, MAX_ENTRIES);
+    const entry = { seq: ++seq, timestamp: now(), level, message };
+    logs = [entry, ...logs].slice(0, MAX_ENTRIES);
+    // Keep the rows the user is reading still: prepending pushes them down by one row.
+    if (scrollContainer && !(autoScroll) && scrollContainer.scrollTop > 0 && (filter === "all" || filter === level)) {
+      scrollContainer.scrollTop += ROW_HEIGHT;
+      scrollTop = scrollContainer.scrollTop;
+    }
   }
 
   function clearLogs() {
@@ -168,7 +176,7 @@
       <div class="empty">No log entries{filter !== "all" ? ` for "${filter}"` : ""}</div>
     {:else}
       <div style="height: {range.padTop}px" aria-hidden="true"></div>
-      {#each rows as entry, i (range.start + i)}
+      {#each rows as entry (entry.seq)}
         <div class="log-line" style="height: {ROW_HEIGHT}px" title={entry.message}>
           <span class="ts">{entry.timestamp}</span>
           <span class="level-badge level-{entry.level}">{entry.level.toUpperCase()}</span>
@@ -180,7 +188,7 @@
   </div>
 
   <div class="footer">
-    <span class="entry-count" aria-live="polite">{logs.length} entries ({allFilteredLogs.length} shown by filter, max {MAX_ENTRIES})</span>
+    <span class="entry-count">{logs.length} entries ({allFilteredLogs.length} shown by filter, max {MAX_ENTRIES})</span>
   </div>
 </div>
 

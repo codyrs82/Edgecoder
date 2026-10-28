@@ -4,7 +4,7 @@
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Skeleton from "../components/Skeleton.svelte";
-  import { fitViewBox, nextNodeIndex, radialLayout } from "../lib/mesh-layout";
+  import { clampIndex, fitViewBox, nextNodeIndex, radialLayout } from "../lib/mesh-layout";
 
   interface Props {
     /** Override polling interval in ms (default 10 000) */
@@ -39,24 +39,31 @@
   let view: "graph" | "cards" = $state("graph");
   let layout = $derived(radialLayout(peers.map((p) => p.peerId), selfPeerId));
   let viewBox = $derived(fitViewBox(layout.nodes));
-  let selectedId: string = $state("");
+  // null = nothing selected; "" is a valid id (the self node before identity loads).
+  let selectedId: string | null = $state(null);
   let focusIndex = $state(0);
-  let selectedPeer = $derived(peers.find((p) => p.peerId === selectedId) ?? null);
+  let safeFocus = $derived(clampIndex(focusIndex, layout.nodes.length));
+  let selectedIsSelf = $derived(selectedId !== null && selectedId === selfPeerId);
+  let selectedPeer = $derived(selectedId === null || selectedIsSelf ? null : peers.find((p) => p.peerId === selectedId) ?? null);
+  // Drop a selection whose peer disappeared.
+  $effect(() => {
+    if (selectedId !== null && !layout.nodes.some((n) => n.id === selectedId)) selectedId = null;
+  });
   let nodeById = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
   let graphEl: SVGSVGElement | undefined = $state(undefined);
 
   function nodeLabel(id: string, self: boolean): string {
     const score = reputationMap.get(id);
-    return `${self ? "This node" : "Peer"} ${truncate(id, 12)}${score !== undefined ? `, reputation ${score}` : ""}`;
+    return `${self ? "This node" : "Peer"}${id ? ` ${truncate(id, 12)}` : ""}${score !== undefined ? `, reputation ${score}` : ""}`;
   }
 
   function onNodeKey(e: KeyboardEvent, i: number, id: string) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      selectedId = selectedId === id ? "" : id;
+      selectedId = selectedId === id ? null : id;
       return;
     }
-    if (e.key === "Escape") { selectedId = ""; return; }
+    if (e.key === "Escape") { selectedId = null; return; }
     const next = nextNodeIndex(e.key, i, layout.nodes.length);
     if (next === null) return;
     e.preventDefault();
@@ -162,10 +169,10 @@
           {@const a = nodeById.get(edge.from)}
           {@const b = nodeById.get(edge.to)}
           {#if a && b}
-            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} class="edge" class:edge-active={selectedId === edge.to} aria-hidden="true" />
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} class="edge" class:edge-active={selectedId !== null && selectedId === edge.to} aria-hidden="true" />
           {/if}
         {/each}
-        {#each layout.nodes as node, i (node.id)}
+        {#each layout.nodes as node, i (node.self ? "\u0000self" : node.id)}
           {@const score = reputationMap.get(node.id)}
           <g
             data-node
@@ -173,10 +180,10 @@
             class:node-selected={selectedId === node.id}
             transform="translate({node.x} {node.y})"
             role="button"
-            tabindex={i === focusIndex ? 0 : -1}
+            tabindex={i === safeFocus ? 0 : -1}
             aria-pressed={selectedId === node.id}
             aria-label={nodeLabel(node.id, node.self)}
-            onclick={() => { focusIndex = i; selectedId = selectedId === node.id ? "" : node.id; }}
+            onclick={() => { focusIndex = i; selectedId = selectedId === node.id ? null : node.id; }}
             onkeydown={(e) => onNodeKey(e, i, node.id)}
           >
             <circle r={node.self ? 22 : 16} />
@@ -184,8 +191,18 @@
           </g>
         {/each}
       </svg>
-      <aside class="graph-details" aria-live="polite">
-        {#if selectedPeer}
+      <aside class="graph-details" aria-label="Selected node details">
+        {#if selectedIsSelf}
+          <h2 class="peer-id" title={identity?.peerId ?? ""}>This node{identity ? ` · ${truncate(identity.peerId, 14)}` : ""}</h2>
+          {#if identity}
+            <span class="mode-badge" class:mode-enterprise={identity.networkMode === "enterprise_overlay"} class:mode-public={identity.networkMode === "public_mesh"}>{networkModeLabel(identity.networkMode as MeshPeer["networkMode"])}</span>
+            <div class="detail-row"><span class="detail-label">Coordinator</span><span class="detail-value" title={identity.coordinatorUrl}>{identity.coordinatorUrl}</span></div>
+            <div class="detail-row"><span class="detail-label">Public Key</span><span class="detail-value mono" title={identity.publicKeyPem}>{truncate(identity.publicKeyPem, 20)}</span></div>
+          {:else}
+            <p class="muted-hint">Identity not loaded yet.</p>
+          {/if}
+          <div class="detail-row"><span class="detail-label">Peers</span><span class="detail-value">{peerCount}</span></div>
+        {:else if selectedPeer}
           {@const score = reputationMap.get(selectedPeer.peerId)}
           <h2 class="peer-id" title={selectedPeer.peerId}>{truncate(selectedPeer.peerId, 20)}</h2>
           <span class="mode-badge" class:mode-enterprise={selectedPeer.networkMode === "enterprise_overlay"} class:mode-public={selectedPeer.networkMode === "public_mesh"}>{networkModeLabel(selectedPeer.networkMode)}</span>

@@ -24,7 +24,9 @@ export interface MeshLayout {
 export function radialLayout(peerIds: readonly string[], selfId: string, size = 400, minGap = 56): MeshLayout {
   const c = size / 2;
   const others = [...new Set(peerIds)].filter((id) => id && id !== selfId).sort();
-  const center: GraphNode = { id: selfId || "self", x: c, y: c, self: true };
+  // The centre keeps the real self id (or "" when unknown). Peers with an empty id are dropped,
+  // so the centre can never collide with a peer, even one literally named "self".
+  const center: GraphNode = { id: selfId, x: c, y: c, self: true };
   if (others.length === 0) return { nodes: [center], edges: [] };
   const needed = (minGap * others.length) / (2 * Math.PI);
   const radius = Math.max(size * 0.36, needed);
@@ -51,4 +53,9 @@ export function nextNodeIndex(key: string, current: number, count: number): numb
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
   return null;
+}
+
+/** Keep a roving focus index valid when the node count shrinks between polls. */
+export function clampIndex(index: number, count: number): number {
+  return count <= 0 ? 0 : Math.min(Math.max(0, index), count - 1);
 }

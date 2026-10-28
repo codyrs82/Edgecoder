@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { visibleRange } from "../src/lib/virtual-list";
-import { fitViewBox, nextNodeIndex, radialLayout } from "../src/lib/mesh-layout";
+import { clampIndex, fitViewBox, nextNodeIndex, radialLayout } from "../src/lib/mesh-layout";
 
 describe("visibleRange (#28 virtualized log)", () => {
   it("renders only the viewport plus overscan, with spacers for the rest", () => {
@@ -47,7 +47,20 @@ describe("radialLayout (#28 mesh graph)", () => {
   });
 
   it("handles no peers and an unknown self id", () => {
-    expect(radialLayout([], "")).toEqual({ nodes: [{ id: "self", x: 200, y: 200, self: true }], edges: [] });
+    expect(radialLayout([], "")).toEqual({ nodes: [{ id: "", x: 200, y: 200, self: true }], edges: [] });
+  });
+
+  it("a peer literally named \"self\" doesn't collide with the centre (#150 review)", () => {
+    const l = radialLayout(["self", ""], "");
+    expect(l.nodes.map((n) => [n.id, n.self])).toEqual([["", true], ["self", false]]);
+    expect(l.edges).toEqual([{ from: "", to: "self" }]);
+  });
+
+  it("clamps the roving focus index when peers drop (#150 review)", () => {
+    expect(clampIndex(5, 3)).toBe(2);
+    expect(clampIndex(-1, 3)).toBe(0);
+    expect(clampIndex(4, 0)).toBe(0);
+    expect(clampIndex(1, 3)).toBe(1);
   });
 
   it("arrow keys wrap around the ring", () => {
