@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { timingSafeEqual } from "node:crypto";
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
+import { anchorProxyHealth, rpcHostForLog } from "./anchor-proxy-health.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
 
@@ -115,21 +116,10 @@ app.get<{ Params: { txid: string } }>("/anchor/confirm/:txid", async (req, reply
 });
 
 /* ---- GET /health ---- */
-app.get("/health", async (req, reply) => {
-  // Health is unauthenticated for Fly health checks, but returns minimal info
-  try {
-    const health = await provider.healthCheck();
-    return {
-      ok: health.reachable,
-      network: BITCOIN_NETWORK,
-      chain: health.chain,
-      blocks: health.blocks,
-      walletAvailable: health.walletAvailable,
-      provider: "anchor-proxy"
-    };
-  } catch (error) {
-    return reply.code(503).send({ ok: false, error: "health_check_failed" });
-  }
+app.get("/health", async (_req, reply) => {
+  // Unauthenticated for Fly health checks; minimal info. 503 when bitcoind is unreachable.
+  const { status, body } = await anchorProxyHealth(provider, BITCOIN_NETWORK);
+  return reply.code(status).send(body);
 });
 
 /* ---- GET /health/detailed ---- */
@@ -155,7 +145,8 @@ app.get("/health/detailed", async (req, reply) => {
 /* ---- start ---- */
 app.listen({ port: PORT, host: LISTEN_HOST }).then((address) => {
   console.log(`[anchor-proxy] listening on ${address}`);
-  console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${BITCOIND_RPC_URL} wallet=${BITCOIND_WALLET_NAME}`);
+  // #128 review: host only, so credentials in a user:pass@ URL never reach the logs.
+  console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${rpcHostForLog(BITCOIND_RPC_URL)} wallet=${BITCOIND_WALLET_NAME}`);
 }).catch((err) => {
   console.error("Failed to start anchor proxy:", err);
   process.exit(1);
