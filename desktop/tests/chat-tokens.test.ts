@@ -15,7 +15,9 @@ const FILES = [
   "components/StreamingIndicator.svelte",
   "pages/ChatView.svelte"
 ];
-const read = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
+// Normalize CRLF (Windows checkouts) so the multi-line checks are line-ending agnostic.
+const load = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const read = (f: string) => load(`../src/${f}`);
 const style = (src: string) => src.slice(src.indexOf("<style"));
 
 describe("chat view on tokens (#25)", () => {
@@ -54,7 +56,7 @@ describe("chat view keyboard access (#25)", () => {
   });
 
   it("there is one token-based focus ring", () => {
-    const css = readFileSync(new URL("../src/app.css", import.meta.url), "utf8");
+    const css = load("../src/app.css");
     expect(css).toMatch(/:focus-visible \{\n  outline: 2px solid var\(--accent\);/);
   });
 });
