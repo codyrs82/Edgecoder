@@ -91,6 +91,8 @@ export function sourceProblem(source: string, domains: string[] = allowedDownloa
   } catch {
     return "invalid_source_url";
   }
+  // %00, %3F, %0A etc. decode into characters that must never reach a filename or a later check.
+  if (/[\x00-\x1f\x7f?#\\]/.test(path)) return "source_path_has_control_chars";
   const dot = path.lastIndexOf(".");
   if (dot < 0 || path.lastIndexOf("/") > dot) return "disallowed_file_extension";
   if (!ALLOWED_MODEL_EXTENSIONS.includes(path.slice(dot).toLowerCase())) return "disallowed_file_extension";
@@ -109,10 +111,24 @@ export function signModelManifest(
   return { ...manifest, manifestVersion: MANIFEST_VERSION, signature, signerPeerId: peerId };
 }
 
+/** Parsed network JSON: every field must have the right type before anything else looks at it. */
+function hasManifestShape(m: unknown): m is SignedModelManifest {
+  if (!m || typeof m !== "object") return false;
+  const r = m as Record<string, unknown>;
+  return (
+    ["modelId", "version", "source", "sha256", "signature", "signerPeerId"].every((k) => typeof r[k] === "string" && (r[k] as string).length > 0) &&
+    // absent = a v1 manifest, reported as unsupported_manifest_version below
+    (r.manifestVersion === undefined || typeof r.manifestVersion === "number")
+  );
+}
+
 export function verifyModelManifest(
   signed: SignedModelManifest,
   trust: TrustConfig
 ): ManifestVerifyResult {
+  if (!hasManifestShape(signed)) {
+    return { valid: false, reason: "malformed_manifest" };
+  }
   if (!trust.trustedPeerIds.includes(signed.signerPeerId)) {
     return { valid: false, reason: "untrusted_peer" };
   }

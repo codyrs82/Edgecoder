@@ -127,7 +127,11 @@ describe("manifest-verifier", () => {
       ["https://models.edgecoder.io.evil.org/m.gguf", "source_not_allowlisted"],
       ["ftp://models.edgecoder.io/m.gguf", "source_not_https"],
       ["not a url", "invalid_source_url"],
-      ["https://models.edgecoder.io/%E0%A4%A.gguf", "invalid_source_url"]
+      ["https://models.edgecoder.io/%E0%A4%A.gguf", "invalid_source_url"],
+      ["https://models.edgecoder.io/payload.exe%00.gguf", "source_path_has_control_chars"],
+      ["https://models.edgecoder.io/payload.exe%3F.gguf", "source_path_has_control_chars"],
+      ["https://models.edgecoder.io/a%0Ab.gguf", "source_path_has_control_chars"],
+      ["https://models.edgecoder.io/a%5C..%5Cb.gguf", "source_path_has_control_chars"]
     ])("sourceProblem(%s) = %s", (source, reason) => {
       expect(sourceProblem(source)).toBe(reason);
     });
@@ -149,5 +153,23 @@ describe("manifest-verifier", () => {
       expect(modelFileMatches({ sha256 }, Buffer.from("tampered"))).toBe(false);
       expect(modelFileMatches({ sha256: "abc" }, data)).toBe(false);
     });
+  });
+  test.each([
+    ["sha256 is a number", { sha256: 123 }],
+    ["signature missing", { signature: undefined }],
+    ["source is an object", { source: { href: "https://models.edgecoder.io/m.gguf" } }],
+    ["manifestVersion is a string", { manifestVersion: "2" }],
+    ["signerPeerId empty", { signerPeerId: "" }]
+  ])("untrusted JSON with the wrong shape is malformed_manifest (%s)", (_name, patch) => {
+    const keys = makeKeys();
+    const signed = { ...signModelManifest(validManifest, keys.privateKeyPem, "coord-1"), ...patch };
+    const result = verifyModelManifest(signed as never, { trustedPeerIds: ["coord-1"], trustedPublicKeys: { "coord-1": keys.publicKeyPem } });
+    expect(result).toEqual({ valid: false, reason: "malformed_manifest" });
+  });
+
+  test("null and non-object input is malformed_manifest", () => {
+    for (const bad of [null, undefined, "x", 5, []]) {
+      expect(verifyModelManifest(bad as never, { trustedPeerIds: [], trustedPublicKeys: {} }).reason).toBe("malformed_manifest");
+    }
   });
 });
