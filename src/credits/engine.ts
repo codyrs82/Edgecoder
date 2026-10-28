@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
-import { baseRatePerSecond, loadMultiplier, LoadSnapshot } from "./pricing.js";
+import { contributionCredits, LoadSnapshot } from "./pricing.js";
 
 export class CreditEngine {
   private readonly txByAccount = new Map<string, CreditTransaction[]>();
@@ -24,16 +24,10 @@ export class CreditEngine {
       throw new Error("duplicate_contribution_report");
     }
     this.seenReports.add(report.reportId);
-    const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
-    const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const credits =
-      computeSeconds *
-      baseRatePerSecond(report.resourceClass) *
-      qualityMultiplier *
-      loadMultiplier(load);
+    const credits = contributionCredits(report, load); // #38: same formula as the Postgres path
     return this.addTx(report.agentId, {
       type: "earn",
-      credits: Number(credits.toFixed(3)),
+      credits,
       reason: "compute_contribution",
       relatedTaskId: report.taskId
     });

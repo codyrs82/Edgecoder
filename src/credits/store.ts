@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
-import { baseRatePerSecond, loadMultiplier, LoadSnapshot } from "./pricing.js";
+import { contributionCredits, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
 
 export const creditEngine = new CreditEngine();
@@ -20,8 +20,7 @@ export async function accrueCredits(
   if (pgStore) {
     const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
     const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const loadFactor = loadMultiplier(load);
-    const credits = computeSeconds * baseRatePerSecond(report.resourceClass) * qualityMultiplier * loadFactor;
+    const credits = contributionCredits(report, load); // #38: single formula
     const resourceWeight = report.resourceClass === "gpu" ? 2 : 1;
     const reliabilityScore = report.success ? 1 : 0.75;
     const weightedContribution = Number((computeSeconds * resourceWeight * qualityMultiplier * reliabilityScore).toFixed(6));
@@ -29,7 +28,7 @@ export async function accrueCredits(
       txId: randomUUID(),
       accountId: report.agentId,
       type: "earn",
-      credits: Number(credits.toFixed(3)),
+      credits,
       reason: "compute_contribution",
       relatedTaskId: report.taskId,
       timestampMs: Date.now()

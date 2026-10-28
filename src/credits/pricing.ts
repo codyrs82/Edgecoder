@@ -21,6 +21,22 @@ export function baseRatePerSecond(resourceClass: ResourceClass): number {
 }
 
 /**
+ * #38: the one formula for compute credits, used for both the balance and the
+ * earnings_accrual ledger payload. Failed results earn 0. `cpuSeconds`/`gpuSeconds`
+ * must be server-measured (coordinator: creditedDurationMs, #44), never self-reported.
+ */
+export function contributionCredits(
+  report: { resourceClass: ResourceClass; cpuSeconds: number; gpuSeconds: number; qualityScore: number; success: boolean },
+  load: LoadSnapshot
+): number {
+  if (!report.success) return 0;
+  const seconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  const quality = Math.max(0.5, Math.min(1.5, Number.isFinite(report.qualityScore) ? report.qualityScore : 1));
+  return Number((seconds * baseRatePerSecond(report.resourceClass) * quality * loadMultiplier(load)).toFixed(3));
+}
+
+/**
  * Compute credits earned for seeding a model to a peer.
  * @param fileSizeBytes Size of the model file transferred
  * @param seederCount Number of active seeders for this model (rarity factor)

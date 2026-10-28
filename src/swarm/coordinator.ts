@@ -2270,7 +2270,9 @@ function enqueueReplica(req: ReplicaRequest): void {
 async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void> {
   const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
-  const accrualCredits = r.ok ? 5 : 2;
+  // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
+  // records the credits actually accrued by the pricing formula, so balances reconcile.
+  if (!r.ok) return;
   const accrued = await accrueCredits(
     {
       reportId: resultReportId(r.subtaskId),
@@ -2300,7 +2302,7 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
       payloadJson: JSON.stringify({
         sourceAgentId: r.agentId,
         accountId: rewardAccountId,
-        credits: accrualCredits,
+        credits: accrued.credits,
         durationMs,
         reportedDurationMs,
         ok: r.ok,
