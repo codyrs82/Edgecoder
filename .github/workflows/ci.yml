@@ -106,6 +106,10 @@ jobs:
             echo "::error::ollama found in the slim server image"; exit 1
           fi
           docker run --rm --entrypoint ollama edgecoder-agent:ci --version
+          # The agent image's real entrypoint must be executable as the non-root user
+          # (scale-nonroot caught exit 126 from a 0644 entrypoint).
+          docker run --rm -e SKIP_OLLAMA=true edgecoder-agent:ci node -e "process.exit(0)"
+          docker run --rm edgecoder-agent:ci sh -c 'test -x /usr/local/bin/docker-entrypoint.sh'
           size=$(docker image inspect edgecoder-server:ci --format '{{.Size}}')
           echo "server image size: $((size / 1024 / 1024)) MB"
           test "$size" -lt $((300 * 1024 * 1024))
