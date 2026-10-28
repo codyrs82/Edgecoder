@@ -28,11 +28,9 @@
   let allFilteredLogs = $derived(
     filter === "all" ? logs : logs.filter((e) => e.level === filter)
   );
-  let counts = $derived({
-    info: logs.filter((e) => e.level === "info").length,
-    warn: logs.filter((e) => e.level === "warn").length,
-    error: logs.filter((e) => e.level === "error").length,
-  });
+  let counts = $derived(
+    logs.reduce((c, e) => { c[e.level]++; return c; }, { info: 0, warn: 0, error: 0 })
+  );
   let scrollTop = $state(0);
   let viewportHeight = $state(400);
   let range = $derived(visibleRange(scrollTop, viewportHeight, ROW_HEIGHT, allFilteredLogs.length));
