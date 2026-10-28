@@ -28,8 +28,10 @@ export interface VerificationConfig {
   timeoutMs: number;
 }
 
+// Default rate 0 (opt-in): most swarm work is LLM generation, whose outputs differ between
+// honest runs, so exact-match verification must be enabled only for deterministic workloads.
 export const DEFAULT_VERIFICATION: VerificationConfig = {
-  rate: 0.1,
+  rate: 0,
   maxExecutions: 3,
   mismatchPenalty: 0.25,
   matchReward: 0.02,
