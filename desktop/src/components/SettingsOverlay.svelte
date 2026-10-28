@@ -11,6 +11,7 @@
   import Settings from "../pages/Settings.svelte";
   import LogViewer from "../pages/LogViewer.svelte";
   import type { AuthUser } from "../lib/api";
+  import { focusTrap, rovingIndex } from "../lib/focus-trap";
 
   interface Props {
     onClose: () => void;
@@ -33,31 +34,55 @@
   ] as const;
 
   let activeSectionId = $state("account");
+  let tabButtons: HTMLButtonElement[] = $state([]);
+
+  // #26: arrow keys / Home / End move between sections (WAI-ARIA tabs, automatic activation).
+  function onNavKeydown(e: KeyboardEvent, index: number) {
+    const next = rovingIndex(e.key, index, sections.length);
+    if (next === null) return;
+    e.preventDefault();
+    activeSectionId = sections[next].id;
+    tabButtons[next]?.focus();
+  }
   let ActiveSection = $derived(
     sections.find((s) => s.id === activeSectionId)?.component ?? Account
   );
 </script>
 
-<div class="overlay">
+<div
+  class="overlay"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="settings-title"
+  tabindex="-1"
+  use:focusTrap={{ onEscape: onClose }}
+>
   <div class="overlay-header">
-    <button class="back-btn" onclick={onClose}>
+    <button class="back-btn" onclick={onClose} aria-label="Close settings">
       <ArrowLeft size={16} strokeWidth={2} />
       Back
     </button>
-    <h2>Settings</h2>
+    <h2 id="settings-title">Settings</h2>
   </div>
   <div class="overlay-body">
-    <nav class="settings-nav">
-      {#each sections as section}
+    <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
+      {#each sections as section, i}
         <button
+          bind:this={tabButtons[i]}
           class="nav-item {activeSectionId === section.id ? 'active' : ''}"
+          role="tab"
+          id="settings-tab-{section.id}"
+          aria-selected={activeSectionId === section.id}
+          aria-controls="settings-panel"
+          tabindex={activeSectionId === section.id ? 0 : -1}
           onclick={() => activeSectionId = section.id}
+          onkeydown={(e) => onNavKeydown(e, i)}
         >
           {section.label}
         </button>
       {/each}
     </nav>
-    <div class="settings-content">
+    <div class="settings-content" role="tabpanel" id="settings-panel" aria-labelledby="settings-tab-{activeSectionId}" tabindex="0">
       {#if activeSectionId === "account"}
         <Account {user} {onLogout} />
       {:else}
@@ -128,6 +153,12 @@
     cursor: pointer;
     font-size: 13px;
     transition: all 0.15s;
+  }
+  .nav-item:focus-visible,
+  .back-btn:focus-visible,
+  .settings-content:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: -2px;
   }
   .nav-item:hover {
     color: var(--text-primary);
