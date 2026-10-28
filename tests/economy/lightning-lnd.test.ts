@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher, type Dispatcher } from "undici";
+import { createHash } from "node:crypto";
 import { LndRestProvider, lndHashToHex } from "../../src/economy/lightning.js";
 
-const HASH_HEX = "a1".repeat(32);
+// A real preimage/hash pair: #47 requires proof of payment on SETTLED invoices.
+const PREIMAGE = Buffer.alloc(32, 7);
+const HASH_HEX = createHash("sha256").update(PREIMAGE).digest("hex");
 const HASH_B64 = Buffer.from(HASH_HEX, "hex").toString("base64");
 const BASE = "https://lnd.test:8080";
 
@@ -38,7 +41,14 @@ describe("LND settlement lookup (#42 review)", () => {
     agent
       .get(BASE)
       .intercept({ path: `/v1/invoice/${HASH_HEX}`, method: "GET" })
-      .reply(200, { settled: true, state: "SETTLED", r_hash: HASH_B64 });
+      .reply(200, {
+        settled: true,
+        state: "SETTLED",
+        r_hash: HASH_B64,
+        r_preimage: PREIMAGE.toString("base64"),
+        value_msat: "10000",
+        amt_paid_msat: "10000"
+      });
     const p = new LndRestProvider(BASE, "macaroon");
     const s = await p.checkSettlement("lnbc1test", HASH_B64);
     expect(s).toMatchObject({ settled: true, paymentHash: HASH_HEX, txRef: `lnd:${HASH_HEX}` });
