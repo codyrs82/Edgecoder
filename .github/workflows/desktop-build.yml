@@ -63,7 +63,8 @@ jobs:
           app=$(ls -d *.app | head -n1)
           [ -n "$app" ] || { echo "::error::no .app bundle produced"; exit 1; }
           tar -czf edgecoder-desktop-debug-macos.tar.gz "$app"
-          tar -tvzf edgecoder-desktop-debug-macos.tar.gz | grep -E "Contents/MacOS/.* -?rwx" | head -n 3
+          # bsdtar lists the mode first ("-rwxr-xr-x ... EdgeCoder.app/Contents/MacOS/x"); fail if no executable.
+          tar -tvzf edgecoder-desktop-debug-macos.tar.gz | grep -E '^-rwx.*Contents/MacOS/' | head -n 3 || { echo "::error::no executable in Contents/MacOS"; exit 1; }
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
