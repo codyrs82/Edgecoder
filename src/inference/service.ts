@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import { createHash } from "node:crypto";
 import { request } from "undici";
@@ -14,7 +17,11 @@ import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("inference") });
+exposeRequestId(app);
+// #14: the existing JSON /metrics stays; Prometheus text is at /metrics/prometheus.
+registerMetrics(app, "inference", { path: "/metrics/prometheus" });
+await registerErrorTracking(app, "inference");
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
@@ -118,7 +125,7 @@ function loadTrustedCoordinatorKeys(): Map<string, string> {
 const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
+  if (req.url === "/health" || req.url === "/metrics" || req.url === "/metrics/prometheus" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
   const token = req.headers["x-inference-token"];
   if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
     return reply.code(401).send({ error: "inference_unauthorized" });
