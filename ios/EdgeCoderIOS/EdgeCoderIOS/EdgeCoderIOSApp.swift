@@ -13,6 +13,7 @@ struct EdgeCoderIOSApp: App {
         bleMeshManager: SwarmRuntimeController.shared.bleMeshManager
     )
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
 
     init() {
         // Register background tasks for BLE mesh and inference
@@ -41,7 +42,7 @@ struct EdgeCoderIOSApp: App {
                 .environmentObject(swarmRuntime)
                 .environmentObject(conversationStore)
                 .environmentObject(chatRouter)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(AppearancePreference.from(appearance).colorScheme)
                 .onReceive(
                     NotificationCenter.default.publisher(
                         for: UIApplication.didEnterBackgroundNotification

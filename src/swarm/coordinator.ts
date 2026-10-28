@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { loadConfigOrExit } from "../common/config.js";
+import { coordinatorConfigSchema } from "./coordinator-config.js";
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
@@ -60,7 +62,7 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, adjustCredits, creditEngine, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { accrueCredits, creditEngine, grantCredits, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
@@ -73,6 +75,14 @@ import {
 } from "../economy/issuance.js";
 import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
+import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
+import {
+  anchorCheckpoint,
+  isTxid,
+  refreshAnchors,
+  requiredConfirmationsFromEnv,
+  type AnchorDeps
+} from "../economy/anchoring.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -136,6 +146,8 @@ await app.register(cors, {
   credentials: true,
 });
 await app.register(websocket);
+// #15: numeric, boolean, enum and URL settings validated once at startup (see coordinator-config.ts).
+const CC = loadConfigOrExit("coordinator", coordinatorConfigSchema);
 const queue = new SwarmQueue(pgStore, leaseConfigFromEnv());
 // #51: subtasks failed at the retry cap go through finalizeFailedSubtask (declared below).
 queue.onLeaseFailure((result) => {
@@ -157,37 +169,37 @@ const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: s
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
-const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
+const PORTAL_SERVICE_URL = CC.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
-const COORDINATOR_FEE_BPS = Number(process.env.COORDINATOR_FEE_BPS ?? "150");
+const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
 const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordinator-fee:default";
-const BITCOIN_NETWORK = (process.env.BITCOIN_NETWORK ?? "testnet") as "bitcoin" | "testnet" | "signet";
-const ROBOT_QUEUE_ENABLED = process.env.ROBOT_QUEUE_ENABLED === "true";
-const ROBOT_COORDINATOR_FEE_BPS = Number(process.env.ROBOT_COORDINATOR_FEE_BPS ?? "200");
+const BITCOIN_NETWORK = CC.BITCOIN_NETWORK;
+const ROBOT_QUEUE_ENABLED = CC.ROBOT_QUEUE_ENABLED;
+const ROBOT_COORDINATOR_FEE_BPS = CC.ROBOT_COORDINATOR_FEE_BPS;
 const coordinatorPullTracker = new PullTracker();
-const ROBOT_SWEEP_INTERVAL_MS = Number(process.env.ROBOT_SWEEP_INTERVAL_MS ?? "86400000");
-const ROBOT_MIN_SWEEP_SATS = Number(process.env.ROBOT_MIN_SWEEP_SATS ?? "10000");
-const ROBOT_TASK_DEFAULT_TIMEOUT_MS = Number(process.env.ROBOT_TASK_DEFAULT_TIMEOUT_MS ?? "3600000");
-const ROBOT_AUTO_SETTLE_DELAY_MS = Number(process.env.ROBOT_AUTO_SETTLE_DELAY_MS ?? "86400000");
+const ROBOT_SWEEP_INTERVAL_MS = CC.ROBOT_SWEEP_INTERVAL_MS;
+const ROBOT_MIN_SWEEP_SATS = CC.ROBOT_MIN_SWEEP_SATS;
+const ROBOT_TASK_DEFAULT_TIMEOUT_MS = CC.ROBOT_TASK_DEFAULT_TIMEOUT_MS;
+const ROBOT_AUTO_SETTLE_DELAY_MS = CC.ROBOT_AUTO_SETTLE_DELAY_MS;
 const APPROVED_COORDINATOR_IDS = new Set(
   (process.env.APPROVED_COORDINATOR_IDS ?? "")
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean)
 );
-const PAYMENT_INTENT_TTL_MS = Number(process.env.PAYMENT_INTENT_TTL_MS ?? "900000");
-const CONTRIBUTION_BURST_CREDITS = Number(process.env.CONTRIBUTION_BURST_CREDITS ?? "25");
-const MIN_CONTRIBUTION_RATIO = Number(process.env.MIN_CONTRIBUTION_RATIO ?? "1.0");
-const ISSUANCE_WINDOW_MS = Number(process.env.ISSUANCE_WINDOW_MS ?? String(24 * 60 * 60 * 1000));
-const ISSUANCE_RECALC_MS = Number(process.env.ISSUANCE_RECALC_MS ?? String(60 * 60 * 1000));
-const ISSUANCE_BASE_DAILY_POOL_TOKENS = Number(process.env.ISSUANCE_BASE_DAILY_POOL_TOKENS ?? "10000");
-const ISSUANCE_MIN_DAILY_POOL_TOKENS = Number(process.env.ISSUANCE_MIN_DAILY_POOL_TOKENS ?? "2500");
-const ISSUANCE_MAX_DAILY_POOL_TOKENS = Number(process.env.ISSUANCE_MAX_DAILY_POOL_TOKENS ?? "100000");
-const ISSUANCE_LOAD_CURVE_SLOPE = Number(process.env.ISSUANCE_LOAD_CURVE_SLOPE ?? "0.35");
-const ISSUANCE_SMOOTHING_ALPHA = Number(process.env.ISSUANCE_SMOOTHING_ALPHA ?? "0.35");
-const ISSUANCE_COORDINATOR_SHARE = Number(process.env.ISSUANCE_COORDINATOR_SHARE ?? "0.05");
-const ISSUANCE_RESERVE_SHARE = Number(process.env.ISSUANCE_RESERVE_SHARE ?? "0.05");
-const ANCHOR_INTERVAL_MS = Number(process.env.ANCHOR_INTERVAL_MS ?? String(2 * 60 * 60 * 1000));
+const PAYMENT_INTENT_TTL_MS = CC.PAYMENT_INTENT_TTL_MS;
+const CONTRIBUTION_BURST_CREDITS = CC.CONTRIBUTION_BURST_CREDITS;
+const MIN_CONTRIBUTION_RATIO = CC.MIN_CONTRIBUTION_RATIO;
+const ISSUANCE_WINDOW_MS = CC.ISSUANCE_WINDOW_MS;
+const ISSUANCE_RECALC_MS = CC.ISSUANCE_RECALC_MS;
+const ISSUANCE_BASE_DAILY_POOL_TOKENS = CC.ISSUANCE_BASE_DAILY_POOL_TOKENS;
+const ISSUANCE_MIN_DAILY_POOL_TOKENS = CC.ISSUANCE_MIN_DAILY_POOL_TOKENS;
+const ISSUANCE_MAX_DAILY_POOL_TOKENS = CC.ISSUANCE_MAX_DAILY_POOL_TOKENS;
+const ISSUANCE_LOAD_CURVE_SLOPE = CC.ISSUANCE_LOAD_CURVE_SLOPE;
+const ISSUANCE_SMOOTHING_ALPHA = CC.ISSUANCE_SMOOTHING_ALPHA;
+const ISSUANCE_COORDINATOR_SHARE = CC.ISSUANCE_COORDINATOR_SHARE;
+const ISSUANCE_RESERVE_SHARE = CC.ISSUANCE_RESERVE_SHARE;
+const ANCHOR_INTERVAL_MS = CC.ANCHOR_INTERVAL_MS;
 const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET ?? "";
 // #5: fail fast in production instead of silently running with auth disabled.
 // LIGHTNING_PROVIDER is only required while payments are enabled (see #43 ECONOMY_PAYMENTS_ENABLED).
@@ -202,10 +214,10 @@ requireProdEnv("coordinator", [
 const IS_PROD = isProduction();
 // #42: production must verify webhook HMACs.
 assertPaymentWebhookSecret();
-const IOS_BATTERY_PULL_MIN_INTERVAL_MS = Number(process.env.IOS_BATTERY_PULL_MIN_INTERVAL_MS ?? "45000");
-const IOS_BATTERY_TASK_STOP_LEVEL_PCT = Number(process.env.IOS_BATTERY_TASK_STOP_LEVEL_PCT ?? "20");
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
-const COORDINATOR_PUBLIC_URL = process.env.COORDINATOR_PUBLIC_URL ?? "http://127.0.0.1:4301";
+const IOS_BATTERY_PULL_MIN_INTERVAL_MS = CC.IOS_BATTERY_PULL_MIN_INTERVAL_MS;
+const IOS_BATTERY_TASK_STOP_LEVEL_PCT = CC.IOS_BATTERY_TASK_STOP_LEVEL_PCT;
+const CONTROL_PLANE_URL = CC.CONTROL_PLANE_URL ?? "";
+const COORDINATOR_PUBLIC_URL = CC.COORDINATOR_PUBLIC_URL;
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
@@ -217,13 +229,16 @@ const COORDINATOR_REGISTRATION_TOKEN = process.env.COORDINATOR_REGISTRATION_TOKE
 const COORDINATOR_PEER_CACHE_FILE = resolve(
   process.env.COORDINATOR_PEER_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-peer-cache.json`
 );
-const STATS_LEDGER_SYNC_INTERVAL_MS = Number(process.env.STATS_LEDGER_SYNC_INTERVAL_MS ?? "10000");
-const STATS_ANCHOR_INTERVAL_MS = Number(process.env.STATS_ANCHOR_INTERVAL_MS ?? "600000");
-const STATS_ANCHOR_MIN_CONFIRMATIONS = Number(process.env.STATS_ANCHOR_MIN_CONFIRMATIONS ?? "1");
-const AGENT_RATE_LIMIT_MAX = Number(process.env.AGENT_RATE_LIMIT_MAX ?? "30");
-const AGENT_RATE_LIMIT_WINDOW_MS = Number(process.env.AGENT_RATE_LIMIT_WINDOW_MS ?? "60000");
-const SECURITY_NONCE_TTL_MS = Number(process.env.SECURITY_NONCE_TTL_MS ?? "300000");
-const SECURITY_MAX_SKEW_MS = Number(process.env.SECURITY_MAX_SKEW_MS ?? "120000");
+const STATS_LEDGER_SYNC_INTERVAL_MS = CC.STATS_LEDGER_SYNC_INTERVAL_MS;
+const STATS_ANCHOR_INTERVAL_MS = CC.STATS_ANCHOR_INTERVAL_MS;
+const STATS_ANCHOR_MIN_CONFIRMATIONS = CC.STATS_ANCHOR_MIN_CONFIRMATIONS;
+// #46: depth at which an anchor counts as "anchored", and how often pending anchors are polled.
+const ANCHOR_REQUIRED_CONFIRMATIONS = requiredConfirmationsFromEnv();
+const ANCHOR_CONFIRM_POLL_MS = Math.max(30_000, Number(process.env.ANCHOR_CONFIRM_POLL_MS ?? "600000") || 600_000);
+const AGENT_RATE_LIMIT_MAX = CC.AGENT_RATE_LIMIT_MAX;
+const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
+const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
+const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
 const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
 const nonceStore = new InMemoryNonceStore();
 const securityLog = new SecurityEventLogger((event) => {
@@ -256,13 +271,11 @@ function loadCoordinatorKeys() {
 const coordinatorKeys = loadCoordinatorKeys();
 const networkMode: NetworkMode =
   (process.env.NETWORK_MODE as NetworkMode | undefined) ?? "public_mesh";
-const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
-  | "edgecoder-local"
-  | "ollama-local";
+const PROVIDER = CC.LOCAL_MODEL_PROVIDER;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
-const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
-const INFERENCE_URL = process.env.INFERENCE_URL ?? "http://127.0.0.1:4302";
+const OLLAMA_AUTO_INSTALL = CC.OLLAMA_AUTO_INSTALL;
+const INFERENCE_URL = CC.INFERENCE_URL;
 const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
 const identity = createPeerIdentity(coordinatorKeys, COORDINATOR_PUBLIC_URL, networkMode);
 const ordering = new OrderingChain(identity.peerId, coordinatorKeys.privateKeyPem);
@@ -343,10 +356,10 @@ const activeTunnels = new Map<
   }
 >();
 const tunnelByPairKey = new Map<string, string>();
-const TUNNEL_IDLE_TTL_MS = Number(process.env.TUNNEL_IDLE_TTL_MS ?? "90000");
-const TUNNEL_MAX_RELAYS_PER_MIN = Number(process.env.TUNNEL_MAX_RELAYS_PER_MIN ?? "120");
-const RELAY_RATE_LIMIT_PER_10S = Number(process.env.RELAY_RATE_LIMIT_PER_10S ?? "80");
-const DIRECT_WORK_OFFERS_PER_10S = Number(process.env.DIRECT_WORK_OFFERS_PER_10S ?? "20");
+const TUNNEL_IDLE_TTL_MS = CC.TUNNEL_IDLE_TTL_MS;
+const TUNNEL_MAX_RELAYS_PER_MIN = CC.TUNNEL_MAX_RELAYS_PER_MIN;
+const RELAY_RATE_LIMIT_PER_10S = CC.RELAY_RATE_LIMIT_PER_10S;
+const DIRECT_WORK_OFFERS_PER_10S = CC.DIRECT_WORK_OFFERS_PER_10S;
 const blacklistByAgent = new Map<string, BlacklistRecord>();
 const blacklistAuditLog: BlacklistRecord[] = [];
 let blacklistVersion = 0;
@@ -428,7 +441,7 @@ function evaluateAndEnforce(agentId: string): void {
 // ── Release manifest cache for code signing verification ──
 const releaseManifestCache = new ReleaseManifestCache();
 releaseManifestCache.start();
-const REQUIRE_VERIFIED_AGENTS = process.env.REQUIRE_VERIFIED_AGENTS === "true";
+const REQUIRE_VERIFIED_AGENTS = CC.REQUIRE_VERIFIED_AGENTS;
 // #44: signed agent requests are mandatory by default (always in production).
 const REQUIRE_SIGNED_AGENT_REQUESTS = requireSignedAgentRequests();
 
@@ -1135,26 +1148,49 @@ async function maybeFinalizeStatsCheckpoint(): Promise<void> {
   }
 }
 
-async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
+/**
+ * #46: anchoring needs a real provider. In production an unset BITCOIN_ANCHOR_PROVIDER
+ * disables anchoring (no simulated records) instead of exiting; dev falls back to mock.
+ */
+let anchorProviderCache: BitcoinAnchorProvider | null | undefined;
+function anchorDeps(): AnchorDeps | null {
   if (!pgStore) return null;
+  if (anchorProviderCache === undefined) {
+    if (IS_PROD && !process.env.BITCOIN_ANCHOR_PROVIDER) {
+      app.log.warn("bitcoin_anchoring_disabled: set BITCOIN_ANCHOR_PROVIDER=bitcoind|anchor-proxy to anchor checkpoints");
+      anchorProviderCache = null;
+    } else {
+      anchorProviderCache = createBitcoinAnchorProviderFromEnv(BITCOIN_NETWORK);
+    }
+  }
+  return anchorProviderCache ? { provider: anchorProviderCache, store: pgStore, network: BITCOIN_NETWORK } : null;
+}
+
+/** Confirmations to report for an anchor: only real txids count (legacy simulated rows = 0). */
+function anchorConfirmations(anchor: BitcoinAnchorRecord | null | undefined): number {
+  return anchor && anchor.status !== "failed" && isTxid(anchor.txRef) ? anchor.confirmations ?? 0 : 0;
+}
+
+async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return null;
   const head = await pgStore.latestStatsLedgerHead();
   if (!head) return null;
-  const checkpointHash = head.hash;
-  const existing = await pgStore.latestAnchorByCheckpoint(checkpointHash);
-  if (existing && existing.status === "anchored") return existing;
-  const now = Date.now();
-  const record: BitcoinAnchorRecord = {
-    anchorId: existing?.anchorId ?? randomUUID(),
-    epochId: `stats:${head.count}`,
-    checkpointHash,
-    anchorNetwork: BITCOIN_NETWORK,
-    txRef: existing?.txRef ?? `stats-anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: now,
-    createdAtMs: existing?.createdAtMs ?? now
-  };
-  await pgStore.upsertBitcoinAnchor(record);
-  return record;
+  return anchorCheckpoint(deps, { epochId: `stats:${head.count}`, checkpointHash: head.hash });
+}
+
+/** #46: poll pending anchors (and re-verify the latest ones for reorgs). */
+async function refreshAnchorConfirmations(): Promise<void> {
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return;
+  const recent = await pgStore.listAnchors(5);
+  const events = await refreshAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, recent);
+  for (const e of events) {
+    if (e.event === "reorg") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reorg_reverted_to_pending");
+    else if (e.event === "confirmed") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_confirmed");
+    else if (e.event === "unknown") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_confirmation_unavailable");
+    else if (e.event === "conflicted") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_conflicted_marked_failed");
+  }
 }
 
 async function latestStatsFinality(): Promise<{
@@ -1187,7 +1223,7 @@ async function latestStatsFinality(): Promise<{
     };
   }
   const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.hash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  const confirmations = anchorConfirmations(anchor);
   const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
   return {
     checkpointHash: latestCommit.hash,
@@ -1446,11 +1482,15 @@ async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocat
 }
 
 async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | null> {
-  if (!pgStore) return null;
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return null;
   const epoch = await pgStore.latestIssuanceEpoch(true);
   if (!epoch) return null;
   const latestAnchor = await pgStore.latestAnchor();
-  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status === "anchored") return latestAnchor;
+  // #46: a real broadcast (pending or anchored) for this epoch is never re-sent.
+  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status !== "failed" && isTxid(latestAnchor.txRef)) {
+    return latestAnchor;
+  }
   const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
   const checkpointHash = createHash("sha256")
     .update(JSON.stringify({ epoch, allocations }))
@@ -1460,18 +1500,7 @@ async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | 
     epochId: epoch.issuanceEpochId,
     payload: { checkpointHash, allocationCount: allocations.length }
   });
-  const anchor: BitcoinAnchorRecord = {
-    anchorId: randomUUID(),
-    epochId: epoch.issuanceEpochId,
-    checkpointHash,
-    anchorNetwork: BITCOIN_NETWORK,
-    txRef: `anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: Date.now(),
-    createdAtMs: Date.now()
-  };
-  await pgStore.upsertBitcoinAnchor(anchor);
-  return anchor;
+  return anchorCheckpoint(deps, { epochId: epoch.issuanceEpochId, checkpointHash });
 }
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
@@ -1558,14 +1587,14 @@ const settleIfPaid = createPaymentSettler({
   saveIntent: (intent) => {
     paymentIntents.set(intent.intentId, intent);
   },
-  grantCredits: (accountId, credits, reason) => adjustCredits(accountId, credits, reason),
+  grantCredits: (accountId, credits, reason) => grantCredits(accountId, credits, reason),
   onSettled: async (intent) => {
     await recordIntentSettlementSideEffects(intent);
   }
 });
 
 // Grace on top of the TTL so a payment made just before expiry is still picked up.
-const PAYMENT_INTENT_EXPIRY_GRACE_MS = Number(process.env.PAYMENT_INTENT_EXPIRY_GRACE_MS ?? "120000");
+const PAYMENT_INTENT_EXPIRY_GRACE_MS = CC.PAYMENT_INTENT_EXPIRY_GRACE_MS;
 
 /** #42 review: always ask the node first; expire only an unpaid intent past TTL + grace. */
 function reconcileIntent(intent: PaymentIntent): Promise<"settled" | "expired" | "pending"> {
@@ -1976,8 +2005,14 @@ app.post("/submit", async (req, reply) => {
     try {
       // Spend credits when using public mesh resources.
       await spendCredits(body.submitterAccountId, 1, "task_submit", body.taskId);
-    } catch {
-      return reply.code(402).send({ error: "insufficient_credits" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) {
+        return reply.code(402).send({ error: "insufficient_credits" });
+      }
+      // DB/lock failures are not "insufficient credits" (#48 review): surface and log them.
+      req.log.error({ err, taskId: body.taskId }, "task_submit_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
     }
   }
 
@@ -2475,7 +2510,7 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
   const billing = taskBilling.get(result.taskId);
   if (billing && !billing.refunded) {
     billing.refunded = true;
-    await adjustCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
+    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
   }
   app.log.warn(
     { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
@@ -3730,7 +3765,7 @@ app.get("/stats/anchors/verify", async (req, reply) => {
     })
     .parse(req.query);
   const anchor = await pgStore?.latestAnchorByCheckpoint(query.checkpointHash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  const confirmations = anchorConfirmations(anchor);
   return {
     ok: true,
     checkpointHash: query.checkpointHash,
@@ -4367,7 +4402,7 @@ app.get("/orchestration/coordinator/status", async (req, reply) => {
   };
 });
 
-const AGENT_ORCHESTRATION_ONLINE_WINDOW_MS = Number(process.env.AGENT_ORCHESTRATION_ONLINE_WINDOW_MS ?? "120000");
+const AGENT_ORCHESTRATION_ONLINE_WINDOW_MS = CC.AGENT_ORCHESTRATION_ONLINE_WINDOW_MS;
 
 function canonicalNodeSuffix(nodeId: string): string {
   return String(nodeId)
@@ -5195,6 +5230,9 @@ export async function initCoordinator(): Promise<void> {
           for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
         })().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
       }, 60_000);
+      setInterval(() => {
+        void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
+      }, ANCHOR_CONFIRM_POLL_MS);
       // ── Security: nonce prune scheduler ──
       const pruneAdapter: PrunableStore = {
         async noncePrune() { await nonceStore.prune(); return 0; },
