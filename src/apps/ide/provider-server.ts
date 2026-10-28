@@ -3,6 +3,7 @@
 
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging.js";
+import { registerMetrics } from "../../common/metrics.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
@@ -23,6 +24,7 @@ import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, res
 
 const app = Fastify({ ...serviceLoggerOptions("ide-provider") });
 exposeRequestId(app);
+registerMetrics(app, "ide-provider");
 
 // #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
 // No import-time side effects: the token file is read/created on first authenticated

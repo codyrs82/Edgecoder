@@ -3,6 +3,7 @@
 
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
 import cors from "@fastify/cors";
 import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
@@ -45,6 +46,7 @@ import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinat
 // #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
 const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: trustProxyHops(process.env.PORTAL_TRUST_PROXY_HOPS) });
 exposeRequestId(app);
+registerMetrics(app, "portal");
 
 const DESKTOP_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"];
 await app.register(cors, {

@@ -166,6 +166,14 @@ npm run build:ble-proxy
 | `DOCS_SITE_URL` | Documentation site URL (used in portal links). |
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
 
+## Observability (#14)
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `info` | pino log level for every service. |
+| `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). In production, `/metrics` is not served at all unless this is set. Outside production it is open. |
+| `REQUEST_ID_FORWARD_ORIGINS` | unset | Extra comma-separated origins that receive `x-request-id` on outbound calls. The service URLs (`COORDINATOR_URL`, `CONTROL_PLANE_URL`, `INFERENCE_URL`, `PORTAL_SERVICE_URL`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_DISCOVERY_URLS`) are included automatically; third-party APIs never get it. |
+
 ## Common profiles
 
 ```bash

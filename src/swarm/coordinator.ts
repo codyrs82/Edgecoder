@@ -4,6 +4,7 @@
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
@@ -123,6 +124,7 @@ import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ ...serviceLoggerOptions("coordinator") });
 exposeRequestId(app);
+registerMetrics(app, "coordinator");
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
@@ -694,6 +696,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/register") return;
   // Health check must be unauthenticated for Fly health probes
   if (reqPath === "/health/runtime") return;
+  // #14: /metrics has its own METRICS_TOKEN check (src/common/metrics.ts)
+  if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
