@@ -4,6 +4,8 @@
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, type EditorFile } from "../lib/editor-store";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
+  import { monacoThemeData } from "../lib/monaco-theme";
+  import tokens from "@edgecoder/tokens/tokens.json";
 
   let editorContainer: HTMLDivElement | undefined = $state(undefined);
   let editor: any = $state(null);
@@ -36,36 +38,9 @@
     const mon = await import("monaco-editor");
     monaco = mon;
 
-    mon.editor.defineTheme("edgecoder-dark", {
-      base: "vs-dark",
-      inherit: true,
-      rules: [],
-      colors: {
-        "editor.background": "#262624",
-        "editor.foreground": "#f7f5f0",
-        "editorLineNumber.foreground": "#8a8478",
-        "editorLineNumber.activeForeground": "#b8b0a4",
-        "editor.selectionBackground": "#5a4a3a",
-        "editor.lineHighlightBackground": "#2f2f2d",
-        "editorCursor.foreground": "#c17850",
-      },
-    });
-
-    // #23: light counterpart; switched live with the app theme.
-    mon.editor.defineTheme("edgecoder-light", {
-      base: "vs",
-      inherit: true,
-      rules: [],
-      colors: {
-        "editor.background": "#ffffff",
-        "editor.foreground": "#1f1f1d",
-        "editorLineNumber.foreground": "#6b665c",
-        "editorLineNumber.activeForeground": "#57524a",
-        "editor.selectionBackground": "#f0d9c8",
-        "editor.lineHighlightBackground": "#f7f5f0",
-        "editorCursor.foreground": "#a65a33",
-      },
-    });
+    // #25: both editor themes come from the shared design tokens.
+    mon.editor.defineTheme("edgecoder-dark", monacoThemeData(tokens, "dark"));
+    mon.editor.defineTheme("edgecoder-light", monacoThemeData(tokens, "light"));
     offTheme = onThemeChange((t) => mon.editor.setTheme(`edgecoder-${t}`));
 
     if (editorContainer) {
@@ -75,7 +50,7 @@
         theme: `edgecoder-${resolvedTheme()}`,
         minimap: { enabled: false },
         fontSize: 14,
-        fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace",
+        fontFamily: tokens.font.mono,
         lineNumbers: "on",
         renderLineHighlight: "line",
         scrollBeyondLastLine: false,

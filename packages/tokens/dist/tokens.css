@@ -48,6 +48,7 @@
   --red: #b91c1c;
   --yellow: #a16207;
   --card: rgba(255, 255, 255, 0.96);
+  --selection: #f0d9c8;
 }
 [data-theme=dark] {
   color-scheme: dark;
@@ -68,6 +69,7 @@
   --red: #f87171;
   --yellow: #fbbf24;
   --card: rgba(58, 58, 55, 0.96);
+  --selection: #5a4a3a;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme=light]) {
@@ -89,5 +91,6 @@
     --red: #f87171;
     --yellow: #fbbf24;
     --card: rgba(58, 58, 55, 0.96);
+    --selection: #5a4a3a;
   }
 }
