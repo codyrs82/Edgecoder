@@ -31,13 +31,15 @@ async function stubBackend(page: Page, signedIn: boolean) {
 
 async function audit(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
-  const critical = results.violations.filter((v) => v.impact === "critical");
-  const serious = results.violations.filter((v) => v.impact === "serious");
-  // Serious issues are reported (visible in the job log and HTML report) but don't fail yet.
-  if (serious.length) {
-    test.info().annotations.push({ type: "axe-serious", description: serious.map((v) => `${v.id} (${v.nodes.length})`).join(", ") });
+  // Critical and serious both fail (serious includes WCAG AA colour contrast, 4.5:1 text / 3:1 UI).
+  const blocking = results.violations.filter((v) => v.impact === "critical" || v.impact === "serious");
+  const moderate = results.violations.filter((v) => v.impact === "moderate" || v.impact === "minor");
+  if (moderate.length) {
+    test.info().annotations.push({ type: "axe-moderate", description: moderate.map((v) => `${v.id} (${v.nodes.length})`).join(", ") });
   }
-  expect(critical.map((v) => `${v.id}: ${v.help} -> ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
+  expect(
+    blocking.map((v) => `${v.impact} ${v.id}: ${v.help} -> ${v.nodes.map((n) => `${n.target.join(" ")} [${(n.failureSummary ?? "").replace(/\s+/g, " ").slice(0, 160)}]`).join(" | ")}`)
+  ).toEqual([]);
 }
 
 async function noHorizontalOverflow(page: Page) {
@@ -48,9 +50,13 @@ async function noHorizontalOverflow(page: Page) {
   expect(scroll, "page scrolls horizontally").toBeLessThanOrEqual(client + 1);
 }
 
+for (const theme of ["dark", "light"] as const)
 for (const vp of VIEWPORTS) {
-  test.describe(`${vp.width}x${vp.height}`, () => {
+  test.describe(`${theme} ${vp.width}x${vp.height}`, () => {
     test.use({ viewport: vp });
+    test.beforeEach(async ({ page }) => {
+      await page.addInitScript((t) => localStorage.setItem("edgecoder-theme", t), theme);
+    });
 
     test("login screen", async ({ page }) => {
       await stubBackend(page, false);

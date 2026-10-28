@@ -431,7 +431,7 @@
   .btn-sm {
     padding: 0.4rem 0.75rem;
     background: var(--accent, #3b82f6);
-    color: white;
+    color: var(--on-accent, #fff);
     border: none;
     border-radius: 5px;
     cursor: pointer;
@@ -570,7 +570,7 @@
   .btn-save {
     padding: 0.6rem 1.8rem;
     background: var(--accent, #3b82f6);
-    color: white;
+    color: var(--on-accent, #fff);
     border: none;
     border-radius: 7px;
     cursor: pointer;

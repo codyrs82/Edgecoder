@@ -16,6 +16,7 @@
   --color-green: var(--green);
   --color-red: var(--red);
   --color-yellow: var(--yellow);
+  --color-on-accent: var(--on-accent);
   --color-card: var(--card);
   --spacing-1: var(--space-1);
   --spacing-2: var(--space-2);

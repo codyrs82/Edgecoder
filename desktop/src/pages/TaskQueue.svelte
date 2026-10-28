@@ -306,7 +306,7 @@
   .submit-btn {
     align-self: flex-start;
     background: var(--accent, #3b82f6);
-    color: #fff;
+    color: var(--on-accent, #fff);
     border: none;
     padding: 0.55rem 1.5rem;
     border-radius: 6px;

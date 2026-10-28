@@ -165,7 +165,7 @@
   .btn-primary {
     padding: 12px;
     background: var(--accent);
-    color: white;
+    color: var(--on-accent, #fff);
     border: none;
     border-radius: var(--radius-sm);
     font-size: 14px;

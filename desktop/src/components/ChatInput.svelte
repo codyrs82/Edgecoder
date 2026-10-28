@@ -81,7 +81,7 @@
     border-radius: 6px;
     border: none;
     background: var(--accent);
-    color: white;
+    color: var(--on-accent, #fff);
     cursor: pointer;
     display: flex;
     align-items: center;

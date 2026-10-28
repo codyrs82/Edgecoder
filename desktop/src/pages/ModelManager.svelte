@@ -904,7 +904,7 @@
 
   .btn-primary {
     background: var(--accent, #3b82f6);
-    color: #fff;
+    color: var(--on-accent, #fff);
   }
   .btn-primary:hover:not(:disabled) {
     background: var(--accent-hover, #2563eb);
@@ -912,7 +912,7 @@
 
   .btn-swap {
     background: var(--accent, #3b82f6);
-    color: #fff;
+    color: var(--on-accent, #fff);
   }
   .btn-swap:hover:not(:disabled) {
     background: var(--accent-hover, #2563eb);

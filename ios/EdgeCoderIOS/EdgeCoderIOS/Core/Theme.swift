@@ -13,19 +13,21 @@ enum Theme {
     static let card = Color.adaptive(dark: 0x3a3a37, light: 0xffffff, darkOpacity: 0.96, lightOpacity: 0.96)
 
     // Accent
-    static let accent = Color.adaptive(dark: 0xc17850, light: 0xa65a33)
-    static let accentHover = Color.adaptive(dark: 0xd4895f, light: 0x8f4a27)
-    static let accentSecondary = Color.adaptive(dark: 0x4a90d9, light: 0x2a64a8)
+    static let accent = Color.adaptive(dark: 0xd8ab92, light: 0x9a542f)
+    static let accentHover = Color.adaptive(dark: 0xdfa889, light: 0x8f4a27)
+    /// Text/icons on an accent fill (buttons, selected rows).
+    static let onAccent = Color.adaptive(dark: 0x1a1a18, light: 0xffffff)
+    static let accentSecondary = Color.adaptive(dark: 0x8bb8e7, light: 0x2a64a8)
 
     // Text
     static let textPrimary = Color.adaptive(dark: 0xf7f5f0, light: 0x1f1f1d)
-    static let textSecondary = Color.adaptive(dark: 0xb8b0a4, light: 0x57524a)
-    static let textMuted = Color.adaptive(dark: 0x8a8478, light: 0x6b665c)
+    static let textSecondary = Color.adaptive(dark: 0xbbb4a8, light: 0x57524a)
+    static let textMuted = Color.adaptive(dark: 0xb7b3ac, light: 0x6b665c)
 
     // Status
-    static let green = Color.adaptive(dark: 0x4ade80, light: 0x15803d)
-    static let red = Color.adaptive(dark: 0xf87171, light: 0xb91c1c)
-    static let yellow = Color.adaptive(dark: 0xfbbf24, light: 0xa16207)
+    static let green = Color.adaptive(dark: 0x4ade80, light: 0x137538)
+    static let red = Color.adaptive(dark: 0xfa9a9a, light: 0xb91c1c)
+    static let yellow = Color.adaptive(dark: 0xfbbf24, light: 0x925906)
 
     // Border (warm grey, not white, to match the desktop tokens)
     static let border = Color.adaptive(dark: 0xd6ccc2, light: 0x2f2f2d, darkOpacity: 0.08, lightOpacity: 0.10)
