@@ -97,6 +97,7 @@ npm run build:ble-proxy
 |---|---|---|
 | `MAX_CONCURRENT_TASKS` | `1` | Parallel task limit per agent. Increase gradually only on machines with headroom. |
 | `PEER_OFFER_COOLDOWN_MS` | `20000` | Cooldown between peer-direct offers while idle (ms). Lower = more aggressive. |
+| `DOCKER_PROBE_TIMEOUT_MS` | `3000` | Timeout for the `docker info` availability probe; a hung daemon counts as unavailable. Result cached 30 s. |
 
 ## iOS power telemetry (reported by iOS agents)
 

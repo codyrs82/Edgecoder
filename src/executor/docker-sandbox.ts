@@ -9,12 +9,75 @@ const DOCKER_IMAGES: Record<Language, string> = {
   javascript: "edgecoder/sandbox-node:latest"
 };
 
-export async function isDockerAvailable(): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const proc = spawn("docker", ["info"], { stdio: "ignore" });
-    proc.on("close", (code) => resolve(code === 0));
-    proc.on("error", () => resolve(false));
+let dockerProbeCache: { value: boolean; at: number } | undefined;
+let dockerProbeInFlight: Promise<boolean> | undefined;
+const DOCKER_PROBE_TTL_MS = 30_000;
+/** Negative results expire sooner so a cold-starting daemon is picked up quickly. */
+const DOCKER_PROBE_NEGATIVE_TTL_MS = 5_000;
+const DEFAULT_DOCKER_PROBE_TIMEOUT_MS = 3_000;
+
+/** DOCKER_PROBE_TIMEOUT_MS, falling back to 3 s when unset, empty, non-numeric or <= 0. */
+export function dockerProbeTimeoutMs(raw: string | undefined = process.env.DOCKER_PROBE_TIMEOUT_MS): number {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? n : DEFAULT_DOCKER_PROBE_TIMEOUT_MS;
+}
+
+/**
+ * #32: probe the Docker daemon with a hard timeout (kills a hung `docker info`),
+ * caching the answer for 30 s so per-loop callers stay cheap.
+ */
+export async function isDockerAvailable(
+  timeoutMs: number = dockerProbeTimeoutMs()
+): Promise<boolean> {
+  if (dockerProbeCache) {
+    const ttl = dockerProbeCache.value ? DOCKER_PROBE_TTL_MS : DOCKER_PROBE_NEGATIVE_TTL_MS;
+    if (Date.now() - dockerProbeCache.at < ttl) return dockerProbeCache.value;
+  }
+  // Concurrent callers share one `docker info` process.
+  if (dockerProbeInFlight) return dockerProbeInFlight;
+  dockerProbeInFlight = probeDocker(timeoutMs).then((value) => {
+    dockerProbeCache = { value, at: Date.now() };
+    dockerProbeInFlight = undefined;
+    return value;
   });
+  return dockerProbeInFlight;
+}
+
+function probeDocker(timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (v: boolean) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve(v);
+    };
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn("docker", ["info", "--format", "{{.ServerVersion}}"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      finish(false);
+      return;
+    }
+    timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      finish(false);
+    }, timeoutMs);
+    timer.unref?.();
+    proc.on("close", (code) => finish(code === 0));
+    proc.on("error", () => finish(false));
+  });
+}
+
+/** Test hook: forget the cached probe result. */
+export function __resetDockerProbeCache(): void {
+  dockerProbeCache = undefined;
+  dockerProbeInFlight = undefined;
 }
 
 export interface DockerSandboxOptions {

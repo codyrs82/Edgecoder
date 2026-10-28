@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// #32: never probe the real Docker daemon here; mock the probe for both branches.
+const dockerAvailable = vi.fn(async () => true);
+vi.mock("../../src/executor/docker-sandbox.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/executor/docker-sandbox.js")>();
+  return { ...actual, isDockerAvailable: () => dockerAvailable() };
+});
 import type { SandboxPolicy, SandboxMode } from "../../src/common/types.js";
 import {
   buildDockerArgs,
@@ -66,15 +73,15 @@ describe("enforceSandboxPolicy", () => {
     expect(error).toBeNull();
   });
 
-  it("returns null when mode is docker and docker is available (or returns error if Docker not running)", async () => {
-    // This test adapts to the environment: if Docker is available it passes,
-    // otherwise it expects the appropriate error
+  it("returns null when mode is docker and docker is available", async () => {
+    dockerAvailable.mockResolvedValueOnce(true);
+    expect(await enforceSandboxPolicy("docker", true)).toBeNull();
+  });
+
+  it("returns sandbox_unavailable when mode is docker and docker is not available", async () => {
+    dockerAvailable.mockResolvedValueOnce(false);
     const error = await enforceSandboxPolicy("docker", true);
-    if (error) {
-      expect(error).toContain("sandbox_unavailable");
-    } else {
-      expect(error).toBeNull();
-    }
+    expect(error).toContain("sandbox_unavailable");
   });
 
   it("returns null for vm mode (no runtime check yet)", async () => {
