@@ -39,6 +39,8 @@ describe("anchor proxy reconciliation routes (#103/#116)", () => {
   it("happy paths", async () => {
     const a = app();
     expect((await a.inject({ ...routes[0], headers: AUTH })).json()).toEqual({ ok: true, txid: TXID });
+    // A full 80-byte payload fits in the path parameter.
+    expect((await a.inject({ method: "GET", url: `/anchor/find/${"ab".repeat(80)}`, headers: AUTH })).statusCode).toBe(200);
     expect((await a.inject({ ...routes[1], headers: AUTH })).json()).toEqual({ ok: true, inMempool: true });
     expect((await a.inject({ ...routes[2], headers: AUTH })).json()).toEqual({ ok: true });
   });

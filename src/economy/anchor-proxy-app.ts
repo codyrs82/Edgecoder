@@ -54,7 +54,8 @@ export function buildAnchorProxyApp(opts: AnchorProxyOptions): FastifyInstance {
   const maxReconcile = opts.maxReconcileCallsPerMinute ?? 30;
   const broadcastLimit = new SlidingWindow(maxBroadcasts, now);
   const reconcileLimit = new SlidingWindow(maxReconcile, now);
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Fastify's default maxParamLength (100) would 414 a full 80-byte (160 hex) payload in /anchor/find.
+  const app = Fastify({ logger: opts.logger ?? false, maxParamLength: 256 });
 
   function requireAuth(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }): boolean {
     const authHeader = String(req.headers.authorization ?? "");
