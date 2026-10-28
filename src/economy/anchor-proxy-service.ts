@@ -19,6 +19,9 @@ import { LISTEN_HOST } from "../common/env-guard.js";
 /*  endpoints:                                                         */
 /*    POST /anchor/broadcast   – broadcast an OP_RETURN                */
 /*    GET  /anchor/confirm/:txid – check confirmation status           */
+/*    GET  /anchor/find/:dataHex – wallet tx carrying an OP_RETURN (#103) */
+/*    GET  /anchor/mempool/:txid – is an unconfirmed tx in the mempool   */
+/*    POST /anchor/abandon      – abandontransaction for a dropped tx    */
 /*    GET  /health              – node + wallet health                  */
 /*                                                                     */
 /*  Auth: Bearer token via ANCHOR_PROXY_TOKEN env var.                 */
@@ -109,6 +112,49 @@ app.get<{ Params: { txid: string } }>("/anchor/confirm/:txid", async (req, reply
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return reply.code(502).send({ error: "confirmation_check_failed", message });
+  }
+});
+
+/* ---- #103 reconciliation: GET /anchor/find/:dataHex ---- */
+app.get<{ Params: { dataHex: string } }>("/anchor/find/:dataHex", async (req, reply) => {
+  if (!requireAuth(req as any, reply)) return;
+  const { dataHex } = req.params;
+  if (!dataHex || !/^[0-9a-fA-F]+$/.test(dataHex) || dataHex.length > 160) {
+    return reply.code(400).send({ error: "invalid_data_hex" });
+  }
+  try {
+    return { ok: true, txid: await provider.findCheckpointTx(dataHex) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(502).send({ error: "find_failed", message });
+  }
+});
+
+/* ---- GET /anchor/mempool/:txid ---- */
+app.get<{ Params: { txid: string } }>("/anchor/mempool/:txid", async (req, reply) => {
+  if (!requireAuth(req as any, reply)) return;
+  const { txid } = req.params;
+  if (!txid || !/^[0-9a-fA-F]{64}$/.test(txid)) return reply.code(400).send({ error: "invalid_txid" });
+  try {
+    return { ok: true, inMempool: await provider.isInMempool(txid) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(502).send({ error: "mempool_check_failed", message });
+  }
+});
+
+/* ---- POST /anchor/abandon ---- */
+app.post("/anchor/abandon", async (req, reply) => {
+  if (!requireAuth(req as any, reply)) return;
+  const txid = (req.body as { txid?: unknown } | undefined)?.txid;
+  if (typeof txid !== "string" || !/^[0-9a-fA-F]{64}$/.test(txid)) return reply.code(400).send({ error: "invalid_txid" });
+  try {
+    await provider.abandonTx(txid);
+    app.log.info({ txid }, "anchor_proxy_abandon_ok");
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(502).send({ error: "abandon_failed", message });
   }
 });
 

@@ -436,6 +436,27 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
     return { txid: result.txid };
   }
 
+  /** #103: wallet lookup through the proxy. Errors propagate (the reconciler counts an attempt). */
+  async findCheckpointTx(dataHex: string): Promise<string | null> {
+    const result = (await this.proxyRequest(`/anchor/find/${encodeURIComponent(dataHex)}`)) as { ok?: boolean; txid?: unknown };
+    if (!result || result.ok !== true || !(result.txid === null || typeof result.txid === "string")) {
+      throw new Error("anchor_proxy_find_invalid_response");
+    }
+    return result.txid;
+  }
+
+  async isInMempool(txid: string): Promise<boolean> {
+    const result = (await this.proxyRequest(`/anchor/mempool/${encodeURIComponent(txid)}`)) as { ok?: boolean; inMempool?: unknown };
+    if (!result || result.ok !== true || typeof result.inMempool !== "boolean") {
+      throw new Error("anchor_proxy_mempool_invalid_response");
+    }
+    return result.inMempool;
+  }
+
+  async abandonTx(txid: string): Promise<void> {
+    await this.proxyRequest("/anchor/abandon", "POST", { txid });
+  }
+
   /** #46 review: proxy/node errors propagate ("unknown"), they are not "left the chain". */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
       const result = (await this.proxyRequest(`/anchor/confirm/${txid}`)) as {
