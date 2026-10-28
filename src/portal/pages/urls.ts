@@ -13,10 +13,17 @@ export function supportEmail(raw: string | undefined = process.env.SUPPORT_EMAIL
 }
 export const SUPPORT_EMAIL = supportEmail();
 
-/** Label for "Back to …" links: the PORTAL_PUBLIC_URL host, e.g. "edgecoder.io". */
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+}
+
+/**
+ * Label for "Back to …" links: the PORTAL_PUBLIC_URL host, e.g. "edgecoder.io", HTML-escaped
+ * (WHATWG URL lets characters like ' and " through in hostnames).
+ */
 export function siteLabel(publicUrl: string | undefined = process.env.PORTAL_PUBLIC_URL): string {
   try {
-    return publicUrl ? new URL(publicUrl).host : "home";
+    return publicUrl ? escapeHtml(new URL(publicUrl).host) : "home";
   } catch {
     return "home";
   }

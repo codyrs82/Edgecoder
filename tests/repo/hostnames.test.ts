@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { allowedDownloadDomains, DEFAULT_DOWNLOAD_DOMAINS } from "../../src/security/manifest-verifier.js";
+import { allowedDownloadDomains, DEFAULT_DOWNLOAD_DOMAINS, isDownloadDomain } from "../../src/security/manifest-verifier.js";
 import { siteLabel, supportEmail } from "../../src/portal/pages/urls.js";
 
 // #22: EdgeCoder-run hostnames may only appear in src/ as env-var defaults (or comments), so
@@ -43,6 +43,31 @@ describe("configurable hostnames (#22)", () => {
       "models.example.org",
       "huggingface.co"
     ]);
+  });
+
+  it.each([
+    "https://models.example.org",
+    "models.example.org:443",
+    "models.example.org/path",
+    "*.example.org",
+    "10.0.0.5",
+    "localhost",
+    "a;b.example.org",
+    "-bad.example.org",
+    "a..example.org"
+  ])("MODEL_DOWNLOAD_DOMAINS rejects %j", (entry) => {
+    expect(isDownloadDomain(entry)).toBe(false);
+    expect(() => allowedDownloadDomains({ MODEL_DOWNLOAD_DOMAINS: `huggingface.co,${entry}` })).toThrow(/invalid entries/);
+  });
+
+  it("MODEL_DOWNLOAD_DOMAINS set to only commas is an error", () => {
+    expect(() => allowedDownloadDomains({ MODEL_DOWNLOAD_DOMAINS: " , ," })).toThrow(/no hostnames/);
+  });
+
+  it("the site label is HTML-escaped", () => {
+    const label = siteLabel("https://a'b\"c.example.org");
+    expect(label).not.toMatch(/['"<>]/);
+    expect(label).toContain("&#39;");
   });
 
   it("SUPPORT_EMAIL and the site label come from config", () => {
