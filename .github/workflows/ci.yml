@@ -63,6 +63,29 @@ jobs:
           path: junit.xml
           if-no-files-found: ignore
 
+  credits-pg:
+    # #48 (and later economy fixes): tests that need a real Postgres for locking/transactions.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: credits }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d credits" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: "Postgres-backed credit tests"
+        env:
+          TEST_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/credits
+        run: npx vitest run tests/credits/atomic-debit.test.ts
+
   desktop-token-test:
     # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
     # crate needs webkit system libraries, so build just the token module).
