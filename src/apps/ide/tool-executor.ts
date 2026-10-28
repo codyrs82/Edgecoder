@@ -9,7 +9,7 @@
 
 import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, resolve, relative, dirname } from "node:path";
+import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
@@ -26,6 +26,157 @@ export interface ToolResult {
 // ---------------------------------------------------------------------------
 // ToolExecutor
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// #4: run_shell policy
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SHELL_ALLOW = [
+  "npm", "npx", "node", "python3", "python", "pytest", "git", "ls", "cat", "rg",
+  "grep", "head", "tail", "wc", "pwd", "echo", "tsc", "vitest", "jest", "cargo", "go",
+];
+const GIT_READONLY_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote",
+]);
+const SHELL_METACHAR = /[;&|`<>\n\r]|\$\(/;
+/** Interpreter flags that evaluate inline code. */
+const INLINE_EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c", "-i", "--interactive", "-r", "--require", "--import", "--loader", "-m"]);
+const INTERPRETERS = /^(node|python\d*(\.\d+)?|deno|bun|ruby|perl|php)$/;
+
+export function shellAllowlist(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const raw = env.IDE_SHELL_ALLOW?.trim();
+  const list = raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_SHELL_ALLOW;
+  return new Set(list);
+}
+
+/** Minimal POSIX-ish argv parser: whitespace split with '' and "" quoting. */
+export function parseArgv(command: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: "'" | '"' | null = null;
+  let has = false;
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has || cur) out.push(cur);
+      cur = "";
+      has = false;
+    } else {
+      cur += ch;
+      has = true;
+    }
+  }
+  if (quote) throw new Error("unterminated quote");
+  if (has || cur) out.push(cur);
+  return out;
+}
+
+export type ShellDecision =
+  | { allowed: true; argv: string[]; useShell: boolean }
+  | { allowed: false; reason: string };
+
+/** Unapproved git: read-only subcommands, with no flags that write or rewrite. */
+function gitUnapprovedReason(args: string[]): string | null {
+  const sub = args[0] ?? "";
+  if (!GIT_READONLY_SUBCOMMANDS.has(sub)) return `git ${sub} is not read-only`;
+  if (args.some((a) => a === "--output" || a.startsWith("--output="))) return "git --output writes files";
+  if (sub === "remote" && !(args.length === 1 || (args.length === 2 && (args[1] === "-v" || args[1] === "--verbose")))) {
+    return "git remote is only allowed as `git remote` or `git remote -v`";
+  }
+  if (sub === "branch") {
+    const destructive = new Set(["-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description"]);
+    if (args.slice(1).some((a) => destructive.has(a) || a.startsWith("--set-upstream-to="))) return "git branch with a modifying flag";
+    if (args.slice(1).some((a) => !a.startsWith("-"))) return "git branch <name> creates a branch";
+  }
+  return null;
+}
+
+/** True if an argument names a path outside `root` (absolute, ~, or ..-escaping). */
+function escapesRoot(arg: string, root: string): boolean {
+  const value = arg.includes("=") && arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
+  if (!value || (value.startsWith("-") && !value.includes("/"))) return false;
+  if (value.startsWith("~")) return true;
+  const abs = resolve(root, value);
+  const rel = relative(root, abs);
+  return rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../") || isAbsolute(rel);
+}
+
+/**
+ * Decide whether `command` may run. Without explicit user approval (including
+ * IDE_SHELL_AUTO_APPROVE=1) only allowlisted binaries run, with no shell syntax,
+ * no inline-code interpreter flags, no npx / npm exec / cargo run / go run, and
+ * no path arguments outside the project root.
+ */
+export function evaluateShellCommand(
+  command: string,
+  opts: { approved?: boolean; env?: NodeJS.ProcessEnv; root?: string } = {},
+): ShellDecision {
+  const approved = opts.approved === true;
+  const trimmed = command.trim();
+  if (!trimmed) return { allowed: false, reason: "empty command" };
+  if (SHELL_METACHAR.test(trimmed)) {
+    if (!approved) return { allowed: false, reason: "shell metacharacters require explicit approval" };
+    return { allowed: true, argv: [], useShell: true };
+  }
+  let argv: string[];
+  try {
+    argv = parseArgv(trimmed);
+  } catch (e) {
+    return { allowed: false, reason: String((e as Error).message) };
+  }
+  if (argv.length === 0) return { allowed: false, reason: "empty command" };
+  if (!approved) {
+    const deny = (why: string): ShellDecision => ({ allowed: false, reason: `${why}; approval required` });
+    const bin = argv[0];
+    const args = argv.slice(1);
+    if (bin.includes("/") || bin.includes("\\")) return deny("binaries must be named, not given as a path");
+    if (!shellAllowlist(opts.env).has(bin)) return deny(`'${bin}' is not in the allowlist (IDE_SHELL_ALLOW)`);
+    if (bin === "npx") return deny("npx runs arbitrary packages");
+    if (bin === "npm" && ["exec", "x", "explore"].includes(args[0] ?? "")) return deny(`npm ${args[0]} runs arbitrary code`);
+    if ((bin === "cargo" || bin === "go") && args[0] === "run") return deny(`${bin} run executes arbitrary code`);
+    if (INTERPRETERS.test(bin) && (args.length === 0 || args.some((a) => INLINE_EVAL_FLAGS.has(a) || /^--(eval|print|require|import|loader)=/.test(a)))) {
+      return deny(`${bin} inline code / REPL`);
+    }
+    if (bin === "git") {
+      const why = gitUnapprovedReason(args);
+      if (why) return deny(why);
+    }
+    if (opts.root) {
+      const outside = args.find((a) => escapesRoot(a, opts.root!));
+      if (outside !== undefined) return deny(`path '${outside}' is outside the project root`);
+    }
+  }
+  return { allowed: true, argv, useShell: false };
+}
+
+/** Environment variables passed to shell commands; everything else is dropped. */
+const SHELL_ENV_ALLOW = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ",
+  "TMPDIR", "TMP", "TEMP", "NODE_ENV", "COLORTERM", "NO_COLOR", "FORCE_COLOR",
+  // Windows essentials
+  "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "SYSTEMDRIVE",
+]);
+
+/**
+ * Allowlisted environment for shell commands (#4 review): PATH, HOME, locale,
+ * terminal and temp vars, LC_*, plus names listed in IDE_SHELL_ENV_PASS.
+ */
+export function scrubShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const extra = new Set(
+    (env.IDE_SHELL_ENV_PASS ?? "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+  );
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    const key = k.toUpperCase();
+    if (SHELL_ENV_ALLOW.has(key) || key.startsWith("LC_") || extra.has(key)) out[k] = v;
+  }
+  return out;
+}
 
 export class ToolExecutor {
   private readonly root: string;
@@ -67,6 +218,7 @@ export class ToolExecutor {
   async execute(
     tool: ToolName,
     args: Record<string, unknown>,
+    opts: { approved?: boolean } = {},
   ): Promise<ToolResult> {
     try {
       switch (tool) {
@@ -81,7 +233,7 @@ export class ToolExecutor {
         case "edit_file":
           return await this.editFile(args);
         case "run_shell":
-          return await this.runShell(args);
+          return await this.runShell(args, opts.approved === true);
         case "git_status":
           return this.gitStatus();
         case "git_diff":
@@ -295,34 +447,63 @@ export class ToolExecutor {
   // run_shell
   // -----------------------------------------------------------------------
 
-  private async runShell(args: Record<string, unknown>): Promise<ToolResult> {
+  private async runShell(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
     const command = String(args.command ?? "");
     const timeout =
       typeof args.timeout === "number" ? args.timeout : 30_000;
 
+    // #4: policy check before anything is spawned.
+    const decision = evaluateShellCommand(command, { approved, root: this.root });
+    if (!decision.allowed) {
+      return { error: `run_shell rejected: ${decision.reason}` };
+    }
+
     return new Promise<ToolResult>((resolvePromise) => {
-      const proc = spawn("sh", ["-c", command], {
-        cwd: this.root,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      // Default: no shell, parsed argv. Only an explicitly approved command that
+      // needs shell syntax (pipes, &&, …) is run through sh -c.
+      const [cmd, cmdArgs] = decision.useShell
+        ? ["sh", ["-c", command]]
+        : [decision.argv[0], decision.argv.slice(1)];
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn(cmd, cmdArgs, {
+          cwd: this.root,
+          shell: false,
+          env: scrubShellEnv(process.env),
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        resolvePromise({ error: `run_shell failed: ${String(error)}` });
+        return;
+      }
 
       let stdout = "";
       let stderr = "";
       let killed = false;
+      let settled = false;
 
       const timer = setTimeout(() => {
         killed = true;
         proc.kill("SIGKILL");
       }, timeout);
 
-      proc.stdout.on("data", (chunk: Buffer) => {
+      proc.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString("utf-8");
       });
-      proc.stderr.on("data", (chunk: Buffer) => {
+      proc.stderr?.on("data", (chunk: Buffer) => {
         stderr += chunk.toString("utf-8");
       });
 
+      proc.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolvePromise({ error: `run_shell failed: ${error.message}` });
+      });
+
       proc.on("close", (code) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         const exitCode = killed ? 137 : (code ?? 1);
         resolvePromise({

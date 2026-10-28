@@ -17,8 +17,26 @@ import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
+import { createIdeAuthHook, isLoopbackHost, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 const app = Fastify({ logger: true });
+
+// #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
+// No import-time side effects: the token file is read/created on first authenticated
+// request, and the bind address is validated only when the server is started.
+const ideHost = (process.env.IDE_PROVIDER_HOST ?? "").trim() || "127.0.0.1";
+const idePort = Number(process.env.IDE_PROVIDER_PORT ?? 4304) || 4304;
+let ideToken: string | undefined;
+app.addHook(
+  "onRequest",
+  createIdeAuthHook({
+    token: () => (ideToken ??= resolveIdeToken()),
+    port: idePort,
+    enforceLoopbackHost: isLoopbackHost(ideHost),
+  })
+);
+
+app.get("/health", async () => ({ ok: true }));
 const providers = new ProviderRegistry();
 const router = new IntelligentRouter();
 const idePullTracker = new PullTracker();
@@ -489,7 +507,10 @@ app.post("/v1/ide/chat", async (req, reply) => {
       }
 
       const callId = `tc_${randomUUID().slice(0, 8)}`;
-      const requiresApproval = !READ_TOOLS.has(toolName);
+      // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
+      // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
+      const shellAutoApprove = toolName === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
+      const requiresApproval = !READ_TOOLS.has(toolName) && !shellAutoApprove;
 
       sendEvent({
         type: "tool_call",
@@ -533,7 +554,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
       }
 
       // Execute the tool
-      const result = await executor.execute(toolName, toolArgs);
+      const result = await executor.execute(toolName, toolArgs, { approved: requiresApproval });
 
       // For run_shell results, parse and send as shell_output
       if (toolName === "run_shell" && result.result) {
@@ -621,8 +642,15 @@ app.post("/run", async (req, reply) => {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  // #45 review: InteractiveAgent runs host code (origin "local"), so the server must be local-only.
-  app.listen({ port: 4304, host: process.env.IDE_PROVIDER_HOST ?? "127.0.0.1" }).catch((error) => {
+  let listenOptions: { host: string; port: number };
+  try {
+    listenOptions = resolveListenOptions();
+    ideToken = resolveIdeToken();
+  } catch (error) {
+    app.log.error(error);
+    process.exit(1);
+  }
+  app.listen(listenOptions).catch((error) => {
     app.log.error(error);
     process.exit(1);
   });

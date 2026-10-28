@@ -112,6 +112,31 @@ Keep this running. You should see:
 {"level":"info","msg":"Server listening at http://127.0.0.1:4304"}
 ```
 
+### Security: token, bind address and shell approval
+
+The provider server can read and write your project and run commands, so it is locked down by default (#4).
+
+- **Bind address.** It binds to `127.0.0.1` only. Set `IDE_PROVIDER_HOST` to change this. A non-loopback host is refused unless `IDE_PROVIDER_TOKEN` is set explicitly.
+- **Bearer token.** Every route except `GET /health` needs `Authorization: Bearer <token>`.
+  - The token comes from `IDE_PROVIDER_TOKEN`, or from `~/.edgecoder/ide-token`.
+  - If neither exists, the server creates the file on first start (mode 0600, 32 random bytes, base64url).
+  - The VS Code extension reads the file automatically, or uses the `edgecoder.providerToken` setting.
+- **Browser and DNS-rebinding protection.** Requests carrying a web `Origin` (`http(s)://…`) get 403. When the server is bound to loopback, so do requests whose `Host` is not `127.0.0.1:4304`, `localhost:4304` or `[::1]:4304`.
+  - The desktop webview origins (`tauri://localhost`, `http(s)://tauri.localhost`) are allowed.
+  - Add more origins with `IDE_ALLOWED_ORIGINS` (comma-separated).
+- **`run_shell`.** Every shell command needs your approval in the IDE.
+  - Commands are parsed into argv and run with `shell: false`, with variables like `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY` and `*_PRIVATE_KEY` stripped from the environment.
+  - Shell syntax (`;`, `&&`, `|`, backticks, `$(`, redirects) is refused unless approved.
+  - Commands get an allowlisted environment only: `PATH`, `HOME`, `USER`, `SHELL`, locale, terminal and temp variables, and `LC_*`. Add names with `IDE_SHELL_ENV_PASS` (comma-separated). Everything else, including every token and secret, is dropped.
+  - Without approval, the following are refused:
+    - `node`/`python` with inline-code flags (`-e`, `-c`, `-p`, `-m`, `--eval`, …) or with no arguments (REPL)
+    - `npx`, `npm exec`, `cargo run` and `go run`
+    - binaries given as a path
+    - any path argument outside the project root (absolute, `~` or `..`)
+    - `git` subcommands that modify anything
+  - **Warning:** `IDE_SHELL_AUTO_APPROVE=1` still lets the model run allowlisted tools such as `npm test` or `node script.js`, and those run project code as you. Only enable it for projects you trust.
+  - `IDE_SHELL_AUTO_APPROVE=1` (local opt-in) skips the prompt only for allowlisted binaries. The default allowlist is `npm`, `npx`, `node`, `python3`, `pytest`, `git` (read-only subcommands), `ls`, `cat`, `rg` and similar. Override it with `IDE_SHELL_ALLOW` (comma-separated).
+
 ---
 
 ### Step 2 -- Add as a custom model in your IDE
@@ -125,7 +150,7 @@ Keep this running. You should see:
    ```
    http://127.0.0.1:4304/v1
    ```
-5. Set the API key to any non-empty value (e.g. `edgecoder`) -- not validated
+5. Set the API key to your IDE token (`cat ~/.edgecoder/ide-token`). It is sent as `Authorization: Bearer <token>` and is required.
 6. In the model name field, type `edgecoder-auto` and press Enter to add it
 7. Select `edgecoder-auto` as your active model
 
@@ -181,14 +206,14 @@ Add to `~/.continue/config.json`:
       "title": "EdgeCoder (auto-route)",
       "provider": "openai",
       "model": "edgecoder-auto",
-      "apiKey": "edgecoder",
+      "apiKey": "<contents of ~/.edgecoder/ide-token>",
       "apiBase": "http://127.0.0.1:4304/v1"
     },
     {
       "title": "EdgeCoder (local only)",
       "provider": "openai",
       "model": "edgecoder-local",
-      "apiKey": "edgecoder",
+      "apiKey": "<contents of ~/.edgecoder/ide-token>",
       "apiBase": "http://127.0.0.1:4304/v1"
     }
   ]
@@ -234,6 +259,7 @@ For agentic workflows, the REST API at `:4304` is fully scriptable:
 
 ```bash
 curl -s http://127.0.0.1:4304/v1/chat/completions \
+  -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "edgecoder-auto",
@@ -252,10 +278,11 @@ Test that the server is up and returning models:
 curl http://127.0.0.1:4304/health
 
 # Model list (OpenAI format)
-curl http://127.0.0.1:4304/v1/models | jq '.data[].id'
+curl -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" http://127.0.0.1:4304/v1/models | jq '.data[].id'
 
 # Quick inference test
 curl -s http://127.0.0.1:4304/v1/chat/completions \
+  -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" \
   -H "Content-Type: application/json" \
   -d '{"model":"edgecoder-auto","messages":[{"role":"user","content":"say hello"}]}' \
   | jq '.choices[0].message.content, .edgecoder'
@@ -314,7 +341,7 @@ cd "/path/to/EdgeCoder" && npm run dev:ide
 
 Make sure you typed the model name exactly: `edgecoder-auto`, `edgecoder-local`, or `edgecoder-swarm`. Verify they appear:
 ```bash
-curl http://127.0.0.1:4304/v1/models
+curl -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" http://127.0.0.1:4304/v1/models
 ```
 
 ### Responses are slow
@@ -326,7 +353,7 @@ curl http://127.0.0.1:11434/api/tags
 
 ### Cursor keeps asking for an OpenAI API key
 
-Enter any non-empty string in the API key field -- `edgecoder` works fine. The local server does not validate keys.
+Enter your IDE token (`~/.edgecoder/ide-token`) in the API key field. The server rejects requests without it (401).
 
 ### Desktop app cannot connect to services
 
