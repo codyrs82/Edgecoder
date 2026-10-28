@@ -121,6 +121,28 @@ export class SubtaskDepTracker {
   }
 
   /**
+   * #51: a subtask failed permanently, so every held subtask that (transitively)
+   * depends on it can never run. Remove and return them so the caller can fail them.
+   */
+  dropDependents(failedSubtaskId: string): Array<Omit<Subtask, "id"> & { id: string }> {
+    const dropped: Array<Omit<Subtask, "id"> & { id: string }> = [];
+    const failed = new Set([failedSubtaskId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [id, entry] of this.pending) {
+        if (entry.dependsOn.some((d) => failed.has(d))) {
+          this.pending.delete(id);
+          failed.add(id);
+          dropped.push(entry.subtask);
+          changed = true;
+        }
+      }
+    }
+    return dropped;
+  }
+
+  /**
    * Add a subtask to the pending map (it will be held until its deps complete).
    */
   hold(entry: PendingDependentSubtask): void {
