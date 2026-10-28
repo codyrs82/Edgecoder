@@ -165,6 +165,8 @@ npm run build:ble-proxy
 | `NODE_BIN` | Override Node.js binary path if auto-detection fails (macOS/Linux daemon). |
 | `DOCS_SITE_URL` | Documentation site URL (used in portal links). |
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
+| `SUPPORT_EMAIL` | Contact address on the portal's privacy and terms pages (default `support@edgecoder.io`; plain address only) (#22). |
+| `MODEL_DOWNLOAD_DOMAINS` | Comma-separated exact hostnames that signed model manifests may download from; replaces the default `models.edgecoder.io,huggingface.co` (#22). See [Self-hosting](../operations/self-hosting.md). |
 
 ## Common profiles
 
