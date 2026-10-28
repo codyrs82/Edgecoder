@@ -130,30 +130,35 @@ export interface LndInvoice {
 }
 
 /**
- * #47: decide settlement from an LND invoice response.
+ * #47: decide settlement from an LND invoice response. Fails closed: anything
+ * missing or inconsistent on a money path counts as unpaid.
  * - `state` is authoritative (`settled` is deprecated); only SETTLED counts, so an
  *   ACCEPTED hold invoice or a CANCELED one is unpaid.
- * - The returned r_hash must be the invoice we asked for.
- * - The preimage, when returned, must hash to the payment hash (proof of payment).
- * - The amount paid must cover the invoice value when both are reported.
+ * - r_hash, r_preimage, value_msat and amt_paid_msat are all required: LND returns
+ *   them for a settled invoice it created, so a body without them means a proxy,
+ *   version mismatch or spoofed response.
+ * - The returned r_hash must be the invoice we asked for, and the preimage must
+ *   hash to it (proof of payment). AMP/keysend invoices would fail this check;
+ *   that is intended, since we never create them.
+ * - value_msat must be > 0 (we never create amountless invoices, where any
+ *   payment would "cover" the value) and amt_paid_msat must cover it.
  */
 export function interpretLndInvoice(body: LndInvoice, hashHex: string): SettlementResult {
   const settled = body.state !== undefined ? body.state === "SETTLED" : body.settled === true;
   if (!settled) return { settled: false };
-  if (body.r_hash !== undefined && lndHashToHex(body.r_hash) !== hashHex) return { settled: false };
-  let preimage: string | undefined;
-  if (body.r_preimage) {
-    preimage = Buffer.from(body.r_preimage.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("hex");
-    if (createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex") !== hashHex) {
-      return { settled: false };
-    }
+  if (!body.r_hash || !body.r_preimage || body.value_msat === undefined || body.amt_paid_msat === undefined) {
+    return { settled: false };
   }
-  if (body.value_msat !== undefined && body.amt_paid_msat !== undefined) {
-    try {
-      if (BigInt(body.amt_paid_msat) < BigInt(body.value_msat)) return { settled: false };
-    } catch {
-      return { settled: false };
-    }
+  if (lndHashToHex(body.r_hash) !== hashHex) return { settled: false };
+  const preimage = Buffer.from(body.r_preimage.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("hex");
+  if (preimage.length !== 64 || createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex") !== hashHex) {
+    return { settled: false };
+  }
+  try {
+    const value = BigInt(body.value_msat);
+    if (value <= 0n || BigInt(body.amt_paid_msat) < value) return { settled: false };
+  } catch {
+    return { settled: false };
   }
   return { settled: true, txRef: `lnd:${hashHex}`, paymentHash: hashHex, preimage };
 }

@@ -44,6 +44,18 @@ describe("interpretLndInvoice (#47)", () => {
     expect(interpretLndInvoice({ ...fx.settled, amt_paid_msat: "999999" }, HASH).settled).toBe(false);
     expect(interpretLndInvoice({ ...fx.settled, amt_paid_msat: "nope" }, HASH).settled).toBe(false);
   });
+
+  test("fails closed when a SETTLED body is missing its proof fields", () => {
+    for (const field of ["r_hash", "r_preimage", "value_msat", "amt_paid_msat"]) {
+      const { [field]: _drop, ...partial } = fx.settled;
+      expect(interpretLndInvoice(partial, HASH).settled, field).toBe(false);
+    }
+  });
+
+  test("zero-amount (amountless) invoices are rejected", () => {
+    expect(interpretLndInvoice({ ...fx.settled, value_msat: "0", amt_paid_msat: "0" }, HASH).settled).toBe(false);
+    expect(interpretLndInvoice({ ...fx.settled, value_msat: "0" }, HASH).settled).toBe(false);
+  });
 });
 
 describe("LndRestProvider.checkSettlement over HTTP (#47)", () => {
