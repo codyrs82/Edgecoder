@@ -4,6 +4,8 @@ export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "edgecoder-theme";
+/** Dark until light mode has had a visual QA pass (#85 checklist); then switch to "system". */
+export const DEFAULT_THEME: ThemePreference = "dark";
 const QUERY = "(prefers-color-scheme: dark)";
 
 interface Env {
@@ -13,7 +15,7 @@ interface Env {
 }
 
 let env: Env | null = null;
-let preference: ThemePreference = "system";
+let preference: ThemePreference = DEFAULT_THEME;
 let mql: ReturnType<Env["matchMedia"]> | null = null;
 const listeners = new Set<(t: ResolvedTheme) => void>();
 
@@ -47,7 +49,7 @@ export function initTheme(e: Env = defaultEnv()): ResolvedTheme {
   env = e;
   let stored: string | null = null;
   try { stored = e.storage.getItem(THEME_STORAGE_KEY); } catch { /* storage unavailable */ }
-  preference = isPref(stored) ? stored : "system";
+  preference = isPref(stored) ? stored : DEFAULT_THEME;
   mql = e.matchMedia(QUERY);
   mql.addEventListener("change", onSystemChange);
   apply();

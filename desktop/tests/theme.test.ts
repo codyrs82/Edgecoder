@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { initTheme, setTheme, getThemePreference, onThemeChange, THEME_STORAGE_KEY } from "../src/lib/theme";
+import { initTheme, setTheme, getThemePreference, onThemeChange, THEME_STORAGE_KEY, DEFAULT_THEME } from "../src/lib/theme";
 
 function fakeEnv(systemDark: boolean, stored: string | null = null) {
   const store = new Map<string, string>();
@@ -23,8 +23,16 @@ describe("desktop theme (#23)", () => {
   let f: ReturnType<typeof fakeEnv>;
   beforeEach(() => { f = fakeEnv(true); initTheme(f.env); });
 
-  it("defaults to system and follows prefers-color-scheme", () => {
-    expect(getThemePreference()).toBe("system");
+  it("defaults to dark (until light mode is QA'd), regardless of the OS", () => {
+    expect(DEFAULT_THEME).toBe("dark");
+    const g = fakeEnv(false);
+    initTheme(g.env);
+    expect(getThemePreference()).toBe("dark");
+    expect(g.env.root.dataset.theme).toBe("dark");
+  });
+
+  it('"system" follows prefers-color-scheme', () => {
+    setTheme("system");
     expect(f.env.root.dataset.theme).toBe("dark");
     f.flip(false);
     expect(f.env.root.dataset.theme).toBe("light");
@@ -44,8 +52,8 @@ describe("desktop theme (#23)", () => {
     expect(g.env.root.dataset.theme).toBe("dark");
     const h = fakeEnv(false, "neon");
     initTheme(h.env);
-    expect(getThemePreference()).toBe("system");
-    expect(h.env.root.dataset.theme).toBe("light");
+    expect(getThemePreference()).toBe("dark");
+    expect(h.env.root.dataset.theme).toBe("dark");
   });
 
   it("notifies subscribers (Monaco) and unsubscribes", () => {
