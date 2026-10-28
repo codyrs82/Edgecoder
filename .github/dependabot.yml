@@ -31,30 +31,16 @@ updates:
     labels: [dependencies, github-actions]
     groups:
       actions: { patterns: ["*"] }
-  # #84: base images are pinned by digest; these entries keep the pins moving so Node 22 and
-  # Debian security patches reach rebuilds. All node:22-bookworm-slim bumps land in one PR per
-  # directory (Dependabot groups per directory), and tests/repo/docker-digests.test.ts fails if
-  # the node digest ever differs between Dockerfiles, so a partial bump can't merge silently.
+  # #84: base images are pinned by digest; this entry keeps the pins moving so Node 22 and
+  # Debian security patches reach rebuilds. One entry with `directories:` and one group means
+  # every image bump across all four folders lands in a single PR, and
+  # tests/repo/docker-digests.test.ts fails if the node digest ever differs between Dockerfiles.
   - package-ecosystem: docker
-    directory: /
-    schedule: { interval: weekly }
-    labels: [dependencies, docker]
-    groups:
-      base-images: { patterns: ["*"] }
-  - package-ecosystem: docker
-    directory: /deploy/docker
-    schedule: { interval: weekly }
-    labels: [dependencies, docker]
-    groups:
-      base-images: { patterns: ["*"] }
-  - package-ecosystem: docker
-    directory: /docker
-    schedule: { interval: weekly }
-    labels: [dependencies, docker]
-    groups:
-      base-images: { patterns: ["*"] }
-  - package-ecosystem: docker
-    directory: /tests/e2e
+    directories:
+      - /
+      - /deploy/docker
+      - /docker
+      - /tests/e2e
     schedule: { interval: weekly }
     labels: [dependencies, docker]
     groups:

@@ -29,11 +29,15 @@ describe("Docker base image pins (#84)", () => {
     expect(node.size).toBe(1);
   });
 
-  it("dependabot watches every directory with a Dockerfile", () => {
+  it("one dependabot docker entry covers every directory with a Dockerfile (single PR)", () => {
     const yml = readFileSync(".github/dependabot.yml", "utf8").replace(/\r\n/g, "\n");
-    const dirs = new Set(DOCKERFILES.map((f) => "/" + f.split("/").slice(0, -1).join("/")).map((d) => (d === "/" ? "/" : d)));
-    for (const d of dirs) {
-      expect(yml).toMatch(new RegExp(`package-ecosystem: docker\\n    directory: ${d.replace(/\//g, "\\/")}\\n`));
-    }
+    const entries = yml.split(/\n(?=  - package-ecosystem: )/).filter((e) => e.startsWith("  - package-ecosystem: docker"));
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry).not.toMatch(/\n    directory: /);
+    const listed = [...entry.matchAll(/^      - (\/\S*)$/gm)].map((m) => m[1]).sort();
+    const dirs = [...new Set(DOCKERFILES.map((f) => "/" + f.split("/").slice(0, -1).join("/")))].sort();
+    expect(listed).toEqual(dirs);
+    expect(entry).toMatch(/groups:\n      base-images: \{ patterns: \["\*"\] \}/);
   });
 });
