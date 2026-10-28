@@ -37,6 +37,7 @@ export default withMermaid(defineConfig({
         items: [
           { text: "Public Mesh Operations", link: "/operations/public-mesh-operations" },
           { text: "Deployment Topology", link: "/operations/deployment-topology" },
+          { text: "Self-hosting: Hostnames", link: "/operations/self-hosting" },
           { text: "Role-based Runbooks", link: "/operations/role-based-runbooks" },
           { text: "Agent Mesh Peer-Direct Flow", link: "/operations/agent-mesh-peer-direct" },
           { text: "Coordinator Discovery and Failover", link: "/operations/coordinator-discovery-failover" },

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
+import { siteLabel } from "./urls.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerHomePage(app: FastifyInstance): void {
@@ -118,7 +119,7 @@ app.get("/portal", async (_req, reply) => {
               <div class="muted">Sign in to access dashboard, nodes, wallet, and settings pages.</div>
             </div>
           </div>
-          <a href="/">Back to edgecoder.io</a>
+          <a href="/">Back to ${siteLabel()}</a>
         </div>
         <div class="layout">
           <div class="card simple-intro">

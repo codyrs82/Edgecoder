@@ -4,7 +4,16 @@
 import { sign, verify } from "node:crypto";
 
 export const ALLOWED_MODEL_EXTENSIONS = [".gguf", ".bin", ".safetensors"];
-export const ALLOWED_DOWNLOAD_DOMAINS = ["models.edgecoder.io", "huggingface.co"];
+export const DEFAULT_DOWNLOAD_DOMAINS = ["models.edgecoder.io", "huggingface.co"];
+
+/** #22: MODEL_DOWNLOAD_DOMAINS (comma list of exact hostnames) replaces the defaults when set. */
+export function allowedDownloadDomains(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.MODEL_DOWNLOAD_DOMAINS?.trim();
+  if (!raw) return DEFAULT_DOWNLOAD_DOMAINS;
+  return [...new Set(raw.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean))];
+}
+
+export const ALLOWED_DOWNLOAD_DOMAINS = allowedDownloadDomains();
 
 export interface ModelManifest {
   modelId: string;
@@ -52,7 +61,7 @@ export function verifyModelManifest(
 
   try {
     const url = new URL(signed.source);
-    if (!ALLOWED_DOWNLOAD_DOMAINS.includes(url.hostname)) {
+    if (!allowedDownloadDomains().includes(url.hostname)) {
       return { valid: false, reason: "source_not_allowlisted" };
     }
   } catch {
