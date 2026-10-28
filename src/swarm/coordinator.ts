@@ -75,6 +75,8 @@ import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningP
 import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
 import {
   anchorCheckpoint,
+  reconcileAnchors,
+  reconcileConfigFromEnv,
   isTxid,
   refreshAnchors,
   requiredConfirmationsFromEnv,
@@ -212,6 +214,9 @@ const STATS_ANCHOR_INTERVAL_MS = Number(process.env.STATS_ANCHOR_INTERVAL_MS ?? 
 const STATS_ANCHOR_MIN_CONFIRMATIONS = Number(process.env.STATS_ANCHOR_MIN_CONFIRMATIONS ?? "1");
 // #46: depth at which an anchor counts as "anchored", and how often pending anchors are polled.
 const ANCHOR_REQUIRED_CONFIRMATIONS = requiredConfirmationsFromEnv();
+/** #103: reconcile in-flight / stuck anchors on startup and on this interval. */
+const ANCHOR_RECONCILE_MS = Math.max(60_000, Number(process.env.ANCHOR_RECONCILE_MS ?? "900000") || 900_000);
+const ANCHOR_RECONCILE_CONFIG = reconcileConfigFromEnv();
 const ANCHOR_CONFIRM_POLL_MS = Math.max(30_000, Number(process.env.ANCHOR_CONFIRM_POLL_MS ?? "600000") || 600_000);
 const AGENT_RATE_LIMIT_MAX = Number(process.env.AGENT_RATE_LIMIT_MAX ?? "30");
 const AGENT_RATE_LIMIT_WINDOW_MS = Number(process.env.AGENT_RATE_LIMIT_WINDOW_MS ?? "60000");
@@ -1169,6 +1174,19 @@ async function refreshAnchorConfirmations(): Promise<void> {
     else if (e.event === "confirmed") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_confirmed");
     else if (e.event === "unknown") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_confirmation_unavailable");
     else if (e.event === "conflicted") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_conflicted_marked_failed");
+  }
+}
+
+/** #103: resolve "broadcasting" rows (crash mid-broadcast) and stuck pending txs. */
+async function reconcileAnchorRows(): Promise<void> {
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return;
+  const events = await reconcileAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, ANCHOR_RECONCILE_CONFIG);
+  for (const e of events) {
+    if (e.event === "needs_admin") app.log.error({ anchorId: e.anchorId }, "bitcoin_anchor_needs_admin_reconcile");
+    else if (e.event === "recovered") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_reconciled_txid_recovered");
+    else if (e.event === "failed") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reconciled_marked_failed");
+    else if (e.event === "retry_later") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reconcile_lookup_failed");
   }
 }
 
@@ -4963,6 +4981,9 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
       }, ANCHOR_CONFIRM_POLL_MS);
+      setInterval(() => {
+        void reconcileAnchorRows().catch((error) => app.log.warn({ error }, "anchor_reconcile_tick_failed"));
+      }, ANCHOR_RECONCILE_MS);
       // ── Security: nonce prune scheduler ──
       const pruneAdapter: PrunableStore = {
         async noncePrune() { await nonceStore.prune(); return 0; },
@@ -4990,6 +5011,8 @@ export async function initCoordinator(): Promise<void> {
     await maybeFinalizeStatsCheckpoint();
   })().catch(() => undefined);
   await runIssuanceTick().catch(() => undefined);
+  // #103: reconcile before anchoring so a crash-left "broadcasting" row is resolved first.
+  await reconcileAnchorRows().catch((error) => app.log.warn({ error }, "anchor_reconcile_startup_failed"));
   await maybeAnchorLatestFinalizedEpoch().catch(() => undefined);
   await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
 }

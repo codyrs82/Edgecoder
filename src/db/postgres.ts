@@ -329,6 +329,8 @@ ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS confirmations INTEGE
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS block_hash TEXT;
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS block_height INTEGER;
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS last_checked_at_ms BIGINT;
+-- #103: reconciliation attempts for broadcasting / stuck rows.
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_anchor_records_status ON bitcoin_anchor_records (status);
 
 CREATE TABLE IF NOT EXISTS issuance_payout_events (
@@ -1194,8 +1196,8 @@ export class PostgresStore {
   async upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO bitcoin_anchor_records (
-        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       ON CONFLICT (anchor_id) DO UPDATE SET
         tx_ref = EXCLUDED.tx_ref,
         status = EXCLUDED.status,
@@ -1203,7 +1205,8 @@ export class PostgresStore {
         confirmations = EXCLUDED.confirmations,
         block_hash = EXCLUDED.block_hash,
         block_height = EXCLUDED.block_height,
-        last_checked_at_ms = EXCLUDED.last_checked_at_ms`,
+        last_checked_at_ms = EXCLUDED.last_checked_at_ms,
+        reconcile_attempts = EXCLUDED.reconcile_attempts`,
       [
         record.anchorId,
         record.epochId,
@@ -1216,7 +1219,8 @@ export class PostgresStore {
         record.confirmations ?? 0,
         record.blockHash ?? null,
         record.blockHeight ?? null,
-        record.lastCheckedAtMs ?? null
+        record.lastCheckedAtMs ?? null,
+        record.reconcileAttempts ?? 0
       ]
     );
   }
@@ -1234,13 +1238,14 @@ export class PostgresStore {
       confirmations: row.confirmations !== undefined && row.confirmations !== null ? Number(row.confirmations) : 0,
       blockHash: row.block_hash ?? undefined,
       blockHeight: row.block_height !== undefined && row.block_height !== null ? Number(row.block_height) : undefined,
-      lastCheckedAtMs: row.last_checked_at_ms ? Number(row.last_checked_at_ms) : undefined
+      lastCheckedAtMs: row.last_checked_at_ms ? Number(row.last_checked_at_ms) : undefined,
+      reconcileAttempts: row.reconcile_attempts !== undefined && row.reconcile_attempts !== null ? Number(row.reconcile_attempts) : 0
     };
   }
 
   async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT 1`
@@ -1251,7 +1256,7 @@ export class PostgresStore {
 
   async listAnchors(limit = 100): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT $1`,
@@ -1285,10 +1290,23 @@ export class PostgresStore {
     return Number(result.rows[0]?.n ?? 0);
   }
 
+  /** #103: rows to reconcile: in-flight broadcasts, and pending rows older than `pendingBeforeMs`. */
+  async listAnchorsToReconcile(pendingBeforeMs: number, limit = 50): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
+       FROM bitcoin_anchor_records
+       WHERE status = 'broadcasting' OR (status = 'pending' AND created_at_ms < $1)
+       ORDER BY created_at_ms ASC
+       LIMIT $2`,
+      [pendingBeforeMs, limit]
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
   /** #46: anchors awaiting confirmation depth (or re-confirmation after a reorg). */
   async listPendingAnchors(limit = 50): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
        FROM bitcoin_anchor_records
        WHERE status = 'pending'
        ORDER BY created_at_ms ASC
@@ -1300,7 +1318,7 @@ export class PostgresStore {
 
   async latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts
        FROM bitcoin_anchor_records
        WHERE checkpoint_hash = $1
        ORDER BY created_at_ms DESC

@@ -96,6 +96,13 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | No | Absolute fee cap per anchor tx (default: `20000`) |
 | `BITCOIN_ANCHOR_MIN_FEE_SAT_VB` | No | Fee-rate floor in sat/vB (default: `2`) |
 | `BITCOIN_ANCHOR_MAINNET` | For mainnet | Must be `1` to broadcast when `BITCOIN_NETWORK=bitcoin`; mainnet anchoring is opt-in |
+| `ANCHOR_RECONCILE_MS` | No | How often to reconcile in-flight and stuck anchors; also runs at startup (default: `900000`) |
+| `ANCHOR_RECONCILE_MAX_ATTEMPTS` | No | Failed lookups before a `broadcasting` row is flagged `needs_admin` (default: `5`) |
+| `ANCHOR_STUCK_AFTER_MS` | No | A pending tx this old that is unconfirmed and not in the mempool is marked `failed` and re-anchored (default: `21600000`, 6h) |
+
+### Reconciliation (#103)
+
+A `broadcasting` row means the coordinator stopped between broadcasting and storing the txid. On startup and every `ANCHOR_RECONCILE_MS`, the coordinator searches the bitcoind wallet for a transaction whose OP_RETURN carries that checkpoint. If it finds one, it stores the txid and tracks confirmations as usual. If the wallet definitely has no such transaction, the row becomes `failed` and is re-anchored. If the node can't answer, the coordinator counts an attempt. After `ANCHOR_RECONCILE_MAX_ATTEMPTS` failed attempts the row becomes `needs_admin` (logged as `bitcoin_anchor_needs_admin_reconcile`). That checkpoint is then never re-broadcast automatically. An operator checks the wallet and sets the row's `tx_ref`/`status` by hand. Wallet lookup needs `BITCOIN_ANCHOR_PROVIDER=bitcoind`. With other providers, in-flight rows go to `needs_admin`.
 
 ## Verification
 

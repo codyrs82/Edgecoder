@@ -28,6 +28,13 @@ export interface BitcoinAnchorProvider {
   broadcastOpReturn(dataHex: string): Promise<AnchorBroadcastResult>;
   /** Check the confirmation status of a previously broadcast txid. */
   getConfirmations(txid: string): Promise<AnchorConfirmationResult>;
+  /**
+   * #103: find a wallet tx whose OP_RETURN carries `dataHex` (crash between broadcast
+   * and the txid write). Resolves null on a definite miss; throws when the node can't answer.
+   */
+  findCheckpointTx?(dataHex: string): Promise<string | null>;
+  /** #103: whether an unconfirmed tx is still in the node's mempool. Throws when the node can't answer. */
+  isInMempool?(txid: string): Promise<boolean>;
   /** Check RPC connectivity and return node info. */
   healthCheck(): Promise<BitcoinNodeHealth>;
   /** Send BTC to multiple outputs in a single transaction (for payout sweeps). */
@@ -159,6 +166,32 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
       blockHeight: confirmations > 0 ? tx.blockheight : undefined,
       blockHash: confirmations > 0 ? tx.blockhash : undefined
     };
+  }
+
+  async findCheckpointTx(dataHex: string): Promise<string | null> {
+    const want = dataHex.toLowerCase();
+    const txs = (await this.rpc("listtransactions", ["*", 500, 0, true])) as Array<{ txid?: string; category?: string }>;
+    const candidates = [...new Set(txs.filter((t) => t.category === "send" && t.txid).map((t) => t.txid as string))];
+    for (const txid of candidates.reverse()) {
+      const tx = (await this.rpc("gettransaction", [txid, true, true])) as {
+        decoded?: { vout?: Array<{ scriptPubKey?: { type?: string; hex?: string } }> };
+      };
+      const hit = tx.decoded?.vout?.some(
+        (o) => o.scriptPubKey?.type === "nulldata" && (o.scriptPubKey.hex ?? "").toLowerCase().endsWith(want)
+      );
+      if (hit) return txid;
+    }
+    return null;
+  }
+
+  async isInMempool(txid: string): Promise<boolean> {
+    try {
+      await this.rpc("getmempoolentry", [txid]);
+      return true;
+    } catch (err) {
+      if (err instanceof Error && /bitcoind_rpc_error: -5 /.test(err.message)) return false;
+      throw err;
+    }
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {

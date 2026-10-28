@@ -33,6 +33,8 @@ export interface AnchorStore {
   listPendingAnchors(limit?: number): Promise<BitcoinAnchorRecord[]>;
   /** Cross-instance lock for one checkpoint (Postgres advisory lock). */
   withCheckpointLock?<T>(checkpointHash: string, fn: () => Promise<T>): Promise<T>;
+  /** #103: in-flight broadcasts plus pending rows created before `pendingBeforeMs`. */
+  listAnchorsToReconcile?(pendingBeforeMs: number, limit?: number): Promise<BitcoinAnchorRecord[]>;
   /** Broadcast attempts (real txids or in-flight "broadcasting" rows) created since `sinceMs`. */
   countAnchorBroadcastsSince?(sinceMs: number): Promise<number>;
 }
@@ -124,7 +126,7 @@ async function anchorCheckpointLocked(
   const policy = deps.policy ?? anchorPolicyFromEnv();
   const existing = await deps.store.latestAnchorByCheckpoint(input.checkpointHash);
   if (existing && existing.status !== "failed" && isTxid(existing.txRef)) return existing;
-  if (existing?.status === "broadcasting") {
+  if (existing?.status === "broadcasting" || existing?.status === "needs_admin") {
     throw new Error(`anchor_broadcast_unreconciled:${existing.anchorId}`);
   }
 
@@ -268,6 +270,120 @@ export async function refreshAnchors(
     seen.add(rec.anchorId);
     const { event } = await refreshAnchor(deps, rec, required);
     out.push({ anchorId: rec.anchorId, event });
+  }
+  return out;
+}
+
+/* ── #103: reconciliation of in-flight and stuck anchors ── */
+
+export interface ReconcileConfig {
+  /** Lookup failures before a row is flagged `needs_admin`. */
+  maxAttempts: number;
+  /** A pending tx this old that is neither confirmed nor in the mempool is marked failed (re-anchored). */
+  stuckAfterMs: number;
+}
+
+export function reconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReconcileConfig {
+  const n = (k: string, d: number, min: number) => {
+    const v = Number(env[k]);
+    return env[k] !== undefined && env[k] !== "" && Number.isFinite(v) && v >= min ? Math.floor(v) : d;
+  };
+  return {
+    maxAttempts: n("ANCHOR_RECONCILE_MAX_ATTEMPTS", 5, 1),
+    stuckAfterMs: n("ANCHOR_STUCK_AFTER_MS", 6 * 60 * 60 * 1000, 60_000)
+  };
+}
+
+export type ReconcileEvent = "recovered" | "failed" | "retry_later" | "needs_admin" | "still_pending" | "skipped";
+
+async function bumpAttempts(
+  deps: AnchorDeps,
+  record: BitcoinAnchorRecord,
+  cfg: ReconcileConfig,
+  nowMs: number
+): Promise<ReconcileEvent> {
+  const attempts = (record.reconcileAttempts ?? 0) + 1;
+  const flag = attempts >= cfg.maxAttempts;
+  await deps.store.upsertBitcoinAnchor({
+    ...record,
+    reconcileAttempts: attempts,
+    lastCheckedAtMs: nowMs,
+    // Only an in-flight row is parked for an operator; a stuck pending row keeps its txid
+    // and status (it may still confirm) but stops being retried automatically.
+    status: flag && record.status === "broadcasting" ? "needs_admin" : record.status
+  });
+  return flag ? "needs_admin" : "retry_later";
+}
+
+/**
+ * #103: resolve one row.
+ * - "broadcasting" (crash between broadcast and txid write): look the checkpoint's
+ *   OP_RETURN up in the wallet. Found -> store the txid as pending and refresh it
+ *   (may go straight to anchored). Definitely absent -> "failed" so a later tick
+ *   re-anchors. Lookup error -> count an attempt; after maxAttempts -> "needs_admin".
+ * - "pending" older than stuckAfterMs and unconfirmed: if the node says it isn't in
+ *   the mempool (evicted / replaced) -> "failed" so it is re-anchored.
+ */
+export async function reconcileAnchor(
+  deps: AnchorDeps,
+  record: BitcoinAnchorRecord,
+  required: number,
+  cfg: ReconcileConfig
+): Promise<ReconcileEvent> {
+  const nowMs = (deps.now ?? Date.now)();
+  if ((record.reconcileAttempts ?? 0) >= cfg.maxAttempts) return "skipped";
+
+  if (record.status === "broadcasting") {
+    if (!deps.provider.findCheckpointTx) return bumpAttempts(deps, record, cfg, nowMs);
+    let txid: string | null;
+    try {
+      txid = await deps.provider.findCheckpointTx(encodeCheckpointForOpReturn(record.checkpointHash));
+    } catch {
+      return bumpAttempts(deps, record, cfg, nowMs);
+    }
+    const normalized = txid?.toLowerCase();
+    if (!isTxid(normalized)) {
+      await deps.store.upsertBitcoinAnchor({ ...record, status: "failed", lastCheckedAtMs: nowMs });
+      return "failed";
+    }
+    const recovered: BitcoinAnchorRecord = { ...record, txRef: normalized, status: "pending", reconcileAttempts: 0, lastCheckedAtMs: nowMs };
+    await deps.store.upsertBitcoinAnchor(recovered);
+    await refreshAnchor(deps, recovered, required);
+    return "recovered";
+  }
+
+  if (record.status === "pending" && isTxid(record.txRef) && nowMs - record.createdAtMs >= cfg.stuckAfterMs) {
+    if (!deps.provider.isInMempool) return "skipped";
+    let conf: AnchorConfirmationResult;
+    let inMempool: boolean;
+    try {
+      conf = await deps.provider.getConfirmations(record.txRef);
+      if (conf.confirmed) return "still_pending";
+      inMempool = await deps.provider.isInMempool(record.txRef);
+    } catch {
+      return bumpAttempts(deps, record, cfg, nowMs);
+    }
+    if (inMempool) return "still_pending";
+    await deps.store.upsertBitcoinAnchor({ ...record, status: "failed", confirmations: 0, lastCheckedAtMs: nowMs });
+    return "failed";
+  }
+  return "skipped";
+}
+
+export async function reconcileAnchors(
+  deps: AnchorDeps,
+  required: number,
+  cfg: ReconcileConfig
+): Promise<Array<{ anchorId: string; event: ReconcileEvent }>> {
+  if (!deps.store.listAnchorsToReconcile) return [];
+  const nowMs = (deps.now ?? Date.now)();
+  const rows = await deps.store.listAnchorsToReconcile(nowMs - cfg.stuckAfterMs, 50);
+  const out: Array<{ anchorId: string; event: ReconcileEvent }> = [];
+  for (const row of rows) {
+    // Same per-checkpoint lock as anchorCheckpoint, so reconcile never races a broadcast.
+    const run = () => reconcileAnchor(deps, row, required, cfg);
+    const event = deps.store.withCheckpointLock ? await deps.store.withCheckpointLock(row.checkpointHash, run) : await run();
+    out.push({ anchorId: row.anchorId, event });
   }
   return out;
 }

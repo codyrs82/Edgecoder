@@ -6,6 +6,9 @@ import {
   isTxid,
   refreshAnchor,
   refreshAnchors,
+  reconcileAnchor,
+  reconcileAnchors,
+  reconcileConfigFromEnv,
   requiredConfirmationsFromEnv,
   type AnchorStore
 } from "../../src/economy/anchoring.js";
@@ -295,5 +298,70 @@ describe("anchoring review fixes (#46)", () => {
     const r = applyConfirmation(anchored(), { confirmed: false, confirmations: -1 }, 6, 2_000);
     expect(r.event).toBe("conflicted");
     expect(r.record.status).toBe("failed");
+  });
+});
+
+describe("reconciliation (#103)", () => {
+  const CFG = { maxAttempts: 3, stuckAfterMs: 60_000 };
+  const inflight = (over: Partial<BitcoinAnchorRecord> = {}): BitcoinAnchorRecord => ({
+    anchorId: "b1", epochId: "e", checkpointHash: CHECKPOINT, anchorNetwork: "signet",
+    txRef: "broadcasting:x", status: "broadcasting", createdAtMs: 1, confirmations: 0, ...over
+  });
+  const withLookup = (find: () => Promise<string | null>, conf: AnchorConfirmationResult = { confirmed: false, confirmations: 0 }) => ({
+    ...scriptedProvider([conf]).provider,
+    findCheckpointTx: find
+  });
+
+  it("recovers the txid of a crash-left broadcast and refreshes it (straight to anchored when deep)", async () => {
+    const store = memStore([inflight()]);
+    let asked = "";
+    const provider = withLookup(async () => TXID, { confirmed: true, confirmations: 6, blockHash: BLOCK_A, blockHeight: 9 });
+    provider.findCheckpointTx = async (hex: string) => { asked = hex; return TXID; };
+    expect(await reconcileAnchor(deps(provider, store), inflight(), 6, CFG)).toBe("recovered");
+    expect(decodeOpReturnCheckpoint(asked)).toEqual({ version: 1, checkpointHash: CHECKPOINT });
+    expect(store.rows.get("b1")).toMatchObject({ txRef: TXID, status: "anchored", confirmations: 6 });
+  });
+
+  it("a broadcast the wallet never sent is marked failed so it is re-anchored", async () => {
+    const store = memStore([inflight()]);
+    expect(await reconcileAnchor(deps(withLookup(async () => null), store), inflight(), 6, CFG)).toBe("failed");
+    expect(store.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("lookup errors count attempts; after maxAttempts the row is flagged needs_admin and never re-broadcast", async () => {
+    const store = memStore([inflight()]);
+    const provider = withLookup(async () => { throw new Error("ECONNREFUSED"); });
+    const events: string[] = [];
+    for (let i = 0; i < 4; i += 1) events.push(await reconcileAnchor(deps(provider, store), store.rows.get("b1")!, 6, CFG));
+    expect(events).toEqual(["retry_later", "retry_later", "needs_admin", "skipped"]);
+    expect(store.rows.get("b1")).toMatchObject({ status: "needs_admin", reconcileAttempts: 3 });
+    const sp = scriptedProvider([]);
+    await expect(anchorCheckpoint(deps(sp.provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/unreconciled/);
+    expect(sp.broadcasts).toHaveLength(0);
+  });
+
+  it("a stuck pending tx that left the mempool is marked failed; one still in the mempool is kept", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const mk = (inMempool: boolean) => ({ ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => inMempool });
+    const d = (p: BitcoinAnchorProvider, st: AnchorStore) => ({ ...deps(p, st), now: () => 1 + CFG.stuckAfterMs });
+    const s1 = memStore([stuck]);
+    expect(await reconcileAnchor(d(mk(true), s1), stuck, 6, CFG)).toBe("still_pending");
+    expect(s1.rows.get("b1")?.status).toBe("pending");
+    const s2 = memStore([stuck]);
+    expect(await reconcileAnchor(d(mk(false), s2), stuck, 6, CFG)).toBe("failed");
+    expect(s2.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("reconcileAnchors walks the store's reconcile list", async () => {
+    const store = Object.assign(memStore([inflight()]), {
+      async listAnchorsToReconcile() { return [...store.rows.values()].filter((r) => r.status === "broadcasting"); }
+    });
+    const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
+    expect(out).toEqual([{ anchorId: "b1", event: "failed" }]);
+  });
+
+  it("config from env", () => {
+    expect(reconcileConfigFromEnv({})).toEqual({ maxAttempts: 5, stuckAfterMs: 6 * 60 * 60 * 1000 });
+    expect(reconcileConfigFromEnv({ ANCHOR_RECONCILE_MAX_ATTEMPTS: "2", ANCHOR_STUCK_AFTER_MS: "120000" })).toEqual({ maxAttempts: 2, stuckAfterMs: 120_000 });
   });
 });
