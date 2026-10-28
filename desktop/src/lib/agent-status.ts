@@ -14,9 +14,18 @@ export function statusFromTokenError(message: string): LocalAgentStatus | null {
   return m ? (m[1] as LocalAgentStatus) : null;
 }
 
-/** Whether local :4301 may be used. Outside Tauri (dev/web) the status is "unknown". */
+/**
+ * Whether local :4301 may be used: only our own live agent ("spawned"), or "unknown" outside
+ * Tauri (dev / web build, where there is no shell to ask). "not_started" and "port_occupied"
+ * are unusable.
+ */
 export function localAgentUsable(status: LocalAgentStatus): boolean {
-  return status !== "port_occupied";
+  return status === "spawned" || status === "unknown";
+}
+
+/** The cached inference token must be dropped whenever the shell says it's not our live agent. */
+export function shouldDropToken(status: LocalAgentStatus): boolean {
+  return status === "port_occupied" || status === "not_started";
 }
 
 export function agentStatusMessage(status: LocalAgentStatus): string | null {

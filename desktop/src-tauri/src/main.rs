@@ -16,7 +16,7 @@ use glob::glob;
 
 mod agent_guard;
 mod token;
-use agent_guard::{port_in_use, AgentGuard, AgentOwnership, AGENT_ADDR};
+use agent_guard::{port_in_use, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
 
 struct AgentProcess(Arc<Mutex<Option<Child>>>);
@@ -114,13 +114,31 @@ fn get_system_metrics() -> SystemMetrics {
 fn get_local_token(
     state: tauri::State<'_, LocalToken>,
     control: tauri::State<'_, AgentControl>,
+    process: tauri::State<'_, AgentProcess>,
 ) -> Result<String, String> {
-    control.guard.token_for_webview(&state.0)
+    // Check the child right now, so a dead agent never gets the token in the monitor's gap.
+    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
+    control.guard.token_for_webview(&state.0, alive)
+}
+
+/// True while the child we spawned is still running.
+fn child_alive(slot: &mut Option<Child>) -> bool {
+    match slot.as_mut() {
+        Some(child) => matches!(child.try_wait(), Ok(None)),
+        None => false,
+    }
 }
 
 /// #72: "spawned", "port_occupied" or "not_started", for the UI.
 #[tauri::command]
-fn get_agent_status(control: tauri::State<'_, AgentControl>) -> String {
+fn get_agent_status(
+    control: tauri::State<'_, AgentControl>,
+    process: tauri::State<'_, AgentProcess>,
+) -> String {
+    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
+    if !alive {
+        control.guard.apply(AgentEvent::Exited);
+    }
     control.guard.get().as_str().to_string()
 }
 
@@ -130,20 +148,23 @@ fn retry_local_agent(
     control: tauri::State<'_, AgentControl>,
     process: tauri::State<'_, AgentProcess>,
 ) -> String {
-    if control.guard.get() == AgentOwnership::Spawned {
+    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
+    if alive && control.guard.get() == AgentOwnership::Spawned {
         return "spawned".to_string();
     }
+    if !alive {
+        control.guard.apply(AgentEvent::Exited);
+    }
     if port_in_use(AGENT_ADDR) {
-        control.guard.set(AgentOwnership::PortOccupied);
-        return "port_occupied".to_string();
+        return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
     }
     let child = control.agent_dir.as_ref().and_then(|dir| spawn_agent_process(dir, &control.tokens));
-    let status = if child.is_some() { AgentOwnership::Spawned } else { AgentOwnership::NotStarted };
+    let event = if child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed };
+    // The monitor thread (started at launch whenever an agent dir exists) watches this child.
     if let Ok(mut guard) = process.0.lock() {
         *guard = child;
     }
-    control.guard.set(status);
-    status.as_str().to_string()
+    control.guard.apply(event).as_str().to_string()
 }
 
 /// Path of the IDE provider token written by the IDE server (#4): ~/.edgecoder/ide-token.
@@ -598,15 +619,15 @@ fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard) -> (O
     // #72: an existing listener never got this launch's tokens, so don't trust it.
     if port_in_use(AGENT_ADDR) {
         eprintln!("Something is already listening on :4301 — not spawning, inference token withheld");
-        guard.set(AgentOwnership::PortOccupied);
+        guard.apply(AgentEvent::PortBusy);
         return (None, agent_dir);
     }
     let Some(dir) = agent_dir else {
-        guard.set(AgentOwnership::NotStarted);
+        guard.apply(AgentEvent::SpawnFailed);
         return (None, None);
     };
     let child = spawn_agent_process(&dir, tokens);
-    guard.set(if child.is_some() { AgentOwnership::Spawned } else { AgentOwnership::NotStarted });
+    guard.apply(if child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed });
     (child, Some(dir))
 }
 
@@ -620,8 +641,10 @@ fn monitor_agent(
         let mut restarts = 0u32;
         const MAX_RESTARTS: u32 = 5;
 
+        // #72: keeps watching after MAX_RESTARTS (and with no child yet), so an agent started
+        // later by Retry is watched too; only auto-restart stops.
         loop {
-            thread::sleep(Duration::from_secs(5));
+            thread::sleep(Duration::from_secs(2));
 
             let needs_restart = {
                 let mut guard: std::sync::MutexGuard<'_, Option<Child>> =
@@ -635,12 +658,13 @@ fn monitor_agent(
                             eprintln!("Agent process exited with: {status}");
                             *guard = None;
                             // #72: stop handing out the token until our agent is back.
-                            agent_guard.set(AgentOwnership::NotStarted);
+                            agent_guard.apply(AgentEvent::Exited);
                             true
                         }
                         Ok(None) => false, // still running
                         Err(e) => {
                             eprintln!("Error checking agent process: {e}");
+                            agent_guard.apply(AgentEvent::Exited);
                             false
                         }
                     },
@@ -651,9 +675,9 @@ fn monitor_agent(
             if needs_restart {
                 if restarts >= MAX_RESTARTS {
                     eprintln!(
-                        "Agent has restarted {MAX_RESTARTS} times — stopping auto-restart"
+                        "Agent has restarted {MAX_RESTARTS} times — no more auto-restarts (Retry still works)"
                     );
-                    break;
+                    continue;
                 }
 
                 eprintln!(
@@ -665,14 +689,17 @@ fn monitor_agent(
 
                 if port_in_use(AGENT_ADDR) {
                     eprintln!("Agent port taken by another process — skipping respawn, token withheld");
-                    agent_guard.set(AgentOwnership::PortOccupied);
+                    agent_guard.apply(AgentEvent::PortBusy);
                     continue;
                 }
 
-                let new_child = spawn_agent_process(&agent_dir, &tokens);
-                agent_guard.set(if new_child.is_some() { AgentOwnership::Spawned } else { AgentOwnership::NotStarted });
                 if let Ok(mut guard) = agent_mutex.lock() {
-                    *guard = new_child;
+                    // A Retry may have started an agent during the 3 s wait; keep that one.
+                    if guard.is_none() {
+                        let new_child = spawn_agent_process(&agent_dir, &tokens);
+                        agent_guard.apply(if new_child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed });
+                        *guard = new_child;
+                    }
                 }
                 restarts += 1;
             }
@@ -722,7 +749,6 @@ fn main() {
 
             let agent_guard = Arc::new(AgentGuard::new());
             let (child, agent_dir) = start_agent(app, &tokens, &agent_guard);
-            let spawned = child.is_some();
             let agent_mutex = Arc::new(Mutex::new(child));
             app.manage(AgentProcess(Arc::clone(&agent_mutex)));
             app.manage(AgentControl {
@@ -731,7 +757,7 @@ fn main() {
                 tokens: tokens.clone(),
             });
 
-            if let (true, Some(dir)) = (spawned, agent_dir) {
+            if let Some(dir) = agent_dir {
                 monitor_agent(Arc::clone(&agent_mutex), dir, tokens.clone(), Arc::clone(&agent_guard));
             }
 

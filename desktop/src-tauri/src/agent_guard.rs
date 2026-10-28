@@ -35,6 +35,32 @@ impl AgentOwnership {
     }
 }
 
+/// Things that happen to the agent slot; `transition` is the whole state machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentEvent {
+    /// Before a spawn: something already listens on the agent port.
+    PortBusy,
+    /// We spawned the agent with this launch's tokens.
+    SpawnOk,
+    /// Spawning failed (no bundled agent, no node, ...).
+    SpawnFailed,
+    /// The child we spawned has exited (or can no longer be checked).
+    Exited,
+}
+
+/// Next ownership state. Only `SpawnOk` can lead to `Spawned`; an exit always revokes it.
+pub fn transition(state: AgentOwnership, event: AgentEvent) -> AgentOwnership {
+    match event {
+        AgentEvent::PortBusy => AgentOwnership::PortOccupied,
+        AgentEvent::SpawnOk => AgentOwnership::Spawned,
+        AgentEvent::SpawnFailed => AgentOwnership::NotStarted,
+        AgentEvent::Exited => match state {
+            AgentOwnership::Spawned => AgentOwnership::NotStarted,
+            other => other,
+        },
+    }
+}
+
 pub struct AgentGuard {
     state: Mutex<AgentOwnership>,
 }
@@ -54,8 +80,22 @@ impl AgentGuard {
         }
     }
 
-    /// The inference token, but only while the agent on :4301 is the one this app spawned.
-    pub fn token_for_webview(&self, token: &str) -> Result<String, String> {
+    pub fn apply(&self, event: AgentEvent) -> AgentOwnership {
+        match self.state.lock() {
+            Ok(mut g) => {
+                *g = transition(*g, event);
+                *g
+            }
+            Err(_) => AgentOwnership::NotStarted,
+        }
+    }
+
+    /// The inference token, but only while the agent on :4301 is the one this app spawned and
+    /// `child_alive` (checked by the caller right now) says it is still running.
+    pub fn token_for_webview(&self, token: &str, child_alive: bool) -> Result<String, String> {
+        if !child_alive {
+            self.apply(AgentEvent::Exited);
+        }
         match self.get() {
             AgentOwnership::Spawned => Ok(token.to_string()),
             AgentOwnership::PortOccupied => Err(format!(
@@ -88,15 +128,64 @@ mod tests {
     #[test]
     fn token_only_for_spawned_agent() {
         let g = AgentGuard::new();
-        assert!(g.token_for_webview("t").is_err());
+        assert!(g.token_for_webview("t", true).is_err());
         g.set(AgentOwnership::PortOccupied);
-        let err = g.token_for_webview("secret-token").unwrap_err();
+        let err = g.token_for_webview("secret-token", true).unwrap_err();
         assert!(err.starts_with("port_occupied"));
         assert!(!err.contains("secret-token"));
         g.set(AgentOwnership::Spawned);
-        assert_eq!(g.token_for_webview("t").unwrap(), "t");
+        assert_eq!(g.token_for_webview("t", true).unwrap(), "t");
         g.set(AgentOwnership::PortOccupied);
-        assert!(g.token_for_webview("t").is_err());
+        assert!(g.token_for_webview("t", true).is_err());
+    }
+
+    #[test]
+    fn dead_child_revokes_the_token_immediately() {
+        let g = AgentGuard::new();
+        g.apply(AgentEvent::SpawnOk);
+        assert!(g.token_for_webview("t", true).is_ok());
+        let err = g.token_for_webview("secret", false).unwrap_err();
+        assert!(err.starts_with("not_started"));
+        assert!(!err.contains("secret"));
+        assert_eq!(g.get(), AgentOwnership::NotStarted);
+        // Stays revoked even if a later caller thinks it's alive, until a new spawn.
+        assert!(g.token_for_webview("t", true).is_err());
+        g.apply(AgentEvent::SpawnOk);
+        assert!(g.token_for_webview("t", true).is_ok());
+    }
+
+    #[test]
+    fn state_transitions() {
+        use AgentEvent::*;
+        use AgentOwnership::*;
+        let cases = [
+            (NotStarted, SpawnOk, Spawned),
+            (NotStarted, SpawnFailed, NotStarted),
+            (NotStarted, PortBusy, PortOccupied),
+            (NotStarted, Exited, NotStarted),
+            (Spawned, Exited, NotStarted),
+            (Spawned, PortBusy, PortOccupied),
+            (Spawned, SpawnFailed, NotStarted),
+            (PortOccupied, Exited, PortOccupied),
+            (PortOccupied, SpawnOk, Spawned),
+            (PortOccupied, SpawnFailed, NotStarted),
+        ];
+        for (from, ev, to) in cases {
+            assert_eq!(transition(from, ev), to, "{from:?} + {ev:?}");
+        }
+    }
+
+    #[test]
+    fn retry_lifecycle() {
+        // Launch with :4301 taken -> user frees it -> Retry spawns -> that agent dies -> revoked.
+        let g = AgentGuard::new();
+        g.apply(AgentEvent::PortBusy);
+        assert!(g.token_for_webview("t", false).is_err());
+        assert_eq!(g.get(), AgentOwnership::PortOccupied);
+        g.apply(AgentEvent::SpawnOk);
+        assert!(g.token_for_webview("t", true).is_ok());
+        g.apply(AgentEvent::Exited);
+        assert!(g.token_for_webview("t", true).is_err());
     }
 
     #[test]

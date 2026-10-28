@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentStatusMessage, localAgentUsable, parseAgentStatus, statusFromTokenError } from "../src/lib/agent-status";
+import { agentStatusMessage, localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError } from "../src/lib/agent-status";
 
 describe("local agent status (#72)", () => {
   it("parses the shell's status strings", () => {
@@ -20,7 +20,15 @@ describe("local agent status (#72)", () => {
     expect(localAgentUsable("port_occupied")).toBe(false);
     expect(localAgentUsable("spawned")).toBe(true);
     expect(localAgentUsable("unknown")).toBe(true);
+    expect(localAgentUsable("not_started")).toBe(false);
     expect(agentStatusMessage("port_occupied")).toMatch(/4301/);
     expect(agentStatusMessage("spawned")).toBeNull();
+  });
+
+  it("drops the cached token unless it's our live agent", () => {
+    expect(shouldDropToken("not_started")).toBe(true);
+    expect(shouldDropToken("port_occupied")).toBe(true);
+    expect(shouldDropToken("spawned")).toBe(false);
+    expect(shouldDropToken("unknown")).toBe(false);
   });
 });
