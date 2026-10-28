@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getHealth, getStatus, backendReady, isRemoteMode } from "../lib/api";
+  import { visibleRange } from "../lib/virtual-list";
 
   // --- Types ---
   interface LogEntry {
@@ -14,17 +15,26 @@
   let filter: "all" | "info" | "warn" | "error" = $state("all");
   let autoScroll = $state(true);
   let prevResults = $state(-1);
-  let visibleLimit = $state(100);
   let lastErrorMsg = $state("");
   let polling = false;
   let pollInterval: ReturnType<typeof setInterval> | undefined;
 
-  // Derived filtered logs — capped at visibleLimit for DOM perf
+  // #28: the list is virtualized (only the rows in view are in the DOM), so the
+  // history can be much longer than the old 500-entry / "Show more" cap.
+  const MAX_ENTRIES = 5000;
+  const ROW_HEIGHT = 22; // px; rows are single-line (full text in the title tooltip)
   let allFilteredLogs = $derived(
     filter === "all" ? logs : logs.filter((e) => e.level === filter)
   );
-  let filteredLogs = $derived(allFilteredLogs.slice(0, visibleLimit));
-  let hasMore = $derived(allFilteredLogs.length > visibleLimit);
+  let counts = $derived({
+    info: logs.filter((e) => e.level === "info").length,
+    warn: logs.filter((e) => e.level === "warn").length,
+    error: logs.filter((e) => e.level === "error").length,
+  });
+  let scrollTop = $state(0);
+  let viewportHeight = $state(400);
+  let range = $derived(visibleRange(scrollTop, viewportHeight, ROW_HEIGHT, allFilteredLogs.length));
+  let rows = $derived(allFilteredLogs.slice(range.start, range.end));
 
   // Reference for the scroll container
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
@@ -42,13 +52,12 @@
     if (level === "error" && message === lastErrorMsg) return;
     if (level === "error") lastErrorMsg = message;
     else lastErrorMsg = "";
-    logs = [{ timestamp: now(), level, message }, ...logs].slice(0, 500);
+    logs = [{ timestamp: now(), level, message }, ...logs].slice(0, MAX_ENTRIES);
   }
 
   function clearLogs() {
     logs = [];
     prevResults = -1;
-    visibleLimit = 100;
     lastErrorMsg = "";
   }
 
@@ -58,6 +67,7 @@
     const _len = logs.length;
     if (autoScroll && scrollContainer) {
       scrollContainer.scrollTop = 0;
+      scrollTop = 0;
     }
   });
 
@@ -120,17 +130,17 @@
   <div class="header">
     <h1>Activity Log</h1>
     <div class="controls">
-      <div class="filter-tabs">
-        {#each ["all", "info", "warn", "error"] as tab}
+      <div class="filter-tabs" role="group" aria-label="Filter by level">
+        {#each ["all", "info", "warn", "error"] as const as tab}
           <button
+            type="button"
             class="tab {filter === tab ? 'active' : ''} {tab !== 'all' ? `tab-${tab}` : ''}"
-            onclick={() => (filter = tab as typeof filter)}
+            aria-pressed={filter === tab}
+            onclick={() => (filter = tab)}
           >
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
             {#if tab !== "all"}
-              <span class="tab-count">
-                {logs.filter((e) => tab === "all" || e.level === tab).length}
-              </span>
+              <span class="tab-count">{counts[tab]}</span>
             {/if}
           </button>
         {/each}
@@ -143,27 +153,34 @@
     </div>
   </div>
 
-  <div class="log-container" bind:this={scrollContainer}>
-    {#if filteredLogs.length === 0}
+  <!-- Focusable so keyboard users can scroll it (axe: scrollable-region-focusable). -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="log-container"
+    bind:this={scrollContainer}
+    bind:clientHeight={viewportHeight}
+    onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
+    role="log"
+    aria-label="Activity log, newest first"
+    tabindex="0"
+  >
+    {#if allFilteredLogs.length === 0}
       <div class="empty">No log entries{filter !== "all" ? ` for "${filter}"` : ""}</div>
     {:else}
-      {#each filteredLogs as entry}
-        <div class="log-line">
+      <div style="height: {range.padTop}px" aria-hidden="true"></div>
+      {#each rows as entry, i (range.start + i)}
+        <div class="log-line" style="height: {ROW_HEIGHT}px" title={entry.message}>
           <span class="ts">{entry.timestamp}</span>
           <span class="level-badge level-{entry.level}">{entry.level.toUpperCase()}</span>
           <span class="msg">{entry.message}</span>
         </div>
       {/each}
-      {#if hasMore}
-        <button class="btn-show-more" onclick={() => (visibleLimit += 100)}>
-          Show more ({allFilteredLogs.length - visibleLimit} remaining)
-        </button>
-      {/if}
+      <div style="height: {range.padBottom}px" aria-hidden="true"></div>
     {/if}
   </div>
 
   <div class="footer">
-    <span class="entry-count">{logs.length} entries (showing {filteredLogs.length} of {allFilteredLogs.length})</span>
+    <span class="entry-count" aria-live="polite">{logs.length} entries ({allFilteredLogs.length} shown by filter, max {MAX_ENTRIES})</span>
   </div>
 </div>
 
@@ -269,15 +286,22 @@
   .log-container {
     flex: 1;
     overflow-y: auto;
-    background: #0a0a15;
+    background: var(--bg-base, #0a0a15);
     border: 1px solid var(--border, #1e1e3f);
-    border-radius: 8px;
+    border-radius: var(--radius-md, 8px);
     padding: 0.5rem;
-    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-family: var(--font-mono, "SF Mono", "Fira Code", "Cascadia Code", monospace);
     font-size: 0.78rem;
     line-height: 1.7;
     min-height: 300px;
     contain: content;
+  }
+
+  .log-container:focus-visible,
+  .tab:focus-visible,
+  .btn-clear:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
   }
 
   .empty {
@@ -290,9 +314,12 @@
 
   .log-line {
     display: flex;
-    align-items: baseline;
+    align-items: center;
+    box-sizing: border-box;
+    overflow: hidden;
+    white-space: nowrap;
     gap: 0.6rem;
-    padding: 0.1rem 0.4rem;
+    padding: 0 0.4rem;
     border-radius: 3px;
     transition: background 0.1s;
   }
@@ -335,28 +362,12 @@
 
   .msg {
     flex: 1;
-    word-break: break-word;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .btn-show-more {
-    display: block;
-    width: 100%;
-    margin-top: 0.5rem;
-    padding: 0.4rem;
-    background: var(--bg-surface, #1a1a2e);
-    color: var(--accent, #3b82f6);
-    border: 1px solid var(--border, #1e1e3f);
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.78rem;
-    font-weight: 600;
-    text-align: center;
-    transition: background 0.15s;
-  }
 
-  .btn-show-more:hover {
-    background: #1e1e4f;
-  }
 
   /* Footer */
   .footer {
