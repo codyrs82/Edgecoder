@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 //
