@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MONACO_TOKEN_MAP, monacoThemeData } from "../src/lib/monaco-theme";
+import { MONACO_TOKEN_MAP, monacoThemeData, monacoThemeDataOrBase } from "../src/lib/monaco-theme";
 
 const tokens = JSON.parse(readFileSync(new URL("../../packages/tokens/src/tokens.json", import.meta.url), "utf8"));
 
@@ -13,19 +13,39 @@ describe("Monaco theme from tokens (#25)", () => {
     }
   });
 
-  it("keeps the previous hand-written editor colors", () => {
+  it("keeps all 7 previous hand-written editor colors in both modes", () => {
     expect(monacoThemeData(tokens, "dark").colors).toMatchObject({
       "editor.background": "#262624",
       "editor.foreground": "#f7f5f0",
+      "editorLineNumber.foreground": "#8a8478",
+      "editorLineNumber.activeForeground": "#b8b0a4",
       "editor.selectionBackground": "#5a4a3a",
       "editor.lineHighlightBackground": "#2f2f2d",
       "editorCursor.foreground": "#c17850"
     });
     expect(monacoThemeData(tokens, "light").colors).toMatchObject({
       "editor.background": "#ffffff",
+      "editor.foreground": "#1f1f1d",
+      "editorLineNumber.foreground": "#6b665c",
+      "editorLineNumber.activeForeground": "#57524a",
+      "editor.selectionBackground": "#f0d9c8",
       "editor.lineHighlightBackground": "#f7f5f0",
       "editorCursor.foreground": "#a65a33"
     });
+  });
+
+  it("widgets differ from the editor background in both modes", () => {
+    for (const mode of ["dark", "light"] as const) {
+      const c = monacoThemeData(tokens, mode).colors;
+      expect(c["editorSuggestWidget.background"], mode).not.toBe(c["editor.background"]);
+      expect(c["editorWidget.border"], mode).toMatch(/^#/);
+    }
+  });
+
+  it("falls back to the base theme instead of throwing", () => {
+    const errors: unknown[] = [];
+    expect(monacoThemeDataOrBase({ color: {} }, "light", (e) => errors.push(e))).toEqual({ base: "vs", inherit: true, rules: [], colors: {} });
+    expect(errors).toHaveLength(1);
   });
 
   it("rejects a missing or non-hex token", () => {

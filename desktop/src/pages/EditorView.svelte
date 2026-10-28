@@ -4,7 +4,7 @@
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, type EditorFile } from "../lib/editor-store";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
-  import { monacoThemeData } from "../lib/monaco-theme";
+  import { monacoThemeDataOrBase } from "../lib/monaco-theme";
   import tokens from "@edgecoder/tokens/tokens.json";
 
   let editorContainer: HTMLDivElement | undefined = $state(undefined);
@@ -39,8 +39,8 @@
     monaco = mon;
 
     // #25: both editor themes come from the shared design tokens.
-    mon.editor.defineTheme("edgecoder-dark", monacoThemeData(tokens, "dark"));
-    mon.editor.defineTheme("edgecoder-light", monacoThemeData(tokens, "light"));
+    mon.editor.defineTheme("edgecoder-dark", monacoThemeDataOrBase(tokens, "dark"));
+    mon.editor.defineTheme("edgecoder-light", monacoThemeDataOrBase(tokens, "light"));
     offTheme = onThemeChange((t) => mon.editor.setTheme(`edgecoder-${t}`));
 
     if (editorContainer) {

@@ -9,10 +9,18 @@
 export type TokenMode = "light" | "dark";
 type Tokens = { color: Record<string, { light: string; dark: string }> };
 
+/** Structurally the same as monaco.editor.ITokenThemeRule (kept local so this file has no Monaco import). */
+export interface MonacoTokenRule {
+  token: string;
+  foreground?: string;
+  background?: string;
+  fontStyle?: string;
+}
+
 export interface MonacoThemeData {
   base: "vs" | "vs-dark";
   inherit: boolean;
-  rules: [];
+  rules: MonacoTokenRule[];
   colors: Record<string, string>;
 }
 
@@ -25,9 +33,15 @@ export const MONACO_TOKEN_MAP: Record<string, string> = {
   "editor.selectionBackground": "selection",
   "editor.lineHighlightBackground": "bg-base",
   "editorCursor.foreground": "accent",
-  "editorWidget.background": "bg-surface",
-  "editorSuggestWidget.background": "bg-surface",
-  "editorSuggestWidget.selectedBackground": "bg-elevated",
+  // #131 review: bg-elevated (not bg-surface, which equals bg-input in light mode) plus a hex
+  // border, so suggest/hover widgets stand out from the editor in both modes.
+  "editorWidget.background": "bg-elevated",
+  "editorWidget.border": "text-muted",
+  "editorHoverWidget.background": "bg-elevated",
+  "editorHoverWidget.border": "text-muted",
+  "editorSuggestWidget.background": "bg-elevated",
+  "editorSuggestWidget.border": "text-muted",
+  "editorSuggestWidget.selectedBackground": "selection",
   "focusBorder": "accent"
 };
 
@@ -42,4 +56,14 @@ export function monacoThemeData(tokens: Tokens, mode: TokenMode): MonacoThemeDat
     colors[key] = value;
   }
   return { base: mode === "dark" ? "vs-dark" : "vs", inherit: true, rules: [], colors };
+}
+
+/** #131 review: a bad token must not blank the editor; fall back to Monaco's base theme. */
+export function monacoThemeDataOrBase(tokens: Tokens, mode: TokenMode, onError: (e: unknown) => void = console.error): MonacoThemeData {
+  try {
+    return monacoThemeData(tokens, mode);
+  } catch (error) {
+    onError(error);
+    return { base: mode === "dark" ? "vs-dark" : "vs", inherit: true, rules: [], colors: {} };
+  }
 }
