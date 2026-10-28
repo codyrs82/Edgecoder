@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 // #20: build output, IDE user state and internal planning docs stay out of the repo.
 // Checks what git tracks (git ls-files), not the working tree: local builds legitimately
 // create out/, gen/schemas/ and xcuserdata/ on disk, and those are fine as long as they're ignored.
-const tracked = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
+// safe.directory: the debian-validation job runs in a container as a different uid.
+const tracked = execFileSync("git", ["-c", "safe.directory=*", "ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
   .split("\0")
   .filter(Boolean);
 
