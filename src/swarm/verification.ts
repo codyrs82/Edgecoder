@@ -57,6 +57,12 @@ export interface ExecutionResult<T = unknown> {
   /** Id of the subtask actually executed (original or replica). */
   subtaskId: string;
   agentId: string;
+  /**
+   * Reward account the execution pays into. Exclusion and one-vote-per-executor are
+   * keyed on this (falls back to agentId), so one operator with two agent ids on the
+   * same account can't run the original and the replica and agree with itself.
+   */
+  accountId?: string;
   ok: boolean;
   output: string;
   /** Caller data needed to settle later (e.g. credited duration, task id). */
@@ -72,7 +78,11 @@ export function resultKey(r: { ok: boolean; output: string }): string {
 export interface ReplicaRequest {
   subtask: Subtask;
   excludeAgents: string[];
+  /** Reward accounts that already executed this subtask; the replica must go to a different one. */
+  excludeAccounts: string[];
 }
+
+const executorKey = (r: { agentId: string; accountId?: string }) => r.accountId ?? r.agentId;
 
 export type VerificationOutcome<T> =
   | { status: "verified"; originalSubtaskId: string; winners: ExecutionResult<T>[]; losers: ExecutionResult<T>[]; output: string; ok: boolean }
@@ -136,7 +146,8 @@ export class ResultVerifier<T = unknown> {
     this.replicaToOriginal.set(id, p.original.id);
     return {
       subtask: { ...p.original, id, dependsOn: undefined },
-      excludeAgents: [...new Set(p.results.map((r) => r.agentId))]
+      excludeAgents: [...new Set(p.results.map((r) => r.agentId))],
+      excludeAccounts: [...new Set(p.results.map(executorKey))]
     };
   }
 
@@ -158,8 +169,8 @@ export class ResultVerifier<T = unknown> {
     const originalId = this.replicaToOriginal.get(replicaSubtaskId);
     const p = originalId ? this.pending.get(originalId) : undefined;
     if (!originalId || !p) return null;
-    // One execution per agent: a repeat agent can't vote twice.
-    if (p.results.some((r) => r.agentId === result.agentId)) return null;
+    // One execution per agent and per reward account: neither can vote twice.
+    if (p.results.some((r) => r.agentId === result.agentId || executorKey(r) === executorKey(result))) return null;
     p.results.push(result);
 
     const groups = new Map<string, ExecutionResult<T>[]>();

@@ -132,6 +132,43 @@ describe("ResultVerifier (#50)", () => {
     expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_EXECUTIONS: "1" }).maxExecutions).toBe(3);
   });
 
+  it("verification is off by default (rate 0): nothing is sampled", () => {
+    expect(DEFAULT_VERIFICATION.rate).toBe(0);
+    expect(verificationConfigFromEnv({}).rate).toBe(0);
+    const v = new ResultVerifier<null>(verificationConfigFromEnv({}), () => 0);
+    expect(v.sampleRate("anyone")).toBe(0);
+    expect(v.shouldVerify("anyone")).toBe(false);
+  });
+
+  it("replicas exclude the original's reward account; a second agent id on it can't vote", () => {
+    const v = new ResultVerifier<null>({ rate: 1 }, () => 0);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a1", accountId: "acct", ok: true, output: "1", meta: null });
+    expect(r1.excludeAccounts).toEqual(["acct"]);
+    expect(
+      v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "a2", accountId: "acct", ok: true, output: "1", meta: null })
+    ).toBeNull();
+    expect(v.isPending("s")).toBe(true);
+  });
+
+  it("queue: an agent on an excluded reward account can't claim the replica", () => {
+    const q = new SwarmQueue(null);
+    q.registerAgent("a2", policy);
+    q.registerAgent("b", policy);
+    q.enqueueSubtask(subtask("r", "x"), { excludeAgents: ["a1"], excludeAccounts: ["acct"] });
+    expect(q.claim("a2", undefined, "acct")).toBeUndefined();
+    expect(q.claim("b", undefined, "other")?.id).toBe("r");
+  });
+
+  it("queue: removeHeld takes the item off without publishing a result", () => {
+    const q = new SwarmQueue(null);
+    q.registerAgent("a", policy);
+    q.enqueueSubtask(subtask("h", "x"));
+    q.claim("a");
+    expect(q.removeHeld("h")).toBe(true);
+    expect(q.status().results).toBe(0);
+    expect(q.getClaim("h")).toBeUndefined();
+  });
+
   it("queue: an excluded agent can't claim the replica", () => {
     const q = new SwarmQueue(null);
     q.registerAgent("a", policy);

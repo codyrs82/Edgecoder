@@ -51,7 +51,8 @@ import {
   PeerExchangePayload,
   CapabilityAnnouncePayload,
   MeshPeerRole,
-  SandboxMode
+  SandboxMode,
+  SubtaskResult
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -2138,7 +2139,7 @@ app.post("/pull", async (req, reply) => {
     app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
     return reply.send(sandboxRejection);
   }
-  const task = queue.claim(body.agentId, capability?.activeModel);
+  const task = queue.claim(body.agentId, capability?.activeModel, await rewardAccountForAgent(body.agentId));
   if (task) {
 
     // ── Power policy: small-tasks-only check ──
@@ -2224,6 +2225,8 @@ function releaseDependents(subtaskId: string, output: string): void {
 
 // ── #50: result verification (redundant execution) ──
 interface ResultMeta {
+  /** The result as reported; published (with the verified output) only once verification settles. */
+  report: SubtaskResult;
   taskId: string;
   durationMs: number;
   reportedDurationMs: number;
@@ -2232,8 +2235,11 @@ interface ResultMeta {
 const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfigFromEnv());
 
 function enqueueReplica(req: ReplicaRequest): void {
-  queue.enqueueSubtask(req.subtask, { excludeAgents: req.excludeAgents });
-  app.log.info({ replicaId: req.subtask.id, excludeAgents: req.excludeAgents }, "verification_replica_enqueued");
+  queue.enqueueSubtask(req.subtask, { excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts });
+  app.log.info(
+    { replicaId: req.subtask.id, excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts },
+    "verification_replica_enqueued"
+  );
 }
 
 /** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
@@ -2282,7 +2288,49 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   }
 }
 
-/** #50: pay agreeing executions, penalize mismatches, then release dependents with the verified output. */
+/**
+ * Make a subtask result visible: queue result, task_complete ledger record, forward to
+ * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
+ * for verification this runs only at settle time, with the verified output.
+ */
+async function publishResult(result: SubtaskResult): Promise<void> {
+  queue.complete(result);
+  const completeRecord = ordering.append({
+    eventType: "task_complete",
+    taskId: result.taskId,
+    subtaskId: result.subtaskId,
+    actorId: result.agentId
+  });
+  await pgStore?.persistLedgerRecord(completeRecord);
+  await persistStatsLedgerRecord(completeRecord);
+
+  const origin = taskOriginMap.get(result.subtaskId);
+  if (origin && origin.coordinatorId !== identity.peerId) {
+    taskOriginMap.delete(result.subtaskId);
+    void request(`${origin.coordinatorUrl}/result`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+      body: JSON.stringify(result)
+    })
+      .then(() => app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin"))
+      .catch((e) => app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed"));
+  }
+
+  void mesh.broadcast(
+    protocol.createMessage(
+      "result_announce",
+      identity.peerId,
+      { taskId: result.taskId, subtaskId: result.subtaskId, ok: result.ok },
+      coordinatorKeys.privateKeyPem
+    )
+  );
+}
+
+/**
+ * #50: pay agreeing executions, penalize mismatches, then publish the original
+ * subtask's result: the verified output when verified, a failure when unresolved,
+ * and release dependents. Replica results are never published.
+ */
 async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Promise<void> {
   for (const w of outcome.winners) await accrueResultCredits(w);
   for (const l of outcome.losers) {
@@ -2300,13 +2348,27 @@ async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Pro
       coordinatorId: identity.peerId,
     });
   }
+  const original = [...outcome.winners, ...outcome.losers].find((r) => r.subtaskId === outcome.originalSubtaskId);
+  if (!original) {
+    app.log.error({ subtaskId: outcome.originalSubtaskId }, "result_verification_original_missing");
+    return;
+  }
   if (outcome.status === "unresolved") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_unresolved");
+    // The requester gets a failure, never an unverified output. (Failing dependents and
+    // refunding share the #51 finalize path once both PRs are on one branch.)
+    await publishResult({
+      ...original.meta.report,
+      ok: false,
+      output: "",
+      error: "result_verification_unresolved"
+    });
     return;
   }
   if (outcome.status === "timeout") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_timeout_accepted_unverified");
   }
+  await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output });
   releaseDependents(outcome.originalSubtaskId, outcome.output);
 }
 
@@ -2372,7 +2434,6 @@ app.post("/result", async (req, reply) => {
   const subtask = isPeerForward ? undefined : claim?.subtask;
   // Server-side duration: never more than measured since claim or the subtask timeout.
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
-  queue.complete(body);
 
   // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
   if (!isPeerForward) {
@@ -2385,13 +2446,17 @@ app.post("/result", async (req, reply) => {
   // verification settles (see settleVerification).
   let verificationHold = false;
   let verificationOutcome: VerificationOutcome<ResultMeta> | null = null;
+  // Peer-forwarded results skip verification here: their agentId is unauthenticated and
+  // they earn nothing on this coordinator; the coordinator that ran the claim verifies
+  // (and holds) before paying or forwarding.
   if (!isPeerForward && subtask) {
     const execution: ExecutionResult<ResultMeta> = {
       subtaskId: body.subtaskId,
       agentId: body.agentId,
+      accountId: await rewardAccountForAgent(body.agentId),
       ok: body.ok,
       output: body.output ?? "",
-      meta: { taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
     };
     if (resultVerifier.isReplica(body.subtaskId)) {
       verificationHold = true;
@@ -2405,58 +2470,27 @@ app.post("/result", async (req, reply) => {
     }
   }
 
+  if (verificationHold) {
+    // #50: held original or replica. Nothing is visible to the requester or the origin
+    // coordinator, and nothing is paid, until the verdict (settleVerification).
+    queue.removeHeld(body.subtaskId);
+    if (verificationOutcome) await settleVerification(verificationOutcome);
+    return reply.send({ ok: true, held: true });
+  }
+
+  await publishResult(body);
   // ── Dependency tracking: store output and release dependent subtasks ──
-  if (!verificationHold) releaseDependents(body.subtaskId, body.output ?? "");
+  releaseDependents(body.subtaskId, body.output ?? "");
 
-  const completeRecord = ordering.append({
-    eventType: "task_complete",
-    taskId: body.taskId,
-    subtaskId: body.subtaskId,
-    actorId: body.agentId
-  });
-  await pgStore?.persistLedgerRecord(completeRecord);
-  await persistStatsLedgerRecord(completeRecord);
-
-  if (subtask && !verificationHold) {
+  if (subtask) {
     await accrueResultCredits({
       subtaskId: body.subtaskId,
       agentId: body.agentId,
       ok: body.ok,
       output: body.output ?? "",
-      meta: { taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
     });
   }
-  if (verificationOutcome) await settleVerification(verificationOutcome);
-
-  // Forward result to origin coordinator if this task came from mesh gossip
-  const origin = taskOriginMap.get(body.subtaskId);
-  if (origin && origin.coordinatorId !== identity.peerId) {
-    void (async () => {
-      try {
-        const { request: httpReq } = await import("undici");
-        await httpReq(`${origin.coordinatorUrl}/result`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
-          },
-          body: JSON.stringify(body),
-        });
-        app.log.info({ subtaskId: body.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin");
-      } catch (e) {
-        app.log.warn({ subtaskId: body.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed");
-      }
-    })();
-    taskOriginMap.delete(body.subtaskId);
-  }
-
-  const message = protocol.createMessage(
-    "result_announce",
-    identity.peerId,
-    { taskId: body.taskId, subtaskId: body.subtaskId, ok: body.ok },
-    coordinatorKeys.privateKeyPem
-  );
-  void mesh.broadcast(message);
   return reply.send({ ok: true });
 });
 
