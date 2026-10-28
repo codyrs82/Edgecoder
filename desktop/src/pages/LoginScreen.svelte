@@ -2,6 +2,7 @@
   import { login, getOAuthStartUrl, completeOAuthWithToken } from "../lib/api";
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
+  import { portalSignupUrl } from "../lib/endpoints";
 
   interface Props {
     onLogin: (user: AuthUser) => void;
@@ -40,6 +41,16 @@
       await open(url);
     } catch (err) {
       error = "Could not open browser for sign-in";
+    }
+  }
+
+  // Sign-up happens on the portal, in the system browser (never inside the webview).
+  async function handleSignup() {
+    error = "";
+    try {
+      await open(portalSignupUrl());
+    } catch {
+      error = "Could not open browser for sign-up";
     }
   }
 
@@ -121,7 +132,7 @@
     </div>
 
     <p class="signup-link">
-      Don't have an account? <button type="button" class="link-btn">Sign up</button>
+      Don't have an account? <button type="button" class="link-btn" onclick={handleSignup}>Sign up <span class="sr-only">(opens in your browser)</span></button>
     </p>
   </div>
 </main>
