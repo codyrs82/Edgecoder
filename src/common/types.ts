@@ -395,9 +395,20 @@ export interface BitcoinAnchorRecord {
   checkpointHash: string;
   anchorNetwork: BitcoinNetwork;
   txRef: string;
-  status: "pending" | "anchored" | "failed";
+  /**
+   * #46: "pending" = broadcast (real txid in txRef), below the required confirmation
+   * depth or reorged out; "anchored" = at least the required confirmations on chain;
+   * "broadcasting" = written just before broadcast, so a crash mid-broadcast is visible.
+   */
+  status: "pending" | "anchored" | "failed" | "broadcasting";
   anchoredAtMs?: number;
   createdAtMs: number;
+  /** #46: confirmations seen at the last check. */
+  confirmations?: number;
+  /** #46: block that included the tx at the last check (reorg detection). */
+  blockHash?: string;
+  blockHeight?: number;
+  lastCheckedAtMs?: number;
 }
 
 export interface CoordinatorFeeEvent {

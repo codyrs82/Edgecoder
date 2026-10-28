@@ -116,7 +116,7 @@ It mounts persistent storage for Ollama model data:
   PORTAL_PUBLIC_URL = "https://edgecoder.io"
   PASSKEY_RP_ID = "edgecoder.io"
   PASSKEY_ORIGIN = "https://edgecoder.io"
-  DOCS_SITE_URL = "https://docs.edgecoder.io"
+  DOCS_SITE_URL = "https://codyrs82.github.io/Edgecoder/"
   COORDINATOR_DISCOVERY_URL = "https://edgecoder-seed.fly.dev"
 ```
 
