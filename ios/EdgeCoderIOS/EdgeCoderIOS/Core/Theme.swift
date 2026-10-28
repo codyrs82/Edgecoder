@@ -32,6 +32,40 @@ enum Theme {
     static let borderStrong = Color.adaptive(dark: 0xd6ccc2, light: 0x2f2f2d, darkOpacity: 0.15, lightOpacity: 0.18)
 }
 
+/// #151: System / Light / Dark, matching the desktop's theme setting (desktop/src/lib/theme.ts).
+/// Lives in Theme.swift so no Xcode project change is needed.
+enum AppearancePreference: String, CaseIterable, Identifiable {
+    case system, light, dark
+
+    /// Same key name as the desktop. Dark stays the default until light mode has had a visual check.
+    static let storageKey = "edgecoder-theme"
+    static let defaultValue: AppearancePreference = .dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// nil = follow the system setting.
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    /// Unknown or missing stored values fall back to the default.
+    static func from(_ raw: String?) -> AppearancePreference {
+        raw.flatMap(AppearancePreference.init(rawValue:)) ?? defaultValue
+    }
+}
+
 extension Color {
     init(hex: UInt32, opacity: Double = 1.0) {
         let r = Double((hex >> 16) & 0xFF) / 255.0
@@ -42,6 +76,7 @@ extension Color {
 
     /// Resolves per trait collection, so it follows the system light/dark setting.
     static func adaptive(dark: UInt32, light: UInt32, darkOpacity: Double = 1.0, lightOpacity: Double = 1.0) -> Color {
+        // `.unspecified` resolves to light; the app always sets a scheme via AppearancePreference.
         Color(UIColor { traits in
             traits.userInterfaceStyle == .dark
                 ? UIColor(hex: dark, alpha: darkOpacity)

@@ -39,6 +39,23 @@ describe("iOS Theme.swift matches packages/tokens (#29)", () => {
     expect(swiftColor!.light).toEqual(parseCss(tokens.color[key].light));
   });
 
+  it("every colour in enum Theme goes through Color.adaptive (#151 review)", () => {
+    const body = /enum Theme \{([\s\S]*?)\n\}/.exec(swift)?.[1] ?? "";
+    const lets = [...body.matchAll(/static let (\w+)\s*=\s*([^\n]+)/g)];
+    expect(lets.length).toBeGreaterThan(0);
+    expect(lets.filter(([, , rhs]) => !rhs.trim().startsWith("Color.adaptive(")).map(([, n]) => n)).toEqual([]);
+  });
+
+  it("appearance setting matches the desktop: same key, same options, Dark by default (#151)", () => {
+    const desktop = readFileSync(join(here, "../../../desktop/src/lib/theme.ts"), "utf8");
+    const key = /THEME_STORAGE_KEY = "([^"]+)"/.exec(desktop)?.[1];
+    const def = /DEFAULT_THEME: ThemePreference = "([^"]+)"/.exec(desktop)?.[1];
+    expect(swift).toContain(`static let storageKey = "${key}"`);
+    expect(def).toBe("dark");
+    expect(swift).toContain("static let defaultValue: AppearancePreference = .dark");
+    expect(swift).toMatch(/case system, light, dark/);
+  });
+
   it("Theme.swift has no colours that aren't tokens", () => {
     const known = new Set(Object.keys(tokens.color).map(camel));
     expect([...ios.keys()].filter((k) => !known.has(k))).toEqual([]);
