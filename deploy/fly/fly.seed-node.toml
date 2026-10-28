@@ -9,6 +9,9 @@ primary_region = "ord"
 
 [env]
   NODE_ENV = "production"
+  # #43: production requires LIGHTNING_PROVIDER=lnd|cln (+ LND_*/CLN_* via fly secrets).
+  # Payments stay off until a Lightning node is configured; flip to "true" with those secrets set.
+  ECONOMY_PAYMENTS_ENABLED = "false"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"

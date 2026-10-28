@@ -138,8 +138,19 @@ class ClnRestProvider implements LightningProvider {
   }
 }
 
+/**
+ * ECONOMY_PAYMENTS_ENABLED switch. Default on; "0", "false", "off" or "no"
+ * (case-insensitive, trimmed) turn payments off.
+ */
+export function economyPaymentsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.ECONOMY_PAYMENTS_ENABLED ?? "").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
 export function createLightningProviderFromEnv(): LightningProvider {
-  const provider = (process.env.LIGHTNING_PROVIDER ?? "mock").toLowerCase();
+  const raw = process.env.LIGHTNING_PROVIDER?.trim().toLowerCase() || undefined;
+  const isProd = process.env.NODE_ENV === "production";
+  const provider = raw ?? (isProd ? "" : "mock");
   if (provider === "lnd") {
     const baseUrl = process.env.LND_REST_URL;
     const macaroonHex = process.env.LND_MACAROON_HEX;
@@ -156,9 +167,14 @@ export function createLightningProviderFromEnv(): LightningProvider {
     }
     return new ClnRestProvider(baseUrl, apiToken);
   }
-  if (provider !== "mock" && process.env.NODE_ENV === "production") {
-    console.error("FATAL: LIGHTNING_PROVIDER must be set to 'lnd', 'cln', or 'mock' in production");
-    process.exit(1);
+  if (isProd) {
+    throw new Error("lightning_provider_required: set LIGHTNING_PROVIDER=lnd|cln in production");
+  }
+  if (provider !== "mock") {
+    throw new Error(`unknown_lightning_provider:${provider}`);
+  }
+  if (process.env.ALLOW_MOCK_LIGHTNING !== "1" && process.env.NODE_ENV !== "test") {
+    throw new Error("mock_lightning_disabled: set ALLOW_MOCK_LIGHTNING=1 for local dev");
   }
   console.warn("[lightning] using MockLightningProvider — all invoices auto-settle");
   return new MockLightningProvider();

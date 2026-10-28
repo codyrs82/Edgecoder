@@ -69,7 +69,7 @@ import {
   IssuancePoolConfig,
   smoothLoadIndex
 } from "../economy/issuance.js";
-import { createLightningProviderFromEnv } from "../economy/lightning.js";
+import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import { AgentPowerTelemetry, evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
@@ -382,7 +382,31 @@ const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>(
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
-const lightningProvider = createLightningProviderFromEnv();
+/** Routes that need a Lightning provider: payment intents/webhook and robot task creation (invoices). */
+function isPaymentGatedRequest(method: string, url: string): boolean {
+  const path = url.split("?")[0];
+  if (path.startsWith("/economy/payments")) return true;
+  return method === "POST" && path === "/robot/tasks";
+}
+// ECONOMY_PAYMENTS_ENABLED=false lets a coordinator boot (including in production)
+// without a Lightning node: payment routes return 503 and no provider is created.
+const ECONOMY_PAYMENTS_ENABLED = economyPaymentsEnabled();
+const disabledLightningProvider: LightningProvider = {
+  async createInvoice() {
+    throw new Error("economy_payments_disabled");
+  },
+  async checkSettlement() {
+    return { settled: false };
+  }
+};
+const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
+  ? createLightningProviderFromEnv()
+  : disabledLightningProvider;
+app.addHook("onRequest", async (req, reply) => {
+  if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
+    return reply.code(503).send({ error: "economy_payments_disabled" });
+  }
+});
 let treasuryPolicy: TreasuryPolicy | null = null;
 const keyCustodyEvents: KeyCustodyEvent[] = [];
 const settledTxRefs = new Set<string>();
