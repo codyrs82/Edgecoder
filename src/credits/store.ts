@@ -99,6 +99,18 @@ export async function spendCredits(
   return debit(accountId, credits, reason, relatedTaskId);
 }
 
+/**
+ * Grant-only helper for callers that must never debit (the Lightning payment
+ * settler, #42/#48). Zero is a no-op that returns null (a paid intent whose
+ * quote rounded to 0 credits must not throw after it was marked settled);
+ * negative or non-finite amounts throw, so a bad sign can never become a debit.
+ */
+export async function grantCredits(accountId: string, credits: number, reason: string) {
+  if (credits === 0) return null;
+  assertAmount(credits);
+  return adjustCredits(accountId, credits, reason);
+}
+
 /** Positive = grant (earn). Negative = debit, which is balance-checked like a spend (#48). */
 export async function adjustCredits(accountId: string, credits: number, reason: string) {
   if (!Number.isFinite(credits) || credits === 0) throw new Error("invalid_credit_amount");

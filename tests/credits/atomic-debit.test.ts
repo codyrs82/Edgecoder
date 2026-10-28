@@ -130,3 +130,16 @@ describe.skipIf(!PG_URL)("debitCredits against real Postgres (#48)", () => {
     }
   }, 60_000);
 });
+
+describe("grantCredits (#48 review: payment settler)", () => {
+  it("is a no-op for a zero-credit settlement and refuses to debit", async () => {
+    const { grantCredits, creditEngine } = await import("../../src/credits/store.js");
+    const acct = `grant-${randomUUID()}`;
+    await expect(grantCredits(acct, 0, "credit_purchase:zero")).resolves.toBeNull();
+    expect(creditEngine.balance(acct)).toBe(0);
+    await expect(grantCredits(acct, -5, "credit_purchase:neg")).rejects.toThrow("invalid_credit_amount");
+    await expect(grantCredits(acct, Number.NaN, "credit_purchase:nan")).rejects.toThrow("invalid_credit_amount");
+    await grantCredits(acct, 3, "credit_purchase:ok");
+    expect(creditEngine.balance(acct)).toBe(3);
+  });
+});
