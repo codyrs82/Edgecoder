@@ -33,7 +33,7 @@ const malicious: Worker = () => ({ ok: true, output: "fake output, collect credi
 /** Mini coordinator mirroring /result: sampled results held, replicas to other agents, credits only when verified/unsampled. */
 function harness(rate: number, workers: Record<string, Worker>, random = () => 0) {
   const queue = new SwarmQueue(null, { graceMs: 1_000, livenessMs: 60_000, maxAttempts: 3 });
-  const verifier = new ResultVerifier<{ id: string }>({ rate }, random);
+  const verifier = new ResultVerifier<{ id: string }>({ rate, initialReputation: 1 }, random);
   const credits = new Map<string, number>();
   const released: Array<{ id: string; output: string }> = [];
   const earn = (r: ExecutionResult<{ id: string }>) => credits.set(r.agentId, (credits.get(r.agentId) ?? 0) + 5);
@@ -76,7 +76,7 @@ describe("ResultVerifier (#50)", () => {
   it("rate 0 never samples; rate 1 always; lower reputation samples more", () => {
     expect(new ResultVerifier({ rate: 0 }).shouldVerify("a")).toBe(false);
     expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a")).toBe(true);
-    const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5 }, () => 0);
+    const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5, initialReputation: 1 }, () => 0);
     expect(v.sampleRate("a")).toBeCloseTo(0.1);
     const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "bad", meta: null });
     const r2 = v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "b", ok: true, output: "good", meta: null });
@@ -176,6 +176,41 @@ describe("ResultVerifier (#50)", () => {
     q.enqueueSubtask(subtask("r", "x"), { excludeAgents: ["a"] });
     expect(q.claim("a")).toBeUndefined();
     expect(q.claim("b")?.id).toBe("r");
+  });
+});
+
+describe("verification hardening (#106)", () => {
+  it("unknown agents start at reputation 0.5 and are sampled more", () => {
+    const v = new ResultVerifier<null>({ rate: 0.1 }, () => 0);
+    expect(v.reputation("new-agent")).toBe(0.5);
+    expect(v.sampleRate("new-agent")).toBeCloseTo(0.15);
+  });
+
+  it("a claimed-but-abandoned replica makes the result unresolved instead of paying it unverified", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "accomplice");
+    now = 1001;
+    expect(v.expire()).toMatchObject([{ status: "unresolved", winners: [], abandonedBy: ["accomplice"] }]);
+  });
+
+  it("an unclaimed replica still times out to an unverified accept (single-node meshes)", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);
+    v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    now = 1001;
+    expect(v.expire()).toMatchObject([{ status: "timeout", output: "1" }]);
+  });
+
+  it("maxExecutions is capped at 3", () => {
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_EXECUTIONS: "7" }).maxExecutions).toBe(3);
+    const v = new ResultVerifier<null>({ rate: 1, maxExecutions: 7 }, () => 0);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    const r2 = v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "b", ok: true, output: "2", meta: null });
+    if (r2?.status !== "pending") throw new Error("expected pending");
+    const r3 = v.recordReplica(r2.next.subtask.id, { subtaskId: r2.next.subtask.id, agentId: "c", ok: true, output: "3", meta: null });
+    expect(r3).toMatchObject({ status: "unresolved" });
   });
 });
 

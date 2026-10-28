@@ -26,7 +26,20 @@ export interface VerificationConfig {
   matchReward: number;
   /** Hold time before an unreplicated result is released unverified. */
   timeoutMs: number;
+  /**
+   * #106: reputation of an agent id never seen before. Below 1 so a caught cheater
+   * can't reset to full trust by re-registering; it is sampled more until it earns trust.
+   */
+  initialReputation: number;
 }
+
+/**
+ * #106: verification cost. Winning replicas are paid like any accepted execution, from
+ * newly minted compute credits (not debited from the requester), and at most
+ * maxExecutions - 1 replicas run per sampled subtask. maxExecutions is capped at 3:
+ * the rule is "the first two executions that agree win", which is only a majority at 3.
+ */
+export const MAX_EXECUTIONS_CAP = 3;
 
 // Default rate 0 (opt-in): most swarm work is LLM generation, whose outputs differ between
 // honest runs, so exact-match verification must be enabled only for deterministic workloads.
@@ -35,7 +48,8 @@ export const DEFAULT_VERIFICATION: VerificationConfig = {
   maxExecutions: 3,
   mismatchPenalty: 0.25,
   matchReward: 0.02,
-  timeoutMs: 15 * 60_000
+  timeoutMs: 15 * 60_000,
+  initialReputation: 0.5
 };
 
 export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VerificationConfig {
@@ -46,10 +60,11 @@ export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
   };
   return {
     rate: num("RESULT_VERIFICATION_RATE", DEFAULT_VERIFICATION.rate, (n) => n >= 0 && n <= 1),
-    maxExecutions: Math.floor(num("RESULT_VERIFICATION_MAX_EXECUTIONS", DEFAULT_VERIFICATION.maxExecutions, (n) => n >= 2 && n <= 7)),
+    maxExecutions: Math.floor(num("RESULT_VERIFICATION_MAX_EXECUTIONS", DEFAULT_VERIFICATION.maxExecutions, (n) => n >= 2 && n <= MAX_EXECUTIONS_CAP)),
     mismatchPenalty: num("RESULT_VERIFICATION_MISMATCH_PENALTY", DEFAULT_VERIFICATION.mismatchPenalty, (n) => n >= 0 && n <= 1),
     matchReward: DEFAULT_VERIFICATION.matchReward,
-    timeoutMs: num("RESULT_VERIFICATION_TIMEOUT_MS", DEFAULT_VERIFICATION.timeoutMs, (n) => n >= 10_000)
+    timeoutMs: num("RESULT_VERIFICATION_TIMEOUT_MS", DEFAULT_VERIFICATION.timeoutMs, (n) => n >= 10_000),
+    initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1)
   };
 }
 
@@ -86,7 +101,7 @@ const executorKey = (r: { agentId: string; accountId?: string }) => r.accountId 
 
 export type VerificationOutcome<T> =
   | { status: "verified"; originalSubtaskId: string; winners: ExecutionResult<T>[]; losers: ExecutionResult<T>[]; output: string; ok: boolean }
-  | { status: "unresolved"; originalSubtaskId: string; winners: []; losers: ExecutionResult<T>[] }
+  | { status: "unresolved"; originalSubtaskId: string; winners: []; losers: ExecutionResult<T>[]; abandonedBy?: string[] }
   | { status: "timeout"; originalSubtaskId: string; winners: ExecutionResult<T>[]; losers: []; output: string; ok: boolean };
 
 interface Pending<T> {
@@ -94,6 +109,8 @@ interface Pending<T> {
   results: ExecutionResult<T>[];
   startedAtMs: number;
   replicaIds: Set<string>;
+  /** #106: agents that claimed a replica of this subtask (abandonment detection). */
+  replicaClaimants: Set<string>;
 }
 
 export function replicaId(originalId: string, n: number): string {
@@ -112,10 +129,11 @@ export class ResultVerifier<T = unknown> {
     private readonly now: () => number = Date.now
   ) {
     this.cfg = { ...DEFAULT_VERIFICATION, ...cfg };
+    this.cfg.maxExecutions = Math.max(2, Math.min(MAX_EXECUTIONS_CAP, Math.floor(this.cfg.maxExecutions)));
   }
 
   reputation(agentId: string): number {
-    return this.rep.get(agentId) ?? 1;
+    return this.rep.get(agentId) ?? this.cfg.initialReputation;
   }
 
   private adjust(agentId: string, delta: number): void {
@@ -136,6 +154,13 @@ export class ResultVerifier<T = unknown> {
     return this.replicaToOriginal.has(subtaskId);
   }
 
+  /** #106: the coordinator calls this when an agent claims a replica subtask. */
+  markReplicaClaimed(replicaSubtaskId: string, agentId: string): void {
+    const originalId = this.replicaToOriginal.get(replicaSubtaskId);
+    const p = originalId ? this.pending.get(originalId) : undefined;
+    p?.replicaClaimants.add(agentId);
+  }
+
   isPending(originalSubtaskId: string): boolean {
     return this.pending.has(originalSubtaskId);
   }
@@ -153,7 +178,7 @@ export class ResultVerifier<T = unknown> {
 
   /** Hold the original result and request the first replica. */
   start(original: Subtask, first: ExecutionResult<T>): ReplicaRequest {
-    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set() };
+    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set() };
     this.pending.set(original.id, p);
     return this.nextReplica(p);
   }
@@ -203,9 +228,15 @@ export class ResultVerifier<T = unknown> {
     for (const [id, p] of this.pending) {
       if (now - p.startedAtMs <= this.cfg.timeoutMs) continue;
       this.settle(id, p);
-      if (p.results.length === 1) {
+      const abandonedBy = [...p.replicaClaimants].filter((a) => !p.results.some((r) => r.agentId === a));
+      if (p.results.length === 1 && abandonedBy.length === 0) {
+        // Nobody else ever picked the replica up (e.g. no other agents online): accept unverified.
         const [only] = p.results;
         out.push({ status: "timeout", originalSubtaskId: id, winners: [only], losers: [], output: only.output, ok: only.ok });
+      } else if (p.results.length === 1) {
+        // #106: a replica was claimed and never reported. Paying the original now would let an
+        // accomplice stall verification into an unverified payout, so nobody earns.
+        out.push({ status: "unresolved", originalSubtaskId: id, winners: [], losers: [...p.results], abandonedBy });
       } else {
         // Disagreeing results and no tie-breaker arrived: nobody earns.
         for (const r of p.results) this.adjust(r.agentId, -this.cfg.mismatchPenalty / 2);

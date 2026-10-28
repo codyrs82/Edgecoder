@@ -2175,6 +2175,8 @@ app.post("/pull", async (req, reply) => {
 
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
     behaviorTracker.recordTaskClaim(body.agentId);
+    // #106: remember who took a verification replica, so abandoning it can't force an unverified payout.
+    if (resultVerifier.isReplica(task.id)) resultVerifier.markReplicaClaimed(task.id, body.agentId);
     const claimRecord = ordering.append({
       eventType: "task_claim",
       taskId: task.taskId,
@@ -2379,6 +2381,16 @@ async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Pro
   }
   if (outcome.status === "unresolved") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_unresolved");
+    for (const agentId of outcome.abandonedBy ?? []) {
+      securityLog.log({
+        level: securityLog.severity("result_verification_replica_abandoned"),
+        event: "result_verification_replica_abandoned",
+        source: { type: "agent", id: agentId },
+        details: { originalSubtaskId: outcome.originalSubtaskId },
+        action: "credits_withheld",
+        coordinatorId: identity.peerId,
+      });
+    }
     // #107: the requester gets a failure, never an unverified output. Same terminal path
     // as the #51 retry cap: fail held dependents, ledger/forward/announce, refund once.
     await finalizeFailedSubtask(
