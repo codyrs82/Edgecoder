@@ -30,6 +30,7 @@ jobs:
       - run: npm run check:fly-configs
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
+      - run: npm run test:integration
       - name: Upload test report
         if: failure()
         uses: actions/upload-artifact@v4
@@ -53,6 +54,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
+      - run: npm run test:integration
       - name: Upload test report
         if: failure()
         uses: actions/upload-artifact@v4
