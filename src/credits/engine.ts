@@ -5,13 +5,23 @@ import { randomUUID } from "node:crypto";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
 import { baseRatePerSecond, loadMultiplier, LoadSnapshot } from "./pricing.js";
 
+/** #108: in-memory balances use integer micro-credits (6 decimals, matching the Postgres migration). */
+const MICROS = 1_000_000;
+const toMicros = (credits: number) => Math.round(credits * MICROS);
+
 export class CreditEngine {
   private readonly txByAccount = new Map<string, CreditTransaction[]>();
   private readonly seenReports = new Set<string>();
 
   balance(accountId: string): number {
+    return this.balanceMicros(accountId) / MICROS;
+  }
+
+  /** #108: sum in integer micro-credits so 0.1 + 0.2 covers a 0.3 spend exactly. */
+  private balanceMicros(accountId: string): number {
     return (this.txByAccount.get(accountId) ?? []).reduce((sum, tx) => {
-      return sum + (tx.type === "spend" ? -tx.credits : tx.credits);
+      const m = toMicros(tx.credits);
+      return sum + (tx.type === "spend" ? -m : m);
     }, 0);
   }
 
@@ -41,7 +51,7 @@ export class CreditEngine {
 
   spend(accountId: string, credits: number, reason: string, relatedTaskId?: string): CreditTransaction {
     const current = this.balance(accountId);
-    if (current < credits) {
+    if (this.balanceMicros(accountId) < toMicros(credits)) {
       throw new Error(`insufficient_credits: ${current} < ${credits}`);
     }
     return this.addTx(accountId, {
@@ -59,7 +69,7 @@ export class CreditEngine {
     // #48: negative adjustments are debits and can't take the balance below zero.
     const debit = Math.abs(credits);
     const current = this.balance(accountId);
-    if (current < debit) {
+    if (this.balanceMicros(accountId) < toMicros(debit)) {
       throw new Error(`insufficient_credits: ${current} < ${debit}`);
     }
     return this.addTx(accountId, { type: "spend", credits: debit, reason });
@@ -78,7 +88,7 @@ export class CreditEngine {
       txId: randomUUID(),
       accountId,
       type: input.type,
-      credits: input.credits,
+      credits: Math.round(input.credits * MICROS) / MICROS, // #108: 6 decimals, like Postgres
       reason: input.reason,
       relatedTaskId: input.relatedTaskId,
       timestampMs: Date.now()
