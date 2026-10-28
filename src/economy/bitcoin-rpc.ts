@@ -471,8 +471,25 @@ export class MockBitcoinAnchorProvider implements BitcoinAnchorProvider {
 /*  Factory – create provider from environment variables              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * #102: providers that can broadcast an anchor. `blockstream` only reads (confirmation lookups);
+ * its broadcastOpReturn always throws, so accepting it for anchoring made every tick fail.
+ */
+export const ANCHORING_PROVIDERS = ["anchor-proxy", "bitcoind"] as const;
+
+/** Null when BITCOIN_ANCHOR_PROVIDER can anchor, else why not (for startup checks). */
+export function anchorProviderProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  const provider = (env.BITCOIN_ANCHOR_PROVIDER ?? "mock").trim().toLowerCase();
+  if (provider === "blockstream") {
+    return "blockstream_cannot_anchor: BITCOIN_ANCHOR_PROVIDER=blockstream is read-only (confirmation lookups) and can't broadcast; use anchor-proxy or bitcoind";
+  }
+  return null;
+}
+
 export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): BitcoinAnchorProvider {
-  const provider = (process.env.BITCOIN_ANCHOR_PROVIDER ?? "mock").toLowerCase();
+  const provider = (process.env.BITCOIN_ANCHOR_PROVIDER ?? "mock").trim().toLowerCase();
+  const problem = anchorProviderProblem(process.env);
+  if (problem) throw new Error(problem);
   if (provider === "bitcoind") {
     const rpcUrl = process.env.BITCOIND_RPC_URL;
     const rpcUser = process.env.BITCOIND_RPC_USER;
@@ -491,11 +508,8 @@ export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): Bit
     }
     return new AnchorProxyClientProvider(proxyUrl, proxyToken);
   }
-  if (provider === "blockstream") {
-    return new BlockstreamProvider(network);
-  }
   if (process.env.NODE_ENV === "production") {
-    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'bitcoind', 'anchor-proxy', or 'blockstream' in production (mock produces fake transactions)");
+    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
     process.exit(1);
   }
   console.warn("[bitcoin] using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");

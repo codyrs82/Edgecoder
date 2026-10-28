@@ -78,7 +78,7 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 |----------|----------|-----------|
 | **anchor-proxy** | Production (recommended) | `BITCOIN_ANCHOR_PROVIDER=anchor-proxy` |
 | **bitcoind** | Direct RPC access to a local node | `BITCOIN_ANCHOR_PROVIDER=bitcoind` |
-| **blockstream** | Read-only confirmation checking | `BITCOIN_ANCHOR_PROVIDER=blockstream` |
+| **blockstream** | Read-only confirmation lookups. **Not accepted for anchoring** (it can't broadcast); the factory rejects it with `blockstream_cannot_anchor` (#102). | (used internally for lookups only) |
 | **mock** | Development and testing | `BITCOIN_ANCHOR_PROVIDER=mock` |
 
 ## Coordinator environment variables

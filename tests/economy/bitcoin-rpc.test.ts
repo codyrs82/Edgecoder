@@ -4,7 +4,10 @@ import {
   encodeCheckpointForOpReturn,
   decodeOpReturnCheckpoint,
   MockBitcoinAnchorProvider,
-  AnchorProxyClientProvider
+  AnchorProxyClientProvider,
+  anchorProviderProblem,
+  ANCHORING_PROVIDERS,
+  BlockstreamProvider
 } from "../../src/economy/bitcoin-rpc.js";
 
 describe("bitcoin anchor provider", () => {
@@ -83,5 +86,26 @@ describe("bitcoin anchor provider", () => {
   test("mock provider sendToMany rejects empty outputs", async () => {
     const provider = new MockBitcoinAnchorProvider();
     await expect(provider.sendToMany([])).rejects.toThrow("no_outputs");
+  });
+
+  describe("#102: blockstream is read-only, not an anchoring provider", () => {
+    test.each(["blockstream", "Blockstream", " blockstream "])("factory rejects BITCOIN_ANCHOR_PROVIDER=%j", (value) => {
+      process.env.BITCOIN_ANCHOR_PROVIDER = value;
+      try {
+        expect(() => createBitcoinAnchorProviderFromEnv("bitcoin")).toThrow("blockstream_cannot_anchor");
+      } finally {
+        delete process.env.BITCOIN_ANCHOR_PROVIDER;
+      }
+    });
+
+    test("anchorProviderProblem flags only blockstream", () => {
+      expect(anchorProviderProblem({ BITCOIN_ANCHOR_PROVIDER: "blockstream" })).toMatch(/anchor-proxy or bitcoind/);
+      for (const ok of [...ANCHORING_PROVIDERS, "mock"]) expect(anchorProviderProblem({ BITCOIN_ANCHOR_PROVIDER: ok })).toBeNull();
+      expect(anchorProviderProblem({})).toBeNull();
+    });
+
+    test("BlockstreamProvider still can't broadcast (why it's rejected)", async () => {
+      await expect(new BlockstreamProvider("bitcoin").broadcastOpReturn("00")).rejects.toThrow("blockstream_broadcast_not_supported");
+    });
   });
 });
