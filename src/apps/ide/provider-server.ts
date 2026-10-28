@@ -18,7 +18,7 @@ import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
-import { createIdeAuthHook, isLoopbackHost, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
+import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 const app = Fastify({ logger: true });
 
@@ -28,14 +28,18 @@ const app = Fastify({ logger: true });
 const ideHost = (process.env.IDE_PROVIDER_HOST ?? "").trim() || "127.0.0.1";
 const idePort = Number(process.env.IDE_PROVIDER_PORT ?? 4304) || 4304;
 let ideToken: string | undefined;
+const ideOrigins = allowedOrigins();
 app.addHook(
   "onRequest",
   createIdeAuthHook({
     token: () => (ideToken ??= resolveIdeToken()),
     port: idePort,
     enforceLoopbackHost: isLoopbackHost(ideHost),
+    allowedOrigins: ideOrigins,
   })
 );
+// #77: after the auth hook, so a preflight from a disallowed origin is rejected (403) first.
+await registerIdeCors(app, ideOrigins);
 
 const PKG_VERSION = (() => {
   try {
