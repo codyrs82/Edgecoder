@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { sign, verify } from "node:crypto";
+import { createHash, sign, timingSafeEqual, verify } from "node:crypto";
 
 export const ALLOWED_MODEL_EXTENSIONS = [".gguf", ".bin", ".safetensors"];
 export const DEFAULT_DOWNLOAD_DOMAINS = ["models.edgecoder.io", "huggingface.co"];
@@ -40,7 +40,14 @@ export interface ModelManifest {
   sha256: string;
 }
 
+/**
+ * #144: v2 signs every field a client acts on, including `source`. v1 (modelId, version and
+ * sha256 only) let anyone swap the download URL on a validly signed manifest, so it is rejected.
+ */
+export const MANIFEST_VERSION = 2;
+
 export interface SignedModelManifest extends ModelManifest {
+  manifestVersion: number;
   signature: string;
   signerPeerId: string;
 }
@@ -56,7 +63,40 @@ export interface ManifestVerifyResult {
 }
 
 function canonicalize(m: ModelManifest): string {
-  return `${m.modelId}\n${m.version}\n${m.sha256}`;
+  // Versioned, newline-separated; a field containing a newline is rejected before signing.
+  return [`edgecoder-model-manifest-v${MANIFEST_VERSION}`, m.modelId, m.version, m.sha256, m.source].join("\n");
+}
+
+function hasNewline(m: ModelManifest): boolean {
+  return [m.modelId, m.version, m.sha256, m.source].some((v) => /[\r\n]/.test(v));
+}
+
+/** Why `source` is not an acceptable download URL, or null. https only, no tricks. */
+export function sourceProblem(source: string, domains: string[] = allowedDownloadDomains()): string | null {
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    return "invalid_source_url";
+  }
+  if (url.protocol !== "https:") return "source_not_https";
+  if (url.username || url.password) return "source_has_credentials";
+  if (url.port) return "source_has_port";
+  if (url.hash) return "source_has_fragment";
+  if (!domains.includes(url.hostname)) return "source_not_allowlisted";
+  // Extension from the decoded path only, so ?x=.gguf or #.gguf can't satisfy it.
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return "invalid_source_url";
+  }
+  // %00, %3F, %0A etc. decode into characters that must never reach a filename or a later check.
+  if (/[\x00-\x1f\x7f?#\\]/.test(path)) return "source_path_has_control_chars";
+  const dot = path.lastIndexOf(".");
+  if (dot < 0 || path.lastIndexOf("/") > dot) return "disallowed_file_extension";
+  if (!ALLOWED_MODEL_EXTENSIONS.includes(path.slice(dot).toLowerCase())) return "disallowed_file_extension";
+  return null;
 }
 
 export function signModelManifest(
@@ -64,32 +104,44 @@ export function signModelManifest(
   privateKeyPem: string,
   peerId: string
 ): SignedModelManifest {
+  if (hasNewline(manifest)) throw new Error("manifest_field_has_newline");
+  if (!/^[0-9a-f]{64}$/.test(manifest.sha256)) throw new Error("manifest_sha256_must_be_64_lowercase_hex");
   const payload = canonicalize(manifest);
   const signature = sign(null, Buffer.from(payload, "utf8"), privateKeyPem).toString("base64");
-  return { ...manifest, signature, signerPeerId: peerId };
+  return { ...manifest, manifestVersion: MANIFEST_VERSION, signature, signerPeerId: peerId };
+}
+
+/** Parsed network JSON: every field must have the right type before anything else looks at it. */
+function hasManifestShape(m: unknown): m is SignedModelManifest {
+  if (!m || typeof m !== "object") return false;
+  const r = m as Record<string, unknown>;
+  return (
+    ["modelId", "version", "source", "sha256", "signature", "signerPeerId"].every((k) => typeof r[k] === "string" && (r[k] as string).length > 0) &&
+    // absent = a v1 manifest, reported as unsupported_manifest_version below
+    (r.manifestVersion === undefined || typeof r.manifestVersion === "number")
+  );
 }
 
 export function verifyModelManifest(
   signed: SignedModelManifest,
   trust: TrustConfig
 ): ManifestVerifyResult {
+  if (!hasManifestShape(signed)) {
+    return { valid: false, reason: "malformed_manifest" };
+  }
   if (!trust.trustedPeerIds.includes(signed.signerPeerId)) {
     return { valid: false, reason: "untrusted_peer" };
   }
 
-  try {
-    const url = new URL(signed.source);
-    if (!allowedDownloadDomains().includes(url.hostname)) {
-      return { valid: false, reason: "source_not_allowlisted" };
-    }
-  } catch {
-    return { valid: false, reason: "invalid_source_url" };
+  if (signed.manifestVersion !== MANIFEST_VERSION) {
+    return { valid: false, reason: "unsupported_manifest_version" };
+  }
+  if (hasNewline(signed) || !/^[0-9a-f]{64}$/.test(signed.sha256)) {
+    return { valid: false, reason: "malformed_manifest" };
   }
 
-  const ext = signed.source.substring(signed.source.lastIndexOf("."));
-  if (!ALLOWED_MODEL_EXTENSIONS.includes(ext)) {
-    return { valid: false, reason: "disallowed_file_extension" };
-  }
+  const problem = sourceProblem(signed.source);
+  if (problem) return { valid: false, reason: problem };
 
   const pubKey = trust.trustedPublicKeys[signed.signerPeerId];
   if (!pubKey) {
@@ -109,4 +161,14 @@ export function verifyModelManifest(
   }
 
   return { valid: true };
+}
+
+/**
+ * #144: the downloaded bytes must match the signed sha256 before the file is used. Call this
+ * after verifyModelManifest() on the data actually downloaded from `source`.
+ */
+export function modelFileMatches(signed: Pick<ModelManifest, "sha256">, data: Buffer): boolean {
+  const actual = createHash("sha256").update(data).digest();
+  const expected = Buffer.from(signed.sha256, "hex");
+  return expected.length === 32 && timingSafeEqual(actual, expected);
 }
