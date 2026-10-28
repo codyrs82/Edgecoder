@@ -100,6 +100,23 @@ npm run build:ble-proxy
 | `PEER_OFFER_COOLDOWN_MS` | `20000` | Cooldown between peer-direct offers while idle (ms). Lower = more aggressive. |
 | `DOCKER_PROBE_TIMEOUT_MS` | `3000` | Timeout for the `docker info` availability probe; a hung daemon counts as unavailable. Result cached 30 s. |
 
+## Inference service (port 4302)
+
+The inference service checks these values at startup against `inferenceConfigSchema` (`src/inference/config.ts`). A missing or invalid value stops the service, and the error lists every problem at once. Empty values count as unset (#15).
+
+| Variable | Default | Rule |
+|---|---|---|
+| `INFERENCE_AUTH_TOKEN` | — | **Required.** Shared token for `/model/*` writes and coordinator calls. |
+| `INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS` | `false` | `true`/`false`. When `true`, `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM` or `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON` must be set. |
+| `INFERENCE_MAX_SIGNATURE_SKEW_MS` | `120000` | Integer, 1000–3600000. |
+| `INFERENCE_NONCE_TTL_MS` | `300000` | Integer, 1000–86400000. |
+| `INFERENCE_COORDINATOR_PEER_ID` | empty | Paired with `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM`. |
+| `INFERENCE_COORDINATOR_PUBLIC_KEY_PEM` | empty | The trusted coordinator's public key. |
+| `INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON` | empty | A JSON object of `peerId` → public key PEM. |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | An http(s) URL. |
+| `OLLAMA_MODEL` | `qwen3.5:9b` | The model that is active at startup. |
+| `OLLAMA_COORDINATOR_MODEL` | `qwen3.5:9b` (decompose and reflect); falls back to `OLLAMA_MODEL` for chat | The model used for coordinator prompts. |
+
 ## IDE provider server (port 4304)
 
 | Variable | Default | Description |

@@ -13,6 +13,8 @@ import { buildModelSwapRoutes } from "../model/swap-routes.js";
 import { PullTracker } from "../model/pull-tracker.js";
 import { buildDashboardRoutes } from "./dashboard.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
+import { loadConfigOrExit } from "../common/config.js";
+import { inferenceConfigSchema } from "./config.js";
 
 const app = Fastify({ logger: true });
 await app.register(cors, {
@@ -21,18 +23,15 @@ await app.register(cors, {
   allowedHeaders: ["Content-Type", "x-inference-token", "Authorization"],
 });
 requireProdEnv("inference", ["INFERENCE_AUTH_TOKEN"]);
-if (!process.env.INFERENCE_AUTH_TOKEN) {
-  console.error("[inference] FATAL: INFERENCE_AUTH_TOKEN must be set");
-  process.exit(1);
-}
-const INFERENCE_AUTH_TOKEN: string = process.env.INFERENCE_AUTH_TOKEN;
-const INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS =
-  process.env.INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS === "true";
-const INFERENCE_MAX_SIGNATURE_SKEW_MS = Number(process.env.INFERENCE_MAX_SIGNATURE_SKEW_MS ?? "120000");
-const INFERENCE_NONCE_TTL_MS = Number(process.env.INFERENCE_NONCE_TTL_MS ?? "300000");
-const INFERENCE_COORDINATOR_PEER_ID = process.env.INFERENCE_COORDINATOR_PEER_ID ?? "";
-const INFERENCE_COORDINATOR_PUBLIC_KEY_PEM = process.env.INFERENCE_COORDINATOR_PUBLIC_KEY_PEM ?? "";
-const INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON = process.env.INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON ?? "";
+// #15: every env value this service reads is validated once here; bad config exits with a clear list.
+const config = loadConfigOrExit("inference", inferenceConfigSchema);
+const INFERENCE_AUTH_TOKEN: string = config.INFERENCE_AUTH_TOKEN;
+const INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS = config.INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS;
+const INFERENCE_MAX_SIGNATURE_SKEW_MS = config.INFERENCE_MAX_SIGNATURE_SKEW_MS;
+const INFERENCE_NONCE_TTL_MS = config.INFERENCE_NONCE_TTL_MS;
+const INFERENCE_COORDINATOR_PEER_ID = config.INFERENCE_COORDINATOR_PEER_ID;
+const INFERENCE_COORDINATOR_PUBLIC_KEY_PEM = config.INFERENCE_COORDINATOR_PUBLIC_KEY_PEM;
+const INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON = config.INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON;
 const seenInferenceNonces = new Map<string, number>();
 
 const metrics = {
@@ -199,8 +198,8 @@ app.post("/decompose", async (req, reply) => {
   const startMs = Date.now();
   metrics.decomposeRequests++;
   const parsed = decomposeSchema.parse(req.body);
-  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
+  const ollamaHost = config.OLLAMA_HOST;
+  const model = config.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
 
   const prompt = decomposePrompt(parsed.prompt);
 
@@ -248,8 +247,8 @@ app.post("/escalate", async (req, reply) => {
   const startMs = Date.now();
   metrics.escalateRequests++;
   const body = escalateSchema.parse(req.body);
-  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
+  const ollamaHost = config.OLLAMA_HOST;
+  const model = config.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
 
   const errorContext = body.errorHistory.length > 0
     ? body.errorHistory.join("\n")
@@ -296,8 +295,8 @@ const chatSchema = z.object({
 
 app.post("/chat", async (req, reply) => {
   const body = chatSchema.parse(req.body);
-  const ollamaHost = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  let chatModel = body.model ?? process.env.OLLAMA_COORDINATOR_MODEL ?? process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
+  const ollamaHost = config.OLLAMA_HOST;
+  let chatModel = body.model ?? config.OLLAMA_COORDINATOR_MODEL ?? config.OLLAMA_MODEL;
 
   // Auto-detect available model if configured one isn't available
   try {
@@ -371,7 +370,7 @@ app.get("/health", async () => ({ ok: true }));
 app.get("/metrics", async () => ({ ...metrics }));
 
 const modelSwapState = {
-  activeModel: process.env.OLLAMA_MODEL ?? "qwen3.5:9b",
+  activeModel: config.OLLAMA_MODEL,
   activeModelParamSize: 0,
   pullTracker: new PullTracker(),
 };
