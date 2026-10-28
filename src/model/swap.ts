@@ -71,31 +71,7 @@ export async function swapModel(
 
   // Model not installed — trigger streaming pull
   tracker?.startPull(targetModel);
-
-  try {
-    const res = await fetch(`${OLLAMA_HOST}/api/pull`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: targetModel, stream: true }),
-    });
-
-    if (!res.ok || !res.body) {
-      tracker?.failPull("pull_request_failed");
-      return {
-        previous: currentModel,
-        active: currentModel,
-        status: "error",
-        paramSize: 0,
-        error: "pull_failed",
-      };
-    }
-
-    // Process streaming NDJSON in background — don't block the response
-    processStreamingPull(res.body, tracker).catch(() => {
-      tracker?.failPull("stream_read_error");
-    });
-  } catch {
-    tracker?.failPull("pull_fetch_error");
+  if (!(await beginOllamaPull(targetModel, tracker))) {
     return {
       previous: currentModel,
       active: currentModel,
@@ -112,6 +88,55 @@ export async function swapModel(
     paramSize: 0,
     progress: 0,
   };
+}
+
+/**
+ * Start Ollama's streaming /api/pull and feed progress to the tracker in the background.
+ * Shared by swapModel and pullModel. Resolves false (tracker marked failed) if the pull
+ * request itself fails.
+ */
+async function beginOllamaPull(model: string, tracker?: PullTracker): Promise<boolean> {
+  try {
+    const res = await fetch(`${OLLAMA_HOST}/api/pull`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: model, stream: true }),
+    });
+    if (!res.ok || !res.body) {
+      tracker?.failPull("pull_request_failed");
+      return false;
+    }
+    // Process streaming NDJSON in background — don't block the response
+    processStreamingPull(res.body, tracker).catch(() => tracker?.failPull("stream_read_error"));
+    return true;
+  } catch {
+    tracker?.failPull("pull_fetch_error");
+    return false;
+  }
+}
+
+/**
+ * #37: start downloading a model without switching to it (POST /model/pull). The caller must
+ * already hold the tracker (PullTracker.tryStart); it is released here on "ready", and marked
+ * failed on errors.
+ */
+export async function pullModel(
+  model: string,
+  tracker?: PullTracker,
+): Promise<{ model: string; status: "ready" | "pulling" | "error"; error?: string }> {
+  let tags: OllamaTagsResponse;
+  try {
+    tags = await ollamaTags();
+  } catch {
+    tracker?.failPull("ollama_not_running");
+    return { model, status: "error", error: "ollama_not_running: Start Ollama with: ollama serve" };
+  }
+  if (tags.models.some((m) => m.name === model)) {
+    tracker?.completePull();
+    return { model, status: "ready" };
+  }
+  if (!(await beginOllamaPull(model, tracker))) return { model, status: "error", error: "pull_failed" };
+  return { model, status: "pulling" };
 }
 
 async function processStreamingPull(

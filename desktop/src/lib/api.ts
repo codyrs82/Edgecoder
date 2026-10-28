@@ -284,30 +284,29 @@ export interface ModelPullProgress {
   error?: string;
 }
 
-export async function getModelPullProgress(): Promise<ModelPullProgress | null> {
+async function fetchPullProgress(url: string, headers?: Record<string, string>): Promise<ModelPullProgress | null> {
   try {
-    const res = await fetch(`${agentBase()}/model/pull/progress`, {
-      signal: AbortSignal.timeout(2000),
-    });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(2000) });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.status === "idle") return null;
+    if (!data || data.status === "idle") return null;
     return data as ModelPullProgress;
   } catch {
-    // Coordinator not available, try inference service
-    try {
-      const res = await fetch(`${INFERENCE_BASE}/model/pull/progress`, {
-        headers: await inferenceHeaders(),
-        signal: AbortSignal.timeout(2000),
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (data.status === "idle") return null;
-      return data as ModelPullProgress;
-    } catch {
-      return null;
-    }
+    return null;
   }
+}
+
+/**
+ * #37 / #119 review: pullModel() and swapModel() post to the inference service (4302), so read
+ * its progress too. The agent/coordinator answers "idle" for pulls it didn't start, which used
+ * to hide a 4302 pull. Ask both and prefer whichever has a pull in flight.
+ */
+export async function getModelPullProgress(): Promise<ModelPullProgress | null> {
+  const [inference, agent] = await Promise.all([
+    fetchPullProgress(`${INFERENCE_BASE}/model/pull/progress`, await inferenceHeaders()),
+    fetchPullProgress(`${agentBase()}/model/pull/progress`),
+  ]);
+  return inference ?? agent;
 }
 
 // ---------------------------------------------------------------------------
