@@ -137,6 +137,16 @@ The provider server can read and write your project and run commands, so it is l
   - **Warning:** `IDE_SHELL_AUTO_APPROVE=1` still lets the model run allowlisted tools such as `npm test` or `node script.js`, and those run project code as you. Only enable it for projects you trust.
   - `IDE_SHELL_AUTO_APPROVE=1` (local opt-in) skips the prompt only for allowlisted binaries. The default allowlist is `npm`, `npx`, `node`, `python3`, `pytest`, `git` (read-only subcommands), `ls`, `cat`, `rg` and similar. Override it with `IDE_SHELL_ALLOW` (comma-separated).
 
+### Extension endpoints
+
+The VS Code extension uses these endpoints (#36). The full contract is in `src/apps/ide/routes.ts`.
+
+- `GET /health` (no token)
+- `GET /status` (alias of `/v1/router/status`)
+- `POST /run`, `POST /run/local` and `POST /run/swarm` with `{ task, language, maxTokens? }`
+
+`/run/swarm` returns `503 { "error": "swarm_unavailable" }` when `MESH_AUTH_TOKEN` is not set.
+
 ---
 
 ### Step 2 -- Add as a custom model in your IDE

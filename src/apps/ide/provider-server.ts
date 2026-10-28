@@ -3,6 +3,7 @@
 
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { ProviderRegistry } from "../../model/providers.js";
 import { InteractiveAgent } from "../../agent/interactive.js";
@@ -36,9 +37,22 @@ app.addHook(
   })
 );
 
-app.get("/health", async () => ({ ok: true }));
+const PKG_VERSION = (() => {
+  try {
+    // src/apps/ide or dist/apps/ide -> repo root package.json
+    return (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version?: string }).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
+app.get("/health", async () => ({ ok: true, service: "ide-provider", version: PKG_VERSION }));
+
 const providers = new ProviderRegistry();
 const router = new IntelligentRouter();
+
+// #36: the VS Code extension polls /status; alias of /v1/router/status.
+app.get("/status", async () => router.status());
 const idePullTracker = new PullTracker();
 
 // --- IDE Agent state ---
@@ -623,23 +637,59 @@ app.post("/v1/ide/chat", async (req, reply) => {
 
 // --- Legacy endpoints (backward compat) ---
 
-const legacyRequestSchema = z.object({
-  provider: z.enum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
+// #36: /run, /run/local, /run/swarm, the shape the VS Code extension expects
+// (InteractiveAgent output + route + latencyMs; see src/apps/ide/routes.ts).
+const runSchema = z.object({
   task: z.string().min(1),
-  language: z.enum(["python", "javascript"]).default("python")
+  language: z.enum(["python", "javascript"]).default("python"),
+  maxTokens: z.number().int().positive().max(8192).optional(),
+  provider: z.enum(["edgecoder-local", "ollama-local"]).optional()
 });
 
 app.get("/models", async () => ({
   providers: providers.availableProviders()
 }));
 
-app.post("/run", async (req, reply) => {
-  const body = legacyRequestSchema.parse(req.body);
-  providers.use(body.provider);
+async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown; log?: any }, reply: any) {
+  const parsed = runSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+  const body = parsed.data;
+  const started = Date.now();
+
+  if (mode === "swarm") {
+    if (!router.swarmEnabled) {
+      return reply.code(503).send({ error: "swarm_unavailable", message: "Swarm routing is not configured (MESH_AUTH_TOKEN unset)." });
+    }
+    try {
+      const res = await router.routeSwarm(body.task);
+      return reply.send({
+        plan: "",
+        generatedCode: res.text,
+        // Nothing ran locally: don't present swarm output as an executed, passing run.
+        runResult: { stdout: "", stderr: "", exitCode: null },
+        ran: false,
+        route: "swarm",
+        latencyMs: res.latencyMs,
+        creditsSpent: res.creditsSpent,
+        swarmTaskId: res.swarmTaskId
+      });
+    } catch (error) {
+      // Log details server-side; don't echo coordinator URLs/responses to the client.
+      req.log?.error?.({ err: error }, "ide /run/swarm failed");
+      return reply.code(502).send({ error: "swarm_failed", message: "The swarm request failed. See the provider server log for details." });
+    }
+  }
+
+  const provider = body.provider ?? "edgecoder-local";
+  providers.use(provider);
   const agent = new InteractiveAgent(providers.current());
   const output = await agent.run(body.task, body.language);
-  return reply.send(output);
-});
+  return reply.send({ ...output, ran: true, route: provider, latencyMs: Date.now() - started });
+}
+
+app.post("/run", (req, reply) => handleRun("auto", req, reply));
+app.post("/run/local", (req, reply) => handleRun("local", req, reply));
+app.post("/run/swarm", (req, reply) => handleRun("swarm", req, reply));
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   let listenOptions: { host: string; port: number };
