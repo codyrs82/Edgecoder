@@ -7,7 +7,14 @@ name: Deploy to Fly.io
 # DISABLED until #31: the Fly apps were deleted on purpose. Every deploy job is
 # gated on the repo variable DEPLOY_ENABLED == 'true', which is intentionally left
 # unset, so neither a merge to main nor a manual dispatch can deploy. Re-enable only
-# as part of #31 (create the `production` environment first, then set the variable).
+# as part of #31 (create the `production` environment and the apps first, then set
+# the variable).
+#
+# #33: one matrix job per real deploy/fly/*.toml. There is no separate coordinator
+# app (fly.seed-node.toml runs EDGE_RUNTIME_MODE=all-in-one, so the seed *is* the
+# coordinator), so the old deploy-coordinator job and its missing fly.toml are gone.
+# Docs publish only to GitHub Pages (deploy-docs.yml); the Fly docs app was dropped.
+# scripts/check-fly-configs.mjs keeps this list and deploy/fly/ in sync.
 on:
   workflow_run:
     workflows: [edgecoder-ci]
@@ -31,41 +38,40 @@ jobs:
     steps:
       - run: echo "CI green for ${{ github.event.workflow_run.head_sha || github.sha }}"
 
-  deploy-portal:
+  deploy:
     needs: gate
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }} # disabled until #31
+    # disabled until #31; main only
+    if: ${{ vars.DEPLOY_ENABLED == 'true' && (github.ref == 'refs/heads/main' || github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
+    concurrency: { group: "fly-${{ matrix.app }}", cancel-in-progress: false }
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # seeds first, one at a time
+      matrix:
+        include:
+          - { app: seed, config: deploy/fly/fly.seed-node.toml, smoke: "https://edgecoder-seed.fly.dev/health/runtime" }
+          - { app: seed-eu, config: deploy/fly/fly.seed-eu.toml, smoke: "https://edgecoder-seed-eu.fly.dev/health/runtime" }
+          - { app: portal, config: deploy/fly/fly.portal.toml, smoke: "https://edgecoder-portal.fly.dev/health" }
+          - { app: anchor-proxy, config: deploy/fly/fly.anchor-proxy.toml, smoke: "https://edgecoder-anchor-proxy.fly.dev/health" }
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ github.event.workflow_run.head_sha || github.sha }}" }
       - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
-      - run: flyctl deploy --config deploy/fly/fly.portal.toml --remote-only
+      - run: flyctl deploy --config ${{ matrix.config }} --remote-only --wait-timeout 600
         env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
-
-  deploy-coordinator:
-    needs: gate
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }} # disabled until #31
-    runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: "${{ github.event.workflow_run.head_sha || github.sha }}" }
-      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
-      - run: flyctl deploy --config deploy/fly/fly.toml --remote-only
+      - run: flyctl status --config ${{ matrix.config }}
         env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
-
-  deploy-seed:
-    needs: gate
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }} # disabled until #31
-    runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: "${{ github.event.workflow_run.head_sha || github.sha }}" }
-      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
-      - run: flyctl deploy --config deploy/fly/fly.seed-node.toml --remote-only
-        env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
+      # #9: seeds mount the Ollama models volume; chown it for the non-root image, restart,
+      # then smoke-test the portal. Same DEPLOY_ENABLED gate as the deploy (see #31).
+      - name: Post-deploy runbook (seeds)
+        if: ${{ matrix.app == 'seed' || matrix.app == 'seed-eu' }}
+        run: bash scripts/fly-post-deploy.sh ${{ matrix.config }}
+        env:
+          FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}"
+          DEPLOY_ENABLED: "${{ vars.DEPLOY_ENABLED }}"
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 10); do curl -fsS "${{ matrix.smoke }}" -o /dev/null && exit 0; sleep 6; done
+          echo "::error::${{ matrix.app }} smoke check failed: ${{ matrix.smoke }}"; exit 1

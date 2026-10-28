@@ -27,6 +27,7 @@ jobs:
       # if they can't compile on a runner, npm ci skips them instead of failing.
       - run: npm ci
       - run: npm run check:scripts
+      - run: npm run check:fly-configs
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
       - run: npm run test:integration
