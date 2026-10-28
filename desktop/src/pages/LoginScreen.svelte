@@ -28,8 +28,9 @@
     }
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") handleSubmit();
+  function onFormSubmit(e: SubmitEvent) {
+    e.preventDefault();
+    handleSubmit();
   }
 
   async function handleOAuth(provider: "google" | "microsoft") {
@@ -66,54 +67,64 @@
   };
 </script>
 
-<div class="login-screen">
-  <div class="login-card">
+<main class="login-screen">
+  <div class="login-card" aria-busy={submitting}>
     <div class="logo">
       <h1>EdgeCoder</h1>
     </div>
 
     {#if error}
-      <div class="error-msg">{error}</div>
+      <div class="error-msg" id="login-error" role="alert">{error}</div>
     {/if}
 
-    <div class="form">
+    <form class="form" onsubmit={onFormSubmit} aria-label="Sign in with email" novalidate>
+      <label class="sr-only" for="login-email">Email</label>
       <input
+        id="login-email"
         type="email"
+        autocomplete="username"
+        required
         bind:value={email}
         placeholder="Email"
-        onkeydown={handleKeydown}
+        aria-invalid={error ? "true" : undefined}
+        aria-describedby={error ? "login-error" : undefined}
         disabled={submitting}
       />
+      <label class="sr-only" for="login-password">Password</label>
       <input
+        id="login-password"
         type="password"
+        autocomplete="current-password"
+        required
         bind:value={password}
         placeholder="Password"
-        onkeydown={handleKeydown}
+        aria-invalid={error ? "true" : undefined}
+        aria-describedby={error ? "login-error" : undefined}
         disabled={submitting}
       />
-      <button class="btn-primary" onclick={handleSubmit} disabled={submitting}>
+      <button type="submit" class="btn-primary" disabled={submitting}>
         {submitting ? "Signing in..." : "Sign In"}
       </button>
-    </div>
+    </form>
 
-    <div class="divider">
+    <div class="divider" aria-hidden="true">
       <span>or continue with</span>
     </div>
 
-    <div class="oauth-buttons">
-      <button class="btn-oauth" onclick={() => handleOAuth("microsoft")} disabled={submitting}>
+    <div class="oauth-buttons" role="group" aria-label="Continue with">
+      <button class="btn-oauth" type="button" onclick={() => handleOAuth("microsoft")} disabled={submitting}>
         Microsoft 365
       </button>
-      <button class="btn-oauth" onclick={() => handleOAuth("google")} disabled={submitting}>
+      <button class="btn-oauth" type="button" onclick={() => handleOAuth("google")} disabled={submitting}>
         Google
       </button>
     </div>
 
     <p class="signup-link">
-      Don't have an account? <button class="link-btn">Sign up</button>
+      Don't have an account? <button type="button" class="link-btn">Sign up</button>
     </p>
   </div>
-</div>
+</main>
 
 <style>
   .login-screen {
@@ -158,6 +169,22 @@
   }
   .form input:focus {
     border-color: var(--accent);
+  }
+  .form input:focus-visible,
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .form input::placeholder {
     color: var(--text-muted);
