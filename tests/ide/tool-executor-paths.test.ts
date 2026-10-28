@@ -1,15 +1,24 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { ToolExecutor, isWithin } from "../../src/apps/ide/tool-executor.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { ToolExecutor, evaluateShellCommand, isWithin } from "../../src/apps/ide/tool-executor.js";
+
+const made: string[] = [];
+afterEach(() => {
+  for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 // #17: path traversal and symlink escape for the IDE tool executor.
 const canSymlink = (() => {
   try {
     const d = mkdtempSync(join(tmpdir(), "ec-sl-"));
-    symlinkSync(d, join(d, "l"), "dir");
-    return true;
+    try {
+      symlinkSync(d, join(d, "l"), "dir");
+      return true;
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   } catch {
     return false; // Windows without developer mode
   }
@@ -17,6 +26,7 @@ const canSymlink = (() => {
 
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), "ec-paths-"));
+  made.push(base);
   const root = join(base, "proj");
   const outside = join(base, "outside");
   const sibling = join(base, "proj-evil");
@@ -87,5 +97,20 @@ describe("ToolExecutor path safety (#17)", () => {
     const w = await viaLink.execute("write_file", { path: "new/deep.txt", content: "hi" }, { approved: true });
     expect(w.error).toBeUndefined();
     expect(readFileSync(join(realpathSync(root), "new", "deep.txt"), "utf8")).toBe("hi");
+  });
+
+  it.skipIf(!canSymlink)("run_shell: an unapproved command can't read through a committed symlink (#121 review)", () => {
+    const { root, outside } = fixture();
+    symlinkSync(outside, join(root, "link"), "dir");
+    expect(evaluateShellCommand("cat link/secret.txt", { root })).toMatchObject({ allowed: false });
+    expect(evaluateShellCommand("cat ok.txt", { root })).toMatchObject({ allowed: true });
+  });
+
+  it("search_files: a pattern starting with '-' is a pattern, not a grep option (#121 review)", async () => {
+    const { exec, root } = fixture();
+    writeFileSync(join(root, "flags.txt"), "use -f carefully\n");
+    const r = await exec.execute("search_files", { pattern: "-f", path: "." });
+    expect(r.error).toBeUndefined();
+    expect(r.result).toContain("flags.txt");
   });
 });
