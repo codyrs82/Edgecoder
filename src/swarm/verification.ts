@@ -37,6 +37,12 @@ export interface VerificationConfig {
   replicaClaimTimeoutMs: number;
   /** #114 review: how many times one sampled subtask's stalled replicas are reassigned (default 1). */
   maxReassignments: number;
+  /**
+   * #114: pay winning replicas from newly minted compute credits. Off by default
+   * (RESULT_VERIFICATION_MINT_REPLICA_REWARDS), so verification doesn't inflate supply
+   * until minting is explicitly decided; the original execution is still paid as usual.
+   */
+  mintReplicaRewards: boolean;
 }
 
 /**
@@ -59,7 +65,8 @@ export const DEFAULT_VERIFICATION: VerificationConfig = {
   initialReputation: 0.5,
   abandonPenalty: 0.25,
   replicaClaimTimeoutMs: 5 * 60_000,
-  maxReassignments: 1
+  maxReassignments: 1,
+  mintReplicaRewards: false
 };
 
 export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VerificationConfig {
@@ -77,8 +84,28 @@ export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
     abandonPenalty: num("RESULT_VERIFICATION_ABANDON_PENALTY", DEFAULT_VERIFICATION.abandonPenalty, (n) => n >= 0 && n <= 1),
     replicaClaimTimeoutMs: num("RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS", DEFAULT_VERIFICATION.replicaClaimTimeoutMs, (n) => n >= 10_000),
     maxReassignments: num("RESULT_VERIFICATION_MAX_REASSIGNMENTS", DEFAULT_VERIFICATION.maxReassignments, (n) => Number.isInteger(n) && n >= 0 && n <= 10),
-    initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1)
+    initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1),
+    mintReplicaRewards: /^(1|true|yes)$/i.test((env.RESULT_VERIFICATION_MINT_REPLICA_REWARDS ?? "").trim())
   };
+}
+
+/**
+ * #114: which winners of a settled verification get credits. The original execution is
+ * always paid; winning replicas are paid (from minted credits) only when mintReplicaRewards is on.
+ */
+export function payableWinners<T>(
+  outcome: VerificationOutcome<T>,
+  cfg: Pick<VerificationConfig, "mintReplicaRewards">
+): ExecutionResult<T>[] {
+  return outcome.winners.filter((w) => cfg.mintReplicaRewards || w.subtaskId === outcome.originalSubtaskId);
+}
+
+/** #114: startup warning text when verification is on, or null when there's nothing to warn about. */
+export function verificationStartupWarning(cfg: Pick<VerificationConfig, "rate" | "mintReplicaRewards">): string | null {
+  if (!(cfg.rate > 0)) return null;
+  return cfg.mintReplicaRewards
+    ? `result verification rate ${cfg.rate} > 0 with RESULT_VERIFICATION_MINT_REPLICA_REWARDS on: winning replicas are paid from newly minted credits`
+    : `result verification rate ${cfg.rate} > 0: winning replicas are NOT paid (RESULT_VERIFICATION_MINT_REPLICA_REWARDS is off)`;
 }
 
 export interface ExecutionResult<T = unknown> {

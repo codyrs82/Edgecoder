@@ -4,6 +4,8 @@ import {
   ResultVerifier,
   resultKey,
   verificationConfigFromEnv,
+  payableWinners,
+  verificationStartupWarning,
   DEFAULT_VERIFICATION,
   type ExecutionResult,
   type ReplicaRequest
@@ -301,5 +303,41 @@ describe("malicious fake worker (#50)", () => {
     h.queue.enqueueSubtask(subtask("s1", "x"));
     h.run(["evil1", "evil2", "h1"]);
     expect(h.credits.get("h1") ?? 0).toBe(0);
+  });
+});
+
+// #114: replica rewards are minted only when explicitly enabled.
+describe("replica reward minting (#114)", () => {
+  const exec = (subtaskId: string) => ({ subtaskId, agentId: `a-${subtaskId}`, ok: true, output: "x" }) as unknown as ExecutionResult;
+  const outcome = {
+    status: "verified" as const,
+    originalSubtaskId: "s1",
+    winners: [exec("s1"), exec("s1#r1")],
+    losers: [],
+    output: "x",
+    ok: true
+  };
+
+  it("defaults the mint flag to false", () => {
+    expect(DEFAULT_VERIFICATION.mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({}).mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MINT_REPLICA_REWARDS: "0" }).mintReplicaRewards).toBe(false);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MINT_REPLICA_REWARDS: "true" }).mintReplicaRewards).toBe(true);
+  });
+
+  it("pays only the original execution when the flag is false", () => {
+    const paid = payableWinners(outcome, verificationConfigFromEnv({}));
+    expect(paid.map((w) => w.subtaskId)).toEqual(["s1"]);
+  });
+
+  it("pays winning replicas when the flag is true", () => {
+    const paid = payableWinners(outcome, { mintReplicaRewards: true });
+    expect(paid.map((w) => w.subtaskId)).toEqual(["s1", "s1#r1"]);
+  });
+
+  it("warns at startup only when the verification rate is above 0", () => {
+    expect(verificationStartupWarning({ rate: 0, mintReplicaRewards: false })).toBeNull();
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false })).toMatch(/NOT paid/);
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: true })).toMatch(/minted/);
   });
 });

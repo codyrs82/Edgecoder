@@ -82,7 +82,9 @@ import {
 } from "./result-integrity.js";
 import {
   ResultVerifier,
+  payableWinners,
   verificationConfigFromEnv,
+  verificationStartupWarning,
   type ExecutionResult,
   type ReplicaRequest,
   type VerificationOutcome
@@ -2258,7 +2260,12 @@ interface ResultMeta {
   reportedDurationMs: number;
   subtask: Subtask;
 }
-const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfigFromEnv());
+const verificationConfig = verificationConfigFromEnv();
+const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfig);
+{
+  const warning = verificationStartupWarning(verificationConfig);
+  if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards }, warning);
+}
 
 function enqueueReplica(req: ReplicaRequest): void {
   queue.enqueueSubtask(req.subtask, { excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts });
@@ -2358,7 +2365,14 @@ async function publishResult(result: SubtaskResult): Promise<void> {
  * and release dependents. Replica results are never published.
  */
 async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Promise<void> {
-  for (const w of outcome.winners) await accrueResultCredits(w);
+  // #114: winning replicas earn minted credits only when RESULT_VERIFICATION_MINT_REPLICA_REWARDS is on.
+  const payable = payableWinners(outcome, verificationConfig);
+  for (const w of payable) await accrueResultCredits(w);
+  for (const w of outcome.winners) {
+    if (!payable.includes(w)) {
+      app.log.info({ originalSubtaskId: outcome.originalSubtaskId, executedSubtaskId: w.subtaskId }, "result_verification_replica_unpaid");
+    }
+  }
   for (const l of outcome.losers) {
     securityLog.log({
       level: securityLog.severity("result_verification_mismatch"),
