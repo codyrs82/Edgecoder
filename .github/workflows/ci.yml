@@ -94,6 +94,8 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      - name: Component tests (LogViewer, MeshTopology; jsdom + testing-library)
+        run: npm run test:components
       - run: npm run build
       - name: No eval in main-thread bundles
         run: |
