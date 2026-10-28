@@ -22,9 +22,11 @@ export interface LeaseConfig {
   graceMs: number;
   livenessMs: number;
   maxAttempts: number;
+  /** Server-side cap on a subtask's timeoutMs for lease purposes, so a huge submitted timeout can't pin a claim. */
+  maxTimeoutMs: number;
 }
 
-export const DEFAULT_LEASE: LeaseConfig = { graceMs: 30_000, livenessMs: 45_000, maxAttempts: 3 };
+export const DEFAULT_LEASE: LeaseConfig = { graceMs: 30_000, livenessMs: 45_000, maxAttempts: 3, maxTimeoutMs: 30 * 60_000 };
 
 export function leaseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LeaseConfig {
   const num = (v: string | undefined, d: number, min: number) => {
@@ -34,7 +36,8 @@ export function leaseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LeaseC
   return {
     graceMs: num(env.CLAIM_LEASE_GRACE_MS, DEFAULT_LEASE.graceMs, 0),
     livenessMs: num(env.CLAIM_LEASE_LIVENESS_MS, DEFAULT_LEASE.livenessMs, 1_000),
-    maxAttempts: num(env.CLAIM_MAX_ATTEMPTS, DEFAULT_LEASE.maxAttempts, 1)
+    maxAttempts: num(env.CLAIM_MAX_ATTEMPTS, DEFAULT_LEASE.maxAttempts, 1),
+    maxTimeoutMs: num(env.CLAIM_MAX_TIMEOUT_MS, DEFAULT_LEASE.maxTimeoutMs, 1_000)
   };
 }
 
@@ -62,6 +65,18 @@ export class SwarmQueue {
   private readonly lease: LeaseConfig;
   constructor(private readonly store?: PostgresStore | null, lease: Partial<LeaseConfig> = {}) {
     this.lease = { ...DEFAULT_LEASE, ...lease };
+  }
+
+  /**
+   * #51: called once for every subtask failed at the retry cap, whichever caller
+   * triggered expiry, so the coordinator can finalize it (fail dependents, refund).
+   * Note: leases, attempts and expired holders are in memory only; a coordinator
+   * restart resets them (tracked as a follow-up alongside #55).
+   */
+  private leaseFailureListener?: (result: SubtaskResult) => void;
+
+  onLeaseFailure(listener: (result: SubtaskResult) => void): void {
+    this.leaseFailureListener = listener;
   }
 
   /** #51: subtaskId -> agents whose lease on it expired (their late results are rejected). */
@@ -205,7 +220,8 @@ export class SwarmQueue {
   /**
    * Requeue a single subtask by clearing its claim so it becomes available again.
    * Used when the coordinator itself hands a claim back (e.g. power policy), so it
-   * doesn't count against the retry cap.
+   * doesn't count against the retry cap. Coordinator-side only: never call this
+   * from a worker-triggered path, or a broken worker could bounce a task forever.
    */
   requeue(subtaskId: string): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);
@@ -220,7 +236,9 @@ export class SwarmQueue {
   /** #51: lease deadline for a claimed item (ms epoch). */
   private leaseDeadline(item: QueueItem): number {
     const claimedAt = item.claimedAt ?? 0;
-    const timeout = Number.isFinite(item.subtask.timeoutMs) && item.subtask.timeoutMs > 0 ? item.subtask.timeoutMs : 0;
+    const timeout = Number.isFinite(item.subtask.timeoutMs) && item.subtask.timeoutMs > 0
+      ? Math.min(item.subtask.timeoutMs, this.lease.maxTimeoutMs)
+      : 0;
     const hard = claimedAt + timeout + this.lease.graceMs;
     const live = (item.leaseRenewedAt ?? claimedAt) + this.lease.livenessMs;
     return Math.min(hard, live);
@@ -282,6 +300,11 @@ export class SwarmQueue {
         this.results.push(result);
         void this.store?.persistResult(result).catch(() => undefined);
         failed.push(item.subtask.id);
+        try {
+          this.leaseFailureListener?.(result);
+        } catch {
+          // finalize errors must not break lease bookkeeping
+        }
       } else {
         requeued.push(item.subtask.id);
       }

@@ -270,9 +270,16 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry
  * coordinator renews the claim lease (it expires after CLAIM_LEASE_LIVENESS_MS of silence).
  */
 const LEASE_HEARTBEAT_MS = Math.max(1_000, Number(process.env.LEASE_HEARTBEAT_MS ?? "15000") || 15_000);
+/**
+ * #51: lease-only renewal while a claimed subtask runs. `leaseOnly` tells the
+ * coordinator to renew leases without draining tunnel invites / close notices /
+ * direct-work offers, which the main loop's full heartbeat still collects.
+ * Only wired around claims pulled from this coordinator: mesh-gossip tasks are
+ * leased by their origin coordinator, and peer-direct/offline runs hold no lease.
+ */
 function startLeaseHeartbeat(): () => void {
   const timer = setInterval(() => {
-    const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE };
+    const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE, leaseOnly: true };
     void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", body) }).catch(
       (e) => console.warn(`[agent:${AGENT_ID}] lease heartbeat failed: ${e}`)
     );
