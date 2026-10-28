@@ -57,14 +57,14 @@
   <h1>Active Work</h1>
 
   {#if noLocalAgent}
-    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see active work.</div>
+    <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to see active work.</div>
   {:else if error}
     <ErrorBanner message={error} onRetry={fetchAll} />
   {/if}
 
   <!-- Job Queue Summary -->
-  <div class="section">
-    <h2>Job Queue</h2>
+  <section class="section" aria-labelledby="aw-queue">
+    <h2 id="aw-queue">Job Queue</h2>
     {#if loading}
       <p class="muted">Loading...</p>
     {:else if status}
@@ -83,21 +83,21 @@
         </div>
       </div>
     {/if}
-  </div>
+  </section>
 
   <!-- Connected Agents -->
-  <div class="section">
-    <h2>Connected Agents ({capacity?.totals.agentsConnected ?? 0})</h2>
+  <section class="section" aria-labelledby="aw-agents">
+    <h2 id="aw-agents">Connected Agents ({capacity?.totals.agentsConnected ?? 0})</h2>
     {#if loading}
       <p class="muted">Loading...</p>
     {:else if capacity && capacity.agents.length > 0}
-      <div class="agent-list">
+      <ul class="agent-list">
         {#each capacity.agents as agent}
-          <div class="agent-row">
+          <li class="agent-row">
             <div class="agent-main">
               <StatusDot status={agentHealth(agent)} />
               <div class="agent-info">
-                <span class="agent-id">{agent.agentId.slice(0, 12)}...</span>
+                <span class="agent-id" title={agent.agentId}>{agent.agentId.slice(0, 12)}…</span>
                 <span class="agent-meta">
                   {agent.os} &middot; v{agent.version} &middot; {agent.mode}
                 </span>
@@ -114,38 +114,38 @@
                 {timeAgo(agent.lastSeenMs)}
               </span>
             </div>
-          </div>
+          </li>
         {/each}
-      </div>
+      </ul>
     {:else}
       <p class="muted">No agents connected</p>
     {/if}
-  </div>
+  </section>
 
   <!-- Mesh Peers -->
-  <div class="section">
-    <h2>Mesh Peers ({peers.length})</h2>
+  <section class="section" aria-labelledby="aw-peers">
+    <h2 id="aw-peers">Mesh Peers ({peers.length})</h2>
     {#if loading}
       <p class="muted">Loading...</p>
     {:else if peers.length > 0}
-      <div class="peer-list">
+      <ul class="peer-list">
         {#each peers as peer}
-          <div class="peer-row">
+          <li class="peer-row">
             <div class="peer-main">
               <StatusDot status="online" />
               <div class="peer-info">
-                <span class="peer-id">{peer.peerId.slice(0, 16)}...</span>
+                <span class="peer-id" title={peer.peerId}>{peer.peerId.slice(0, 16)}…</span>
                 <span class="peer-meta">{peer.coordinatorUrl}</span>
               </div>
             </div>
-            <span class="detail-badge">{peer.networkMode.replace("_", " ")}</span>
-          </div>
+            <span class="detail-badge">{peer.networkMode.replaceAll("_", " ")}</span>
+          </li>
         {/each}
-      </div>
+      </ul>
     {:else}
       <p class="muted">No mesh peers discovered</p>
     {/if}
-  </div>
+  </section>
 </div>
 
 <style>
@@ -242,7 +242,7 @@
     font-size: 0.72rem;
     font-weight: 600;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm, 4px);
     background: rgba(193, 120, 80, 0.1);
     color: var(--accent);
     white-space: nowrap;
@@ -252,5 +252,10 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: var(--radius-md, 8px); margin-bottom: 1rem; font-size: 0.9rem; }
+
+  .agent-list, .peer-list { list-style: none; margin: 0; padding: 0; }
+  @media (max-width: 720px) {
+    .agent-row, .peer-row { flex-wrap: wrap; gap: 0.5rem; }
+  }
 </style>
