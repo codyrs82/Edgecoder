@@ -9,6 +9,9 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
   group: desktop-build-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, bundles: app, artifact: "desktop/src-tauri/target/debug/bundle/macos/*.app" }
+          - { os: macos-latest, bundles: app, artifact: "desktop/src-tauri/target/debug/bundle/macos/edgecoder-desktop-debug-macos.tar.gz" }
           - { os: windows-latest, bundles: nsis, artifact: "desktop/src-tauri/target/debug/bundle/nsis/*.exe" }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -49,6 +52,18 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=6144
         # createUpdaterArtifacts needs the updater signing key; turn it off for CI debug builds.
         run: npx tauri build --debug --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      # upload-artifact zips files without Unix modes, which would strip the exec bit
+      # from EdgeCoder.app/Contents/MacOS/*. A tarball keeps it.
+      - name: Tar macOS .app (keeps the exec bit)
+        if: runner.os == 'macOS'
+        working-directory: desktop/src-tauri/target/debug/bundle/macos
+        shell: bash
+        run: |
+          set -eu
+          app=$(ls -d *.app | head -n1)
+          [ -n "$app" ] || { echo "::error::no .app bundle produced"; exit 1; }
+          tar -czf edgecoder-desktop-debug-macos.tar.gz "$app"
+          tar -tvzf edgecoder-desktop-debug-macos.tar.gz | grep -E "Contents/MacOS/.* -?rwx" | head -n 3
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
