@@ -10,7 +10,8 @@
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // isComposing: Enter that confirms an IME composition must not send.
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
     }
@@ -38,11 +39,12 @@
     {placeholder}
     {disabled}
     rows="1"
+    aria-label="Message"
     onkeydown={handleKeydown}
     oninput={autoResize}
   ></textarea>
-  <button class="send-btn" onclick={send} disabled={!text.trim() || disabled}>
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  <button class="send-btn" type="button" onclick={send} disabled={!text.trim() || disabled} aria-label="Send message" title="Send (Enter)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
       <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
     </svg>
   </button>

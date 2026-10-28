@@ -32,11 +32,11 @@
       <div class="step {step.status}">
         <span class="step-indicator">
           {#if step.status === "completed"}
-            <span class="icon check">&#10003;</span>
+            <span class="icon check" role="img" aria-label="Done">&#10003;</span>
           {:else if step.status === "failed"}
-            <span class="icon cross">&#10007;</span>
+            <span class="icon cross" role="img" aria-label="Failed">&#10007;</span>
           {:else if step.status === "in_progress"}
-            <span class="icon play">&#9654;</span>
+            <span class="icon play" role="img" aria-label="In progress">&#9654;</span>
           {:else}
             <span class="step-number">{step.index + 1}</span>
           {/if}
@@ -49,9 +49,9 @@
 
 <style>
   .plan-block {
-    border-left: 3px solid var(--accent, #3b82f6);
+    border-left: 3px solid var(--accent);
     border-radius: var(--radius-sm, 6px);
-    background: var(--bg-surface, #3a3a37);
+    background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
   }
@@ -61,13 +61,13 @@
     align-items: center;
     justify-content: space-between;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border-bottom: 1px solid var(--border);
   }
 
   .title {
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-primary, #f7f5f0);
+    color: var(--text-primary);
   }
 
   .badge {
@@ -78,16 +78,16 @@
     text-transform: capitalize;
   }
   .badge-proposed {
-    color: var(--text-muted, #8a8478);
-    background: var(--bg-elevated, #454542);
+    color: var(--text-muted);
+    background: var(--bg-elevated);
   }
   .badge-approved {
-    color: var(--green, #4ade80);
-    background: rgba(74, 222, 128, 0.1);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 10%, transparent);
   }
   .badge-executing {
-    color: var(--accent, #3b82f6);
-    background: rgba(59, 130, 246, 0.1);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 
   .body {
@@ -117,7 +117,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
   }
 
   .icon {
@@ -125,13 +125,13 @@
     line-height: 1;
   }
   .icon.check {
-    color: var(--green, #4ade80);
+    color: var(--green);
   }
   .icon.cross {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
   .icon.play {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     font-size: 11px;
     animation: pulse-play 1.2s ease-in-out infinite;
   }
@@ -139,18 +139,18 @@
   .step-description {
     font-size: 13px;
     line-height: 1.4;
-    color: var(--text-secondary, #b8b0a4);
+    color: var(--text-secondary);
   }
 
   .step.completed .step-description {
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
     text-decoration: line-through;
   }
   .step.failed .step-description {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
   .step.in_progress .step-description {
-    color: var(--text-primary, #f7f5f0);
+    color: var(--text-primary);
     font-weight: 500;
   }
 

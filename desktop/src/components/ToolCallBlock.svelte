@@ -39,13 +39,13 @@
   ];
 
   let borderColor = $derived.by(() => {
-    if (status === "rejected") return "var(--red, #f87171)";
-    if (status === "completed") return "var(--green, #4ade80)";
+    if (status === "rejected") return "var(--red)";
+    if (status === "completed") return "var(--green)";
     if (status === "pending" && requiresApproval)
-      return "var(--yellow, #fbbf24)";
+      return "var(--yellow)";
     if (readTools.includes(tool))
-      return "var(--accent-secondary, #4a90d9)";
-    return "var(--amber, #f59e0b)";
+      return "var(--accent-secondary)";
+    return "var(--yellow)";
   });
 
   let mainArg = $derived.by(() => {
@@ -83,14 +83,14 @@
 </script>
 
 <div class="tool-call-block" style="border-left-color: {borderColor}">
-  <button class="header" onclick={toggle} type="button">
+  <button class="header" onclick={toggle} type="button" aria-expanded={expanded}>
     <span class="tool-info">
       {#if status === "executing"}
         <span class="spinner"></span>
       {:else if status === "completed"}
-        <span class="icon check">&#10003;</span>
+        <span class="icon check" role="img" aria-label="Completed">&#10003;</span>
       {:else if status === "rejected"}
-        <span class="icon cross">&#10007;</span>
+        <span class="icon cross" role="img" aria-label="Rejected">&#10007;</span>
       {:else}
         <span class="dot" style="background: {borderColor}"></span>
       {/if}
@@ -99,7 +99,7 @@
         <span class="main-arg">{mainArg}</span>
       {/if}
     </span>
-    <span class="chevron" class:open={expanded}>&#9656;</span>
+    <span class="chevron" class:open={expanded} aria-hidden="true">&#9656;</span>
   </button>
 
   {#if status === "pending" && requiresApproval}
@@ -133,9 +133,9 @@
 
 <style>
   .tool-call-block {
-    border-left: 3px solid var(--accent-secondary, #4a90d9);
+    border-left: 3px solid var(--accent-secondary);
     border-radius: var(--radius-sm, 6px);
-    background: var(--bg-surface, #3a3a37);
+    background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
   }
@@ -148,14 +148,14 @@
     padding: 8px 12px;
     background: none;
     border: none;
-    color: var(--text-primary, #f7f5f0);
+    color: var(--text-primary);
     cursor: pointer;
     font-size: 13px;
     font-family: inherit;
     text-align: left;
   }
   .header:hover {
-    background: var(--bg-elevated, #454542);
+    background: var(--bg-elevated);
   }
 
   .tool-info {
@@ -179,17 +179,17 @@
     line-height: 1;
   }
   .icon.check {
-    color: var(--green, #4ade80);
+    color: var(--green);
   }
   .icon.cross {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
 
   .spinner {
     width: 12px;
     height: 12px;
-    border: 2px solid var(--border-strong, rgba(214, 204, 194, 0.15));
-    border-top-color: var(--accent, #3b82f6);
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     flex-shrink: 0;
@@ -202,7 +202,7 @@
   }
 
   .main-arg {
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
     font-family: var(--font-mono, monospace);
     font-size: 12px;
     white-space: nowrap;
@@ -212,7 +212,7 @@
 
   .chevron {
     font-size: 12px;
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
     transition: transform 0.15s ease;
     flex-shrink: 0;
     margin-left: 8px;
@@ -226,12 +226,12 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
-    background: rgba(251, 191, 36, 0.08);
-    border-top: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    background: color-mix(in srgb, var(--yellow) 8%, transparent);
+    border-top: 1px solid var(--border);
   }
   .approval-label {
     font-size: 12px;
-    color: var(--yellow, #fbbf24);
+    color: var(--yellow);
     font-weight: 500;
   }
   .approval-actions {
@@ -252,16 +252,16 @@
     opacity: 0.85;
   }
   .btn.allow {
-    background: var(--green, #4ade80);
-    color: #000;
+    background: var(--green);
+    color: var(--bg-deep);
   }
   .btn.deny {
-    background: var(--red, #f87171);
-    color: #000;
+    background: var(--red);
+    color: var(--bg-deep);
   }
 
   .body {
-    border-top: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border-top: 1px solid var(--border);
     padding: 8px 12px;
   }
 
@@ -269,7 +269,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 12px;
     line-height: 1.5;
-    color: var(--text-secondary, #b8b0a4);
+    color: var(--text-secondary);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 300px;
@@ -278,12 +278,12 @@
   }
 
   .error-output {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
 
   .placeholder {
     font-size: 12px;
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
     font-style: italic;
   }
 

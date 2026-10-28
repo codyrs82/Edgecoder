@@ -36,7 +36,7 @@
         <button class="btn deny" onclick={handleReject} type="button">Deny</button>
       {:else if status === "completed"}
         {#if exitCode === 0 || exitCode === undefined}
-          <span class="exit-badge success">&#10003;</span>
+          <span class="exit-badge success" role="img" aria-label="Exit code 0">&#10003;</span>
         {:else}
           <span class="exit-badge failure">exit {exitCode}</span>
         {/if}
@@ -59,10 +59,10 @@
 <style>
   .shell-block {
     border-radius: var(--radius-sm, 6px);
-    background: var(--bg-deep, #1a1a18);
+    background: var(--bg-deep);
     margin: 6px 0;
     overflow: hidden;
-    border: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border: 1px solid var(--border);
   }
 
   .header {
@@ -82,7 +82,7 @@
   }
 
   .prompt {
-    color: var(--green, #4ade80);
+    color: var(--green);
     font-family: var(--font-mono, monospace);
     font-size: 14px;
     font-weight: 700;
@@ -92,7 +92,7 @@
   .command {
     font-family: var(--font-mono, monospace);
     font-size: 13px;
-    color: var(--text-primary, #f7f5f0);
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -118,12 +118,12 @@
     opacity: 0.85;
   }
   .btn.run {
-    background: var(--green, #4ade80);
-    color: #000;
+    background: var(--green);
+    color: var(--bg-deep);
   }
   .btn.deny {
-    background: var(--red, #f87171);
-    color: #000;
+    background: var(--red);
+    color: var(--bg-deep);
   }
 
   .exit-badge {
@@ -134,15 +134,15 @@
     border-radius: var(--radius-sm, 6px);
   }
   .exit-badge.success {
-    color: var(--green, #4ade80);
+    color: var(--green);
   }
   .exit-badge.failure {
-    color: var(--red, #f87171);
-    background: rgba(248, 113, 113, 0.1);
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
   }
 
   .body {
-    border-top: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border-top: 1px solid var(--border);
     padding: 8px 12px;
     max-height: 300px;
     overflow-y: auto;
@@ -158,10 +158,10 @@
   }
 
   .stdout {
-    color: var(--text-secondary, #b8b0a4);
+    color: var(--text-secondary);
   }
 
   .stderr {
-    color: var(--yellow, #fbbf24);
+    color: var(--yellow);
   }
 </style>
