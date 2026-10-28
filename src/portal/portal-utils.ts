@@ -32,14 +32,38 @@ export function secureCompare(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
+/** #10: cookies are Secure (and use the __Host- prefix) in production or with PORTAL_COOKIE_SECURE=1. */
+export function cookieSecure(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.PORTAL_COOKIE_SECURE === "1";
+}
+
+/** Name actually written to the browser: `__Host-<name>` when secure (requires Secure, Path=/, no Domain). */
+export function cookieName(name: string): string {
+  return cookieSecure() ? `__Host-${name}` : name;
+}
+
+// SameSite=Lax (not Strict) is required so the session survives OAuth redirect callbacks;
+// state-changing requests are additionally Origin-checked (src/portal/security.ts).
 export function encodeCookie(name: string, value: string, maxAgeSeconds: number): string {
-  const secure = process.env.NODE_ENV === "production" ? "Secure; " : "";
-  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=${maxAgeSeconds}`;
+  const secure = cookieSecure() ? "Secure; " : "";
+  return `${cookieName(name)}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=${maxAgeSeconds}`;
 }
 
 export function clearCookie(name: string): string {
-  const secure = process.env.NODE_ENV === "production" ? "Secure; " : "";
-  return `${name}=; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=0`;
+  const secure = cookieSecure() ? "Secure; " : "";
+  return `${cookieName(name)}=; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=0`;
+}
+
+/** Clear both the current and the legacy (pre-#10, unprefixed) cookie. */
+export function clearCookies(name: string): string[] {
+  const out = [clearCookie(name)];
+  if (cookieName(name) !== name) out.push(`${name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`);
+  return out;
+}
+
+/** Read a cookie by logical name, accepting the `__Host-` name and (for one release) the legacy name. */
+export function readCookie(cookies: Record<string, string>, name: string): string | undefined {
+  return cookies[`__Host-${name}`] ?? cookies[name];
 }
 
 export function hashPassword(password: string): string {

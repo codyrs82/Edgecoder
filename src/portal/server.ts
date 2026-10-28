@@ -21,7 +21,8 @@ import {
   parseCookies,
   secureCompare,
   encodeCookie,
-  clearCookie,
+  clearCookies,
+  readCookie,
   hashPassword,
   verifyPassword,
   decodeJwtPayload,
@@ -36,13 +37,31 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
+import { parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
-const app = Fastify({ logger: true });
+// #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
+const app = Fastify({ logger: true, trustProxy: trustProxyHops(process.env.PORTAL_TRUST_PROXY_HOPS) });
 
+const DESKTOP_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"];
 await app.register(cors, {
-  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  origin: DESKTOP_ORIGINS,
   credentials: true,
+});
+
+// #10: helmet (CSP report-only for the first release), CSRF origin check, rate limits.
+// Registered before any route so per-route rate limits attach.
+await registerPortalSecurity(app, {
+  publicOrigin: (() => {
+    try {
+      return new URL(process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310").origin;
+    } catch {
+      return "http://127.0.0.1:4310";
+    }
+  })(),
+  trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
+  connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
+  enforceCsp: process.env.PORTAL_CSP_ENFORCE === "1",
 });
 
 const store = PortalStore.fromEnv();
@@ -314,7 +333,7 @@ async function sendWalletSendMfaCodeEmail(input: {
 async function getCurrentUser(req: { headers: Record<string, unknown> }) {
   if (!store) return null;
   const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
-  let sessionToken = cookies.edgecoder_portal_session;
+  let sessionToken = readCookie(cookies, "edgecoder_portal_session");
   // Fall back to Bearer token (for desktop app persistence)
   if (!sessionToken) {
     const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
@@ -1767,11 +1786,11 @@ app.post("/auth/login", async (req, reply) => {
 app.post("/auth/logout", async (req, reply) => {
   if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
   const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
-  const sessionToken = cookies.edgecoder_portal_session;
+  const sessionToken = readCookie(cookies, "edgecoder_portal_session");
   if (sessionToken) {
     await store.deleteSessionByTokenHash(sha256Hex(sessionToken));
   }
-  reply.header("set-cookie", clearCookie("edgecoder_portal_session"));
+  reply.header("set-cookie", clearCookies("edgecoder_portal_session"));
   return reply.send({ ok: true });
 });
 
