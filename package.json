@@ -24,6 +24,7 @@
     "build:ble-proxy": "bash scripts/macos/build-ble-proxy.sh",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.e2e.config.ts",
     "docs:dev": "vitepress dev site-docs",
     "docs:build": "vitepress build site-docs",
     "docs:preview": "vitepress preview site-docs",
