@@ -24,3 +24,7 @@ xcuserdata/
 
 # VitePress cache
 site-docs/.vitepress/cache/
+
+# #29 Playwright a11y output
+desktop/test-results/
+desktop/a11y-report/

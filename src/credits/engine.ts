@@ -56,7 +56,13 @@ export class CreditEngine {
     if (credits >= 0) {
       return this.addTx(accountId, { type: "earn", credits, reason });
     }
-    return this.addTx(accountId, { type: "spend", credits: Math.abs(credits), reason });
+    // #48: negative adjustments are debits and can't take the balance below zero.
+    const debit = Math.abs(credits);
+    const current = this.balance(accountId);
+    if (current < debit) {
+      throw new Error(`insufficient_credits: ${current} < ${debit}`);
+    }
+    return this.addTx(accountId, { type: "spend", credits: debit, reason });
   }
 
   private addTx(

@@ -4,6 +4,7 @@
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import { clampIndex, fitViewBox, nextNodeIndex, radialLayout } from "../lib/mesh-layout";
 
   interface Props {
     /** Override polling interval in ms (default 10 000) */
@@ -33,6 +34,42 @@
 
   /** The local node's peerId (empty string when identity is unknown) */
   let selfPeerId: string = $derived(identity?.peerId ?? "");
+
+  // #28: interactive graph view (default) alongside the card grid.
+  let view: "graph" | "cards" = $state("graph");
+  let layout = $derived(radialLayout(peers.map((p) => p.peerId), selfPeerId));
+  let viewBox = $derived(fitViewBox(layout.nodes));
+  // null = nothing selected; "" is a valid id (the self node before identity loads).
+  let selectedId: string | null = $state(null);
+  let focusIndex = $state(0);
+  let safeFocus = $derived(clampIndex(focusIndex, layout.nodes.length));
+  let selectedIsSelf = $derived(selectedId !== null && selectedId === selfPeerId);
+  let selectedPeer = $derived(selectedId === null || selectedIsSelf ? null : peers.find((p) => p.peerId === selectedId) ?? null);
+  // Drop a selection whose peer disappeared.
+  $effect(() => {
+    if (selectedId !== null && !layout.nodes.some((n) => n.id === selectedId)) selectedId = null;
+  });
+  let nodeById = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
+  let graphEl: SVGSVGElement | undefined = $state(undefined);
+
+  function nodeLabel(id: string, self: boolean): string {
+    const score = reputationMap.get(id);
+    return `${self ? "This node" : "Peer"}${id ? ` ${truncate(id, 12)}` : ""}${score !== undefined ? `, reputation ${score}` : ""}`;
+  }
+
+  function onNodeKey(e: KeyboardEvent, i: number, id: string) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      selectedId = selectedId === id ? null : id;
+      return;
+    }
+    if (e.key === "Escape") { selectedId = null; return; }
+    const next = nextNodeIndex(e.key, i, layout.nodes.length);
+    if (next === null) return;
+    e.preventDefault();
+    focusIndex = next;
+    graphEl?.querySelectorAll<SVGGElement>("[data-node]")[next]?.focus();
+  }
 
   /** Peer count shown in the subtitle */
   let peerCount: number = $derived(peers.length);
@@ -99,6 +136,10 @@
   <header class="page-header">
     <h1>Mesh Topology</h1>
     <p class="subtitle">{peerCount} {peerCount === 1 ? "peer" : "peers"} discovered</p>
+    <div class="view-toggle" role="group" aria-label="View">
+      <button type="button" aria-pressed={view === "graph"} onclick={() => (view = "graph")}>Graph</button>
+      <button type="button" aria-pressed={view === "cards"} onclick={() => (view = "cards")}>Cards</button>
+    </div>
   </header>
 
   {#if noLocalAgent}
@@ -121,6 +162,57 @@
       title="No Peers Discovered"
       description="Peers appear when other coordinators join the mesh network. Connect to a seed node to discover peers."
     />
+  {:else if !error && view === "graph"}
+    <div class="graph-wrap">
+      <svg bind:this={graphEl} class="mesh-graph" {viewBox} role="group" aria-label="Mesh graph: this node and {peerCount} peers. Use arrow keys to move, Enter to show details.">
+        {#each layout.edges as edge (edge.to)}
+          {@const a = nodeById.get(edge.from)}
+          {@const b = nodeById.get(edge.to)}
+          {#if a && b}
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} class="edge" class:edge-active={selectedId !== null && selectedId === edge.to} aria-hidden="true" />
+          {/if}
+        {/each}
+        {#each layout.nodes as node, i (node.self ? "\u0000self" : node.id)}
+          {@const score = reputationMap.get(node.id)}
+          <g
+            data-node
+            class="node {node.self ? 'node-self' : score === undefined ? 'rep-unknown' : reputationColor(score)}"
+            class:node-selected={selectedId === node.id}
+            transform="translate({node.x} {node.y})"
+            role="button"
+            tabindex={i === safeFocus ? 0 : -1}
+            aria-pressed={selectedId === node.id}
+            aria-label={nodeLabel(node.id, node.self)}
+            onclick={() => { focusIndex = i; selectedId = selectedId === node.id ? null : node.id; }}
+            onkeydown={(e) => onNodeKey(e, i, node.id)}
+          >
+            <circle r={node.self ? 22 : 16} />
+            <text y={node.self ? 38 : 30} text-anchor="middle" aria-hidden="true">{node.self ? "This node" : truncate(node.id, 8)}</text>
+          </g>
+        {/each}
+      </svg>
+      <aside class="graph-details" aria-label="Selected node details">
+        {#if selectedIsSelf}
+          <h2 class="peer-id" title={identity?.peerId ?? ""}>This node{identity ? ` · ${truncate(identity.peerId, 14)}` : ""}</h2>
+          {#if identity}
+            <span class="mode-badge" class:mode-enterprise={identity.networkMode === "enterprise_overlay"} class:mode-public={identity.networkMode === "public_mesh"}>{networkModeLabel(identity.networkMode as MeshPeer["networkMode"])}</span>
+            <div class="detail-row"><span class="detail-label">Coordinator</span><span class="detail-value" title={identity.coordinatorUrl}>{identity.coordinatorUrl}</span></div>
+            <div class="detail-row"><span class="detail-label">Public Key</span><span class="detail-value mono" title={identity.publicKeyPem}>{truncate(identity.publicKeyPem, 20)}</span></div>
+          {:else}
+            <p class="muted-hint">Identity not loaded yet.</p>
+          {/if}
+          <div class="detail-row"><span class="detail-label">Peers</span><span class="detail-value">{peerCount}</span></div>
+        {:else if selectedPeer}
+          {@const score = reputationMap.get(selectedPeer.peerId)}
+          <h2 class="peer-id" title={selectedPeer.peerId}>{truncate(selectedPeer.peerId, 20)}</h2>
+          <span class="mode-badge" class:mode-enterprise={selectedPeer.networkMode === "enterprise_overlay"} class:mode-public={selectedPeer.networkMode === "public_mesh"}>{networkModeLabel(selectedPeer.networkMode)}</span>
+          <div class="detail-row"><span class="detail-label">Coordinator</span><span class="detail-value" title={selectedPeer.coordinatorUrl}>{selectedPeer.coordinatorUrl}</span></div>
+          <div class="detail-row"><span class="detail-label">Reputation</span><span class="detail-value">{score ?? "no score"}</span></div>
+        {:else}
+          <p class="muted-hint">Select a node to see its details.</p>
+        {/if}
+      </aside>
+    </div>
   {:else if !error}
     <div class="peer-grid">
       {#each peers as peer (peer.peerId)}
@@ -193,6 +285,28 @@
   .page-header {
     margin-bottom: 1.25rem;
   }
+
+  .view-toggle { display: inline-flex; margin-top: 0.6rem; border: 1px solid var(--border, #1e1e3f); border-radius: var(--radius-sm, 6px); overflow: hidden; }
+  .view-toggle button { background: none; border: none; color: var(--text-secondary, #94a3b8); padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.8rem; }
+  .view-toggle button[aria-pressed="true"] { background: var(--accent, #3b82f6); color: var(--on-accent, #fff); }
+  .view-toggle button:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: -2px; }
+
+  .graph-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 1rem; align-items: start; }
+  @media (max-width: 760px) { .graph-wrap { grid-template-columns: 1fr; } }
+  .mesh-graph { width: 100%; max-height: 70vh; background: var(--bg-surface, #1a1a2e); border-radius: var(--radius-md, 10px); }
+  .edge { stroke: var(--border-strong, rgba(255, 255, 255, 0.15)); stroke-width: 1.5; }
+  .edge-active { stroke: var(--accent, #3b82f6); stroke-width: 2.5; }
+  .node { cursor: pointer; outline: none; }
+  .node circle { fill: var(--bg-elevated, #2a2a40); stroke-width: 3; stroke: var(--text-muted, #64748b); }
+  .node text { fill: var(--text-secondary, #94a3b8); font-size: 11px; pointer-events: none; }
+  .node.rep-green circle { stroke: var(--green, #4ade80); }
+  .node.rep-yellow circle { stroke: var(--yellow, #facc15); }
+  .node.rep-red circle { stroke: var(--red, #f87171); }
+  .node-self circle { fill: var(--accent, #3b82f6); stroke: var(--accent, #3b82f6); }
+  .node-selected circle, .node:focus-visible circle { stroke: var(--text-primary, #e2e8f0); stroke-width: 4; }
+  .graph-details { background: var(--bg-surface, #1a1a2e); border-radius: var(--radius-md, 10px); padding: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .graph-details h2 { margin: 0; font-size: 1rem; }
+  .muted-hint { margin: 0; color: var(--text-secondary, #94a3b8); font-size: 0.85rem; }
 
   .page-header h1 {
     margin: 0 0 0.25rem;

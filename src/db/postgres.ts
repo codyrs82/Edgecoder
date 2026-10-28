@@ -775,6 +775,43 @@ export class PostgresStore {
   }
 
   /**
+   * #48: atomic debit. The balance check and the spend row commit in one
+   * transaction under the same per-account advisory lock as applyBleTransfer,
+   * so concurrent debits of one account serialise and the balance can't go negative.
+   */
+  async debitCredits(tx: CreditTransaction): Promise<{ status: "applied" | "insufficient"; balance: number }> {
+    if (tx.type !== "spend") throw new Error("debitCredits requires a spend transaction");
+    if (!Number.isFinite(tx.credits) || tx.credits <= 0) throw new Error("invalid_credit_amount");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [tx.accountId]);
+      const bal = await client.query(
+        `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance
+         FROM credit_transactions WHERE account_id = $1`,
+        [tx.accountId]
+      );
+      const balance = Number(bal.rows[0]?.balance ?? 0);
+      if (balance < tx.credits) {
+        await client.query("ROLLBACK");
+        return { status: "insufficient", balance };
+      }
+      await client.query(
+        `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms)
+         VALUES ($1,$2,'spend',$3,$4,$5,$6)`,
+        [tx.txId, tx.accountId, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
+      );
+      await client.query("COMMIT");
+      return { status: "applied", balance: balance - tx.credits };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * #41: atomic BLE transfer. Dedupe row, balance check and the spend/earn pair
    * commit together; a per-requester advisory lock serialises concurrent debits.
    */
