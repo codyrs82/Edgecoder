@@ -34,6 +34,19 @@ import { OllamaLocalProvider, EdgeCoderLocalProvider } from "./providers.js";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * #71/#113: thrown when the coordinator accepted the swarm task but we never got the
+ * result (no subtask id, poll timeout). The task may still run and bill, so callers
+ * must count the spend, not release the reservation.
+ */
+export class SwarmPostSubmitError extends Error {
+  readonly submitted = true;
+  constructor(message: string, readonly swarmTaskId?: string) {
+    super(message);
+    this.name = "SwarmPostSubmitError";
+  }
+}
+
 export type RouteDecision =
   | "bluetooth-local"
   | "ollama-local"
@@ -304,14 +317,16 @@ export class IntelligentRouter {
       throw new Error(`Swarm submit failed (${submitRes.statusCode}): ${errBody}`);
     }
 
-    const submitBody = (await submitRes.body.json()) as {
-      taskId: string;
-      subtasks: string[];
-    };
+    let submitBody: { taskId: string; subtasks: string[] };
+    try {
+      submitBody = (await submitRes.body.json()) as { taskId: string; subtasks: string[] };
+    } catch {
+      throw new SwarmPostSubmitError("Swarm: unreadable submit response");
+    }
     const taskId = submitBody.taskId;
     const subtaskId = submitBody.subtasks?.[0];
 
-    if (!subtaskId) throw new Error("Swarm: no subtaskId returned");
+    if (!subtaskId) throw new SwarmPostSubmitError("Swarm: no subtaskId returned", taskId);
 
     // Poll for result — up to 90s
     const pollUrl = `${coordinatorUrl}/tasks/${taskId}/subtasks/${subtaskId}/result`;
@@ -339,7 +354,7 @@ export class IntelligentRouter {
       }
     }
 
-    throw new Error("Swarm task timed out after 90s");
+    throw new SwarmPostSubmitError("Swarm task timed out after 90s", taskId);
   }
 
   // -------------------------------------------------------------------------

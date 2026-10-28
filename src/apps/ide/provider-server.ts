@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { ProviderRegistry } from "../../model/providers.js";
 import { InteractiveAgent } from "../../agent/interactive.js";
-import { IntelligentRouter } from "../../model/router.js";
+import { IntelligentRouter, SwarmPostSubmitError } from "../../model/router.js";
 import {
   formatOpenAiResponse,
   formatOpenAiStreamChunk,
@@ -676,7 +676,10 @@ async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown;
       try {
         res = await router.routeSwarm(body.task, body.maxTokens);
       } catch (error) {
-        swarmBudget.release();
+        // #113: only a failed submit is free. Once the coordinator accepted the task it can
+        // still run and bill, so a poll timeout counts the estimate against the cap.
+        if (error instanceof SwarmPostSubmitError) swarmBudget.settle(undefined);
+        else swarmBudget.release();
         throw error;
       }
       const settled = swarmBudget.settle(res.creditsSpent);
