@@ -62,7 +62,7 @@ jobs:
           if-no-files-found: ignore
 
   desktop-token-test:
-    # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
+    # #6/#72: unit-test desktop/src-tauri/src/token.rs and agent_guard.rs standalone (the full Tauri
     # crate needs webkit system libraries, so build just the token module).
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -75,6 +75,12 @@ jobs:
           cp desktop/src-tauri/src/token.rs /tmp/token-test/src/lib.rs
           printf '[package]\nname = "token-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\ngetrandom = "0.2"\nhex = "0.4"\n' > /tmp/token-test/Cargo.toml
           cargo test --manifest-path /tmp/token-test/Cargo.toml
+      - name: cargo test agent_guard module (#72)
+        run: |
+          mkdir -p /tmp/agent-guard-test/src
+          cp desktop/src-tauri/src/agent_guard.rs /tmp/agent-guard-test/src/lib.rs
+          printf '[package]\nname = "agent-guard-test"\nversion = "0.0.0"\nedition = "2021"\n' > /tmp/agent-guard-test/Cargo.toml
+          cargo test --manifest-path /tmp/agent-guard-test/Cargo.toml
 
   # #11: build the desktop web bundle and make sure the production CSP holds:
   # no eval / new Function in the main-thread JS (Monaco workers are bundled separately).
