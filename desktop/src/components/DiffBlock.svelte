@@ -67,10 +67,10 @@
 <style>
   .diff-block {
     border-radius: var(--radius-sm, 6px);
-    background: var(--bg-surface, #3a3a37);
+    background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
-    border: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    border: 1px solid var(--border);
   }
 
   .header {
@@ -78,14 +78,14 @@
     align-items: center;
     justify-content: space-between;
     padding: 8px 12px;
-    background: var(--bg-elevated, #454542);
-    border-bottom: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
   }
 
   .file-path {
     font-family: var(--font-mono, monospace);
     font-size: 13px;
-    color: var(--text-primary, #f7f5f0);
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -110,12 +110,12 @@
     opacity: 0.85;
   }
   .btn.accept {
-    background: var(--green, #4ade80);
-    color: #000;
+    background: var(--green);
+    color: var(--bg-deep);
   }
   .btn.reject {
-    background: var(--red, #f87171);
-    color: #000;
+    background: var(--red);
+    color: var(--bg-deep);
   }
 
   .status-label {
@@ -125,12 +125,12 @@
     border-radius: var(--radius-sm, 6px);
   }
   .status-label.applied {
-    color: var(--green, #4ade80);
-    background: rgba(74, 222, 128, 0.1);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 10%, transparent);
   }
   .status-label.rejected {
-    color: var(--red, #f87171);
-    background: rgba(248, 113, 113, 0.1);
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
   }
 
   .body {
@@ -149,18 +149,18 @@
   }
 
   .diff-line.add {
-    color: var(--green, #4ade80);
-    background: rgba(74, 222, 128, 0.08);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 8%, transparent);
   }
   .diff-line.remove {
-    color: var(--red, #f87171);
-    background: rgba(248, 113, 113, 0.08);
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 8%, transparent);
   }
   .diff-line.context {
-    color: var(--text-muted, #8a8478);
+    color: var(--text-muted);
   }
   .diff-line.header {
-    color: var(--accent-secondary, #4a90d9);
+    color: var(--accent-secondary);
     font-weight: 500;
   }
 </style>

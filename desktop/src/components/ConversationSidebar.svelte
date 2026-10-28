@@ -164,6 +164,26 @@
     if (!inline) onClose();
   }
 
+  // #25: keyboard access. Enter/Space opens a conversation; Escape closes the open menu,
+  // then the drawer.
+  function handleItemKeydown(e: KeyboardEvent, id: string) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleSelect(id);
+    }
+  }
+
+  function handleSidebarKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape" || renamingId) return;
+    if (menuOpenId) {
+      menuOpenId = null;
+      e.stopPropagation();
+    } else if (!inline && open) {
+      onClose?.();
+    }
+  }
+
   function toggleMenu(e: MouseEvent, id: string) {
     e.stopPropagation();
     confirmDeleteId = null;
@@ -177,12 +197,13 @@
   <div class="backdrop" onclick={handleBackdropClick}></div>
 {/if}
 
-<div class="sidebar" class:open class:inline>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="sidebar" class:open class:inline onkeydown={handleSidebarKeydown}>
   {#if !inline}
     <div class="sidebar-header">
       <h2 class="sidebar-title">History</h2>
-      <button class="close-btn" onclick={onClose} title="Close">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <button class="close-btn" type="button" onclick={onClose} title="Close" aria-label="Close history">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M18 6L6 18M6 6l12 12"/>
         </svg>
       </button>
@@ -206,6 +227,7 @@
       class="search-input"
       type="text"
       placeholder="Search conversations..."
+      aria-label="Search conversations"
       bind:value={searchQuery}
     />
   </div>
@@ -223,12 +245,14 @@
       </div>
     {:else}
       {#each filtered as convo (convo.id)}
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="conversation-item"
           class:active={convo.id === activeConversationId}
+          role="button"
+          tabindex="0"
+          aria-current={convo.id === activeConversationId ? "true" : undefined}
           onclick={() => handleSelect(convo.id)}
+          onkeydown={(e) => handleItemKeydown(e, convo.id)}
         >
           <div class="convo-content">
             {#if renamingId === convo.id}
@@ -253,24 +277,28 @@
           <div class="convo-actions">
             <button
               class="kebab-btn"
+              type="button"
               onclick={(e) => toggleMenu(e, convo.id)}
               title="More options"
+              aria-label="More options for {convo.title}"
+              aria-haspopup="menu"
+              aria-expanded={menuOpenId === convo.id}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
               </svg>
             </button>
             {#if menuOpenId === convo.id}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="context-menu" onclick={(e) => e.stopPropagation()}>
-                <button class="context-menu-item" onclick={() => startRename(convo)}>
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="context-menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+                <button class="context-menu-item" type="button" role="menuitem" onclick={() => startRename(convo)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
                     <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
                   </svg>
                   Rename
                 </button>
-                <button class="context-menu-item delete" onclick={() => handleDelete(convo.id)}>
+                <button class="context-menu-item delete" type="button" role="menuitem" onclick={() => handleDelete(convo.id)}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6"/>
                     <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
@@ -328,7 +356,7 @@
     max-width: none;
     border-left: none;
     box-shadow: none;
-    background: var(--bg-base, #2f2f2d);
+    background: var(--bg-base);
   }
 
   .sidebar-header {
@@ -390,7 +418,7 @@
 
   .new-chat-btn:hover {
     border-color: var(--accent);
-    background: rgba(193, 120, 80, 0.1);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
     color: var(--accent);
   }
 
@@ -460,7 +488,7 @@
 
   .conversation-item.active {
     border-left-color: var(--accent);
-    background: rgba(193, 120, 80, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
   .convo-content {
@@ -595,6 +623,6 @@
   }
 
   .context-menu-item.delete:hover {
-    background: rgba(248, 113, 113, 0.1);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
   }
 </style>
