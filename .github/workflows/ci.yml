@@ -38,6 +38,30 @@ jobs:
           path: junit.xml
           if-no-files-found: ignore
 
+  # #13: every lockfile must install cleanly with npm ci and have no high/critical advisories.
+  dependency-audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [".", "desktop", "extensions/vscode"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      # Install scripts are skipped: this job checks that the lockfile is in sync, not native builds.
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+      - if: matrix.dir == 'extensions/vscode'
+        run: npm run compile --if-present
+
   debian-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 20
