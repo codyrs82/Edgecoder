@@ -3,6 +3,7 @@
 
 import Fastify from "fastify";
 import { registerPortalPages } from "./pages/index.js";
+import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -248,6 +249,7 @@ function validatePortalSecurityConfig(): void {
   if (!/^https:\/\//i.test(PORTAL_PUBLIC_URL)) {
     throw new Error("PORTAL_PUBLIC_URL must use https in production.");
   }
+  assertOauthStateSecret(); // #88: every instance must share the OAuth state HMAC key
 }
 
 function normalizeNativeOauthRedirect(value: string | undefined): string | null {
@@ -494,7 +496,8 @@ async function createSessionForUser(userId: string, reply: any): Promise<string>
     tokenHash: sha256Hex(sessionToken),
     expiresAtMs: Date.now() + SESSION_TTL_MS
   });
-  reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+  // #88: append, so a cookie set earlier in the same response (OAuth state clear) survives.
+  appendSetCookie(reply, encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
   return sessionToken;
 }
 
