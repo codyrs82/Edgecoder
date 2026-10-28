@@ -820,6 +820,7 @@ async function bootstrapPeerMesh(): Promise<void> {
       peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
       discoveredForCache.add(gossipUrl!);
 
+      const selfUrl = normalizeUrl(COORDINATOR_PUBLIC_URL) ?? COORDINATOR_PUBLIC_URL;
       const registerRes = await request(`${peerUrl}/mesh/register-peer`, {
         method: "POST",
         headers: {
@@ -829,12 +830,12 @@ async function bootstrapPeerMesh(): Promise<void> {
         body: JSON.stringify({
           peerId: identity.peerId,
           publicKeyPem: identity.publicKeyPem,
-          coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL),
+          coordinatorUrl: selfUrl,
           networkMode,
           registrationToken: COORDINATOR_REGISTRATION_TOKEN,
           // #52: prove we hold the key the peer's allowlist names.
           ...signRegistration(
-            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL) },
+            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl },
             coordinatorKeys.privateKeyPem
           )
         }),
