@@ -5,7 +5,7 @@ description: Security architecture, cryptographic controls, and audit mechanisms
 
 # Trust and Security
 
-This page unifies controls from `docs/security-baseline.md`, `README.dev.md`,
+This page unifies controls from `docs/security-baseline.md`, `README.md`, `SECURITY.md`,
 `docs/public-mesh-operations.md`, and relevant architecture decisions.
 
 ## Security Model Summary
@@ -140,4 +140,4 @@ currently staged for activation in the task pipeline.
 
 - [Security Baseline](https://github.com/codyrs82/Edgecoder/blob/main/docs/security-baseline.md)
 - [Public Mesh Operations](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
-- [Developer Guide Security Notes](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
+- [Developer Guide Security Notes](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)
