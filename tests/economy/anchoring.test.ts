@@ -302,7 +302,7 @@ describe("anchoring review fixes (#46)", () => {
 });
 
 describe("reconciliation (#103)", () => {
-  const CFG = { maxAttempts: 3, stuckAfterMs: 60_000 };
+  const CFG = { maxAttempts: 3, stuckAfterMs: 60_000, abandonWatchMs: 10 * 60_000 };
   const inflight = (over: Partial<BitcoinAnchorRecord> = {}): BitcoinAnchorRecord => ({
     anchorId: "b1", epochId: "e", checkpointHash: CHECKPOINT, anchorNetwork: "signet",
     txRef: "broadcasting:x", status: "broadcasting", createdAtMs: 1, confirmations: 0, ...over
@@ -375,6 +375,32 @@ describe("reconciliation (#103)", () => {
     expect(store.rows.get("b1")?.status).toBe("pending");
   });
 
+  it("an abandoned tx that confirms anyway is re-marked anchored (#109 review)", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const now = 1 + CFG.stuckAfterMs;
+    const s1 = memStore([stuck]);
+    const dropped = { ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => false, abandonTx: async () => undefined };
+    expect(await reconcileAnchor({ ...deps(dropped, s1), now: () => now }, stuck, 6, CFG)).toBe("failed");
+    const failed = s1.rows.get("b1")!;
+    expect(failed).toMatchObject({ status: "failed", txRef: TXID, abandonedAtMs: now });
+
+    // Still unconfirmed: keep watching, row unchanged.
+    const quiet = scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider;
+    expect(await reconcileAnchor({ ...deps(quiet, s1), now: () => now + 1000 }, failed, 6, CFG)).toBe("still_pending");
+    expect(s1.rows.get("b1")?.status).toBe("failed");
+
+    // It confirms after all: back to anchored, abandonment kept so the budget charges it.
+    const later = now + 2000;
+    const confirmedP = scriptedProvider([{ confirmed: true, confirmations: 6, blockHash: "h", blockHeight: 10 }]).provider;
+    expect(await reconcileAnchor({ ...deps(confirmedP, s1), now: () => later }, failed, 6, CFG)).toBe("resurrected");
+    expect(s1.rows.get("b1")).toMatchObject({ status: "anchored", txRef: TXID, abandonedAtMs: now });
+
+    // Outside the watch window it is left alone.
+    const s2 = memStore([failed]);
+    expect(await reconcileAnchor({ ...deps(confirmedP, s2), now: () => now + CFG.abandonWatchMs + 1 }, failed, 6, CFG)).toBe("skipped");
+    expect(s2.rows.get("b1")?.status).toBe("failed");
+  });
+
   it("reconcileAnchors walks the store's reconcile list", async () => {
     const store = Object.assign(memStore([inflight()]), {
       async listAnchorsToReconcile() { return [...store.rows.values()].filter((r) => r.status === "broadcasting"); }
@@ -384,7 +410,7 @@ describe("reconciliation (#103)", () => {
   });
 
   it("config from env", () => {
-    expect(reconcileConfigFromEnv({})).toEqual({ maxAttempts: 5, stuckAfterMs: 6 * 60 * 60 * 1000 });
-    expect(reconcileConfigFromEnv({ ANCHOR_RECONCILE_MAX_ATTEMPTS: "2", ANCHOR_STUCK_AFTER_MS: "120000" })).toEqual({ maxAttempts: 2, stuckAfterMs: 120_000 });
+    expect(reconcileConfigFromEnv({})).toEqual({ maxAttempts: 5, stuckAfterMs: 6 * 60 * 60 * 1000, abandonWatchMs: 72 * 60 * 60 * 1000 });
+    expect(reconcileConfigFromEnv({ ANCHOR_RECONCILE_MAX_ATTEMPTS: "2", ANCHOR_STUCK_AFTER_MS: "120000" })).toEqual({ maxAttempts: 2, stuckAfterMs: 120_000, abandonWatchMs: 72 * 60 * 60 * 1000 });
   });
 });
