@@ -64,6 +64,8 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `120000` | Passkey challenge expiry (ms). |
+| `PORTAL_TRUSTED_PROXIES` | `172.16.0.0/12,fdaa::/16` | Comma-separated proxy IPs/CIDRs to trust for `X-Forwarded-*`. **Preferred.** When set, it replaces the hop count. |
+| `PORTAL_TRUST_PROXY_HOPS` | `1` | Used only when `PORTAL_TRUSTED_PROXIES` is unset. Trusts the nearest N hops, the pre-#13 behavior. Fastify 5.12 no longer honors bare hop counts, because they can't validate the immediate peer. |
 
 ## Key provider and rotation
 
