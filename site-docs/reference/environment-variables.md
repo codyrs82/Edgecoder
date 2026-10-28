@@ -136,6 +136,8 @@ npm run build:ble-proxy
 | `CLN_REST_URL` / `CLN_API_TOKEN` | Core Lightning REST endpoint and token (required when `LIGHTNING_PROVIDER=cln`). |
 | `ALLOW_MOCK_LIGHTNING` | Set to `1` to allow the auto-settling mock provider in local dev. Never allowed in production; not needed when `NODE_ENV=test`. |
 | `PAYMENT_WEBHOOK_SECRET` | **Required in production.** HMAC-SHA256 key for `POST /economy/payments/webhook`; senders must send `x-payment-signature: sha256=<hex hmac of raw body>` plus `x-mesh-token` (see [API endpoints → Payment webhook signature](api-endpoints-detailed.md#payment-webhook-signature)). The webhook is only a hint — settlement is always confirmed with the Lightning node. |
+| `BLE_SYNC_MAX_CREDITS_PER_TX` | Default `100`. Max credits per offline BLE transaction accepted by `/credits/ble-sync`. |
+| `BLE_SYNC_ALLOW_V1` | Set `1` (non-production only, one release) to accept legacy v1 BLE signatures that do not cover `credits`. |
 | `ECONOMY_PAYMENTS_ENABLED` | Default `true`. Set `0`, `false`, `off` or `no` (case-insensitive) to run without a Lightning node: no provider is created, and `/economy/payments/*` and `POST /robot/tasks` return 503. |
 
 ## Network and infrastructure
