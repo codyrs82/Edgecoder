@@ -34,6 +34,19 @@ import { OllamaLocalProvider, EdgeCoderLocalProvider } from "./providers.js";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * #71/#113: thrown when the coordinator accepted the swarm task but we never got the
+ * result (no subtask id, poll timeout). The task may still run and bill, so callers
+ * must count the spend, not release the reservation.
+ */
+export class SwarmPostSubmitError extends Error {
+  readonly submitted = true;
+  constructor(message: string, readonly swarmTaskId?: string) {
+    super(message);
+    this.name = "SwarmPostSubmitError";
+  }
+}
+
 export type RouteDecision =
   | "bluetooth-local"
   | "ollama-local"
@@ -192,10 +205,10 @@ export class IntelligentRouter {
   }
 
   /** #36: explicit swarm route for the IDE /run/swarm endpoint. Throws if swarm is not configured. */
-  async routeSwarm(prompt: string): Promise<RouterResult> {
+  async routeSwarm(prompt: string, maxTokens?: number): Promise<RouterResult> {
     if (!this.cfg.meshAuthToken) throw new Error("swarm_unavailable");
     const started = Date.now();
-    const result = await this.runViaSwarm(prompt);
+    const result = await this.runViaSwarm(prompt, undefined, maxTokens);
     return { ...result, route: "swarm", latencyMs: Date.now() - started };
   }
 
@@ -269,7 +282,8 @@ export class IntelligentRouter {
 
   private async runViaSwarm(
     prompt: string,
-    requestedModel?: string
+    requestedModel?: string,
+    maxTokens?: number
   ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
     const coordinatorUrl = this.cfg.coordinatorUrl.replace(/\/$/, "");
     const headers = {
@@ -290,6 +304,8 @@ export class IntelligentRouter {
         resourceClass: "cpu",
         priority: 60,
         requestedModel,
+        // #71: forwarded so the coordinator can price and limit the request.
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
         subtasks: [{ prompt, language: this.cfg.swarmLanguage ?? "python" }]
       }),
       headersTimeout: 15_000,
@@ -301,14 +317,16 @@ export class IntelligentRouter {
       throw new Error(`Swarm submit failed (${submitRes.statusCode}): ${errBody}`);
     }
 
-    const submitBody = (await submitRes.body.json()) as {
-      taskId: string;
-      subtasks: string[];
-    };
+    let submitBody: { taskId: string; subtasks: string[] };
+    try {
+      submitBody = (await submitRes.body.json()) as { taskId: string; subtasks: string[] };
+    } catch {
+      throw new SwarmPostSubmitError("Swarm: unreadable submit response");
+    }
     const taskId = submitBody.taskId;
     const subtaskId = submitBody.subtasks?.[0];
 
-    if (!subtaskId) throw new Error("Swarm: no subtaskId returned");
+    if (!subtaskId) throw new SwarmPostSubmitError("Swarm: no subtaskId returned", taskId);
 
     // Poll for result — up to 90s
     const pollUrl = `${coordinatorUrl}/tasks/${taskId}/subtasks/${subtaskId}/result`;
@@ -336,7 +354,7 @@ export class IntelligentRouter {
       }
     }
 
-    throw new Error("Swarm task timed out after 90s");
+    throw new SwarmPostSubmitError("Swarm task timed out after 90s", taskId);
   }
 
   // -------------------------------------------------------------------------
