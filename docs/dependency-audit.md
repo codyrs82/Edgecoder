@@ -15,9 +15,15 @@ Generated from `npm audit --json` on each lockfile, before (base `ci/31-scale-no
 | desktop | removed `@types/marked` | `marked` ships its own types (#13). |
 | extensions/vscode | `@vscode/vsce` ^2.22.0 → ^3.9.2 | high: markdown-it / linkify-it ReDoS, which only vsce 3 fixes. vsce is a dev-only packaging tool. |
 
-BLE: `@abandonware/noble` and `bleno` stay `optionalDependencies` (they are unmaintained, with no fixed release). Their vulnerable build chain is patched through the overrides above. If they fail to compile, `npm ci` skips them, and `src/mesh/ble/noble-ble-transport.ts` loads them dynamically.
+BLE is **best-effort until it's replaced.** The node-gyp 11 / node-pre-gyp 2 overrides are not verified against a native build of the `@abandonware/*` modules, and because they are optional, `npm ci` silently skips them if they fail to compile, so BLE can disappear on Linux or macOS without an error. If BLE is needed, check with `node -e "import('@abandonware/noble')"` after install.
+
+vitepress 1.6.4 is built for vite 5, so running it on vite 6 (the override) is an unsupported pairing. Nothing verifies the docs build until #34 / #120 land. Revisit this override then: drop it if vitepress ships a vite-6 release, or accept the dev-only vite 5 advisory.
+
+`@abandonware/noble` and `bleno` stay `optionalDependencies` (they are unmaintained, with no fixed release). Their vulnerable build chain is patched through the overrides above. If they fail to compile, `npm ci` skips them, and `src/mesh/ble/noble-ble-transport.ts` loads them dynamically.
 
 Remaining (low only): root: katex/mermaid (fix would need mermaid 10, a downgrade). desktop: deepmerge via vite-plugin-svelte-inspector. vscode: 3 moderate (`@azure/identity`, `@azure/msal-node`, `uuid` through vsce).
+
+The `dependency-audit` job is deliberately strict: an advisory published after merge turns unrelated PRs red until it is fixed, and Dependabot security PRs usually fix it. If that becomes noisy, make the audit step `continue-on-error` and rely on Dependabot.
 
 Dependabot (`.github/dependabot.yml`) now opens weekly grouped updates for the three npm lockfiles, Cargo and GitHub Actions.
 

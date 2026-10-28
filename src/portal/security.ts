@@ -1,5 +1,6 @@
 // #10: portal security headers (helmet), CSRF origin checks and per-route rate limits.
 // Kept separate from server.ts so it can be tested with a small Fastify app.
+import { isIP } from "node:net";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -38,23 +39,31 @@ export function rateLimitFor(url: string, method: string | string[] = "POST"): {
   return undefined;
 }
 
-/** PORTAL_TRUST_PROXY_HOPS: a positive integer, else 1 (Fly). */
-export function trustProxyHops(raw: string | undefined): number {
-  const n = Number(raw ?? 1);
-  return Number.isInteger(n) && n > 0 ? n : 1;
+/*
+ * #13 / #125 review: client IP for rate limits.
+ * Fastify >= 5.12 ignores a numeric `trustProxy` (hop counts can't validate the immediate peer),
+ * and Fly doesn't publish a stable proxy CIDR to trust, so the portal no longer trusts
+ * X-Forwarded-For at all (`trustProxy: false`). On Fly, the edge proxy sets `Fly-Client-IP` to
+ * the client address as it saw it (https://fly.io/docs/networking/request-headers/). That header
+ * is used only when PORTAL_TRUST_FLY_CLIENT_IP=true *and* the Fly runtime's FLY_APP_NAME is set,
+ * because off Fly any client could send it. Keep it unset until #31 rolls the portal on Fly.
+ */
+export const FLY_CLIENT_IP_HEADER = "fly-client-ip";
+
+export function flyClientIpEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PORTAL_TRUST_FLY_CLIENT_IP === "true" && Boolean((env.FLY_APP_NAME ?? "").trim());
 }
 
-/**
- * #13: Fastify >= 5.12 treats a numeric `trustProxy` as "trust nothing" (hop counts can't
- * validate the immediate peer), and its types no longer accept a number.
- * - PORTAL_TRUSTED_PROXIES (comma-separated IPs/CIDRs, e.g. Fly's proxy range): trust exactly those.
- * - Otherwise: keep the previous behaviour (trust the nearest PORTAL_TRUST_PROXY_HOPS hops).
- */
-export function trustProxySetting(env: NodeJS.ProcessEnv = process.env): string | ((addr: string, hop: number) => boolean) {
-  const cidrs = (env.PORTAL_TRUSTED_PROXIES ?? "").trim();
-  if (cidrs) return cidrs;
-  const hops = trustProxyHops(env.PORTAL_TRUST_PROXY_HOPS);
-  return (_addr: string, hop: number) => hop < hops;
+export function clientIp(
+  req: { ip: string; headers: Record<string, unknown> },
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  if (flyClientIpEnabled(env)) {
+    const raw = req.headers[FLY_CLIENT_IP_HEADER];
+    const v = (Array.isArray(raw) ? raw[0] : raw) as unknown;
+    if (typeof v === "string" && isIP(v.trim())) return v.trim();
+  }
+  return req.ip;
 }
 
 export function parseOriginList(raw: string | undefined): string[] {
@@ -100,7 +109,7 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
   });
   await app.register(rateLimit, {
     global: false,
-    keyGenerator: (req: FastifyRequest) => req.ip,
+    keyGenerator: (req: FastifyRequest) => clientIp(req),
     errorResponseBuilder: (_req, ctx) => ({ statusCode: 429, error: "rate_limited", retryAfter: ctx.after }),
   });
 

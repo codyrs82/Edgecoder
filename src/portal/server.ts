@@ -37,13 +37,13 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity, trustProxySetting } from "./security.js";
+import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
-// #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
-// #13: Fastify 5.12 no longer honours a numeric hop count; see trustProxySetting.
-const app = Fastify({ logger: true, trustProxy: trustProxySetting() });
+// #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
+// (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
+const app = Fastify({ logger: true, trustProxy: false });
 
 const DESKTOP_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"];
 await app.register(cors, {

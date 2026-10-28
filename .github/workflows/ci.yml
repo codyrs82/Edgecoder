@@ -59,6 +59,8 @@ jobs:
       # Install scripts are skipped: this job checks that the lockfile is in sync, not native builds.
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
+      # Runs after an --ignore-scripts install: fine for plain tsc, but a compile that
+      # needs a postinstall step would behave differently here than in a real install.
       - if: matrix.dir == 'extensions/vscode'
         run: npm run compile --if-present
 

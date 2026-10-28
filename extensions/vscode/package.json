@@ -1,7 +1,7 @@
 {
   "name": "edgecoder",
   "displayName": "EdgeCoder",
-  "description": "Connect your IDE to the EdgeCoder swarm \u2014 local Ollama, Bluetooth, or distributed mesh",
+  "description": "Connect your IDE to the EdgeCoder swarm — local Ollama, Bluetooth, or distributed mesh",
   "version": "0.1.0",
   "publisher": "edgecoder",
   "engines": {
