@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { PostgresStore, SCHEMA_SQL } from "../../src/db/postgres.js";
+import { CREDIT_LOCK_NAMESPACE, PostgresStore, SCHEMA_SQL } from "../../src/db/postgres.js";
 import { CreditEngine } from "../../src/credits/engine.js";
 import type { CreditTransaction } from "../../src/common/types.js";
 
@@ -38,7 +38,11 @@ function fakePool() {
           if (sql === "COMMIT") { committed.push(...pending); pending = []; end(); return { rows: [], rowCount: 0 }; }
           if (sql === "ROLLBACK") { pending = []; end(); return { rows: [], rowCount: 0 }; }
           if (sql.includes("pg_advisory_xact_lock")) {
-            const key = String(params[0]);
+            // #108: two-key form, credit namespace first.
+            if (!sql.includes("pg_advisory_xact_lock($1, hashtext($2))") || params[0] !== CREDIT_LOCK_NAMESPACE) {
+              throw new Error(`unexpected lock: ${sql} ${JSON.stringify(params)}`);
+            }
+            const key = String(params[1]);
             while (locks.has(key)) await locks.get(key);
             lockKey = key;
             locks.set(key, new Promise<void>((r) => { release = r; }));
@@ -47,7 +51,9 @@ function fakePool() {
           if (sql.includes("SUM(CASE WHEN tx_type = 'spend'")) {
             const bal = committed.filter((r) => r.account_id === params[0])
               .reduce((s, r) => s + (r.tx_type === "spend" ? -r.credits : r.credits), 0);
-            return { rows: [{ balance: bal }], rowCount: 1 };
+            // Real Postgres compares NUMERICs exactly; model that with micro-credits.
+            const enough = Math.round(bal * 1e6) >= Math.round(Number(params[1]) * 1e6);
+            return { rows: [{ balance: bal, enough }], rowCount: 1 };
           }
           if (sql.includes("INSERT INTO credit_transactions")) {
             pending.push({ account_id: String(params[1]), tx_type: "spend", credits: Number(params[2]) });
@@ -111,6 +117,30 @@ describe("CreditEngine negative adjust (#48)", () => {
   });
 });
 
+describe("exact credit arithmetic (#108)", () => {
+  it("in memory: 0.1 + 0.2 earned covers a 0.3 spend, leaving exactly 0", () => {
+    const e = new CreditEngine();
+    e.adjust("f", 0.1, "seed");
+    e.adjust("f", 0.2, "seed");
+    e.spend("f", 0.3, "task_submit");
+    expect(e.balance("f")).toBe(0);
+    expect(() => e.spend("f", 0.001, "task_submit")).toThrow(/insufficient_credits/);
+  });
+
+  it("Postgres path: the sufficiency check is done in SQL on NUMERIC, not in JS", async () => {
+    const pool = fakePool();
+    pool.committed.push({ account_id: "f", tx_type: "earn", credits: 0.1 }, { account_id: "f", tx_type: "earn", credits: 0.2 });
+    const store = new PostgresStore(pool as unknown as pg.Pool);
+    expect((await store.debitCredits(spendTx("f", 0.3))).status).toBe("applied");
+    expect((await store.debitCredits(spendTx("f", 0.001))).status).toBe("insufficient");
+  });
+
+  it("schema declares credit_transactions.credits NUMERIC and migrates DOUBLE PRECISION", () => {
+    expect(SCHEMA_SQL).toMatch(/CREATE TABLE IF NOT EXISTS credit_transactions \([\s\S]*?credits NUMERIC NOT NULL/);
+    expect(SCHEMA_SQL).toContain("ALTER COLUMN credits TYPE NUMERIC USING round(credits::numeric, 6)");
+  });
+});
+
 // Real Postgres (CI `credits-pg` job sets TEST_DATABASE_URL). Proves the advisory
 // lock + transaction actually serialise concurrent debits across pool connections.
 const PG_URL = process.env.TEST_DATABASE_URL;
@@ -142,4 +172,57 @@ describe("grantCredits (#48 review: payment settler)", () => {
     await grantCredits(acct, 3, "credit_purchase:ok");
     expect(creditEngine.balance(acct)).toBe(3);
   });
+});
+
+describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
+  it("exact fractional balance can be spent in full; concurrent BLE + debit share one lock", async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 10 });
+    try {
+      await pool.query(SCHEMA_SQL);
+      const store = new PostgresStore(pool);
+      const acct = `frac-${randomUUID()}`;
+      await store.persistCreditTransaction({ ...spendTx(acct, 0.1), type: "earn", reason: "seed" });
+      await store.persistCreditTransaction({ ...spendTx(acct, 0.2), type: "earn", reason: "seed" });
+      expect((await store.debitCredits(spendTx(acct, 0.3))).status).toBe("applied");
+      expect(await store.creditBalance(acct)).toBe(0);
+
+      const shared = `shared-${randomUUID()}`;
+      await store.persistCreditTransaction({ ...spendTx(shared, 5), type: "earn", reason: "seed" });
+      const ops = Array.from({ length: 20 }, (_, i) =>
+        i % 2
+          ? store.debitCredits(spendTx(shared, 0.5)).then((r) => r.status)
+          : store.applyBleTransfer({ txId: randomUUID(), requesterAccountId: shared, providerAccountId: `p-${randomUUID()}`, credits: 0.5 }),
+      );
+      const applied = (await Promise.all(ops)).filter((s) => s === "applied").length;
+      expect(applied).toBe(10);
+      expect(await store.creditBalance(shared)).toBe(0);
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+
+  it("migrates an existing DOUBLE PRECISION column and cleans float artefacts", async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 1 });
+    const schema = `mig_${randomUUID().replace(/-/g, "")}`;
+    try {
+      await pool.query(`CREATE SCHEMA ${schema}`);
+      await pool.query(`SET search_path TO ${schema}`);
+      await pool.query(`CREATE TABLE credit_transactions (
+        tx_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, tx_type TEXT NOT NULL,
+        credits DOUBLE PRECISION NOT NULL, reason TEXT NOT NULL, related_task_id TEXT, timestamp_ms BIGINT NOT NULL)`);
+      await pool.query(`INSERT INTO credit_transactions VALUES ('a','m','earn',0.1 + 0.2,'seed',NULL,1)`);
+      await pool.query(SCHEMA_SQL);
+      const type = await pool.query(
+        `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'credit_transactions' AND column_name = 'credits'`,
+        [schema],
+      );
+      expect(type.rows[0].data_type).toBe("numeric");
+      const row = await pool.query(`SELECT credits::text AS c FROM credit_transactions WHERE tx_id = 'a'`);
+      expect(row.rows[0].c).toBe("0.300000");
+      await pool.query(SCHEMA_SQL); // idempotent
+    } finally {
+      await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await pool.end();
+    }
+  }, 60_000);
 });
