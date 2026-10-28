@@ -184,7 +184,10 @@ const ADMIN_ROUTES: Array<{ method: "GET" | "POST"; url: string; route: string }
   { method: "GET", url: "/admin/dashboard", route: "/admin/dashboard" },
   { method: "GET", url: "/admin/dashboard/api/overview", route: "/admin/dashboard/api/overview" },
   { method: "GET", url: "/admin/agents/x/behavior", route: "/admin/agents/:agentId/behavior" },
-  { method: "POST", url: "/security/blacklist", route: "/security/blacklist" }
+  { method: "POST", url: "/security/blacklist", route: "/security/blacklist" },
+  // #100: manual anchor triggers spend sats.
+  { method: "POST", url: "/economy/issuance/anchor", route: "/economy/issuance/anchor" },
+  { method: "POST", url: "/stats/anchors/anchor-latest", route: "/stats/anchors/anchor-latest" }
 ];
 
 describe("coordinator admin/debug/webhook/ble-sync auth (#40)", () => {
