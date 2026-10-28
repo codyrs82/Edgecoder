@@ -20,6 +20,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - run: npm run test:integration
 
   debian-validation:
     runs-on: ubuntu-latest
@@ -35,6 +36,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - run: npm run test:integration
 
   desktop-token-test:
     # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
