@@ -7,6 +7,7 @@ struct SettingsView: View {
     @StateObject private var authViewModel = AuthViewModel()
     @ObservedObject private var swarmRuntime = SwarmRuntimeController.shared
     private let config = AppConfig.current
+    @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
 
     var body: some View {
         NavigationStack {
@@ -17,6 +18,7 @@ struct SettingsView: View {
                     modelCard
                     networkCard
                     nodeCard
+                    appearanceCard
                     aboutCard
                 }
                 .padding(.horizontal, 16)
@@ -326,6 +328,27 @@ struct SettingsView: View {
     }
 
     // MARK: - About Card
+
+    private var appearanceCard: some View {
+        SettingsCard {
+            SettingsCardHeader(icon: "circle.lefthalf.filled", title: "Appearance", color: Theme.textSecondary)
+
+            Picker("Appearance", selection: Binding(
+                get: { AppearancePreference.from(appearance) },
+                set: { appearance = $0.rawValue }
+            )) {
+                ForEach(AppearancePreference.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Appearance")
+
+            Text("Dark is the default while light mode is being reviewed.")
+                .font(.caption)
+                .foregroundColor(Theme.textMuted)
+        }
+    }
 
     private var aboutCard: some View {
         SettingsCard {
