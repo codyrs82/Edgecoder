@@ -12,6 +12,7 @@
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { Toaster } from "svelte-sonner";
+  import AuthExpiredBanner from "./components/AuthExpiredBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
 
   let activeTab: "chat" | "editor" = $state("chat");
@@ -156,6 +157,7 @@
 {:else}
   <div class="app-shell">
     <UpdateBanner />
+    <AuthExpiredBanner onSignIn={() => { clearSessionToken(); user = null; settingsOpen = false; }} />
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
       <button class="header-btn" title="New chat" onclick={() => {
