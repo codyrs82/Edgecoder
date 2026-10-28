@@ -34,7 +34,7 @@ export interface AnchorStore {
   /** Cross-instance lock for one checkpoint (Postgres advisory lock). */
   withCheckpointLock?<T>(checkpointHash: string, fn: () => Promise<T>): Promise<T>;
   /** #103: in-flight broadcasts plus pending rows created before `pendingBeforeMs`. */
-  listAnchorsToReconcile?(pendingBeforeMs: number, limit?: number): Promise<BitcoinAnchorRecord[]>;
+  listAnchorsToReconcile?(pendingBeforeMs: number, limit?: number, abandonedSinceMs?: number): Promise<BitcoinAnchorRecord[]>;
   /** Broadcast attempts (real txids or in-flight "broadcasting" rows) created since `sinceMs`. */
   countAnchorBroadcastsSince?(sinceMs: number): Promise<number>;
 }
@@ -281,6 +281,8 @@ export interface ReconcileConfig {
   maxAttempts: number;
   /** A pending tx this old that is neither confirmed nor in the mempool is marked failed (re-anchored). */
   stuckAfterMs: number;
+  /** #109 review: how long an abandoned tx is still watched in case it confirms anyway. */
+  abandonWatchMs: number;
 }
 
 export function reconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReconcileConfig {
@@ -290,11 +292,12 @@ export function reconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Re
   };
   return {
     maxAttempts: n("ANCHOR_RECONCILE_MAX_ATTEMPTS", 5, 1),
-    stuckAfterMs: n("ANCHOR_STUCK_AFTER_MS", 6 * 60 * 60 * 1000, 60_000)
+    stuckAfterMs: n("ANCHOR_STUCK_AFTER_MS", 6 * 60 * 60 * 1000, 60_000),
+    abandonWatchMs: n("ANCHOR_ABANDON_WATCH_MS", 72 * 60 * 60 * 1000, 60_000)
   };
 }
 
-export type ReconcileEvent = "recovered" | "failed" | "retry_later" | "needs_admin" | "still_pending" | "skipped";
+export type ReconcileEvent = "resurrected" | "recovered" | "failed" | "retry_later" | "needs_admin" | "still_pending" | "skipped";
 
 async function bumpAttempts(
   deps: AnchorDeps,
@@ -373,8 +376,26 @@ export async function reconcileAnchor(
     } catch {
       return bumpAttempts(deps, record, cfg, nowMs);
     }
-    await deps.store.upsertBitcoinAnchor({ ...record, status: "failed", confirmations: 0, lastCheckedAtMs: nowMs });
+    await deps.store.upsertBitcoinAnchor({ ...record, status: "failed", confirmations: 0, lastCheckedAtMs: nowMs, abandonedAtMs: nowMs });
     return "failed";
+  }
+
+  // #109 review: an abandoned tx can still confirm (another node kept it). Watch it for
+  // abandonWatchMs; if it confirms, put the row back on the confirmation path so it ends
+  // "anchored". The store's budget count then charges its fee at the time it confirmed.
+  if (record.status === "failed" && record.abandonedAtMs !== undefined && isTxid(record.txRef)) {
+    if (nowMs - record.abandonedAtMs > cfg.abandonWatchMs) return "skipped";
+    let conf: AnchorConfirmationResult;
+    try {
+      conf = await deps.provider.getConfirmations(record.txRef);
+    } catch {
+      return "skipped";
+    }
+    if (!conf.confirmed || conf.confirmations < 1) return "still_pending";
+    const revived: BitcoinAnchorRecord = { ...record, status: "pending", lastCheckedAtMs: nowMs };
+    await deps.store.upsertBitcoinAnchor(revived);
+    await refreshAnchor(deps, revived, required);
+    return "resurrected";
   }
   return "skipped";
 }
@@ -386,7 +407,7 @@ export async function reconcileAnchors(
 ): Promise<Array<{ anchorId: string; event: ReconcileEvent }>> {
   if (!deps.store.listAnchorsToReconcile) return [];
   const nowMs = (deps.now ?? Date.now)();
-  const rows = await deps.store.listAnchorsToReconcile(nowMs - cfg.stuckAfterMs, 50);
+  const rows = await deps.store.listAnchorsToReconcile(nowMs - cfg.stuckAfterMs, 50, nowMs - cfg.abandonWatchMs);
   const out: Array<{ anchorId: string; event: ReconcileEvent }> = [];
   for (const row of rows) {
     // Same per-checkpoint lock as anchorCheckpoint, so reconcile never races a broadcast.

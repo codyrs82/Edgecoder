@@ -412,6 +412,11 @@ export interface BitcoinAnchorRecord {
   lastCheckedAtMs?: number;
   /** #103: failed reconciliation attempts (lookup errors) for broadcasting/stuck rows. */
   reconcileAttempts?: number;
+  /**
+   * #109 review: when reconciliation abandoned this row's tx (abandontransaction) and marked it
+   * failed. The txid is kept and watched; if it confirms anyway the row is re-marked anchored.
+   */
+  abandonedAtMs?: number;
 }
 
 export interface CoordinatorFeeEvent {

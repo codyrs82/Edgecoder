@@ -99,12 +99,13 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `ANCHOR_RECONCILE_MS` | No | How often to reconcile in-flight and stuck anchors; also runs at startup (default: `900000`) |
 | `ANCHOR_RECONCILE_MAX_ATTEMPTS` | No | Failed lookups before a `broadcasting` row is flagged `needs_admin` (default: `5`) |
 | `ANCHOR_STUCK_AFTER_MS` | No | A pending tx this old that is unconfirmed and not in the mempool is marked `failed` and re-anchored (default: `21600000`, 6h) |
+| `ANCHOR_ABANDON_WATCH_MS` | No | How long an abandoned tx is watched in case it confirms anyway (default: `259200000`, 72h) |
 
 ### Reconciliation (#103)
 
 A `broadcasting` row means the coordinator stopped between broadcasting and storing the txid. On startup and every `ANCHOR_RECONCILE_MS`, the coordinator searches the bitcoind wallet for a transaction whose OP_RETURN carries that checkpoint. If it finds one, it stores the txid and tracks confirmations as usual. If the wallet definitely has no such transaction, the row becomes `failed` and is re-anchored. If the node can't answer, the coordinator counts an attempt. After `ANCHOR_RECONCILE_MAX_ATTEMPTS` failed attempts the row becomes `needs_admin` (logged as `bitcoin_anchor_needs_admin_reconcile`). That checkpoint is then never re-broadcast automatically. An operator checks the wallet and sets the row's `tx_ref`/`status` by hand. Wallet lookup needs `BITCOIN_ANCHOR_PROVIDER=bitcoind`. With other providers, in-flight rows go to `needs_admin`.
 
-Before a stuck `pending` tx is marked `failed`, the coordinator calls bitcoind `abandontransaction` on it so its inputs are released and a re-anchor can't conflict with the old tx. If that call fails, or the provider can't abandon transactions, the row stays `pending` and the failure counts as an attempt. Each reconcile pass re-reads a row under the checkpoint lock and skips it if it changed since it was listed. The final fee of a recovered transaction is not re-checked against `BITCOIN_ANCHOR_MAX_FEE_SATS`.
+Before a stuck `pending` tx is marked `failed`, the coordinator calls bitcoind `abandontransaction` on it so its inputs are released and a re-anchor can't conflict with the old tx. If that call fails, or the provider can't abandon transactions, the row stays `pending` and the failure counts as an attempt. Each reconcile pass re-reads a row under the checkpoint lock and skips it if it changed since it was listed. An abandoned transaction keeps its txid and is watched for `ANCHOR_ABANDON_WATCH_MS` (default `259200000`, 72h). If it confirms anyway, the row goes back to `pending` and then `anchored`, and its fee counts toward the daily budget for the 24h after it confirmed. `needs_admin` rows also count toward the budget, since they may have spent sats. The final fee of a recovered transaction is not re-checked against `BITCOIN_ANCHOR_MAX_FEE_SATS`.
 
 ## Verification
 
