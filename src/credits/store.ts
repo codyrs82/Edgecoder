@@ -60,17 +60,18 @@ export async function rewardAccountForAgent(agentId: string): Promise<string> {
   return ownership?.accountId ?? agentId;
 }
 
-export async function spendCredits(
-  accountId: string,
-  credits: number,
-  reason: string,
-  relatedTaskId?: string
-) {
+function assertAmount(credits: number): void {
+  if (!Number.isFinite(credits) || credits <= 0) throw new Error("invalid_credit_amount");
+}
+
+/**
+ * Atomic debit (#48). Postgres: balance check + insert in one transaction under a
+ * per-account advisory lock. In-memory: synchronous check + insert.
+ * Throws `insufficient_credits: <balance> < <credits>`; the balance never goes negative.
+ */
+async function debit(accountId: string, credits: number, reason: string, relatedTaskId?: string): Promise<CreditTransaction> {
+  assertAmount(credits);
   if (pgStore) {
-    const current = await pgStore.creditBalance(accountId);
-    if (current < credits) {
-      throw new Error(`insufficient_credits: ${current} < ${credits}`);
-    }
     const tx: CreditTransaction = {
       txId: randomUUID(),
       accountId,
@@ -80,26 +81,39 @@ export async function spendCredits(
       relatedTaskId,
       timestampMs: Date.now()
     };
-    await pgStore.persistCreditTransaction(tx);
+    const result = await pgStore.debitCredits(tx);
+    if (result.status === "insufficient") {
+      throw new Error(`insufficient_credits: ${result.balance} < ${credits}`);
+    }
     return tx;
   }
-  const tx = creditEngine.spend(accountId, credits, reason, relatedTaskId);
-  return tx;
+  return creditEngine.spend(accountId, credits, reason, relatedTaskId);
 }
 
+export async function spendCredits(
+  accountId: string,
+  credits: number,
+  reason: string,
+  relatedTaskId?: string
+) {
+  return debit(accountId, credits, reason, relatedTaskId);
+}
+
+/** Positive = grant (earn). Negative = debit, which is balance-checked like a spend (#48). */
 export async function adjustCredits(accountId: string, credits: number, reason: string) {
+  if (!Number.isFinite(credits) || credits === 0) throw new Error("invalid_credit_amount");
+  if (credits < 0) return debit(accountId, -credits, reason);
   if (pgStore) {
     const tx: CreditTransaction = {
       txId: randomUUID(),
       accountId,
-      type: credits >= 0 ? "earn" : "spend",
-      credits: Math.abs(credits),
+      type: "earn",
+      credits,
       reason,
       timestampMs: Date.now()
     };
     await pgStore.persistCreditTransaction(tx);
     return tx;
   }
-  const tx = creditEngine.adjust(accountId, credits, reason);
-  return tx;
+  return creditEngine.adjust(accountId, credits, reason);
 }
