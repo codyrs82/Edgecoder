@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /*
  * #88: bind the OAuth `state` to the browser that started the flow (login CSRF / session
@@ -102,4 +102,18 @@ export function appendSetCookie(reply: { getHeader(name: string): unknown; heade
   const prev = reply.getHeader("set-cookie");
   const list = prev === undefined ? [] : Array.isArray(prev) ? prev.map(String) : [String(prev)];
   reply.header("set-cookie", [...list, cookie]);
+}
+
+/**
+ * #137: PKCE (RFC 7636, S256). The code_verifier is derived from the state with the same HMAC
+ * key under its own label, so nothing new is stored, it's 43 base64url chars (256 bits), it
+ * never leaves the server until the token exchange, and every instance sharing
+ * OAUTH_STATE_SECRET derives the same value.
+ */
+export function pkceVerifier(key: Buffer, provider: string, state: string): string {
+  return createHmac("sha256", key).update(`pkce.${provider}.${state}`).digest("base64url");
+}
+
+export function pkceChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier, "ascii").digest("base64url");
 }
