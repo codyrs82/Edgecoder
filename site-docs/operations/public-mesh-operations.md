@@ -60,7 +60,7 @@ In production, coordinators fail closed: a peer is trusted only if its key is on
 |---|---|---|
 | `COORDINATOR_PRIVATE_KEY_PEM` | Its own stable Ed25519 key (PKCS#8 PEM), stored as a secret | Without it the key is regenerated on every restart and drops off its peers' allowlists. |
 | `COORDINATOR_PEER_ID` | Optional stable id | The default is derived from `COORDINATOR_PUBLIC_URL`. |
-| `MESH_PEER_ALLOWLIST` | `peerId:fingerprint@https://peer-url` for each **other** coordinator it peers with (the `@url` is recommended) | Fingerprint = SHA-256 (hex) of the peer's SPKI public key (see the one-liner in [Environment variables](/reference/environment-variables)). |
+| `MESH_PEER_ALLOWLIST` | `peerId:fingerprint@https://peer-url` for each **other** coordinator it peers with (**`@url` is required in production**: the coordinator refuses to start if any entry lacks it) | Fingerprint = SHA-256 (hex) of the peer's SPKI public key (see the one-liner in [Environment variables](/reference/environment-variables)). |
 
 Without `MESH_PEER_ALLOWLIST`, a production coordinator rejects:
 - token-only `/mesh/register-peer`;
@@ -68,7 +68,7 @@ Without `MESH_PEER_ALLOWLIST`, a production coordinator rejects:
 - `/mesh/ingest` and `/mesh/relay-gossip` messages from peers that aren't allowlisted;
 - forwarded `/result`s.
 
-Peer endpoints are pinned. A peer's URL comes from its `@url` in the allowlist or, if it has none, from the bootstrap URL we reached it on. Gossip (`peer_exchange`) never sets or changes an endpoint, and a registration whose URL disagrees with the pin is rejected. An unpinned peer must be found by bootstrap before it can register.
+Peer endpoints are pinned. In production a peer's URL always comes from its `@url` in the allowlist. In dev, an entry without `@url` falls back to the bootstrap URL we reached it on. Gossip (`peer_exchange`) never sets or changes an endpoint, and a registration whose URL disagrees with the pin is rejected. An unpinned peer must be found by bootstrap before it can register.
 
 Forwarded results must be signed by an allowlisted peer, can't be replayed, and are accepted only for subtasks this coordinator offered to the mesh.
 

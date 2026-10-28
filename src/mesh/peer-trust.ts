@@ -63,6 +63,18 @@ export function parsePeerUrlPins(raw: string | undefined): PeerUrlPins {
   return new Map(parseEntries(raw).filter((e) => e.url).map((e) => [e.peerId, e.url!]));
 }
 
+/**
+ * #118 review (Edward): in production every allowlist entry must pin its URL (`@url`), so no peer
+ * endpoint ever comes from discovery. Throws, listing the unpinned peer ids.
+ */
+export function assertUrlPinsForProduction(raw: string | undefined, production: boolean): void {
+  if (!production) return;
+  const missing = parseEntries(raw).filter((e) => !e.url).map((e) => e.peerId);
+  if (missing.length) {
+    throw new Error(`MESH_PEER_ALLOWLIST: production requires @url on every entry; missing for ${missing.join(", ")}`);
+  }
+}
+
 /** http(s) origin + path without trailing slash, or null. */
 export function canonicalPeerUrl(raw: string | undefined): string | null {
   if (!raw) return null;

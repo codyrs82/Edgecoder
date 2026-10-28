@@ -7,6 +7,7 @@ import {
   ReplayCache,
   parsePeerAllowlist,
   parsePeerUrlPins,
+  assertUrlPinsForProduction,
   publicKeyFingerprint,
   signForwardedResult,
   signRegistration,
@@ -118,6 +119,14 @@ describe("peer table admission (#118 review)", () => {
     expect(parsePeerUrlPins(`coord-a:${fpA}`)).toEqual(new Map());
     expect(() => parsePeerAllowlist(`coord-a:${fpA}@ftp://x`)).toThrow(/bad url/);
     expect(() => parsePeerAllowlist(`coord-a:${fpA}@https://u:p@x`)).toThrow(/bad url/);
+  });
+
+  it("production requires @url on every allowlist entry", () => {
+    const fpB = publicKeyFingerprint(createPeerKeys("coord-b").publicKeyPem);
+    expect(() => assertUrlPinsForProduction(`${pinnedRaw},coord-b:${fpB}`, true)).toThrow(/missing for coord-b/);
+    expect(() => assertUrlPinsForProduction(`${pinnedRaw},coord-b:${fpB}@https://b.example`, true)).not.toThrow();
+    expect(() => assertUrlPinsForProduction(`coord-a:${fpA}`, false)).not.toThrow(); // dev: optional
+    expect(() => assertUrlPinsForProduction("", true)).not.toThrow(); // empty is handled by allowlist_required
   });
 
   it("drops non-allowlisted entries on every path", () => {

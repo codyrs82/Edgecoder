@@ -61,6 +61,7 @@ import {
   isAllowlistedKey,
   parsePeerAllowlist,
   parsePeerUrlPins,
+  assertUrlPinsForProduction,
   type PeerUrlPins,
   ReplayCache,
   signForwardedResult,
@@ -186,7 +187,9 @@ const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
 const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
   try {
-    return parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
+    const parsed = parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
+    assertUrlPinsForProduction(process.env.MESH_PEER_ALLOWLIST, isProduction());
+    return parsed;
   } catch (error) {
     // Fail closed, but say why before the process exits.
     console.error(`[coordinator] FATAL: invalid MESH_PEER_ALLOWLIST: ${(error as Error).message}`);
