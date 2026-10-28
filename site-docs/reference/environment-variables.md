@@ -48,6 +48,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | `INFERENCE_AUTH_TOKEN` | Auth token for the inference service API. |
 | `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. |
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
+| `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-signature`, …). Set `false` only for local dev with legacy unsigned agents. |
 
 ## Portal and passkeys
 

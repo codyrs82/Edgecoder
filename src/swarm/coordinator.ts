@@ -71,6 +71,13 @@ import {
 } from "../economy/issuance.js";
 import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
 import {
+  checkResultClaim,
+  classifyResultAuth,
+  creditedDurationMs,
+  requireSignedAgentRequests,
+  resultReportId
+} from "./result-integrity.js";
+import {
   applyBleSyncBatch,
   bleSyncAllowV1,
   createBleSyncSchema,
@@ -391,6 +398,8 @@ function evaluateAndEnforce(agentId: string): void {
 const releaseManifestCache = new ReleaseManifestCache();
 releaseManifestCache.start();
 const REQUIRE_VERIFIED_AGENTS = process.env.REQUIRE_VERIFIED_AGENTS === "true";
+// #44: signed agent requests are mandatory by default (always in production).
+const REQUIRE_SIGNED_AGENT_REQUESTS = requireSignedAgentRequests();
 
 const relayWindowByAgent = new Map<string, { windowMs: number; count: number }>();
 const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>();
@@ -504,10 +513,13 @@ function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders |
 async function verifyAgentRequest(
   headers: Record<string, unknown>,
   routePath: string,
-  sourceIp?: string
+  sourceIp?: string,
+  opts?: { allowUnsigned?: boolean }
 ): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
   const signed = extractSignedHeaders(headers);
-  if (!signed) return null; // No signed headers: backward compat
+  // #44: unsigned requests are rejected unless the policy is explicitly relaxed (non-prod),
+  // or the route has its own alternative auth for unsigned callers (allowUnsigned).
+  if (!signed) return REQUIRE_SIGNED_AGENT_REQUESTS && !opts?.allowUnsigned ? "rejected" : null;
 
   const agentId = signed["x-agent-id"];
 
@@ -2160,7 +2172,9 @@ app.post("/pull", async (req, reply) => {
 });
 
 app.post("/result", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip);
+  // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
+  // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const rawBody = req.body as Record<string, unknown>;
@@ -2196,12 +2210,36 @@ app.post("/result", async (req, reply) => {
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
   }
-  const subtask = queue.getSubtask(body.subtaskId);
+  // ── #44: claim ownership, before anything is recorded ──
+  const claim = queue.getClaim(body.subtaskId);
+  // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the
+  // mesh token but no agent signature and have no local claim. They are accepted for bookkeeping
+  // and dependency release only; no credits are accrued here.
+  const resultAuth = classifyResultAuth({
+    verified,
+    // #44 review: "locally owned" only if a local agent actually claimed it; an unclaimed
+    // queued copy of a gossiped subtask must still accept the relayed result.
+    hasLocalClaim: Boolean(claim?.claimedBy),
+    meshTokenConfigured: MESH_AUTH_TOKEN !== "",
+    meshTokenValid: hasMeshToken((req as any).headers ?? {}),
+    requireSigned: REQUIRE_SIGNED_AGENT_REQUESTS
+  });
+  if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });
+  const isPeerForward = resultAuth === "peer_forward";
+  if (!isPeerForward) {
+    const claimCheck = checkResultClaim(claim, body.agentId);
+    if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
+  }
+  const subtask = isPeerForward ? undefined : claim?.subtask;
+  // Server-side duration: never more than measured since claim or the subtask timeout.
+  const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
   queue.complete(body);
 
-  // ── Behavioral monitoring ──
-  behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
-  evaluateAndEnforce(body.agentId);
+  // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
+  if (!isPeerForward) {
+    behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
+    evaluateAndEnforce(body.agentId);
+  }
 
   // ── Dependency tracking: store output and release dependent subtasks ──
   const released = depTracker.recordCompletionAndRelease(
@@ -2248,15 +2286,15 @@ app.post("/result", async (req, reply) => {
   if (subtask) {
     const rewardAccountId = await rewardAccountForAgent(body.agentId);
     const accrualCredits = body.ok ? 5 : 2;
-    await accrueCredits(
+    const accrued = await accrueCredits(
       {
-        reportId: randomUUID(),
+        reportId: resultReportId(body.subtaskId),
         agentId: rewardAccountId,
         sourceAgentId: body.agentId,
         taskId: body.taskId,
         resourceClass: subtask.projectMeta.resourceClass,
-        cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? body.durationMs / 1000 : 0,
-        gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? body.durationMs / 1000 : 0,
+        cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
+        gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
         success: body.ok,
         qualityScore: body.ok ? 1.0 : 0.6,
         timestampMs: Date.now()
@@ -2266,23 +2304,27 @@ app.post("/result", async (req, reply) => {
         activeAgents: queue.status().agents
       }
     );
-    const earningsRecord = ordering.append({
-      eventType: "earnings_accrual",
-      taskId: body.taskId,
-      subtaskId: body.subtaskId,
-      actorId: rewardAccountId,
-      coordinatorId: identity.peerId,
-      payloadJson: JSON.stringify({
-        sourceAgentId: body.agentId,
-        accountId: rewardAccountId,
-        credits: accrualCredits,
-        durationMs: body.durationMs,
-        ok: body.ok,
-        resourceClass: subtask.projectMeta.resourceClass
-      })
-    });
-    await pgStore?.persistLedgerRecord(earningsRecord);
-    await persistStatsLedgerRecord(earningsRecord);
+    // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
+    if (accrued) {
+      const earningsRecord = ordering.append({
+        eventType: "earnings_accrual",
+        taskId: body.taskId,
+        subtaskId: body.subtaskId,
+        actorId: rewardAccountId,
+        coordinatorId: identity.peerId,
+        payloadJson: JSON.stringify({
+          sourceAgentId: body.agentId,
+          accountId: rewardAccountId,
+          credits: accrualCredits,
+          durationMs,
+          reportedDurationMs: body.durationMs,
+          ok: body.ok,
+          resourceClass: subtask.projectMeta.resourceClass
+        })
+      });
+      await pgStore?.persistLedgerRecord(earningsRecord);
+      await persistStatsLedgerRecord(earningsRecord);
+    }
   }
 
   // Forward result to origin coordinator if this task came from mesh gossip
@@ -4691,7 +4733,8 @@ const syncedBLETxIds = new Set<string>(); // non-PG mode only
 const inMemoryBleTransfer = createInMemoryBleTransfer(creditEngine, syncedBLETxIds);
 
 app.post("/credits/ble-sync", async (req, reply) => {
-  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip);
+  // Unsigned callers fall through to the (configured) mesh-token check below.
+  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip, { allowUnsigned: true });
   if (!isBleSyncAuthorized(verified, MESH_AUTH_TOKEN !== "", hasMeshToken(req.headers as any))) {
     return reply.code(401).send({ error: "unauthorized" });
   }
