@@ -57,6 +57,21 @@ import {
   SubtaskResult
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
+import {
+  admitPeer,
+  allowlistEnforced,
+  checkPeerRegistration,
+  isAllowlistedKey,
+  parsePeerAllowlist,
+  parsePeerUrlPins,
+  assertUrlPinsForProduction,
+  type PeerUrlPins,
+  ReplayCache,
+  signForwardedResult,
+  signRegistration,
+  verifyForwardedResult,
+  type PeerAllowlist
+} from "../mesh/peer-trust.js";
 import { MeshProtocol } from "../mesh/protocol.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
@@ -141,6 +156,16 @@ import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system
 import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ logger: true });
+// #118 review: keep the exact request bytes so signed bodies (forwarded /result) are verified
+// against what was sent, not a re-serialization. Parsing itself is Fastify's default (safe) parser.
+{
+  const defaultJsonParser = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    (req as unknown as { rawBody?: string }).rawBody = body as string;
+    defaultJsonParser(req, body as string, done);
+  });
+}
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
@@ -157,6 +182,26 @@ queue.onLeaseFailure((result) => {
 });
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
+// #118 review: one admission rule for every way into the peer table.
+mesh.setAdmission((peer, existing, opts) =>
+  admitPeer({
+    allowlist: MESH_PEER_ALLOWLIST,
+    pins: MESH_PEER_URL_PINS,
+    production: isProduction(),
+    peer,
+    existing,
+    authoritative: opts.authoritative,
+    source: opts.source
+  })
+);
+mesh.onBroadcast((message) => {
+  if (message.type !== "task_offer") return;
+  const subtaskId = message.payload?.subtaskId;
+  if (typeof subtaskId !== "string") return;
+  const now = Date.now();
+  for (const [id, exp] of offeredToPeers) if (exp <= now) offeredToPeers.delete(id);
+  offeredToPeers.set(subtaskId, now + OFFERED_SUBTASK_TTL_MS);
+});
 if (process.env.MESH_AUTH_TOKEN) {
   mesh.setMeshToken(process.env.MESH_AUTH_TOKEN);
 }
@@ -169,6 +214,25 @@ const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: s
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
+// #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
+const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
+  try {
+    const parsed = parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
+    assertUrlPinsForProduction(process.env.MESH_PEER_ALLOWLIST, isProduction());
+    return parsed;
+  } catch (error) {
+    // Fail closed, but say why before the process exits.
+    console.error(`[coordinator] FATAL: invalid MESH_PEER_ALLOWLIST: ${(error as Error).message}`);
+    throw error;
+  }
+})();
+// #118 review: optional `@url` on each allowlist entry pins that peer's endpoint.
+const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(process.env.MESH_PEER_ALLOWLIST);
+const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
+/** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */
+const forwardReplayCache = new ReplayCache();
+const OFFERED_SUBTASK_TTL_MS = 24 * 60 * 60 * 1000;
+const offeredToPeers = new Map<string, number>();
 const PORTAL_SERVICE_URL = CC.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
 const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
@@ -840,15 +904,24 @@ async function bootstrapPeerMesh(): Promise<void> {
       }
       // Use the actual reachable URL for gossip if the self-reported URL is different
       const gossipUrl = normalizedPeerUrl ?? effectiveUrl;
-      mesh.addPeer({
-        peerId: remote.peerId,
-        publicKeyPem: remote.publicKeyPem,
-        coordinatorUrl: gossipUrl!,
-        networkMode: remote.networkMode
-      });
+      const admitted = mesh.addPeer(
+        {
+          peerId: remote.peerId,
+          publicKeyPem: remote.publicKeyPem,
+          coordinatorUrl: gossipUrl!,
+          networkMode: remote.networkMode
+        },
+        // Dev without an allowlist keeps the old refresh-on-bootstrap behaviour.
+        { authoritative: !PEER_ALLOWLIST_ENFORCED, source: "bootstrap" }
+      );
+      if (!admitted) {
+        app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_not_allowlisted");
+        continue;
+      }
       peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
       discoveredForCache.add(gossipUrl!);
 
+      const selfUrl = normalizeUrl(COORDINATOR_PUBLIC_URL) ?? COORDINATOR_PUBLIC_URL;
       const registerRes = await request(`${peerUrl}/mesh/register-peer`, {
         method: "POST",
         headers: {
@@ -858,9 +931,14 @@ async function bootstrapPeerMesh(): Promise<void> {
         body: JSON.stringify({
           peerId: identity.peerId,
           publicKeyPem: identity.publicKeyPem,
-          coordinatorUrl: normalizeUrl(COORDINATOR_PUBLIC_URL),
+          coordinatorUrl: selfUrl,
           networkMode,
-          registrationToken: COORDINATOR_REGISTRATION_TOKEN
+          registrationToken: COORDINATOR_REGISTRATION_TOKEN,
+          // #52: prove we hold the key the peer's allowlist names.
+          ...signRegistration(
+            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl, networkMode },
+            coordinatorKeys.privateKeyPem
+          )
         }),
         signal: AbortSignal.timeout(8_000)
       });
@@ -2375,10 +2453,16 @@ async function publishResult(result: SubtaskResult): Promise<void> {
   const origin = taskOriginMap.get(result.subtaskId);
   if (origin && origin.coordinatorId !== identity.peerId) {
     taskOriginMap.delete(result.subtaskId);
+    const forwardJson = JSON.stringify(result);
     void request(`${origin.coordinatorUrl}/result`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
-      body: JSON.stringify(result)
+      headers: {
+        "content-type": "application/json",
+        ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+        // #52: the origin checks this against our allowlisted key.
+        ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
+      },
+      body: forwardJson
     })
       .then(() => app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin"))
       .catch((e) => app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed"));
@@ -2492,10 +2576,16 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
     const origin = taskOriginMap.get(r.subtaskId);
     if (origin && origin.coordinatorId !== identity.peerId) {
       taskOriginMap.delete(r.subtaskId);
+      const forwardJson = JSON.stringify(r);
       void request(`${origin.coordinatorUrl}/result`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
-        body: JSON.stringify(r)
+        headers: {
+          "content-type": "application/json",
+          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+          // #52: the origin checks this against our allowlisted key.
+          ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
+        },
+        body: forwardJson
       }).catch((e) => app.log.warn({ subtaskId: r.subtaskId, err: String(e) }, "result_forward_failed"));
     }
     void mesh.broadcast(
@@ -2576,6 +2666,31 @@ app.post("/result", async (req, reply) => {
   });
   if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });
   const isPeerForward = resultAuth === "peer_forward";
+  if (isPeerForward) {
+    // #52: a forwarded result must be signed by an allowlisted peer coordinator.
+    const fwd = verifyForwardedResult({
+      headers: (req as any).headers ?? {},
+      // #118 review: verify the exact bytes received, not a re-serialization.
+      bodyJson: (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(rawBody),
+      allowlist: MESH_PEER_ALLOWLIST,
+      production: isProduction(),
+      publicKeyFor: (id) => (id === identity.peerId ? null : coordinatorPublicKeyById(id)),
+      replay: forwardReplayCache
+    });
+    if (!fwd.ok) {
+      app.log.warn({ subtaskId: body.subtaskId, error: fwd.error }, "forwarded_result_rejected");
+      return reply.code(fwd.code).send({ error: fwd.error });
+    }
+    // #118 review: only results for subtasks we offered to peers, and only once each.
+    if (PEER_ALLOWLIST_ENFORCED) {
+      const exp = offeredToPeers.get(body.subtaskId);
+      if (exp === undefined || exp <= Date.now()) {
+        app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_not_offered");
+        return reply.code(403).send({ error: "subtask_not_offered" });
+      }
+      offeredToPeers.delete(body.subtaskId);
+    }
+  }
   if (!isPeerForward) {
     const claimCheck = checkResultClaim(claim, body.agentId);
     if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
@@ -3216,7 +3331,9 @@ const peerSchema = z.object({
   coordinatorUrl: z.string().url(),
   networkMode: z.enum(["public_mesh", "enterprise_overlay"]),
   role: z.enum(["coordinator", "agent", "phone"]).optional(),
-  registrationToken: z.string().optional()
+  registrationToken: z.string().optional(),
+  issuedAtMs: z.number().optional(),
+  signature: z.string().optional()
 });
 
 app.post("/mesh/register-peer", async (req, reply) => {
@@ -3227,8 +3344,18 @@ app.post("/mesh/register-peer", async (req, reply) => {
   // Coordinators that authenticate with a valid mesh token are trusted peers —
   // skip portal validation (same pattern as loopback self-registration for agents).
   // The mesh token IS the shared secret that proves membership in this coordinator mesh.
-  const meshTokenProvided = MESH_AUTH_TOKEN && (req.headers as Record<string, string>)["x-mesh-token"] === MESH_AUTH_TOKEN;
+  const meshTokenProvided = MESH_AUTH_TOKEN !== "" && hasMeshToken((req.headers ?? {}) as Record<string, unknown>);
   let activationReason = "mesh_token_peer";
+
+  if (meshTokenProvided) {
+    // #52: the shared token alone is not enough; the peer's key must be allowlisted.
+    const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction() });
+    if (!trust.ok) {
+      app.log.warn({ peerId: body.peerId, error: trust.error }, "peer_registration_rejected");
+      return reply.code(trust.code).send({ error: trust.error });
+    }
+    activationReason = trust.mode === "allowlist" ? "mesh_peer_allowlisted" : "mesh_token_peer_legacy";
+  }
 
   if (!meshTokenProvided) {
     const activation = await validatePortalNode({
@@ -3246,7 +3373,12 @@ app.post("/mesh/register-peer", async (req, reply) => {
     activationReason = activation.reason ?? "portal_validated";
   }
 
-  mesh.addPeer(body as MeshPeerIdentity);
+  const { issuedAtMs: _issuedAtMs, signature: _signature, ...peerIdentity } = body;
+  // Proven key (or portal-validated): may replace a squatter or update its own URL.
+  if (!mesh.addPeer(peerIdentity as MeshPeerIdentity, { authoritative: true, source: "register" })) {
+    // #118 review: also refused when the URL disagrees with the pin or no endpoint is pinned/known.
+    return reply.code(403).send({ error: "peer_not_allowlisted_or_url_unpinned" });
+  }
   peerScore.set(body.peerId, 100);
   app.log.info({ peerId: body.peerId, reason: activationReason, url: body.coordinatorUrl }, "peer_registered");
   const approvalRecord = ordering.append({
@@ -3294,6 +3426,13 @@ async function handleMeshIngest(
   message: z.infer<typeof meshIngestSchema>
 ): Promise<{ ok: boolean; statusCode?: number; error?: string; [key: string]: unknown }> {
   const peer = mesh.listPeers().find((p) => p.peerId === message.fromPeerId);
+  // #118 review: with the allowlist enforced, only registered allowlisted peers may send gossip.
+  if (PEER_ALLOWLIST_ENFORCED) {
+    if (!MESH_PEER_ALLOWLIST.has(message.fromPeerId)) return { ok: false, statusCode: 403, error: "peer_not_allowlisted" };
+    if (!peer || !isAllowlistedKey(MESH_PEER_ALLOWLIST, peer.peerId, peer.publicKeyPem)) {
+      return { ok: false, statusCode: 404, error: "peer_unknown" };
+    }
+  }
   // Allow peer_exchange and capability_announce from unknown peers — this is how
   // new peers introduce themselves to the mesh after registering.
   if (!peer && message.type !== "peer_exchange" && message.type !== "capability_announce") {
@@ -3384,16 +3523,18 @@ async function handleMeshIngest(
     let added = 0;
     for (const p of payload.peers ?? []) {
       if (p.peerId === identity.peerId) continue;
-      const existing = mesh.listPeers().find(ep => ep.peerId === p.peerId);
-      if (!existing) {
-        mesh.addPeer({
-          peerId: p.peerId,
-          publicKeyPem: p.publicKeyPem,
-          coordinatorUrl: p.peerUrl,
-          networkMode: p.networkMode,
-        });
-        peerScore.set(p.peerId, 100);
+      // #118 review: admission (allowlist + squatter replacement) is enforced inside addPeer.
+      const admitted = mesh.addPeer({
+        peerId: p.peerId,
+        publicKeyPem: p.publicKeyPem,
+        coordinatorUrl: p.peerUrl,
+        networkMode: p.networkMode,
+      }, { source: "gossip" });
+      if (admitted) {
+        peerScore.set(p.peerId, peerScore.get(p.peerId) ?? 100);
         added++;
+      } else {
+        app.log.debug?.({ from: message.fromPeerId, peerId: p.peerId }, "peer_exchange_entry_dropped");
       }
     }
     if (added > 0) {
