@@ -2936,8 +2936,10 @@ app.get("/economy/issuance/quorum/:epochId", async (req, reply) => {
   return { epochId: params.epochId, records };
 });
 
+// #100: each call can spend real sats, so manual anchor triggers need the admin token
+// (a mesh token is not enough). The #46 per-checkpoint lock and daily budget still apply.
 app.post("/economy/issuance/anchor", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return;
   const anchor = await maybeAnchorLatestFinalizedEpoch();
   return { ok: true, anchor };
 });
@@ -3496,7 +3498,8 @@ app.post("/stats/ledger/ingest", async (req, reply) => {
   return { ok: true, ingested, skipped };
 });
 app.post("/stats/anchors/anchor-latest", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // #100
+
   const anchor = await maybeAnchorLatestStatsCheckpoint();
   const finality = await latestStatsFinality();
   return {
