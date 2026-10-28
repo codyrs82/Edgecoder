@@ -30,6 +30,7 @@ jobs:
       - run: npm run check:fly-configs
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
+      - run: npm run test:integration
       - name: Upload test report
         if: failure()
         uses: actions/upload-artifact@v4
@@ -68,6 +69,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
+      - run: npm run test:integration
       - name: Upload test report
         if: failure()
         uses: actions/upload-artifact@v4
@@ -75,6 +77,29 @@ jobs:
           name: junit-debian
           path: junit.xml
           if-no-files-found: ignore
+
+  credits-pg:
+    # #48 (and later economy fixes): tests that need a real Postgres for locking/transactions.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: credits }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d credits" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: "Postgres-backed credit tests"
+        env:
+          TEST_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/credits
+        run: npx vitest run tests/credits/atomic-debit.test.ts
 
   desktop-token-test:
     # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
@@ -107,6 +132,8 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      - name: Component tests (LogViewer, MeshTopology; jsdom + testing-library)
+        run: npm run test:components
       - run: npm run build
       - name: No eval in main-thread bundles
         run: |
@@ -120,6 +147,69 @@ jobs:
             echo "::error::eval/new Function found in a main-thread bundle (blocked by script-src 'self')"
             exit 1
           fi
+
+  # #29: axe audit (fails on critical violations) and small-window overflow checks at the
+  # Tauri minimum (900x600) and default (1200x800) sizes, against the built web bundle.
+  desktop-a11y:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run test:a11y
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-report
+          path: |
+            desktop/a11y-report
+            desktop/test-results
+          retention-days: 7
+
+  # #29: compile the iOS app for the simulator (no signing) so Swift changes are actually built.
+  ios-build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ios/EdgeCoderIOS
+    steps:
+      - uses: actions/checkout@v4
+      - run: xcodebuild -version
+      - name: Build for iOS Simulator (unsigned)
+        run: |
+          set -u
+          xcodebuild \
+            -project EdgeCoderIOS.xcodeproj \
+            -scheme EdgeCoderIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/ios-dd" \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            build > "$RUNNER_TEMP/xcodebuild.log" 2>&1 || {
+              grep -E "(error|fatal):" "$RUNNER_TEMP/xcodebuild.log" | sort -u | head -80
+              tail -80 "$RUNNER_TEMP/xcodebuild.log"
+              exit 1
+            }
+          tail -5 "$RUNNER_TEMP/xcodebuild.log"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          retention-days: 7
 
   # #9: build both images and check them: non-root, no Ollama in the slim image,
   # no tests/, server size budget, and a /health/runtime smoke test.

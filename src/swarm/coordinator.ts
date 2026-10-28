@@ -25,7 +25,7 @@ import {
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
 import { extractCode } from "../model/extract.js";
-import { SwarmQueue } from "./queue.js";
+import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -51,7 +51,8 @@ import {
   PeerExchangePayload,
   CapabilityAnnouncePayload,
   MeshPeerRole,
-  SandboxMode
+  SandboxMode,
+  SubtaskResult
 } from "../common/types.js";
 import { createPeerIdentity, createPeerKeys, signPayload, verifyPayload } from "../mesh/peer.js";
 import { MeshProtocol } from "../mesh/protocol.js";
@@ -59,7 +60,7 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, adjustCredits, creditEngine, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { accrueCredits, creditEngine, grantCredits, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
@@ -72,6 +73,14 @@ import {
 } from "../economy/issuance.js";
 import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
+import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
+import {
+  anchorCheckpoint,
+  isTxid,
+  refreshAnchors,
+  requiredConfirmationsFromEnv,
+  type AnchorDeps
+} from "../economy/anchoring.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -126,7 +135,13 @@ await app.register(cors, {
   credentials: true,
 });
 await app.register(websocket);
-const queue = new SwarmQueue(pgStore);
+const queue = new SwarmQueue(pgStore, leaseConfigFromEnv());
+// #51: subtasks failed at the retry cap go through finalizeFailedSubtask (declared below).
+queue.onLeaseFailure((result) => {
+  void finalizeFailedSubtask(result).catch((err) =>
+    app.log.error({ err, subtaskId: result.subtaskId }, "subtask_failure_finalize_failed")
+  );
+});
 const protocol = new MeshProtocol();
 const mesh = new GossipMesh();
 if (process.env.MESH_AUTH_TOKEN) {
@@ -138,6 +153,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
+/** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
+const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
@@ -202,6 +219,9 @@ const COORDINATOR_PEER_CACHE_FILE = resolve(
 const STATS_LEDGER_SYNC_INTERVAL_MS = Number(process.env.STATS_LEDGER_SYNC_INTERVAL_MS ?? "10000");
 const STATS_ANCHOR_INTERVAL_MS = Number(process.env.STATS_ANCHOR_INTERVAL_MS ?? "600000");
 const STATS_ANCHOR_MIN_CONFIRMATIONS = Number(process.env.STATS_ANCHOR_MIN_CONFIRMATIONS ?? "1");
+// #46: depth at which an anchor counts as "anchored", and how often pending anchors are polled.
+const ANCHOR_REQUIRED_CONFIRMATIONS = requiredConfirmationsFromEnv();
+const ANCHOR_CONFIRM_POLL_MS = Math.max(30_000, Number(process.env.ANCHOR_CONFIRM_POLL_MS ?? "600000") || 600_000);
 const AGENT_RATE_LIMIT_MAX = Number(process.env.AGENT_RATE_LIMIT_MAX ?? "30");
 const AGENT_RATE_LIMIT_WINDOW_MS = Number(process.env.AGENT_RATE_LIMIT_WINDOW_MS ?? "60000");
 const SECURITY_NONCE_TTL_MS = Number(process.env.SECURITY_NONCE_TTL_MS ?? "300000");
@@ -458,6 +478,7 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
 
 // ── Subtask dependency tracking ─────────────────────────────────────────────
 import { SubtaskDepTracker } from "./subtask-deps.js";
+import { lateResultRejection } from "./lease-gate.js";
 const depTracker = new SubtaskDepTracker();
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
@@ -1116,26 +1137,49 @@ async function maybeFinalizeStatsCheckpoint(): Promise<void> {
   }
 }
 
-async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
+/**
+ * #46: anchoring needs a real provider. In production an unset BITCOIN_ANCHOR_PROVIDER
+ * disables anchoring (no simulated records) instead of exiting; dev falls back to mock.
+ */
+let anchorProviderCache: BitcoinAnchorProvider | null | undefined;
+function anchorDeps(): AnchorDeps | null {
   if (!pgStore) return null;
+  if (anchorProviderCache === undefined) {
+    if (IS_PROD && !process.env.BITCOIN_ANCHOR_PROVIDER) {
+      app.log.warn("bitcoin_anchoring_disabled: set BITCOIN_ANCHOR_PROVIDER=bitcoind|anchor-proxy to anchor checkpoints");
+      anchorProviderCache = null;
+    } else {
+      anchorProviderCache = createBitcoinAnchorProviderFromEnv(BITCOIN_NETWORK);
+    }
+  }
+  return anchorProviderCache ? { provider: anchorProviderCache, store: pgStore, network: BITCOIN_NETWORK } : null;
+}
+
+/** Confirmations to report for an anchor: only real txids count (legacy simulated rows = 0). */
+function anchorConfirmations(anchor: BitcoinAnchorRecord | null | undefined): number {
+  return anchor && anchor.status !== "failed" && isTxid(anchor.txRef) ? anchor.confirmations ?? 0 : 0;
+}
+
+async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return null;
   const head = await pgStore.latestStatsLedgerHead();
   if (!head) return null;
-  const checkpointHash = head.hash;
-  const existing = await pgStore.latestAnchorByCheckpoint(checkpointHash);
-  if (existing && existing.status === "anchored") return existing;
-  const now = Date.now();
-  const record: BitcoinAnchorRecord = {
-    anchorId: existing?.anchorId ?? randomUUID(),
-    epochId: `stats:${head.count}`,
-    checkpointHash,
-    anchorNetwork: BITCOIN_NETWORK,
-    txRef: existing?.txRef ?? `stats-anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: now,
-    createdAtMs: existing?.createdAtMs ?? now
-  };
-  await pgStore.upsertBitcoinAnchor(record);
-  return record;
+  return anchorCheckpoint(deps, { epochId: `stats:${head.count}`, checkpointHash: head.hash });
+}
+
+/** #46: poll pending anchors (and re-verify the latest ones for reorgs). */
+async function refreshAnchorConfirmations(): Promise<void> {
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return;
+  const recent = await pgStore.listAnchors(5);
+  const events = await refreshAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, recent);
+  for (const e of events) {
+    if (e.event === "reorg") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reorg_reverted_to_pending");
+    else if (e.event === "confirmed") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_confirmed");
+    else if (e.event === "unknown") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_confirmation_unavailable");
+    else if (e.event === "conflicted") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_conflicted_marked_failed");
+  }
 }
 
 async function latestStatsFinality(): Promise<{
@@ -1168,7 +1212,7 @@ async function latestStatsFinality(): Promise<{
     };
   }
   const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.hash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  const confirmations = anchorConfirmations(anchor);
   const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
   return {
     checkpointHash: latestCommit.hash,
@@ -1427,11 +1471,15 @@ async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocat
 }
 
 async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | null> {
-  if (!pgStore) return null;
+  const deps = anchorDeps();
+  if (!deps || !pgStore) return null;
   const epoch = await pgStore.latestIssuanceEpoch(true);
   if (!epoch) return null;
   const latestAnchor = await pgStore.latestAnchor();
-  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status === "anchored") return latestAnchor;
+  // #46: a real broadcast (pending or anchored) for this epoch is never re-sent.
+  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status !== "failed" && isTxid(latestAnchor.txRef)) {
+    return latestAnchor;
+  }
   const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
   const checkpointHash = createHash("sha256")
     .update(JSON.stringify({ epoch, allocations }))
@@ -1441,18 +1489,7 @@ async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | 
     epochId: epoch.issuanceEpochId,
     payload: { checkpointHash, allocationCount: allocations.length }
   });
-  const anchor: BitcoinAnchorRecord = {
-    anchorId: randomUUID(),
-    epochId: epoch.issuanceEpochId,
-    checkpointHash,
-    anchorNetwork: BITCOIN_NETWORK,
-    txRef: `anchor:${BITCOIN_NETWORK}:${checkpointHash.slice(0, 24)}`,
-    status: "anchored",
-    anchoredAtMs: Date.now(),
-    createdAtMs: Date.now()
-  };
-  await pgStore.upsertBitcoinAnchor(anchor);
-  return anchor;
+  return anchorCheckpoint(deps, { epochId: epoch.issuanceEpochId, checkpointHash });
 }
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
@@ -1539,7 +1576,7 @@ const settleIfPaid = createPaymentSettler({
   saveIntent: (intent) => {
     paymentIntents.set(intent.intentId, intent);
   },
-  grantCredits: (accountId, credits, reason) => adjustCredits(accountId, credits, reason),
+  grantCredits: (accountId, credits, reason) => grantCredits(accountId, credits, reason),
   onSettled: async (intent) => {
     await recordIntentSettlementSideEffects(intent);
   }
@@ -1626,6 +1663,8 @@ const registerSchema = z.object({
 
 const heartbeatSchema = z.object({
   agentId: z.string(),
+  /** #51: renew claim leases only; don't drain tunnel invites/notices or offers. */
+  leaseOnly: z.boolean().optional(),
   powerTelemetry: z
     .object({
       onExternalPower: z.boolean().optional(),
@@ -1834,6 +1873,11 @@ app.post("/heartbeat", async (req, reply) => {
     });
   }
   queue.heartbeat(body.agentId);
+  if (body.leaseOnly) {
+    // #51: mid-task lease renewal. Signature was checked above (unsigned is rejected
+    // when REQUIRE_SIGNED_AGENT_REQUESTS is on, the production default); nothing is drained.
+    return reply.send({ ok: true, leaseOnly: true });
+  }
   behaviorTracker.recordHeartbeat(body.agentId);
   if (body.powerTelemetry) {
     const existing = agentCapabilities.get(body.agentId);
@@ -1866,7 +1910,12 @@ app.post("/heartbeat", async (req, reply) => {
       existing.sandboxMode = body.sandboxMode as SandboxMode;
     }
   }
-  const requeued = queue.requeueStale(30_000);
+  // #51: lease-based requeue (timeout + grace, renewed by heartbeat, retry cap).
+  const leaseExpiry = queue.expireLeases();
+  const requeued = leaseExpiry.requeued.length;
+  if (leaseExpiry.failed.length > 0) {
+    app.log.warn({ subtaskIds: leaseExpiry.failed }, "subtask_failed_max_attempts");
+  }
   const tunnelInvites = pendingTunnelInvites.get(body.agentId) ?? [];
   pendingTunnelInvites.set(body.agentId, []);
   const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
@@ -1945,8 +1994,14 @@ app.post("/submit", async (req, reply) => {
     try {
       // Spend credits when using public mesh resources.
       await spendCredits(body.submitterAccountId, 1, "task_submit", body.taskId);
-    } catch {
-      return reply.code(402).send({ error: "insufficient_credits" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) {
+        return reply.code(402).send({ error: "insufficient_credits" });
+      }
+      // DB/lock failures are not "insufficient credits" (#48 review): surface and log them.
+      req.log.error({ err, taskId: body.taskId }, "task_submit_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
     }
   }
 
@@ -2005,6 +2060,9 @@ app.post("/submit", async (req, reply) => {
   });
   await pgStore?.persistLedgerRecord(enqueueRecord);
   await persistStatsLedgerRecord(enqueueRecord);
+  if (body.submitterAccountId !== "anonymous") {
+    taskBilling.set(body.taskId, { accountId: body.submitterAccountId, credits: 1, refunded: false });
+  }
 
   // If mesh peers exist, delay local claiming to give peers a chance to claim
   // via gossip first (prevents duplicate execution across coordinators).
@@ -2180,6 +2238,67 @@ app.post("/pull", async (req, reply) => {
   return reply.send({ subtask: task ?? null });
 });
 
+/**
+ * #51: terminal failure of a subtask the coordinator gave up on (retry cap). Does
+ * what /result does for a failed result, minus any accrual (nobody earns, and
+ * "coordinator" is never credited): ledger record, fail held dependents, forward
+ * to the origin coordinator, announce, and refund the requester's submit charge.
+ */
+async function finalizeFailedSubtask(result: SubtaskResult): Promise<void> {
+  const failedResults: SubtaskResult[] = [result];
+  for (const dep of depTracker.dropDependents(result.subtaskId)) {
+    const depResult: SubtaskResult = {
+      subtaskId: dep.id,
+      taskId: dep.taskId,
+      agentId: "coordinator",
+      ok: false,
+      output: "",
+      error: `dependency_failed:${result.subtaskId}`,
+      durationMs: 0
+    };
+    queue.complete(depResult);
+    failedResults.push(depResult);
+  }
+  for (const r of failedResults) {
+    const record = ordering.append({
+      eventType: "task_complete",
+      taskId: r.taskId,
+      subtaskId: r.subtaskId,
+      actorId: "coordinator",
+      payloadJson: JSON.stringify({ ok: false, error: r.error })
+    });
+    await pgStore?.persistLedgerRecord(record);
+    await persistStatsLedgerRecord(record);
+
+    const origin = taskOriginMap.get(r.subtaskId);
+    if (origin && origin.coordinatorId !== identity.peerId) {
+      taskOriginMap.delete(r.subtaskId);
+      void request(`${origin.coordinatorUrl}/result`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+        body: JSON.stringify(r)
+      }).catch((e) => app.log.warn({ subtaskId: r.subtaskId, err: String(e) }, "result_forward_failed"));
+    }
+    void mesh.broadcast(
+      protocol.createMessage(
+        "result_announce",
+        identity.peerId,
+        { taskId: r.taskId, subtaskId: r.subtaskId, ok: false },
+        coordinatorKeys.privateKeyPem
+      )
+    );
+  }
+  const billing = taskBilling.get(result.taskId);
+  if (billing && !billing.refunded) {
+    billing.refunded = true;
+    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
+  }
+  app.log.warn(
+    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
+    "task_failed_max_attempts"
+  );
+}
+
 app.post("/result", async (req, reply) => {
   // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
   // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
@@ -2219,6 +2338,9 @@ app.post("/result", async (req, reply) => {
   if (blacklisted) {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
   }
+  // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
+  const late = lateResultRejection(queue, body.subtaskId, body.agentId);
+  if (late) return reply.code(late.statusCode).send(late.body);
   // ── #44: claim ownership, before anything is recorded ──
   const claim = queue.getClaim(body.subtaskId);
   // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the
@@ -3490,7 +3612,7 @@ app.get("/stats/anchors/verify", async (req, reply) => {
     })
     .parse(req.query);
   const anchor = await pgStore?.latestAnchorByCheckpoint(query.checkpointHash);
-  const confirmations = anchor?.status === "anchored" ? 1 : 0;
+  const confirmations = anchorConfirmations(anchor);
   return {
     ok: true,
     checkpointHash: query.checkpointHash,
@@ -4933,6 +5055,9 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
       }, STATS_ANCHOR_INTERVAL_MS);
+      setInterval(() => {
+        void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
+      }, ANCHOR_CONFIRM_POLL_MS);
       // ── Security: nonce prune scheduler ──
       const pruneAdapter: PrunableStore = {
         async noncePrune() { await nonceStore.prune(); return 0; },
