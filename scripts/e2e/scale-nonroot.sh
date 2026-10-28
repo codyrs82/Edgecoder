@@ -14,9 +14,11 @@ MESH_TOKEN="${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}"
 status() { curl -sf -H "x-mesh-token: ${MESH_TOKEN}" "$SEED_URL/status"; }
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 fail() { echo "::error::$*"; exit 1; }
+# On any failure, print recent container logs to the job log (the artifact has the full set).
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "--- last 200 log lines per service ---"; dc logs --no-color --tail 200 || true; fi' EXIT
 
 echo "=== Non-root scale test: ${WORKERS} workers ==="
-dc up -d --build --scale worker="${WORKERS}"
+dc up -d --build --scale worker="${WORKERS}" || fail "stack failed to start (seed healthcheck or a container exited; logs below)"
 
 echo "[1/4] Waiting for seed node (up to ${WAIT_SECS}s)..."
 ok=""
@@ -49,7 +51,12 @@ done
 
 echo "[4/4] Scanning logs for permission errors..."
 logs=$(dc logs --no-color seed-node worker 2>&1 || true)
-if echo "$logs" | grep -Ei "EACCES|EPERM|permission denied|operation not permitted" | grep -v "^\s*$" | head -n 20; then
+# Capture first, then test: piping straight into `head` lets SIGPIPE (141) under
+# pipefail turn a flood of matches into a pass.
+hits=$(printf '%s\n' "$logs" | grep -Ei "EACCES|EPERM|permission denied|operation not permitted" || true)
+if [ -n "$hits" ]; then
+  echo "$(printf '%s\n' "$hits" | wc -l) matching line(s); first 20:"
+  printf '%s\n' "$hits" | head -n 20 || true
   fail "permission errors in container logs (non-root regression; see above)"
 fi
 
