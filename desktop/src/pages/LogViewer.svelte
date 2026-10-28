@@ -249,7 +249,7 @@
 
   .tab.active {
     background: var(--accent, #3b82f6);
-    color: white;
+    color: var(--on-accent, #fff);
   }
 
   .tab-count {

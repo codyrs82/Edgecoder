@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "bundle-agent": "bash ../scripts/bundle-agent-resources.sh",
     "tauri": "tauri",
+    "test:a11y": "playwright test -c playwright.config.ts",
     "test:components": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
@@ -26,6 +27,8 @@
     "monaco-editor": "^0.55.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.64.1",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.0.0",
