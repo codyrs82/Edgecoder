@@ -39,3 +39,18 @@ WHERE d.refobjid = 'credit_transactions'::regclass
   AND d.classid = 'pg_rewrite'::regclass
   AND v.oid <> d.refobjid;
 ```
+
+## #153: `payment_intents.quoted_credits` to `NUMERIC(30, 6)`
+
+Same pattern as above: `ALTER TABLE payment_intents ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6)
+USING round(quoted_credits::numeric, 6)`, run only while the column isn't `NUMERIC(30, 6)`.
+
+- **Lock:** `ACCESS EXCLUSIVE` on `payment_intents` while the table is rewritten. Its indexes,
+  including `idx_payment_intents_payment_hash`, are rebuilt. Payment creation and settlement block
+  until it commits.
+- **Dependent views:** none ship with EdgeCoder. To check for your own, run the query above with
+  `'payment_intents'::regclass`.
+- **Rollback:** `... TYPE DOUBLE PRECISION`.
+
+`coordinator_earnings_projection.total_credits` is still `DOUBLE PRECISION`. Its conversion is
+blocked on the coordinator split (#153).

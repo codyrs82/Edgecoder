@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   coordinator_fee_bps INT NOT NULL,
   coordinator_fee_sats BIGINT NOT NULL,
   net_sats BIGINT NOT NULL,
-  quoted_credits DOUBLE PRECISION NOT NULL,
+  quoted_credits NUMERIC(30, 6) NOT NULL, -- #153 (was DOUBLE PRECISION; migrated below)
   status TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL,
   settled_at_ms BIGINT,
@@ -400,6 +400,16 @@ BEGIN
                AND column_name = 'credits'
                AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
     ALTER TABLE credit_transactions ALTER COLUMN credits TYPE NUMERIC(30, 6) USING round(credits::numeric, 6);
+  END IF;
+END $$;
+-- #153: payment_intents.quoted_credits to NUMERIC(30,6), same rules as credit_transactions.credits.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'payment_intents'
+               AND column_name = 'quoted_credits'
+               AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
+    ALTER TABLE payment_intents ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6) USING round(quoted_credits::numeric, 6);
   END IF;
 END $$;
 -- #42: payment hash proof per intent (additive migration)
