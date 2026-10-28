@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { CREDIT_LOCK_NAMESPACE, PostgresStore, SCHEMA_SQL } from "../../src/db/postgres.js";
+import { CREDIT_LOCK_NAMESPACE, PostgresStore, SCHEMA_LOCK_KEY, SCHEMA_LOCK_NAMESPACE, SCHEMA_SQL } from "../../src/db/postgres.js";
 import { CreditEngine } from "../../src/credits/engine.js";
 import type { CreditTransaction } from "../../src/common/types.js";
 
@@ -136,8 +136,27 @@ describe("exact credit arithmetic (#108)", () => {
   });
 
   it("schema declares credit_transactions.credits NUMERIC and migrates DOUBLE PRECISION", () => {
-    expect(SCHEMA_SQL).toMatch(/CREATE TABLE IF NOT EXISTS credit_transactions \([\s\S]*?credits NUMERIC NOT NULL/);
-    expect(SCHEMA_SQL).toContain("ALTER COLUMN credits TYPE NUMERIC USING round(credits::numeric, 6)");
+    expect(SCHEMA_SQL).toMatch(/CREATE TABLE IF NOT EXISTS credit_transactions \([\s\S]*?credits NUMERIC\(30, 6\) NOT NULL/);
+    expect(SCHEMA_SQL).toContain("ALTER COLUMN credits TYPE NUMERIC(30, 6) USING round(credits::numeric, 6)");
+  });
+
+  it("schema migration starts with the schema advisory lock (#108 review)", () => {
+    expect(SCHEMA_SQL.trimStart().split("\n")[0]).toBe(`SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});`);
+    expect(SCHEMA_LOCK_NAMESPACE).not.toBe(CREDIT_LOCK_NAMESPACE);
+    // One implicit transaction only works without explicit transaction control in the script.
+    expect(SCHEMA_SQL).not.toMatch(/^\s*(BEGIN|COMMIT)\s*;/m);
+  });
+
+  it("amounts are rounded to 6 decimals on write; sub-micro amounts are rejected (#108 review)", async () => {
+    const { roundCredits, adjustCredits, spendCredits, creditEngine } = await import("../../src/credits/store.js");
+    expect(roundCredits(0.1234567)).toBe(0.123457);
+    expect(roundCredits(0.1 + 0.2)).toBe(0.3);
+    const acct = `round-${randomUUID()}`;
+    const tx = await adjustCredits(acct, 1.0000004, "seed");
+    expect(tx?.credits).toBe(1);
+    await expect(adjustCredits(acct, 0.0000004, "dust")).rejects.toThrow("invalid_credit_amount");
+    await expect(spendCredits(acct, 0.0000004, "dust")).rejects.toThrow("invalid_credit_amount");
+    expect(creditEngine.balance(acct)).toBe(1);
   });
 });
 
@@ -218,6 +237,11 @@ describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
       );
       expect(type.rows[0].data_type).toBe("numeric");
       const row = await pool.query(`SELECT credits::text AS c FROM credit_transactions WHERE tx_id = 'a'`);
+      const t = await pool.query(
+        `SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'credit_transactions' AND column_name = 'credits'`,
+        [schema],
+      );
+      expect(t.rows[0]).toEqual({ numeric_precision: 30, numeric_scale: 6 });
       expect(row.rows[0].c).toBe("0.300000");
       await pool.query(SCHEMA_SQL); // idempotent
     } finally {
@@ -225,4 +249,41 @@ describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
       await pool.end();
     }
   }, 60_000);
+
+  it("rounds to 6 decimals on write", async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 2 });
+    try {
+      await pool.query(SCHEMA_SQL);
+      const store = new PostgresStore(pool);
+      const acct = `r6-${randomUUID()}`;
+      await store.persistCreditTransaction({ ...spendTx(acct, 0.1234567), type: "earn", reason: "seed" });
+      const row = await pool.query(`SELECT credits::text AS c FROM credit_transactions WHERE account_id = $1`, [acct]);
+      expect(row.rows[0].c).toBe("0.123457");
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+
+  it("is safe when several instances migrate at once", async () => {
+    const schema = `race_${randomUUID().replace(/-/g, "")}`;
+    const opts = { connectionString: PG_URL, max: 1, options: `-c search_path=${schema}` };
+    const admin = new pg.Pool(opts);
+    const pools = Array.from({ length: 4 }, () => new pg.Pool(opts));
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      await admin.query(`CREATE TABLE credit_transactions (
+        tx_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, tx_type TEXT NOT NULL,
+        credits DOUBLE PRECISION NOT NULL, reason TEXT NOT NULL, related_task_id TEXT, timestamp_ms BIGINT NOT NULL)`);
+      await admin.query(`INSERT INTO credit_transactions VALUES ('a','m','earn',0.1 + 0.2,'seed',NULL,1)`);
+      // Without the schema lock, concurrent CREATE TABLE IF NOT EXISTS / ALTER can error out.
+      const results = await Promise.allSettled(pools.map((p) => p.query(SCHEMA_SQL)));
+      expect(results.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      const row = await admin.query(`SELECT credits::text AS c FROM credit_transactions WHERE tx_id = 'a'`);
+      expect(row.rows[0].c).toBe("0.300000");
+    } finally {
+      await Promise.all(pools.map((p) => p.end()));
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await admin.end();
+    }
+  }, 120_000);
 });

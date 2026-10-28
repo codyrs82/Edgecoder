@@ -11,6 +11,7 @@ This document covers deploying EdgeCoder services across Fly.io, Docker, systemd
 - [Linux .deb Package](#linux-deb-package)
 - [Windows .msi Installer](#windows-msi-installer)
 - [Environment Variables Reference](#environment-variables-reference)
+- [Database migrations](database-migrations.md) (Postgres schema upgrades, locks, and concurrent starts)
 
 ---
 

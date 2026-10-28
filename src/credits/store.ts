@@ -65,11 +65,21 @@ function assertAmount(credits: number): void {
 }
 
 /**
+ * #108: credits are stored as NUMERIC(30,6). Round here too, so the returned transaction
+ * matches the stored row and an amount that rounds to 0 is rejected instead of writing 0.
+ */
+export function roundCredits(credits: number): number {
+  return Math.round(credits * 1_000_000) / 1_000_000;
+}
+
+/**
  * Atomic debit (#48). Postgres: balance check + insert in one transaction under a
  * per-account advisory lock. In-memory: synchronous check + insert.
  * Throws `insufficient_credits: <balance> < <credits>`; the balance never goes negative.
  */
-async function debit(accountId: string, credits: number, reason: string, relatedTaskId?: string): Promise<CreditTransaction> {
+async function debit(accountId: string, rawCredits: number, reason: string, relatedTaskId?: string): Promise<CreditTransaction> {
+  assertAmount(rawCredits);
+  const credits = roundCredits(rawCredits);
   assertAmount(credits);
   if (pgStore) {
     const tx: CreditTransaction = {
@@ -112,8 +122,10 @@ export async function grantCredits(accountId: string, credits: number, reason: s
 }
 
 /** Positive = grant (earn). Negative = debit, which is balance-checked like a spend (#48). */
-export async function adjustCredits(accountId: string, credits: number, reason: string) {
-  if (!Number.isFinite(credits) || credits === 0) throw new Error("invalid_credit_amount");
+export async function adjustCredits(accountId: string, rawCredits: number, reason: string) {
+  if (!Number.isFinite(rawCredits)) throw new Error("invalid_credit_amount");
+  const credits = roundCredits(rawCredits);
+  if (credits === 0) throw new Error("invalid_credit_amount");
   if (credits < 0) return debit(accountId, -credits, reason);
   if (pgStore) {
     const tx: CreditTransaction = {

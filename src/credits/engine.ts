@@ -88,7 +88,7 @@ export class CreditEngine {
       txId: randomUUID(),
       accountId,
       type: input.type,
-      credits: input.credits,
+      credits: Math.round(input.credits * MICROS) / MICROS, // #108: 6 decimals, like Postgres
       reason: input.reason,
       relatedTaskId: input.relatedTaskId,
       timestampMs: Date.now()
