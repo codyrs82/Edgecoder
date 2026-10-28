@@ -342,7 +342,7 @@ describe("reconciliation (#103)", () => {
 
   it("a stuck pending tx that left the mempool is marked failed; one still in the mempool is kept", async () => {
     const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
-    const mk = (inMempool: boolean) => ({ ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => inMempool });
+    const mk = (inMempool: boolean) => ({ ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => inMempool, abandonTx: async () => undefined });
     const d = (p: BitcoinAnchorProvider, st: AnchorStore) => ({ ...deps(p, st), now: () => 1 + CFG.stuckAfterMs });
     const s1 = memStore([stuck]);
     expect(await reconcileAnchor(d(mk(true), s1), stuck, 6, CFG)).toBe("still_pending");
@@ -350,6 +350,29 @@ describe("reconciliation (#103)", () => {
     const s2 = memStore([stuck]);
     expect(await reconcileAnchor(d(mk(false), s2), stuck, 6, CFG)).toBe("failed");
     expect(s2.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("a dropped tx is not marked failed unless abandontransaction succeeds (#109 review)", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const base = scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider;
+    const d = (p: BitcoinAnchorProvider, st: AnchorStore) => ({ ...deps(p, st), now: () => 1 + CFG.stuckAfterMs });
+    const s1 = memStore([stuck]);
+    const failing = { ...base, isInMempool: async () => false, abandonTx: async () => { throw new Error("rpc down"); } };
+    expect(await reconcileAnchor(d(failing, s1), stuck, 6, CFG)).toBe("retry_later");
+    expect(s1.rows.get("b1")).toMatchObject({ status: "pending", reconcileAttempts: 1 });
+    const s2 = memStore([stuck]);
+    expect(await reconcileAnchor(d({ ...base, isInMempool: async () => false }, s2), stuck, 6, CFG)).toBe("retry_later");
+    expect(s2.rows.get("b1")?.status).toBe("pending");
+  });
+
+  it("reconcileAnchors skips a row that changed between listing and locking (#109 review)", async () => {
+    const listed = inflight();
+    const store = Object.assign(memStore([{ ...listed, status: "pending", txRef: TXID }]), {
+      async listAnchorsToReconcile() { return [listed]; }
+    });
+    const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
+    expect(out).toEqual([{ anchorId: "b1", event: "skipped" }]);
+    expect(store.rows.get("b1")?.status).toBe("pending");
   });
 
   it("reconcileAnchors walks the store's reconcile list", async () => {

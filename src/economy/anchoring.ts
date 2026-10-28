@@ -322,7 +322,8 @@ async function bumpAttempts(
  *   (may go straight to anchored). Definitely absent -> "failed" so a later tick
  *   re-anchors. Lookup error -> count an attempt; after maxAttempts -> "needs_admin".
  * - "pending" older than stuckAfterMs and unconfirmed: if the node says it isn't in
- *   the mempool (evicted / replaced) -> "failed" so it is re-anchored.
+ *   the mempool (evicted / replaced) -> abandontransaction, then "failed" so it is
+ *   re-anchored. No abandon support or an abandon error -> count an attempt instead.
  */
 export async function reconcileAnchor(
   deps: AnchorDeps,
@@ -364,6 +365,14 @@ export async function reconcileAnchor(
       return bumpAttempts(deps, record, cfg, nowMs);
     }
     if (inMempool) return "still_pending";
+    // #109 review: abandon the wallet tx first. If that isn't possible, keep the row and let
+    // the attempt counter escalate it to needs_admin rather than risk a double broadcast.
+    if (!deps.provider.abandonTx) return bumpAttempts(deps, record, cfg, nowMs);
+    try {
+      await deps.provider.abandonTx(record.txRef);
+    } catch {
+      return bumpAttempts(deps, record, cfg, nowMs);
+    }
     await deps.store.upsertBitcoinAnchor({ ...record, status: "failed", confirmations: 0, lastCheckedAtMs: nowMs });
     return "failed";
   }
@@ -381,7 +390,20 @@ export async function reconcileAnchors(
   const out: Array<{ anchorId: string; event: ReconcileEvent }> = [];
   for (const row of rows) {
     // Same per-checkpoint lock as anchorCheckpoint, so reconcile never races a broadcast.
-    const run = () => reconcileAnchor(deps, row, required, cfg);
+    // #109 review: re-read under the lock and skip the row if anything moved since listing.
+    const run = async (): Promise<ReconcileEvent> => {
+      const fresh = await deps.store.latestAnchorByCheckpoint(row.checkpointHash);
+      if (
+        !fresh ||
+        fresh.anchorId !== row.anchorId ||
+        fresh.status !== row.status ||
+        fresh.txRef !== row.txRef ||
+        (fresh.reconcileAttempts ?? 0) !== (row.reconcileAttempts ?? 0)
+      ) {
+        return "skipped";
+      }
+      return reconcileAnchor(deps, fresh, required, cfg);
+    };
     const event = deps.store.withCheckpointLock ? await deps.store.withCheckpointLock(row.checkpointHash, run) : await run();
     out.push({ anchorId: row.anchorId, event });
   }

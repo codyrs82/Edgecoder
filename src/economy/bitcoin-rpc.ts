@@ -35,6 +35,11 @@ export interface BitcoinAnchorProvider {
   findCheckpointTx?(dataHex: string): Promise<string | null>;
   /** #103: whether an unconfirmed tx is still in the node's mempool. Throws when the node can't answer. */
   isInMempool?(txid: string): Promise<boolean>;
+  /**
+   * #109 review: release a dropped wallet tx's inputs (bitcoind `abandontransaction`) before the
+   * anchor is marked failed, so a re-broadcast can't double-spend against a resurrected tx.
+   */
+  abandonTx?(txid: string): Promise<void>;
   /** Check RPC connectivity and return node info. */
   healthCheck(): Promise<BitcoinNodeHealth>;
   /** Send BTC to multiple outputs in a single transaction (for payout sweeps). */
@@ -192,6 +197,10 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
       if (err instanceof Error && /bitcoind_rpc_error: -5 /.test(err.message)) return false;
       throw err;
     }
+  }
+
+  async abandonTx(txid: string): Promise<void> {
+    await this.rpc("abandontransaction", [txid]);
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {
