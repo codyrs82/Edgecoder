@@ -31,7 +31,7 @@ jobs:
       # Throwaway CI-only value; the compose file requires it for every command (up, logs, down).
       POSTGRES_PASSWORD: scale-nonroot-ci-only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: "Scale e2e as non-root (#31 blocker)"
         env:
           WORKERS: "3"
@@ -39,7 +39,7 @@ jobs:
       - name: Compose logs
         if: always()
         run: docker compose -f tests/e2e/docker-compose.scale.yml logs --no-color > scale-nonroot.log 2>&1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: scale-nonroot-logs
