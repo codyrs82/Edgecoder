@@ -50,6 +50,10 @@ Monaco's workers are bundled with Vite (`src/lib/monaco-setup.ts`), so the edito
 
 **Custom hosts:** a coordinator or portal URL set in Settings that isn't in `connect-src` gets blocked by the release CSP. For self-hosted builds, add the host to `connect-src`.
 
+**CI debug artifacts (#85).** Each PR run of the `desktop-debug-build` workflow uploads unsigned debug builds:
+- **macOS:** `edgecoder-desktop-debug-macos-latest` contains `edgecoder-desktop-debug-macos.tar.gz`. Extract it with `tar -xzf` rather than Finder's zip handling, so the executable bit survives. The build is unsigned, so Gatekeeper quarantines it. Clear that with `xattr -dr com.apple.quarantine EdgeCoder.app` (or right-click → Open) before launching.
+- **Windows:** `edgecoder-desktop-debug-windows-latest` contains the NSIS `*-setup.exe`. It's unsigned, so SmartScreen will warn: choose "More info → Run anyway".
+
 **Manual QA before release** (`npm run tauri build -- --debug` is enough):
 - open the editor;
 - check syntax highlighting;
