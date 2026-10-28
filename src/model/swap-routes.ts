@@ -3,10 +3,10 @@
 
 import type { FastifyInstance } from "fastify";
 import { swapModel, getModelStatus, listModels, pullModel } from "./swap.js";
-
-/** Ollama model names: `name[:tag]`, optionally `namespace/name`. */
-const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._\-]*(\/[A-Za-z0-9._\-]+)*(:[A-Za-z0-9._\-]+)?$/;
 import { PullTracker } from "./pull-tracker.js";
+
+/** Ollama model names: `name[:tag]`, optionally `namespace/name`; no segment starts with ".". */
+const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._\-]*(\/(?!\.)[A-Za-z0-9._\-]+)*(:[A-Za-z0-9._\-]+)?$/;
 
 export interface ModelSwapState {
   activeModel: string;
@@ -52,9 +52,9 @@ export function buildModelSwapRoutes(
     if (typeof model !== "string" || model.length > 200 || !MODEL_NAME_RE.test(model)) {
       return reply.code(400).send({ error: "model_required" });
     }
-    const current = state.pullTracker.getProgress();
-    if (current && current.status !== "error") {
-      return reply.code(409).send({ error: "pull_in_progress", progress: current });
+    // Claim synchronously, before any await, so concurrent requests can't both start a pull.
+    if (!state.pullTracker.tryStart(model)) {
+      return reply.code(409).send({ error: "pull_in_progress", progress: state.pullTracker.getProgress() });
     }
     const result = await pullModel(model, state.pullTracker);
     if (result.status === "error") return reply.code(502).send(result);

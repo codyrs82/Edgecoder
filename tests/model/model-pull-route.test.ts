@@ -26,7 +26,6 @@ describe("POST /model/pull (#37)", () => {
   it("starts a pull, returns 202, and progress is visible", async () => {
     const { app, state } = await buildApp();
     mockPull.mockImplementationOnce(async (model, tracker) => {
-      tracker?.startPull(model);
       tracker?.updateProgress("downloading", 50, 100);
       return { model, status: "pulling" };
     });
@@ -42,6 +41,24 @@ describe("POST /model/pull (#37)", () => {
     await app.close();
   });
 
+  it("concurrent pulls: only one starts (#119 review race)", async () => {
+    const { app } = await buildApp();
+    let release!: () => void;
+    mockPull.mockImplementation(async (model) => {
+      await new Promise<void>((r) => (release = r));
+      return { model, status: "pulling" };
+    });
+    const a = app.inject({ method: "POST", url: "/model/pull", payload: { model: "a:1" } });
+    const b = app.inject({ method: "POST", url: "/model/pull", payload: { model: "b:1" } });
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    const codes = (await Promise.all([a, b])).map((r) => r.statusCode).sort();
+    expect(codes).toEqual([202, 409]);
+    expect(mockPull).toHaveBeenCalledTimes(1);
+    mockPull.mockReset();
+    await app.close();
+  });
+
   it("returns 200 when the model is already installed and does not switch the active model", async () => {
     const { app, state } = await buildApp();
     mockPull.mockResolvedValueOnce({ model: "llama3:8b", status: "ready" });
@@ -53,7 +70,7 @@ describe("POST /model/pull (#37)", () => {
 
   it("rejects missing or malformed model names", async () => {
     const { app } = await buildApp();
-    for (const payload of [{}, { model: "" }, { model: 5 }, { model: "bad name" }, { model: "../etc" }]) {
+    for (const payload of [{}, { model: "" }, { model: 5 }, { model: "bad name" }, { model: "../etc" }, { model: "a/../b" }]) {
       expect((await app.inject({ method: "POST", url: "/model/pull", payload })).statusCode).toBe(400);
     }
     expect(mockPull).not.toHaveBeenCalled();

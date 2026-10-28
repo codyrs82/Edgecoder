@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { inferenceRouteAuth } from "./route-auth.js";
 import cors from "@fastify/cors";
 import { createHash } from "node:crypto";
 import { request } from "undici";
@@ -118,11 +119,14 @@ function loadTrustedCoordinatorKeys(): Map<string, string> {
 const trustedCoordinatorKeys = loadTrustedCoordinatorKeys();
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health" || req.url === "/metrics" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
+  const routeAuth = inferenceRouteAuth(req.method, req.url);
+  if (routeAuth === "public") return;
   const token = req.headers["x-inference-token"];
   if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
     return reply.code(401).send({ error: "inference_unauthorized" });
   }
+  // Model mutations from the desktop app: the token is enough (no coordinator signature).
+  if (routeAuth === "token") return;
 
   const signatureRequired = INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS || trustedCoordinatorKeys.size > 0;
   if (!signatureRequired) return;
