@@ -9,11 +9,24 @@
 //   npx tauri build --config src-tauri/tauri.csp.json
 //
 // Rules: https origins are allowed; http only for loopback (127.0.0.1, localhost, [::1]).
+// After parsing, the hostname must be plain letters/digits/hyphens in dot-separated labels
+// (IDNs arrive as punycode) or a bracketed IPv6 literal. WHATWG URL lets `;` `,` `'` `"` `*`
+// and similar through in hostnames, and those would break or widen the CSP, so they fail.
 // Anything else (other schemes, credentials in the URL, http to a remote host) fails the build.
 // With no VITE_* hosts set the output CSP is identical to tauri.conf.json.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
+const IPV6 = /^\[[0-9a-f:.]+\]$/;
+
+/** True when the parsed hostname contains only host characters. */
+export function isPlainHost(hostname) {
+  if (IPV6.test(hostname)) return true;
+  if (hostname.length === 0 || hostname.length > 253) return false;
+  return hostname.split(".").every((label) => LABEL.test(label));
+}
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 export const HOST_VARS = ["VITE_COORDINATOR_URL", "VITE_PORTAL_URL"];
@@ -27,6 +40,7 @@ export function allowedOrigin(name, raw) {
     throw new Error(`${name} is not a valid URL: ${raw}`);
   }
   if (url.username || url.password) throw new Error(`${name} must not contain credentials`);
+  if (!isPlainHost(url.hostname)) throw new Error(`${name} has a non-host character in its hostname: ${JSON.stringify(url.hostname)}`);
   if (url.protocol === "https:") return url.origin;
   if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url.origin;
   throw new Error(`${name} must be https (http only for loopback): ${url.origin}`);

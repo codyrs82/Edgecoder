@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs build script, no type declarations
-import { allowedOrigin, connectSrcWithHosts, cspOverride } from "../scripts/gen-tauri-csp.mjs";
+import { allowedOrigin, connectSrcWithHosts, cspOverride, isPlainHost } from "../scripts/gen-tauri-csp.mjs";
 
 // #11: production CSP has no eval, no inline scripts and no dev origins; devCsp may.
 const conf = JSON.parse(readFileSync(resolve(__dirname, "../src-tauri/tauri.conf.json"), "utf8"));
@@ -85,5 +85,21 @@ describe("gen-tauri-csp (#83)", () => {
   it("leaves every other directive untouched", () => {
     const patch = cspOverride(conf, { VITE_PORTAL_URL: "https://portal.example.org" });
     expect(Object.keys(patch.app.security.csp)).toEqual(["connect-src"]);
+  });
+
+  it.each(["a;b.example.org", "a,b.example.org", "a'b.example.org", 'a"b.example.org', "*.example.org", "a$b.example.org", "a_b.example.org", "a(b).example.org", "a!b.example.org", "-a.example.org", "a..example.org"])(
+    "rejects a hostname with a non-host character: %s",
+    (host) => {
+      expect(() => allowedOrigin("VITE_PORTAL_URL", `https://${host}/`)).toThrow(/non-host character/);
+      expect(() => connectSrcWithHosts(base, { VITE_COORDINATOR_URL: `https://${host}` })).toThrow();
+    }
+  );
+
+  it("accepts plain hosts, IP literals and IDNs (as punycode)", () => {
+    expect(isPlainHost("coord-1.example.org")).toBe(true);
+    expect(isPlainHost("10.0.0.5")).toBe(true);
+    expect(isPlainHost("[::1]")).toBe(true);
+    expect(allowedOrigin("X", "https://BÜCHER.example")).toBe("https://xn--bcher-kva.example");
+    expect(allowedOrigin("X", "http://[::1]:4301")).toBe("http://[::1]:4301");
   });
 });
