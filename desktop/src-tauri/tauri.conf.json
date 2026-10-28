@@ -20,7 +20,17 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420 blob:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* https://edgecoder.io https://edgecoder-portal.fly.dev https://edgecoder-seed.fly.dev https://edgecoder-seed-eu.fly.dev https://accounts.google.com https://login.microsoftonline.com https://graph.microsoft.com https://oauth2.googleapis.com https://api.github.com; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "worker-src": "'self' blob:",
+        "img-src": "'self' data: blob: https://avatars.githubusercontent.com",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:4301 http://localhost:4301 http://127.0.0.1:4302 http://localhost:4302 http://127.0.0.1:4304 http://localhost:4304 http://127.0.0.1:11434 http://localhost:11434 ws://127.0.0.1:4301 ws://localhost:4301 ws://127.0.0.1:4302 ws://localhost:4302 ws://127.0.0.1:4304 ws://localhost:4304 https://edgecoder.io https://*.edgecoder.io https://edgecoder-seed-eu.fly.dev"
+      },
+      "devCsp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:1420 blob:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob: https:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* ws://localhost:* https:",
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {
