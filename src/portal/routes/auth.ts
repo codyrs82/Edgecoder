@@ -11,7 +11,9 @@ import {
   oauthStateCookieMatches,
   oauthStateCookieName,
   oauthStateKey,
-  oauthStateSetCookie
+  oauthStateSetCookie,
+  pkceChallenge,
+  pkceVerifier
 } from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 
@@ -174,6 +176,9 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     authorize.searchParams.set("response_type", "code");
     authorize.searchParams.set("scope", provider.scopes);
     authorize.searchParams.set("state", state);
+    // #137: PKCE S256 for every provider (the verifier goes only to the token endpoint).
+    authorize.searchParams.set("code_challenge", pkceChallenge(pkceVerifier(oauthStateHmacKey, params.provider, state)));
+    authorize.searchParams.set("code_challenge_method", "S256");
     if (params.provider === "microsoft" && OAUTH_MICROSOFT_PROMPT) {
       authorize.searchParams.set("prompt", OAUTH_MICROSOFT_PROMPT);
     }
@@ -234,7 +239,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
         code,
         client_id: provider.clientId,
         client_secret: provider.clientSecret,
-        redirect_uri: state.redirectUri
+        redirect_uri: state.redirectUri,
+        code_verifier: pkceVerifier(oauthStateHmacKey, providerName, stateId)
       }).toString()
     });
     if (tokenRes.statusCode < 200 || tokenRes.statusCode >= 300) {
