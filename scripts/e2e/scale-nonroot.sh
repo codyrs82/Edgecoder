@@ -9,6 +9,9 @@ WORKERS="${WORKERS:-3}"
 WAIT_SECS="${WAIT_SECS:-120}"
 SETTLE_SECS="${SETTLE_SECS:-45}"
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -hex 16)}"
+# Must match the compose default (placeholder, scale tests only); /status needs it since #40.
+MESH_TOKEN="${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}"
+status() { curl -sf -H "x-mesh-token: ${MESH_TOKEN}" "$SEED_URL/status"; }
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 fail() { echo "::error::$*"; exit 1; }
 
@@ -18,7 +21,7 @@ dc up -d --build --scale worker="${WORKERS}"
 echo "[1/4] Waiting for seed node (up to ${WAIT_SECS}s)..."
 ok=""
 for i in $(seq 1 "$WAIT_SECS"); do
-  if curl -sf "$SEED_URL/status" >/dev/null 2>&1; then ok=1; echo "  healthy after ${i}s"; break; fi
+  if status >/dev/null 2>&1; then ok=1; echo "  healthy after ${i}s"; break; fi
   sleep 1
 done
 [ -n "$ok" ] || fail "seed node never became healthy"
@@ -51,5 +54,5 @@ if echo "$logs" | grep -Ei "EACCES|EPERM|permission denied|operation not permitt
 fi
 
 # Informational: registration depends on the portal, which this stack doesn't run.
-echo "  status: $(curl -sf "$SEED_URL/status" | head -c 500)"
+echo "  status: $(status | head -c 500)"
 echo "=== Non-root scale test passed ==="
