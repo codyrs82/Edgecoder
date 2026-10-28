@@ -318,7 +318,6 @@ tests/            - test suites
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Deployment:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - **Developer guide:** [README.dev.md](README.dev.md)
-- **Product plan:** [EDGECODER_PLAN.md](EDGECODER_PLAN.md)
 - **Public mesh operations:** [docs/public-mesh-operations.md](docs/public-mesh-operations.md)
 - **Agent install runbook:** [docs/agent-and-coordinator-install.md](docs/agent-and-coordinator-install.md)
 - **macOS deployment:** [docs/macos-installer.md](docs/macos-installer.md)

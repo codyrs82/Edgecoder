@@ -22,5 +22,10 @@ coverage/
 *.xcuserstate
 xcuserdata/
 
+# #20: build output and generated files (rebuilt by `npm run compile` / `vsce package` / `tauri build`)
+extensions/vscode/out/
+*.vsix
+desktop/src-tauri/gen/schemas/
+
 # VitePress cache
 site-docs/.vitepress/cache/

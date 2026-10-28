@@ -228,7 +228,6 @@ Production startup hardening:
 
 ## Operational references
 
-- Product and architecture plan: `EDGECODER_PLAN.md`
 - Public mesh onboarding and APIs: `docs/public-mesh-operations.md`
 - iOS app release checklist: `docs/ios-app-store-release.md`
 - Docs site deployment and hosting: `docs/docs-site-deployment.md`
