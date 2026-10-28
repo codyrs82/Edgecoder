@@ -30,7 +30,7 @@ COPY --from=ollama /opt/ollama/ /usr/
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
-COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=0755 deploy/docker/agent-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN mkdir -p /data/ollama && chown -R node:node /data
 USER node
 EXPOSE 4301 4302 4303 4304 4310
