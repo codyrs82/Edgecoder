@@ -27,6 +27,9 @@ jobs:
   scale-nonroot:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # Throwaway CI-only value; the compose file requires it for every command (up, logs, down).
+      POSTGRES_PASSWORD: scale-nonroot-ci-only
     steps:
       - uses: actions/checkout@v4
       - name: "Scale e2e as non-root (#31 blocker)"
