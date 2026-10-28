@@ -25,6 +25,18 @@ export class CreditEngine {
     }
     this.seenReports.add(report.reportId);
     const credits = contributionCredits(report, load); // #38: same formula as the Postgres path
+    if (credits <= 0) {
+      // #38: failed work earns 0 under measured credits; record nothing for it.
+      return {
+        txId: randomUUID(),
+        accountId: report.agentId,
+        type: "earn",
+        credits: 0,
+        reason: "compute_contribution",
+        relatedTaskId: report.taskId,
+        timestampMs: Date.now()
+      };
+    }
     return this.addTx(report.agentId, {
       type: "earn",
       credits,
