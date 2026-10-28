@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { loadConfigOrExit } from "../common/config.js";
+import { portalConfigSchema, portalProductionProblems } from "./config.js";
 import Fastify from "fastify";
 import { registerPortalPages } from "./pages/index.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
@@ -83,13 +85,15 @@ await registerPortalSecurity(app, {
 
 const store = PortalStore.fromEnv();
 
-const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
-const EXTERNAL_HTTP_TIMEOUT_MS = Number(process.env.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS ?? 7000);
-const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
-const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL ?? "";
-const PORTAL_PUBLIC_URL = process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310";
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
-const CONTROL_PLANE_ADMIN_TOKEN = process.env.CONTROL_PLANE_ADMIN_TOKEN ?? "";
+// #15: validated once at import; invalid values exit with every problem listed.
+const C = loadConfigOrExit("portal", portalConfigSchema);
+const PORTAL_SERVICE_TOKEN = C.PORTAL_SERVICE_TOKEN ?? "";
+const EXTERNAL_HTTP_TIMEOUT_MS = C.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS;
+const RESEND_API_KEY = C.RESEND_API_KEY ?? "";
+const RESEND_FROM_EMAIL = C.RESEND_FROM_EMAIL ?? "";
+const PORTAL_PUBLIC_URL = C.PORTAL_PUBLIC_URL;
+const CONTROL_PLANE_URL = C.CONTROL_PLANE_URL ?? "";
+const CONTROL_PLANE_ADMIN_TOKEN = C.CONTROL_PLANE_ADMIN_TOKEN ?? "";
 // #35: ordered coordinator list (COORDINATOR_DISCOVERY_URLS, legacy COORDINATOR_DISCOVERY_URL),
 // falling back to the EU seed; the first healthy one is cached for 60 s.
 const COORDINATOR_DISCOVERY_URLS = parseDiscoveryUrls();
@@ -105,11 +109,11 @@ const pickDiscoveryCoordinator = createCoordinatorPicker({
     return res.statusCode >= 200 && res.statusCode < 300;
   }
 });
-const SESSION_TTL_MS = Number(process.env.PORTAL_SESSION_TTL_MS ?? `${1000 * 60 * 60 * 24 * 7}`);
-const EMAIL_VERIFY_TTL_MS = Number(process.env.PORTAL_EMAIL_VERIFY_TTL_MS ?? `${1000 * 60 * 60 * 24}`);
-const PASSKEY_CHALLENGE_TTL_MS = Number(process.env.PASSKEY_CHALLENGE_TTL_MS ?? "300000");
-const WALLET_SEND_MFA_TTL_MS = Number(process.env.WALLET_SEND_MFA_TTL_MS ?? "600000");
-const OAUTH_MICROSOFT_PROMPT = process.env.OAUTH_MICROSOFT_PROMPT ?? "select_account";
+const SESSION_TTL_MS = C.PORTAL_SESSION_TTL_MS;
+const EMAIL_VERIFY_TTL_MS = C.PORTAL_EMAIL_VERIFY_TTL_MS;
+const PASSKEY_CHALLENGE_TTL_MS = C.PASSKEY_CHALLENGE_TTL_MS;
+const WALLET_SEND_MFA_TTL_MS = C.WALLET_SEND_MFA_TTL_MS;
+const OAUTH_MICROSOFT_PROMPT = C.OAUTH_MICROSOFT_PROMPT;
 const DEFAULT_PORTAL_HOST = (() => {
   try {
     return new URL(PORTAL_PUBLIC_URL).hostname || "localhost";
@@ -117,9 +121,9 @@ const DEFAULT_PORTAL_HOST = (() => {
     return "localhost";
   }
 })();
-const PASSKEY_RP_ID = process.env.PASSKEY_RP_ID ?? DEFAULT_PORTAL_HOST;
-const PASSKEY_RP_NAME = process.env.PASSKEY_RP_NAME ?? "EdgeCoder Portal";
-const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? (() => {
+const PASSKEY_RP_ID = C.PASSKEY_RP_ID ?? DEFAULT_PORTAL_HOST;
+const PASSKEY_RP_NAME = C.PASSKEY_RP_NAME;
+const PASSKEY_ORIGIN = C.PASSKEY_ORIGIN ?? (() => {
   try {
     return new URL(PORTAL_PUBLIC_URL).origin;
   } catch {
@@ -127,7 +131,7 @@ const PASSKEY_ORIGIN = process.env.PASSKEY_ORIGIN ?? (() => {
   }
 })();
 const PASSKEY_ALLOWED_ORIGINS = (() => {
-  const configured = (process.env.PASSKEY_ALLOWED_ORIGINS ?? PASSKEY_ORIGIN)
+  const configured = (C.PASSKEY_ALLOWED_ORIGINS ?? PASSKEY_ORIGIN)
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
@@ -147,32 +151,34 @@ const PASSKEY_ALLOWED_ORIGINS = (() => {
   if (normalized.size === 0) normalized.add(PASSKEY_ORIGIN);
   return [...normalized];
 })();
+// #16 urls.js and #15 config: page modules share GITHUB_REPO_URL/DOCS_SITE_URL from urls.js
+// (same env + defaults); C still validates both at startup (DOCS_SITE_URL is required in production).
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./pages/urls.js";
-const WALLET_DEFAULT_NETWORK = (process.env.WALLET_DEFAULT_NETWORK ?? "signet") as "bitcoin" | "testnet" | "signet";
-const NODE_ENV = process.env.NODE_ENV ?? "development";
-const WALLET_SECRET_PEPPER = process.env.WALLET_SECRET_PEPPER ?? "";
+const WALLET_DEFAULT_NETWORK = C.WALLET_DEFAULT_NETWORK;
+const NODE_ENV = C.NODE_ENV;
+const WALLET_SECRET_PEPPER = C.WALLET_SECRET_PEPPER ?? "";
 const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
-  (process.env.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
+  (C.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
     .split(",")
     .map((value) => normalizeEmail(value))
     .filter(Boolean)
 );
 const SYSTEM_ADMIN_EMAILS = new Set(
-  (process.env.SYSTEM_ADMIN_EMAILS ?? "")
+  (C.SYSTEM_ADMIN_EMAILS ?? "")
     .split(",")
     .map((value) => normalizeEmail(value))
     .filter(Boolean)
 );
 const COORDINATOR_ADMIN_EMAILS = new Set(
-  (process.env.COORDINATOR_ADMIN_EMAILS ?? "")
+  (C.COORDINATOR_ADMIN_EMAILS ?? "")
     .split(",")
     .map((value) => normalizeEmail(value))
     .filter(Boolean)
 );
 
 export type ProviderName = "google" | "microsoft" | "github";
-const IOS_OAUTH_CALLBACK_PREFIX = process.env.IOS_OAUTH_CALLBACK_PREFIX ?? "edgecoder://oauth-callback";
-const MOBILE_OAUTH_TOKEN_TTL_MS = Number(process.env.MOBILE_OAUTH_TOKEN_TTL_MS ?? "300000");
+const IOS_OAUTH_CALLBACK_PREFIX = C.IOS_OAUTH_CALLBACK_PREFIX;
+const MOBILE_OAUTH_TOKEN_TTL_MS = C.MOBILE_OAUTH_TOKEN_TTL_MS;
 const oauthNativeRedirectByState = new Map<string, string>();
 const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number }>();
 
@@ -187,28 +193,26 @@ type OauthProviderConfig = {
 
 const oauthProviders: Record<ProviderName, OauthProviderConfig> = {
   google: {
-    clientId: process.env.OAUTH_GOOGLE_CLIENT_ID ?? "",
-    clientSecret: process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? "",
-    authorizeUrl: process.env.OAUTH_GOOGLE_AUTHORIZE_URL ?? "https://accounts.google.com/o/oauth2/v2/auth",
-    tokenUrl: process.env.OAUTH_GOOGLE_TOKEN_URL ?? "https://oauth2.googleapis.com/token",
-    userinfoUrl: process.env.OAUTH_GOOGLE_USERINFO_URL ?? "https://openidconnect.googleapis.com/v1/userinfo",
+    clientId: C.OAUTH_GOOGLE_CLIENT_ID ?? "",
+    clientSecret: C.OAUTH_GOOGLE_CLIENT_SECRET ?? "",
+    authorizeUrl: C.OAUTH_GOOGLE_AUTHORIZE_URL,
+    tokenUrl: C.OAUTH_GOOGLE_TOKEN_URL,
+    userinfoUrl: C.OAUTH_GOOGLE_USERINFO_URL,
     scopes: "openid email profile"
   },
   microsoft: {
-    clientId: process.env.OAUTH_MICROSOFT_CLIENT_ID ?? "",
-    clientSecret: process.env.OAUTH_MICROSOFT_CLIENT_SECRET ?? "",
+    clientId: C.OAUTH_MICROSOFT_CLIENT_ID ?? "",
+    clientSecret: C.OAUTH_MICROSOFT_CLIENT_SECRET ?? "",
     authorizeUrl:
-      process.env.OAUTH_MICROSOFT_AUTHORIZE_URL ??
-      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+      C.OAUTH_MICROSOFT_AUTHORIZE_URL,
     tokenUrl:
-      process.env.OAUTH_MICROSOFT_TOKEN_URL ??
-      "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    userinfoUrl: process.env.OAUTH_MICROSOFT_USERINFO_URL ?? "https://graph.microsoft.com/oidc/userinfo",
+      C.OAUTH_MICROSOFT_TOKEN_URL,
+    userinfoUrl: C.OAUTH_MICROSOFT_USERINFO_URL,
     scopes: "openid email profile"
   },
   github: {
-    clientId: process.env.OAUTH_GITHUB_CLIENT_ID ?? "",
-    clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET ?? "",
+    clientId: C.OAUTH_GITHUB_CLIENT_ID ?? "",
+    clientSecret: C.OAUTH_GITHUB_CLIENT_SECRET ?? "",
     authorizeUrl: "https://github.com/login/oauth/authorize",
     tokenUrl: "https://github.com/login/oauth/access_token",
     userinfoUrl: "https://api.github.com/user",
@@ -228,25 +232,13 @@ function validatePortalSecurityConfig(): void {
 
   if (NODE_ENV !== "production") return;
 
-  const missing: string[] = [];
-  if (!PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
-  if (!WALLET_SECRET_PEPPER) missing.push("WALLET_SECRET_PEPPER");
-  if (!RESEND_API_KEY) missing.push("RESEND_API_KEY");
-  if (!CONTROL_PLANE_URL && !discoveryConfigured()) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URLS");
-  if (CONTROL_PLANE_URL && !CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
-  if (!PASSKEY_RP_ID) missing.push("PASSKEY_RP_ID");
-  if (!PASSKEY_RP_NAME) missing.push("PASSKEY_RP_NAME");
-  if (!PASSKEY_ORIGIN) missing.push("PASSKEY_ORIGIN");
-  if (!PORTAL_PUBLIC_URL) missing.push("PORTAL_PUBLIC_URL");
-  if (missing.length > 0) {
-    throw new Error(`Missing required production environment variables: ${missing.join(", ")}`);
-  }
+  const problems = portalProductionProblems(C, discoveryConfigured());
+  if (!PASSKEY_RP_ID) problems.push("PASSKEY_RP_ID is required in production.");
+  if (!PASSKEY_ORIGIN) problems.push("PASSKEY_ORIGIN is required in production.");
+  if (problems.length > 0) throw new Error(problems.join(" "));
 
   if (PASSKEY_ALLOWED_ORIGINS.some((origin) => !/^https:\/\//i.test(origin))) {
     throw new Error("PASSKEY_ALLOWED_ORIGINS must use https in production.");
-  }
-  if (!/^https:\/\//i.test(PORTAL_PUBLIC_URL)) {
-    throw new Error("PORTAL_PUBLIC_URL must use https in production.");
   }
 }
 
