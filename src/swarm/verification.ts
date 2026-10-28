@@ -33,8 +33,10 @@ export interface VerificationConfig {
   initialReputation: number;
   /** #106: reputation lost for claiming a replica and never reporting it. */
   abandonPenalty: number;
-  /** #106: a claimed replica with no report after this long is reassigned once to another agent. */
+  /** #106: a claimed replica with no report after this long is reassigned (up to maxReassignments times) to another agent. */
   replicaClaimTimeoutMs: number;
+  /** #114 review: how many times one sampled subtask's stalled replicas are reassigned (default 1). */
+  maxReassignments: number;
 }
 
 /**
@@ -56,7 +58,8 @@ export const DEFAULT_VERIFICATION: VerificationConfig = {
   timeoutMs: 15 * 60_000,
   initialReputation: 0.5,
   abandonPenalty: 0.25,
-  replicaClaimTimeoutMs: 5 * 60_000
+  replicaClaimTimeoutMs: 5 * 60_000,
+  maxReassignments: 1
 };
 
 export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VerificationConfig {
@@ -73,6 +76,7 @@ export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
     timeoutMs: num("RESULT_VERIFICATION_TIMEOUT_MS", DEFAULT_VERIFICATION.timeoutMs, (n) => n >= 10_000),
     abandonPenalty: num("RESULT_VERIFICATION_ABANDON_PENALTY", DEFAULT_VERIFICATION.abandonPenalty, (n) => n >= 0 && n <= 1),
     replicaClaimTimeoutMs: num("RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS", DEFAULT_VERIFICATION.replicaClaimTimeoutMs, (n) => n >= 10_000),
+    maxReassignments: num("RESULT_VERIFICATION_MAX_REASSIGNMENTS", DEFAULT_VERIFICATION.maxReassignments, (n) => Number.isInteger(n) && n >= 0 && n <= 10),
     initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1)
   };
 }
@@ -124,7 +128,7 @@ interface Pending<T> {
   claims: Map<string, { agentId: string; atMs: number }>;
   /** Agents already penalized for abandoning a replica of this subtask. */
   abandoners: Set<string>;
-  reassigned: boolean;
+  reassignments: number;
 }
 
 export function replicaId(originalId: string, n: number): string {
@@ -199,8 +203,8 @@ export class ResultVerifier<T = unknown> {
         if (p.results.some((r) => r.agentId === c.agentId)) continue;
         this.penalizeAbandon(p, c.agentId);
         abandoned.push({ originalSubtaskId: id, agentId: c.agentId });
-        if (p.reassigned) continue;
-        p.reassigned = true;
+        if (p.reassignments >= this.cfg.maxReassignments) continue;
+        p.reassignments += 1;
         this.replicaToOriginal.delete(rid); // a late report from the abandoner is ignored
         p.replicaIds.delete(rid);
         const next = this.nextReplica(p, rid);
@@ -228,7 +232,7 @@ export class ResultVerifier<T = unknown> {
 
   /** Hold the original result and request the first replica. */
   start(original: Subtask, first: ExecutionResult<T>): ReplicaRequest {
-    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set(), claims: new Map(), abandoners: new Set(), reassigned: false };
+    const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set(), claims: new Map(), abandoners: new Set(), reassignments: 0 };
     this.pending.set(original.id, p);
     return this.nextReplica(p);
   }

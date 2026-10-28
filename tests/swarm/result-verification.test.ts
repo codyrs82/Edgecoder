@@ -215,6 +215,34 @@ describe("verification hardening (#106)", () => {
     expect(v.reputation("lazy")).toBeCloseTo(0.25);
   });
 
+  it("maxReassignments controls how often a stalled replica is reissued (#114 review)", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, maxReassignments: 2 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
+    v.markReplicaClaimed(r1.subtask.id, "lazy1");
+    now = 1001;
+    const first = v.reassignStalled().replacements;
+    expect(first).toHaveLength(1);
+    v.markReplicaClaimed(first[0].request.subtask.id, "lazy2");
+    now = 2002;
+    const second = v.reassignStalled().replacements;
+    expect(second).toHaveLength(1);
+    expect(second[0].request.excludeAgents).toEqual(expect.arrayContaining(["a", "lazy1", "lazy2"]));
+    expect(second[0].request.subtask.id).not.toBe(first[0].request.subtask.id);
+    v.markReplicaClaimed(second[0].request.subtask.id, "lazy3");
+    now = 3003;
+    const third = v.reassignStalled();
+    expect(third.replacements).toHaveLength(0);
+    expect(third.abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy3" }]);
+
+    const zero = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, maxReassignments: 0 }, () => 0, () => now);
+    const z1 = zero.start(subtask("z", "x"), { subtaskId: "z", agentId: "a", ok: true, output: "1", meta: null });
+    zero.markReplicaClaimed(z1.subtask.id, "lazy");
+    now += 1001;
+    expect(zero.reassignStalled().replacements).toHaveLength(0);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_REASSIGNMENTS: "3" }).maxReassignments).toBe(3);
+  });
+
   it("an unclaimed replica still times out to an unverified accept (single-node meshes)", () => {
     let now = 0;
     const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 1000 }, () => 0, () => now);

@@ -60,7 +60,8 @@ Consolidated reference for all environment controls. The primary config file on 
 |---|---|---|
 | `RESULT_VERIFICATION_RATE` | `0` | Base fraction of subtasks re-executed for verification. `0` = verification off (the default). |
 | `RESULT_VERIFICATION_ABANDON_PENALTY` | `0.25` | Reputation lost for claiming a verification replica and never reporting it. |
-| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` | A claimed replica with no report after this long is reassigned (once per subtask) to an agent other than the abandoner. |
+| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` | A claimed replica with no report after this long is reassigned to an agent other than the abandoner(s). |
+| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | `1` | How many times one sampled subtask's stalled replica is reassigned (0–10). After that the subtask waits for the overall timeout. |
 | `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation (0–1) of an agent id the coordinator has never seen. Below 1 so a caught agent can't regain full trust by re-registering; lower reputation means its results are re-executed more often. |
 | `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Max executions of a sampled subtask (original + replicas), 2–3. Values above 3 are capped. Replica earnings are newly minted, at most this minus one per sampled subtask. This is a deliberate economic choice: it only happens when verification is on, which is off by default. |
 
