@@ -9,6 +9,7 @@ import {
   PORTAL_KEY,
   coordinatorUrl,
   defaultEndpoints,
+  portalSignupUrl,
   portalUrl,
   resetEndpoints,
   setEndpoint,
@@ -78,5 +79,12 @@ describe("desktop endpoints (#35)", () => {
     };
     walk(root);
     expect(hits).toEqual([]);
+  });
+});
+
+describe("portalSignupUrl (#26 sign-up button)", () => {
+  it("uses the portal override or the default, without a double slash", () => {
+    expect(portalSignupUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal");
+    expect(portalSignupUrl(mem())).toMatch(/^https:\/\/[^/]+(\/[^/]+)*\/portal$/);
   });
 });

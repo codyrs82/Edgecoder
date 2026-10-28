@@ -91,6 +91,11 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `ANCHOR_PROXY_TOKEN` | When using anchor-proxy | Bearer token matching the proxy |
 | `ANCHOR_CONFIRMATION_POLL_MS` | No | Poll interval for pending anchors (default: `60000`) |
 | `STATS_ANCHOR_MIN_CONFIRMATIONS` | No | Required confirmations (default: `1`) |
+| `BITCOIN_ANCHOR_CONFIRMATIONS` | No | Confirmations before an anchor counts as `anchored` (default: `6`) |
+| `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | No | Daily anchoring budget in sats (default: `200000`). A broadcast is refused when (broadcasts in the last 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` would exceed it, so the default allows 10 anchors/day at the default fee cap. `0` disables broadcasting. |
+| `BITCOIN_ANCHOR_MAX_FEE_SATS` | No | Absolute fee cap per anchor tx (default: `20000`) |
+| `BITCOIN_ANCHOR_MIN_FEE_SAT_VB` | No | Fee-rate floor in sat/vB (default: `2`) |
+| `BITCOIN_ANCHOR_MAINNET` | For mainnet | Must be `1` to broadcast when `BITCOIN_NETWORK=bitcoin`; mainnet anchoring is opt-in |
 
 ## Verification
 
