@@ -406,8 +406,8 @@
   input[type="number"] {
     width: 100%;
     padding: 0.45rem 0.6rem;
-    background: #0d0d1a;
-    border: 1px solid var(--border, #1e1e3f);
+    background: var(--bg-input, #0d0d1a);
+    border: 1px solid var(--border-control, #99928b);
     border-radius: 5px;
     color: inherit;
     font-size: 0.88rem;

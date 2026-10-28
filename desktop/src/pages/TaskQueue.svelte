@@ -282,7 +282,7 @@
   select {
     background: var(--bg-input, #0f0f23);
     color: var(--fg, #e2e8f0);
-    border: 1px solid var(--border, #2d2d5f);
+    border: 1px solid var(--border-control, #99928b);
     border-radius: 6px;
     padding: 0.55rem 0.7rem;
     font-size: 0.9rem;

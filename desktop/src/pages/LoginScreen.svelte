@@ -149,7 +149,7 @@
   .form input {
     padding: 12px 14px;
     background: var(--bg-surface);
-    border: 0.5px solid var(--border-strong);
+    border: 1px solid var(--border-control);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: 14px;

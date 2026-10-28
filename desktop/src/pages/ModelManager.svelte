@@ -741,7 +741,7 @@
     flex: 1;
     padding: 0.55rem 0.75rem;
     background: var(--bg-input, #12122a);
-    border: 1px solid var(--border-color, #2d2d5f);
+    border: 1px solid var(--border-control, #99928b);
     border-radius: 6px;
     color: var(--text-primary, #e2e8f0);
     font-family: inherit;

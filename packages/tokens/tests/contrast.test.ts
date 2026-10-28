@@ -35,6 +35,15 @@ const cases = (["dark", "light"] as const).flatMap((mode) => [
   [mode, "on-accent", "accent-hover"] as const,
 ]);
 
+// WCAG 1.4.11 non-text contrast: control edges (inputs, buttons, toggles), focus rings and
+// accent fills need 3:1 against every surface they sit on. `border` and `border-strong` are
+// translucent decorative dividers and are exempt; controls must use `border-control`.
+const UI = ["border-control", "focus-ring", "accent", "accent-hover"];
+const uiCases = (["dark", "light"] as const).flatMap((mode) =>
+  UI.flatMap((fg) => BACKGROUNDS.map((bg) => [mode, fg, bg] as const)),
+);
+const DECORATIVE = new Set(["border", "border-strong", "card"]);
+
 describe("token contrast meets WCAG AA (#29)", () => {
   it("contrast() matches known values", () => {
     expect(contrast("#ffffff", "#000000")).toBeCloseTo(21, 5);
@@ -43,5 +52,14 @@ describe("token contrast meets WCAG AA (#29)", () => {
 
   it.each(cases)("%s: %s on %s is at least 4.5:1", (mode, fg, bg) => {
     expect(contrast(color[fg][mode], color[bg][mode])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it.each(uiCases)("%s: %s on %s is at least 3:1 (UI component)", (mode, fg, bg) => {
+    expect(contrast(color[fg][mode], color[bg][mode])).toBeGreaterThanOrEqual(3);
+  });
+
+  it("every colour token is either checked or listed as decorative", () => {
+    const checked = new Set([...BACKGROUNDS, ...TEXT, ...UI, "on-accent"]);
+    expect(Object.keys(color).filter((k) => !checked.has(k) && !DECORATIVE.has(k))).toEqual([]);
   });
 });
