@@ -114,15 +114,48 @@ export class LndRestProvider implements LightningProvider {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       return { settled: false };
     }
-    const body = (await res.body.json()) as { settled?: boolean; state?: string; r_hash?: string; r_preimage?: string };
-    const settled = Boolean(body.settled) || body.state === "SETTLED";
-    return {
-      settled,
-      txRef: settled ? `lnd:${hashHex}` : undefined,
-      paymentHash: settled ? hashHex : undefined,
-      preimage: settled && body.r_preimage ? Buffer.from(body.r_preimage, "base64").toString("hex") : undefined
-    };
+    const body = (await res.body.json()) as LndInvoice;
+    return interpretLndInvoice(body, hashHex);
   }
+}
+
+/** Subset of LND's `lnrpc.Invoice` REST JSON (int64 fields arrive as strings). */
+export interface LndInvoice {
+  settled?: boolean;
+  state?: "OPEN" | "SETTLED" | "CANCELED" | "ACCEPTED" | string;
+  r_hash?: string;
+  r_preimage?: string;
+  value_msat?: string;
+  amt_paid_msat?: string;
+}
+
+/**
+ * #47: decide settlement from an LND invoice response.
+ * - `state` is authoritative (`settled` is deprecated); only SETTLED counts, so an
+ *   ACCEPTED hold invoice or a CANCELED one is unpaid.
+ * - The returned r_hash must be the invoice we asked for.
+ * - The preimage, when returned, must hash to the payment hash (proof of payment).
+ * - The amount paid must cover the invoice value when both are reported.
+ */
+export function interpretLndInvoice(body: LndInvoice, hashHex: string): SettlementResult {
+  const settled = body.state !== undefined ? body.state === "SETTLED" : body.settled === true;
+  if (!settled) return { settled: false };
+  if (body.r_hash !== undefined && lndHashToHex(body.r_hash) !== hashHex) return { settled: false };
+  let preimage: string | undefined;
+  if (body.r_preimage) {
+    preimage = Buffer.from(body.r_preimage.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("hex");
+    if (createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex") !== hashHex) {
+      return { settled: false };
+    }
+  }
+  if (body.value_msat !== undefined && body.amt_paid_msat !== undefined) {
+    try {
+      if (BigInt(body.amt_paid_msat) < BigInt(body.value_msat)) return { settled: false };
+    } catch {
+      return { settled: false };
+    }
+  }
+  return { settled: true, txRef: `lnd:${hashHex}`, paymentHash: hashHex, preimage };
 }
 
 class ClnRestProvider implements LightningProvider {
