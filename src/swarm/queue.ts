@@ -59,6 +59,10 @@ interface QueueItem {
   /** If set, local agents cannot claim this task until after this timestamp.
    *  Gives gossip peers a window to send task_claim before local execution. */
   claimableAfterMs?: number;
+  /** #50: agents that may not claim this item (verification replicas go to a different agent). */
+  excludeAgents?: string[];
+  /** #50: reward accounts that may not claim this item (same operator, different agent id). */
+  excludeAccounts?: string[];
 }
 
 export class SwarmQueue {
@@ -130,16 +134,33 @@ export class SwarmQueue {
       .catch(() => undefined);
   }
 
-  enqueueSubtask(subtask: Omit<Subtask, "id"> & { id?: string }, opts?: { claimDelayMs?: number }): Subtask {
+  enqueueSubtask(
+    subtask: Omit<Subtask, "id"> & { id?: string },
+    opts?: { claimDelayMs?: number; excludeAgents?: string[]; excludeAccounts?: string[] }
+  ): Subtask {
     const materialized: Subtask = { ...subtask, id: subtask.id ?? randomUUID() };
     // Deduplicate — prevent same subtask from being enqueued twice via mesh gossip
     if (this.tasks.some(t => t.subtask.id === materialized.id)) {
       return materialized;
     }
     const claimableAfterMs = opts?.claimDelayMs ? Date.now() + opts.claimDelayMs : undefined;
-    this.tasks.push({ subtask: materialized, claimableAfterMs });
+    const excludeAgents = opts?.excludeAgents?.length ? [...opts.excludeAgents] : undefined;
+    const excludeAccounts = opts?.excludeAccounts?.length ? [...opts.excludeAccounts] : undefined;
+    this.tasks.push({ subtask: materialized, claimableAfterMs, excludeAgents, excludeAccounts });
     void this.store?.persistSubtask(materialized).catch(() => undefined);
     return materialized;
+  }
+
+  /**
+   * #50: take a claimed item off the queue without publishing a result. Used for
+   * results held for verification: the requester-visible result is recorded with
+   * complete() once the verdict is in.
+   */
+  removeHeld(subtaskId: string): boolean {
+    const idx = this.tasks.findIndex((t) => t.subtask.id === subtaskId);
+    if (idx < 0) return false;
+    this.tasks.splice(idx, 1);
+    return true;
   }
 
   /** Remove an unclaimed task that was claimed by a peer coordinator via mesh gossip. */
@@ -152,11 +173,16 @@ export class SwarmQueue {
     return false;
   }
 
-  claim(agentId: string, agentActiveModel?: string): Subtask | undefined {
+  /** `accountId` = the agent's reward account (defaults to agentId), for #50 replica exclusion. */
+  claim(agentId: string, agentActiveModel?: string, accountId: string = agentId): Subtask | undefined {
     const now = Date.now();
     this.expireLeases(now);
     const unclaimed = this.tasks.filter(
-      (task) => !task.claimedBy && (!task.claimableAfterMs || now >= task.claimableAfterMs)
+      (task) =>
+        !task.claimedBy &&
+        (!task.claimableAfterMs || now >= task.claimableAfterMs) &&
+        !task.excludeAgents?.includes(agentId) &&
+        !task.excludeAccounts?.includes(accountId)
     );
     if (unclaimed.length === 0) return undefined;
 

@@ -91,6 +91,13 @@ import {
   resultReportId
 } from "./result-integrity.js";
 import {
+  ResultVerifier,
+  verificationConfigFromEnv,
+  type ExecutionResult,
+  type ReplicaRequest,
+  type VerificationOutcome
+} from "./verification.js";
+import {
   applyBleSyncBatch,
   bleSyncAllowV1,
   createBleSyncSchema,
@@ -2191,7 +2198,7 @@ app.post("/pull", async (req, reply) => {
     app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
     return reply.send(sandboxRejection);
   }
-  const task = queue.claim(body.agentId, capability?.activeModel);
+  const task = queue.claim(body.agentId, capability?.activeModel, await rewardAccountForAgent(body.agentId));
   if (task) {
 
     // ── Power policy: small-tasks-only check ──
@@ -2240,13 +2247,197 @@ app.post("/pull", async (req, reply) => {
   return reply.send({ subtask: task ?? null });
 });
 
+/** Store a subtask's output and release (and gossip) the subtasks that depended on it. */
+function releaseDependents(subtaskId: string, output: string): void {
+  const released = depTracker.recordCompletionAndRelease(
+    subtaskId,
+    output,
+    (s, opts) => queue.enqueueSubtask(s, opts)
+  );
+  for (const releasedSubtask of released) {
+    app.log.info(
+      { subtaskId: releasedSubtask.id, taskId: releasedSubtask.taskId },
+      "dependent_subtask_released"
+    );
+    // Gossip released subtasks to peer coordinators
+    const offerMsg = protocol.createMessage(
+      "task_offer",
+      identity.peerId,
+      {
+        subtaskId: releasedSubtask.id,
+        taskId: releasedSubtask.taskId,
+        kind: releasedSubtask.kind,
+        language: releasedSubtask.language,
+        input: releasedSubtask.input,
+        timeoutMs: releasedSubtask.timeoutMs,
+        snapshotRef: releasedSubtask.snapshotRef,
+        projectMeta: releasedSubtask.projectMeta,
+        originCoordinatorId: identity.peerId,
+        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+      },
+      coordinatorKeys.privateKeyPem,
+      60_000
+    );
+    void mesh.broadcast(offerMsg);
+  }
+}
+
+// ── #50: result verification (redundant execution) ──
+interface ResultMeta {
+  /** The result as reported; published (with the verified output) only once verification settles. */
+  report: SubtaskResult;
+  taskId: string;
+  durationMs: number;
+  reportedDurationMs: number;
+  subtask: Subtask;
+}
+const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfigFromEnv());
+
+function enqueueReplica(req: ReplicaRequest): void {
+  queue.enqueueSubtask(req.subtask, { excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts });
+  app.log.info(
+    { replicaId: req.subtask.id, excludeAgents: req.excludeAgents, excludeAccounts: req.excludeAccounts },
+    "verification_replica_enqueued"
+  );
+}
+
+/** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
+async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void> {
+  const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
+  const rewardAccountId = await rewardAccountForAgent(r.agentId);
+  const accrualCredits = r.ok ? 5 : 2;
+  const accrued = await accrueCredits(
+    {
+      reportId: resultReportId(r.subtaskId),
+      agentId: rewardAccountId,
+      sourceAgentId: r.agentId,
+      taskId,
+      resourceClass: subtask.projectMeta.resourceClass,
+      cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
+      gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
+      success: r.ok,
+      qualityScore: r.ok ? 1.0 : 0.6,
+      timestampMs: Date.now()
+    },
+    {
+      queuedTasks: queue.status().queued,
+      activeAgents: queue.status().agents
+    }
+  );
+  // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
+  if (accrued) {
+    const earningsRecord = ordering.append({
+      eventType: "earnings_accrual",
+      taskId,
+      subtaskId: r.subtaskId,
+      actorId: rewardAccountId,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({
+        sourceAgentId: r.agentId,
+        accountId: rewardAccountId,
+        credits: accrualCredits,
+        durationMs,
+        reportedDurationMs,
+        ok: r.ok,
+        resourceClass: subtask.projectMeta.resourceClass
+      })
+    });
+    await pgStore?.persistLedgerRecord(earningsRecord);
+    await persistStatsLedgerRecord(earningsRecord);
+  }
+}
+
+/**
+ * Make a subtask result visible: queue result, task_complete ledger record, forward to
+ * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
+ * for verification this runs only at settle time, with the verified output.
+ */
+async function publishResult(result: SubtaskResult): Promise<void> {
+  queue.complete(result);
+  const completeRecord = ordering.append({
+    eventType: "task_complete",
+    taskId: result.taskId,
+    subtaskId: result.subtaskId,
+    actorId: result.agentId
+  });
+  await pgStore?.persistLedgerRecord(completeRecord);
+  await persistStatsLedgerRecord(completeRecord);
+
+  const origin = taskOriginMap.get(result.subtaskId);
+  if (origin && origin.coordinatorId !== identity.peerId) {
+    taskOriginMap.delete(result.subtaskId);
+    void request(`${origin.coordinatorUrl}/result`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+      body: JSON.stringify(result)
+    })
+      .then(() => app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin"))
+      .catch((e) => app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed"));
+  }
+
+  void mesh.broadcast(
+    protocol.createMessage(
+      "result_announce",
+      identity.peerId,
+      { taskId: result.taskId, subtaskId: result.subtaskId, ok: result.ok },
+      coordinatorKeys.privateKeyPem
+    )
+  );
+}
+
+/**
+ * #50: pay agreeing executions, penalize mismatches, then publish the original
+ * subtask's result: the verified output when verified, a failure when unresolved,
+ * and release dependents. Replica results are never published.
+ */
+async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Promise<void> {
+  for (const w of outcome.winners) await accrueResultCredits(w);
+  for (const l of outcome.losers) {
+    securityLog.log({
+      level: securityLog.severity("result_verification_mismatch"),
+      event: "result_verification_mismatch",
+      source: { type: "agent", id: l.agentId },
+      details: {
+        originalSubtaskId: outcome.originalSubtaskId,
+        executedSubtaskId: l.subtaskId,
+        status: outcome.status,
+        reputation: resultVerifier.reputation(l.agentId)
+      },
+      action: "credits_withheld",
+      coordinatorId: identity.peerId,
+    });
+  }
+  const original = [...outcome.winners, ...outcome.losers].find((r) => r.subtaskId === outcome.originalSubtaskId);
+  if (!original) {
+    app.log.error({ subtaskId: outcome.originalSubtaskId }, "result_verification_original_missing");
+    return;
+  }
+  if (outcome.status === "unresolved") {
+    app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_unresolved");
+    // #107: the requester gets a failure, never an unverified output. Same terminal path
+    // as the #51 retry cap: fail held dependents, ledger/forward/announce, refund once.
+    await finalizeFailedSubtask(
+      { ...original.meta.report, ok: false, output: "", error: "result_verification_unresolved" },
+      { recordResult: true }
+    );
+    return;
+  }
+  if (outcome.status === "timeout") {
+    app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_timeout_accepted_unverified");
+  }
+  await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output });
+  releaseDependents(outcome.originalSubtaskId, outcome.output);
+}
+
 /**
  * #51: terminal failure of a subtask the coordinator gave up on (retry cap). Does
  * what /result does for a failed result, minus any accrual (nobody earns, and
  * "coordinator" is never credited): ledger record, fail held dependents, forward
  * to the origin coordinator, announce, and refund the requester's submit charge.
  */
-async function finalizeFailedSubtask(result: SubtaskResult): Promise<void> {
+async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult?: boolean } = {}): Promise<void> {
+  // The retry-cap path already recorded `result` in the queue; other callers (#107) ask us to.
+  if (opts.recordResult) queue.complete(result);
   const failedResults: SubtaskResult[] = [result];
   for (const dep of depTracker.dropDependents(result.subtaskId)) {
     const depResult: SubtaskResult = {
@@ -2366,7 +2557,6 @@ app.post("/result", async (req, reply) => {
   const subtask = isPeerForward ? undefined : claim?.subtask;
   // Server-side duration: never more than measured since claim or the subtask timeout.
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
-  queue.complete(body);
 
   // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
   if (!isPeerForward) {
@@ -2374,121 +2564,56 @@ app.post("/result", async (req, reply) => {
     evaluateAndEnforce(body.agentId);
   }
 
-  // ── Dependency tracking: store output and release dependent subtasks ──
-  const released = depTracker.recordCompletionAndRelease(
-    body.subtaskId,
-    body.output ?? "",
-    (s, opts) => queue.enqueueSubtask(s, opts)
-  );
-  for (const releasedSubtask of released) {
-    app.log.info(
-      { subtaskId: releasedSubtask.id, taskId: releasedSubtask.taskId },
-      "dependent_subtask_released"
-    );
-    // Gossip released subtasks to peer coordinators
-    const offerMsg = protocol.createMessage(
-      "task_offer",
-      identity.peerId,
-      {
-        subtaskId: releasedSubtask.id,
-        taskId: releasedSubtask.taskId,
-        kind: releasedSubtask.kind,
-        language: releasedSubtask.language,
-        input: releasedSubtask.input,
-        timeoutMs: releasedSubtask.timeoutMs,
-        snapshotRef: releasedSubtask.snapshotRef,
-        projectMeta: releasedSubtask.projectMeta,
-        originCoordinatorId: identity.peerId,
-        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
-      },
-      coordinatorKeys.privateKeyPem,
-      60_000
-    );
-    void mesh.broadcast(offerMsg);
-  }
-
-  const completeRecord = ordering.append({
-    eventType: "task_complete",
-    taskId: body.taskId,
-    subtaskId: body.subtaskId,
-    actorId: body.agentId
-  });
-  await pgStore?.persistLedgerRecord(completeRecord);
-  await persistStatsLedgerRecord(completeRecord);
-
-  if (subtask) {
-    const rewardAccountId = await rewardAccountForAgent(body.agentId);
-    const accrualCredits = body.ok ? 5 : 2;
-    const accrued = await accrueCredits(
-      {
-        reportId: resultReportId(body.subtaskId),
-        agentId: rewardAccountId,
-        sourceAgentId: body.agentId,
-        taskId: body.taskId,
-        resourceClass: subtask.projectMeta.resourceClass,
-        cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
-        gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
-        success: body.ok,
-        qualityScore: body.ok ? 1.0 : 0.6,
-        timestampMs: Date.now()
-      },
-      {
-        queuedTasks: queue.status().queued,
-        activeAgents: queue.status().agents
-      }
-    );
-    // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
-    if (accrued) {
-      const earningsRecord = ordering.append({
-        eventType: "earnings_accrual",
-        taskId: body.taskId,
-        subtaskId: body.subtaskId,
-        actorId: rewardAccountId,
-        coordinatorId: identity.peerId,
-        payloadJson: JSON.stringify({
-          sourceAgentId: body.agentId,
-          accountId: rewardAccountId,
-          credits: accrualCredits,
-          durationMs,
-          reportedDurationMs: body.durationMs,
-          ok: body.ok,
-          resourceClass: subtask.projectMeta.resourceClass
-        })
-      });
-      await pgStore?.persistLedgerRecord(earningsRecord);
-      await persistStatsLedgerRecord(earningsRecord);
+  // ── #50: sampled results are held for redundant verification ──
+  // A held result (or a replica) doesn't release dependents or earn until the
+  // verification settles (see settleVerification).
+  let verificationHold = false;
+  let verificationOutcome: VerificationOutcome<ResultMeta> | null = null;
+  // Peer-forwarded results skip verification here: their agentId is unauthenticated and
+  // they earn nothing on this coordinator; the coordinator that ran the claim verifies
+  // (and holds) before paying or forwarding.
+  if (!isPeerForward && subtask) {
+    const execution: ExecutionResult<ResultMeta> = {
+      subtaskId: body.subtaskId,
+      agentId: body.agentId,
+      accountId: await rewardAccountForAgent(body.agentId),
+      ok: body.ok,
+      output: body.output ?? "",
+      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+    };
+    if (resultVerifier.isReplica(body.subtaskId)) {
+      verificationHold = true;
+      const r = resultVerifier.recordReplica(body.subtaskId, execution);
+      if (r && r.status === "pending") enqueueReplica(r.next);
+      else if (r) verificationOutcome = r;
+    } else if (resultVerifier.shouldVerify(body.agentId)) {
+      verificationHold = true;
+      enqueueReplica(resultVerifier.start(subtask, execution));
+      app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "result_held_for_verification");
     }
   }
 
-  // Forward result to origin coordinator if this task came from mesh gossip
-  const origin = taskOriginMap.get(body.subtaskId);
-  if (origin && origin.coordinatorId !== identity.peerId) {
-    void (async () => {
-      try {
-        const { request: httpReq } = await import("undici");
-        await httpReq(`${origin.coordinatorUrl}/result`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
-          },
-          body: JSON.stringify(body),
-        });
-        app.log.info({ subtaskId: body.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin");
-      } catch (e) {
-        app.log.warn({ subtaskId: body.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed");
-      }
-    })();
-    taskOriginMap.delete(body.subtaskId);
+  if (verificationHold) {
+    // #50: held original or replica. Nothing is visible to the requester or the origin
+    // coordinator, and nothing is paid, until the verdict (settleVerification).
+    queue.removeHeld(body.subtaskId);
+    if (verificationOutcome) await settleVerification(verificationOutcome);
+    return reply.send({ ok: true, held: true });
   }
 
-  const message = protocol.createMessage(
-    "result_announce",
-    identity.peerId,
-    { taskId: body.taskId, subtaskId: body.subtaskId, ok: body.ok },
-    coordinatorKeys.privateKeyPem
-  );
-  void mesh.broadcast(message);
+  await publishResult(body);
+  // ── Dependency tracking: store output and release dependent subtasks ──
+  releaseDependents(body.subtaskId, body.output ?? "");
+
+  if (subtask) {
+    await accrueResultCredits({
+      subtaskId: body.subtaskId,
+      agentId: body.agentId,
+      ok: body.ok,
+      output: body.output ?? "",
+      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+    });
+  }
   return reply.send({ ok: true });
 });
 
@@ -5057,6 +5182,12 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
       }, STATS_ANCHOR_INTERVAL_MS);
+      // #50: release verifications whose replicas never reported.
+      setInterval(() => {
+        void (async () => {
+          for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
+        })().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
+      }, 60_000);
       setInterval(() => {
         void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
       }, ANCHOR_CONFIRM_POLL_MS);
