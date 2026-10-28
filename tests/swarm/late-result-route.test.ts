@@ -43,7 +43,8 @@ const result = (subtaskId: string, agentId: string): SubtaskResult => ({
 });
 
 describe("/result late-result gate (#51)", () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
+  // Only Date is faked: Fastify's inject needs real timers/setImmediate.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(1_000_000); });
   afterEach(() => vi.useRealTimers());
 
   it("returns 409 lease_expired to an expired holder and credits nothing", async () => {
@@ -52,7 +53,7 @@ describe("/result late-result gate (#51)", () => {
     q.registerAgent("B", policy);
     const st = q.enqueueSubtask(subtask());
     expect(q.claim("A")?.id).toBe(st.id);
-    vi.advanceTimersByTime(LEASE.livenessMs + 1); // A goes silent
+    vi.setSystemTime(Date.now() + LEASE.livenessMs + 1); // A goes silent
     expect(q.claim("B")?.id).toBe(st.id);
     const { app, credited } = buildApp(q);
 
@@ -73,7 +74,7 @@ describe("/result late-result gate (#51)", () => {
     q.registerAgent("A", policy);
     const st = q.enqueueSubtask(subtask(24 * 60 * 60_000)); // 24h requested
     q.claim("A");
-    vi.advanceTimersByTime(30_000 + LEASE.graceMs + 1); // capped deadline, despite liveness
+    vi.setSystemTime(Date.now() + 30_000 + LEASE.graceMs + 1); // capped deadline, despite liveness
     q.heartbeat("A");
     expect(q.getClaim(st.id)).toBeUndefined();
     expect(failures.map((f) => [f.subtaskId, f.agentId, f.ok])).toEqual([[st.id, "coordinator", false]]);

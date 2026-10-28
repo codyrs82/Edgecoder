@@ -114,7 +114,8 @@ describe("claim leases (#51)", () => {
   it("env config parses and falls back on bad values", () => {
     expect(leaseConfigFromEnv({})).toEqual(DEFAULT_LEASE);
     expect(leaseConfigFromEnv({ CLAIM_LEASE_GRACE_MS: "5000", CLAIM_LEASE_LIVENESS_MS: "60000", CLAIM_MAX_ATTEMPTS: "5" }))
-      .toEqual({ graceMs: 5000, livenessMs: 60000, maxAttempts: 5 });
+      .toEqual({ graceMs: 5000, livenessMs: 60000, maxAttempts: 5, maxTimeoutMs: DEFAULT_LEASE.maxTimeoutMs });
+    expect(leaseConfigFromEnv({ CLAIM_MAX_TIMEOUT_MS: "600000" }).maxTimeoutMs).toBe(600_000);
     expect(leaseConfigFromEnv({ CLAIM_LEASE_LIVENESS_MS: "10", CLAIM_MAX_ATTEMPTS: "0", CLAIM_LEASE_GRACE_MS: "x" }))
       .toEqual(DEFAULT_LEASE);
   });
