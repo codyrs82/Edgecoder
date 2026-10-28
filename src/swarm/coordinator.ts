@@ -1167,6 +1167,8 @@ async function refreshAnchorConfirmations(): Promise<void> {
   for (const e of events) {
     if (e.event === "reorg") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reorg_reverted_to_pending");
     else if (e.event === "confirmed") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_confirmed");
+    else if (e.event === "unknown") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_confirmation_unavailable");
+    else if (e.event === "conflicted") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_conflicted_marked_failed");
   }
 }
 
