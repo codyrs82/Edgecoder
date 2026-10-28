@@ -55,10 +55,10 @@
   aria-modal="true"
   aria-labelledby="settings-title"
   tabindex="-1"
-  use:focusTrap={{ onEscape: onClose }}
+  use:focusTrap={{ onEscape: onClose, initialFocus: () => tabButtons[sections.findIndex((s) => s.id === activeSectionId)] }}
 >
   <div class="overlay-header">
-    <button class="back-btn" onclick={onClose} aria-label="Close settings">
+    <button class="back-btn" onclick={onClose}>
       <ArrowLeft size={16} strokeWidth={2} />
       Back
     </button>
