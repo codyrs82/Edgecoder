@@ -136,23 +136,29 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
     return { txid, rawHex: signed.hex };
   }
 
+  /**
+   * #46 review: only a definite answer counts. RPC -5 (unknown txid) means not in
+   * the wallet/chain; any other error (node down, auth, timeout, wallet not loaded)
+   * is thrown so callers keep the last known state instead of treating it as a reorg.
+   * Negative confirmations (conflicted/replaced) are passed through.
+   */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
+    let tx: { confirmations?: number; blockhash?: string; blockheight?: number };
     try {
-      const tx = (await this.rpc("gettransaction", [txid])) as {
-        confirmations?: number;
-        blockhash?: string;
-        blockheight?: number;
-      };
-      const confirmations = tx.confirmations ?? 0;
-      return {
-        confirmed: confirmations > 0,
-        confirmations,
-        blockHeight: tx.blockheight,
-        blockHash: tx.blockhash
-      };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
+      tx = (await this.rpc("gettransaction", [txid])) as typeof tx;
+    } catch (err) {
+      if (err instanceof Error && /bitcoind_rpc_error: -5 /.test(err.message)) {
+        return { confirmed: false, confirmations: 0 };
+      }
+      throw err;
     }
+    const confirmations = tx.confirmations ?? 0;
+    return {
+      confirmed: confirmations > 0,
+      confirmations,
+      blockHeight: confirmations > 0 ? tx.blockheight : undefined,
+      blockHash: confirmations > 0 ? tx.blockhash : undefined
+    };
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {
@@ -282,10 +288,16 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
 
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
     const base = apiBaseUrl(this.network);
-    try {
+    {
+      // #46 review: 404 = definitely unknown; other failures throw (not a reorg).
       const txRes = await request(`${base}/tx/${txid}`, { method: "GET" });
-      if (txRes.statusCode < 200 || txRes.statusCode >= 300) {
+      if (txRes.statusCode === 404) {
+        await txRes.body.dump();
         return { confirmed: false, confirmations: 0 };
+      }
+      if (txRes.statusCode < 200 || txRes.statusCode >= 300) {
+        await txRes.body.dump();
+        throw new Error(`blockstream_tx_lookup_failed:${txRes.statusCode}`);
       }
       const tx = (await txRes.body.json()) as {
         status?: { confirmed?: boolean; block_height?: number; block_hash?: string };
@@ -295,9 +307,11 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
       }
       // Get current tip height to compute confirmations
       const tipRes = await request(`${base}/blocks/tip/height`, { method: "GET" });
-      const tipHeight = tipRes.statusCode >= 200 && tipRes.statusCode < 300
-        ? Number(await tipRes.body.text())
-        : 0;
+      if (tipRes.statusCode < 200 || tipRes.statusCode >= 300) {
+        await tipRes.body.dump();
+        throw new Error(`blockstream_tip_lookup_failed:${tipRes.statusCode}`);
+      }
+      const tipHeight = Number(await tipRes.body.text());
       const blockHeight = tx.status.block_height ?? 0;
       const confirmations = tipHeight > 0 && blockHeight > 0 ? tipHeight - blockHeight + 1 : 0;
       return {
@@ -306,8 +320,6 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
         blockHeight,
         blockHash: tx.status.block_hash
       };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
     }
   }
 
@@ -382,8 +394,9 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
     return { txid: result.txid };
   }
 
+  /** #46 review: proxy/node errors propagate ("unknown"), they are not "left the chain". */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
-    try {
+    {
       const result = (await this.proxyRequest(`/anchor/confirm/${txid}`)) as {
         ok: boolean;
         confirmed: boolean;
@@ -391,15 +404,15 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
         blockHeight?: number;
         blockHash?: string;
       };
+      if (!result || result.ok !== true || typeof result.confirmations !== "number") {
+        throw new Error("anchor_proxy_confirm_invalid_response");
+      }
       return {
         confirmed: result.confirmed,
         confirmations: result.confirmations,
         blockHeight: result.blockHeight,
         blockHash: result.blockHash
       };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
-    }
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {

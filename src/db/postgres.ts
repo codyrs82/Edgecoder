@@ -1260,6 +1260,31 @@ export class PostgresStore {
     return result.rows.map((row) => this.anchorFromRow(row));
   }
 
+  /** #46 review: cross-instance lock so one checkpoint is broadcast at most once. */
+  async withCheckpointLock<T>(checkpointHash: string, fn: () => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(46, hashtext($1))", [checkpointHash]);
+      try {
+        return await fn();
+      } finally {
+        await client.query("SELECT pg_advisory_unlock(46, hashtext($1))", [checkpointHash]).catch(() => undefined);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /** #46 review: broadcast attempts since `sinceMs`, for the daily anchoring budget. */
+  async countAnchorBroadcastsSince(sinceMs: number): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM bitcoin_anchor_records
+       WHERE created_at_ms >= $1 AND (status = 'broadcasting' OR tx_ref ~ '^[0-9a-f]{64}$')`,
+      [sinceMs]
+    );
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
   /** #46: anchors awaiting confirmation depth (or re-confirmation after a reorg). */
   async listPendingAnchors(limit = 50): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(

@@ -397,9 +397,10 @@ export interface BitcoinAnchorRecord {
   txRef: string;
   /**
    * #46: "pending" = broadcast (real txid in txRef), below the required confirmation
-   * depth or reorged out; "anchored" = at least the required confirmations on chain.
+   * depth or reorged out; "anchored" = at least the required confirmations on chain;
+   * "broadcasting" = written just before broadcast, so a crash mid-broadcast is visible.
    */
-  status: "pending" | "anchored" | "failed";
+  status: "pending" | "anchored" | "failed" | "broadcasting";
   anchoredAtMs?: number;
   createdAtMs: number;
   /** #46: confirmations seen at the last check. */

@@ -49,7 +49,8 @@ function scriptedProvider(script: AnchorConfirmationResult[]) {
   return { provider, broadcasts };
 }
 
-const deps = (provider: BitcoinAnchorProvider, store: AnchorStore) => ({ provider, store, network: "signet" as const, now: () => 1_000 });
+const POLICY = { dailyBudgetSats: 1_000_000, maxFeeSats: 20_000, mainnetEnabled: false };
+const deps = (provider: BitcoinAnchorProvider, store: AnchorStore) => ({ provider, store, network: "signet" as const, now: () => 1_000, policy: POLICY });
 
 describe("anchorCheckpoint (#46)", () => {
   it("broadcasts an EC OP_RETURN and stores the real txid as pending", async () => {
@@ -85,7 +86,9 @@ describe("anchorCheckpoint (#46)", () => {
     const store = memStore();
     const provider = { ...scriptedProvider([]).provider, broadcastOpReturn: async () => ({ txid: "mock-123" }) };
     await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/invalid_txid/);
-    expect(store.rows.size).toBe(0);
+    // Something may have been sent: the "broadcasting" row stays for reconciliation and blocks a re-send.
+    expect([...store.rows.values()].map((r) => r.status)).toEqual(["broadcasting"]);
+    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/unreconciled/);
   });
 });
 
@@ -215,5 +218,82 @@ describe("bitcoind coin selection (#46)", () => {
     expect(anchorFeeRateSatVb(undefined, {})).toBe(2);
     expect(anchorFeeRateSatVb(0.00025, {})).toBe(25);
     expect(anchorFeeRateSatVb(0.00001, { BITCOIN_ANCHOR_MIN_FEE_SAT_VB: "5" })).toBe(5);
+  });
+});
+
+describe("anchoring review fixes (#46)", () => {
+  const anchored = (): BitcoinAnchorRecord => ({
+    anchorId: "a1", epochId: "e", checkpointHash: CHECKPOINT, anchorNetwork: "signet", txRef: TXID,
+    status: "anchored", anchoredAtMs: 500, createdAtMs: 1, confirmations: 6, blockHash: BLOCK_A, blockHeight: 100
+  });
+
+  it("an unreachable node is not a reorg: last known state is kept and nothing is written", async () => {
+    const store = memStore([anchored()]);
+    const provider = { ...scriptedProvider([]).provider, getConfirmations: async () => { throw new Error("ECONNREFUSED"); } };
+    const r = await refreshAnchor(deps(provider, store), anchored(), 6);
+    expect(r.event).toBe("unknown");
+    expect(store.rows.get("a1")).toMatchObject({ status: "anchored", confirmations: 6, blockHash: BLOCK_A, anchoredAtMs: 500 });
+  });
+
+  it("bitcoind: RPC -5 (unknown txid) is a definite miss, other RPC errors throw", async () => {
+    const original = getGlobalDispatcher();
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    setGlobalDispatcher(agent);
+    try {
+      const pool = agent.get("http://btc.test:38332");
+      pool.intercept({ path: /.*/, method: "POST" }).reply(200, { result: null, error: { code: -5, message: "Invalid or non-wallet transaction id" } });
+      pool.intercept({ path: /.*/, method: "POST" }).reply(200, { result: null, error: { code: -18, message: "Requested wallet does not exist or is not loaded" } });
+      const p = new BitcoindRpcProvider("http://btc.test:38332", "u", "p", "anchor");
+      await expect(p.getConfirmations(TXID)).resolves.toEqual({ confirmed: false, confirmations: 0 });
+      await expect(p.getConfirmations(TXID)).rejects.toThrow(/-18/);
+    } finally {
+      setGlobalDispatcher(original);
+      await agent.close();
+    }
+  });
+
+  it("concurrent anchorCheckpoint calls broadcast once", async () => {
+    const store = memStore();
+    const { provider, broadcasts } = scriptedProvider([]);
+    const d = deps(provider, store);
+    const recs = await Promise.all([1, 2, 3, 4].map(() => anchorCheckpoint(d, { epochId: "e", checkpointHash: CHECKPOINT })));
+    expect(broadcasts).toHaveLength(1);
+    expect(new Set(recs.map((r) => r.anchorId)).size).toBe(1);
+  });
+
+  it("a failed broadcast is marked failed and can be retried", async () => {
+    const store = memStore();
+    let n = 0;
+    const provider = { ...scriptedProvider([]).provider, broadcastOpReturn: async () => { if (n++ === 0) throw new Error("insufficient funds"); return { txid: TXID }; } };
+    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/insufficient/);
+    expect([...store.rows.values()][0].status).toBe("failed");
+    const rec = await anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT });
+    expect(rec).toMatchObject({ status: "pending", txRef: TXID });
+  });
+
+  it("mainnet needs an explicit opt-in", async () => {
+    const { provider, broadcasts } = scriptedProvider([]);
+    const d = { ...deps(provider, memStore()), network: "bitcoin" as const };
+    await expect(anchorCheckpoint(d, { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/mainnet_not_enabled/);
+    expect(broadcasts).toHaveLength(0);
+    const ok = await anchorCheckpoint({ ...d, policy: { ...POLICY, mainnetEnabled: true } }, { epochId: "e", checkpointHash: "ef".repeat(32) });
+    expect(ok.status).toBe("pending");
+  });
+
+  it("daily budget refuses broadcasts past (count + 1) x maxFeeSats", async () => {
+    const store = Object.assign(memStore(), { countAnchorBroadcastsSince: async () => 2 });
+    const { provider, broadcasts } = scriptedProvider([]);
+    const d = { ...deps(provider, store), policy: { ...POLICY, dailyBudgetSats: 60_000 } };
+    await expect(anchorCheckpoint(d, { epochId: "e", checkpointHash: CHECKPOINT })).resolves.toMatchObject({ status: "pending" });
+    const tight = { ...d, policy: { ...POLICY, dailyBudgetSats: 59_999 } };
+    await expect(anchorCheckpoint(tight, { epochId: "e", checkpointHash: "ef".repeat(32) })).rejects.toThrow(/daily_budget/);
+    expect(broadcasts).toHaveLength(1);
+  });
+
+  it("negative confirmations (conflicted / replaced) mark the anchor failed", () => {
+    const r = applyConfirmation(anchored(), { confirmed: false, confirmations: -1 }, 6, 2_000);
+    expect(r.event).toBe("conflicted");
+    expect(r.record.status).toBe("failed");
   });
 });
