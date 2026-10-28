@@ -3,8 +3,9 @@
 
 import type { FastifyInstance } from "fastify";
 import { registerAccountPages } from "./account.js";
+import { registerChatPage } from "./chat.js";
 import { registerDashboardPages } from "./dashboard.js";
-import { registerHomeAndChatPages } from "./home-chat.js";
+import { registerHomePage } from "./home.js";
 import { registerLegacyPage } from "./legacy.js";
 import { registerPublicPages } from "./public.js";
 import { registerReviewsPage } from "./reviews.js";
@@ -13,7 +14,8 @@ import { registerReviewsPage } from "./reviews.js";
 export function registerPortalPages(app: FastifyInstance): void {
   registerPublicPages(app);
   registerLegacyPage(app);
-  registerHomeAndChatPages(app);
+  registerHomePage(app);
+  registerChatPage(app);
   registerDashboardPages(app);
   registerAccountPages(app);
   registerReviewsPage(app);
