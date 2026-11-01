@@ -14,6 +14,7 @@ import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../in
 import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
+import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
@@ -135,6 +136,13 @@ let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
 // Attempt portal-based coordinator discovery at startup
 (async () => {
+  if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
+    const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined });
+    if (picked) {
+      console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
+      activeCoordinatorUrl = picked.url;
+    }
+  }
   if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
     if (discovered) {
