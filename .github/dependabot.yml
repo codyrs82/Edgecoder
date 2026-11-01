@@ -1,0 +1,32 @@
+# #13: weekly dependency updates. Minor and patch bumps are grouped per ecosystem to keep the PR count down.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      root-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      desktop-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /extensions/vscode
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    groups:
+      vscode-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: cargo
+    directory: /desktop/src-tauri
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    groups:
+      cargo-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
