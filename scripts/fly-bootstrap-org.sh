@@ -125,11 +125,19 @@ ensure_app "$SEED"; ensure_app "$SEED_EU"; ensure_app "$PORTAL"
 # --------------------------------------------------------------- postgres ----
 if [ "${SKIP_PG:-0}" != "1" ]; then
   log "Postgres"
-  if app_exists "$PG_APP"; then
+  pg_has_machines() { fly machines list -a "$PG_APP" --json 2>/dev/null | python3 -c 'import json,sys; sys.exit(0 if len(json.load(sys.stdin))>0 else 1)'; }
+  if app_exists "$PG_APP" && pg_has_machines; then
     echo "postgres $PG_APP: exists"
   else
+    if app_exists "$PG_APP"; then
+      # A previous run created the app but not its machine/volume (e.g. no payment method yet).
+      # `fly postgres create` can't adopt an empty app, so remove it and create the cluster fresh.
+      echo "postgres $PG_APP: app exists without machines; recreating"
+      fly apps destroy "$PG_APP" --yes
+    fi
     fly postgres create --name "$PG_APP" --org "$ORG" --region "${PG_REGION:-ord}" \
-      --vm-size "${PG_VM_SIZE:-shared-cpu-1x}" --volume-size "${PG_VOLUME_GB:-10}" --initial-cluster-size 1
+      --vm-size "${PG_VM_SIZE:-shared-cpu-1x}" --volume-size "${PG_VOLUME_GB:-10}" --initial-cluster-size 1 \
+      || die "Postgres cluster creation failed (a new org needs a payment method at https://fly.io/dashboard/$ORG/billing before volumes over 1 GB can be created)"
   fi
   # `fly postgres attach` sets the connection string as a secret on the target app. It
   # fails if that app already has the variable, so re-runs just report "already attached".
