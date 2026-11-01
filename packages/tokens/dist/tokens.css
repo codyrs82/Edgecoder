@@ -51,6 +51,7 @@
   --yellow: #925906;
   --on-accent: #ffffff;
   --card: rgba(255, 255, 255, 0.96);
+  --selection: #f0d9c8;
 }
 [data-theme=dark] {
   color-scheme: dark;
@@ -74,6 +75,7 @@
   --yellow: #fbbf24;
   --on-accent: #1a1a18;
   --card: rgba(58, 58, 55, 0.96);
+  --selection: #5a4a3a;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme=light]) {
@@ -98,5 +100,6 @@
     --yellow: #fbbf24;
     --on-accent: #1a1a18;
     --card: rgba(58, 58, 55, 0.96);
+    --selection: #5a4a3a;
   }
 }
