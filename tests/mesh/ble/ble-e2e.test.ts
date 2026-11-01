@@ -5,8 +5,13 @@ import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { BLETaskRequest, BLETaskResponse } from "../../../src/common/types.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
 import { createPeerKeys, signPayload, verifyPayload } from "../../../src/mesh/peer.js";
+import { bleTxV3FieldsFromTx, verifyBleTxV3 } from "../../../src/credits/ble-tx-canonical.js";
+import { attachMockProvider } from "./cosign-test-helper.js";
 
 let store: SQLiteStore;
+// #63: requesters co-sign offline transactions with their agent key.
+const phoneKeys = createPeerKeys("phone");
+const signer = { privateKeyPem: phoneKeys.privateKeyPem };
 
 beforeEach(() => {
   store = new SQLiteStore(":memory:");
@@ -33,19 +38,17 @@ describe("BLE mesh e2e (mock transport)", () => {
       deviceType: "workstation"
     });
 
-    // Laptop handles incoming tasks
-    laptopTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "macbook",
-      status: "completed" as const,
-      generatedCode: "def factorial(n):\n    result = 1\n    for i in range(2, n+1):\n        result *= i\n    return result\nprint(factorial(10))",
-      output: "3628800",
+    // Laptop handles incoming tasks (and co-signs the resulting transaction, #63)
+    attachMockProvider(laptopTransport, {
+      agentId: "macbook",
+      modelParamSize: 7,
       cpuSeconds: 3.2,
-      providerSignature: "laptop-sig"
-    }));
+      generatedCode: "def factorial(n):\n    result = 1\n    for i in range(2, n+1):\n        result *= i\n    return result\nprint(factorial(10))",
+      output: "3628800"
+    });
 
     // Phone goes offline and needs to route a task
-    const phoneMesh = new BLEMeshManager("iphone", "user-account", phoneTransport, store);
+    const phoneMesh = new BLEMeshManager("iphone", "iphone", phoneTransport, store, signer);
     phoneMesh.setOffline(true);
     phoneMesh.refreshPeers();
 
@@ -69,8 +72,9 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].requesterId).toBe("iphone");
     expect(pending[0].providerId).toBe("macbook");
-    // requesterAccountId is derived from requesterId in SQLite-backed ledger
+    // #63: the signed account id is persisted with the row
     expect(pending[0].requesterAccountId).toBe("iphone");
+    expect(pending[0].providerAccountId).toBe("macbook");
     expect(pending[0].cpuSeconds).toBe(3.2);
     expect(pending[0].credits).toBeGreaterThan(0);
 
@@ -134,17 +138,9 @@ describe("BLE mesh e2e (mock transport)", () => {
       currentLoad: 0,
       deviceType: "phone"
     });
-    tinyTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "tiny-device",
-      status: "completed" as const,
-      generatedCode: "print('hi')",
-      output: "hi",
-      cpuSeconds: 5.0,
-      providerSignature: "tiny-sig"
-    }));
+    attachMockProvider(tinyTransport, { agentId: "tiny-device", modelParamSize: 0.5, cpuSeconds: 5.0, generatedCode: "print('hi')", output: "hi" });
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -415,17 +411,9 @@ describe("BLE mesh e2e (mock transport)", () => {
       cpuSeconds: 0,
       providerSignature: "",
     }));
-    reliableTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "reliable",
-      status: "completed" as const,
-      generatedCode: "print('ok')",
-      output: "ok",
-      cpuSeconds: 2.0,
-      providerSignature: "rel-sig",
-    }));
+    attachMockProvider(reliableTransport, { agentId: "reliable", modelParamSize: 7, cpuSeconds: 2.0, generatedCode: "print('ok')", output: "ok" });
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -448,8 +436,7 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending[0].cpuSeconds).toBe(2.0);
   });
 
-  it("signed credit flow: signatures propagate through ledger", async () => {
-    const phoneKeys = createPeerKeys("phone");
+  it("signed credit flow (#63): message signatures stay on the messages, the ledger carries the v3 co-signatures", async () => {
     const laptopKeys = createPeerKeys("laptop");
     const network = new Map<string, MockBLETransport>();
     const phoneTransport = new MockBLETransport("phone", network);
@@ -467,19 +454,25 @@ describe("BLE mesh e2e (mock transport)", () => {
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "laptop",
-      status: "completed" as const,
-      output: "signed-output",
+    const seenRequests: BLETaskRequest[] = [];
+    attachMockProvider(laptopTransport, {
+      agentId: "laptop",
+      modelParamSize: 7,
       cpuSeconds: 2.5,
-      providerSignature: signPayload(
-        JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash }),
-        laptopKeys.privateKeyPem
-      ),
-    }));
+      output: "signed-output",
+      keys: laptopKeys,
+      respond: (req) => {
+        seenRequests.push(req as BLETaskRequest);
+        return {
+          providerSignature: signPayload(
+            JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash }),
+            laptopKeys.privateKeyPem
+          ),
+        };
+      },
+    });
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -488,7 +481,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       phoneKeys.privateKeyPem
     );
 
-    await mesh.routeTask({
+    const response = await mesh.routeTask({
       requestId: "signed-req",
       requesterId: "phone",
       task: taskText,
@@ -496,16 +489,18 @@ describe("BLE mesh e2e (mock transport)", () => {
       requesterSignature: reqSig,
     }, 1.5);
 
+    // Message-level signatures are still valid on the request/response pair
+    expect(verifyPayload(JSON.stringify({ requesterId: "phone", taskHash }), seenRequests[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
+    const provPayload = JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash });
+    expect(verifyPayload(provPayload, response!.providerSignature, laptopKeys.publicKeyPem)).toBe(true);
+
+    // The ledger entry carries both v3 co-signatures over the canonical bytes
     const pending = mesh.pendingTransactions();
     expect(pending).toHaveLength(1);
-    expect(pending[0].requesterSignature).toBe(reqSig);
-    expect(pending[0].providerSignature).not.toBe("");
-
-    // Verify signatures are cryptographically valid
-    const reqPayload = JSON.stringify({ requesterId: "phone", taskHash });
-    expect(verifyPayload(reqPayload, pending[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
-
-    const provPayload = JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash });
-    expect(verifyPayload(provPayload, pending[0].providerSignature, laptopKeys.publicKeyPem)).toBe(true);
+    expect(pending[0].taskHash).toBe(taskHash);
+    expect(pending[0].credits).toBe(2.5);
+    const fields = bleTxV3FieldsFromTx(pending[0]);
+    expect(verifyBleTxV3(fields, pending[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields, pending[0].providerSignature, laptopKeys.publicKeyPem)).toBe(true);
   });
 });

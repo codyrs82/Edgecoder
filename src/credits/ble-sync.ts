@@ -5,10 +5,12 @@ import { z } from "zod";
 import type { BLECreditTransaction } from "../common/types.js";
 import { verifyPayload } from "../mesh/peer.js";
 import type { CreditEngine } from "./engine.js";
+import { bleTxV3FieldsFromTx, validateBleTxV3Fields, verifyBleTxV3, type BleTxV3Fields } from "./ble-tx-canonical.js";
 
 /**
  * #41: /credits/ble-sync settlement logic, kept free of coordinator globals so it
- * can be unit tested.
+ * can be unit tested. #63: signatures are verified over the canonical v3 bytes
+ * (see ble-tx-canonical.ts); v1/v2 payloads only behind non-production flags.
  */
 
 export const BLE_SYNC_MAX_CREDITS_PER_TX = (() => {
@@ -55,8 +57,9 @@ export function isBleSyncAuthorized(
 export type BleSyncTx = BLECreditTransaction;
 
 /**
- * Canonical v2 payload. BOTH requester and provider sign exactly this string, so
- * credits, txId and the requester account are covered by both signatures.
+ * Legacy v2 payload (#41): float JSON, signed by both parties. Superseded by the
+ * canonical v3 bytes (#63, src/credits/ble-tx-canonical.ts). Only honoured with
+ * BLE_SYNC_ALLOW_V2=1 outside production.
  */
 export function bleTxSignedPayloadV2(tx: Pick<
   BLECreditTransaction,
@@ -86,38 +89,68 @@ export function bleSyncAllowV1(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV !== "production" && env.BLE_SYNC_ALLOW_V1 === "1";
 }
 
+export function bleSyncAllowV2(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV !== "production" && env.BLE_SYNC_ALLOW_V2 === "1";
+}
+
 export type BleSkipReason =
   | "signature_required"
   | "invalid_signature"
+  | "invalid_payload"
   | "account_mismatch"
   | "duplicate"
   | "insufficient";
 
 export type BleTransferResult = "applied" | "duplicate" | "insufficient";
 
+export interface BleSyncLegacyAllowances {
+  /** Accept v1 (credits unsigned) payloads. Never in production. */
+  v1?: boolean;
+  /** Accept v2 (float JSON) payloads. Never in production. */
+  v2?: boolean;
+}
+
 export interface BleSyncDeps {
   getPublicKeyPem: (agentId: string) => string | undefined;
   rewardAccountForAgent: (agentId: string) => Promise<string>;
   /** Persistent dedupe + balance-checked debit/credit, atomically. */
   transfer: (tx: BleSyncTx, requesterAccountId: string, providerAccountId: string) => Promise<BleTransferResult>;
-  allowV1?: boolean;
+  legacy?: BleSyncLegacyAllowances;
 }
 
+/**
+ * #63: both signatures must verify over the canonical v3 bytes. Any tampering
+ * with a signed field (including credits by one milli-unit) -> invalid_signature.
+ * Fields that cannot be canonically encoded (newline in a string, bad amounts)
+ * -> invalid_payload.
+ */
 export function verifyBleTxSignatures(
   tx: BleSyncTx,
   requesterPem: string | undefined,
   providerPem: string | undefined,
-  allowV1 = false
-): "ok" | "signature_required" | "invalid_signature" {
+  allow: BleSyncLegacyAllowances = {}
+): "ok" | "signature_required" | "invalid_signature" | "invalid_payload" {
   if (!requesterPem || !providerPem || !tx.requesterSignature || !tx.providerSignature) {
     return "signature_required";
   }
-  const v2 = bleTxSignedPayloadV2(tx);
-  if (verifyPayload(v2, tx.requesterSignature, requesterPem) && verifyPayload(v2, tx.providerSignature, providerPem)) {
+  let fields: BleTxV3Fields;
+  try {
+    fields = bleTxV3FieldsFromTx(tx);
+  } catch {
+    return "invalid_payload";
+  }
+  if (validateBleTxV3Fields(fields)) return "invalid_payload";
+  if (verifyBleTxV3(fields, tx.requesterSignature, requesterPem) && verifyBleTxV3(fields, tx.providerSignature, providerPem)) {
     return "ok";
   }
+  if (allow.v2) {
+    const v2 = bleTxSignedPayloadV2(tx);
+    if (verifyPayload(v2, tx.requesterSignature, requesterPem) && verifyPayload(v2, tx.providerSignature, providerPem)) {
+      return "ok";
+    }
+  }
   if (
-    allowV1 &&
+    allow.v1 &&
     verifyPayload(v1RequesterPayload(tx), tx.requesterSignature, requesterPem) &&
     verifyPayload(v1ProviderPayload(tx), tx.providerSignature, providerPem)
   ) {
@@ -137,7 +170,7 @@ export async function applyBleSyncBatch(
       tx,
       deps.getPublicKeyPem(tx.requesterId),
       deps.getPublicKeyPem(tx.providerId),
-      deps.allowV1 ?? false
+      deps.legacy ?? {}
     );
     if (sig !== "ok") {
       skipped.push({ txId: tx.txId, reason: sig });

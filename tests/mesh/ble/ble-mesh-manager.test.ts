@@ -2,8 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
+import { createPeerKeys } from "../../../src/mesh/peer.js";
+import { bleTxV3FieldsFromTx, verifyBleTxV3 } from "../../../src/credits/ble-tx-canonical.js";
+import { attachMockProvider } from "./cosign-test-helper.js";
 
 let store: SQLiteStore;
+// #63: a requester needs a signing key to co-sign offline transactions.
+const requesterKeys = createPeerKeys();
+const signer = { privateKeyPem: requesterKeys.privateKeyPem };
 
 beforeEach(() => {
   store = new SQLiteStore(":memory:");
@@ -75,17 +81,9 @@ describe("BLEMeshManager", () => {
     const transportA = new MockBLETransport("agent-a", network);
     const transportB = new MockBLETransport("agent-b", network);
     transportB.startAdvertising({ agentId: "agent-b", model: "big", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
-    transportB.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "agent-b",
-      status: "completed" as const,
-      generatedCode: "x = 1",
-      output: "",
-      cpuSeconds: 2.0,
-      providerSignature: "sig-b"
-    }));
+    attachMockProvider(transportB, { agentId: "agent-b", modelParamSize: 7, cpuSeconds: 2.0, generatedCode: "x = 1", output: "" });
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, signer);
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -108,17 +106,9 @@ describe("BLEMeshManager", () => {
     const transportA = new MockBLETransport("agent-a", network);
     const transportSmall = new MockBLETransport("agent-small", network);
     transportSmall.startAdvertising({ agentId: "agent-small", model: "tiny", modelParamSize: 0.5, memoryMB: 2048, batteryPct: 100, currentLoad: 0, deviceType: "phone" });
-    transportSmall.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "agent-small",
-      status: "completed" as const,
-      generatedCode: "x = 1",
-      output: "",
-      cpuSeconds: 10.0,
-      providerSignature: "sig-s"
-    }));
+    attachMockProvider(transportSmall, { agentId: "agent-small", modelParamSize: 0.5, cpuSeconds: 10.0, generatedCode: "x = 1", output: "" });
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, signer);
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -290,21 +280,14 @@ describe("BLEMeshManager mesh token auth", () => {
     expect(result!.output).toBe("authenticated");
   });
 
-  it("propagates request and response signatures into credit transaction", async () => {
+  it("records co-signed v3 signatures (not the request/response message signatures) in the credit transaction (#63)", async () => {
     const network = new Map<string, MockBLETransport>();
     const transportA = new MockBLETransport("agent-a", network);
     const transportB = new MockBLETransport("agent-b", network);
     transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
-    transportB.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "agent-b",
-      status: "completed" as const,
-      output: "ok",
-      cpuSeconds: 1.0,
-      providerSignature: "provider-sig-abc",
-    }));
+    const provider = attachMockProvider(transportB, { agentId: "agent-b", modelParamSize: 7, cpuSeconds: 1.0, respond: () => ({ providerSignature: "provider-sig-abc" }) });
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, signer);
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -317,8 +300,12 @@ describe("BLEMeshManager mesh token auth", () => {
 
     const pending = manager.pendingTransactions();
     expect(pending).toHaveLength(1);
-    expect(pending[0].requesterSignature).toBe("requester-sig-xyz");
-    expect(pending[0].providerSignature).toBe("provider-sig-abc");
+    expect(pending[0].requesterSignature).not.toBe("requester-sig-xyz");
+    expect(pending[0].providerSignature).not.toBe("provider-sig-abc");
+    const fields = bleTxV3FieldsFromTx(pending[0]);
+    expect(verifyBleTxV3(fields, pending[0].requesterSignature, requesterKeys.publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields, pending[0].providerSignature, provider.keys.publicKeyPem)).toBe(true);
+    expect(pending[0].requesterAccountId).toBe("account-a");
   });
 });
 
@@ -418,16 +405,9 @@ describe("BLEMeshManager retry/failover", () => {
       cpuSeconds: 0,
       providerSignature: "",
     }));
-    transportOk.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "peer-ok",
-      status: "completed" as const,
-      output: "ok",
-      cpuSeconds: 5.0,
-      providerSignature: "sig",
-    }));
+    attachMockProvider(transportOk, { agentId: "peer-ok", modelParamSize: 3, cpuSeconds: 5.0 });
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, signer);
     manager.setOffline(true);
 
     await manager.routeTask({

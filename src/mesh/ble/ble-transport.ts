@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { BLETaskRequest, BLETaskResponse, BLEPeerEntry } from "../../common/types.js";
+import { BLE_COSIGN_MSG_TYPE, type BleCoSignRequest, type BleCoSignResponse } from "./ble-cosign.js";
 
 export interface BLEAdvertisement {
   agentId: string;
@@ -15,6 +16,8 @@ export interface BLEAdvertisement {
 }
 
 export type TaskRequestHandler = (req: BLETaskRequest) => Promise<BLETaskResponse>;
+/** #63: provider-side handler for the co-sign step (see ble-cosign.ts). */
+export type CoSignRequestHandler = (req: BleCoSignRequest) => Promise<BleCoSignResponse> | BleCoSignResponse;
 
 export interface BLETransport {
   startAdvertising(advertisement: BLEAdvertisement): void;
@@ -24,6 +27,9 @@ export interface BLETransport {
   discoveredPeers(): BLEPeerEntry[];
   sendTaskRequest(peerId: string, request: BLETaskRequest): Promise<BLETaskResponse>;
   onTaskRequest(handler: TaskRequestHandler): void;
+  /** #63: send the final transaction to the provider and get its signature back. */
+  sendCoSignRequest(peerId: string, request: BleCoSignRequest): Promise<BleCoSignResponse>;
+  onCoSignRequest(handler: CoSignRequestHandler): void;
   updateAdvertisement(update: Partial<BLEAdvertisement>): void;
   currentAdvertisement(): BLEAdvertisement | null;
 }
@@ -32,6 +38,7 @@ export class MockBLETransport implements BLETransport {
   private advertisement: BLEAdvertisement | null = null;
   private scanning = false;
   private handler: TaskRequestHandler | null = null;
+  private coSignHandler: CoSignRequestHandler | null = null;
 
   constructor(
     private readonly localId: string,
@@ -94,6 +101,20 @@ export class MockBLETransport implements BLETransport {
       };
     }
     return peer.handler(request);
+  }
+
+  onCoSignRequest(handler: CoSignRequestHandler): void {
+    this.coSignHandler = handler;
+  }
+
+  async sendCoSignRequest(peerId: string, request: BleCoSignRequest): Promise<BleCoSignResponse> {
+    const peer = this.network.get(peerId);
+    if (!peer || !peer.coSignHandler) {
+      return { type: BLE_COSIGN_MSG_TYPE, txId: request.tx.txId, status: "rejected", reason: "no_cosign_handler" };
+    }
+    // Round-trip through JSON like the real GATT transport does.
+    const wire = JSON.parse(JSON.stringify(request)) as BleCoSignRequest;
+    return JSON.parse(JSON.stringify(await peer.coSignHandler(wire))) as BleCoSignResponse;
   }
 
   updateAdvertisement(update: Partial<BLEAdvertisement>): void {

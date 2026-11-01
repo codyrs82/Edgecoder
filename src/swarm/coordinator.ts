@@ -122,6 +122,7 @@ import {
 import {
   applyBleSyncBatch,
   bleSyncAllowV1,
+  bleSyncAllowV2,
   createBleSyncSchema,
   createInMemoryBleTransfer,
   isBleSyncAuthorized
@@ -5184,7 +5185,7 @@ app.post("/escalate/:taskId/result", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
-// #41: authenticated, double-signed, balance-checked, persistently deduped BLE settlement.
+// #41/#63: authenticated, co-signed (canonical v3 bytes), balance-checked, persistently deduped BLE settlement.
 const bleSyncSchema = createBleSyncSchema();
 const syncedBLETxIds = new Set<string>(); // non-PG mode only
 const inMemoryBleTransfer = createInMemoryBleTransfer(creditEngine, syncedBLETxIds);
@@ -5203,7 +5204,8 @@ app.post("/credits/ble-sync", async (req, reply) => {
   const { applied, skipped } = await applyBleSyncBatch(body.transactions, {
     getPublicKeyPem: (agentId) => agentCapabilities.get(agentId)?.publicKeyPem,
     rewardAccountForAgent,
-    allowV1: bleSyncAllowV1(),
+    // #63: v3 canonical bytes only; v1/v2 compat is opt-in and never in production.
+    legacy: { v1: bleSyncAllowV1(), v2: bleSyncAllowV2() },
     transfer: (tx, requesterAccountId, providerAccountId) =>
       pgStore
         ? pgStore.applyBleTransfer({ txId: tx.txId, requesterAccountId, providerAccountId, credits: tx.credits })

@@ -14,6 +14,8 @@ import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
+import { BleProviderCoSigner } from "../mesh/ble/ble-cosign.js";
+import { ledgerRowToTransaction } from "../mesh/ble/offline-ledger.js";
 import { localStore } from "../db/local-store.js";
 import { signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
@@ -367,23 +369,21 @@ async function flushOfflineLedger(): Promise<void> {
   if (unsynced.length === 0) return;
   console.log(`[agent:${AGENT_ID}] flushing ${unsynced.length} BLE credit transaction(s)`);
   try {
-    const transactions = unsynced.map(row => ({
-      txId: row.txId,
-      requesterId: row.requesterId,
-      providerId: row.providerId,
-      requesterAccountId: row.requesterId,
-      providerAccountId: row.providerId,
-      credits: row.credits,
-      cpuSeconds: row.cpuSeconds,
-      taskHash: row.taskHash,
-      timestamp: row.createdAt * 1000,
-      requesterSignature: row.requesterSig,
-      providerSignature: row.providerSig,
-    }));
+    // #63: rows carry both v3 signatures and the account ids they were signed over.
+    const transactions = unsynced.map(ledgerRowToTransaction);
     const bleSyncBody = { transactions };
-    await post("/credits/ble-sync", bleSyncBody, { extraHeaders: signedHeaders("/credits/ble-sync", bleSyncBody) });
+    const result = (await post("/credits/ble-sync", bleSyncBody, { extraHeaders: signedHeaders("/credits/ble-sync", bleSyncBody) })) as {
+      applied?: string[];
+      skipped?: Array<{ txId: string; reason: string }>;
+    };
+    // Mark everything the coordinator has decided on (applied or permanently skipped);
+    // only an HTTP failure leaves rows for retry.
     localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
-    console.log(`[agent:${AGENT_ID}] BLE credits synced`);
+    const skipped = result?.skipped ?? [];
+    if (skipped.length > 0) {
+      console.warn(`[agent:${AGENT_ID}] BLE credits: ${skipped.length} skipped by coordinator: ${skipped.map(s => `${s.txId}=${s.reason}`).join(", ")}`);
+    }
+    console.log(`[agent:${AGENT_ID}] BLE credits synced (${result?.applied?.length ?? 0} applied)`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] BLE credit flush failed (will retry): ${String(e)}`);
   }
@@ -580,8 +580,21 @@ async function loop(): Promise<void> {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
-      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore);
+      // #63: the requester co-signs offline transactions with its agent key.
+      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore, {
+        privateKeyPem: keys.privateKeyPem,
+        onCoSignFailure: ({ peerId, requestId, reason }) =>
+          console.warn(`[BLE] task ${requestId} completed by ${peerId} but not settled offline: ${reason}`),
+      });
       bleMesh.setOwnTokenHash(computeMeshTokenHash());
+      // #63: the provider co-signs only transactions matching what it actually served.
+      const bleCoSigner = new BleProviderCoSigner({
+        agentId: AGENT_ID,
+        accountId: AGENT_ID,
+        privateKeyPem: keys.privateKeyPem,
+        modelParamSize: () => bleTransport?.currentAdvertisement()?.modelParamSize ?? 0,
+      });
+      bleTransport.onCoSignRequest((req) => bleCoSigner.handle(req));
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
         model: OLLAMA_MODEL,
@@ -623,6 +636,7 @@ async function loop(): Promise<void> {
           const durationMs = Date.now() - started;
           try { localStore.recordTaskComplete(subtaskId, response.text, durationMs); } catch (e) { console.warn(`[db] BLE task complete write failed: ${e}`); }
           const taskHash = computeTaskHash(req.task);
+          bleCoSigner.recordServed({ requestId: req.requestId, requesterId: req.requesterId, taskHash, cpuSeconds: durationMs / 1000 });
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,

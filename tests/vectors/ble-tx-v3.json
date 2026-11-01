@@ -1,0 +1,244 @@
+{
+  "$comment": "#63 shared vectors for the canonical BLE tx v3 signed bytes. Asserted by tests/credits/ble-tx-canonical.test.ts (vitest) and ios/EdgeCoderIOS/EdgeCoderIOSTests/BleTxCanonicalTests.swift (XCTest). The key is a throwaway test key.",
+  "version": 3,
+  "domain": "edgecoder-ble-tx-v3",
+  "format": "UTF-8 of: domain, txId, requesterId, requesterAccountId, providerId, providerAccountId, taskHash, cpuMillis, creditMillis joined by '\\n' with no trailing newline. cpuMillis = round(cpuSeconds*1000), creditMillis = round(credits*1000), base-10 integers without sign, leading zeros or exponent. Strings must not contain '\\n'.",
+  "key": {
+    "algorithm": "ed25519",
+    "seedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "publicKeyRawHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n",
+    "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g\n-----END PRIVATE KEY-----\n"
+  },
+  "vectors": [
+    {
+      "name": "basic",
+      "tx": {
+        "txId": "7b0f0d5a-1c2e-4f3a-9b8c-0d1e2f3a4b5c",
+        "requesterId": "iphone-abc123",
+        "requesterAccountId": "iphone-abc123",
+        "providerId": "macbook-def456",
+        "providerAccountId": "macbook-def456",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuSeconds": 3.2,
+        "credits": 3.2
+      },
+      "fields": {
+        "txId": "7b0f0d5a-1c2e-4f3a-9b8c-0d1e2f3a4b5c",
+        "requesterId": "iphone-abc123",
+        "requesterAccountId": "iphone-abc123",
+        "providerId": "macbook-def456",
+        "providerAccountId": "macbook-def456",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 3200,
+        "creditMillis": 3200
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\n7b0f0d5a-1c2e-4f3a-9b8c-0d1e2f3a4b5c\niphone-abc123\niphone-abc123\nmacbook-def456\nmacbook-def456\n9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n3200\n3200",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a37623066306435612d316332652d346633612d396238632d3064316532663361346235630a6970686f6e652d6162633132330a6970686f6e652d6162633132330a6d6163626f6f6b2d6465663435360a6d6163626f6f6b2d6465663435360a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a333230300a33323030",
+      "signatureHex": "0b987e0152fd85578d1bf9edeab47c9470ebe4a60647036fd645dd7cc4d882eda34f3153170cb1d5f91eab715a5e21958a6993d6d30dfc5eb68731cbfb1c7800",
+      "signatureBase64": "C5h+AVL9hVeNG/nt6rR8lHDr5KYGRwNv1kXdfMTYgu2jTzFTFwyx1fkeq3FaXiGVimmT1tMN/F62hzHL+xx4AA=="
+    },
+    {
+      "name": "fractional-rounding",
+      "tx": {
+        "txId": "tx-2",
+        "requesterId": "agent-req",
+        "requesterAccountId": "acct-req",
+        "providerId": "agent-prov",
+        "providerAccountId": "acct-prov",
+        "taskHash": "abc123",
+        "cpuSeconds": 10,
+        "credits": 3
+      },
+      "fields": {
+        "txId": "tx-2",
+        "requesterId": "agent-req",
+        "requesterAccountId": "acct-req",
+        "providerId": "agent-prov",
+        "providerAccountId": "acct-prov",
+        "taskHash": "abc123",
+        "cpuMillis": 10000,
+        "creditMillis": 3000
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\ntx-2\nagent-req\nacct-req\nagent-prov\nacct-prov\nabc123\n10000\n3000",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d320a6167656e742d7265710a616363742d7265710a6167656e742d70726f760a616363742d70726f760a6162633132330a31303030300a33303030",
+      "signatureHex": "872bcdd204220609ec36b7a50301ae55bec31c6141d051f606a210b703edce0c707d293b90e3088d90ba4fd1680897c147163f65ba38ae33897781812d3ef20b",
+      "signatureBase64": "hyvN0gQiBgnsNrelAwGuVb7DHGFB0FH2BqIQtwPtzgxwfSk7kOMIjZC6T9FoCJfBRxY/Zbo4rjOJd4GBLT7yCw=="
+    },
+    {
+      "name": "sub-milli-rounds-half-up",
+      "tx": {
+        "txId": "tx-3",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuSeconds": 0.0005,
+        "credits": 0.0015
+      },
+      "fields": {
+        "txId": "tx-3",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 1,
+        "creditMillis": 2
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\ntx-3\nr\nr\np\np\nh\n1\n2",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d330a720a720a700a700a680a310a32",
+      "signatureHex": "9550ff65eeed851038b68b79fc8ff92f524cdf5bf2470a48bc334b8fc9abc95523c5ac7f9b5f726536a46097ffd37743849288b9c3c86b52eef72d736a5b3409",
+      "signatureBase64": "lVD/Ze7thRA4tot5/I/5L1JM31vyRwpIvDNLj8mryVUjxax/m19yZTakYJf/03dDhJKIucPIa1Lu9y1zals0CQ=="
+    },
+    {
+      "name": "zero-amounts",
+      "tx": {
+        "txId": "tx-zero",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuSeconds": 0,
+        "credits": 0
+      },
+      "fields": {
+        "txId": "tx-zero",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 0,
+        "creditMillis": 0
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\ntx-zero\nr\nr\np\np\nh\n0\n0",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d7a65726f0a720a720a700a700a680a300a30",
+      "signatureHex": "dc2ebf2585db42b973c0b859762a488b05b3e293cd99079919eeb05a9c6a4755b498414b2231b959b10e50c1d701de1a67a3b550d962c464a47f5c957eaeb402",
+      "signatureBase64": "3C6/JYXbQrlzwLhZdipIiwWz4pPNmQeZGe6wWpxqR1W0mEFLIjG5WbEOUMHXAd4aZ6O1UNlixGSkf1yVfq60Ag=="
+    },
+    {
+      "name": "unicode-strings",
+      "tx": {
+        "txId": "tx-ünï-🚀",
+        "requesterId": "requester-日本",
+        "requesterAccountId": "acct-日本",
+        "providerId": "provider-ñ",
+        "providerAccountId": "acct-ñ",
+        "taskHash": "deadbeef",
+        "cpuSeconds": 1.5,
+        "credits": 1.05
+      },
+      "fields": {
+        "txId": "tx-ünï-🚀",
+        "requesterId": "requester-日本",
+        "requesterAccountId": "acct-日本",
+        "providerId": "provider-ñ",
+        "providerAccountId": "acct-ñ",
+        "taskHash": "deadbeef",
+        "cpuMillis": 1500,
+        "creditMillis": 1050
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\ntx-ünï-🚀\nrequester-日本\nacct-日本\nprovider-ñ\nacct-ñ\ndeadbeef\n1500\n1050",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782dc3bc6ec3af2df09f9a800a7265717565737465722de697a5e69cac0a616363742de697a5e69cac0a70726f76696465722dc3b10a616363742dc3b10a64656164626565660a313530300a31303530",
+      "signatureHex": "54b095e6d02308a37fe9aa6d63353fda84dffbf1406427837b579d21f51f21228ccb26ed75694e7d144dacc925efeb73cd6172ea4968e200891a4a8ab5471a07",
+      "signatureBase64": "VLCV5tAjCKN/6aptYzU/2oTf+/FAZCeDe1edIfUfISKMyybtdWlOfRRNrMkl7+tzzWFy6klo4gCJGkqKtUcaBw=="
+    },
+    {
+      "name": "large-amounts",
+      "tx": {
+        "txId": "tx-large",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuSeconds": 123456.789,
+        "credits": 99.999
+      },
+      "fields": {
+        "txId": "tx-large",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 123456789,
+        "creditMillis": 99999
+      },
+      "canonicalUtf8": "edgecoder-ble-tx-v3\ntx-large\nr\nr\np\np\nh\n123456789\n99999",
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d6c617267650a720a720a700a700a680a3132333435363738390a3939393939",
+      "signatureHex": "0bb24e51bec785775c074fc853ce6c3ba0abc0bc8590a5c8dea4b8d8ceaecad07c7f1e1467635395a42008fb68129aef0a7cd4b7cb4f3f21dae1aa906627ce08",
+      "signatureBase64": "C7JOUb7HhXdcB0/IU85sO6CrwLyFkKXI3qS42M6uytB8fx4UZ2NTlaQgCPtoEprvCnzUt8tPPyHa4aqQZifOCA=="
+    }
+  ],
+  "invalid": [
+    {
+      "name": "newline-in-txId",
+      "fields": {
+        "txId": "tx\n1",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      }
+    },
+    {
+      "name": "newline-in-taskHash",
+      "fields": {
+        "txId": "tx",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h\nx",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      }
+    },
+    {
+      "name": "empty-requesterId",
+      "fields": {
+        "txId": "tx",
+        "requesterId": "",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      }
+    },
+    {
+      "name": "negative-creditMillis",
+      "fields": {
+        "txId": "tx",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 1,
+        "creditMillis": -1
+      }
+    },
+    {
+      "name": "fractional-cpuMillis",
+      "fields": {
+        "txId": "tx",
+        "requesterId": "r",
+        "requesterAccountId": "r",
+        "providerId": "p",
+        "providerAccountId": "p",
+        "taskHash": "h",
+        "cpuMillis": 1.5,
+        "creditMillis": 1
+      }
+    }
+  ]
+}

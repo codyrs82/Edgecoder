@@ -3,18 +3,25 @@
 
 import { randomUUID, createHash } from "node:crypto";
 import { BLETaskRequest, BLETaskResponse, BLECreditTransaction } from "../../common/types.js";
-import { baseRatePerSecond } from "../../credits/pricing.js";
+import { bleTxV3FieldsFromTx, fromMillis, toMillis, type BleTxV3Fields } from "../../credits/ble-tx-canonical.js";
 import { BLETransport } from "./ble-transport.js";
 import { BLERouter } from "./ble-router.js";
-import { OfflineLedger } from "./offline-ledger.js";
+import { BLE_COSIGN_MSG_TYPE, type BleCoSignResponse } from "./ble-cosign.js";
+import { computeBleCredits, modelQualityMultiplier } from "./ble-pricing.js";
+import { OfflineLedger, signBleTransactionV3 } from "./offline-ledger.js";
 import type { SQLiteStore } from "../../db/sqlite-store.js";
 
-/** Maps model param size to a credit quality multiplier */
-export function modelQualityMultiplier(paramSize: number): number {
-  if (paramSize >= 7) return 1.0;
-  if (paramSize >= 3) return 0.7;
-  if (paramSize >= 1.5) return 0.5;
-  return 0.3;
+export { modelQualityMultiplier, computeBleCredits };
+
+export interface BLEMeshManagerOptions {
+  /**
+   * #63: this agent's ed25519 private key (PEM). Required to co-sign offline
+   * credit transactions; without it tasks still route but nothing is written to
+   * the offline ledger (the coordinator would reject it anyway).
+   */
+  privateKeyPem?: string;
+  /** Called when a completed task could not be turned into a co-signed transaction. */
+  onCoSignFailure?: (info: { peerId: string; requestId: string; reason: string }) => void;
 }
 
 export class BLEMeshManager {
@@ -25,13 +32,16 @@ export class BLEMeshManager {
   private readonly store: SQLiteStore | null;
   private readonly agentId: string;
   private readonly accountId: string;
+  private readonly options: BLEMeshManagerOptions;
   private ownTokenHash = "";
+  private warnedNoKey = false;
 
-  constructor(agentId: string, accountId: string, transport: BLETransport, store?: SQLiteStore) {
+  constructor(agentId: string, accountId: string, transport: BLETransport, store?: SQLiteStore, options: BLEMeshManagerOptions = {}) {
     this.agentId = agentId;
     this.accountId = accountId;
     this.transport = transport;
     this.store = store ?? null;
+    this.options = options;
     this.ledger = new OfflineLedger(store);
   }
 
@@ -85,27 +95,91 @@ export class BLEMeshManager {
 
       if (response.status === "completed") {
         const taskHash = createHash("sha256").update(request.task).digest("hex");
-        const qualityMul = modelQualityMultiplier(peer.modelParamSize);
-        const credits = response.cpuSeconds * baseRatePerSecond("cpu") * qualityMul;
-        const tx: BLECreditTransaction = {
-          txId: randomUUID(),
-          requesterId: this.agentId,
-          providerId: response.providerId,
-          requesterAccountId: this.accountId,
-          providerAccountId: peer.accountId,
-          credits: Number(credits.toFixed(3)),
-          cpuSeconds: response.cpuSeconds,
+        await this.settleOffline({
+          peerId: peer.agentId,
+          peerAccountId: peer.accountId,
+          peerModelParamSize: peer.modelParamSize,
+          requestId: request.requestId,
           taskHash,
-          timestamp: Date.now(),
-          requesterSignature: request.requesterSignature,
-          providerSignature: response.providerSignature
-        };
-        this.ledger.record(tx);
+          response
+        });
         return response;
       }
       // Failed — try next peer
     }
     return null;
+  }
+
+  /**
+   * #63 co-sign step: build the final tx, get the provider's signature over the
+   * canonical v3 bytes, add ours, and only then record it in the offline ledger.
+   */
+  private async settleOffline(args: {
+    peerId: string;
+    peerAccountId: string;
+    peerModelParamSize: number;
+    requestId: string;
+    taskHash: string;
+    response: BLETaskResponse;
+  }): Promise<void> {
+    const fail = (reason: string) => {
+      this.options.onCoSignFailure?.({ peerId: args.peerId, requestId: args.requestId, reason });
+    };
+    const privateKeyPem = this.options.privateKeyPem;
+    if (!privateKeyPem) {
+      if (!this.warnedNoKey) {
+        this.warnedNoKey = true;
+        console.warn("[BLE] no signing key configured: completed BLE tasks will not be settled offline (#63)");
+      }
+      fail("no_signing_key");
+      return;
+    }
+
+    const credits = computeBleCredits(args.response.cpuSeconds, args.peerModelParamSize);
+    let fields: BleTxV3Fields;
+    try {
+      fields = bleTxV3FieldsFromTx({
+        txId: randomUUID(),
+        requesterId: this.agentId,
+        requesterAccountId: this.accountId,
+        providerId: args.response.providerId,
+        providerAccountId: args.peerAccountId || args.response.providerId,
+        taskHash: args.taskHash,
+        cpuSeconds: args.response.cpuSeconds,
+        credits
+      });
+    } catch (e) {
+      fail(`invalid_payload: ${String(e)}`);
+      return;
+    }
+    const timestamp = Date.now();
+
+    let cosign: BleCoSignResponse;
+    try {
+      cosign = await this.transport.sendCoSignRequest(args.peerId, { type: BLE_COSIGN_MSG_TYPE, tx: { ...fields, timestamp } });
+    } catch (e) {
+      fail(`transport_error: ${String(e)}`);
+      return;
+    }
+    if (cosign.status !== "signed" || !cosign.providerSignature || cosign.txId !== fields.txId) {
+      fail(cosign.reason ?? "rejected");
+      return;
+    }
+
+    const tx: BLECreditTransaction = {
+      txId: fields.txId,
+      requesterId: fields.requesterId,
+      providerId: fields.providerId,
+      requesterAccountId: fields.requesterAccountId,
+      providerAccountId: fields.providerAccountId,
+      credits: fromMillis(fields.creditMillis),
+      cpuSeconds: fromMillis(fields.cpuMillis),
+      taskHash: fields.taskHash,
+      timestamp,
+      requesterSignature: signBleTransactionV3(fields, privateKeyPem),
+      providerSignature: cosign.providerSignature
+    };
+    this.ledger.record(tx);
   }
 
   pendingTransactions(): BLECreditTransaction[] {
@@ -139,3 +213,6 @@ export class BLEMeshManager {
     });
   }
 }
+
+/** Milli-unit helpers re-exported for callers building transactions by hand. */
+export { toMillis, fromMillis };

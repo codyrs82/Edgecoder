@@ -6,6 +6,14 @@ import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
 import { baseRatePerSecond } from "../../../src/credits/pricing.js";
+import { applyBleSyncBatch, createInMemoryBleTransfer } from "../../../src/credits/ble-sync.js";
+import { createPeerKeys } from "../../../src/mesh/peer.js";
+import { ledgerRowToTransaction } from "../../../src/mesh/ble/offline-ledger.js";
+import { bleTxV3FieldsFromTx, verifyBleTxV3 } from "../../../src/credits/ble-tx-canonical.js";
+import { attachMockProvider } from "./cosign-test-helper.js";
+
+const phoneKeys = createPeerKeys();
+const signer = { privateKeyPem: phoneKeys.privateKeyPem };
 
 describe("BLE sync endpoint schema", () => {
   it("validates a well-formed transaction batch", () => {
@@ -152,16 +160,9 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "laptop",
-      status: "completed" as const,
-      output: "result",
-      cpuSeconds: 4.0,
-      providerSignature: "sig",
-    }));
+    const laptop = attachMockProvider(laptopTransport, { agentId: "laptop", modelParamSize: 7, cpuSeconds: 4.0, output: "result" });
 
-    const mesh = new BLEMeshManager("phone", "phone-account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -183,29 +184,26 @@ describe("BLE credit settlement full pipeline", () => {
     expect(tx.credits).toBe(4.0);
     expect(tx.cpuSeconds).toBe(4.0);
 
-    // 3. Simulate flush: read unsynced from SQLite
+    // 3. Simulate flush: read unsynced from SQLite (both v3 co-signatures are present)
     const unsynced = store.listUnsyncedBLECredits(50);
     expect(unsynced).toHaveLength(1);
-    expect(unsynced[0].requesterSig).toBe("req-sig");
-    expect(unsynced[0].providerSig).toBe("sig");
+    expect(unsynced[0].requesterSig).not.toBe("");
+    expect(unsynced[0].providerSig).not.toBe("");
 
-    // 4. Simulate coordinator settlement with CreditEngine
+    // 4. Coordinator settlement through the real /credits/ble-sync logic (#63)
     const engine = new CreditEngine();
-    engine.adjust("phone-account", 20, "seed"); // Give phone initial credits
-    const synced = new Set<string>();
-
-    for (const row of unsynced) {
-      if (synced.has(row.txId)) continue;
-      // This mirrors what the coordinator does
-      const providerAccountId = row.providerId; // rewardAccountForAgent fallback
-      engine.adjust(providerAccountId, row.credits, "ble_compute");
-      engine.adjust("phone-account", -row.credits, "ble_compute");
-      synced.add(row.txId);
-    }
+    engine.adjust("phone", 20, "seed"); // Give phone initial credits
+    const pubkeys: Record<string, string> = { phone: phoneKeys.publicKeyPem, laptop: laptop.keys.publicKeyPem };
+    const out = await applyBleSyncBatch(unsynced.map(ledgerRowToTransaction), {
+      getPublicKeyPem: (id) => pubkeys[id],
+      rewardAccountForAgent: async (id) => id,
+      transfer: createInMemoryBleTransfer(engine)
+    });
+    expect(out.applied).toEqual([tx.txId]);
 
     // 5. Verify balances
     expect(engine.balance("laptop")).toBe(4.0);
-    expect(engine.balance("phone-account")).toBe(16.0); // 20 - 4
+    expect(engine.balance("phone")).toBe(16.0); // 20 - 4
 
     // 6. Mark synced in SQLite
     store.markBLECreditsSynced(unsynced.map(r => r.txId));
@@ -227,16 +225,9 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "phone",
     });
-    tinyTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "tiny",
-      status: "completed" as const,
-      output: "ok",
-      cpuSeconds: 10.0,
-      providerSignature: "",
-    }));
+    attachMockProvider(tinyTransport, { agentId: "tiny", modelParamSize: 0.5, cpuSeconds: 10.0 });
 
-    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -277,16 +268,9 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
-      requestId: req.requestId,
-      providerId: "laptop",
-      status: "completed" as const,
-      output: "done",
-      cpuSeconds: 1.0,
-      providerSignature: "prov-sig-123",
-    }));
+    const laptop = attachMockProvider(laptopTransport, { agentId: "laptop", modelParamSize: 7, cpuSeconds: 1.0, output: "done" });
 
-    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, signer);
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -303,22 +287,11 @@ describe("BLE credit settlement full pipeline", () => {
     expect(rows).toHaveLength(1);
 
     // Map to BLECreditTransaction shape (same as worker-runner flushOfflineLedger)
-    const transactions = rows.map(row => ({
-      txId: row.txId,
-      requesterId: row.requesterId,
-      providerId: row.providerId,
-      requesterAccountId: row.requesterId,
-      providerAccountId: row.providerId,
-      credits: row.credits,
-      cpuSeconds: row.cpuSeconds,
-      taskHash: row.taskHash,
-      timestamp: row.createdAt * 1000,
-      requesterSignature: row.requesterSig,
-      providerSignature: row.providerSig,
-    }));
+    const transactions = rows.map(ledgerRowToTransaction);
 
-    expect(transactions[0].requesterSignature).toBe("req-sig-456");
-    expect(transactions[0].providerSignature).toBe("prov-sig-123");
+    const fields = bleTxV3FieldsFromTx(transactions[0]);
+    expect(verifyBleTxV3(fields, transactions[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields, transactions[0].providerSignature, laptop.keys.publicKeyPem)).toBe(true);
     expect(transactions[0].taskHash).toBe(
       createHash("sha256").update("test sigs").digest("hex")
     );
