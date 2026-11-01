@@ -4,7 +4,7 @@
 // #16: moved verbatim from src/portal/server.ts.
 export function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "chat" | "dashboard" | "wallet" | "settings" | "download" | "reviews";
+  activeTab: "chat" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews";
   heading: string;
   subtitle: string;
   content: string;
@@ -16,6 +16,7 @@ export function portalAuthedPageHtml(input: {
     { key: "chat", href: "/portal/chat", label: "Chat", icon: "&#9993;" },
     { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "&#9998;", hasBadge: true },
     { key: "wallet", href: "/portal/wallet", label: "Wallet", icon: "&#9733;" },
+    { key: "market", href: "/portal/market", label: "Market", icon: "&#9650;" },
     { key: "settings", href: "/portal/settings", label: "Settings", icon: "&#9881;" },
   ];
   const navHtml = navItems.map((item) => {

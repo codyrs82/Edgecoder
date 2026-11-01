@@ -89,6 +89,11 @@ export class ComputeOrderBook {
     return this.reference.get(computeClass) ?? 1;
   }
 
+  /** False until the oracle has set a reference for the class (ticks before that would chart a placeholder price). */
+  hasReference(computeClass: ComputeClassId): boolean {
+    return this.reference.has(computeClass);
+  }
+
   /** Post or update an agent's ask. `msatPerCredit` undefined => track the class reference. */
   postAsk(agentId: string, computeClass: ComputeClassId, msatPerCredit: number | undefined, nowMs = Date.now()): Ask {
     const tracking = msatPerCredit === undefined || !Number.isFinite(msatPerCredit) || msatPerCredit <= 0;
@@ -127,6 +132,18 @@ export class ComputeOrderBook {
 
   removeBid(taskId: string): void {
     this.bids.delete(taskId);
+  }
+
+  /** Remove every bid for which `stale` is true; returns how many were removed. */
+  pruneBids(stale: (bid: Bid) => boolean): number {
+    let n = 0;
+    for (const [taskId, bid] of this.bids) {
+      if (stale(bid)) {
+        this.bids.delete(taskId);
+        n++;
+      }
+    }
+    return n;
   }
 
   bidFor(taskId: string): Bid | undefined {
@@ -171,7 +188,8 @@ export class ComputeOrderBook {
     );
     const bestAsk = askLevels[0]?.msatPerCredit;
     const bestBid = bidLevels[0]?.msatPerCredit;
-    const mid = bestAsk !== undefined && bestBid !== undefined ? Math.round((bestAsk + bestBid) / 2) : bestAsk ?? bestBid ?? ref;
+    // One-sided books quote the reference: a lone bid (or ask) is not a price the market agreed on.
+    const mid = bestAsk !== undefined && bestBid !== undefined ? Math.round((bestAsk + bestBid) / 2) : ref;
     const window = this.opts.tradeWindowMs ?? 60 * 60 * 1000;
     const recentTrades = this.trades.filter((t) => t.computeClass === computeClass && nowMs - t.atMs <= window).length;
     return {

@@ -85,6 +85,7 @@ import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMulti
 import { isRateEpochStale, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
 import { COMPUTE_CLASS_IDS, classifyHardware, modalityMultiplier, type ComputeClassId, type HardwareProfile } from "../economy/compute-classes.js";
 import { ComputeOrderBook } from "../economy/order-book.js";
+import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
 import {
   computeDailyPoolTokens,
@@ -536,6 +537,50 @@ let latestRateEpoch: RateEpoch | null = null;
  * oracle sets the reference each epoch; tracking asks follow it (see order-book.ts).
  */
 const orderBook = new ComputeOrderBook();
+/** Minute ticks + trade tape per class: candles, depth and the trade list for the market page. */
+const marketHistory = new MarketHistory();
+const MARKET_TICK_MS = 60_000;
+/** Standing orders from the portal keyed by `${accountId}:${side}`. */
+const marketOrders = new Map<string, MarketOrder>();
+
+const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
+function recordMarketTicks(nowMs = Date.now()): void {
+  // Bids are per task; drop any that outlived their task (failed, abandoned, lost on restart).
+  orderBook.pruneBids((bid) => nowMs - bid.createdAtMs > MARKET_BID_MAX_AGE_MS || (queue.openSubtaskCount(bid.taskId) === 0 && nowMs - bid.createdAtMs > 10 * 60_000));
+  for (const id of COMPUTE_CLASS_IDS) {
+    if (!orderBook.hasReference(id)) continue; // no oracle rate yet: nothing meaningful to chart
+    const snap = orderBook.snapshot(id, nowMs);
+    const tick = {
+      atMs: nowMs,
+      computeClass: id,
+      referenceMsat: snap.referenceMsatPerCredit,
+      bestAskMsat: snap.bestAsk,
+      bestBidMsat: snap.bestBid,
+      midMsat: snap.midMsatPerCredit,
+      clearingMsat: snap.clearingMsatPerCredit,
+      agents: snap.agents,
+      openTasks: snap.openTasks
+    };
+    marketHistory.recordTick(tick);
+    void pgStore?.persistMarketTick(tick).catch(() => undefined);
+  }
+}
+
+/** A seller's standing order applies to every agent the account owns; a buyer's becomes the default bid for its tasks. */
+async function applyMarketOrder(order: MarketOrder): Promise<void> {
+  marketOrders.set(`${order.accountId}:${order.side}`, order);
+  await pgStore?.upsertMarketOrder(order);
+  if (order.side === "sell") {
+    const owned = (await pgStore?.listAgentOwnershipByAccount(order.accountId)) ?? [];
+    const ids = new Set<string>([...owned.map((o) => o.agentId), order.accountId]);
+    for (const agentId of ids) {
+      const cap = agentCapabilities.get(agentId);
+      if (cap && (order.computeClass === "any" || order.computeClass === cap.computeClass)) {
+        orderBook.postAsk(agentId, cap.computeClass, order.msatPerCredit > 0 ? order.msatPerCredit : undefined);
+      }
+    }
+  }
+}
 const MARKET_DEFAULT_BID_PREMIUM_BPS = CC.MARKET_DEFAULT_BID_PREMIUM_BPS;
 const NETWORK_FEE_BPS = CC.NETWORK_FEE_BPS;
 
@@ -551,6 +596,7 @@ async function recalibrateRateEpoch(): Promise<RateEpoch> {
   const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: latestRateEpoch });
   latestRateEpoch = epoch;
   syncOrderBookReference(epoch);
+  recordMarketTicks();
   await pgStore?.upsertRateEpoch(epoch);
   app.log.info(
     {
@@ -673,6 +719,14 @@ function hasMeshToken(headers: Record<string, unknown>): boolean {
 
 function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
+}
+
+/** Routes the portal proxies for logged-in users (market data and standing orders) accept either token. */
+function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  if (hasMeshToken(headers) || hasPortalServiceToken(headers)) return true;
+  reply.code(401).send({ error: "mesh_unauthorized" });
+  return false;
 }
 
 const robotQueue = ROBOT_QUEUE_ENABLED
@@ -903,7 +957,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat")
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current")
   ) {
     return;
   }
@@ -2039,7 +2093,13 @@ app.post("/register", async (req, reply) => {
   behaviorTracker.recordRegistration(body.agentId, now);
   evaluateAndEnforce(body.agentId);
   // Market: post the agent's ask on its compute class (tracking the oracle reference unless explicit).
-  orderBook.postAsk(body.agentId, classifyHardware(body.hardwareProfile), body.askMsatPerCredit, now);
+  {
+    const ownerAccount = await rewardAccountForAgent(body.agentId);
+    const standing = marketOrders.get(`${ownerAccount}:sell`);
+    const cls = classifyHardware(body.hardwareProfile);
+    const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
+    orderBook.postAsk(body.agentId, cls, ask, now);
+  }
   const approvalRecord = ordering.append({
     eventType: "node_approval",
     taskId: `agent:${body.agentId}`,
@@ -2303,7 +2363,9 @@ app.post("/submit", async (req, reply) => {
   const GOSSIP_CLAIM_DELAY_MS = 3_000;
 
   // Market: register the requester's bid for this task (default = reference × premium).
-  const marketBid = orderBook.postBid(body.taskId, body.computeClass, body.maxBidMsatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS);
+  const standingBuy = marketOrders.get(`${body.submitterAccountId}:buy`);
+  const bidCeiling = body.maxBidMsatPerCredit ?? (standingBuy && (standingBuy.computeClass === "any" || standingBuy.computeClass === body.computeClass) ? standingBuy.msatPerCredit : undefined);
+  const marketBid = orderBook.postBid(body.taskId, body.computeClass, bidCeiling, MARKET_DEFAULT_BID_PREMIUM_BPS);
 
   // Assign stable IDs before scheduling so dependsOn references resolve
   const subtasksWithIds = payload.subtasks.map((s) => ({
@@ -2438,7 +2500,10 @@ app.post("/pull", async (req, reply) => {
     const match = orderBook.canMatch(body.agentId, task.taskId);
     if (match.ok) {
       claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass });
-      orderBook.recordTrade({ taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() });
+      const trade = { taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() };
+      orderBook.recordTrade(trade);
+      marketHistory.recordTrade(trade);
+      void pgStore?.persistMarketTrade(trade).catch(() => undefined);
     }
 
     // ── Power policy: small-tasks-only check ──
@@ -2586,6 +2651,7 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   );
   // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
   if (accrued) {
+    marketHistory.settleTrade(r.subtaskId, accrued.credits);
     const earningsRecord = ordering.append({
       eventType: "earnings_accrual",
       taskId,
@@ -2619,6 +2685,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
  */
 async function publishResult(result: SubtaskResult): Promise<void> {
   queue.complete(result);
+  // Market: a task's bid leaves the book once its last subtask has a result.
+  if (queue.openSubtaskCount(result.taskId) === 0 && depTracker.heldCountForTask(result.taskId) === 0) orderBook.removeBid(result.taskId);
   const completeRecord = ordering.append({
     eventType: "task_complete",
     taskId: result.taskId,
@@ -3118,7 +3186,7 @@ app.get("/economy/price/current", async (req, reply) => {
 
 /** Current rate-oracle epoch (market sats per CPU/GPU hour, sources, hashprice signal) and the live credit quote. */
 app.get("/economy/rates/current", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!requireMeshOrPortalToken(req, reply)) return;
   return {
     enabled: RATE_ORACLE_ENABLED,
     recalibrationMs: RATE_RECALIBRATION_MS,
@@ -3147,15 +3215,79 @@ app.get("/economy/rates/history", async (req, reply) => {
 
 /** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
 app.get("/economy/market/book", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!requireMeshOrPortalToken(req, reply)) return;
   const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).optional() }).parse(req.query);
   const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
   return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
 });
 
+/** Candles (OHLC of the mid, trade volume) for one class; `interval` 1m|5m|15m|1h|4h|1d. Portal-token readable. */
+app.get("/economy/market/candles", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z
+    .object({
+      computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"),
+      interval: z.enum(Object.keys(CANDLE_INTERVALS) as [string, ...string[]]).default("5m"),
+      limit: z.coerce.number().int().min(1).max(2000).default(500)
+    })
+    .parse(req.query);
+  return {
+    computeClass: query.computeClass,
+    interval: query.interval,
+    candles: marketHistory.candles(query.computeClass, CANDLE_INTERVALS[query.interval], query.limit),
+    latest: marketHistory.latest(query.computeClass) ?? null
+  };
+});
+
+app.get("/economy/market/trades", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z
+    .object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"), limit: z.coerce.number().int().min(1).max(500).default(50) })
+    .parse(req.query);
+  return { computeClass: query.computeClass, trades: marketHistory.recentTrades(query.computeClass, query.limit) };
+});
+
+app.get("/economy/market/depth", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std") }).parse(req.query);
+  const snap = orderBook.snapshot(query.computeClass);
+  return { computeClass: query.computeClass, ...MarketHistory.depth(snap.asks, snap.bids), snapshot: snap };
+});
+
+/**
+ * Standing orders from the portal. buy: the account's default max bid for its tasks (msat per
+ * credit). sell: the ask applied to every agent the account owns (0 = track the reference).
+ */
+app.post("/economy/market/orders", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const body = z
+    .object({
+      accountId: z.string().min(1).max(128),
+      side: z.enum(["buy", "sell"]),
+      computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+      msatPerCredit: z.number().min(0).max(1e9)
+    })
+    .parse(req.body);
+  const order: MarketOrder = { ...body, updatedAtMs: Date.now() };
+  await applyMarketOrder(order);
+  return { ok: true, order };
+});
+
+app.get("/economy/market/orders/:accountId", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
+  const orders = ["buy", "sell"].map((side) => marketOrders.get(`${params.accountId}:${side}`)).filter(Boolean);
+  const owned = (await pgStore?.listAgentOwnershipByAccount(params.accountId)) ?? [];
+  const agents = [...new Set([...owned.map((o) => o.agentId), params.accountId])]
+    .map((agentId) => ({ agentId, capability: agentCapabilities.get(agentId), ask: orderBook.askFor(agentId) }))
+    .filter((a) => a.capability)
+    .map((a) => ({ agentId: a.agentId, computeClass: a.capability!.computeClass, ask: a.ask?.msatPerCredit ?? null, tracking: a.ask?.tracking ?? true }));
+  return { accountId: params.accountId, orders, agents };
+});
+
 /** Compute class definitions with the current oracle rate and connected agents per class. */
 app.get("/economy/market/classes", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!requireMeshOrPortalToken(req, reply)) return;
   const agentsByClass = new Map<string, number>();
   for (const cap of agentCapabilities.values()) agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
   return {
@@ -5549,6 +5681,9 @@ export async function initCoordinator(): Promise<void> {
       if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
       latestRateEpoch = await storeRef.latestRateEpoch();
       syncOrderBookReference(latestRateEpoch);
+      for (const t of await storeRef.listMarketTicks(7 * 24 * 60)) marketHistory.recordTick(t);
+      for (const t of await storeRef.listMarketTrades(5_000)) marketHistory.recordTrade(t);
+      for (const o of await storeRef.listMarketOrders()) marketOrders.set(`${o.accountId}:${o.side}`, o);
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {
@@ -5583,6 +5718,8 @@ export async function initCoordinator(): Promise<void> {
         void runIssuanceTick().catch((error) => app.log.warn({ error }, "issuance_tick_failed"));
       }, ISSUANCE_RECALC_MS);
       // Rate oracle: recalibrate at startup when there is no fresh epoch, then on the daily timer.
+      recordMarketTicks();
+      setInterval(() => recordMarketTicks(), MARKET_TICK_MS);
       if (RATE_ORACLE_ENABLED) {
         if (isRateEpochStale(latestRateEpoch, rateOracleConfig)) {
           void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));

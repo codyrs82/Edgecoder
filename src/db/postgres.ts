@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import type { RateEpoch } from "../economy/rate-oracle.js";
+import type { MarketOrder, MarketTick, MarketTrade } from "../economy/market-history.js";
 import {
   AccountMembership,
   AgentOwnership,
@@ -247,6 +248,37 @@ CREATE TABLE IF NOT EXISTS rate_epochs (
   payload_json JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rate_epochs_created ON rate_epochs (created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS market_ticks (
+  at_ms BIGINT NOT NULL,
+  compute_class TEXT NOT NULL,
+  reference_msat BIGINT NOT NULL,
+  best_ask_msat BIGINT,
+  best_bid_msat BIGINT,
+  mid_msat BIGINT NOT NULL,
+  clearing_msat BIGINT NOT NULL,
+  agents INTEGER NOT NULL DEFAULT 0,
+  open_tasks INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (compute_class, at_ms)
+);
+CREATE TABLE IF NOT EXISTS market_trades (
+  subtask_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  credits DOUBLE PRECISION,
+  at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_trades_class_at ON market_trades (compute_class, at_ms DESC);
+CREATE TABLE IF NOT EXISTS market_orders (
+  account_id TEXT NOT NULL,
+  side TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  PRIMARY KEY (account_id, side)
+);
 
 CREATE TABLE IF NOT EXISTS coordinator_fee_events (
   event_id TEXT PRIMARY KEY,
@@ -2061,6 +2093,69 @@ export class PostgresStore {
   async listRateEpochs(limit = 30): Promise<RateEpoch[]> {
     const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT $1`, [limit]);
     return result.rows.map((r) => r.payload_json as RateEpoch);
+  }
+
+  // ── Compute market history ──
+  async persistMarketTick(t: MarketTick): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_ticks (at_ms, compute_class, reference_msat, best_ask_msat, best_bid_msat, mid_msat, clearing_msat, agents, open_tasks)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (compute_class, at_ms) DO NOTHING`,
+      [t.atMs, t.computeClass, t.referenceMsat, t.bestAskMsat ?? null, t.bestBidMsat ?? null, t.midMsat, t.clearingMsat, t.agents, t.openTasks]
+    );
+  }
+
+  async listMarketTicks(limitPerClass = 10_080): Promise<MarketTick[]> {
+    const r = await this.pool.query(
+      `SELECT * FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY compute_class ORDER BY at_ms DESC) AS rn FROM market_ticks
+       ) x WHERE rn <= $1 ORDER BY at_ms ASC`,
+      [limitPerClass]
+    );
+    return r.rows.map((row) => ({
+      atMs: Number(row.at_ms),
+      computeClass: row.compute_class,
+      referenceMsat: Number(row.reference_msat),
+      bestAskMsat: row.best_ask_msat === null ? undefined : Number(row.best_ask_msat),
+      bestBidMsat: row.best_bid_msat === null ? undefined : Number(row.best_bid_msat),
+      midMsat: Number(row.mid_msat),
+      clearingMsat: Number(row.clearing_msat),
+      agents: Number(row.agents),
+      openTasks: Number(row.open_tasks)
+    }));
+  }
+
+  async persistMarketTrade(t: MarketTrade): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_trades (subtask_id, task_id, agent_id, compute_class, msat_per_credit, credits, at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (subtask_id) DO UPDATE SET credits = COALESCE(EXCLUDED.credits, market_trades.credits)`,
+      [t.subtaskId, t.taskId, t.agentId, t.computeClass, t.msatPerCredit, t.credits ?? null, t.atMs]
+    );
+  }
+
+  async listMarketTrades(limit = 5_000): Promise<MarketTrade[]> {
+    const r = await this.pool.query(`SELECT * FROM market_trades ORDER BY at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.reverse().map((row) => ({
+      subtaskId: row.subtask_id,
+      taskId: row.task_id,
+      agentId: row.agent_id,
+      computeClass: row.compute_class,
+      msatPerCredit: Number(row.msat_per_credit),
+      credits: row.credits === null ? undefined : Number(row.credits),
+      atMs: Number(row.at_ms)
+    }));
+  }
+
+  async upsertMarketOrder(o: MarketOrder): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_orders (account_id, side, compute_class, msat_per_credit, updated_at_ms) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (account_id, side) DO UPDATE SET compute_class = EXCLUDED.compute_class, msat_per_credit = EXCLUDED.msat_per_credit, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [o.accountId, o.side, o.computeClass, o.msatPerCredit, o.updatedAtMs]
+    );
+  }
+
+  async listMarketOrders(): Promise<MarketOrder[]> {
+    const r = await this.pool.query(`SELECT * FROM market_orders`);
+    return r.rows.map((row) => ({ accountId: row.account_id, side: row.side, computeClass: row.compute_class, msatPerCredit: Number(row.msat_per_credit), updatedAtMs: Number(row.updated_at_ms) }));
   }
 
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {
