@@ -6,7 +6,6 @@ This index links the documents this wiki synthesizes.
 
 - [README.md](https://github.com/codyrs82/Edgecoder/blob/main/README.md)
 - [README.dev.md](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
-- [EDGECODER_PLAN.md](https://github.com/codyrs82/Edgecoder/blob/main/EDGECODER_PLAN.md)
 
 ## Operational runbooks
 
