@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
+import { inferenceRouteAuth } from "./route-auth.js";
 import cors from "@fastify/cors";
 import { createHash } from "node:crypto";
 import { request } from "undici";
@@ -104,11 +105,14 @@ export function parseDecomposition(
 const trustedCoordinatorKeys = keysFromConfig(config);
 
 app.addHook("preHandler", async (req, reply) => {
-  if (req.url === "/health" || req.url === "/metrics" || req.url === "/metrics/prometheus" || req.url.startsWith("/dashboard") || req.url.startsWith("/model")) return;
+  const routeAuth = inferenceRouteAuth(req.method, req.url);
+  if (routeAuth === "public") return;
   const token = req.headers["x-inference-token"];
   if (typeof token !== "string" || token !== INFERENCE_AUTH_TOKEN) {
     return reply.code(401).send({ error: "inference_unauthorized" });
   }
+  // Model mutations from the desktop app: the token is enough (no coordinator signature).
+  if (routeAuth === "token") return;
 
   const signatureRequired = INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS || trustedCoordinatorKeys.size > 0;
   if (!signatureRequired) return;

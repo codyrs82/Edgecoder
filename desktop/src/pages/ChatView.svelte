@@ -475,8 +475,8 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: rgba(251, 191, 36, 0.08);
-    border-bottom: 0.5px solid rgba(251, 191, 36, 0.2);
+    background: color-mix(in srgb, var(--yellow) 8%, transparent);
+    border-bottom: 0.5px solid color-mix(in srgb, var(--yellow) 20%, transparent);
     font-size: 12px;
     color: var(--yellow);
     flex-shrink: 0;

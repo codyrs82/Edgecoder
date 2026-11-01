@@ -1,0 +1,41 @@
+name: Bug report
+description: Something isn't working as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Security problem? Don't file it here; see SECURITY.md for private reporting."
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Portal, Coordinator, Inference, Control plane, Worker, Desktop app, iOS app, IDE extension, Docs, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: input
+    id: env
+    attributes:
+      label: OS / Node version
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove tokens, keys and other secrets first.
+      render: text

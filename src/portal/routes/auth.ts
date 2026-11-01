@@ -5,10 +5,22 @@ import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
+import {
+  appendSetCookie,
+  oauthStateClearCookie,
+  oauthStateCookieMatches,
+  oauthStateCookieName,
+  oauthStateKey,
+  oauthStateSetCookie,
+  pkceChallenge,
+  pkceVerifier
+} from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+  // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
+  const oauthStateHmacKey = oauthStateKey();
   app.get("/auth/capabilities", async () => {
     const oauthGoogleConfigured = Boolean(oauthProviders.google.clientId && oauthProviders.google.clientSecret);
     const oauthMicrosoftConfigured = Boolean(oauthProviders.microsoft.clientId && oauthProviders.microsoft.clientSecret);
@@ -164,9 +176,13 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     authorize.searchParams.set("response_type", "code");
     authorize.searchParams.set("scope", provider.scopes);
     authorize.searchParams.set("state", state);
+    // #137: PKCE S256 for every provider (the verifier goes only to the token endpoint).
+    authorize.searchParams.set("code_challenge", pkceChallenge(pkceVerifier(oauthStateHmacKey, params.provider, state)));
+    authorize.searchParams.set("code_challenge_method", "S256");
     if (params.provider === "microsoft" && OAUTH_MICROSOFT_PROMPT) {
       authorize.searchParams.set("prompt", OAUTH_MICROSOFT_PROMPT);
     }
+    appendSetCookie(reply, oauthStateSetCookie(oauthStateHmacKey, params.provider, state));
     return reply.redirect(authorize.toString());
   });
 
@@ -174,22 +190,37 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
     const query = z.object({ code: z.string(), state: z.string() }).parse(req.query);
-    return handleOauthCallback(params.provider, query.code, query.state, reply);
+    return handleOauthCallback(params.provider, query.code, query.state, req, reply);
   });
 
   app.post("/auth/oauth/:provider/callback", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
     const body = z.object({ code: z.string(), state: z.string() }).parse(req.body);
-    return handleOauthCallback(params.provider, body.code, body.state, reply);
+    return handleOauthCallback(params.provider, body.code, body.state, req, reply);
   });
 
-  async function handleOauthCallback(providerName: ProviderName, code: string, stateId: string, reply: any) {
+  async function handleOauthCallback(
+    providerName: ProviderName,
+    code: string,
+    stateId: string,
+    req: { headers: Record<string, unknown> },
+    reply: any
+  ) {
     const portalStore = store;
     if (!portalStore) return reply.code(503).send({ error: "portal_database_not_configured" });
     const provider = oauthProviders[providerName];
+    // #88: consume first, so the state is single-use even when the checks below fail;
+    // always clear the browser's state cookie.
     const state = await portalStore.consumeOauthState(stateId);
-    if (!state || state.provider !== providerName) return reply.code(400).send({ error: "oauth_state_invalid" });
+    appendSetCookie(reply, oauthStateClearCookie(providerName));
+    const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
+    // exact __Host- name only (readCookie would also accept an unprefixed, spoofable cookie)
+    const stateCookie = cookies[oauthStateCookieName(providerName)];
+    if (!state || state.provider !== providerName || !oauthStateCookieMatches(oauthStateHmacKey, stateCookie, providerName, stateId)) {
+      oauthNativeRedirectByState.delete(stateId);
+      return reply.code(403).send({ error: "oauth_state_invalid" });
+    }
     const nativeRedirect = oauthNativeRedirectByState.get(stateId);
     if (nativeRedirect) oauthNativeRedirectByState.delete(stateId);
 
@@ -208,7 +239,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
         code,
         client_id: provider.clientId,
         client_secret: provider.clientSecret,
-        redirect_uri: state.redirectUri
+        redirect_uri: state.redirectUri,
+        code_verifier: pkceVerifier(oauthStateHmacKey, providerName, stateId)
       }).toString()
     });
     if (tokenRes.statusCode < 200 || tokenRes.statusCode >= 300) {

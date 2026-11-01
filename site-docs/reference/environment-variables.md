@@ -80,6 +80,8 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `120000` | Passkey challenge expiry (ms). |
+| `PORTAL_TRUST_FLY_CLIENT_IP` | unset | When `true` and Fly's runtime `FLY_APP_NAME` is set, the rate-limit client IP is read from the `Fly-Client-IP` header that the Fly edge proxy sets ([Fly request headers](https://fly.io/docs/networking/request-headers/)). Otherwise it is the socket address, and `X-Forwarded-*` is never trusted (`trustProxy: false`). **Keep unset until #31.** Until it is set, all portal traffic on Fly shares the proxy's rate-limit bucket. `PORTAL_TRUST_PROXY_HOPS` is gone, because Fastify 5.12 ignores hop counts. |
+| `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). **Required in production** (at least 32 characters; the portal refuses to start without it). Set the same value on every instance. Outside production, unset means a random key per process. |
 
 ## Key provider and rotation
 
@@ -157,7 +159,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 
 | Variable | Default | Description |
 |---|---|---|
-| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Provider type: `anchor-proxy`, `bitcoind`, `blockstream`, `mock`. |
+| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Anchoring provider: `anchor-proxy`, `bitcoind`, or `mock` (dev only). `blockstream` is rejected because it can't broadcast (#102). |
 | `BITCOIN_ANCHOR_CONFIRMATIONS` | `6` | Confirmations before an anchor counts as anchored. |
 | `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | `200000` | Daily anchoring budget: refuse a broadcast when (broadcasts in 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` exceeds it. |
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | `20000` | Absolute fee cap per anchor tx. |
@@ -202,6 +204,8 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `NODE_BIN` | Override Node.js binary path if auto-detection fails (macOS/Linux daemon). |
 | `DOCS_SITE_URL` | Documentation site URL (used in portal links). |
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
+| `SUPPORT_EMAIL` | Contact address on the portal's privacy and terms pages (default `support@edgecoder.io`; plain address only) (#22). |
+| `MODEL_DOWNLOAD_DOMAINS` | Comma-separated exact hostnames that signed model manifests may download from; replaces the default `models.edgecoder.io,huggingface.co` (#22). See [Self-hosting](../operations/self-hosting.md). |
 
 ## Startup validation (#15)
 

@@ -32,7 +32,21 @@ import {
   WalletAccount
 } from "../common/types.js";
 
+/**
+ * #108: advisory-lock namespace for per-account credit locks. The two-key form
+ * pg_advisory_xact_lock(namespace, hashtext(account)) keeps these locks from colliding
+ * with any other single-key advisory locks.
+ */
+export const CREDIT_LOCK_NAMESPACE = 0x45430001;
+/**
+ * #108 review: migrate() takes this transaction-level lock first, so two instances starting
+ * at once run SCHEMA_SQL one after the other (it is sent as one implicit transaction).
+ */
+export const SCHEMA_LOCK_NAMESPACE = 0x45430000;
+export const SCHEMA_LOCK_KEY = 1;
+
 export const SCHEMA_SQL = `
+SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});
 CREATE TABLE IF NOT EXISTS queue_tasks (
   subtask_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -116,7 +130,8 @@ CREATE TABLE IF NOT EXISTS credit_transactions (
   tx_id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL,
   tx_type TEXT NOT NULL,
-  credits DOUBLE PRECISION NOT NULL,
+  -- #108: exact decimal, rounded to 6 places on write (was DOUBLE PRECISION; migrated below).
+  credits NUMERIC(30, 6) NOT NULL,
   reason TEXT NOT NULL,
   related_task_id TEXT,
   timestamp_ms BIGINT NOT NULL
@@ -213,7 +228,7 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   coordinator_fee_bps INT NOT NULL,
   coordinator_fee_sats BIGINT NOT NULL,
   net_sats BIGINT NOT NULL,
-  quoted_credits DOUBLE PRECISION NOT NULL,
+  quoted_credits NUMERIC(30, 6) NOT NULL, -- #153 (was DOUBLE PRECISION; migrated below)
   status TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL,
   settled_at_ms BIGINT,
@@ -383,6 +398,29 @@ CREATE TABLE IF NOT EXISTS ble_synced_tx (
   credits NUMERIC NOT NULL,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- #108: credit amounts are exact NUMERIC(30,6). Float rows are rounded to 6 places, which removes
+-- binary artefacts like 0.30000000000000004. Runs only while the column is not yet NUMERIC(30,6),
+-- under the schema lock above. Takes an ACCESS EXCLUSIVE lock and rewrites the table; a view on
+-- the column makes it fail (none ship with EdgeCoder). See docs/database-migrations.md.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'credit_transactions'
+               AND column_name = 'credits'
+               AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
+    ALTER TABLE credit_transactions ALTER COLUMN credits TYPE NUMERIC(30, 6) USING round(credits::numeric, 6);
+  END IF;
+END $$;
+-- #153: payment_intents.quoted_credits to NUMERIC(30,6), same rules as credit_transactions.credits.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'payment_intents'
+               AND column_name = 'quoted_credits'
+               AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
+    ALTER TABLE payment_intents ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6) USING round(quoted_credits::numeric, 6);
+  END IF;
+END $$;
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
 -- Unique indexes are created only when no duplicate rows exist, so migrate() can never
@@ -410,6 +448,11 @@ CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issue
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
 `;
+
+/** Balance and "enough to cover $2" computed in SQL on NUMERIC, so no float comparison (#108). */
+const BALANCE_CHECK_SQL = `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
+         COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) >= round($2::numeric, 6) AS enough
+         FROM credit_transactions WHERE account_id = $1`;
 
 export class PostgresStore {
   constructor(private readonly pool: Pool) {}
@@ -788,14 +831,10 @@ export class PostgresStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [tx.accountId]);
-      const bal = await client.query(
-        `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance
-         FROM credit_transactions WHERE account_id = $1`,
-        [tx.accountId]
-      );
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, tx.accountId]);
+      const bal = await client.query(BALANCE_CHECK_SQL, [tx.accountId, String(tx.credits)]);
       const balance = Number(bal.rows[0]?.balance ?? 0);
-      if (balance < tx.credits) {
+      if (bal.rows[0]?.enough !== true) {
         await client.query("ROLLBACK");
         return { status: "insufficient", balance };
       }
@@ -827,7 +866,7 @@ export class PostgresStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [tx.requesterAccountId]);
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, tx.requesterAccountId]);
       const ins = await client.query(
         `INSERT INTO ble_synced_tx (tx_id, requester_account_id, provider_account_id, credits)
          VALUES ($1,$2,$3,$4) ON CONFLICT (tx_id) DO NOTHING RETURNING tx_id`,
@@ -837,12 +876,8 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return "duplicate";
       }
-      const bal = await client.query(
-        `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance
-         FROM credit_transactions WHERE account_id = $1`,
-        [tx.requesterAccountId]
-      );
-      if (Number(bal.rows[0]?.balance ?? 0) < tx.credits) {
+      const bal = await client.query(BALANCE_CHECK_SQL, [tx.requesterAccountId, String(tx.credits)]);
+      if (bal.rows[0]?.enough !== true) {
         await client.query("ROLLBACK");
         return "insufficient";
       }
@@ -1907,8 +1942,6 @@ export class PostgresStore {
   async settlePaymentIntentAtomic(
     intentId: string,
     txRef: string,
-    accountId: string,
-    credits: number,
     paymentHash?: string
   ): Promise<{ status: "settled" | "already"; intent?: PaymentIntent }> {
     const client = await this.pool.connect();
@@ -1919,17 +1952,20 @@ export class PostgresStore {
         `UPDATE payment_intents
             SET status = 'settled', settled_at_ms = $2, tx_ref = $3, payment_hash = COALESCE(payment_hash, $4)
           WHERE intent_id = $1 AND status = 'created'
-          RETURNING intent_id`,
+          RETURNING account_id, quoted_credits`,
         [intentId, now, txRef, paymentHash ?? null]
       );
       if ((upd.rowCount ?? 0) === 0) {
         await client.query("COMMIT");
         return { status: "already", intent: (await this.getPaymentIntent(intentId)) ?? undefined };
       }
+      // #155: credit the account and amount stored on the intent (quoted_credits stays NUMERIC
+      // end to end), never caller-supplied values. A zero quote settles without a credit row.
+      const { account_id: accountId, quoted_credits: credits } = upd.rows[0];
       await client.query(
         `INSERT INTO credit_transactions (
            tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-         ) VALUES ($1,$2,'earn',$3,$4,NULL,$5)`,
+         ) SELECT $1,$2,'earn',$3::numeric,$4,NULL,$5 WHERE $3::numeric > 0`,
         [randomUUID(), accountId, credits, `credit_purchase:${intentId}`, now]
       );
       await client.query("COMMIT");

@@ -4,7 +4,10 @@ import {
   encodeCheckpointForOpReturn,
   decodeOpReturnCheckpoint,
   MockBitcoinAnchorProvider,
-  AnchorProxyClientProvider
+  AnchorProxyClientProvider,
+  anchorProviderProblem,
+  ANCHORING_PROVIDERS,
+  BlockstreamProvider
 } from "../../src/economy/bitcoin-rpc.js";
 
 describe("bitcoin anchor provider", () => {
@@ -83,5 +86,56 @@ describe("bitcoin anchor provider", () => {
   test("mock provider sendToMany rejects empty outputs", async () => {
     const provider = new MockBitcoinAnchorProvider();
     await expect(provider.sendToMany([])).rejects.toThrow("no_outputs");
+  });
+
+  describe("#102: blockstream is read-only, not an anchoring provider", () => {
+    test.each(["blockstream", "Blockstream", " blockstream "])("factory rejects BITCOIN_ANCHOR_PROVIDER=%j", (value) => {
+      process.env.BITCOIN_ANCHOR_PROVIDER = value;
+      try {
+        expect(() => createBitcoinAnchorProviderFromEnv("bitcoin")).toThrow("blockstream_cannot_anchor");
+      } finally {
+        delete process.env.BITCOIN_ANCHOR_PROVIDER;
+      }
+    });
+
+    test.each([
+      [{}, /anchor_provider_unset/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "  " }, /anchor_provider_unset/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "mock" }, /anchor_provider_mock/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "blockstream" }, /blockstream_cannot_anchor/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "bitcoin" }, /unknown_anchor_provider/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "anchor_proxy" }, /unknown_anchor_provider/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "bitcoind" }, /missing_env: bitcoind needs BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD/],
+      [{ BITCOIN_ANCHOR_PROVIDER: "anchor-proxy", ANCHOR_PROXY_URL: "https://p.example.org" }, /missing_env: anchor-proxy needs ANCHOR_PROXY_TOKEN$/]
+    ])("anchorProviderProblem(%j) is strict for production", (env, re) => {
+      expect(anchorProviderProblem(env as NodeJS.ProcessEnv)).toMatch(re);
+    });
+
+    test("anchorProviderProblem passes only a fully configured real provider", () => {
+      expect(ANCHORING_PROVIDERS).toEqual(["anchor-proxy", "bitcoind"]);
+      expect(anchorProviderProblem({ BITCOIN_ANCHOR_PROVIDER: " Anchor-Proxy ", ANCHOR_PROXY_URL: "u", ANCHOR_PROXY_TOKEN: "t" })).toBeNull();
+      expect(anchorProviderProblem({ BITCOIN_ANCHOR_PROVIDER: "bitcoind", BITCOIND_RPC_URL: "u", BITCOIND_RPC_USER: "a", BITCOIND_RPC_PASSWORD: "p" })).toBeNull();
+    });
+
+    test("the problem never echoes credential values", () => {
+      const msg = anchorProviderProblem({ BITCOIN_ANCHOR_PROVIDER: "bitcoind", BITCOIND_RPC_URL: "u", BITCOIND_RPC_USER: "a", BITCOIND_RPC_PASSWORD: "" });
+      expect(msg).toMatch(/BITCOIND_RPC_PASSWORD/);
+      expect(msg).not.toMatch(/\bu\b|\ba\b/);
+    });
+
+    test("factory rejects typos in every environment, still allows mock/unset in dev", () => {
+      process.env.BITCOIN_ANCHOR_PROVIDER = "bitcoin-d";
+      try {
+        expect(() => createBitcoinAnchorProviderFromEnv("testnet")).toThrow("unknown_anchor_provider");
+        process.env.BITCOIN_ANCHOR_PROVIDER = "mock";
+        expect(createBitcoinAnchorProviderFromEnv("testnet")).toBeInstanceOf(MockBitcoinAnchorProvider);
+      } finally {
+        delete process.env.BITCOIN_ANCHOR_PROVIDER;
+      }
+    });
+
+    test("BlockstreamProvider still can't broadcast (why it's rejected)", async () => {
+      await expect(new BlockstreamProvider("bitcoin").broadcastOpReturn("00")).rejects.toThrow("blockstream_broadcast_not_supported");
+    });
   });
 });

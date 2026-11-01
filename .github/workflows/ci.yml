@@ -39,6 +39,32 @@ jobs:
           path: junit.xml
           if-no-files-found: ignore
 
+  # #13: every lockfile must install cleanly with npm ci and have no high/critical advisories.
+  dependency-audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [".", "desktop", "extensions/vscode"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      # Install scripts are skipped: this job checks that the lockfile is in sync, not native builds.
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+      # Runs after an --ignore-scripts install: fine for plain tsc, but a compile that
+      # needs a postinstall step would behave differently here than in a real install.
+      - if: matrix.dir == 'extensions/vscode'
+        run: npm run compile --if-present
+
   debian-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -87,7 +113,7 @@ jobs:
         run: npx vitest run tests/credits/atomic-debit.test.ts
 
   desktop-token-test:
-    # #6: unit-test desktop/src-tauri/src/token.rs standalone (the full Tauri
+    # #6/#72: unit-test desktop/src-tauri/src/token.rs and agent_guard.rs standalone (the full Tauri
     # crate needs webkit system libraries, so build just the token module).
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -100,6 +126,12 @@ jobs:
           cp desktop/src-tauri/src/token.rs /tmp/token-test/src/lib.rs
           printf '[package]\nname = "token-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\ngetrandom = "0.2"\nhex = "0.4"\n' > /tmp/token-test/Cargo.toml
           cargo test --manifest-path /tmp/token-test/Cargo.toml
+      - name: cargo test agent_guard module (#72)
+        run: |
+          mkdir -p /tmp/agent-guard-test/src
+          cp desktop/src-tauri/src/agent_guard.rs /tmp/agent-guard-test/src/lib.rs
+          printf '[package]\nname = "agent-guard-test"\nversion = "0.0.0"\nedition = "2021"\n' > /tmp/agent-guard-test/Cargo.toml
+          cargo test --manifest-path /tmp/agent-guard-test/Cargo.toml
 
   # #11: build the desktop web bundle and make sure the production CSP holds:
   # no eval / new Function in the main-thread JS (Monaco workers are bundled separately).

@@ -58,8 +58,13 @@ describe("token contrast meets WCAG AA (#29)", () => {
     expect(contrast(color[fg][mode], color[bg][mode])).toBeGreaterThanOrEqual(3);
   });
 
+  // #25: selected text in the editor keeps the editor foreground, so text-primary must stay readable on it.
+  it.each(["dark", "light"] as const)("%s: text-primary on selection is at least 4.5:1", (mode) => {
+    expect(contrast(color["text-primary"][mode], color["selection"][mode])).toBeGreaterThanOrEqual(4.5);
+  });
+
   it("every colour token is either checked or listed as decorative", () => {
-    const checked = new Set([...BACKGROUNDS, ...TEXT, ...UI, "on-accent"]);
+    const checked = new Set([...BACKGROUNDS, ...TEXT, ...UI, "on-accent", "selection"]);
     expect(Object.keys(color).filter((k) => !checked.has(k) && !DECORATIVE.has(k))).toEqual([]);
   });
 });

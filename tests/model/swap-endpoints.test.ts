@@ -5,6 +5,7 @@ vi.mock("../../src/model/swap.js", () => ({
   swapModel: vi.fn(),
   getModelStatus: vi.fn(),
   listModels: vi.fn(),
+  pullModel: vi.fn(),
 }));
 
 const mockSwapModel = vi.mocked(swapModule.swapModel);

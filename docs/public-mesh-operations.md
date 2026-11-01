@@ -117,7 +117,7 @@ Core APIs:
 - `GET /economy/issuance/history` - historical issuance epochs.
 - `GET /economy/issuance/rolling/:accountId` - rolling 24h contribution share for an account.
 - `GET /economy/issuance/quorum/:epochId` - quorum records for issuance proposal/vote/commit/checkpoint.
-- `POST /economy/issuance/anchor` / `GET /economy/issuance/anchors` - Bitcoin anchor lifecycle for finalized checkpoints.
+- `POST /economy/issuance/anchor` (admin token; spends sats) / `GET /economy/issuance/anchors` (mesh token) - Bitcoin anchor lifecycle for finalized checkpoints.
 - `POST /economy/issuance/reconcile` - payout drift scan between settled intents and issuance payout records.
 - `GET /network/summary` - control-plane aggregate of current capacity, jobs, and pricing.
 
@@ -261,7 +261,7 @@ Use staged rollout to avoid operational regressions while enabling decentralized
 
 Verifier and anchor APIs on coordinator:
 
-- `POST /stats/anchors/anchor-latest` (mesh-auth): creates/updates the latest stats checkpoint anchor record.
+- `POST /stats/anchors/anchor-latest` (admin token, `x-admin-token`; it spends sats): creates/updates the latest stats checkpoint anchor record.
 - `GET /stats/anchors/verify?checkpointHash=<hash>` (mesh-auth or portal service token): verifies whether checkpoint has reached configured hard-finality threshold.
 
 ## Abuse Blacklist Coordination

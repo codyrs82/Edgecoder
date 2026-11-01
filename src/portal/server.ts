@@ -8,6 +8,7 @@ import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import { registerPortalPages } from "./pages/index.js";
+import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -58,12 +59,13 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
+import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
-// #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
-const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: trustProxyHops(process.env.PORTAL_TRUST_PROXY_HOPS) });
+// #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
+// (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
+const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: false });
 exposeRequestId(app);
 registerMetrics(app, "portal");
 await registerErrorTracking(app, "portal");
@@ -246,6 +248,7 @@ function validatePortalSecurityConfig(): void {
   if (PASSKEY_ALLOWED_ORIGINS.some((origin) => !/^https:\/\//i.test(origin))) {
     throw new Error("PASSKEY_ALLOWED_ORIGINS must use https in production.");
   }
+  assertOauthStateSecret(); // #88: every instance must share the OAuth state HMAC key
 }
 
 function normalizeNativeOauthRedirect(value: string | undefined): string | null {
@@ -492,7 +495,8 @@ async function createSessionForUser(userId: string, reply: any): Promise<string>
     tokenHash: sha256Hex(sessionToken),
     expiresAtMs: Date.now() + SESSION_TTL_MS
   });
-  reply.header("set-cookie", encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
+  // #88: append, so a cookie set earlier in the same response (OAuth state clear) survives.
+  appendSetCookie(reply, encodeCookie("edgecoder_portal_session", sessionToken, Math.floor(SESSION_TTL_MS / 1000)));
   return sessionToken;
 }
 

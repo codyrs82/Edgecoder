@@ -43,4 +43,4 @@ Representative endpoint groups:
 ## Source references
 
 - [Public Mesh Operations APIs](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
-- [Developer Guide endpoint sections](https://github.com/codyrs82/Edgecoder/blob/main/README.dev.md)
+- [Developer Guide endpoint sections](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)
