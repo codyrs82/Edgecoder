@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     getModelList,
+    getModelCatalog,
     getOllamaTags,
     getOllamaPs,
     pullModelStream,
@@ -39,6 +40,8 @@
   let error = $state<string | null>(null);
 
   let modelList = $state<ModelInfo[]>([]);
+  // Served catalog (GET /model/catalog) when the inference service answers, else the bundled copy.
+  let catalog = $state<CatalogModel[]>(MODEL_CATALOG);
   let ollamaTags = $state<OllamaModel[]>([]);
   let runningModels = $state<OllamaRunningModel[]>([]);
 
@@ -115,7 +118,7 @@
     const activeModel = modelList.find((m) => m.active)?.modelId ?? "";
     const runningNames = runningModels.map((r) => r.name);
     const tagNames = ollamaTags.map((t) => t.name);
-    return MODEL_CATALOG.map((cm) => ({
+    return catalog.map((cm) => ({
       ...cm,
       installed: tagNames.some((t) => tagMatchesCatalog(t, cm.modelId)),
       active: activeModel ? tagMatchesCatalog(activeModel, cm.modelId) : false,
@@ -132,7 +135,7 @@
 
   // ---- Non-catalog installed models (shown in separate table) ----
   let nonCatalogModels = $derived(
-    models.filter((m) => !MODEL_CATALOG.some((cm) => tagMatchesCatalog(m.modelId, cm.modelId)))
+    models.filter((m) => !catalog.some((cm) => tagMatchesCatalog(m.modelId, cm.modelId)))
   );
 
   let pullPercent = $derived(
@@ -165,6 +168,13 @@
     }
 
     noLocalAgent = false;
+    // Catalog refresh is best-effort: an older inference service without /model/catalog, or a
+    // network error, leaves the bundled list in place.
+    getModelCatalog()
+      .then((served) => {
+        if (Array.isArray(served?.models) && served.models.length > 0) catalog = served.models;
+      })
+      .catch(() => undefined);
     try {
       const [list, tags, ps] = await Promise.all([
         getModelList(),

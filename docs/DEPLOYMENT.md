@@ -109,7 +109,7 @@ The seed node TOML (`fly.seed-node.toml`) sets these environment variables:
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen2.5:7b"
+  OLLAMA_MODEL = "qwen3.5:9b"
   DISABLE_SELF_AGENT = "1"
 ```
 

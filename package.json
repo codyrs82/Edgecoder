@@ -31,6 +31,8 @@
     "model:swap": "tsx bin/swap-model.ts swap",
     "model:status": "tsx bin/swap-model.ts status",
     "model:pull": "tsx bin/swap-model.ts pull",
+    "models:verify-catalog": "tsx scripts/check-model-catalog.ts",
+    "models:sync-catalog": "node scripts/sync-model-catalog.mjs",
     "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts",
     "test:e2e:up": "docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build",
     "test:e2e:down": "docker compose -f tests/e2e/docker-compose.e2e.yml down -v",

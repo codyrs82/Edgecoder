@@ -890,18 +890,21 @@ export class PostgresStore {
     }));
   }
 
-  async creditContributionStats(accountId: string): Promise<{ earned: number; spent: number }> {
+  /** Inputs to the contribute-first policy: compute earnings, submit spend, and sats-purchased credits. */
+  async creditContributionStats(accountId: string): Promise<{ earned: number; spent: number; purchased: number }> {
     const result = await this.pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'compute_contribution' THEN credits ELSE 0 END), 0) AS earned,
-         COALESCE(SUM(CASE WHEN tx_type = 'spend' AND reason = 'task_submit' THEN credits ELSE 0 END), 0) AS spent
+         COALESCE(SUM(CASE WHEN tx_type = 'spend' AND reason = 'task_submit' THEN credits ELSE 0 END), 0) AS spent,
+         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason LIKE 'credit_purchase:%' THEN credits ELSE 0 END), 0) AS purchased
        FROM credit_transactions
        WHERE account_id = $1`,
       [accountId]
     );
     return {
       earned: Number(result.rows[0]?.earned ?? 0),
-      spent: Number(result.rows[0]?.spent ?? 0)
+      spent: Number(result.rows[0]?.spent ?? 0),
+      purchased: Number(result.rows[0]?.purchased ?? 0)
     };
   }
 

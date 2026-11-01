@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { swapModel, getModelStatus, listModels } from "./swap.js";
 import { PullTracker } from "./pull-tracker.js";
+import { CATEGORY_LABELS, MODEL_CATALOG, MODEL_CATALOG_VERSION } from "./catalog.js";
 
 export interface ModelSwapState {
   activeModel: string;
@@ -41,6 +42,11 @@ export function buildModelSwapRoutes(
   app.get("/model/list", async (_req, reply) => {
     const result = await listModels(state.activeModel);
     return reply.send(result);
+  });
+
+  /** Curated install catalog (see src/model/catalog.ts). Read-only; the desktop app refreshes its bundled copy from here. */
+  app.get("/model/catalog", async (_req, reply) => {
+    return reply.send({ version: MODEL_CATALOG_VERSION, categories: CATEGORY_LABELS, models: MODEL_CATALOG });
   });
 
   app.get("/model/pull/progress", async (_req, reply) => {

@@ -270,6 +270,14 @@ export const swapModel = async (model: string) =>
 export const pullModel = async (model: string) =>
   post<unknown>(INFERENCE_BASE, "/model/pull", { model }, await inferenceHeaders());
 
+/** Curated install catalog served by the inference service (falls back to the bundled copy in lib/models.ts). */
+export const getModelCatalog = async () =>
+  get<{ version: string; categories: Record<string, string>; models: import("./models").CatalogModel[] }>(
+    INFERENCE_BASE,
+    "/model/catalog",
+    await inferenceHeaders(),
+  );
+
 // ---------------------------------------------------------------------------
 // Pull progress — try coordinator first, fall back to inference service
 // ---------------------------------------------------------------------------

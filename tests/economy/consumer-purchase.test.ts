@@ -1,73 +1,52 @@
 import { describe, expect, test } from "vitest";
+import { contributionPolicyDecision } from "../../src/swarm/coordinator-utils.js";
 
 /**
- * Tests for the consumer-only purchase path.
+ * Contribute-first policy for POST /submit, as actually enforced by the coordinator.
  *
- * The enforceContributionFirstPolicy now considers purchased credits
- * (reason LIKE 'credit_purchase:%') alongside earned credits from compute
- * contribution when checking the contribution-first ratio.
+ * effectiveEarned = earned (compute_contribution) + purchased (credit_purchase:%)
+ * allowed when balance >= burstCredits, or spent == 0, or effectiveEarned / spent >= minRatio.
  *
- * The formula: effectiveEarned = earned + purchased
- * Ratio: effectiveEarned / spent >= MIN_CONTRIBUTION_RATIO (default 1.0)
- *
- * This enables agents that ONLY purchase credits (never contribute compute)
- * to still submit tasks, as long as they maintain a valid ratio.
+ * Regression: the previous version of this file re-did the arithmetic locally and never
+ * called the coordinator, while the real query only counted compute_contribution. A user who
+ * bought credits with sats, had a balance under the burst threshold and had ever submitted a
+ * task was refused with contribute_first_required.
  */
+const CFG = { burstCredits: 25, minRatio: 1.0 };
 
-describe("consumer purchase path", () => {
-  test("purchased credits satisfy contribution ratio", () => {
-    const stats = { earned: 0, spent: 5, purchased: 10 };
-    const effectiveEarned = stats.earned + stats.purchased;
-    const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : effectiveEarned / stats.spent;
-    expect(ratio).toBe(2);
-    expect(ratio >= 1.0).toBe(true);
+describe("contribute-first policy (consumer purchase path)", () => {
+  test("purchased credits satisfy the ratio with no compute contribution", () => {
+    const d = contributionPolicyDecision({ earned: 0, spent: 5, purchased: 10 }, 5, CFG);
+    expect(d).toEqual({ ok: true, reason: "ratio_ok" });
   });
 
-  test("mixed earned + purchased credits satisfy ratio", () => {
-    const stats = { earned: 3, spent: 5, purchased: 3 };
-    const effectiveEarned = stats.earned + stats.purchased;
-    const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : effectiveEarned / stats.spent;
-    expect(ratio).toBe(1.2);
-    expect(ratio >= 1.0).toBe(true);
+  test("mixed earned + purchased credits satisfy the ratio", () => {
+    expect(contributionPolicyDecision({ earned: 3, spent: 5, purchased: 3 }, 1, CFG).ok).toBe(true);
   });
 
-  test("zero earned + zero purchased still blocked when spent > 0", () => {
-    const stats = { earned: 0, spent: 5, purchased: 0 };
-    const balance = 3; // below CONTRIBUTION_BURST_CREDITS default of 25
-    const effectiveEarned = stats.earned + stats.purchased;
-    const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : effectiveEarned / stats.spent;
-    expect(ratio).toBe(0);
-    expect(ratio >= 1.0).toBe(false);
-    expect(balance >= 25).toBe(false);
+  test("zero earned + zero purchased is blocked once something was spent and the balance is small", () => {
+    const d = contributionPolicyDecision({ earned: 0, spent: 5, purchased: 0 }, 3, CFG);
+    expect(d.ok).toBe(false);
+    expect(d.reason).toMatch(/contribute_first_policy/);
+    expect(d.reason).toMatch(/purchased=0.000/);
   });
 
-  test("burst credits bypass contribution policy", () => {
-    const stats = { earned: 0, spent: 0, purchased: 0 };
-    const balance = 30; // above CONTRIBUTION_BURST_CREDITS default of 25
-    // Policy allows if balance >= CONTRIBUTION_BURST_CREDITS regardless of ratio
-    expect(balance >= 25).toBe(true);
+  test("burst balance bypasses the ratio", () => {
+    expect(contributionPolicyDecision({ earned: 0, spent: 100, purchased: 0 }, 30, CFG)).toEqual({ ok: true, reason: "burst_balance" });
   });
 
-  test("credit_purchase reason matches LIKE pattern", () => {
-    const reason = "credit_purchase:intent-abc-123";
-    // The SQL uses: reason LIKE 'credit_purchase:%'
-    expect(reason.startsWith("credit_purchase:")).toBe(true);
+  test("a fresh account that never spent is allowed", () => {
+    expect(contributionPolicyDecision({ earned: 0, spent: 0, purchased: 0 }, 0, CFG)).toEqual({ ok: true, reason: "nothing_spent" });
   });
 
-  test("adjustCredits creates earn type for positive credits", () => {
-    // Verify the existing adjustCredits logic: positive credits → type "earn"
-    const credits = 50;
-    const type = credits >= 0 ? "earn" : "spend";
-    expect(type).toBe("earn");
+  test("pure consumer: keeps submitting while purchases keep pace with spend, blocked when they fall behind", () => {
+    expect(contributionPolicyDecision({ earned: 0, spent: 10, purchased: 15 }, 5, CFG).ok).toBe(true);
+    expect(contributionPolicyDecision({ earned: 0, spent: 16, purchased: 15 }, 0, CFG).ok).toBe(false);
   });
 
-  test("pure consumer flow: no compute, only purchases", () => {
-    const stats = { earned: 0, spent: 10, purchased: 15 };
-    const effectiveEarned = stats.earned + stats.purchased;
-    const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : effectiveEarned / stats.spent;
-    expect(ratio).toBe(1.5);
-    expect(ratio >= 1.0).toBe(true);
-    // A user who only buys credits and never contributes compute
-    // passes the policy as long as purchased >= spent
+  test("minRatio is honoured and negative stats never help", () => {
+    expect(contributionPolicyDecision({ earned: 1, spent: 4, purchased: 0 }, 0, { burstCredits: 25, minRatio: 0.25 }).ok).toBe(true);
+    expect(contributionPolicyDecision({ earned: 1, spent: 4, purchased: 0 }, 0, { burstCredits: 25, minRatio: 0.5 }).ok).toBe(false);
+    expect(contributionPolicyDecision({ earned: -5, spent: 4, purchased: 4 }, 0, CFG).ok).toBe(true);
   });
 });

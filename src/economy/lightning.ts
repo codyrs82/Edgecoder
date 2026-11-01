@@ -196,28 +196,66 @@ class ClnRestProvider implements LightningProvider {
     };
   }
 
-  async checkSettlement(invoiceRef: string): Promise<SettlementResult> {
-    const res = await request(`${this.baseUrl}/v1/invoice/listInvoices?invstring=${encodeURIComponent(invoiceRef)}`, {
+  async checkSettlement(invoiceRef: string, paymentHash?: string): Promise<SettlementResult> {
+    // Look the invoice up by payment hash when we have it (exact match), else by bolt11.
+    const hashHex = typeof paymentHash === "string" && /^[0-9a-fA-F]{64}$/.test(paymentHash) ? paymentHash.toLowerCase() : undefined;
+    const query = hashHex ? `payment_hash=${hashHex}` : `invstring=${encodeURIComponent(invoiceRef)}`;
+    const res = await request(`${this.baseUrl}/v1/invoice/listInvoices?${query}`, {
       method: "GET",
       headers: {
         authorization: `Bearer ${this.apiToken}`
       }
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
+      await res.body.dump();
       return { settled: false };
     }
-    const body = (await res.body.json()) as {
-      invoices?: Array<{ status?: string; payment_hash?: string; payment_preimage?: string }>;
-    };
-    const paid = (body.invoices ?? []).find((i) => i.status === "paid");
-    const settled = Boolean(paid);
-    return {
-      settled,
-      txRef: settled ? `cln:${paid?.payment_hash ?? invoiceRef}` : undefined,
-      paymentHash: paid?.payment_hash,
-      preimage: paid?.payment_preimage
-    };
+    const body = (await res.body.json()) as { invoices?: ClnInvoice[] };
+    return interpretClnInvoices(body.invoices ?? [], { hashHex, bolt11: invoiceRef });
   }
+}
+
+/** Subset of Core Lightning's `listinvoices` entry (via c-lightning-REST). Amounts arrive as "Nmsat" strings or numbers. */
+export interface ClnInvoice {
+  status?: "unpaid" | "paid" | "expired" | string;
+  bolt11?: string;
+  payment_hash?: string;
+  payment_preimage?: string;
+  amount_msat?: string | number;
+  amount_received_msat?: string | number;
+}
+
+function clnMsat(value: string | number | undefined): bigint | undefined {
+  if (value === undefined || value === null) return undefined;
+  const digits = String(value).trim().replace(/msat$/i, "");
+  return /^\d+$/.test(digits) ? BigInt(digits) : undefined;
+}
+
+/**
+ * Decide settlement from a Core Lightning listinvoices response. Same fail-closed rules as
+ * the LND path: only status "paid" counts; the entry must be the invoice we asked about
+ * (payment hash, or bolt11 when no hash is stored); the preimage must hash to the payment
+ * hash; the invoice amount must be > 0 and fully received.
+ */
+export function interpretClnInvoices(
+  invoices: ClnInvoice[],
+  expected: { hashHex?: string; bolt11?: string }
+): SettlementResult {
+  const match = invoices.find((i) => {
+    const h = i.payment_hash?.toLowerCase();
+    if (expected.hashHex) return h === expected.hashHex;
+    return Boolean(expected.bolt11) && i.bolt11 === expected.bolt11;
+  });
+  if (!match || match.status !== "paid") return { settled: false };
+  const hashHex = match.payment_hash?.toLowerCase();
+  if (!hashHex || !/^[0-9a-f]{64}$/.test(hashHex)) return { settled: false };
+  const preimage = match.payment_preimage?.toLowerCase();
+  if (!preimage || !/^[0-9a-f]{64}$/.test(preimage)) return { settled: false };
+  if (createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex") !== hashHex) return { settled: false };
+  const amount = clnMsat(match.amount_msat);
+  const received = clnMsat(match.amount_received_msat);
+  if (amount === undefined || received === undefined || amount <= 0n || received < amount) return { settled: false };
+  return { settled: true, txRef: `cln:${hashHex}`, paymentHash: hashHex, preimage };
 }
 
 /**

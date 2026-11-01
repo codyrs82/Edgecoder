@@ -22,7 +22,8 @@ import {
   pairKey,
   weightedMedian,
   parseRecordPayload,
-  computeIntentFee
+  computeIntentFee,
+  contributionPolicyDecision
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
@@ -1585,15 +1586,11 @@ async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: 
   if (!pgStore) return { ok: true };
   const stats = await pgStore.creditContributionStats(accountId);
   const balance = await pgStore.creditBalance(accountId);
-  if (balance >= CONTRIBUTION_BURST_CREDITS) return { ok: true };
-  const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : stats.earned / stats.spent;
-  if (ratio < MIN_CONTRIBUTION_RATIO) {
-    return {
-      ok: false,
-      reason: `contribute_first_policy: earned=${stats.earned.toFixed(3)} spent=${stats.spent.toFixed(3)} ratio=${ratio.toFixed(3)}`
-    };
-  }
-  return { ok: true };
+  const decision = contributionPolicyDecision(stats, balance, {
+    burstCredits: CONTRIBUTION_BURST_CREDITS,
+    minRatio: MIN_CONTRIBUTION_RATIO
+  });
+  return decision.ok ? { ok: true } : decision;
 }
 
 async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {

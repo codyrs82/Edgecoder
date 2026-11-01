@@ -20,7 +20,7 @@ primary_region = "cdg"
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed-eu.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen2.5:7b"
+  OLLAMA_MODEL = "qwen3.5:4b" # 8 GB machine: 4B fits beside Node; the 16 GB US seed runs qwen3.5:9b
   # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
   # check (SANDBOX_MODE=docker) and would just log errors. Seeds are coordinator + Ollama
   # chat only; compute comes from enrolled agents. Same setting as fly.seed-node.toml.
