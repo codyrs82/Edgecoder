@@ -1,0 +1,166 @@
+import { describe, expect, it } from "vitest";
+import { detectHardware, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGpu, type Probe } from "../../src/install/hardware.js";
+import { helpText, parseInstallArgs, parseTokensFile, INSTALL_OPTIONS } from "../../src/install/options.js";
+import { pickModel, planInstall, renderEnvFile } from "../../src/install/plan.js";
+import { applyPlan, defaultPaths, launchdAgentPlist, removeServices, systemdAgentUnit, systemdOllamaUnit, windowsAgentCmd, type Host } from "../../src/install/services.js";
+
+const NVIDIA_8X = Array.from({ length: 8 }, (_, i) => `${i}, NVIDIA RTX 6000 Ada Generation, 49140`).join("\n") + "\n";
+
+function fakeHost(platform: NodeJS.Platform) {
+  const files = new Map<string, string>();
+  const commands: string[] = [];
+  const host: Host = {
+    platform,
+    writeFile: (p, c) => { files.set(p, c); },
+    removeFile: (p) => { files.delete(p); },
+    run: (cmd, args) => { commands.push([cmd, ...args].join(" ")); return { code: 0, stdout: "active\n", stderr: "" }; },
+    exists: (p) => files.has(p)
+  };
+  return { host, files, commands };
+}
+
+describe("hardware detection", () => {
+  it("parses nvidia-smi and flags workstation/datacenter parts", () => {
+    const gpus = parseNvidiaSmi(NVIDIA_8X);
+    expect(gpus).toHaveLength(8);
+    expect(gpus[7]).toMatchObject({ index: 7, vendor: "nvidia", model: "NVIDIA RTX 6000 Ada Generation", vramGb: 48, datacenter: true });
+    expect(parseNvidiaSmi("0, NVIDIA GeForce RTX 4090, 24564\n")[0]).toMatchObject({ vramGb: 24, datacenter: false });
+    expect(isDatacenterGpu("NVIDIA H100 80GB HBM3")).toBe(true);
+    expect(isDatacenterGpu("NVIDIA GeForce RTX 3060")).toBe(false);
+  });
+
+  it("parses rocm-smi csv best effort", () => {
+    const out = "device,Card series,VRAM Total Memory (B)\ncard0,AMD Instinct MI300X,206158430208\n";
+    expect(parseRocmSmi(out)[0]).toMatchObject({ vendor: "amd", model: "AMD Instinct MI300X", vramGb: 192, datacenter: true });
+  });
+
+  it("detects Apple silicon as a unified-memory GPU and NVIDIA via the probe", () => {
+    const probe: Probe = (cmd) => (cmd === "nvidia-smi" ? NVIDIA_8X : null);
+    const mac = detectHardware({ probe, platform: "darwin", arch: "arm64", ramGb: 64, cpuModel: "Apple M3 Max", cpuCores: 16, hostname: "studio" });
+    expect(mac.gpus[0]).toMatchObject({ vendor: "apple", vramGb: 64 });
+    expect(mac.unifiedMemory).toBe(true);
+    const linux = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "EPYC", cpuCores: 64, hostname: "gpu-box" });
+    expect(linux.gpus).toHaveLength(8);
+    const none = detectHardware({ probe: () => null, platform: "linux", arch: "x64", ramGb: 16, cpuModel: "i7", cpuCores: 8, hostname: "pc" });
+    expect(none.gpus).toEqual([]);
+  });
+
+  it("selects the GPU an instance owns from CUDA_VISIBLE_DEVICES", () => {
+    const hw = detectHardware({ probe: () => NVIDIA_8X, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "x", cpuCores: 1, hostname: "h" });
+    expect(selectGpu(hw, { CUDA_VISIBLE_DEVICES: "5" })?.index).toBe(5);
+    expect(selectGpu(hw, { EDGECODER_GPU_INDEX: "2", CUDA_VISIBLE_DEVICES: "5" })?.index).toBe(2);
+    expect(selectGpu(hw, {})?.index).toBe(0);
+  });
+});
+
+describe("options", () => {
+  it("parses the shared option table and tokens", () => {
+    const o = parseInstallArgs(["apply", "--mesh-token", "m", "--token", "box-gpu0=t0", "--token", "t-all", "--instances", "2", "--sandbox", "none", "--single", "--json"]);
+    expect(o).toMatchObject({ command: "apply", meshToken: "m", tokens: { "box-gpu0": "t0", "*": "t-all" }, instances: 2, sandbox: "none", perGpu: false, json: true });
+    expect(parseInstallArgs(["plan", "--coordinator-url=https://c.example"]).coordinatorUrl).toBe("https://c.example");
+    expect(() => parseInstallArgs(["--bogus"])).toThrow(/unknown option/);
+    expect(() => parseInstallArgs(["apply", "--instances", "0"])).toThrow(/positive/);
+    expect(parseInstallArgs([], { EDGECODER_REGISTRATION_TOKEN: "envtok" }).tokens["*"]).toBe("envtok");
+    expect(parseTokensFile("# c\nbox-gpu0=a\nbox-gpu1 = b\n")).toEqual({ "box-gpu0": "a", "box-gpu1": "b" });
+    for (const opt of INSTALL_OPTIONS) expect(helpText()).toContain(opt.flag);
+  });
+});
+
+describe("plan", () => {
+  const probe: Probe = (cmd) => (cmd === "nvidia-smi" ? NVIDIA_8X : null);
+  const gpuBox = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "EPYC", cpuCores: 64, hostname: "GPU-Box.local" });
+
+  it("picks the largest coding model that fits with headroom", () => {
+    expect(pickModel(48)).toBe("qwen3-coder:30b");
+    expect(pickModel(16)).toBe("qwen3.5:9b");
+    expect(pickModel(8)).toBe("qwen3.5:4b");
+    expect(pickModel(24)).toBe("qwen3-coder:30b");
+    expect(pickModel(4)).toBe("qwen3.5:2b");
+    expect(pickModel(3)).toBe("qwen3.5:0.8b");
+  });
+
+  it("one agent and one Ollama per GPU, pinned, with tokens matched by agent id", () => {
+    const o = parseInstallArgs(["apply", "--mesh-token", "m", "--token", "gpu-box-local-gpu3=tok3"]);
+    const plan = planInstall(gpuBox, o, true);
+    expect(plan.instances).toHaveLength(8);
+    expect(plan.sandboxMode).toBe("docker");
+    const i3 = plan.instances[3];
+    expect(i3.agentId).toBe("gpu-box-local-gpu3");
+    expect(i3.ollamaPort).toBe(11437);
+    expect(i3.env).toMatchObject({ CUDA_VISIBLE_DEVICES: "3", AGENT_GPU_VRAM_GB: "48", AGENT_GPU_DATACENTER: "1", AGENT_REGISTRATION_TOKEN: "tok3", OLLAMA_HOST: "http://127.0.0.1:11437", OLLAMA_MODEL: "qwen3-coder:30b", SANDBOX_MODE: "docker" });
+    expect(plan.warnings.filter((w) => w.includes("no registration token"))).toHaveLength(7);
+    expect(renderEnvFile(i3.env)).toContain("AGENT_ID=gpu-box-local-gpu3\n");
+  });
+
+  it("--single, --instances and no-docker behave", () => {
+    expect(planInstall(gpuBox, parseInstallArgs(["apply", "--single"]), true).instances).toHaveLength(1);
+    expect(planInstall(gpuBox, parseInstallArgs(["apply", "--instances", "2"]), true).instances.map((i) => i.gpu?.index)).toEqual([0, 1]);
+    const noDocker = planInstall(gpuBox, parseInstallArgs(["apply"]), false);
+    expect(noDocker.sandboxMode).toBe("none");
+    expect(noDocker.warnings[0]).toMatch(/Docker is not available/);
+    const mac = detectHardware({ probe: () => null, platform: "darwin", arch: "arm64", ramGb: 36, cpuModel: "Apple M3 Pro", cpuCores: 12, hostname: "mbp" });
+    const macPlan = planInstall(mac, parseInstallArgs(["apply", "--token", "t"]), true);
+    expect(macPlan.instances).toHaveLength(1);
+    expect(macPlan.instances[0].agentId).toBe("mbp-gpu");
+    expect(macPlan.instances[0].env.CUDA_VISIBLE_DEVICES).toBeUndefined();
+    expect(macPlan.instances[0].model).toBe("qwen3-coder:30b");
+  });
+});
+
+describe("services: the same plan on every platform", () => {
+  const probe: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n1, NVIDIA RTX 6000 Ada Generation, 49140\n" : null);
+  const o = parseInstallArgs(["apply", "--token", "t"]);
+
+  it("linux: systemd units per instance, pinned GPU, shared model store", () => {
+    const hw = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 256, cpuModel: "x", cpuCores: 32, hostname: "box" });
+    const plan = planInstall(hw, o, true);
+    const p = defaultPaths("linux", { nodeBin: "/usr/bin/node", appDir: "/opt/edgecoder/app" });
+    const { host, files, commands } = fakeHost("linux");
+    const r = applyPlan(plan, host, p, false);
+    expect(r.services).toEqual(["edgecoder-ollama-0.service", "edgecoder-agent-0.service", "edgecoder-ollama-1.service", "edgecoder-agent-1.service"]);
+    expect(files.get("/etc/systemd/system/edgecoder-ollama-1.service")).toContain('Environment="CUDA_VISIBLE_DEVICES=1"');
+    expect(files.get("/etc/systemd/system/edgecoder-ollama-1.service")).toContain("OLLAMA_HOST=127.0.0.1:11435");
+    expect(files.get("/etc/systemd/system/edgecoder-agent-1.service")).toContain("EnvironmentFile=/etc/edgecoder/agent-1.env");
+    expect(files.get("/etc/edgecoder/agent-0.env")).toContain("AGENT_REGISTRATION_TOKEN=t");
+    expect(commands.at(-1)).toBe("systemctl enable --now " + r.services.join(" "));
+    expect(systemdOllamaUnit(p, plan.instances[0])).toContain("OLLAMA_MODELS=/var/lib/edgecoder/ollama");
+    expect(systemdAgentUnit(p, plan.instances[0])).toContain("ExecStart=/usr/bin/node /opt/edgecoder/app/dist/swarm/worker-runner.js");
+    expect(removeServices(host, p)).toHaveLength(4);
+    expect(files.size).toBe(0);
+  });
+
+  it("macOS: launchd plists with the instance env", () => {
+    const hw = detectHardware({ probe: () => null, platform: "darwin", arch: "arm64", ramGb: 64, cpuModel: "Apple M2 Ultra", cpuCores: 24, hostname: "studio" });
+    const plan = planInstall(hw, o, true);
+    const p = defaultPaths("darwin", { nodeBin: "/opt/homebrew/bin/node" });
+    const { host, files, commands } = fakeHost("darwin");
+    const r = applyPlan(plan, host, p, false);
+    expect(r.services).toEqual(["io.edgecoder.ollama.0", "io.edgecoder.agent.0"]);
+    const agent = files.get("/Library/LaunchDaemons/io.edgecoder.agent.0.plist")!;
+    expect(agent).toContain("<key>OLLAMA_MODEL</key>");
+    expect(agent).toContain("<string>qwen3-coder:30b</string>");
+    expect(launchdAgentPlist(p, plan.instances[0])).toContain("/opt/edgecoder/app/dist/swarm/worker-runner.js");
+    expect(commands).toContain("launchctl bootstrap system /Library/LaunchDaemons/io.edgecoder.agent.0.plist");
+  });
+
+  it("windows: scheduled tasks and cmd wrappers", () => {
+    const hw = detectHardware({ probe, platform: "win32", arch: "x64", ramGb: 128, cpuModel: "x", cpuCores: 16, hostname: "WINBOX" });
+    const plan = planInstall(hw, o, true);
+    const p = defaultPaths("win32", { configDir: "C:\\ProgramData\\EdgeCoder", appDir: "C:\\Program Files\\EdgeCoder\\app", nodeBin: "C:\\Program Files\\nodejs\\node.exe", ollamaBin: "C:\\ollama.exe", modelsDir: "C:\\ProgramData\\EdgeCoder\\ollama", logDir: "C:\\ProgramData\\EdgeCoder\\logs" });
+    const { host, files, commands } = fakeHost("win32");
+    const r = applyPlan(plan, host, p, false);
+    expect(r.services).toEqual(["EdgeCoder\\ollama-0", "EdgeCoder\\agent-0", "EdgeCoder\\ollama-1", "EdgeCoder\\agent-1"]);
+    expect(files.get("C:\\ProgramData\\EdgeCoder\\agent-1.cmd")).toContain('set "CUDA_VISIBLE_DEVICES=1"');
+    expect(windowsAgentCmd(p, plan.instances[1])).toContain("worker-runner.js");
+    expect(commands.some((c) => c.startsWith("schtasks /Create /F /SC ONSTART /RU SYSTEM /RL HIGHEST /TN EdgeCoder\\agent-1"))).toBe(true);
+  });
+
+  it("dry run writes nothing", () => {
+    const hw = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 256, cpuModel: "x", cpuCores: 32, hostname: "box" });
+    const { host, files, commands } = fakeHost("linux");
+    const r = applyPlan(planInstall(hw, o, true), host, defaultPaths("linux"), true);
+    expect(r.files.length).toBeGreaterThan(0);
+    expect(files.size).toBe(0);
+    expect(commands).toEqual([]);
+  });
+});

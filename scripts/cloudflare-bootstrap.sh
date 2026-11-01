@@ -21,9 +21,14 @@
 #      deploys the static mirror of the public pages to Cloudflare Pages (PAGES_PROJECT=name).
 #
 # Required env:
-#   CLOUDFLARE_API_TOKEN   token with Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit,
-#                          Transform Rules:Edit, Cache Rules:Edit (and Pages:Edit for the mirror)
-#   DOMAIN                 the zone, e.g. edgecoder.io (nameservers must already point to Cloudflare)
+#   CLOUDFLARE_API_TOKEN   token with Zone:Edit (to create the zone), Zone:Read, DNS:Edit,
+#                          Zone Settings:Edit, Zone WAF:Edit, Transform Rules:Edit, Cache Rules:Edit
+#                          (and Account Settings:Read for zone creation, Pages:Edit for the mirror).
+#                          Or put the token in CLOUDFLARE_API_TOKEN_FILE (default
+#                          ~/.config/edgecoder/cloudflare.token, mode 600) and leave the env unset.
+#   DOMAIN                 the zone, e.g. edgecoder.io. Created on the account if missing (the
+#                          script then prints the two nameservers to set at the registrar); the
+#                          configuration is applied even while the zone is still pending.
 # Optional:
 #   FLY_PORTAL_HOST        origin host (default: edgecoder-portal.fly.dev)
 #   FLY_PORTAL_APP         Fly app name, for `fly certs` and APPLY_FLY (default: edgecoder-portal)
@@ -38,7 +43,11 @@ set -euo pipefail
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; }; }
 need curl; need jq; need openssl
-: "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN}"
+TOKEN_FILE="${CLOUDFLARE_API_TOKEN_FILE:-$HOME/.config/edgecoder/cloudflare.token}"
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -r "$TOKEN_FILE" ]; then
+  CLOUDFLARE_API_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+fi
+: "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN or write it to $TOKEN_FILE}"
 : "${DOMAIN:?set DOMAIN (e.g. edgecoder.io)}"
 FLY_PORTAL_HOST="${FLY_PORTAL_HOST:-edgecoder-portal.fly.dev}"
 FLY_PORTAL_APP="${FLY_PORTAL_APP:-edgecoder-portal}"
@@ -63,11 +72,23 @@ check() { # label json
 
 # ------------------------------------------------------------------ zone ----
 log "Zone $DOMAIN"
-ZONE_JSON="$(cf GET "/zones?name=$DOMAIN&status=active")"
+VERIFY="$(cf GET "/user/tokens/verify")"
+printf '%s' "$VERIFY" | ok || { echo "API token rejected: $(printf '%s' "$VERIFY" | jq -c '.errors')" >&2; exit 1; }
+ZONE_JSON="$(cf GET "/zones?name=$DOMAIN")"
 ZONE_ID="$(printf '%s' "$ZONE_JSON" | jq -r '.result[0].id // empty')"
-[ -n "$ZONE_ID" ] || { echo "zone $DOMAIN not found or not active on this account (add the site in the Cloudflare dashboard and move the nameservers first)" >&2; exit 1; }
+if [ -z "$ZONE_ID" ]; then
+  ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-$(cf GET "/accounts?per_page=1" | jq -r '.result[0].id // empty')}"
+  [ -n "$ACCOUNT_ID" ] || { echo "zone $DOMAIN not found and no account visible to this token (give it Account Settings:Read, or set CLOUDFLARE_ACCOUNT_ID)" >&2; exit 1; }
+  echo "  creating zone $DOMAIN on account $ACCOUNT_ID"
+  ZONE_JSON="$(cf POST "/zones" "$(jq -nc --arg n "$DOMAIN" --arg a "$ACCOUNT_ID" '{name:$n,account:{id:$a},type:"full"}')")"
+  check "create zone" "$ZONE_JSON"
+  ZONE_ID="$(printf '%s' "$ZONE_JSON" | jq -r '.result.id')"
+  ZONE_JSON="$(cf GET "/zones?name=$DOMAIN")"
+fi
 PLAN="$(printf '%s' "$ZONE_JSON" | jq -r '.result[0].plan.legacy_id // "unknown"')"
-echo "  zone id: $ZONE_ID  plan: $PLAN"
+ZONE_STATUS="$(printf '%s' "$ZONE_JSON" | jq -r '.result[0].status // "unknown"')"
+NAMESERVERS="$(printf '%s' "$ZONE_JSON" | jq -r '.result[0].name_servers // [] | join(" ")')"
+echo "  zone id: $ZONE_ID  plan: $PLAN  status: $ZONE_STATUS  nameservers: $NAMESERVERS"
 
 # ------------------------------------------------------------------- dns ----
 log "DNS"
@@ -81,6 +102,16 @@ upsert_dns() { # type name content proxied
   if [ -n "$id" ]; then check "$type $name -> $content (update)" "$(cf PUT "/zones/$ZONE_ID/dns_records/$id" "$payload")"
   else check "$type $name -> $content (create)" "$(cf POST "/zones/$ZONE_ID/dns_records" "$payload")"; fi
 }
+# Cloudflare imports the registrar's old A/AAAA records when the zone is added; a CNAME cannot
+# coexist with them at the same name, so clear them first.
+clear_dns() { # name
+  for type in A AAAA; do
+    for id in $(cf GET "/zones/$ZONE_ID/dns_records?type=$type&name=$1" | jq -r '.result[].id'); do
+      check "delete stale $type $1" "$(cf DELETE "/zones/$ZONE_ID/dns_records/$id")" || true
+    done
+  done
+}
+clear_dns "$DOMAIN"; clear_dns "www.$DOMAIN"
 upsert_dns CNAME "$DOMAIN" "$FLY_PORTAL_HOST" true
 upsert_dns CNAME "www.$DOMAIN" "$DOMAIN" true
 # Fly issues the origin certificate over DNS-01; the challenge record must NOT be proxied.
@@ -183,6 +214,14 @@ if [ -n "${PAGES_PROJECT:-}" ]; then
 fi
 
 log "Done"
+if [ "$ZONE_STATUS" != "active" ]; then
+  cat <<EOF
+  ZONE IS $ZONE_STATUS: at the registrar (GoDaddy: Domain > DNS > Nameservers > Change > custom)
+  set the nameservers to:  $NAMESERVERS
+  Cloudflare activates the zone once it sees them (minutes to a few hours). Re-run this script
+  afterwards only if something failed above; the configuration is already stored.
+EOF
+fi
 cat <<EOF
   $DOMAIN and www.$DOMAIN are proxied to $FLY_PORTAL_HOST (TLS Full strict, HSTS, WAF, rate limits, cache).
   Origin lock token: ${GENERATED_LOCK:+(generated) }$ORIGIN_LOCK_TOKEN

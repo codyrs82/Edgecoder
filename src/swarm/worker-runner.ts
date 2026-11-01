@@ -8,7 +8,9 @@ import { cpus, hostname, totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
+import { execFileSync } from "node:child_process";
 import { isDockerAvailable } from "../executor/docker-sandbox.js";
+import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
@@ -54,32 +56,36 @@ const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
+const hardwareProbe: Probe = (cmd, args) => {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+};
 /**
  * Hardware profile reported at registration; the coordinator classifies it into a compute class
- * that prices this agent's seconds. GPU details can't be probed portably, so they come from
- * env: AGENT_GPU_VENDOR, AGENT_GPU_MODEL, AGENT_GPU_VRAM_GB, AGENT_GPU_DATACENTER=1.
+ * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
+ * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
+ * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
+ * override detection (containers and unusual hardware).
  */
 function buildHardwareProfile(): Record<string, unknown> {
-  const cpu = cpus();
+  const hw = detectHardware({ probe: hardwareProbe });
   const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
   const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
-  return {
-    cpuCores: cpu.length,
-    cpuModel: cpu[0]?.model?.slice(0, 128),
-    ramGb: Number((totalmem() / 1024 ** 3).toFixed(1)),
-    arch: process.arch,
-    platform: process.platform,
-    ...(gpuModel || Number.isFinite(gpuVram)
-      ? {
-          gpu: {
-            vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
-            model: gpuModel || undefined,
-            vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
-            datacenter: process.env.AGENT_GPU_DATACENTER === "1"
-          }
-        }
-      : {})
-  };
+  if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
+    return {
+      ...hardwareProfileFor(hw, undefined),
+      gpu: {
+        vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+        model: gpuModel || undefined,
+        vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
+        datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+      }
+    };
+  }
+  return hardwareProfileFor(hw, selectGpu(hw, process.env));
 }
 const HARDWARE_PROFILE = buildHardwareProfile();
 /** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */

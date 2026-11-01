@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPricing } from "../public-pricing.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
@@ -532,5 +534,18 @@ app.get("/", async (_req, reply) => {
   return reply.type("text/html").send(marketingHomeHtml(pricing));
 });
 app.get("/privacy", async (_req, reply) => reply.type("text/html").send(privacyPolicyHtml()));
+// One-line installers (docs/install.md): served from the image's deploy/ copy, else from GitHub.
+for (const name of ["install.sh", "install.ps1"] as const) {
+  app.get(`/${name}`, async (_req, reply) => {
+    for (const dir of [resolve(process.cwd(), "deploy"), resolve(process.cwd(), "..", "deploy")]) {
+      try {
+        return reply.type("text/plain; charset=utf-8").header("cache-control", "public, max-age=300").send(readFileSync(resolve(dir, name), "utf8"));
+      } catch {
+        // try the next location
+      }
+    }
+    return reply.redirect(`${GITHUB_REPO_URL.replace("github.com", "raw.githubusercontent.com")}/main/deploy/${name}`, 302);
+  });
+}
 app.get("/terms", async (_req, reply) => reply.type("text/html").send(termsOfServiceHtml()));
 }

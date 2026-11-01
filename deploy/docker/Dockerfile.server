@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
+COPY --chown=node:node deploy/install.sh deploy/install.ps1 ./deploy/
 USER node
 EXPOSE 4301 4302 4303 4304 4310
 ENTRYPOINT ["/usr/bin/tini", "--"]

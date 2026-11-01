@@ -496,6 +496,7 @@ app.get("/portal/download", async (req, reply) => {
   const detectedOS = detectOS(userAgent);
   const queryToken = ((req.query as Record<string, string>)?.token || "").trim();
   const tokenDisplay = queryToken || "YOUR_TOKEN";
+  const portalBase = (process.env.PORTAL_PUBLIC_URL || "https://edgecoder.io").replace(/\/$/, "");
 
   const osLabels: Record<string, string> = {
     macos: "macOS", windows: "Windows", linux: "Linux", ios: "iOS", unknown: "your OS"
@@ -572,7 +573,13 @@ app.get("/portal/download", async (req, reply) => {
   };
   const primaryKey = (detectedOS === "unknown") ? "macos" : detectedOS;
   const primaryCard = allCards[primaryKey];
-  const secondaryCards = Object.entries(allCards)
+  // One installer for every platform (docs/install.md): detects GPUs, one agent per GPU.
+  const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 style="margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
+    <p style="margin:0 0 12px;font-size:13px;color:var(--muted);">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
+    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-sh')">Copy</button></div>
+    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-ps1')">Copy</button></div>
+    <div style="font-size:12px;color:var(--muted);margin-top:8px;">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
+  const secondaryCards = universalCard + Object.entries(allCards)
     .filter(([k]) => k !== primaryKey)
     .map(([, v]) => v)
     .join("");
