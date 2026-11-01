@@ -2,7 +2,7 @@ app = "edgecoder-seed"
 primary_region = "ord"
 
 [processes]
-  app = "node dist/index.js"
+  app = "node dist/cli/edgecoder.js all-in-one"
 
 [build]
   dockerfile = "../docker/Dockerfile.agent"

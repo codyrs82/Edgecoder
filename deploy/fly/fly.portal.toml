@@ -5,7 +5,7 @@ primary_region = "ord"
   dockerfile = "../docker/Dockerfile.server"
 
 [processes]
-  app = "node dist/portal/server.js"
+  app = "node dist/cli/edgecoder.js portal"
 
 [env]
   NODE_ENV = "production"

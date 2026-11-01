@@ -3,6 +3,13 @@
   "version": "1.0.0",
   "description": "EdgeCoder on-device and swarm runtime scaffold",
   "main": "dist/index.js",
+  "bin": {
+    "edgecoder": "dist/cli/edgecoder.js",
+    "edgecoder-agent": "dist/cli/edgecoder-agent.js",
+    "edgecoder-coordinator": "dist/cli/edgecoder-coordinator.js",
+    "edgecoder-portal": "dist/cli/edgecoder-portal.js",
+    "edgecoder-install": "dist/cli/edgecoder-install.js"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "dev:alt": "INFERENCE_PORT=4312 COORDINATOR_PORT=4311 CONTROL_PLANE_PORT=4313 INFERENCE_URL=http://127.0.0.1:4312 COORDINATOR_URL=http://127.0.0.1:4311 tsx src/index.ts",

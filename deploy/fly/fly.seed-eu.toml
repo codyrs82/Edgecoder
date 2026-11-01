@@ -3,7 +3,7 @@ primary_region = "cdg"
 
 [processes]
   # #9: the agent image entrypoint starts Ollama in the background.
-  app = "node dist/index.js"
+  app = "node dist/cli/edgecoder.js all-in-one"
 
 [build]
   dockerfile = "../docker/Dockerfile.agent"
