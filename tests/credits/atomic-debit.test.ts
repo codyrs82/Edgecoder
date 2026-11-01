@@ -304,3 +304,45 @@ describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
     }
   }, 120_000);
 });
+
+describe.skipIf(!PG_URL)("payment settlement credits the stored intent (#155, real Postgres)", () => {
+  it("ignores caller values: stored account and NUMERIC quote are credited, once", async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 4 });
+    try {
+      await pool.query(SCHEMA_SQL);
+      const store = new PostgresStore(pool);
+      const id = `intent-${randomUUID()}`;
+      const acct = `buyer-${randomUUID()}`;
+      await store.upsertPaymentIntent({
+        intentId: id, accountId: acct, coordinatorId: "c", walletType: "lightning", network: "regtest",
+        invoiceRef: `lnbc-${id}`, amountSats: 1000, coordinatorFeeBps: 0, coordinatorFeeSats: 0, netSats: 1000,
+        quotedCredits: 0.1 + 0.2, status: "created", createdAtMs: Date.now()
+      });
+      const { createPaymentSettler } = await import("../../src/economy/payment-settlement.js");
+      const asked: string[] = [];
+      const settle = createPaymentSettler({
+        provider: {
+          async createInvoice() { return { invoiceRef: "x", paymentHash: "h", expiresAtMs: 0 }; },
+          async checkSettlement(ref: string) { asked.push(ref); return { settled: true, txRef: "node-tx" }; }
+        },
+        store,
+        getIntent: () => undefined,
+        saveIntent: () => undefined,
+        grantCredits: async () => { throw new Error("atomic store must insert its own credit row"); }
+      });
+      const tampered = {
+        ...(await store.getPaymentIntent(id))!, accountId: "attacker", quotedCredits: 1_000_000, invoiceRef: "lnbc-other"
+      };
+      const results = await Promise.all([settle(tampered), settle(tampered)]);
+      expect(results.map((r) => r.status).sort()).toEqual(["already", "settled"]);
+      expect(asked.every((r) => r === `lnbc-${id}`)).toBe(true);
+      const rows = await pool.query(
+        `SELECT account_id, credits::text AS c FROM credit_transactions WHERE reason = $1`, [`credit_purchase:${id}`]
+      );
+      expect(rows.rows).toEqual([{ account_id: acct, c: "0.300000" }]);
+      expect(await store.creditBalance("attacker")).toBe(0);
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+});
