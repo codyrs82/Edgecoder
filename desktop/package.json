@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "bundle-agent": "bash ../scripts/bundle-agent-resources.sh",
     "tauri": "tauri",
+    "csp:gen": "node scripts/gen-tauri-csp.mjs",
     "test:a11y": "playwright test -c playwright.config.ts",
     "test:components": "vitest run --config vitest.config.ts"
   },
