@@ -61,11 +61,14 @@ targets:
           NSAllowsArbitraryLoads: false
         ITSAppUsesNonExemptEncryption: false
     dependencies:
-      - package: llama
+      - package: SwiftLlama
+        product: SwiftLlama
 packages:
-  llama:
-    url: https://github.com/ggml-org/llama.cpp
-    branch: master
+  # #126 review: match the checked-in project (swift-llama-cpp, resolved to 1.2.0 in
+  # Package.resolved) and pin it, instead of floating on llama.cpp master.
+  SwiftLlama:
+    url: https://github.com/pgorzelany/swift-llama-cpp.git
+    exactVersion: 1.2.0
 schemes:
   EdgeCoderIOS:
     build:

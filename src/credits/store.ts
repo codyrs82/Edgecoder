@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
-import { baseRatePerSecond, loadMultiplier, LoadSnapshot } from "./pricing.js";
+import { contributionCredits, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
 
 export const creditEngine = new CreditEngine();
@@ -20,8 +20,7 @@ export async function accrueCredits(
   if (pgStore) {
     const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
     const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const loadFactor = loadMultiplier(load);
-    const credits = computeSeconds * baseRatePerSecond(report.resourceClass) * qualityMultiplier * loadFactor;
+    const credits = contributionCredits(report, load); // #38: single formula
     const resourceWeight = report.resourceClass === "gpu" ? 2 : 1;
     const reliabilityScore = report.success ? 1 : 0.75;
     const weightedContribution = Number((computeSeconds * resourceWeight * qualityMultiplier * reliabilityScore).toFixed(6));
@@ -29,7 +28,7 @@ export async function accrueCredits(
       txId: randomUUID(),
       accountId: report.agentId,
       type: "earn",
-      credits: Number(credits.toFixed(3)),
+      credits,
       reason: "compute_contribution",
       relatedTaskId: report.taskId,
       timestampMs: Date.now()
@@ -60,17 +59,18 @@ export async function rewardAccountForAgent(agentId: string): Promise<string> {
   return ownership?.accountId ?? agentId;
 }
 
-export async function spendCredits(
-  accountId: string,
-  credits: number,
-  reason: string,
-  relatedTaskId?: string
-) {
+function assertAmount(credits: number): void {
+  if (!Number.isFinite(credits) || credits <= 0) throw new Error("invalid_credit_amount");
+}
+
+/**
+ * Atomic debit (#48). Postgres: balance check + insert in one transaction under a
+ * per-account advisory lock. In-memory: synchronous check + insert.
+ * Throws `insufficient_credits: <balance> < <credits>`; the balance never goes negative.
+ */
+async function debit(accountId: string, credits: number, reason: string, relatedTaskId?: string): Promise<CreditTransaction> {
+  assertAmount(credits);
   if (pgStore) {
-    const current = await pgStore.creditBalance(accountId);
-    if (current < credits) {
-      throw new Error(`insufficient_credits: ${current} < ${credits}`);
-    }
     const tx: CreditTransaction = {
       txId: randomUUID(),
       accountId,
@@ -80,26 +80,51 @@ export async function spendCredits(
       relatedTaskId,
       timestampMs: Date.now()
     };
-    await pgStore.persistCreditTransaction(tx);
+    const result = await pgStore.debitCredits(tx);
+    if (result.status === "insufficient") {
+      throw new Error(`insufficient_credits: ${result.balance} < ${credits}`);
+    }
     return tx;
   }
-  const tx = creditEngine.spend(accountId, credits, reason, relatedTaskId);
-  return tx;
+  return creditEngine.spend(accountId, credits, reason, relatedTaskId);
 }
 
+export async function spendCredits(
+  accountId: string,
+  credits: number,
+  reason: string,
+  relatedTaskId?: string
+) {
+  return debit(accountId, credits, reason, relatedTaskId);
+}
+
+/**
+ * Grant-only helper for callers that must never debit (the Lightning payment
+ * settler, #42/#48). Zero is a no-op that returns null (a paid intent whose
+ * quote rounded to 0 credits must not throw after it was marked settled);
+ * negative or non-finite amounts throw, so a bad sign can never become a debit.
+ */
+export async function grantCredits(accountId: string, credits: number, reason: string) {
+  if (credits === 0) return null;
+  assertAmount(credits);
+  return adjustCredits(accountId, credits, reason);
+}
+
+/** Positive = grant (earn). Negative = debit, which is balance-checked like a spend (#48). */
 export async function adjustCredits(accountId: string, credits: number, reason: string) {
+  if (!Number.isFinite(credits) || credits === 0) throw new Error("invalid_credit_amount");
+  if (credits < 0) return debit(accountId, -credits, reason);
   if (pgStore) {
     const tx: CreditTransaction = {
       txId: randomUUID(),
       accountId,
-      type: credits >= 0 ? "earn" : "spend",
-      credits: Math.abs(credits),
+      type: "earn",
+      credits,
       reason,
       timestampMs: Date.now()
     };
     await pgStore.persistCreditTransaction(tx);
     return tx;
   }
-  const tx = creditEngine.adjust(accountId, credits, reason);
-  return tx;
+  return creditEngine.adjust(accountId, credits, reason);
 }

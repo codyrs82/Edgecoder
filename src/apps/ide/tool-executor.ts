@@ -11,7 +11,7 @@ import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, lstatSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
 
 // ---------------------------------------------------------------------------
@@ -96,14 +96,59 @@ function gitUnapprovedReason(args: string[]): string | null {
   return null;
 }
 
+/** #17: `child` is `root` or inside it (no prefix confusion: /proj-evil is not inside /proj). */
+export function isWithin(root: string, child: string): boolean {
+  const rel = relative(root, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * #17: realpath check of the deepest existing part of `abs`. Checking only an existing leaf let
+ * `write_file link/new.txt` (link -> /etc) or a dangling leaf symlink write outside the root.
+ * lstat errors other than ENOENT (EACCES, ENOTDIR) also just move up a level; that is intended,
+ * since the ancestor that does exist is still checked.
+ * Not atomic with the later read/write: a concurrent process could swap a directory for a symlink
+ * in between. Closing that needs O_NOFOLLOW opens or a re-check right before the write.
+ */
+export function realPathEscape(root: string, abs: string, rootReal = safeRealpath(root) ?? root): "dangling" | "escape" | null {
+  let probe = abs;
+  for (;;) {
+    let exists = false;
+    try {
+      lstatSync(probe);
+      exists = true;
+    } catch {
+      // not there; try the parent
+    }
+    if (exists) {
+      const real = safeRealpath(probe);
+      if (real === null) return "dangling";
+      // realpath never goes through a symlinked ancestor, so comparing with rootReal is enough.
+      return isWithin(rootReal, real) ? null : "escape";
+    }
+    const parent = dirname(probe);
+    if (parent === probe) return null;
+    probe = parent;
+  }
+}
+
+function safeRealpath(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
 /** True if an argument names a path outside `root` (absolute, ~, or ..-escaping). */
 function escapesRoot(arg: string, root: string): boolean {
   const value = arg.includes("=") && arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
   if (!value || (value.startsWith("-") && !value.includes("/"))) return false;
   if (value.startsWith("~")) return true;
   const abs = resolve(root, value);
-  const rel = relative(root, abs);
-  return rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../") || isAbsolute(rel);
+  if (!isWithin(root, abs)) return true;
+  // #121 review: a committed symlink (link -> /etc) must not let `cat link/passwd` run unapproved.
+  return realPathEscape(root, abs) !== null;
 }
 
 /**
@@ -182,8 +227,19 @@ export class ToolExecutor {
   private readonly root: string;
   private readonly githubToken: string | null;
 
+  /** #17: symlink-resolved root (e.g. /tmp -> /private/tmp on macOS), for real-path checks. */
+  private readonly rootReal: string;
+
   constructor(projectRoot: string, githubToken?: string | null) {
     this.root = resolve(projectRoot);
+    let rootReal = this.root;
+    try {
+      rootReal = realpathSync(this.root);
+    } catch {
+      // root doesn't exist yet; lexical checks still apply
+    }
+    // Captured once: if the root is created later as a symlink, every path is rejected (safe).
+    this.rootReal = rootReal;
     this.githubToken = githubToken ?? null;
   }
 
@@ -197,17 +253,12 @@ export class ToolExecutor {
    */
   private resolvePath(relativePath: string): string {
     const abs = resolve(this.root, relativePath);
-    const rel = relative(this.root, abs);
-    if (rel.startsWith("..")) {
+    if (!isWithin(this.root, abs)) {
       throw new Error(`Path escapes project root: ${relativePath}`);
     }
-    // If the path exists, verify the real (symlink-resolved) path is also within root
-    if (existsSync(abs)) {
-      const real = realpathSync(abs);
-      if (!real.startsWith(this.root)) {
-        throw new Error(`Symlink escapes project root: ${relativePath}`);
-      }
-    }
+    const why = realPathEscape(this.root, abs, this.rootReal);
+    if (why === "dangling") throw new Error(`Dangling symlink in path: ${relativePath}`);
+    if (why === "escape") throw new Error(`Symlink escapes project root: ${relativePath}`);
     return abs;
   }
 
@@ -332,11 +383,12 @@ export class ToolExecutor {
     const searchDir = this.resolvePath(String(args.path ?? "."));
     const include = typeof args.include === "string" ? args.include : "";
 
-    const grepArgs = ["grep", "-rn", "-E", pattern];
+    // #121 review: -e keeps a pattern starting with "-" from being parsed as a grep option.
+    const grepArgs = ["grep", "-rn", "-E", "-e", pattern];
     if (include) {
       grepArgs.push("--include", include);
     }
-    grepArgs.push(searchDir);
+    grepArgs.push("--", searchDir);
 
     return new Promise<ToolResult>((resolvePromise) => {
       const proc = spawn(grepArgs[0], grepArgs.slice(1), {

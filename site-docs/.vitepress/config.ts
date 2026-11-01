@@ -2,10 +2,14 @@ import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
 const repoUrl = "https://github.com/codyrs82/Edgecoder";
+// #34: GitHub Pages serves this project site under /Edgecoder/; a custom domain serves it at /.
+// The Pages workflow sets DOCS_BASE; local builds and a custom domain use "/".
+const base = process.env.DOCS_BASE ?? "/";
 
 export default withMermaid(defineConfig({
   title: "EdgeCoder Docs",
   description: "Wiki-style documentation for the EdgeCoder platform.",
+  base,
   cleanUrls: true,
   themeConfig: {
     nav: [
