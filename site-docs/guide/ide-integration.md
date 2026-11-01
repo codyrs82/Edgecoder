@@ -52,7 +52,7 @@ cd "/path/to/EdgeCoder"
 npm run desktop
 ```
 
-The app connects to the local services automatically. Make sure the backend services are running (see the [quickstart guide](/guide/quickstart) for details).
+The app connects to the local services automatically. Make sure the backend services are running (see [Runtime modes](/reference/runtime-modes) and the [README quickstart](https://github.com/codyrs82/Edgecoder#readme) for details).
 
 ---
 
