@@ -877,6 +877,44 @@ export class PostgresStore {
     );
   }
 
+  /** Several credit rows in one transaction (fee-pool distribution: pool spend + host earns). */
+  async recordCreditTransactions(rows: CreditTransaction[]): Promise<void> {
+    if (rows.length === 0) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const tx of rows) {
+        await client.query(
+          `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (tx_id) DO NOTHING`,
+          [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs, tx.msat ?? null]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Lightning address (user@domain or LNURL) used for automatic payouts of an account. */
+  async setLightningAddress(accountId: string, lightningAddress: string | null, network: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO wallet_accounts (account_id, wallet_type, network, payout_address, created_at_ms)
+       VALUES ($1, 'lightning', $3, $2, $4)
+       ON CONFLICT (account_id) DO UPDATE SET payout_address = EXCLUDED.payout_address`,
+      [accountId, lightningAddress, network, Date.now()]
+    );
+  }
+
+  /** msat moved out of an account by spend rows (the fee pool's past distributions). */
+  async distributedMsat(accountId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'spend'`, [accountId]);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
   /** Sats (msat) earned by an account, as locked on its earn rows. */
   async earnedMsat(accountId: string): Promise<number> {
     const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [accountId]);

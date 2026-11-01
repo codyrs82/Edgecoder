@@ -38,6 +38,8 @@ export interface PayoutStore {
   /** Fee-pool distribution rows: a spend on the pool and an earn (with msat) on each host account. */
   recordCreditTransactions(rows: CreditTransaction[]): Promise<void>;
   creditBalance(accountId: string): Promise<number>;
+  /** msat already moved out of an account by spend rows (the pool's past distributions). */
+  distributedMsat(accountId: string): Promise<number>;
 }
 
 /** In-memory store for dev and tests; same semantics, no durability. */
@@ -90,6 +92,9 @@ export class MemoryPayoutStore implements PayoutStore {
   }
   async creditBalance(accountId: string) {
     return this.rows.filter((r) => r.accountId === accountId).reduce((s, r) => s + (r.type === "spend" ? -r.credits : r.credits), 0);
+  }
+  async distributedMsat(accountId: string) {
+    return this.rows.filter((r) => r.accountId === accountId && r.type === "spend").reduce((s, r) => s + (r.msat ?? 0), 0);
   }
 }
 
@@ -211,15 +216,14 @@ export class PayoutService {
   async distributeFeePool(expectedHeartbeats: number): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
     const now = this.d.now ?? Date.now;
     const [poolCredits, poolMsat] = await Promise.all([this.d.store.creditBalance(this.d.feePoolAccountId), this.d.store.earnedMsat(this.d.feePoolAccountId)]);
-    const distributedBefore = await this.d.store.payoutsTotalMsat({ accountId: this.d.feePoolAccountId, statuses: ["paid"] }); // unused for pool; kept 0
-    void distributedBefore;
-    const alreadyOut = this.d.poolDistributedMsat?.() ?? 0;
+    const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);
     const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut);
     const hosts = await this.d.store.listInfrastructureHosts();
     const shares = distributeFeePool(availableMsat, hosts, expectedHeartbeats);
-    if (shares.length === 0 || poolCredits <= 0) return { distributedMsat: 0, hosts: [] };
     const totalMsat = shares.reduce((s, h) => s + h.msat, 0);
-    const creditsPerMsat = poolCredits / Math.max(1, availableMsat);
+    if (shares.length === 0 || totalMsat <= 0) return { distributedMsat: 0, hosts: [] };
+    // Purchase fees arrive as sats without credits; accrual fees carry both. Credits follow the sats pro rata.
+    const creditsPerMsat = poolCredits > 0 ? poolCredits / Math.max(1, availableMsat) : 0;
     const ts = now();
     const rows: CreditTransaction[] = [];
     rows.push({ txId: randomUUID(), accountId: this.d.feePoolAccountId, type: "spend", credits: Number((totalMsat * creditsPerMsat).toFixed(6)), reason: `fee_pool_distribution:${ts}`, timestampMs: ts, msat: totalMsat });

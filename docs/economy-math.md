@@ -172,24 +172,56 @@ quorum (`issuance_proposal` / `issuance_vote` / `issuance_commit`) finalizes wit
 coordinator because `quorumThreshold()` is 1 unless a treasury policy with approved coordinators
 exists. Token allocation is bookkeeping until a decision is made on what a token redeems for.
 
-## 5. Payout accounting (sats from purchases)
+## 5. Payouts (sats leave the ledger)
 
-`allocateIntentPayouts` runs when a purchase settles:
+Every `earn` row carries the sats it was worth when earned (`msat`, locked at the trade price).
+`PayoutService` (`src/economy/payout-service.ts`) is the only path out:
 
 ```
-coordinatorShare = 0.05, reserveShare = 0.05, contributorShare = 0.90   (of netSats)
-contributor_i    = netSats × 0.90 × allocationShare_i    (latest finalized epoch)
-coordinator      = netSats × 0.05
-reserve          = netSats × 0.05
+earned(account)   = Σ msat of the account's earn rows
+payable(account)  = earned − Σ (amount + fee) of its paid and pending payouts
+capacity(node)    = receivedPurchaseSats × (1 − PAYOUT_RESERVE_BPS/10000) − Σ all paid/pending
+withdraw(bolt11)  : amount ≤ payable, amount + maxFee ≤ capacity, invoice network = BITCOIN_NETWORK,
+                    amount ≥ PAYOUT_MIN_SATS, maxFee = max(PAYOUT_MAX_FEE_BPS × amount, PAYOUT_MIN_FEE_FLOOR_SATS)
 ```
 
-Example: net 9,850 sats → 8,865 to contributors by share, 492.5 coordinator, 492.5 reserve.
+A withdrawal reserves a pending row under a per-account lock (Postgres advisory lock; the
+payment hash is unique so an invoice is never paid twice), pays it through the coordinator's
+Lightning node (`LightningProvider.payInvoice`, LND or CLN), and settles the row only when the
+returned preimage hashes to the invoice's payment hash. A definite node failure frees the
+balance; an ambiguous transport failure leaves the row pending for reconciliation.
 
-These are `issuance_payout_events` rows with `tokens` holding a **sats** amount. Nothing sends
-sats: `sendToMany` exists on the bitcoind provider but no caller uses it, there is no payout
-address per account, and the events are never marked paid. The 1.5 % intent fee is recorded
-separately (`coordinator_fee_events`) and also never moved anywhere; it simply stays in the
-node's Lightning balance.
+Automatic payouts: an account with a Lightning address (`POST /economy/payouts/address`, or an
+infrastructure host's `INFRA_HOST_LIGHTNING_ADDRESS`) is paid every `PAYOUT_AUTO_INTERVAL_MS`
+once payable ≥ `PAYOUT_AUTO_MIN_SATS`, by requesting an invoice over LNURL-pay.
+
+### The network fee pool pays infrastructure hosts
+
+Two inflows to `network:fee_pool`:
+
+- `NETWORK_FEE_BPS` of every accrual (credits and msat, split in the same transaction);
+- the coordinator fee of every settled purchase (`purchase_fee:<intent>` rows: sats only).
+
+Hosts heartbeat every `HOST_HEARTBEAT_MS` (`POST /economy/hosts/heartbeat`; a coordinator
+heartbeats for itself) declaring the services they run. Every `FEE_POOL_DISTRIBUTION_MS`:
+
+```
+uptime_h  = min(1, heartbeats_h / expectedHeartbeats)          (0 below 50 %)
+weight_h  = uptime_h × (coordinator 1.0 + bitcoind 1.0 + lightning 1.0 + electrs 0.5)
+share_h   = available_pool_msat × weight_h / Σ weight
+```
+
+Each share becomes an `earn` row on the host's account (msat, plus credits pro rata when the
+pool holds any), the pool gets a matching `spend`, the ledger records `fee_pool_distribution`,
+and the heartbeat window resets. Hosts withdraw like anyone else.
+
+Routes: `GET /economy/payouts/:accountId`, `POST /economy/payouts/withdraw`,
+`POST /economy/payouts/address`, `POST /economy/hosts/heartbeat`, `GET /economy/hosts`,
+`GET /economy/fee-pool`, `POST /economy/fee-pool/distribute` (mesh token or portal service
+token; the portal exposes them to users as `/wallet/payouts*`).
+
+The older issuance records (`issuance_payout_events`, `coordinator_fee_events`) are still
+written for bookkeeping but pay nothing; the pool and payouts above are the live path.
 
 ## 6. Anchoring costs
 
@@ -211,5 +243,5 @@ Each ledger checkpoint is an OP_RETURN transaction. Guards (`src/economy/anchori
 | Contribute-first gate for buyers | Fixed in this change |
 | Price discovery | Daily oracle (verified live: 4 exchanges agree) × compute class × model size, with a per-class ask/bid order book matched at claim time |
 | Token issuance | Records only; tokens redeem for nothing |
-| Sats payouts to contributors | Records only; no on-chain or Lightning sends |
+| Sats payouts to contributors | Working: BOLT11 withdrawals and LNURL auto payouts through the node (needs `LIGHTNING_PROVIDER=lnd|cln`); fee pool distributed to infrastructure hosts daily |
 | Ledger anchoring | Working with bitcoind / anchor proxy; mock in dev |

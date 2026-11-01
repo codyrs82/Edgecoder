@@ -39,6 +39,11 @@ export const coordinatorConfigSchema = z.object({
   MARKET_DEFAULT_BID_PREMIUM_BPS: envInt(1000, { min: 0 }),
   /** Share of every accrual (bps) moved to the network fee pool that pays infrastructure hosts. */
   NETWORK_FEE_BPS: envInt(500, { min: 0 }),
+  /** Infrastructure hosts heartbeat this often; the fee pool is distributed by heartbeats per window. */
+  HOST_HEARTBEAT_MS: envInt(60_000, { min: 1000 }),
+  FEE_POOL_DISTRIBUTION_MS: envInt(86_400_000, { min: 60_000 }),
+  /** Automatic Lightning-address payouts run this often. */
+  PAYOUT_AUTO_INTERVAL_MS: envInt(21_600_000, { min: 60_000 }),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),

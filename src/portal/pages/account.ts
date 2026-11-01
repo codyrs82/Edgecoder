@@ -74,6 +74,30 @@ app.get("/portal/wallet", async (_req, reply) => {
     </div>
     <div class="grid2">
       <div class="card">
+        <h3 style="margin-top:0;">Withdraw sats</h3>
+        <p class="muted" style="margin-top:0;">Sats earned by your agents, paid from the coordinator's Lightning node. Withdrawals need an invoice for an exact amount; automatic payouts go to a Lightning address once the balance passes the minimum.</p>
+        <div class="kpis" style="margin-bottom:12px;">
+          <div class="kpi"><div class="k">Earned</div><div class="v" id="payoutEarned">–</div></div>
+          <div class="kpi"><div class="k">Paid out</div><div class="v" id="payoutPaid">–</div></div>
+          <div class="kpi"><div class="k">Available</div><div class="v" id="payoutPayable">–</div></div>
+        </div>
+        <label>BOLT11 invoice (amount in sats, from your wallet)</label>
+        <textarea id="withdrawInvoice" rows="3" placeholder="lnbc…" style="font-family:var(--font-mono);font-size:12px;"></textarea>
+        <div class="row" style="margin-top:8px;">
+          <button class="primary" id="withdrawBtn">Pay invoice</button>
+          <span class="muted" id="payoutPolicyNote"></span>
+        </div>
+        <label style="margin-top:14px;">Lightning address for automatic payouts</label>
+        <div class="row">
+          <input id="lightningAddress" type="text" placeholder="you@wallet.example" style="flex:1;" />
+          <button id="saveLightningAddressBtn">Save</button>
+        </div>
+        <table style="margin-top:14px;">
+          <thead><tr><th>Time</th><th>Kind</th><th>Sats</th><th>Fee</th><th>Status</th></tr></thead>
+          <tbody id="payoutsBody"></tbody>
+        </table>
+      </div>
+      <div class="card">
         <h3 style="margin-top:0;">Credit ledger</h3>
         <table>
           <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
@@ -156,6 +180,43 @@ app.get("/portal/wallet", async (_req, reply) => {
     }
     let pendingSendMfa = null;
     let allPaymentIntents = [];
+    function sats(msat) { return (Number(msat || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 0 }); }
+    async function loadPayouts() {
+      try {
+        const p = await api("/wallet/payouts", { method: "GET", headers: {} });
+        const b = p.balance || {};
+        document.getElementById("payoutEarned").textContent = sats(b.earnedMsat) + " sats";
+        document.getElementById("payoutPaid").textContent = sats(b.paidMsat) + " sats";
+        document.getElementById("payoutPayable").textContent = sats(b.payableMsat) + " sats";
+        const pol = p.policy || {};
+        document.getElementById("payoutPolicyNote").textContent = pol.lightningEnabled === false
+          ? "Lightning payouts are not enabled on this coordinator yet."
+          : "Minimum " + (pol.minPayoutSats || 0).toLocaleString() + " sats; routing fee up to " + ((pol.maxFeeBps || 0) / 100) + "% is deducted. Network: " + (pol.network || "");
+        const rows = (p.payouts || []).map((x) => "<tr><td>" + fmtTime(x.createdAtMs) + "</td><td>" + x.kind + "</td><td>" + sats(x.amountMsat) +
+          "</td><td>" + sats(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") + (x.error ? " <span class=\"muted\">" + x.error + "</span>" : "") + "</td></tr>");
+        renderRows("payoutsBody", rows, 5, "No payouts yet.");
+      } catch (err) {
+        document.getElementById("payoutPolicyNote").textContent = "Payout balance unavailable: " + String(err.message || err);
+      }
+    }
+    document.getElementById("withdrawBtn").addEventListener("click", async () => {
+      const bolt11 = document.getElementById("withdrawInvoice").value.trim();
+      if (!bolt11) { showToast("Paste a BOLT11 invoice first.", true); return; }
+      try {
+        const r = await api("/wallet/payouts/withdraw", { method: "POST", body: JSON.stringify({ bolt11 }) });
+        if (r.ok) { showToast("Paid " + sats(r.payout.amountMsat) + " sats."); document.getElementById("withdrawInvoice").value = ""; }
+        else showToast("Payout " + (r.code || "failed") + (r.detail ? ": " + r.detail : ""), true);
+      } catch (err) { showToast("Withdrawal failed: " + String(err.message || err), true); }
+      loadPayouts();
+    });
+    document.getElementById("saveLightningAddressBtn").addEventListener("click", async () => {
+      const lightningAddress = document.getElementById("lightningAddress").value.trim() || null;
+      try {
+        await api("/wallet/payouts/address", { method: "POST", body: JSON.stringify({ lightningAddress }) });
+        showToast(lightningAddress ? "Automatic payouts will go to " + lightningAddress : "Automatic payouts disabled.");
+      } catch (err) { showToast("Could not save address: " + String(err.message || err), true); }
+    });
+    loadPayouts();
     let allSendRequests = [];
     function renderDepositDetails(accountId, wallet) {
       document.getElementById("depositAccountValue").textContent = accountId || "n/a";

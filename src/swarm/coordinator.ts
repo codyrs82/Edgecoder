@@ -78,7 +78,10 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { NETWORK_FEE_POOL_ACCOUNT, accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { MemoryPayoutStore, PayoutService, type PayoutStore } from "../economy/payout-service.js";
+import { payoutPolicyFromEnv } from "../economy/payouts.js";
+import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
@@ -683,6 +686,110 @@ const disabledLightningProvider: LightningProvider = {
 const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
   ? createLightningProviderFromEnv()
   : disabledLightningProvider;
+
+// ── Payouts and the network fee pool (docs/economy-math.md "Payouts") ──
+// Earned sats leave the ledger only through PayoutService: a withdrawal pays a BOLT11 invoice from
+// the coordinator's Lightning node, auto payouts pay Lightning addresses, and the fee pool (network
+// fee on every accrual + the coordinator fee on every purchase) is distributed to infrastructure
+// hosts by uptime. In-memory mode (no Postgres) keeps the same semantics without durability.
+const payoutPolicy = payoutPolicyFromEnv(BITCOIN_NETWORK);
+class EnginePayoutStore extends MemoryPayoutStore {
+  constructor() {
+    super((accountId) => creditEngine.earnedMsat(accountId));
+  }
+  override async creditBalance(accountId: string): Promise<number> {
+    return creditEngine.balance(accountId) + (await super.creditBalance(accountId));
+  }
+}
+const memoryPayoutStore = pgStore ? null : new EnginePayoutStore();
+const payoutStore: PayoutStore = pgStore ?? (memoryPayoutStore as PayoutStore);
+let lastFeePoolDistribution: { atMs: number; distributedMsat: number; hosts: number } | null = null;
+const payoutService = new PayoutService({
+  store: payoutStore,
+  provider: lightningProvider,
+  policy: payoutPolicy,
+  coordinatorId: identity.peerId,
+  feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT,
+  fetcher: async (url: string) => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`lnurl_http_${res.status}`);
+    return res.json();
+  },
+  log: app.log,
+  onPaid: async (p) => {
+    ordering.append({
+      eventType: "payout_settled",
+      taskId: p.payoutId,
+      subtaskId: p.paymentHash,
+      actorId: p.accountId,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({ payoutId: p.payoutId, accountId: p.accountId, kind: p.kind, amountMsat: p.amountMsat, feeMsat: p.feeMsat, paymentHash: p.paymentHash, destination: p.destination, settledAtMs: p.settledAtMs })
+    });
+  },
+  onDistributed: async (rows, hosts) => {
+    lastFeePoolDistribution = { atMs: Date.now(), distributedMsat: hosts.reduce((a, h) => a + h.msat, 0), hosts: hosts.length };
+    ordering.append({
+      eventType: "fee_pool_distribution",
+      taskId: rows[0]?.txId ?? randomUUID(),
+      subtaskId: "",
+      actorId: NETWORK_FEE_POOL_ACCOUNT,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({ hosts, totalMsat: hosts.reduce((a, h) => a + h.msat, 0) })
+    });
+  }
+});
+
+/** Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime × services. */
+async function recordInfraHeartbeat(input: { hostId: string; accountId?: string; services: string[]; region?: string; coordinatorUrl?: string; lightningAddress?: string }): Promise<InfrastructureHost> {
+  const now = Date.now();
+  const host: InfrastructureHost = {
+    hostId: input.hostId,
+    accountId: input.accountId ?? `host:${input.hostId}`,
+    coordinatorUrl: input.coordinatorUrl,
+    region: input.region,
+    services: [...new Set(input.services.map((x) => x.trim().toLowerCase()).filter(Boolean))],
+    lightningAddress: input.lightningAddress,
+    firstSeenMs: now,
+    lastSeenMs: now,
+    heartbeatsInWindow: 1
+  };
+  if (pgStore) {
+    await pgStore.upsertInfrastructureHost(host);
+    await pgStore.recordHostHeartbeat(host.hostId, now);
+  } else if (memoryPayoutStore) {
+    const existing = memoryPayoutStore.hosts.get(host.hostId);
+    if (existing) {
+      Object.assign(existing, { accountId: host.accountId, services: host.services, lastSeenMs: now, heartbeatsInWindow: existing.heartbeatsInWindow + 1, region: host.region ?? existing.region, coordinatorUrl: host.coordinatorUrl ?? existing.coordinatorUrl, lightningAddress: host.lightningAddress ?? existing.lightningAddress });
+    } else {
+      memoryPayoutStore.hosts.set(host.hostId, host);
+    }
+    if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
+  }
+  return host;
+}
+const INFRA_HOST_ENABLED = (process.env.INFRA_HOST_ENABLED ?? "1") !== "0";
+const INFRA_HOST_SERVICES: string[] = (process.env.INFRA_HOST_SERVICES ?? "")
+  .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+if (INFRA_HOST_SERVICES.length === 0) {
+  INFRA_HOST_SERVICES.push("coordinator");
+  if (process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind") INFRA_HOST_SERVICES.push("bitcoind");
+  if (["lnd", "cln"].includes((process.env.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
+}
+async function selfInfraHeartbeat(): Promise<void> {
+  if (!INFRA_HOST_ENABLED) return;
+  await recordInfraHeartbeat({
+    hostId: identity.peerId,
+    accountId: process.env.INFRA_HOST_ACCOUNT_ID || undefined,
+    services: INFRA_HOST_SERVICES,
+    region: process.env.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
+    coordinatorUrl: COORDINATOR_PUBLIC_URL,
+    lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined
+  });
+}
+async function runFeePoolDistribution(): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
+  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
+  return payoutService.distributeFeePool(expectedHeartbeats);
+}
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
@@ -957,7 +1064,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current")
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
   ) {
     return;
   }
@@ -1804,6 +1911,20 @@ async function recordIntentSettlementSideEffects(settled: PaymentIntent): Promis
     createdAtMs: Date.now()
   };
   await pgStore?.persistCoordinatorFeeEvent(feeEvent);
+  // The coordinator fee on a purchase is network revenue: it goes to the fee pool as sats (no
+  // compute credits attached) and reaches infrastructure hosts at the next distribution.
+  if (settled.coordinatorFeeSats > 0) {
+    const row: CreditTransaction = {
+      txId: `purchase-fee:${settled.intentId}`,
+      accountId: NETWORK_FEE_POOL_ACCOUNT,
+      type: "earn",
+      credits: 0,
+      reason: `purchase_fee:${settled.intentId}`,
+      timestampMs: Date.now(),
+      msat: Math.round(settled.coordinatorFeeSats * 1000)
+    };
+    await payoutStore.recordCreditTransactions([row]);
+  }
   await allocateIntentPayouts(settled);
   return feeEvent;
 }
@@ -3214,6 +3335,73 @@ app.get("/economy/rates/history", async (req, reply) => {
 });
 
 /** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
+// ── Payouts, infrastructure hosts and the fee pool ──
+app.get("/economy/payouts/:accountId", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
+  const [balance, payouts] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100)]);
+  return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED } };
+});
+app.post("/economy/payouts/withdraw", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const parsed = z.object({ accountId: z.string().min(1), bolt11: z.string().min(20).max(4096) }).safeParse(req.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
+  const body = parsed.data;
+  const result = await payoutService.withdraw(body.accountId, body.bolt11.trim());
+  if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : 400).send(result);
+  return result;
+});
+app.post("/economy/payouts/address", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const parsedAddr = z.object({ accountId: z.string().min(1), lightningAddress: z.string().max(256).nullable() }).safeParse(req.body ?? {});
+  if (!parsedAddr.success) return reply.code(400).send({ error: "invalid_request" });
+  const body = parsedAddr.data;
+  const address = body.lightningAddress?.trim() || null;
+  if (address && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) && !/^https:\/\//i.test(address) && !/^lnurl1/i.test(address)) {
+    return reply.code(400).send({ error: "invalid_lightning_address" });
+  }
+  if (pgStore) await pgStore.setLightningAddress(body.accountId, address, BITCOIN_NETWORK);
+  else if (memoryPayoutStore) {
+    if (address) memoryPayoutStore.autoAccounts.set(body.accountId, address);
+    else memoryPayoutStore.autoAccounts.delete(body.accountId);
+  }
+  return { accountId: body.accountId, lightningAddress: address };
+});
+app.post("/economy/hosts/heartbeat", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const body = z
+    .object({
+      hostId: z.string().min(3).max(128),
+      accountId: z.string().min(1).max(128).optional(),
+      services: z.array(z.string().min(1).max(32)).min(1).max(8),
+      region: z.string().max(32).optional(),
+      coordinatorUrl: z.string().url().optional(),
+      lightningAddress: z.string().max(256).optional()
+    })
+    .parse(req.body ?? {});
+  const host = await recordInfraHeartbeat(body);
+  return { ok: true, host, heartbeatMs: CC.HOST_HEARTBEAT_MS };
+});
+app.get("/economy/hosts", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const hosts = await payoutStore.listInfrastructureHosts();
+  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
+  return { hosts, expectedHeartbeats, distributionMs: CC.FEE_POOL_DISTRIBUTION_MS };
+});
+app.get("/economy/fee-pool", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const [earnedMsat, distributedMsat, credits] = await Promise.all([
+    payoutStore.earnedMsat(NETWORK_FEE_POOL_ACCOUNT),
+    payoutStore.distributedMsat(NETWORK_FEE_POOL_ACCOUNT),
+    payoutStore.creditBalance(NETWORK_FEE_POOL_ACCOUNT)
+  ]);
+  return { accountId: NETWORK_FEE_POOL_ACCOUNT, earnedMsat, distributedMsat, availableMsat: Math.max(0, earnedMsat - distributedMsat), credits, networkFeeBps: NETWORK_FEE_BPS, lastDistribution: lastFeePoolDistribution };
+});
+app.post("/economy/fee-pool/distribute", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  return runFeePoolDistribution();
+});
+
 app.get("/economy/market/book", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
   const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).optional() }).parse(req.query);
@@ -5720,6 +5908,19 @@ export async function initCoordinator(): Promise<void> {
       // Rate oracle: recalibrate at startup when there is no fresh epoch, then on the daily timer.
       recordMarketTicks();
       setInterval(() => recordMarketTicks(), MARKET_TICK_MS);
+      // Payouts: this host's uptime heartbeat, automatic Lightning-address payouts, fee-pool distribution.
+      void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
+      setInterval(() => {
+        void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
+      }, CC.HOST_HEARTBEAT_MS);
+      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) {
+        setInterval(() => {
+          void payoutService.runAutoPayouts().then((r) => { if (r.length) app.log.info({ results: r }, "auto_payouts"); }).catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
+        }, CC.PAYOUT_AUTO_INTERVAL_MS);
+      }
+      setInterval(() => {
+        void runFeePoolDistribution().catch((error) => app.log.warn({ error: String(error) }, "fee_pool_distribution_failed"));
+      }, CC.FEE_POOL_DISTRIBUTION_MS);
       if (RATE_ORACLE_ENABLED) {
         if (isRateEpochStale(latestRateEpoch, rateOracleConfig)) {
           void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));

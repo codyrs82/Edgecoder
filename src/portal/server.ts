@@ -18,6 +18,7 @@ import { registerWalletRoutes } from "./routes/wallet.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
+import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
@@ -962,8 +963,7 @@ registerReviewRoutes(app, reviewsRouteDeps);
 
 const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser };
 export type MarketRoutesDeps = typeof marketRouteDeps;
-registerMarketRoutes(app, marketRouteDeps);
-
+registerMarketRoutes(app, marketRouteDeps); registerPayoutRoutes(app, marketRouteDeps);
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

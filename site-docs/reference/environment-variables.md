@@ -228,6 +228,19 @@ locks it into every payment intent. See `docs/economy-math.md` §2.
 |---|---|---|
 | `MARKET_DEFAULT_BID_PREMIUM_BPS` | `1000` | A task without `maxBidMsatPerCredit` bids the class reference × (1 + 10 %), so default tasks clear against reference-tracking asks. |
 | `NETWORK_FEE_BPS` | `500` | Share of every accrual moved to the network fee pool (`network:fee_pool`) that pays infrastructure hosts. |
+| `PAYOUTS_ENABLED` | `true` | Lightning payouts (withdrawals and automatic payouts). `false` keeps earning sats on the ledger only. |
+| `PAYOUT_MIN_SATS` | `1000` | Smallest withdrawal. |
+| `PAYOUT_MAX_FEE_BPS` | `100` | Routing fee cap per payout (bps of the amount), floored at `PAYOUT_MIN_FEE_FLOOR_SATS` (`10`). |
+| `PAYOUT_AUTO_MIN_SATS` | `10000` | Automatic payouts to a Lightning address start at this payable balance. |
+| `PAYOUT_RESERVE_BPS` | `200` | Share of received purchase sats the coordinator never pays out (fee and anchoring reserve). |
+| `PAYOUT_AUTO_INTERVAL_MS` | `21600000` | How often automatic payouts run (6 h). |
+| `HOST_HEARTBEAT_MS` | `60000` | Infrastructure hosts heartbeat this often; uptime = heartbeats / expected per window. |
+| `FEE_POOL_DISTRIBUTION_MS` | `86400000` | Fee pool distribution window (daily). |
+| `INFRA_HOST_ENABLED` | `1` | This coordinator registers itself as an infrastructure host (set `0` to opt out of fee-pool shares). |
+| `INFRA_HOST_ACCOUNT_ID` | `host:<peerId>` | Credit account that receives this host's fee-pool share. |
+| `INFRA_HOST_SERVICES` | auto | Comma list of `coordinator,bitcoind,lightning,electrs`; default derived from `BITCOIN_ANCHOR_PROVIDER` and `LIGHTNING_PROVIDER`. |
+| `INFRA_HOST_LIGHTNING_ADDRESS` | unset | Lightning address that receives this host's share automatically. |
+| `INFRA_HOST_REGION` | `FLY_REGION` | Region label shown on the hosts list. |
 | `AGENT_ASK_MSAT_PER_CREDIT` | unset (agent) | Minimum price the agent works for, msat per credit. Unset tracks the coordinator's class reference and moves with the daily oracle. |
 | `AGENT_GPU_VENDOR` / `AGENT_GPU_MODEL` / `AGENT_GPU_VRAM_GB` / `AGENT_GPU_DATACENTER` | unset (agent) | GPU details for the hardware profile (CPU cores, RAM, arch and platform are probed). Determines the compute class. |
 
