@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
+import { DOCS_SITE_URL, GITHUB_REPO_URL, SUPPORT_EMAIL } from "./urls.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function marketingHomeHtml(): string {
@@ -520,7 +520,7 @@ export function privacyPolicyHtml(): string {
             <li><strong>Data portability</strong> — receive your data in a structured, machine-readable format</li>
             <li><strong>Opt-out</strong> — opt out of any non-essential data processing</li>
           </ul>
-          <p>To exercise any of these rights, contact <a href="mailto:support@edgecoder.io">support@edgecoder.io</a>.</p>
+          <p>To exercise any of these rights, contact <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
 
           <h2>Children</h2>
           <p>EdgeCoder is not directed at users under the age of 13. We do not knowingly collect personal information from children. If you believe a child has provided us with personal data, please contact us so we can remove it.</p>
@@ -529,7 +529,7 @@ export function privacyPolicyHtml(): string {
           <p>We may update this Privacy Policy from time to time. When we do, we will revise the "Last updated" date at the top of this page. Continued use of EdgeCoder after changes constitutes acceptance of the updated policy.</p>
 
           <h2>Contact</h2>
-          <p>If you have questions about this Privacy Policy, contact us at <a href="mailto:support@edgecoder.io">support@edgecoder.io</a>.</p>
+          <p>If you have questions about this Privacy Policy, contact us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
           <p style="margin-top: 4px;">EdgeCoder, LLC</p>
         </div>
 
@@ -736,7 +736,7 @@ export function termsOfServiceHtml(): string {
           <p>We may update these Terms of Service from time to time. When we do, we will revise the "Last updated" date at the top of this page. Continued use of EdgeCoder after changes constitutes acceptance of the updated terms.</p>
 
           <h2>13. Contact</h2>
-          <p>If you have questions about these Terms, contact us at <a href="mailto:support@edgecoder.io">support@edgecoder.io</a>.</p>
+          <p>If you have questions about these Terms, contact us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
           <p style="margin-top: 4px;">EdgeCoder, LLC</p>
         </div>
 

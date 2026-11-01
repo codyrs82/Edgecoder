@@ -4,7 +4,34 @@
 import { sign, verify } from "node:crypto";
 
 export const ALLOWED_MODEL_EXTENSIONS = [".gguf", ".bin", ".safetensors"];
-export const ALLOWED_DOWNLOAD_DOMAINS = ["models.edgecoder.io", "huggingface.co"];
+export const DEFAULT_DOWNLOAD_DOMAINS = ["models.edgecoder.io", "huggingface.co"];
+
+const HOST_LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
+
+/** True for a bare DNS hostname with at least one dot (no scheme, port, path, wildcard or IP). */
+export function isDownloadDomain(value: string): boolean {
+  if (value.length > 253 || !value.includes(".") || /^[0-9.]+$/.test(value)) return false;
+  return value.split(".").every((label) => HOST_LABEL.test(label));
+}
+
+/**
+ * #22: MODEL_DOWNLOAD_DOMAINS (comma list of exact hostnames) replaces the defaults when set.
+ * Every entry must be a bare hostname; anything else (a URL, a port, `*.`, an IP) throws, so a
+ * typo fails at startup instead of silently widening or emptying the allowlist.
+ */
+export function allowedDownloadDomains(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.MODEL_DOWNLOAD_DOMAINS?.trim();
+  if (!raw) return DEFAULT_DOWNLOAD_DOMAINS;
+  const entries = raw.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+  const bad = entries.filter((d) => !isDownloadDomain(d));
+  if (bad.length > 0) {
+    throw new Error(`MODEL_DOWNLOAD_DOMAINS has invalid entries (bare hostnames only): ${bad.map((d) => JSON.stringify(d)).join(", ")}`);
+  }
+  if (entries.length === 0) throw new Error("MODEL_DOWNLOAD_DOMAINS is set but lists no hostnames");
+  return [...new Set(entries)];
+}
+
+export const ALLOWED_DOWNLOAD_DOMAINS = allowedDownloadDomains();
 
 export interface ModelManifest {
   modelId: string;
@@ -52,7 +79,7 @@ export function verifyModelManifest(
 
   try {
     const url = new URL(signed.source);
-    if (!ALLOWED_DOWNLOAD_DOMAINS.includes(url.hostname)) {
+    if (!allowedDownloadDomains().includes(url.hostname)) {
       return { valid: false, reason: "source_not_allowlisted" };
     }
   } catch {
