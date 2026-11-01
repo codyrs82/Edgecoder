@@ -83,7 +83,7 @@
     border-radius: 6px;
     border: none;
     background: var(--accent);
-    color: var(--on-accent, #fff);
+    color: var(--on-accent);
     cursor: pointer;
     display: flex;
     align-items: center;

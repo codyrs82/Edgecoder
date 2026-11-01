@@ -57,6 +57,6 @@ describe("chat view keyboard access (#25)", () => {
 
   it("there is one token-based focus ring", () => {
     const css = load("../src/app.css");
-    expect(css).toMatch(/:focus-visible \{\n  outline: 2px solid var\(--accent\);/);
+    expect(css).toMatch(/:focus-visible \{\n  outline: 2px solid var\(--focus-ring\);/);
   });
 });

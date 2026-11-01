@@ -35,6 +35,8 @@ enum Theme {
     // Edges of inputs and other controls, and focus rings: 3:1 on every background (WCAG 1.4.11).
     static let borderControl = Color.adaptive(dark: 0x99928b, light: 0x87817a)
     static let focusRing = Color.adaptive(dark: 0xd8ab92, light: 0x9a542f)
+    /// #25: selected-text background (the desktop Monaco selection colour).
+    static let selection = Color.adaptive(dark: 0x5a4a3a, light: 0xf0d9c8)
 }
 
 /// #151: System / Light / Dark, matching the desktop's theme setting (desktop/src/lib/theme.ts).
