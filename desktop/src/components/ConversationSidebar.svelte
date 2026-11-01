@@ -412,7 +412,7 @@
   .search-input {
     width: 100%;
     padding: 8px 12px 8px 34px;
-    border: 0.5px solid var(--border);
+    border: 1px solid var(--border-control);
     background: var(--bg-input);
     color: var(--text-primary);
     border-radius: var(--radius-sm);

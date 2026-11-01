@@ -56,6 +56,22 @@ export interface SendToManyResult {
   rawHex?: string;
 }
 
+/** #46: anchor fee rate in sat/vB: node estimate (BTC/kvB) with a floor (BITCOIN_ANCHOR_MIN_FEE_SAT_VB, default 2). */
+export function anchorFeeRateSatVb(estimateBtcPerKvB: number | undefined, env: NodeJS.ProcessEnv = process.env): number {
+  const floorRaw = Number(env.BITCOIN_ANCHOR_MIN_FEE_SAT_VB ?? "2");
+  const floor = Number.isFinite(floorRaw) && floorRaw >= 1 ? floorRaw : 2;
+  const est = typeof estimateBtcPerKvB === "number" && Number.isFinite(estimateBtcPerKvB) && estimateBtcPerKvB > 0
+    ? (estimateBtcPerKvB * 1e8) / 1000
+    : 0;
+  return Number(Math.max(floor, est).toFixed(3));
+}
+
+/** #46: absolute fee cap for one anchor tx (BITCOIN_ANCHOR_MAX_FEE_SATS, default 20000). */
+export function anchorMaxFeeSats(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.BITCOIN_ANCHOR_MAX_FEE_SATS ?? "20000");
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
+}
+
 /* ------------------------------------------------------------------ */
 /*  bitcoind JSON-RPC provider                                        */
 /* ------------------------------------------------------------------ */
@@ -92,33 +108,21 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
     if (dataHex.length > 160) {
       throw new Error("op_return_data_too_large: max 80 bytes (160 hex chars)");
     }
-    // 1. Create a raw transaction with an OP_RETURN output
-    const utxos = (await this.rpc("listunspent", [1, 9999999])) as Array<{
-      txid: string;
-      vout: number;
-      amount: number;
-    }>;
-    if (utxos.length === 0) {
-      throw new Error("bitcoind_no_utxos: wallet has no spendable inputs");
+    // #46: let the wallet do coin selection + change (fundrawtransaction) instead of
+    // spending utxos[0]; fee = max(estimatesmartfee, floor) sat/vB, capped in absolute sats.
+    const rawTx0 = (await this.rpc("createrawtransaction", [[], [{ data: dataHex }]])) as string;
+    const est = ((await this.rpc("estimatesmartfee", [6])) as { feerate?: number }).feerate;
+    const feeRateSatVb = anchorFeeRateSatVb(est);
+    const funded = (await this.rpc("fundrawtransaction", [
+      rawTx0,
+      { fee_rate: feeRateSatVb, replaceable: true }
+    ])) as { hex: string; fee: number; changepos: number };
+    const feeSats = Math.round(funded.fee * 1e8);
+    const maxFeeSats = anchorMaxFeeSats();
+    if (feeSats > maxFeeSats) {
+      throw new Error(`bitcoind_anchor_fee_too_high: ${feeSats} > ${maxFeeSats} sats`);
     }
-    // Pick the first utxo with enough value for a fee (OP_RETURN is dust-free)
-    const utxo = utxos[0];
-    const feeRate = ((await this.rpc("estimatesmartfee", [6])) as { feerate?: number }).feerate ?? 0.00001;
-    // OP_RETURN tx is ~250 vbytes
-    const feeBtc = feeRate * 250 / 1000;
-    const changeBtc = utxo.amount - feeBtc;
-    if (changeBtc < 0) {
-      throw new Error("bitcoind_insufficient_funds: utxo too small for anchor fee");
-    }
-    const changeAddress = (await this.rpc("getrawchangeaddress")) as string;
-    const outputs: Record<string, unknown>[] = [
-      { data: dataHex },
-      { [changeAddress]: Number(changeBtc.toFixed(8)) }
-    ];
-    const rawTx = (await this.rpc("createrawtransaction", [
-      [{ txid: utxo.txid, vout: utxo.vout }],
-      outputs
-    ])) as string;
+    const rawTx = funded.hex;
     // 2. Sign the raw transaction
     const signed = (await this.rpc("signrawtransactionwithwallet", [rawTx])) as {
       hex: string;
@@ -132,23 +136,29 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
     return { txid, rawHex: signed.hex };
   }
 
+  /**
+   * #46 review: only a definite answer counts. RPC -5 (unknown txid) means not in
+   * the wallet/chain; any other error (node down, auth, timeout, wallet not loaded)
+   * is thrown so callers keep the last known state instead of treating it as a reorg.
+   * Negative confirmations (conflicted/replaced) are passed through.
+   */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
+    let tx: { confirmations?: number; blockhash?: string; blockheight?: number };
     try {
-      const tx = (await this.rpc("gettransaction", [txid])) as {
-        confirmations?: number;
-        blockhash?: string;
-        blockheight?: number;
-      };
-      const confirmations = tx.confirmations ?? 0;
-      return {
-        confirmed: confirmations > 0,
-        confirmations,
-        blockHeight: tx.blockheight,
-        blockHash: tx.blockhash
-      };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
+      tx = (await this.rpc("gettransaction", [txid])) as typeof tx;
+    } catch (err) {
+      if (err instanceof Error && /bitcoind_rpc_error: -5 /.test(err.message)) {
+        return { confirmed: false, confirmations: 0 };
+      }
+      throw err;
     }
+    const confirmations = tx.confirmations ?? 0;
+    return {
+      confirmed: confirmations > 0,
+      confirmations,
+      blockHeight: confirmations > 0 ? tx.blockheight : undefined,
+      blockHash: confirmations > 0 ? tx.blockhash : undefined
+    };
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {
@@ -278,10 +288,16 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
 
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
     const base = apiBaseUrl(this.network);
-    try {
+    {
+      // #46 review: 404 = definitely unknown; other failures throw (not a reorg).
       const txRes = await request(`${base}/tx/${txid}`, { method: "GET" });
-      if (txRes.statusCode < 200 || txRes.statusCode >= 300) {
+      if (txRes.statusCode === 404) {
+        await txRes.body.dump();
         return { confirmed: false, confirmations: 0 };
+      }
+      if (txRes.statusCode < 200 || txRes.statusCode >= 300) {
+        await txRes.body.dump();
+        throw new Error(`blockstream_tx_lookup_failed:${txRes.statusCode}`);
       }
       const tx = (await txRes.body.json()) as {
         status?: { confirmed?: boolean; block_height?: number; block_hash?: string };
@@ -291,9 +307,11 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
       }
       // Get current tip height to compute confirmations
       const tipRes = await request(`${base}/blocks/tip/height`, { method: "GET" });
-      const tipHeight = tipRes.statusCode >= 200 && tipRes.statusCode < 300
-        ? Number(await tipRes.body.text())
-        : 0;
+      if (tipRes.statusCode < 200 || tipRes.statusCode >= 300) {
+        await tipRes.body.dump();
+        throw new Error(`blockstream_tip_lookup_failed:${tipRes.statusCode}`);
+      }
+      const tipHeight = Number(await tipRes.body.text());
       const blockHeight = tx.status.block_height ?? 0;
       const confirmations = tipHeight > 0 && blockHeight > 0 ? tipHeight - blockHeight + 1 : 0;
       return {
@@ -302,8 +320,6 @@ export class BlockstreamProvider implements BitcoinAnchorProvider {
         blockHeight,
         blockHash: tx.status.block_hash
       };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
     }
   }
 
@@ -378,8 +394,8 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
     return { txid: result.txid };
   }
 
+  /** #46 review: proxy/node errors propagate ("unknown"), they are not "left the chain". */
   async getConfirmations(txid: string): Promise<AnchorConfirmationResult> {
-    try {
       const result = (await this.proxyRequest(`/anchor/confirm/${txid}`)) as {
         ok: boolean;
         confirmed: boolean;
@@ -387,15 +403,15 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
         blockHeight?: number;
         blockHash?: string;
       };
+      if (!result || result.ok !== true || typeof result.confirmations !== "number") {
+        throw new Error("anchor_proxy_confirm_invalid_response");
+      }
       return {
         confirmed: result.confirmed,
         confirmations: result.confirmations,
         blockHeight: result.blockHeight,
         blockHash: result.blockHash
       };
-    } catch {
-      return { confirmed: false, confirmations: 0 };
-    }
   }
 
   async healthCheck(): Promise<BitcoinNodeHealth> {
