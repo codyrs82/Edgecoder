@@ -138,6 +138,9 @@ describe("exact credit arithmetic (#108)", () => {
   it("schema declares credit_transactions.credits NUMERIC and migrates DOUBLE PRECISION", () => {
     expect(SCHEMA_SQL).toMatch(/CREATE TABLE IF NOT EXISTS credit_transactions \([\s\S]*?credits NUMERIC\(30, 6\) NOT NULL/);
     expect(SCHEMA_SQL).toContain("ALTER COLUMN credits TYPE NUMERIC(30, 6) USING round(credits::numeric, 6)");
+    // #153
+    expect(SCHEMA_SQL).toMatch(/quoted_credits NUMERIC\(30, 6\) NOT NULL/);
+    expect(SCHEMA_SQL).toContain("ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6) USING round(quoted_credits::numeric, 6)");
   });
 
   it("schema migration starts with the schema advisory lock (#108 review)", () => {
@@ -230,7 +233,21 @@ describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
         tx_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, tx_type TEXT NOT NULL,
         credits DOUBLE PRECISION NOT NULL, reason TEXT NOT NULL, related_task_id TEXT, timestamp_ms BIGINT NOT NULL)`);
       await pool.query(`INSERT INTO credit_transactions VALUES ('a','m','earn',0.1 + 0.2,'seed',NULL,1)`);
+      // #153: a legacy payment_intents with a float quoted_credits.
+      await pool.query(`CREATE TABLE payment_intents (
+        intent_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, coordinator_id TEXT NOT NULL, wallet_type TEXT NOT NULL,
+        network TEXT NOT NULL, invoice_ref TEXT NOT NULL, amount_sats BIGINT NOT NULL, coordinator_fee_bps INT NOT NULL,
+        coordinator_fee_sats BIGINT NOT NULL, net_sats BIGINT NOT NULL, quoted_credits DOUBLE PRECISION NOT NULL,
+        status TEXT NOT NULL, created_at_ms BIGINT NOT NULL, settled_at_ms BIGINT, tx_ref TEXT)`);
+      await pool.query(`INSERT INTO payment_intents VALUES ('i','m','c','lightning','regtest','inv',100,0,0,100,0.1 + 0.2,'pending',1,NULL,NULL)`);
       await pool.query(SCHEMA_SQL);
+      const q = await pool.query(`SELECT quoted_credits::text AS q FROM payment_intents WHERE intent_id = 'i'`);
+      expect(q.rows[0].q).toBe("0.300000");
+      const qt = await pool.query(
+        `SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'payment_intents' AND column_name = 'quoted_credits'`,
+        [schema],
+      );
+      expect(qt.rows[0]).toEqual({ numeric_precision: 30, numeric_scale: 6 });
       const type = await pool.query(
         `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'credit_transactions' AND column_name = 'credits'`,
         [schema],
