@@ -193,7 +193,7 @@ app.get("/portal/wallet", async (_req, reply) => {
           ? "Lightning payouts are not enabled on this coordinator yet."
           : "Minimum " + (pol.minPayoutSats || 0).toLocaleString() + " sats; routing fee up to " + ((pol.maxFeeBps || 0) / 100) + "% is deducted. Network: " + (pol.network || "");
         const rows = (p.payouts || []).map((x) => "<tr><td>" + fmtTime(x.createdAtMs) + "</td><td>" + x.kind + "</td><td>" + sats(x.amountMsat) +
-          "</td><td>" + sats(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") + (x.error ? " <span class=\"muted\">" + x.error + "</span>" : "") + "</td></tr>");
+          "</td><td>" + sats(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") + (x.error ? " <span class='muted'>" + x.error + "</span>" : "") + "</td></tr>");
         renderRows("payoutsBody", rows, 5, "No payouts yet.");
       } catch (err) {
         document.getElementById("payoutPolicyNote").textContent = "Payout balance unavailable: " + String(err.message || err);
