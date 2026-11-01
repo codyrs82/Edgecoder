@@ -16,6 +16,7 @@ import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
+import { registerMarketRoutes } from "./routes/market.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
@@ -953,6 +954,10 @@ registerChatApiRoutes(app, chatRouteDeps);
 const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
+
+const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser };
+export type MarketRoutesDeps = typeof marketRouteDeps;
+registerMarketRoutes(app, marketRouteDeps);
 
 
 // #16: HTML pages live in src/portal/pages/.

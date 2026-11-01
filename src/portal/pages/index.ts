@@ -7,6 +7,7 @@ import { registerChatPage } from "./chat.js";
 import { registerDashboardPages } from "./dashboard.js";
 import { registerHomePage } from "./home.js";
 import { registerLegacyPage } from "./legacy.js";
+import { registerMarketPage } from "./market.js";
 import { registerPublicPages } from "./public.js";
 import { registerReviewsPage } from "./reviews.js";
 
@@ -19,4 +20,5 @@ export function registerPortalPages(app: FastifyInstance): void {
   registerDashboardPages(app);
   registerAccountPages(app);
   registerReviewsPage(app);
+  registerMarketPage(app);
 }
