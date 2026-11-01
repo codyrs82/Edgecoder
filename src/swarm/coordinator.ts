@@ -103,6 +103,12 @@ import {
   requiredConfirmationsFromEnv,
   type AnchorDeps
 } from "../economy/anchoring.js";
+// ── Work receipts + replication (architecture step 2; src/receipts) ──
+import { MemoryReceiptStore, type ReceiptStore } from "../receipts/store.js";
+import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
+import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
+import { agentReceiptClaimSchema, issueReceiptForAccrual } from "../receipts/issue.js";
+import type { SignedAgentReceiptClaim } from "../receipts/receipt.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -601,6 +607,66 @@ if (robotQueue) {
     lightningProvider
   });
 }
+
+// ── Work receipts (architecture step 2): store, routes, epoch close + anchor, peer replication ──
+// Receipts are issued in accrueResultCredits (recordWorkReceipt); everything else lives in src/receipts.
+const receiptStore: ReceiptStore = pgStore ? pgStore.receiptStore() : new MemoryReceiptStore();
+registerReceiptRoutes(app, {
+  store: receiptStore,
+  coordinatorId: identity.peerId,
+  requireMeshToken: (req, reply) => requireMeshToken(req, reply),
+  sign: (payload) => signPayload(payload, coordinatorKeys.privateKeyPem),
+  coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
+  log: app.log
+});
+async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number): Promise<void> {
+  const computeClass = r.meta.subtask.projectMeta.resourceClass;
+  const satsPerCredit = latestPriceEpochByResource.get(computeClass)?.pricePerComputeUnitSats ?? 30;
+  const outcome = issueReceiptForAccrual({
+    claim: (r.meta.report as { receipt?: SignedAgentReceiptClaim }).receipt,
+    result: { taskId: r.meta.taskId, subtaskId: r.subtaskId, agentId: r.agentId, output: r.output },
+    registeredAgentPublicKeyPem: agentCapabilities.get(r.agentId)?.publicKeyPem,
+    coordinator: { coordinatorId: identity.peerId, publicKeyPem: identity.publicKeyPem, privateKeyPem: coordinatorKeys.privateKeyPem },
+    computeClass,
+    credits,
+    msatPerCredit: satsPerCredit * 1000
+  });
+  if (!outcome.receipt) {
+    app.log.debug({ subtaskId: r.subtaskId, agentId: r.agentId, reason: outcome.skipped }, "work_receipt_skipped");
+    return;
+  }
+  await receiptStore.append(outcome.receipt);
+  app.log.info({ receiptId: outcome.receipt.receiptId, subtaskId: r.subtaskId, agentId: r.agentId }, "work_receipt_issued");
+}
+app.addHook("onReady", async () => {
+  const epochTimer = setInterval(() => {
+    void (async () => {
+      const closed = await closeEpoch(receiptStore, { coordinatorId: identity.peerId, coordinatorPrivateKeyPem: coordinatorKeys.privateKeyPem });
+      if (!closed) return;
+      app.log.info({ epochId: closed.epoch.epochId, count: closed.epoch.count, merkleRoot: closed.epoch.merkleRoot }, "receipt_epoch_closed");
+      const deps = anchorDeps();
+      if (!deps) return;
+      const anchored = await anchorEpoch(closed.epoch, deps, receiptStore);
+      app.log.info({ epochId: anchored.epoch.epochId, txRef: anchored.txRef }, "receipt_epoch_anchored");
+    })().catch((error) => app.log.warn({ error }, "receipt_epoch_tick_failed"));
+  }, CC.RECEIPT_EPOCH_MS);
+  epochTimer.unref?.();
+  startReceiptReplication({
+    peers: () =>
+      mesh
+        .listPeers()
+        .filter((p) => isApprovedCoordinator(p.peerId))
+        .map((p) => ({ peerId: p.peerId, coordinatorUrl: p.coordinatorUrl, publicKeyPem: p.publicKeyPem })),
+    store: receiptStore,
+    intervalMs: CC.RECEIPT_REPLICATION_MS,
+    fetch: (url, init) => fetch(url, init),
+    selfId: identity.peerId,
+    meshToken: MESH_AUTH_TOKEN || undefined,
+    coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
+    log: app.log
+  });
+});
+// ── end work receipts ──
 
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
   const agentId = headers["x-agent-id"];
@@ -1840,7 +1906,8 @@ const resultSchema = z.object({
   error: z.string().optional(),
   durationMs: z.number(),
   reportNonce: z.string().optional(),
-  reportSignature: z.string().optional()
+  reportSignature: z.string().optional(),
+  receipt: agentReceiptClaimSchema.optional() // work receipt claim signed by the agent (src/receipts)
 });
 
 app.post("/register", async (req, reply) => {
@@ -2459,6 +2526,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
     });
     await pgStore?.persistLedgerRecord(earningsRecord);
     await persistStatsLedgerRecord(earningsRecord);
+    // Work receipt (architecture step 2): countersign the agent's claim for what was just credited.
+    await recordWorkReceipt(r, accrued.credits).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
   }
 }
 
@@ -2658,6 +2727,7 @@ app.post("/result", async (req, reply) => {
         agentId: rawBody.agentId,
         reportNonce: rawBody.reportNonce,
         reportSignature: rawBody.reportSignature,
+        receipt: rawBody.receipt,
       });
       app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
     } catch (decryptErr) {

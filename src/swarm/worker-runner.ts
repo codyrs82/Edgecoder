@@ -11,6 +11,8 @@ import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../
 import { isDockerAvailable } from "../executor/docker-sandbox.js";
 import { enforceSandboxPolicy, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
+import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
+import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
@@ -28,6 +30,10 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
+// Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
+const coordinatorTrust = new CoordinatorTrustGate({
+  store: PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` })
+});
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
@@ -686,6 +692,14 @@ async function loop(): Promise<void> {
           continue;
         }
 
+        // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).
+        const trust = await coordinatorTrust.check(activeCoordinatorUrl);
+        if (!trust.trusted) {
+          console.error(`[agent:${AGENT_ID}] refusing to work for ${activeCoordinatorUrl}: ${describeTrustFailure(trust)}`);
+          if (trust.decision) process.exit(1); // key mismatch or unlisted: a policy refusal, not a transient error
+          throw new Error("coordinator_identity_unavailable"); // transient: backoff and failover below
+        }
+
         const registerBody = {
           agentId: AGENT_ID,
           ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
@@ -958,6 +972,20 @@ async function loop(): Promise<void> {
               console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
             }
           }
+          // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
+          const finishedAtMs = Date.now();
+          resultPayload.receipt = signReceiptAsAgent(
+            {
+              taskId: result.taskId,
+              subtaskId: result.subtaskId,
+              agentId: result.agentId,
+              agentPublicKeyPem: keys.publicKeyPem,
+              startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
+              finishedAtMs,
+              resultHash: hashResultOutput(result.output)
+            },
+            keys.privateKeyPem
+          );
 
           try {
             await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });

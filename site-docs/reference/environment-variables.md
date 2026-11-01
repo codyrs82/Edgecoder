@@ -176,6 +176,18 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `ANCHOR_PROXY_PORT` | `4310` | Listen port for the anchor proxy service. |
 | `MAX_BROADCASTS_PER_MINUTE` | `10` | Rate limit for OP_RETURN broadcasts (anchor proxy). |
 
+## Work receipts and pinned-key trust
+
+See [Work receipts and pinned-key trust](https://github.com/codyrs82/Edgecoder/blob/main/docs/receipts-and-trust.md) for what a receipt proves and how to verify one.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RECEIPT_EPOCH_MS` | `3600000` | Coordinator: how often open work receipts are closed into a signed Merkle epoch and (when a Bitcoin anchor provider is configured) the root is anchored in an OP_RETURN. |
+| `RECEIPT_REPLICATION_MS` | `60000` | Coordinator: interval at which `GET /receipts/since` is pulled from every approved mesh peer; every receipt is verified before it is stored. |
+| `EDGECODER_TRUST_MODE` | `tofu` | Agent: `tofu` pins the first key seen per coordinator id and refuses a later different key; `strict` trusts only listed keys; `open` trusts any key (mismatches are logged only). |
+| `TRUSTED_COORDINATOR_KEYS` | unset | Agent: comma-separated `peerId:sha256(publicKeyPem)` entries that are always pinned (take precedence over the trust file). |
+| `EDGECODER_TRUST_FILE` | `<config dir>/trusted-coordinators` | Agent: trust file with one `peerId:fingerprint` per line (`#` comments). In `tofu` mode first-seen keys are appended here. |
+
 ## Wallet and economy
 
 | Variable | Description |
@@ -281,6 +293,8 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `RELAY_RATE_LIMIT_PER_10S` | integer ≥ 0 | `80` |
 | `DIRECT_WORK_OFFERS_PER_10S` | integer ≥ 0 | `20` |
 | `AGENT_ORCHESTRATION_ONLINE_WINDOW_MS` | integer ≥ 1 | `120000` |
+| `RECEIPT_EPOCH_MS` | integer ≥ 1 | `3600000` |
+| `RECEIPT_REPLICATION_MS` | integer ≥ 1 | `60000` |
 | `ROBOT_QUEUE_ENABLED` | true/false | `false` |
 | `REQUIRE_VERIFIED_AGENTS` | true/false | `false` |
 | `INFERENCE_URL` | http(s) URL | `http://127.0.0.1:4302` |
