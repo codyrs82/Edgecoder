@@ -36,12 +36,13 @@
     bind:this={textareaEl}
     bind:value={text}
     {placeholder}
+    aria-label={placeholder || "Message"}
     {disabled}
     rows="1"
     onkeydown={handleKeydown}
     oninput={autoResize}
   ></textarea>
-  <button class="send-btn" onclick={send} disabled={!text.trim() || disabled}>
+  <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
     </svg>
@@ -54,7 +55,7 @@
     align-items: flex-end;
     gap: 8px;
     background: var(--bg-surface);
-    border: 0.5px solid var(--border-strong);
+    border: 1px solid var(--border-control);
     border-radius: var(--radius-md);
     padding: 8px 12px;
     flex: 1;
@@ -80,7 +81,7 @@
     border-radius: 6px;
     border: none;
     background: var(--accent);
-    color: white;
+    color: var(--on-accent, #fff);
     cursor: pointer;
     display: flex;
     align-items: center;

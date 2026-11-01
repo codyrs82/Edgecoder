@@ -51,3 +51,25 @@ See [API Surfaces](/reference/api-surfaces) for consolidated endpoint map.
 - [Agent + Coordinator Install](https://github.com/codyrs82/Edgecoder/blob/main/docs/agent-and-coordinator-install.md)
 - [Fly.io Bootstrap](https://github.com/codyrs82/Edgecoder/blob/main/docs/flyio-bootstrap.md)
 - [Cross-OS Validation](https://github.com/codyrs82/Edgecoder/blob/main/docs/cross-os-validation.md)
+
+## Coordinator peer allowlist (#52) — required before redeploying
+
+In production, coordinators fail closed: a peer is trusted only if its key is on the allowlist. Before redeploying US and EU (or any coordinator that peers), set these on **every** coordinator:
+
+| Variable | Per coordinator | Notes |
+|---|---|---|
+| `COORDINATOR_PRIVATE_KEY_PEM` | Its own stable Ed25519 key (PKCS#8 PEM), stored as a secret | Without it the key is regenerated on every restart and drops off its peers' allowlists. |
+| `COORDINATOR_PEER_ID` | Optional stable id | The default is derived from `COORDINATOR_PUBLIC_URL`. |
+| `MESH_PEER_ALLOWLIST` | `peerId:fingerprint@https://peer-url` for each **other** coordinator it peers with (**`@url` is required in production**: the coordinator refuses to start if any entry lacks it) | Fingerprint = SHA-256 (hex) of the peer's SPKI public key (see the one-liner in [Environment variables](/reference/environment-variables)). |
+
+Without `MESH_PEER_ALLOWLIST`, a production coordinator rejects:
+- token-only `/mesh/register-peer`;
+- peers learned from bootstrap discovery or `peer_exchange` gossip;
+- `/mesh/ingest` and `/mesh/relay-gossip` messages from peers that aren't allowlisted;
+- forwarded `/result`s.
+
+Peer endpoints are pinned. In production a peer's URL always comes from its `@url` in the allowlist. In dev, an entry without `@url` falls back to the bootstrap URL we reached it on. Gossip (`peer_exchange`) never sets or changes an endpoint, and a registration whose URL disagrees with the pin is rejected. An unpinned peer must be found by bootstrap before it can register.
+
+Forwarded results must be signed by an allowlisted peer, can't be replayed, and are accepted only for subtasks this coordinator offered to the mesh.
+
+Rollout: generate a key per coordinator, compute the fingerprints, set `MESH_PEER_ALLOWLIST` on all of them, then restart them. Until every coordinator has the others on its list, they won't peer.

@@ -71,6 +71,11 @@ export function portalUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv)
   return validateEndpointUrl(s?.getItem(PORTAL_KEY)) ?? defaultEndpoints(env).portal;
 }
 
+/** The portal's sign-up page (the /portal page hosts the create-account form). Opened in the system browser. */
+export function portalSignupUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
+  return `${portalUrl(s, env).replace(/\/+$/, "")}/portal`;
+}
+
 /** Save an override; throws on an invalid URL. Empty string clears it. */
 export function setEndpoint(kind: EndpointKind, raw: string, s: KV | null = storage()): void {
   const key = kind === "coordinator" ? COORDINATOR_KEY : PORTAL_KEY;

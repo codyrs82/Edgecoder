@@ -293,13 +293,17 @@ describe("Scenario 3: Success vs Failure Credit Differences", () => {
 
     // Verify exact values:
     // success: 2.0 * 1.0 * 1.2 * 1.0 = 2.4
-    // fail:    2.0 * 1.0 * 0.5 * 1.0 = 1.0
+    // fail:    0 (#38 measured credits: failed work earns nothing, which prevents gaming)
     expect(txSuccess.credits).toBe(2.4);
-    expect(txFail.credits).toBe(1.0);
+    expect(txFail.credits).toBe(0);
 
     // Verify balances
     expect(engine.balance("agent-success")).toBe(2.4);
-    expect(engine.balance("agent-fail")).toBe(1.0);
+    expect(engine.balance("agent-fail")).toBe(0);
+    expect(engine.balance("agent-fail")).toBeGreaterThanOrEqual(0);
+
+    // No ledger entry is written for the failed report
+    expect(engine.history("agent-fail")).toHaveLength(0);
   });
 
   it("should clamp qualityScore to [0.5, 1.5] range", () => {
