@@ -227,6 +227,11 @@ export class SwarmQueue {
     return item.subtask;
   }
 
+  /** Subtasks of a task still queued or running (0 once every subtask has a result or was removed). */
+  openSubtaskCount(taskId: string): number {
+    return this.tasks.reduce((n, t) => n + (t.subtask.taskId === taskId ? 1 : 0), 0);
+  }
+
   /** Requester-visible result for a subtask (the latest one recorded), or undefined while it is still queued/running. */
   getResult(subtaskId: string): SubtaskResult | undefined {
     for (let i = this.results.length - 1; i >= 0; i--) {

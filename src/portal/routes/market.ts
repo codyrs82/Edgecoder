@@ -4,6 +4,8 @@
 import type { FastifyInstance } from "fastify";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { request } from "undici";
 import { z } from "zod";
 import type { MarketRoutesDeps } from "../server.js";
@@ -20,12 +22,33 @@ export function registerMarketRoutes(
 ): void {
   const require = createRequire(import.meta.url);
   let chartLib: string | null = null;
+  const chartLibCandidates = (): string[] => {
+    const rel = "lightweight-charts/dist/lightweight-charts.standalone.production.js";
+    const out: string[] = [];
+    try {
+      out.push(require.resolve(rel));
+    } catch {
+      // the package's "exports" map doesn't list dist/, so resolve the package root instead
+    }
+    try {
+      out.push(resolve(dirname(require.resolve("lightweight-charts")), "dist", "lightweight-charts.standalone.production.js"));
+    } catch {
+      // not installed via the main entry either
+    }
+    out.push(resolve(fileURLToPath(new URL("../../../node_modules/" + rel, import.meta.url))));
+    out.push(resolve(process.cwd(), "node_modules", rel));
+    return out;
+  };
   app.get("/portal/vendor/lightweight-charts.js", async (_req, reply) => {
     if (chartLib === null) {
-      try {
-        chartLib = readFileSync(require.resolve("lightweight-charts/dist/lightweight-charts.standalone.production.js"), "utf8");
-      } catch {
-        chartLib = "";
+      chartLib = "";
+      for (const candidate of chartLibCandidates()) {
+        try {
+          chartLib = readFileSync(candidate, "utf8");
+          break;
+        } catch {
+          // try the next location
+        }
       }
     }
     if (!chartLib) return reply.code(404).send("lightweight-charts not installed");

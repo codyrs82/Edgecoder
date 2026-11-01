@@ -543,8 +543,12 @@ const MARKET_TICK_MS = 60_000;
 /** Standing orders from the portal keyed by `${accountId}:${side}`. */
 const marketOrders = new Map<string, MarketOrder>();
 
+const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
 function recordMarketTicks(nowMs = Date.now()): void {
+  // Bids are per task; drop any that outlived their task (failed, abandoned, lost on restart).
+  orderBook.pruneBids((bid) => nowMs - bid.createdAtMs > MARKET_BID_MAX_AGE_MS || (queue.openSubtaskCount(bid.taskId) === 0 && nowMs - bid.createdAtMs > 10 * 60_000));
   for (const id of COMPUTE_CLASS_IDS) {
+    if (!orderBook.hasReference(id)) continue; // no oracle rate yet: nothing meaningful to chart
     const snap = orderBook.snapshot(id, nowMs);
     const tick = {
       atMs: nowMs,
@@ -592,6 +596,7 @@ async function recalibrateRateEpoch(): Promise<RateEpoch> {
   const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: latestRateEpoch });
   latestRateEpoch = epoch;
   syncOrderBookReference(epoch);
+  recordMarketTicks();
   await pgStore?.upsertRateEpoch(epoch);
   app.log.info(
     {
@@ -2680,6 +2685,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
  */
 async function publishResult(result: SubtaskResult): Promise<void> {
   queue.complete(result);
+  // Market: a task's bid leaves the book once its last subtask has a result.
+  if (queue.openSubtaskCount(result.taskId) === 0 && depTracker.heldCountForTask(result.taskId) === 0) orderBook.removeBid(result.taskId);
   const completeRecord = ordering.append({
     eventType: "task_complete",
     taskId: result.taskId,
@@ -3179,7 +3186,7 @@ app.get("/economy/price/current", async (req, reply) => {
 
 /** Current rate-oracle epoch (market sats per CPU/GPU hour, sources, hashprice signal) and the live credit quote. */
 app.get("/economy/rates/current", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!requireMeshOrPortalToken(req, reply)) return;
   return {
     enabled: RATE_ORACLE_ENABLED,
     recalibrationMs: RATE_RECALIBRATION_MS,

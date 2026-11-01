@@ -112,6 +112,17 @@ describe("compute order book", () => {
     expect(book.canMatch("cheap", "legacy-no-bid").ok).toBe(true);
   });
 
+  it("a one-sided book quotes the reference as mid and bids can be pruned", () => {
+    const book = new ComputeOrderBook();
+    book.setReference("cpu.std", 10);
+    book.postBid("t1", "cpu.std", 85, 0, 1_000);
+    expect(book.snapshot("cpu.std", 2_000)).toMatchObject({ bestBid: 85, bestAsk: undefined, midMsatPerCredit: 10, openTasks: 1 });
+    expect(book.pruneBids((b) => b.taskId === "t1")).toBe(1);
+    expect(book.snapshot("cpu.std", 2_000).openTasks).toBe(0);
+    expect(book.hasReference("cpu.std")).toBe(true);
+    expect(book.hasReference("gpu.c24")).toBe(false);
+  });
+
   it("snapshot reports spread, mid and clearing price", () => {
     const book = new ComputeOrderBook({ tradeWindowMs: 60_000 });
     book.setReference("cpu.std", 10);

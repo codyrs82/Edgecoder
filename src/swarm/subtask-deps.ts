@@ -148,4 +148,11 @@ export class SubtaskDepTracker {
   hold(entry: PendingDependentSubtask): void {
     this.pending.set(entry.subtask.id, entry);
   }
+
+  /** Subtasks of `taskId` still waiting on dependencies. */
+  heldCountForTask(taskId: string): number {
+    let n = 0;
+    for (const entry of this.pending.values()) if (entry.subtask.taskId === taskId) n++;
+    return n;
+  }
 }
