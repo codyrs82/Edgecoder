@@ -34,3 +34,8 @@ desktop/a11y-report/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Infrastructure node bundle: operator config and secrets (scripts/infra-bootstrap.sh)
+deploy/infra/.env
+deploy/infra/generated/
+deploy/infra/secrets/
