@@ -125,7 +125,7 @@ Key environment variables (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the 
 | `AGENT_ID` | `worker-1` | Unique agent identifier |
 | `AGENT_MODE` | `swarm-only` | Agent mode (`swarm-only` or `ide-enabled`) |
 | `AGENT_OS` | auto-detected | Operating system (`macos`, `linux`, `windows`, `ios`) |
-| `SANDBOX_MODE` | `docker` | Sandbox mode (`docker`, `process`, `none`) |
+| `SANDBOX_MODE` | `docker` | Sandbox mode (`docker`, `none`, `vm`). Anything else is treated as `none` (node registers but pulls no swarm tasks). |
 | `DATABASE_URL` | | PostgreSQL connection string |
 | `BITCOIN_NETWORK` | `testnet` | Bitcoin network (`bitcoin`, `testnet`, `signet`) |
 
@@ -199,7 +199,7 @@ Swarm agent process that registers with a coordinator, enters a poll loop, pulls
 **Key features:**
 - Coordinator discovery with failover and cache
 - Concurrent task execution (configurable via `MAX_CONCURRENT_TASKS`)
-- Sandbox enforcement: Docker, process-level (`sandbox-exec` on macOS, seccomp/namespaces on Linux), or none
+- Sandbox enforcement: Docker (required for swarm compute) or none (node registers but pulls no swarm tasks)
 - Offline resilience with exponential backoff and reconnect probes
 - BLE mesh participation for local peer discovery
 - Agent-mesh HTTP server for direct peer-to-peer work
@@ -260,7 +260,7 @@ This installs Node.js, clones the repo, builds, and installs a systemd service. 
 - **Mesh authentication** via shared `MESH_AUTH_TOKEN` on all coordinator routes
 - **Request signing** (Ed25519) on agent-to-coordinator communication with nonce and timestamp validation
 - **Task envelope encryption** (X25519 ECDH + AES-256-GCM) for subtask payloads
-- **Sandbox enforcement** -- Docker isolation (default for swarm workers), process-level sandboxing (`sandbox-exec` on macOS, seccomp/namespaces on Linux)
+- **Sandbox enforcement** -- Docker isolation (default and required for swarm workers); remote tasks are never executed on the host
 - **Blacklist propagation** with evidence hashing, reporter signature verification, and gossip broadcast
 - **Tamper-evident audit ledger** (hash-chain) with Bitcoin anchoring for integrity verification
 - **Rate limiting** per agent with configurable window

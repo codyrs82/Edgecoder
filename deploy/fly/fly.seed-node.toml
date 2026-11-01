@@ -20,6 +20,9 @@ primary_region = "ord"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
   OLLAMA_MODEL = "qwen2.5:7b"
+  # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
+  # check (SANDBOX_MODE=docker). Seeds are coordinator + Ollama chat only; compute comes
+  # from enrolled agents. Ollama itself is started by the agent image entrypoint (#9).
   DISABLE_SELF_AGENT = "1"
 
 [http_service]

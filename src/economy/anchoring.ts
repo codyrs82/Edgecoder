@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { BitcoinAnchorRecord, BitcoinNetwork } from "../common/types.js";
 import {
   encodeCheckpointForOpReturn,
+  isAnchorBroadcastRejected,
   type AnchorConfirmationResult,
   type BitcoinAnchorProvider
 } from "./bitcoin-rpc.js";
@@ -139,8 +140,11 @@ async function anchorCheckpointLocked(
     throw new Error(`anchor_daily_budget_exceeded: ${recent} broadcasts in 24h x ${policy.maxFeeSats} sats, budget ${policy.dailyBudgetSats}`);
   }
 
+  // #158: a retry after a definite rejection gets its own row; the failed row stays for
+  // audit instead of being overwritten. Only a legacy simulated row keeps its id.
+  const reuseId = existing && existing.status !== "failed" ? existing.anchorId : undefined;
   const base: BitcoinAnchorRecord = {
-    anchorId: existing?.anchorId ?? randomUUID(),
+    anchorId: reuseId ?? randomUUID(),
     epochId: input.epochId,
     checkpointHash: input.checkpointHash,
     anchorNetwork: deps.network,
@@ -161,9 +165,18 @@ async function anchorCheckpointLocked(
   try {
     ({ txid } = await deps.provider.broadcastOpReturn(dataHex));
   } catch (err) {
-    // The provider reported failure: mark failed so a later tick may retry.
-    await deps.store.upsertBitcoinAnchor({ ...base, status: "failed", lastCheckedAtMs: now() });
-    throw err;
+    if (isAnchorBroadcastRejected(err)) {
+      // #158: definite rejection before anything reached the network (fee cap, signing,
+      // no UTXOs, node verify-reject): mark failed so a later tick may retry.
+      await deps.store.upsertBitcoinAnchor({ ...base, status: "failed", lastCheckedAtMs: now() });
+      throw err;
+    }
+    // Ambiguous (timeout, reset, unreadable answer, proxy 5xx): the tx may have been
+    // relayed. Leave the "broadcasting" row so #103 reconciles it; never re-send.
+    throw new Error(
+      `anchor_broadcast_ambiguous:${base.anchorId}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    );
   }
   const normalized = String(txid ?? "").toLowerCase();
   if (!isTxid(normalized)) {

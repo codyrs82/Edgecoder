@@ -16,73 +16,85 @@ This document covers deploying EdgeCoder services across Fly.io, Docker, systemd
 
 ## Fly.io Deployment
 
-Fly.io configuration files are in `deploy/fly/`. Each service has its own TOML config.
+Fly.io configuration files are in `deploy/fly/`. Each service has its own TOML config. There are
+four apps; there is no separate coordinator, inference or control-plane app any more (#33): the
+seed runs `EDGE_RUNTIME_MODE=all-in-one`, so the seed *is* the coordinator, inference service and
+control plane.
 
 ### Services
 
-| Config File | App Name | Entrypoint | Port | VM |
-|-------------|----------|------------|------|-----|
-| `fly.seed-node.toml` | `edgecoder-seed` | `node dist/index.js` + Ollama | 4301 | 8 GB, 2 perf CPUs |
-| `fly.seed-eu.toml` | EU seed node | `node dist/index.js` + Ollama | 4301 | 8 GB, 2 perf CPUs |
-| `fly.toml` | `edgecoder-coordinator` | `node dist/swarm/coordinator.js` + Ollama | 4301 | 8 GB, 2 perf CPUs |
-| `fly.portal.toml` | `edgecoder-portal` | `node dist/portal/server.js` | 4310 | 1 GB, shared |
-| `fly.control-plane.toml` | `edgecoder-control-plane` | `node dist/control-plane/server.js` | 4303 | 1 GB, shared |
-| `fly.inference.toml` | `edgecoder-inference` | `node dist/inference/service.js` | 4302 | 1 GB, shared |
+| Config File | App Name | Region | Entrypoint | Port | VM |
+|-------------|----------|--------|------------|------|-----|
+| `fly.seed-node.toml` | `edgecoder-seed` | `ord` | `node dist/index.js` (+ Ollama via the agent image entrypoint) | 4301 | 16 GB, 2 perf CPUs |
+| `fly.seed-eu.toml` | `edgecoder-seed-eu` | `cdg` | `node dist/index.js` (+ Ollama) | 4301 | 8 GB, 2 perf CPUs |
+| `fly.portal.toml` | `edgecoder-portal` | `ord` | `node dist/portal/server.js` | 4310 | 1 GB, shared |
+| `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | `ord` | `node dist/economy/anchor-proxy-service.js` | 4311 | 256 MB, shared |
 
-### Deploying a Service
+Both seeds set `DISABLE_SELF_AGENT=1` (#39): Fly machines have no Docker, so the embedded worker
+could never pass the `SANDBOX_MODE=docker` check. Seeds coordinate and serve Ollama chat; swarm
+compute comes from enrolled agents.
+
+### Fresh Fly organization (one command)
+
+`scripts/fly-bootstrap-org.sh` stands the whole stack up in a Fly org of its own, idempotently:
 
 ```bash
-# Deploy the seed node (all-in-one coordinator + inference + control plane + worker)
-fly deploy -c deploy/fly/fly.seed-node.toml
+fly auth login                      # or export FLY_API_TOKEN=...
+export RESEND_API_KEY=re_...        # portal signup email (required in production)
+# optional: PORTAL_DOMAIN=edgecoder.io, OAUTH_*_CLIENT_ID/SECRET, BITCOIND_RPC_* (deploys the anchor proxy)
+npm run fly:bootstrap -- <org-slug> [app-prefix]
+```
 
-# Deploy the portal
-fly deploy -c deploy/fly/fly.portal.toml
+It creates the apps (`<prefix>-seed`, `<prefix>-seed-eu`, `<prefix>-portal`, and `<prefix>-anchor-proxy`
+when `BITCOIND_RPC_URL` is set), one Fly Postgres cluster attached as `DATABASE_URL` (seeds) and
+`PORTAL_DATABASE_URL` (portal), the Ollama volumes, every production-required secret (generated
+once and kept in `.fly-bootstrap/<org>.env`, git-ignored), renders the TOML files for the prefix
+and domain, deploys seeds then portal, runs the #9 volume chown + restart, and smoke-tests
+`/health/runtime`, `/capacity` and the portal `/health`. Re-running it redeploys without rotating
+secrets. `SKIP_DEPLOY=1` prepares everything without building.
 
-# Deploy the control plane
-fly deploy -c deploy/fly/fly.control-plane.toml
+App names are global on Fly: if the default `edgecoder-*` names are taken, pass a prefix (second
+argument), e.g. `npm run fly:bootstrap -- my-org rightway`.
 
-# Deploy the inference service
-fly deploy -c deploy/fly/fly.inference.toml
+### Deploying a Service by hand
 
-# Deploy a standalone coordinator
-fly deploy -c deploy/fly/fly.toml
+```bash
+# Seeds first (all-in-one coordinator + inference + control plane; Ollama chat)
+fly deploy -c deploy/fly/fly.seed-node.toml --remote-only
+fly deploy -c deploy/fly/fly.seed-eu.toml --remote-only
+# Then the portal
+fly deploy -c deploy/fly/fly.portal.toml --remote-only
+# Anchor proxy (only with a bitcoind behind it)
+fly deploy -c deploy/fly/fly.anchor-proxy.toml --remote-only
 ```
 
 ### Setting Secrets
 
-Secrets are not stored in the TOML files. Set them with `fly secrets set`:
+Secrets are not stored in the TOML files. With `NODE_ENV=production` every service refuses to
+start without its required secrets (`src/common/env-guard.ts`, `src/*/config.ts`). The bootstrap
+script sets all of these; by hand:
 
 ```bash
-# Seed node / coordinator secrets
-fly secrets set -c deploy/fly/fly.seed-node.toml \
-  MESH_AUTH_TOKEN="<token>" \
-  DATABASE_URL="postgresql://..." \
-  COORDINATOR_REGISTRATION_TOKEN="<token>" \
-  PORTAL_SERVICE_URL="https://portal.edgecoder.io" \
-  PORTAL_SERVICE_TOKEN="<token>"
+# Seeds (coordinator + inference + control plane in one process)
+fly secrets set -a edgecoder-seed \
+  MESH_AUTH_TOKEN="<token>" ADMIN_API_TOKEN="<token>" INFERENCE_AUTH_TOKEN="<32+ chars>" \
+  PORTAL_SERVICE_URL="https://edgecoder.io" PORTAL_SERVICE_TOKEN="<token>" \
+  PAYMENT_WEBHOOK_SECRET="<token>" COORDINATOR_REGISTRATION_TOKEN="<token>" \
+  COORDINATOR_BOOTSTRAP_URLS="https://edgecoder-seed-eu.fly.dev" \
+  DATABASE_URL="postgresql://..."
+# same for edgecoder-seed-eu (same MESH_AUTH_TOKEN / PORTAL_SERVICE_TOKEN; bootstrap URL = the other seed)
 
-# Portal secrets
-fly secrets set -c deploy/fly/fly.portal.toml \
-  PORTAL_SERVICE_TOKEN="<token>" \
-  CONTROL_PLANE_ADMIN_TOKEN="<token>" \
-  WALLET_SECRET_PEPPER="<secret>" \
-  RESEND_API_KEY="<key>" \
-  RESEND_FROM_EMAIL="noreply@edgecoder.io" \
-  OAUTH_GOOGLE_CLIENT_ID="<id>" \
-  OAUTH_GOOGLE_CLIENT_SECRET="<secret>" \
-  OAUTH_MICROSOFT_CLIENT_ID="<id>" \
-  OAUTH_MICROSOFT_CLIENT_SECRET="<secret>"
+# Portal
+fly secrets set -a edgecoder-portal \
+  PORTAL_SERVICE_TOKEN="<same as seeds>" CONTROL_PLANE_ADMIN_TOKEN="<ADMIN_API_TOKEN of the seeds>" \
+  WALLET_SECRET_PEPPER="<secret>" RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@edgecoder.io" \
+  PORTAL_DATABASE_URL="postgresql://..." \
+  OAUTH_GOOGLE_CLIENT_ID="<id>" OAUTH_GOOGLE_CLIENT_SECRET="<secret>" \
+  OAUTH_MICROSOFT_CLIENT_ID="<id>" OAUTH_MICROSOFT_CLIENT_SECRET="<secret>"
 
-# Control plane secrets
-fly secrets set -c deploy/fly/fly.control-plane.toml \
-  ADMIN_API_TOKEN="<token>" \
-  MESH_AUTH_TOKEN="<token>" \
-  PORTAL_SERVICE_URL="https://portal.edgecoder.io" \
-  PORTAL_SERVICE_TOKEN="<token>"
-
-# Inference service secrets
-fly secrets set -c deploy/fly/fly.inference.toml \
-  INFERENCE_AUTH_TOKEN="<token>"
+# Anchor proxy
+fly secrets set -a edgecoder-anchor-proxy \
+  ANCHOR_PROXY_TOKEN="<token>" BITCOIND_RPC_URL="http://..." BITCOIND_RPC_USER="..." BITCOIND_RPC_PASSWORD="..."
 ```
 
 ### Seed Node Configuration
@@ -96,16 +108,17 @@ The seed node TOML (`fly.seed-node.toml`) sets these environment variables:
   NETWORK_MODE = "public_mesh"
   COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
   LOCAL_MODEL_PROVIDER = "ollama-local"
-  OLLAMA_AUTO_INSTALL = "false"
-  OLLAMA_MODEL = "qwen3.5:9b"
+  OLLAMA_AUTO_INSTALL = "true"
+  OLLAMA_MODEL = "qwen2.5:7b"
+  DISABLE_SELF_AGENT = "1"
 ```
 
-It mounts persistent storage for Ollama model data:
+It mounts persistent storage for Ollama model data (owned by uid 1000 after the #9 post-deploy step):
 
 ```toml
 [mounts]
   source = "ollama_data"
-  destination = "/root/.ollama"
+  destination = "/data/ollama"
 ```
 
 ### Portal Configuration
@@ -117,7 +130,7 @@ It mounts persistent storage for Ollama model data:
   PASSKEY_RP_ID = "edgecoder.io"
   PASSKEY_ORIGIN = "https://edgecoder.io"
   DOCS_SITE_URL = "https://codyrs82.github.io/Edgecoder/"
-  COORDINATOR_DISCOVERY_URL = "https://edgecoder-seed.fly.dev"
+  COORDINATOR_DISCOVERY_URLS = "https://edgecoder-seed-eu.fly.dev,https://edgecoder-seed.fly.dev"
 ```
 
 ---
@@ -433,7 +446,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SANDBOX_MODE` | `docker` (swarm) / `none` (IDE) | Sandbox mode: `docker`, `process`, `none` |
+| `SANDBOX_MODE` | `docker` (swarm) / `none` (IDE) | Sandbox mode: `docker`, `none`, `vm`. Unknown values (e.g. the old `process`) are treated as `none` with a warning |
 | `SANDBOX_REQUIRED` | `false` | Block execution when sandbox is unavailable |
 | `SNAPSHOT_ENFORCEMENT` | `warn` | Snapshot ref enforcement: `warn` or `strict` |
 

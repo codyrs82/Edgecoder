@@ -220,6 +220,14 @@ export class SwarmQueue {
     return item.subtask;
   }
 
+  /** Requester-visible result for a subtask (the latest one recorded), or undefined while it is still queued/running. */
+  getResult(subtaskId: string): SubtaskResult | undefined {
+    for (let i = this.results.length - 1; i >= 0; i--) {
+      if (this.results[i].subtaskId === subtaskId) return this.results[i];
+    }
+    return undefined;
+  }
+
   complete(result: SubtaskResult): void {
     this.results.push(result);
     void this.store?.persistResult(result).catch(() => undefined);

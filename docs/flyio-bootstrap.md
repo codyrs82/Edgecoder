@@ -1,312 +1,106 @@
 # Fly.io Bootstrap
 
-This project is configured to run first production services on Fly.io:
+The Fly layout is four apps (#33): two all-in-one seeds (`edgecoder-seed` in `ord`,
+`edgecoder-seed-eu` in `cdg`), the portal (`edgecoder-portal`) and, when a bitcoind is available,
+the anchor proxy (`edgecoder-anchor-proxy`). The separate coordinator, inference and control-plane
+apps described in earlier versions of this document no longer exist: the seed runs
+`EDGE_RUNTIME_MODE=all-in-one`.
 
-- First coordinator service: `edgecoder-coordinator`
-- First inference service: `edgecoder-inference`
-- First coordinator UI service (control-plane): `edgecoder-control-plane`
-- User portal service: `edgecoder-portal`
-- Coordinator/control-plane SQL backend: Fly Postgres (PostgreSQL 16)
-- Portal SQL backend (separate): Fly Postgres (PostgreSQL 16)
-
-Custom production domains:
-
-- Portal: `https://portal.edgecoder.io`
-- Control plane: `https://control.edgecoder.io`
-- Coordinator: `https://coordinator.edgecoder.io`
-
-Related install runbook:
-
-- `docs/agent-and-coordinator-install.md`
-
-## 1) Create Fly Postgres clusters (separate DBs)
+## Bootstrap a fresh organization
 
 ```bash
-fly auth login
-fly postgres create --name edgecoder-postgres --region ord --initial-cluster-size 1
-fly postgres create --name edgecoder-portal-postgres --region ord --initial-cluster-size 1
+fly auth login                           # or export FLY_API_TOKEN=...
+export RESEND_API_KEY=re_...             # portal signup email; required in production
+# optional: PORTAL_DOMAIN=edgecoder.io  OAUTH_GOOGLE_CLIENT_ID=... OAUTH_GOOGLE_CLIENT_SECRET=...
+#           OAUTH_MICROSOFT_CLIENT_ID=... OAUTH_MICROSOFT_CLIENT_SECRET=...
+#           BITCOIND_RPC_URL=... BITCOIND_RPC_USER=... BITCOIND_RPC_PASSWORD=...   (deploys the anchor proxy)
+npm run fly:bootstrap -- <org-slug> [app-prefix]
 ```
 
-Attach coordinator DB credentials:
+`scripts/fly-bootstrap-org.sh` is idempotent. It:
+
+1. creates the apps in the org (skips existing ones);
+2. creates a Fly Postgres cluster `<prefix>-pg` and attaches it (`DATABASE_URL` on the seeds,
+   `PORTAL_DATABASE_URL` on the portal);
+3. creates the Ollama model volumes (`ollama_data` in `ord`, `ollama_data_eu` in `cdg`);
+4. generates the production-required secrets once (kept in `.fly-bootstrap/<org>.env`, git-ignored,
+   `chmod 600`) and sets them on each app;
+5. renders `deploy/fly/*.toml` for the prefix and portal domain into `.fly-bootstrap/<org>/`;
+6. deploys the seeds, runs the #9 post-deploy step (`chown -R 1000:1000 /data/ollama`, restart),
+   deploys the portal and the anchor proxy;
+7. smoke-tests `/health/runtime` and `/capacity` on both seeds and `/health` on the portal.
+
+Pass a prefix when the default `edgecoder-*` app names are taken (Fly app names are global).
+Set `PORTAL_DOMAIN` to use a custom host; the script runs `fly certs add` and prints the DNS
+records to create. Passkeys are bound to that host (`PASSKEY_RP_ID`), so pick it before users enrol.
+
+## After the first deploy
+
+- Portal: `https://<prefix>-portal.fly.dev/health`, `/`, `/portal`, `/portal/chat`, `/auth/capabilities`
+- Seeds: `https://<prefix>-seed.fly.dev/health/runtime` (public), `/status` and `/capacity` (mesh token)
+- Enrol a node on the portal Nodes page, then start a worker with `AGENT_REGISTRATION_TOKEN`,
+  `MESH_AUTH_TOKEN` (from the secrets file) and `COORDINATOR_URL=https://<prefix>-seed.fly.dev`.
+- Ollama pulls `OLLAMA_MODEL` on first use (`OLLAMA_AUTO_INSTALL=true`); the first chat is slow.
+
+## CI deploys
+
+`.github/workflows/deploy-fly.yml` deploys the four configs after green CI on `main`, gated on the
+repository variable `DEPLOY_ENABLED=true` and a `FLY_API_TOKEN` secret in the `production`
+environment (#31). Its smoke URLs assume the default `edgecoder-*` app names.
+
+## Access control verification
+
+Coordinator routes are mesh-internal. Public unauthenticated requests must fail:
 
 ```bash
-fly postgres attach --app edgecoder-coordinator edgecoder-postgres
-fly postgres attach --app edgecoder-control-plane edgecoder-postgres
-```
-
-Attach portal DB credentials:
-
-```bash
-fly postgres attach --app edgecoder-portal edgecoder-portal-postgres
-```
-
-## 2) Deploy Coordinator
-
-```bash
-fly deploy -c deploy/fly/fly.toml
-```
-
-## 3) Deploy Inference Service
-
-```bash
-fly deploy -c deploy/fly/fly.inference.toml
-fly secrets set INFERENCE_URL="https://edgecoder-inference.fly.dev" -a edgecoder-coordinator
-fly secrets set INFERENCE_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-inference
-fly secrets set INFERENCE_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-coordinator
-fly secrets set INFERENCE_COORDINATOR_PEER_ID="<COORDINATOR_PEER_ID>" INFERENCE_COORDINATOR_PUBLIC_KEY_PEM="<COORDINATOR_PUBLIC_KEY_PEM>" INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS="true" -a edgecoder-inference
-fly deploy -c deploy/fly/fly.toml
-```
-
-## 4) Deploy Control Plane (UI home)
-
-```bash
-fly deploy -c deploy/fly/fly.control-plane.toml
-```
-
-## 5) Deploy User Portal (separate app/network)
-
-```bash
-fly deploy -c deploy/fly/fly.portal.toml
-```
-
-Restrict UI access to your public IP:
-
-```bash
-fly secrets set ALLOWED_UI_IPS="<YOUR_PUBLIC_IP>" -a edgecoder-control-plane
-```
-
-You can provide multiple IPs as comma-separated values.
-
-Node/operator onboarding note:
-
-- Coordinators and agents cannot fully join until node enrollment is approved.
-- Enrollment is tied to a registered portal user email.
-- Use portal coordinator operations page (`/portal/coordinator-ops`) to approve/reject coordinator and agent nodes.
-
-Set admin and mesh security secrets:
-
-```bash
-fly secrets set ADMIN_API_TOKEN="<LONG_RANDOM_TOKEN>" ALLOWED_ADMIN_IPS="<YOUR_PUBLIC_IP>" -a edgecoder-control-plane
-fly secrets set COORDINATOR_MESH_TOKEN="<LONG_RANDOM_TOKEN>" MESH_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-control-plane
-fly secrets set MESH_AUTH_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-coordinator
-```
-
-Enable coordinator-local Ollama on Fly:
-
-```bash
-fly secrets set LOCAL_MODEL_PROVIDER="ollama-local" OLLAMA_AUTO_INSTALL="false" OLLAMA_MODEL="qwen3.5:9b" -a edgecoder-coordinator
-fly secrets set OLLAMA_HOST="http://127.0.0.1:11434" -a edgecoder-coordinator
-fly deploy -c deploy/fly/fly.toml
-```
-
-Notes:
-
-- Fly coordinator image includes Ollama CLI/runtime and starts `ollama serve` during app boot.
-- Production recommendation is `OLLAMA_AUTO_INSTALL=false`; pre-pull models explicitly:
-
-```bash
-fly ssh console -a edgecoder-coordinator -C "sh -lc 'OLLAMA_NOPROGRESS=1 ollama pull qwen3.5:9b && ollama list'"
-```
-
-- Keep coordinator VM at or above performance 2x / 8GB for stable local Ollama operation.
-
-Set portal integration secrets so coordinator/control-plane can validate node activation:
-
-```bash
-fly secrets set PORTAL_SERVICE_URL="https://portal.edgecoder.io" PORTAL_SERVICE_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-control-plane
-fly secrets set PORTAL_SERVICE_URL="https://portal.edgecoder.io" PORTAL_SERVICE_TOKEN="<LONG_RANDOM_TOKEN>" -a edgecoder-coordinator
-```
-
-Set portal auth and email secrets:
-
-```bash
-fly secrets set \
-  PORTAL_DATABASE_URL="<POSTGRES_URL_FROM_PORTAL_ATTACH>" \
-  PORTAL_SERVICE_TOKEN="<LONG_RANDOM_TOKEN>" \
-  COORDINATOR_OPERATIONS_OWNER_EMAILS="admin@example.com" \
-  RESEND_API_KEY="<RESEND_API_KEY>" \
-  RESEND_FROM_EMAIL="EdgeCoder <no-reply@yourdomain.com>" \
-  PORTAL_PUBLIC_URL="https://portal.edgecoder.io" \
-  PASSKEY_RP_ID="portal.edgecoder.io" \
-  PASSKEY_RP_NAME="EdgeCoder Portal" \
-  PASSKEY_ORIGIN="https://portal.edgecoder.io" \
-  PASSKEY_CHALLENGE_TTL_MS="300000" \
-  WALLET_SECRET_PEPPER="<HIGH_ENTROPY_RANDOM_SECRET>" \
-  WALLET_DEFAULT_NETWORK="signet" \
-  CONTROL_PLANE_URL="https://control.edgecoder.io" \
-  CONTROL_PLANE_ADMIN_TOKEN="<ADMIN_API_TOKEN>" \
-  OAUTH_GOOGLE_CLIENT_ID="<GOOGLE_CLIENT_ID>" \
-  OAUTH_GOOGLE_CLIENT_SECRET="<GOOGLE_CLIENT_SECRET>" \
-  OAUTH_MICROSOFT_CLIENT_ID="<MICROSOFT_CLIENT_ID>" \
-  OAUTH_MICROSOFT_CLIENT_SECRET="<MICROSOFT_CLIENT_SECRET>" \
-  -a edgecoder-portal
-```
-
-The portal now fails startup if `WALLET_SECRET_PEPPER` is missing, and in production it also
-fails fast when portal service token/admin integration/passkey origin config is incomplete.
-
-SSO provider callback URLs to register:
-
-- Google redirect URI: `https://portal.edgecoder.io/auth/oauth/google/callback`
-- Microsoft redirect URI: `https://portal.edgecoder.io/auth/oauth/microsoft/callback`
-
-Recommended network split:
-
-- put `edgecoder-portal` and `edgecoder-portal-postgres` in a dedicated Fly organization/network segment.
-- keep `edgecoder-coordinator`, `edgecoder-control-plane`, and `edgecoder-postgres` in the coordinator network segment.
-- allow only service-to-service HTTPS from coordinator/control-plane to portal internal APIs via `PORTAL_SERVICE_TOKEN`.
-
-Set durable coordinator signing keys so blacklist signatures remain valid after restarts:
-
-```bash
-fly secrets set COORDINATOR_PEER_ID="coordinator-local" \
-  COORDINATOR_PRIVATE_KEY_PEM="$(cat coordinator-private.pem)" \
-  COORDINATOR_PUBLIC_KEY_PEM="$(cat coordinator-public.pem)" \
-  -a edgecoder-coordinator
-```
-
-Set coordinator discovery/join env (dynamic mesh bootstrap):
-
-```bash
-fly secrets set \
-  COORDINATOR_PUBLIC_URL="https://coordinator.edgecoder.io" \
-  CONTROL_PLANE_URL="https://control.edgecoder.io" \
-  COORDINATOR_BOOTSTRAP_URLS="https://coordinator.edgecoder.io" \
-  COORDINATOR_REGISTRATION_TOKEN="<portal-enrollment-token-for-this-coordinator-node>" \
-  -a edgecoder-coordinator
-```
-
-Optional economy/payment secrets:
-
-```bash
-fly secrets set LIGHTNING_PROVIDER="mock" PAYMENT_WEBHOOK_SECRET="<RANDOM_SHARED_SECRET>" -a edgecoder-coordinator
-```
-
-Recommended coordinator sizing (persisted in `deploy/fly/fly.toml`):
-
-```bash
-fly scale vm performance-2x --memory 8192 -a edgecoder-coordinator
-```
-
-Use admin token for non-UI control-plane APIs:
-
-```bash
-curl -H "Authorization: Bearer <ADMIN_API_TOKEN>" https://control.edgecoder.io/agents
-```
-
-Verify blacklist audit integrity end-to-end:
-
-```bash
-CONTROL_PLANE_URL="https://control.edgecoder.io" \
-COORDINATOR_URL="https://coordinator.edgecoder.io" \
-ADMIN_API_TOKEN="<ADMIN_API_TOKEN>" \
-MESH_AUTH_TOKEN="<MESH_AUTH_TOKEN>" \
-npm run verify:blacklist-audit
-```
-
-## 5) Coordinator Bootstrap
-
-Run DB migration and optional Ollama bootstrap:
-
-```bash
-fly ssh console -a edgecoder-coordinator -C "cd /app && node dist/bootstrap/coordinator.js"
-```
-
-Or trigger through API:
-
-```bash
-curl -X POST https://control.edgecoder.io/bootstrap/coordinator
-```
-
-## 5b) Access control verification
-
-Coordinator is mesh-internal only. Public unauthenticated requests should fail:
-
-```bash
-curl -i https://coordinator.edgecoder.io/status
+curl -i https://<prefix>-seed.fly.dev/status
 # expected: HTTP 401 {"error":"mesh_unauthorized"}
+curl -s https://<prefix>-seed.fly.dev/health/runtime      # the only public route (Fly health probe)
+curl -s -H "x-mesh-token: $MESH_AUTH_TOKEN" https://<prefix>-seed.fly.dev/capacity
 ```
 
-Authenticated internal check (from coordinator machine):
+The Ollama API is never exposed as a public route; chat reaches it through the coordinator's
+`/portal/chat` (portal service token) only.
+
+## Node enrollment and activation flow
+
+1. The user signs up in the portal (`/auth/signup`) or via SSO (Google/Microsoft) and verifies
+   their email through the Resend link.
+2. They enrol an agent or coordinator node on the Nodes page (`/nodes/enroll`) and get a
+   `registrationToken`.
+3. They set `AGENT_REGISTRATION_TOKEN` (plus `MESH_AUTH_TOKEN` and `COORDINATOR_URL`) on the node.
+4. The node stays dormant until an operator approves it (coordinator operations dashboard, or
+   `POST /agents/:agentId/approval` / `POST /coordinators/:coordinatorId/approval` on the control plane).
+5. Once approved, the coordinator accepts the node's registration. A worker registers once per
+   session and then only heartbeats; a node that registers 10 times in 10 minutes is
+   auto-blacklisted (behavioural rule BHV008).
+
+## DNS and TLS for a custom domain
+
+The bootstrap script does this for the portal when `PORTAL_DOMAIN` is set. By hand:
 
 ```bash
-fly ssh console -a edgecoder-coordinator -C "sh -lc 'curl -s -H \"x-mesh-token: $MESH_AUTH_TOKEN\" http://127.0.0.1:4301/health/runtime'"
+fly ips allocate-v4 -a <prefix>-portal          # dedicated IPv4 (recommended for an apex record)
+fly certs add edgecoder.io -a <prefix>-portal
+fly certs show edgecoder.io -a <prefix>-portal  # prints the A/AAAA (or CNAME) records to create
 ```
 
-Expected behavior:
-
-- Coordinator routes require `x-mesh-token`.
-- Ollama API is not exposed as public route.
-- IDE workloads route through local agents (not direct coordinator model endpoint access).
-
-## 6) Node enrollment and activation flow
-
-1. User signs up in portal (`/auth/signup`) or via SSO (Google/Microsoft).
-2. User verifies email through Resend link.
-3. User enrolls agent/coordinator node in portal (`/nodes/enroll`) and gets `registrationToken`.
-4. User sets `AGENT_REGISTRATION_TOKEN` on the node runtime.
-5. Node remains dormant until coordinator admin approves in UI/API:
-   - `POST /agents/:agentId/approval`
-   - `POST /coordinators/:coordinatorId/approval`
-6. Once email is verified and node is approved, coordinator allows registration.
-
-## 7) DNS and TLS setup for edgecoder.io
-
-1. Allocate dedicated IPv4 addresses (recommended for apex + stability):
+Then set the portal's public origin to the domain and redeploy (passkeys are bound to
+`PASSKEY_RP_ID`, so do this before users enrol passkeys):
 
 ```bash
-fly ips allocate-v4 -a edgecoder-portal
-fly ips allocate-v4 -a edgecoder-control-plane
-fly ips allocate-v4 -a edgecoder-coordinator
+fly secrets set PORTAL_PUBLIC_URL="https://edgecoder.io" PASSKEY_RP_ID="edgecoder.io" PASSKEY_ORIGIN="https://edgecoder.io" -a <prefix>-portal
+fly secrets set PORTAL_SERVICE_URL="https://edgecoder.io" -a <prefix>-seed
+fly secrets set PORTAL_SERVICE_URL="https://edgecoder.io" -a <prefix>-seed-eu
 ```
 
-2. Register certificates on each app:
+A seed can get its own name the same way (`fly certs add coordinator.edgecoder.io -a <prefix>-seed`);
+then update `COORDINATOR_PUBLIC_URL` in its TOML and `COORDINATOR_DISCOVERY_URLS` in the portal's.
 
-```bash
-fly certs add portal.edgecoder.io -a edgecoder-portal
-fly certs add control.edgecoder.io -a edgecoder-control-plane
-fly certs add coordinator.edgecoder.io -a edgecoder-coordinator
-```
+## Coordinator discovery
 
-3. DNS records to create at your registrar/DNS provider:
-
-- `A` record: `portal` -> `<edgecoder-portal IPv4 from fly ips list -a edgecoder-portal>`
-- `AAAA` record: `portal` -> `<edgecoder-portal IPv6 from fly ips list -a edgecoder-portal>`
-- `A` record: `control` -> `<edgecoder-control-plane IPv4>`
-- `AAAA` record: `control` -> `<edgecoder-control-plane IPv6>`
-- `A` record: `coordinator` -> `<edgecoder-coordinator IPv4>`
-- `AAAA` record: `coordinator` -> `<edgecoder-coordinator IPv6>`
-
-Optional apex routing:
-
-- If you also want `https://edgecoder.io` (apex) on the portal app, add:
-  - `fly certs add edgecoder.io -a edgecoder-portal`
-  - `A/AAAA` records for apex `@` -> portal app IPs
-
-4. Verify cert issuance:
-
-```bash
-fly certs show portal.edgecoder.io -a edgecoder-portal
-fly certs show control.edgecoder.io -a edgecoder-control-plane
-fly certs show coordinator.edgecoder.io -a edgecoder-coordinator
-```
-
-5. After DNS propagates, update secrets if needed and redeploy:
-
-```bash
-fly secrets set PORTAL_SERVICE_URL="https://portal.edgecoder.io" -a edgecoder-coordinator
-fly secrets set PORTAL_SERVICE_URL="https://portal.edgecoder.io" -a edgecoder-control-plane
-fly secrets set PORTAL_PUBLIC_URL="https://portal.edgecoder.io" PASSKEY_RP_ID="portal.edgecoder.io" PASSKEY_ORIGIN="https://portal.edgecoder.io" CONTROL_PLANE_URL="https://control.edgecoder.io" -a edgecoder-portal
-fly deploy -c deploy/fly/fly.toml
-fly deploy -c deploy/fly/fly.control-plane.toml
-fly deploy -c deploy/fly/fly.portal.toml
-```
-
-## 8) Dynamic coordinator discovery model
-
-- DNS names are bootstrap/rendezvous only (`portal`, `control`, optional seed coordinator).
-- Control plane exposes `GET /network/coordinators` for runtime discovery.
-- Workers select coordinator using:
-  - discovery registry -> local cache -> bootstrap `COORDINATOR_URL`
-- Coordinators discover peers using:
-  - discovery registry -> local cache -> `COORDINATOR_BOOTSTRAP_URLS`
+- DNS names are bootstrap/rendezvous only.
+- The portal tries `COORDINATOR_DISCOVERY_URLS` in order and uses the first healthy seed (cached 60 s).
+- Workers pick a coordinator from the portal's `/nodes/discover-coordinator`, then their local
+  cache, then the bootstrap `COORDINATOR_URL`.
+- Seeds find each other through `COORDINATOR_BOOTSTRAP_URLS` (the script points each seed at the other).

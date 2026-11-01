@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
 import { contributionCredits, LoadSnapshot } from "./pricing.js";
@@ -108,6 +108,28 @@ export async function grantCredits(accountId: string, credits: number, reason: s
   if (credits === 0) return null;
   assertAmount(credits);
   return adjustCredits(accountId, credits, reason);
+}
+
+/**
+ * #160: grant with a caller-chosen tx id. Re-running with the same id is a no-op
+ * (Postgres: ON CONFLICT (tx_id) DO NOTHING; in-memory: id check), so a refund that
+ * threw half-way can be retried without paying twice.
+ */
+export async function grantCreditsIdempotent(accountId: string, credits: number, reason: string, txId: string) {
+  if (credits === 0) return null;
+  assertAmount(credits);
+  if (!txId.trim()) throw new Error("invalid_tx_id");
+  const tx: CreditTransaction = { txId, accountId, type: "earn", credits, reason, timestampMs: Date.now() };
+  if (pgStore) {
+    await pgStore.persistCreditTransaction(tx);
+    return tx;
+  }
+  return creditEngine.addIfAbsent(tx);
+}
+
+/** Deterministic tx id for the one-time refund of a task's submit charge (#160). */
+export function refundTxId(taskId: string): string {
+  return `task_submit_refund:${createHash("sha256").update(taskId).digest("hex").slice(0, 32)}`;
 }
 
 /** Positive = grant (earn). Negative = debit, which is balance-checked like a spend (#48). */

@@ -23,6 +23,43 @@ export interface AnchorConfirmationResult {
   blockHash?: string;
 }
 
+/**
+ * #158: a broadcast that definitely did NOT reach the network: the failure happened
+ * before (or instead of) sendrawtransaction — data too large, fee over the cap,
+ * coin selection / signing failed, or the node itself rejected the transaction.
+ * Only this error lets the anchoring flow mark a row `failed` and retry later.
+ * Any other error (timeout, connection reset, unreadable response, 5xx from the
+ * proxy) is ambiguous: the tx may have been relayed, so the row stays `broadcasting`.
+ */
+export class AnchorBroadcastRejectedError extends Error {
+  readonly rejectedBeforeSend = true;
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "AnchorBroadcastRejectedError";
+  }
+}
+
+export function isAnchorBroadcastRejected(err: unknown): err is AnchorBroadcastRejectedError {
+  return err instanceof AnchorBroadcastRejectedError || (typeof err === "object" && err !== null && (err as any).rejectedBeforeSend === true);
+}
+
+/** bitcoind RPC errors carry their JSON-RPC code so callers can tell a rejection from a transport failure. */
+export class BitcoindRpcError extends Error {
+  constructor(readonly code: number, readonly rpcMessage: string) {
+    super(`bitcoind_rpc_error: ${code} ${rpcMessage}`);
+    this.name = "BitcoindRpcError";
+  }
+}
+
+/**
+ * sendrawtransaction error codes that mean "the node did not accept this tx" and
+ * therefore nothing was relayed: RPC_VERIFY_ERROR (-25), RPC_VERIFY_REJECTED (-26),
+ * RPC_DESERIALIZATION_ERROR (-22), RPC_INVALID_PARAMETER (-8), RPC_TYPE_ERROR (-3).
+ * -27 (RPC_VERIFY_ALREADY_IN_CHAIN) is NOT here: the tx exists on chain, so it is
+ * treated as ambiguous and left for reconciliation rather than re-sent.
+ */
+const SENDRAW_DEFINITE_REJECT_CODES = new Set([-3, -8, -22, -25, -26]);
+
 export interface BitcoinAnchorProvider {
   /** Broadcast an OP_RETURN transaction embedding `dataHex` (≤80 bytes). */
   broadcastOpReturn(dataHex: string): Promise<AnchorBroadcastResult>;
@@ -99,41 +136,58 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
     });
     const body = (await res.body.json()) as { result?: unknown; error?: { message: string; code: number } };
     if (body.error) {
-      throw new Error(`bitcoind_rpc_error: ${body.error.code} ${body.error.message}`);
+      throw new BitcoindRpcError(body.error.code, body.error.message);
     }
     return body.result;
   }
 
   async broadcastOpReturn(dataHex: string): Promise<AnchorBroadcastResult> {
     if (dataHex.length > 160) {
-      throw new Error("op_return_data_too_large: max 80 bytes (160 hex chars)");
+      throw new AnchorBroadcastRejectedError("op_return_data_too_large: max 80 bytes (160 hex chars)");
     }
-    // #46: let the wallet do coin selection + change (fundrawtransaction) instead of
-    // spending utxos[0]; fee = max(estimatesmartfee, floor) sat/vB, capped in absolute sats.
-    const rawTx0 = (await this.rpc("createrawtransaction", [[], [{ data: dataHex }]])) as string;
-    const est = ((await this.rpc("estimatesmartfee", [6])) as { feerate?: number }).feerate;
-    const feeRateSatVb = anchorFeeRateSatVb(est);
-    const funded = (await this.rpc("fundrawtransaction", [
-      rawTx0,
-      { fee_rate: feeRateSatVb, replaceable: true }
-    ])) as { hex: string; fee: number; changepos: number };
-    const feeSats = Math.round(funded.fee * 1e8);
-    const maxFeeSats = anchorMaxFeeSats();
-    if (feeSats > maxFeeSats) {
-      throw new Error(`bitcoind_anchor_fee_too_high: ${feeSats} > ${maxFeeSats} sats`);
+    // #158: everything up to (and excluding) sendrawtransaction cannot have relayed
+    // anything, so any failure here is a definite rejection and safe to retry.
+    let signedHex: string;
+    try {
+      // #46: let the wallet do coin selection + change (fundrawtransaction) instead of
+      // spending utxos[0]; fee = max(estimatesmartfee, floor) sat/vB, capped in absolute sats.
+      const rawTx0 = (await this.rpc("createrawtransaction", [[], [{ data: dataHex }]])) as string;
+      const est = ((await this.rpc("estimatesmartfee", [6])) as { feerate?: number }).feerate;
+      const feeRateSatVb = anchorFeeRateSatVb(est);
+      const funded = (await this.rpc("fundrawtransaction", [
+        rawTx0,
+        { fee_rate: feeRateSatVb, replaceable: true }
+      ])) as { hex: string; fee: number; changepos: number };
+      const feeSats = Math.round(funded.fee * 1e8);
+      const maxFeeSats = anchorMaxFeeSats();
+      if (feeSats > maxFeeSats) {
+        throw new Error(`bitcoind_anchor_fee_too_high: ${feeSats} > ${maxFeeSats} sats`);
+      }
+      // 2. Sign the raw transaction
+      const signed = (await this.rpc("signrawtransactionwithwallet", [funded.hex])) as {
+        hex: string;
+        complete: boolean;
+      };
+      if (!signed.complete) {
+        throw new Error("bitcoind_signing_incomplete");
+      }
+      signedHex = signed.hex;
+    } catch (err) {
+      if (isAnchorBroadcastRejected(err)) throw err;
+      throw new AnchorBroadcastRejectedError(err instanceof Error ? err.message : String(err), err);
     }
-    const rawTx = funded.hex;
-    // 2. Sign the raw transaction
-    const signed = (await this.rpc("signrawtransactionwithwallet", [rawTx])) as {
-      hex: string;
-      complete: boolean;
-    };
-    if (!signed.complete) {
-      throw new Error("bitcoind_signing_incomplete");
+    // 3. Broadcast. Only a node-side verify/reject answer is a definite "not sent";
+    // a transport failure here is ambiguous (the node may have relayed the tx).
+    let txid: string;
+    try {
+      txid = (await this.rpc("sendrawtransaction", [signedHex])) as string;
+    } catch (err) {
+      if (err instanceof BitcoindRpcError && SENDRAW_DEFINITE_REJECT_CODES.has(err.code)) {
+        throw new AnchorBroadcastRejectedError(err.message, err);
+      }
+      throw err;
     }
-    // 3. Broadcast
-    const txid = (await this.rpc("sendrawtransaction", [signed.hex])) as string;
-    return { txid, rawHex: signed.hex };
+    return { txid, rawHex: signedHex };
   }
 
   /**
@@ -378,19 +432,34 @@ export class AnchorProxyClientProvider implements BitcoinAnchorProvider {
     });
     const json = (await res.body.json()) as Record<string, unknown>;
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw new Error(`anchor_proxy_error: ${res.statusCode} ${json.error ?? JSON.stringify(json)}`);
+      const err = new Error(`anchor_proxy_error: ${res.statusCode} ${json.error ?? JSON.stringify(json)}`) as Error & {
+        statusCode?: number;
+        rejectedBeforeSend?: boolean;
+      };
+      err.statusCode = res.statusCode;
+      // #158: the proxy says `rejected: true` only when its node never accepted the tx.
+      err.rejectedBeforeSend = json.rejected === true;
+      throw err;
     }
     return json;
   }
 
   async broadcastOpReturn(dataHex: string): Promise<AnchorBroadcastResult> {
     if (dataHex.length > 160) {
-      throw new Error("op_return_data_too_large: max 80 bytes (160 hex chars)");
+      throw new AnchorBroadcastRejectedError("op_return_data_too_large: max 80 bytes (160 hex chars)");
     }
-    const result = (await this.proxyRequest("/anchor/broadcast", "POST", { dataHex })) as {
-      ok: boolean;
-      txid: string;
-    };
+    let result: { ok: boolean; txid: string };
+    try {
+      result = (await this.proxyRequest("/anchor/broadcast", "POST", { dataHex })) as { ok: boolean; txid: string };
+    } catch (err) {
+      const e = err as Error & { statusCode?: number; rejectedBeforeSend?: boolean };
+      // 400 (validation) and 429 (rate limit) are answered before the proxy talks to
+      // the node; an explicit `rejected: true` means the node refused the tx.
+      if (e.statusCode === 400 || e.statusCode === 429 || e.rejectedBeforeSend === true) {
+        throw new AnchorBroadcastRejectedError(e.message, err);
+      }
+      throw err;
+    }
     return { txid: result.txid };
   }
 

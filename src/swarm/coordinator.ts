@@ -77,7 +77,7 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, creditEngine, grantCredits, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
@@ -1818,7 +1818,13 @@ const resultSchema = z.object({
 });
 
 app.post("/register", async (req, reply) => {
-  const body = registerSchema.parse(req.body);
+  const parsedRegister = registerSchema.safeParse(req.body);
+  if (!parsedRegister.success) {
+    // A malformed registration is the agent's fault, not a server error: 400 with the
+    // issues so the agent logs something actionable instead of retrying a 500 forever.
+    return reply.code(400).send({ error: "invalid_registration", issues: parsedRegister.error.issues });
+  }
+  const body = parsedRegister.data;
   const now = Date.now();
   const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
   const activation = await validatePortalNode({
@@ -1944,7 +1950,11 @@ app.post("/heartbeat", async (req, reply) => {
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
-  const body = heartbeatSchema.parse(req.body);
+  const parsedHeartbeat = heartbeatSchema.safeParse(req.body);
+  if (!parsedHeartbeat.success) {
+    return reply.code(400).send({ error: "invalid_heartbeat", issues: parsedHeartbeat.error.issues });
+  }
+  const body = parsedHeartbeat.data;
   if (verified && verified.agentId !== body.agentId) {
     return reply.code(401).send({ error: "agent_id_mismatch" });
   }
@@ -2599,15 +2609,41 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
       )
     );
   }
-  const billing = taskBilling.get(result.taskId);
-  if (billing && !billing.refunded) {
-    billing.refunded = true;
-    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
-  }
+  const refunded = await refundTaskSubmit(result.taskId);
   app.log.warn(
-    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
+    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded },
     "task_failed_max_attempts"
   );
+}
+
+/**
+ * #160: refund what /submit charged, exactly once, even if the credit store fails.
+ * The tx id is derived from the task id, so a retry after a thrown grant dedupes on
+ * the store's primary key instead of paying twice; `refunded` is only set after the
+ * grant succeeded, and the entry is pruned once settled.
+ */
+const REFUND_RETRY_DELAYS_MS = [250, 1_000, 4_000];
+async function refundTaskSubmit(taskId: string): Promise<boolean> {
+  const billing = taskBilling.get(taskId);
+  if (!billing) return false;
+  if (billing.refunded) return true;
+  const txId = refundTxId(taskId);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await grantCreditsIdempotent(billing.accountId, billing.credits, `task_submit_refund:${taskId}`, txId);
+      billing.refunded = true;
+      taskBilling.delete(taskId);
+      return true;
+    } catch (err) {
+      if (attempt >= REFUND_RETRY_DELAYS_MS.length) {
+        // Left in taskBilling with refunded=false so a later failure event or an
+        // operator replay (same deterministic tx id) can complete it.
+        app.log.error({ err, taskId, accountId: billing.accountId, txId }, "task_submit_refund_failed");
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, REFUND_RETRY_DELAYS_MS[attempt]));
+    }
+  }
 }
 
 app.post("/result", async (req, reply) => {
@@ -2761,6 +2797,31 @@ app.post("/result", async (req, reply) => {
 });
 
 app.get("/status", async () => queue.status());
+
+/**
+ * Requester-side result lookup for a submitted subtask (used by the IDE /run/swarm
+ * route, which polls after POST /submit). Mesh-token protected by the global hook.
+ * 404 while the subtask is still queued/running or when the ids don't match.
+ */
+app.get("/tasks/:taskId/subtasks/:subtaskId/result", async (req, reply) => {
+  const { taskId, subtaskId } = req.params as { taskId: string; subtaskId: string };
+  const result = queue.getResult(subtaskId);
+  if (!result || result.taskId !== taskId) {
+    return reply.code(404).send({ error: "result_not_ready", taskId, subtaskId });
+  }
+  const billing = taskBilling.get(taskId);
+  return reply.send({
+    taskId: result.taskId,
+    subtaskId: result.subtaskId,
+    ok: result.ok,
+    output: result.output,
+    error: result.error,
+    durationMs: result.durationMs,
+    // What /submit charged the submitter (0 once refunded or for anonymous tasks).
+    creditsSpent: billing && !billing.refunded ? billing.credits : 0
+  });
+});
+
 app.get("/health/runtime", async () => {
   const status = queue.status();
   const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";

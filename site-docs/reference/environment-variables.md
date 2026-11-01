@@ -113,6 +113,8 @@ npm run build:ble-proxy
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_CONCURRENT_TASKS` | `1` | Parallel task limit per agent. Increase gradually only on machines with headroom. |
+| `SANDBOX_MODE` | `docker` (swarm-only) / `none` | `docker`, `none` or `vm`. Any other value (the old docs listed `process`) is treated as `none` with a warning: the node registers but pulls no swarm tasks. |
+| `AGENT_REGISTER_REFRESH_MS` | `240000` | How often a connected worker re-sends `/register` to refresh its capabilities. Clamped to >= 60000: the coordinator blacklists an agent that registers 10 times in 10 minutes (BHV008). |
 | `PEER_OFFER_COOLDOWN_MS` | `20000` | Cooldown between peer-direct offers while idle (ms). Lower = more aggressive. |
 | `DOCKER_PROBE_TIMEOUT_MS` | `3000` | Timeout for the `docker info` availability probe; a hung daemon counts as unavailable. Result cached 30 s. |
 
@@ -142,6 +144,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `IDE_ALLOWED_ORIGINS` | *(Tauri origins)* | Extra browser origins allowed; any other web `Origin` gets 403. |
 | `IDE_SHELL_ALLOW` | `npm,npx,node,python3,…` | Comma-separated binaries `run_shell` may run. |
 | `IDE_SHELL_AUTO_APPROVE` | unset | `1` skips the approval prompt for allowlisted shell commands (local opt-in). |
+| `IDE_SWARM_SNAPSHOT_REF` | *(active project's git HEAD)* | Frozen snapshot sent with `/run/swarm` submissions (40-hex commit or `https://` tarball). Without a git project and this unset, `/run/swarm` fails before anything is charged. |
 
 ## iOS power telemetry (reported by iOS agents)
 

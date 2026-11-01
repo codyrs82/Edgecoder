@@ -21,6 +21,10 @@ primary_region = "cdg"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
   OLLAMA_MODEL = "qwen2.5:7b"
+  # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
+  # check (SANDBOX_MODE=docker) and would just log errors. Seeds are coordinator + Ollama
+  # chat only; compute comes from enrolled agents. Same setting as fly.seed-node.toml.
+  DISABLE_SELF_AGENT = "1"
 
 [http_service]
   internal_port = 4301
@@ -38,6 +42,15 @@ primary_region = "cdg"
 [mounts]
   source = "ollama_data_eu"
   destination = "/data/ollama" # #9: OLLAMA_MODELS; volume must be owned by uid 1000 (node)
+
+[checks]
+  [checks.seed_health]
+    type = "http"
+    port = 4301
+    path = "/health/runtime"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "15s"
 
 [[vm]]
   memory = "8192mb"

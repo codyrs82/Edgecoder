@@ -3,7 +3,7 @@
 
 import Fastify from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
+import { BitcoindRpcProvider, isAnchorBroadcastRejected } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
 
@@ -89,8 +89,11 @@ app.post("/anchor/broadcast", async (req, reply) => {
     return { ok: true, txid: result.txid };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    app.log.error({ error: message }, "anchor_proxy_broadcast_failed");
-    return reply.code(502).send({ error: "broadcast_failed", message });
+    // #158: tell the caller whether the node definitely did not accept the tx
+    // (safe to retry) or the outcome is unknown (must be reconciled, never re-sent).
+    const rejected = isAnchorBroadcastRejected(error);
+    app.log.error({ error: message, rejected }, "anchor_proxy_broadcast_failed");
+    return reply.code(rejected ? 422 : 502).send({ error: "broadcast_failed", message, rejected });
   }
 });
 

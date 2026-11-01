@@ -71,6 +71,16 @@ export class CreditEngine {
     return this.addTx(accountId, { type: "spend", credits: debit, reason });
   }
 
+  /** #160: record `tx` unless a transaction with the same txId already exists (returns the existing one). */
+  addIfAbsent(tx: CreditTransaction): CreditTransaction {
+    const existing = (this.txByAccount.get(tx.accountId) ?? []).find((t) => t.txId === tx.txId);
+    if (existing) return existing;
+    const list = this.txByAccount.get(tx.accountId) ?? [];
+    list.push({ ...tx });
+    this.txByAccount.set(tx.accountId, list);
+    return tx;
+  }
+
   private addTx(
     accountId: string,
     input: {
