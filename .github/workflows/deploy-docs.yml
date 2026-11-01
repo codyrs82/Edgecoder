@@ -8,6 +8,8 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/deploy-docs.yml'
+  # Manual publish (e.g. from a feature branch when the docs host changes).
+  workflow_dispatch: {}
   # #34: build (not deploy) on PRs so a broken docs build shows up before main.
   pull_request:
     paths:
@@ -38,8 +40,9 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run docs:build
         env:
-          # Project Pages site: https://codyrs82.github.io/Edgecoder/
-          DOCS_BASE: /Edgecoder/
+          # Served at the custom domain https://docs.edgecoder.io (site-docs/public/CNAME), so the
+          # site root is "/". The project URL codyrs82.github.io/Edgecoder/ redirects there.
+          DOCS_BASE: /
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:
