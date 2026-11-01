@@ -29,6 +29,16 @@ export class PullTracker {
     };
   }
 
+  /**
+   * #119 review: claim the tracker synchronously (before any await) so two concurrent
+   * POST /model/pull requests can't both start a pull. False while a pull is running.
+   */
+  tryStart(model: string): boolean {
+    if (this.current && this.current.status !== "error") return false;
+    this.startPull(model);
+    return true;
+  }
+
   updateProgress(status: string, completed: number, total: number): void {
     if (!this.current) return;
     this.current.status = status;
