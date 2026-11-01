@@ -174,7 +174,13 @@ export class SwarmQueue {
   }
 
   /** `accountId` = the agent's reward account (defaults to agentId), for #50 replica exclusion. */
-  claim(agentId: string, agentActiveModel?: string, accountId: string = agentId): Subtask | undefined {
+  claim(
+    agentId: string,
+    agentActiveModel?: string,
+    accountId: string = agentId,
+    /** Market gate: return false when the agent's ask is above the task's bid or the class doesn't match. */
+    canTake?: (subtask: Subtask) => boolean
+  ): Subtask | undefined {
     const now = Date.now();
     this.expireLeases(now);
     const unclaimed = this.tasks.filter(
@@ -182,7 +188,8 @@ export class SwarmQueue {
         !task.claimedBy &&
         (!task.claimableAfterMs || now >= task.claimableAfterMs) &&
         !task.excludeAgents?.includes(agentId) &&
-        !task.excludeAccounts?.includes(accountId)
+        !task.excludeAccounts?.includes(accountId) &&
+        (!canTake || canTake(task.subtask))
     );
     if (unclaimed.length === 0) return undefined;
 

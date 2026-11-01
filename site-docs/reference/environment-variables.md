@@ -217,6 +217,16 @@ locks it into every payment intent. See `docs/economy-math.md` §2.
 | `BTC_USD_FALLBACK` | unset | Used only when there is no previous epoch and every source failed (offline dev). |
 | `RATE_HASHPRICE_ENABLED` | `true` | Also compute hashprice (sats/TH/day) from mempool.space chain data as an informational signal on the epoch. Never enters the CPU price. |
 | `RATE_MEMPOOL_BASE_URL` | `https://mempool.space` | Self-hosted mempool instance for the hashprice signal and BTC/USD. |
+| `COMPUTE_REFERENCE_USD_PER_HOUR_JSON` | unset | Per-class USD/hour overrides, e.g. `{"gpu.c24":0.4,"gpu.dc80":2.0}`. Classes: `cpu.std`, `cpu.hi`, `apple.m`, `apple.m.hi`, `gpu.c8`, `gpu.c16`, `gpu.c24`, `gpu.dc40`, `gpu.dc80`. |
+
+### Compute market (order book)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MARKET_DEFAULT_BID_PREMIUM_BPS` | `1000` | A task without `maxBidMsatPerCredit` bids the class reference × (1 + 10 %), so default tasks clear against reference-tracking asks. |
+| `NETWORK_FEE_BPS` | `500` | Share of every accrual moved to the network fee pool (`network:fee_pool`) that pays infrastructure hosts. |
+| `AGENT_ASK_MSAT_PER_CREDIT` | unset (agent) | Minimum price the agent works for, msat per credit. Unset tracks the coordinator's class reference and moves with the daily oracle. |
+| `AGENT_GPU_VENDOR` / `AGENT_GPU_MODEL` / `AGENT_GPU_VRAM_GB` / `AGENT_GPU_DATACENTER` | unset (agent) | GPU details for the hardware profile (CPU cores, RAM, arch and platform are probed). Determines the compute class. |
 
 ## Network and infrastructure
 

@@ -101,6 +101,10 @@ export interface TaskProjectMeta {
   tenantId?: string;
   resourceClass: ResourceClass;
   priority: number;
+  /** Compute class the requester wants ("any" = whatever is cheapest and matches resourceClass). */
+  computeClass?: string;
+  /** Requester's maximum price in msat per credit; an agent may claim only if its ask is at or below it. */
+  maxBidMsatPerCredit?: number;
 }
 
 export interface MeshPeerIdentity {

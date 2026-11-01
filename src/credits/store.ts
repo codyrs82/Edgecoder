@@ -4,36 +4,69 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
-import { contributionCredits, LoadSnapshot } from "./pricing.js";
+import { contributionCredits, splitNetworkFee, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
 
 export const creditEngine = new CreditEngine();
 
+/** Account that collects the network fee on every accrual (and the purchase fee); distributed to infrastructure hosts. */
+export const NETWORK_FEE_POOL_ACCOUNT = "network:fee_pool";
+
+export interface AccrualValuation {
+  /** Sats value of one credit at accrual time (market trade price or oracle class rate). Locked on the earn row. */
+  msatPerCredit: number;
+  /** Network fee in basis points taken from the gross credits and moved to the fee pool. */
+  networkFeeBps: number;
+}
+
 /**
  * Accrue credits for a contribution report. Idempotent on `report.reportId`
  * (#44): returns null when the report was already recorded.
+ *
+ * With a `valuation` the worker row carries its sats value (msat) locked at today's rate and
+ * the network fee share is split off into NETWORK_FEE_POOL_ACCOUNT in the same transaction.
+ * The returned row is the worker's (net) row.
  */
 export async function accrueCredits(
   report: ComputeContributionReport,
-  load: LoadSnapshot
+  load: LoadSnapshot,
+  valuation?: AccrualValuation
 ): Promise<CreditTransaction | null> {
+  const grossCredits = contributionCredits(report, load); // #38: single formula
+  const split = valuation ? splitNetworkFee(grossCredits, valuation.networkFeeBps) : { worker: grossCredits, fee: 0 };
+  const msatOf = (credits: number) => (valuation ? Math.round(credits * valuation.msatPerCredit) : undefined);
+  const now = Date.now();
+  const tx: CreditTransaction = {
+    txId: randomUUID(),
+    accountId: report.agentId,
+    type: "earn",
+    credits: split.worker,
+    reason: "compute_contribution",
+    relatedTaskId: report.taskId,
+    timestampMs: now,
+    ...(valuation ? { msat: msatOf(split.worker) } : {})
+  };
+  const feeTx: CreditTransaction | undefined =
+    split.fee > 0
+      ? {
+          txId: randomUUID(),
+          accountId: NETWORK_FEE_POOL_ACCOUNT,
+          type: "earn",
+          credits: split.fee,
+          reason: `network_fee:${report.taskId}`,
+          relatedTaskId: report.taskId,
+          timestampMs: now,
+          msat: msatOf(split.fee)
+        }
+      : undefined;
+
   if (pgStore) {
     const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
     const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const credits = contributionCredits(report, load); // #38: single formula
     const resourceWeight = report.resourceClass === "gpu" ? 2 : 1;
     const reliabilityScore = report.success ? 1 : 0.75;
     const weightedContribution = Number((computeSeconds * resourceWeight * qualityMultiplier * reliabilityScore).toFixed(6));
-    const tx: CreditTransaction = {
-      txId: randomUUID(),
-      accountId: report.agentId,
-      type: "earn",
-      credits,
-      reason: "compute_contribution",
-      relatedTaskId: report.taskId,
-      timestampMs: Date.now()
-    };
-    // Report + credit atomically; false => report id already recorded (idempotent re-post).
+    // Report + credit (+ fee) atomically; false => report id already recorded (idempotent re-post).
     const inserted = await pgStore.persistContributionWithCredit(
       {
         report,
@@ -42,16 +75,34 @@ export async function accrueCredits(
         reliabilityScore,
         weightedContribution
       },
-      tx
+      tx,
+      feeTx
     );
     return inserted ? tx : null;
   }
   try {
-    return creditEngine.accrue(report, load);
+    const recorded = creditEngine.accrue(report, load, valuation ? { msatPerCredit: valuation.msatPerCredit } : undefined);
+    if (recorded.credits > 0 && feeTx) {
+      // In-memory: the engine wrote the gross row; net it down and add the fee row.
+      const gross = creditEngine.history(report.agentId).find((t) => t.txId === recorded.txId);
+      if (gross) {
+        gross.credits = split.worker;
+        gross.msat = msatOf(split.worker);
+      }
+      creditEngine.record(feeTx);
+      return { ...tx, txId: recorded.txId };
+    }
+    return recorded;
   } catch (error) {
     if (error instanceof Error && error.message === "duplicate_contribution_report") return null;
     throw error;
   }
+}
+
+/** Total sats (msat) an account has earned, as locked on its earn rows. */
+export async function earnedMsat(accountId: string): Promise<number> {
+  if (pgStore) return pgStore.earnedMsat(accountId);
+  return creditEngine.earnedMsat(accountId);
 }
 
 export async function rewardAccountForAgent(agentId: string): Promise<string> {

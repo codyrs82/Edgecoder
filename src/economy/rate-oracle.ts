@@ -3,6 +3,13 @@
 
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
+import {
+  COMPUTE_CLASS_IDS,
+  computeClassesFromEnv,
+  satsPerCreditForClass,
+  type ComputeClassId,
+  type ComputeClassSpec
+} from "./compute-classes.js";
 
 /**
  * Daily rate oracle: what a CPU-hour (and GPU-hour) of swarm compute costs in sats.
@@ -33,6 +40,8 @@ export interface JsonNumberSource {
   path: string;
   /** For compute sources: which resource class the number prices (USD per hour). */
   resourceClass?: "cpu" | "gpu";
+  /** For compute sources: the exact compute class this USD/hour prices (overrides that class's reference). */
+  computeClass?: ComputeClassId;
 }
 
 export const DEFAULT_BTC_USD_SOURCES: JsonNumberSource[] = [
@@ -65,6 +74,18 @@ export interface RateOracleConfig {
   /** Compute and report hashprice from mempool.space (informational). */
   hashpriceEnabled: boolean;
   mempoolBaseUrl: string;
+  /** Per-class reference USD/hour and credits/second (src/economy/compute-classes.ts). */
+  computeClasses: Record<ComputeClassId, ComputeClassSpec>;
+}
+
+export interface ClassRate {
+  computeClass: ComputeClassId;
+  usdPerHour: number;
+  satsPerUnitHour: number;
+  satsPerCredit: number;
+  msatPerCredit: number;
+  /** "reference" (configured) or the name of the live source that set usdPerHour. */
+  source: string;
 }
 
 export const DEFAULT_RATE_ORACLE_CONFIG: RateOracleConfig = {
@@ -81,7 +102,8 @@ export const DEFAULT_RATE_ORACLE_CONFIG: RateOracleConfig = {
   minSources: 2,
   staleAfterMs: 48 * 60 * 60 * 1000,
   hashpriceEnabled: true,
-  mempoolBaseUrl: "https://mempool.space"
+  mempoolBaseUrl: "https://mempool.space",
+  computeClasses: computeClassesFromEnv({})
 };
 
 export interface SourceQuote {
@@ -123,6 +145,8 @@ export interface RateEpoch {
   /** "ok": fresh market data. "carried": sources failed, previous epoch re-stamped. "fallback": static BTC_USD_FALLBACK. */
   status: "ok" | "carried" | "fallback";
   hashprice?: HashpriceSignal;
+  /** Sats per credit for every compute class (CPU tiers, Apple silicon, GPU VRAM tiers). */
+  classRates: Partial<Record<ComputeClassId, ClassRate>>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,6 +250,26 @@ export function computeRateEpoch(
   const gpu = status === "ok" ? clampMove(rawGpu, previous?.satsPerGpuHour, cfg.maxDailyMovePct) : { value: rawGpu, clamped: false };
   const satsPerCredit = cpu.value / 3600;
 
+  // Per-class rates: a live source tagged with a computeClass overrides that class's reference.
+  const classRates: Partial<Record<ComputeClassId, ClassRate>> = {};
+  const classMoveFactor = previous && status === "ok" && rawCpu > 0 ? cpu.value / rawCpu : 1; // same clamp ratio as cpu.std
+  for (const id of COMPUTE_CLASS_IDS) {
+    const spec = cfg.computeClasses[id];
+    if (!spec) continue;
+    const live = inputs.computeQuotes.filter((q) => (q as SourceQuote & { computeClass?: string }).computeClass === id);
+    const liveValue = agreeingMedian(live, cfg.maxSourceSpreadPct * 4, 1).value;
+    const usdPerHour = liveValue ?? (id === "cpu.std" ? usdPerCpuHour : id === "gpu.c24" ? usdPerGpuHour : spec.usdPerHourReference);
+    const perCredit = Number((satsPerCreditForClass(spec, usdPerHour, btcUsd, cfg.networkMarkupBps) * classMoveFactor).toFixed(9));
+    classRates[id] = {
+      computeClass: id,
+      usdPerHour,
+      satsPerUnitHour: Number((perCredit * spec.creditsPerSecond * 3600).toFixed(3)),
+      satsPerCredit: perCredit,
+      msatPerCredit: Math.max(1, Math.round(perCredit * 1000)),
+      source: liveValue !== undefined ? (live.find((q) => q.ok)?.name ?? "live") : "reference"
+    };
+  }
+
   return {
     epochId: randomUUID(),
     createdAtMs: nowMs,
@@ -242,7 +286,8 @@ export function computeRateEpoch(
     msatPerCredit: Math.max(1, Math.round(satsPerCredit * 1000)),
     ...(cpu.clamped || gpu.clamped ? { clamped: { unclampedSatsPerCpuHour: rawCpu, unclampedSatsPerGpuHour: rawGpu } } : {}),
     status,
-    ...(inputs.hashprice ? { hashprice: inputs.hashprice } : {})
+    ...(inputs.hashprice ? { hashprice: inputs.hashprice } : {}),
+    classRates
   };
 }
 
@@ -304,7 +349,13 @@ export async function fetchQuotes(sources: JsonNumberSource[], fetcher: JsonFetc
         const body = await fetcher(src.url);
         const value = readNumberAtPath(body, src.path);
         if (value === undefined) return { name: src.name, ok: false, error: `no number at ${src.path}` };
-        return { name: src.name, ok: true, value, ...(src.resourceClass ? { resourceClass: src.resourceClass } : {}) } as SourceQuote;
+        return {
+          name: src.name,
+          ok: true,
+          value,
+          ...(src.resourceClass ? { resourceClass: src.resourceClass } : {}),
+          ...(src.computeClass ? { computeClass: src.computeClass } : {})
+        } as SourceQuote;
       } catch (err) {
         return { name: src.name, ok: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -370,7 +421,11 @@ export function rateOracleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): R
       if (!s || typeof s.name !== "string" || typeof s.url !== "string" || typeof s.path !== "string" || !/^https:\/\//.test(s.url)) {
         throw new Error(`[rate-oracle] RATE_COMPUTE_SOURCES_JSON[${i}] needs name, https url and path`);
       }
-      return { name: s.name, url: s.url, path: s.path, resourceClass: s.resourceClass === "gpu" ? "gpu" : "cpu" };
+      const cc = (s as { computeClass?: string }).computeClass;
+      if (cc !== undefined && !(COMPUTE_CLASS_IDS as string[]).includes(cc)) {
+        throw new Error(`[rate-oracle] RATE_COMPUTE_SOURCES_JSON[${i}].computeClass must be one of ${COMPUTE_CLASS_IDS.join(", ")}`);
+      }
+      return { name: s.name, url: s.url, path: s.path, resourceClass: s.resourceClass === "gpu" ? "gpu" : "cpu", ...(cc ? { computeClass: cc as ComputeClassId } : {}) };
     });
   }
   let btcUsdSources = DEFAULT_BTC_USD_SOURCES;
@@ -397,6 +452,7 @@ export function rateOracleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): R
     staleAfterMs: num("RATE_STALE_AFTER_MS", DEFAULT_RATE_ORACLE_CONFIG.staleAfterMs, 60_000),
     btcUsdFallback: fallback,
     hashpriceEnabled: (env.RATE_HASHPRICE_ENABLED ?? "true").trim().toLowerCase() !== "false",
-    mempoolBaseUrl: env.RATE_MEMPOOL_BASE_URL?.trim() || DEFAULT_RATE_ORACLE_CONFIG.mempoolBaseUrl
+    mempoolBaseUrl: env.RATE_MEMPOOL_BASE_URL?.trim() || DEFAULT_RATE_ORACLE_CONFIG.mempoolBaseUrl,
+    computeClasses: computeClassesFromEnv(env)
   };
 }

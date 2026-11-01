@@ -96,6 +96,36 @@ signal for operators, but it never enters the compute price.
 Open point: the quote and every intent still use the **CPU** rate even when the buyer intends GPU
 work; a per-resource-class purchase is a follow-up.
 
+### Compute classes, model size, and the order book
+
+A credit is a measured second, but seconds are priced by what ran them. Three factors, all
+dynamic:
+
+1. **Compute class** (`src/economy/compute-classes.ts`). Agents report a hardware profile at
+   registration (cores, RAM, arch, platform, GPU vendor/model/VRAM) and are classified into
+   `cpu.std`, `cpu.hi`, `apple.m`, `apple.m.hi`, `gpu.c8`, `gpu.c16`, `gpu.c24`, `gpu.dc40` or
+   `gpu.dc80`. Each class has a reference USD/hour (0.02 for a commodity CPU up to 1.80 for an
+   H100-class GPU) and a credits-per-second rate (1 to 10). The oracle converts every class to
+   sats per credit daily so that one unit-hour of the class is worth its market price:
+   `satsPerCredit = usdPerHour / btcUsd × 1e8 × (1 + markup) / (creditsPerSecond × 3600)`.
+   Live sources tagged with a `computeClass` override that class's reference.
+2. **Model profile** (`src/credits/pricing.ts`). The per-second rate is multiplied by the size of
+   the model that served the task (≤3B 1.0, ≤10B 1.5, ≤35B 2.5, >35B 4.0) and the sats value by
+   its modality (vision +25 %, thinking +10 %), from the catalog's capability labels.
+3. **Market** (`src/economy/order-book.ts`). Every agent posts an ask in msat per credit on its
+   class (default: the oracle reference, which it then tracks; `AGENT_ASK_MSAT_PER_CREDIT` fixes
+   it). Every task carries a bid (`maxBidMsatPerCredit`, default reference × 1.10). At claim time
+   an agent may take a task only if its ask ≤ the bid and the class matches (or the bid is
+   `any`); the trade prices at the ask and that price is locked on the earn row. The best ask,
+   best bid, spread, mid and the volume-weighted price of the last hour's trades per class are
+   on `GET /economy/market/book`; class definitions with current rates on
+   `GET /economy/market/classes`.
+
+Repricing on a market swing therefore happens three ways: the daily oracle moves every
+tracking ask and every default bid; the scarcity multiplier moves quotes with queue depth; and
+agents with fixed asks either become the cheapest or stop matching, which is the signal that
+makes them reprice.
+
 ## 3. Contribute-first policy (who may submit)
 
 `contributionPolicyDecision` in `src/swarm/coordinator-utils.ts`, called from `/submit`:
@@ -179,7 +209,7 @@ Each ledger checkpoint is an OP_RETURN transaction. Guards (`src/economy/anchori
 | Buy credits with Lightning (LND) | Working against a node; fail-closed settlement; not deployable on Fly until a node exists (`ECONOMY_PAYMENTS_ENABLED=false`) |
 | Buy credits with Lightning (CLN) | Hardened in this change; needs a regtest run before trusting it with money |
 | Contribute-first gate for buyers | Fixed in this change |
-| Price discovery | Market-anchored via the daily rate oracle (§2); live verification needs the exchange hosts reachable |
+| Price discovery | Daily oracle (verified live: 4 exchanges agree) × compute class × model size, with a per-class ask/bid order book matched at claim time |
 | Token issuance | Records only; tokens redeem for nothing |
 | Sats payouts to contributors | Records only; no on-chain or Lightning sends |
 | Ledger anchoring | Working with bitcoind / anchor proxy; mock in dev |

@@ -398,6 +398,8 @@ CREATE TABLE IF NOT EXISTS ble_synced_tx (
 );
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
+-- Sats value locked on credit rows (earn: payable msat at accrual, at the market/oracle rate of that moment).
+ALTER TABLE credit_transactions ADD COLUMN IF NOT EXISTS msat BIGINT;
 -- Unique indexes are created only when no duplicate rows exist, so migrate() can never
 -- fail on legacy data; otherwise a WARNING is logged and the duplicates must be cleaned up.
 DO $$
@@ -783,11 +785,17 @@ export class PostgresStore {
   async persistCreditTransaction(tx: CreditTransaction): Promise<void> {
     await this.pool.query(
       `INSERT INTO credit_transactions (
-         tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (tx_id) DO NOTHING`,
-      [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
+      [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs, tx.msat ?? null]
     );
+  }
+
+  /** Sats (msat) earned by an account, as locked on its earn rows. */
+  async earnedMsat(accountId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [accountId]);
+    return Number(r.rows[0]?.msat ?? 0);
   }
 
   /**
@@ -967,7 +975,8 @@ export class PostgresStore {
       reliabilityScore: number;
       weightedContribution: number;
     },
-    tx: CreditTransaction
+    tx: CreditTransaction,
+    feeTx?: CreditTransaction
   ): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -997,12 +1006,15 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return false;
       }
-      await client.query(
-        `INSERT INTO credit_transactions (
-           tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
-      );
+      for (const row of [tx, ...(feeTx ? [feeTx] : [])]) {
+        if (row.credits <= 0) continue;
+        await client.query(
+          `INSERT INTO credit_transactions (
+             tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [row.txId, row.accountId, row.type, row.credits, row.reason, row.relatedTaskId ?? null, row.timestampMs, row.msat ?? null]
+        );
+      }
       await client.query("COMMIT");
       return true;
     } catch (error) {

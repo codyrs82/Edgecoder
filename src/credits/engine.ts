@@ -19,7 +19,12 @@ export class CreditEngine {
     return [...(this.txByAccount.get(accountId) ?? [])];
   }
 
-  accrue(report: ComputeContributionReport, load: LoadSnapshot): CreditTransaction {
+  /** Sats value (msat) of everything this account earned, as locked at accrual time. */
+  earnedMsat(accountId: string): number {
+    return (this.txByAccount.get(accountId) ?? []).reduce((sum, tx) => sum + (tx.type === "earn" ? Math.floor(tx.msat ?? 0) : 0), 0);
+  }
+
+  accrue(report: ComputeContributionReport, load: LoadSnapshot, valuation?: { msatPerCredit: number }): CreditTransaction {
     if (this.seenReports.has(report.reportId)) {
       throw new Error("duplicate_contribution_report");
     }
@@ -41,7 +46,8 @@ export class CreditEngine {
       type: "earn",
       credits,
       reason: "compute_contribution",
-      relatedTaskId: report.taskId
+      relatedTaskId: report.taskId,
+      ...(valuation ? { msat: Math.round(credits * valuation.msatPerCredit) } : {})
     });
   }
 
@@ -81,6 +87,11 @@ export class CreditEngine {
     return tx;
   }
 
+  /** Append an arbitrary row (fee-pool credits, distributions); idempotent on txId. */
+  record(tx: CreditTransaction): CreditTransaction {
+    return this.addIfAbsent(tx);
+  }
+
   private addTx(
     accountId: string,
     input: {
@@ -88,6 +99,7 @@ export class CreditEngine {
       credits: number;
       reason: string;
       relatedTaskId?: string;
+      msat?: number;
     }
   ): CreditTransaction {
     const tx: CreditTransaction = {
@@ -97,7 +109,8 @@ export class CreditEngine {
       credits: input.credits,
       reason: input.reason,
       relatedTaskId: input.relatedTaskId,
-      timestampMs: Date.now()
+      timestampMs: Date.now(),
+      ...(input.msat !== undefined ? { msat: input.msat } : {})
     };
     const existing = this.txByAccount.get(accountId) ?? [];
     existing.push(tx);

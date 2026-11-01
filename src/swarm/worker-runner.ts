@@ -4,7 +4,7 @@
 import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
-import { hostname, totalmem } from "node:os";
+import { cpus, hostname, totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
@@ -54,6 +54,39 @@ const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
+/**
+ * Hardware profile reported at registration; the coordinator classifies it into a compute class
+ * that prices this agent's seconds. GPU details can't be probed portably, so they come from
+ * env: AGENT_GPU_VENDOR, AGENT_GPU_MODEL, AGENT_GPU_VRAM_GB, AGENT_GPU_DATACENTER=1.
+ */
+function buildHardwareProfile(): Record<string, unknown> {
+  const cpu = cpus();
+  const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
+  const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
+  return {
+    cpuCores: cpu.length,
+    cpuModel: cpu[0]?.model?.slice(0, 128),
+    ramGb: Number((totalmem() / 1024 ** 3).toFixed(1)),
+    arch: process.arch,
+    platform: process.platform,
+    ...(gpuModel || Number.isFinite(gpuVram)
+      ? {
+          gpu: {
+            vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+            model: gpuModel || undefined,
+            vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
+            datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+          }
+        }
+      : {})
+  };
+}
+const HARDWARE_PROFILE = buildHardwareProfile();
+/** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
+const ASK_MSAT_PER_CREDIT = (() => {
+  const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+})();
 const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
@@ -706,6 +739,8 @@ async function loop(): Promise<void> {
             powerTelemetry,
             publicKeyPem: keys.publicKeyPem,
             x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+            hardwareProfile: HARDWARE_PROFILE,
+            ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
             ...(binaryIntegrity ? { binaryIntegrity } : {})
           };
           const registerResponse = (await post("/register", registerBody, {

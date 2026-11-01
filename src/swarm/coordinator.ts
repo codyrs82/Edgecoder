@@ -83,6 +83,9 @@ import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
 import { isRateEpochStale, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
+import { COMPUTE_CLASS_IDS, classifyHardware, modalityMultiplier, type ComputeClassId, type HardwareProfile } from "../economy/compute-classes.js";
+import { ComputeOrderBook } from "../economy/order-book.js";
+import { catalogEntryForTag } from "../model/catalog.js";
 import {
   computeDailyPoolTokens,
   computeHourlyIssuanceAllocations,
@@ -215,6 +218,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
+/** Market price agreed at claim time per subtask (msat per credit on the agent's class). */
+const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
 const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
@@ -401,6 +406,9 @@ const agentCapabilities = new Map<
     x25519PublicKey?: string;
     sandboxMode: SandboxMode;
     lastSeenMs: number;
+    hardwareProfile?: HardwareProfile;
+    /** Derived from hardwareProfile at registration; prices the agent's seconds. */
+    computeClass: ComputeClassId;
   }
 >();
 const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
@@ -523,9 +531,26 @@ const RATE_ORACLE_ENABLED = CC.RATE_ORACLE_ENABLED;
 const rateOracleConfig = rateOracleConfigFromEnv();
 let latestRateEpoch: RateEpoch | null = null;
 
+/**
+ * Compute market: agents' asks and tasks' bids per compute class, in msat per credit. The
+ * oracle sets the reference each epoch; tracking asks follow it (see order-book.ts).
+ */
+const orderBook = new ComputeOrderBook();
+const MARKET_DEFAULT_BID_PREMIUM_BPS = CC.MARKET_DEFAULT_BID_PREMIUM_BPS;
+const NETWORK_FEE_BPS = CC.NETWORK_FEE_BPS;
+
+function syncOrderBookReference(epoch: RateEpoch | null): void {
+  if (!epoch) return;
+  for (const id of COMPUTE_CLASS_IDS) {
+    const r = epoch.classRates?.[id];
+    if (r) orderBook.setReference(id, r.msatPerCredit);
+  }
+}
+
 async function recalibrateRateEpoch(): Promise<RateEpoch> {
   const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: latestRateEpoch });
   latestRateEpoch = epoch;
+  syncOrderBookReference(epoch);
   await pgStore?.upsertRateEpoch(epoch);
   app.log.info(
     {
@@ -566,8 +591,9 @@ function quoteSatsPerCredit(resourceClass: ResourceClass = "cpu"): CreditQuote {
     dynamicLoadMultiplier(resourceClass, { cpuCapacity, gpuCapacity, queuedTasks: status.queued, activeAgents: status.agents }).toFixed(4)
   );
   if (latestRateEpoch) {
-    const perHour = resourceClass === "gpu" ? latestRateEpoch.satsPerGpuHour : latestRateEpoch.satsPerCpuHour;
-    const satsPerCredit = Number(((perHour / 3600) * loadMultiplier).toFixed(6));
+    const classRate = latestRateEpoch.classRates?.[resourceClass === "gpu" ? "gpu.c24" : "cpu.std"];
+    const perCreditBase = classRate ? classRate.satsPerCredit : (resourceClass === "gpu" ? latestRateEpoch.satsPerGpuHour : latestRateEpoch.satsPerCpuHour) / 3600;
+    const satsPerCredit = Number((perCreditBase * loadMultiplier).toFixed(6));
     return {
       satsPerCredit,
       msatPerCredit: Math.max(1, Math.round(satsPerCredit * 1000)),
@@ -1786,6 +1812,23 @@ const defaultPolicy: ExecutionPolicy = {
   allowedHours: { startHourUtc: 22, endHourUtc: 6 }
 };
 
+const hardwareProfileSchema = z.object({
+  cpuCores: z.number().int().min(1).max(4096).optional(),
+  cpuModel: z.string().max(128).optional(),
+  ramGb: z.number().min(0).max(65536).optional(),
+  arch: z.string().max(16).optional(),
+  platform: z.string().max(16).optional(),
+  gpu: z
+    .object({
+      vendor: z.string().max(32).optional(),
+      model: z.string().max(128).optional(),
+      vramGb: z.number().min(0).max(8192).optional(),
+      datacenter: z.boolean().optional()
+    })
+    .optional(),
+  benchmarkScore: z.number().min(0).optional()
+});
+
 const registerSchema = z.object({
   agentId: z.string(),
   deviceId: z.string().min(3).max(128).optional(),
@@ -1813,6 +1856,10 @@ const registerSchema = z.object({
   publicKeyPem: z.string().optional(),
   x25519PublicKey: z.string().optional(),
   sandboxMode: z.enum(["none", "docker", "vm"]).default("none"),
+  /** Hardware the agent runs on; classified into a compute class that prices its seconds. */
+  hardwareProfile: hardwareProfileSchema.optional(),
+  /** Minimum price the agent will work for (msat per credit). Omit to track the class reference. */
+  askMsatPerCredit: z.number().positive().max(1e9).optional(),
   binaryIntegrity: z
     .object({
       distHash: z.string(),
@@ -1844,7 +1891,9 @@ const heartbeatSchema = z.object({
   activeModel: z.string().optional(),
   activeModelParamSize: z.number().optional(),
   modelSwapInProgress: z.boolean().optional(),
-  sandboxMode: z.enum(["none", "docker", "vm"]).optional()
+  sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
+  /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
+  askMsatPerCredit: z.number().min(0).max(1e9).optional()
 });
 const diagnosticsSchema = z.object({
   agentId: z.string(),
@@ -1874,7 +1923,11 @@ const taskSchema = z.object({
   resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
   priority: z.number().min(0).max(100).default(50),
   requestedModel: z.string().optional(),
-  sandboxRequired: z.boolean().default(false)
+  sandboxRequired: z.boolean().default(false),
+  /** Which hardware class should run it; "any" matches by resourceClass only. */
+  computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+  /** Requester's ceiling in msat per credit. Default: class reference × (1 + MARKET_DEFAULT_BID_PREMIUM_BPS). */
+  maxBidMsatPerCredit: z.number().positive().max(1e9).optional()
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -1949,6 +2002,8 @@ app.post("/register", async (req, reply) => {
     publicKeyPem: body.publicKeyPem,
     x25519PublicKey: body.x25519PublicKey,
     sandboxMode: body.sandboxMode as SandboxMode,
+    hardwareProfile: body.hardwareProfile,
+    computeClass: classifyHardware(body.hardwareProfile),
     lastSeenMs: now
   });
   // ── Binary integrity verification ──
@@ -1983,6 +2038,8 @@ app.post("/register", async (req, reply) => {
 
   behaviorTracker.recordRegistration(body.agentId, now);
   evaluateAndEnforce(body.agentId);
+  // Market: post the agent's ask on its compute class (tracking the oracle reference unless explicit).
+  orderBook.postAsk(body.agentId, classifyHardware(body.hardwareProfile), body.askMsatPerCredit, now);
   const approvalRecord = ordering.append({
     eventType: "node_approval",
     taskId: `agent:${body.agentId}`,
@@ -2075,6 +2132,10 @@ app.post("/heartbeat", async (req, reply) => {
       existing.activeModelParamSize = body.activeModelParamSize ?? 0;
       existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
     }
+  }
+  if (body.askMsatPerCredit !== undefined) {
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) orderBook.postAsk(body.agentId, existing.computeClass, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now);
   }
   if (body.sandboxMode !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
@@ -2241,6 +2302,9 @@ app.post("/submit", async (req, reply) => {
   const hasMeshPeers = mesh.listPeers().length > 0;
   const GOSSIP_CLAIM_DELAY_MS = 3_000;
 
+  // Market: register the requester's bid for this task (default = reference × premium).
+  const marketBid = orderBook.postBid(body.taskId, body.computeClass, body.maxBidMsatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS);
+
   // Assign stable IDs before scheduling so dependsOn references resolve
   const subtasksWithIds = payload.subtasks.map((s) => ({
     ...s,
@@ -2250,7 +2314,9 @@ app.post("/submit", async (req, reply) => {
       projectId: body.projectId,
       tenantId: body.tenantId,
       resourceClass: body.resourceClass as ResourceClass,
-      priority: body.priority
+      priority: body.priority,
+      computeClass: body.computeClass,
+      maxBidMsatPerCredit: marketBid.maxMsatPerCredit
     }
   }));
 
@@ -2361,8 +2427,19 @@ app.post("/pull", async (req, reply) => {
     app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
     return reply.send(sandboxRejection);
   }
-  const task = queue.claim(body.agentId, capability?.activeModel, await rewardAccountForAgent(body.agentId));
+  const task = queue.claim(
+    body.agentId,
+    capability?.activeModel,
+    await rewardAccountForAgent(body.agentId),
+    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok
+  );
   if (task) {
+    // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
+    const match = orderBook.canMatch(body.agentId, task.taskId);
+    if (match.ok) {
+      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass });
+      orderBook.recordTrade({ taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() });
+    }
 
     // ── Power policy: small-tasks-only check ──
     if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
@@ -2478,6 +2555,15 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
   // records the credits actually accrued by the pricing formula, so balances reconcile.
   if (!r.ok) return;
+  const cap = agentCapabilities.get(r.agentId);
+  const trade = claimedTradePrice.get(r.subtaskId);
+  claimedTradePrice.delete(r.subtaskId);
+  const computeClass = trade?.computeClass ?? cap?.computeClass ?? "cpu.std";
+  const modelParamSizeB = subtask.requestedModel ? cap?.activeModelParamSize : undefined;
+  const modality = modalityMultiplier(catalogEntryForTag(cap?.activeModel ?? "")?.capabilities);
+  // Sats per credit: the market price agreed at claim (agent's ask), else the oracle's class rate.
+  const basePerCredit = trade?.msatPerCredit ?? latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
+  const valuation = basePerCredit !== undefined ? { msatPerCredit: Math.round(basePerCredit * modality), networkFeeBps: NETWORK_FEE_BPS } : undefined;
   const accrued = await accrueCredits(
     {
       reportId: resultReportId(r.subtaskId),
@@ -2489,12 +2575,14 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
       gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
       success: r.ok,
       qualityScore: r.ok ? 1.0 : 0.6,
-      timestampMs: Date.now()
+      timestampMs: Date.now(),
+      modelParamSizeB
     },
     {
       queuedTasks: queue.status().queued,
       activeAgents: queue.status().agents
-    }
+    },
+    valuation
   );
   // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
   if (accrued) {
@@ -2508,6 +2596,11 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         sourceAgentId: r.agentId,
         accountId: rewardAccountId,
         credits: accrued.credits,
+        msat: accrued.msat,
+        msatPerCredit: valuation?.msatPerCredit,
+        networkFeeBps: valuation?.networkFeeBps,
+        computeClass,
+        modelParamSizeB,
         durationMs,
         reportedDurationMs,
         ok: r.ok,
@@ -3050,6 +3143,30 @@ app.get("/economy/rates/history", async (req, reply) => {
   const query = z.object({ limit: z.coerce.number().int().min(1).max(365).default(30) }).parse(req.query);
   const epochs = pgStore ? await pgStore.listRateEpochs(query.limit) : latestRateEpoch ? [latestRateEpoch] : [];
   return { epochs };
+});
+
+/** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
+app.get("/economy/market/book", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).optional() }).parse(req.query);
+  const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
+  return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
+});
+
+/** Compute class definitions with the current oracle rate and connected agents per class. */
+app.get("/economy/market/classes", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const agentsByClass = new Map<string, number>();
+  for (const cap of agentCapabilities.values()) agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
+  return {
+    rateEpochId: latestRateEpoch?.epochId ?? null,
+    classes: COMPUTE_CLASS_IDS.map((id) => ({
+      ...rateOracleConfig.computeClasses[id],
+      rate: latestRateEpoch?.classRates?.[id] ?? null,
+      referenceMsatPerCredit: orderBook.referenceFor(id),
+      agents: agentsByClass.get(id) ?? 0
+    }))
+  };
 });
 
 /** Admin: force a recalibration now (e.g. after changing sources). Daily-move clamp still applies. */
@@ -3751,6 +3868,7 @@ async function handleMeshIngest(
             connectedPeers: new Set<string>(),
             activeModel: payload.models[0],
             activeModelParamSize: 0,
+            computeClass: "cpu.std" as ComputeClassId,
             sandboxMode: "none" as SandboxMode,
             lastSeenMs: Date.now(),
           });
@@ -5430,6 +5548,7 @@ export async function initCoordinator(): Promise<void> {
       if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
       if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
       latestRateEpoch = await storeRef.latestRateEpoch();
+      syncOrderBookReference(latestRateEpoch);
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {

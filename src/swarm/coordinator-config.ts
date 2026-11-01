@@ -35,6 +35,10 @@ export const coordinatorConfigSchema = z.object({
   /** Rate oracle: how often sats-per-CPU-hour is recalibrated from market data (default daily). */
   RATE_RECALIBRATION_MS: envInt(86400000, { min: 60000 }),
   RATE_ORACLE_ENABLED: envBool(true),
+  /** Default bid for tasks that don't set maxBidMsatPerCredit: class reference × (1 + premium). */
+  MARKET_DEFAULT_BID_PREMIUM_BPS: envInt(1000, { min: 0 }),
+  /** Share of every accrual (bps) moved to the network fee pool that pays infrastructure hosts. */
+  NETWORK_FEE_BPS: envInt(500, { min: 0 }),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),
