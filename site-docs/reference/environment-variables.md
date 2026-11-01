@@ -49,6 +49,8 @@ Consolidated reference for all environment controls. The primary config file on 
 |---|---|
 | `MESH_AUTH_TOKEN` | Shared mesh auth secret. Auto-provisioned by coordinator on successful registration if left blank. |
 | `COORDINATOR_MESH_TOKEN` | Alias for `MESH_AUTH_TOKEN`. Keep aligned if both are set. |
+| `MESH_PEER_ALLOWLIST` | #52: comma-separated `peerId:fingerprint@https://peer-url` entries for the peer coordinators this coordinator trusts. `@url` pins the peer's endpoint, and gossip never changes it. **In production every entry must have `@url`, or the coordinator refuses to start.** `fingerprint` is the SHA-256 (hex) of the peer's SPKI public key. With the mesh token, a peer must also be on this list and sign its registration with that key. Results it forwards must be signed too. **Required in production**: without it, token-only peer registration and forwarded results are rejected. In dev an empty list keeps the old token-only behaviour. |
+| `COORDINATOR_PRIVATE_KEY_PEM` | Ed25519 private key (PKCS#8 PEM) for this coordinator's mesh identity. Set it on every coordinator that peers, since a generated key changes on each restart and would drop off its peers' allowlists. Fingerprint for `MESH_PEER_ALLOWLIST`: `node -e 'const c=require("crypto");const k=c.createPublicKey(process.env.COORDINATOR_PRIVATE_KEY_PEM);console.log(c.createHash("sha256").update(k.export({type:"spki",format:"der"})).digest("hex"))'` |
 | `INFERENCE_AUTH_TOKEN` | Auth token for the inference service API. |
 | `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. |
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
@@ -286,6 +288,46 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `UI_RETIRE_REDIRECT_URL` | string | unset |
 | `ALLOWED_ADMIN_IPS` | string | unset |
 | `ALLOWED_UI_IPS` | string | unset |
+
+## Observability (#14)
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `info` | pino log level for every service. |
+| `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). In production, `/metrics` is not served at all unless this is set. Outside production it is open. |
+| `REQUEST_ID_FORWARD_ORIGINS` | unset | Extra comma-separated origins that receive `x-request-id` on outbound calls. The service URLs (`COORDINATOR_URL`, `CONTROL_PLANE_URL`, `INFERENCE_URL`, `PORTAL_SERVICE_URL`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_DISCOVERY_URLS`) are included automatically; third-party APIs never get it. |
+| `SENTRY_DSN` | unset | Optional error tracking. Unset: off, nothing is loaded. Set: 5xx errors go to Sentry, tagged with service, route and request id, with no request bodies, headers or cookies. Needs `@sentry/node` in the image; if it's missing, the service logs one warning and runs without it. |
+| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Sentry environment name. |
+| `SENTRY_RELEASE` | unset | Sentry release (for example the git SHA). |
+
+### Alerting on 5xx without Sentry
+
+Every service exports `edgecoder_http_requests_total{service,method,route,status}`. Example Prometheus rules:
+
+```yaml
+groups:
+  - name: edgecoder-http
+    rules:
+      - alert: EdgeCoderHigh5xxRate
+        # more than 5% of requests failing with 5xx for 10 minutes, per service
+        expr: |
+          sum by (service) (rate(edgecoder_http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(edgecoder_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+      - alert: EdgeCoder5xxOnRoute
+        # any single route returning 5xx steadily (catches a broken endpoint on a busy service)
+        expr: sum by (service, route) (rate(edgecoder_http_requests_total{status=~"5.."}[5m])) > 0.1
+        for: 15m
+        labels: { severity: ticket }
+      - alert: EdgeCoderMetricsMissing
+        # the scrape itself failing usually means the service is down or METRICS_TOKEN is wrong
+        expr: up{job=~"edgecoder-.*"} == 0
+        for: 5m
+        labels: { severity: page }
+```
+
+Scrape `/metrics` (inference: `/metrics/prometheus`) with `authorization: Bearer $METRICS_TOKEN`. `route` is the route pattern, so these rules stay low-cardinality.
 
 ## Common profiles
 

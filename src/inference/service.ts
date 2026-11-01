@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import Fastify from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 import { inferenceRouteAuth } from "./route-auth.js";
 import cors from "@fastify/cors";
 import { createHash } from "node:crypto";
@@ -17,7 +20,11 @@ import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { inferenceConfigSchema, trustedCoordinatorKeys as keysFromConfig } from "./config.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("inference") });
+exposeRequestId(app);
+// #14: the existing JSON /metrics stays; Prometheus text is at /metrics/prometheus.
+registerMetrics(app, "inference", { path: "/metrics/prometheus" });
+await registerErrorTracking(app, "inference");
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
