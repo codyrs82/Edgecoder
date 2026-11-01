@@ -8,8 +8,6 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/deploy-docs.yml'
-  # Manual publish (e.g. from a feature branch when the docs host changes).
-  workflow_dispatch: {}
   # #34: build (not deploy) on PRs so a broken docs build shows up before main.
   pull_request:
     paths:
