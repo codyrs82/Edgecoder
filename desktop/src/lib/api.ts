@@ -1,3 +1,4 @@
+import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -20,7 +21,44 @@ import type {
 let useRemote = true;
 let initialDetectDone = false;
 
+// #72: set from the desktop shell; "port_occupied" means :4301 isn't our agent.
+let _agentStatus: LocalAgentStatus = "unknown";
+let _localToken: string | null = null;
+
+/** Record the shell's status; any state other than our own live agent drops the cached token. */
+function setAgentStatus(status: LocalAgentStatus): LocalAgentStatus {
+  _agentStatus = status;
+  if (shouldDropToken(status)) _localToken = null;
+  return status;
+}
+
+/** Local agent status from the desktop shell (#72), for the UI. */
+export async function localAgentStatus(): Promise<LocalAgentStatus> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    setAgentStatus(parseAgentStatus(await invoke<string>("get_agent_status")));
+  } catch {
+    // Not running inside Tauri (dev / web build).
+  }
+  return _agentStatus;
+}
+
+/** Retry spawning the local agent after the user freed :4301 (#72). */
+export async function retryLocalAgent(): Promise<LocalAgentStatus> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    _localToken = null;
+    setAgentStatus(parseAgentStatus(await invoke<string>("retry_local_agent")));
+    if (_agentStatus === "spawned") await detectBackend();
+  } catch {
+    // Not running inside Tauri.
+  }
+  return _agentStatus;
+}
+
 async function tryLocalHealth(): Promise<boolean> {
+  // #72: never treat an unverified :4301 listener as our agent.
+  if (!localAgentUsable(await localAgentStatus())) return false;
   try {
     const res = await fetch("http://localhost:4301/health/runtime", {
       signal: AbortSignal.timeout(2000),
@@ -139,8 +177,6 @@ const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
 // Local agent token (for inference/admin auth)
 // ---------------------------------------------------------------------------
 
-let _localToken: string | null = null;
-
 async function getLocalToken(): Promise<string> {
   if (_localToken) return _localToken;
   // Retry a few times — Tauri invoke may not be ready immediately
@@ -151,7 +187,15 @@ async function getLocalToken(): Promise<string> {
       console.log("[api] getLocalToken attempt", attempt, "got token:", !!_localToken);
       if (_localToken) return _localToken;
     } catch (e) {
-      console.warn("[api] getLocalToken attempt", attempt, "failed:", (e as Error).message);
+      const message = e instanceof Error ? e.message : String(e);
+      const status = statusFromTokenError(message);
+      if (status) {
+        // #72: the shell refused on purpose; don't retry, and don't use :4301.
+        setAgentStatus(status);
+        console.warn("[api] local agent token withheld:", status);
+        break;
+      }
+      console.warn("[api] getLocalToken attempt", attempt, "failed:", message);
     }
     if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
   }
