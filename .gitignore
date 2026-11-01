@@ -31,3 +31,6 @@ desktop/a11y-report/
 
 # Fly bootstrap output (generated secrets per org; see scripts/fly-bootstrap-org.sh)
 .fly-bootstrap/
+
+# Claude Code agent worktrees
+.claude/worktrees/
