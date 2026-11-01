@@ -168,6 +168,9 @@ export interface QueueEventRecord {
     | "node_approval"
     | "node_validation"
     | "earnings_accrual"
+    | "network_fee"
+    | "payout_settled"
+    | "fee_pool_distribution"
     | "stats_checkpoint_proposal"
     | "stats_checkpoint_signature"
     | "stats_checkpoint_commit";
@@ -204,6 +207,8 @@ export interface ComputeContributionReport {
   success: boolean;
   qualityScore: number;
   timestampMs: number;
+  /** Parameter count (billions) of the model that served the task; sizes the credit rate (0/undefined = plain code execution). */
+  modelParamSizeB?: number;
 }
 
 export interface CreditTransaction {
@@ -214,6 +219,49 @@ export interface CreditTransaction {
   reason: string;
   timestampMs: number;
   relatedTaskId?: string;
+  /**
+   * Sats value (millisatoshi) locked when the row was written: for earn rows the payable
+   * amount at the rate-oracle quote of that moment, for purchase rows the net sats paid.
+   * Payouts are made against the sum of earn msat, never against credits × today's price.
+   */
+  msat?: number;
+}
+
+/** A Lightning payment from the coordinator's node to an account's wallet (worker or infrastructure host). */
+export interface PayoutRecord {
+  payoutId: string;
+  accountId: string;
+  coordinatorId: string;
+  kind: "withdraw" | "auto";
+  bolt11: string;
+  /** Hex payment hash from the invoice; unique, so a retried withdrawal can't pay twice. */
+  paymentHash: string;
+  amountMsat: number;
+  feeMsat: number;
+  maxFeeMsat: number;
+  status: "pending" | "paid" | "failed";
+  preimage?: string;
+  error?: string;
+  /** Lightning address or LNURL the auto payout used, if any. */
+  destination?: string;
+  createdAtMs: number;
+  settledAtMs?: number;
+}
+
+/** A node hosting EdgeCoder infrastructure (coordinator, optionally a Bitcoin/Lightning node), paid from the network fee pool. */
+export interface InfrastructureHost {
+  hostId: string;
+  /** Credit account that receives fee-pool distributions (defaults to host:<hostId>). */
+  accountId: string;
+  coordinatorUrl?: string;
+  region?: string;
+  /** What the host runs, self-declared and reflected in the weight: coordinator, bitcoind, lightning, electrs. */
+  services: string[];
+  lightningAddress?: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  /** Heartbeats observed in the current distribution window. */
+  heartbeatsInWindow: number;
 }
 
 export interface CreditAccount {

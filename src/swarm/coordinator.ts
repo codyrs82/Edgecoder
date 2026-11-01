@@ -603,6 +603,9 @@ const disabledLightningProvider: LightningProvider = {
   },
   async checkSettlement() {
     return { settled: false };
+  },
+  async payInvoice() {
+    return { status: "failed" as const, error: "economy_payments_disabled" };
   }
 };
 const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
