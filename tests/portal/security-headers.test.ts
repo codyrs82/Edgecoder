@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import { registerPortalSecurity, rateLimitFor, trustProxyHops } from "../../src/portal/security.js";
+import { clientIp, flyClientIpEnabled, registerPortalSecurity, rateLimitFor } from "../../src/portal/security.js";
 import { clearCookies, cookieName, encodeCookie, readCookie } from "../../src/portal/portal-utils.js";
 
 // #10: security headers, CSRF origin check, rate limits and cookie hardening.
 async function buildApp() {
-  const app = Fastify({ trustProxy: 1 });
+  const app = Fastify({ trustProxy: false });
   await registerPortalSecurity(app, {
     publicOrigin: "https://edgecoder.io",
     trustedOrigins: ["tauri://localhost"],
@@ -96,10 +96,24 @@ describe("portal CSRF origin check (#10)", () => {
     expect(res.statusCode).toBe(403);
   });
 
-  it("PORTAL_TRUST_PROXY_HOPS falls back to 1 on bad values", () => {
-    expect(trustProxyHops(undefined)).toBe(1);
-    expect(trustProxyHops("2")).toBe(2);
-    for (const bad of ["true", "0", "-1", "1.5", "abc"]) expect(trustProxyHops(bad), bad).toBe(1);
+  it("uses Fly-Client-IP only with PORTAL_TRUST_FLY_CLIENT_IP=true on Fly", () => {
+    const req = { ip: "172.19.0.1", headers: { "fly-client-ip": "203.0.113.7" } };
+    expect(clientIp(req, {})).toBe("172.19.0.1");
+    expect(clientIp(req, { PORTAL_TRUST_FLY_CLIENT_IP: "true" })).toBe("172.19.0.1"); // not on Fly
+    expect(clientIp(req, { FLY_APP_NAME: "edgecoder-portal" })).toBe("172.19.0.1"); // flag unset
+    const on = { PORTAL_TRUST_FLY_CLIENT_IP: "true", FLY_APP_NAME: "edgecoder-portal" };
+    expect(flyClientIpEnabled(on)).toBe(true);
+    expect(clientIp(req, on)).toBe("203.0.113.7");
+    expect(clientIp({ ip: "172.19.0.1", headers: { "fly-client-ip": "not-an-ip" } }, on)).toBe("172.19.0.1");
+    expect(clientIp({ ip: "172.19.0.1", headers: {} }, on)).toBe("172.19.0.1");
+  });
+
+  it("ignores X-Forwarded-For for rate limits", async () => {
+    const app = await buildApp();
+    const hit = (xff: string) => app.inject({ method: "POST", url: "/auth/login", remoteAddress: "10.0.0.9", headers: { "x-forwarded-for": xff }, payload: {} });
+    let last = 0;
+    for (let i = 0; i < 11; i++) last = (await hit(`198.51.100.${i}`)).statusCode;
+    expect(last).toBe(429); // rotating XFF doesn't buy a fresh bucket
   });
 
   it("exempts the Apple form_post OAuth callback", async () => {

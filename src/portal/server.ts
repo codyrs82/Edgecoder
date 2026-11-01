@@ -58,12 +58,13 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
+import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
-// #10: behind Fly's proxy, trust exactly one hop so req.ip is the client (rate limits).
-const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: trustProxyHops(process.env.PORTAL_TRUST_PROXY_HOPS) });
+// #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
+// (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
+const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: false });
 exposeRequestId(app);
 registerMetrics(app, "portal");
 await registerErrorTracking(app, "portal");
