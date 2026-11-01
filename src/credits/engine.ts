@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
-import { baseRatePerSecond, loadMultiplier, LoadSnapshot } from "./pricing.js";
+import { contributionCredits, LoadSnapshot } from "./pricing.js";
 
 export class CreditEngine {
   private readonly txByAccount = new Map<string, CreditTransaction[]>();
@@ -24,16 +24,22 @@ export class CreditEngine {
       throw new Error("duplicate_contribution_report");
     }
     this.seenReports.add(report.reportId);
-    const computeSeconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
-    const qualityMultiplier = Math.max(0.5, Math.min(1.5, report.qualityScore));
-    const credits =
-      computeSeconds *
-      baseRatePerSecond(report.resourceClass) *
-      qualityMultiplier *
-      loadMultiplier(load);
+    const credits = contributionCredits(report, load); // #38: same formula as the Postgres path
+    if (credits <= 0) {
+      // #38: failed work earns 0 under measured credits; record nothing for it.
+      return {
+        txId: randomUUID(),
+        accountId: report.agentId,
+        type: "earn",
+        credits: 0,
+        reason: "compute_contribution",
+        relatedTaskId: report.taskId,
+        timestampMs: Date.now()
+      };
+    }
     return this.addTx(report.agentId, {
       type: "earn",
-      credits: Number(credits.toFixed(3)),
+      credits,
       reason: "compute_contribution",
       relatedTaskId: report.taskId
     });
@@ -56,7 +62,13 @@ export class CreditEngine {
     if (credits >= 0) {
       return this.addTx(accountId, { type: "earn", credits, reason });
     }
-    return this.addTx(accountId, { type: "spend", credits: Math.abs(credits), reason });
+    // #48: negative adjustments are debits and can't take the balance below zero.
+    const debit = Math.abs(credits);
+    const current = this.balance(accountId);
+    if (current < debit) {
+      throw new Error(`insufficient_credits: ${current} < ${debit}`);
+    }
+    return this.addTx(accountId, { type: "spend", credits: debit, reason });
   }
 
   private addTx(

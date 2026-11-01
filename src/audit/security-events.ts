@@ -20,7 +20,9 @@ export type SecurityEventType =
   | "sandbox_seccomp_violation"
   | "binary_integrity_failure"
   | "behavioral_anomaly_detected"
-  | "auto_blacklist_triggered";
+  | "auto_blacklist_triggered"
+  | "result_verification_mismatch"
+  | "result_verification_replica_abandoned";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -48,6 +50,8 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   sandbox_timeout: "WARN",
   sandbox_seccomp_violation: "HIGH",
   binary_integrity_failure: "HIGH",
+  result_verification_mismatch: "HIGH",
+  result_verification_replica_abandoned: "HIGH",
   behavioral_anomaly_detected: "WARN",
   auto_blacklist_triggered: "CRITICAL",
 };
