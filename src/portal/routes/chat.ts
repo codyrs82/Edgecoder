@@ -74,6 +74,11 @@ export function registerChatApiRoutes(app: FastifyInstance, { PORTAL_SERVICE_TOK
       model: z.string().optional(),
     }).parse(req.body);
 
+    // Only the owner may post into (and thereby read back) a conversation (audit auth#1).
+    if ((await store.getConversationOwner(body.conversationId)) !== user.userId) {
+      return reply.code(404).send({ error: "conversation_not_found" });
+    }
+
     // Save user message
     await store.addMessage({
       messageId: randomUUID(),

@@ -793,9 +793,16 @@ async function selfInfraHeartbeat(): Promise<void> {
     lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined
   });
 }
+let feePoolDistributing: Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> | null = null;
 async function runFeePoolDistribution(): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
+  // Single-flight: concurrent callers (a flooded endpoint, overlapping timers) share one run so
+  // the pool is not distributed twice for the same window (audit econ#3). NOTE: this guards one
+  // process only; a multi-instance deployment sharing one database still needs a DB advisory lock
+  // inside distributeFeePool — tracked as a follow-up.
+  if (feePoolDistributing) return feePoolDistributing;
   const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
-  return payoutService.distributeFeePool(expectedHeartbeats);
+  feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats).finally(() => { feePoolDistributing = null; });
+  return feePoolDistributing;
 }
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
@@ -840,6 +847,19 @@ function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, rep
   const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
   if (hasMeshToken(headers) || hasPortalServiceToken(headers)) return true;
   reply.code(401).send({ error: "mesh_unauthorized" });
+  return false;
+}
+
+/**
+ * Account-scoped money routes (withdraw, set payout address, read a user's balance) require the
+ * PORTAL service token specifically. The portal binds accountId = acct-<userId> from the session
+ * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents hold
+ * only the shared mesh token and must NOT be able to move another account's funds (audit econ#1).
+ */
+function requirePortalServiceToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  if (hasPortalServiceToken(headers)) return true;
+  reply.code(401).send({ error: "portal_service_unauthorized" });
   return false;
 }
 
@@ -2282,6 +2302,12 @@ app.post("/register", async (req, reply) => {
     }
     app.log.info({ agentId: body.agentId, verificationStatus, version: body.binaryIntegrity.releaseVersion }, "binary_integrity_check");
   }
+  // Verified-only policy: a missing attestation, an uncached manifest, or absent release keys all
+  // leave verificationStatus "unverified" — reject those too, not just explicit mismatches, so the
+  // policy actually guarantees a verified binary when enabled (audit mesh#2).
+  if (REQUIRE_VERIFIED_AGENTS && verificationStatus !== "verified") {
+    return reply.code(403).send({ error: "binary_integrity_required", status: verificationStatus });
+  }
 
   behaviorTracker.recordRegistration(body.agentId, now);
   evaluateAndEnforce(body.agentId);
@@ -2820,7 +2846,14 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   const modelParamSizeB = subtask.requestedModel ? cap?.activeModelParamSize : undefined;
   const modality = modalityMultiplier(catalogEntryForTag(cap?.activeModel ?? "")?.capabilities);
   // Sats per credit: the market price agreed at claim (agent's ask), else the oracle's class rate.
-  const basePerCredit = trade?.msatPerCredit ?? latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
+  // The msat value locked on an earn row is withdrawable as real sats, so the trade price must not
+  // be trustable to inflate it. Clamp it to [0.25x, 4x] the oracle class reference, which a
+  // self-dealing ask/bid cannot move (audit econ#2). Falls back to the reference when no trade.
+  const classRef = latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
+  let basePerCredit = trade?.msatPerCredit ?? classRef;
+  if (basePerCredit !== undefined && classRef !== undefined && classRef > 0) {
+    basePerCredit = Math.min(Math.max(basePerCredit, classRef * 0.25), classRef * 4);
+  }
   const valuation = basePerCredit !== undefined ? { msatPerCredit: Math.round(basePerCredit * modality), networkFeeBps: NETWORK_FEE_BPS } : undefined;
   const accrued = await accrueCredits(
     {
@@ -3412,13 +3445,13 @@ app.get("/economy/rates/history", async (req, reply) => {
 /** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
 // ── Payouts, infrastructure hosts and the fee pool ──
 app.get("/economy/payouts/:accountId", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  if (!requirePortalServiceToken(req as any, reply)) return;
   const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
   const [balance, payouts] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100)]);
   return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED } };
 });
 app.post("/economy/payouts/withdraw", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  if (!requirePortalServiceToken(req as any, reply)) return;
   const parsed = z.object({ accountId: z.string().min(1), bolt11: z.string().min(20).max(4096) }).safeParse(req.body ?? {});
   if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
   const body = parsed.data;
@@ -3427,7 +3460,7 @@ app.post("/economy/payouts/withdraw", async (req, reply) => {
   return result;
 });
 app.post("/economy/payouts/address", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  if (!requirePortalServiceToken(req as any, reply)) return;
   const parsedAddr = z.object({ accountId: z.string().min(1), lightningAddress: z.string().max(256).nullable() }).safeParse(req.body ?? {});
   if (!parsedAddr.success) return reply.code(400).send({ error: "invalid_request" });
   const body = parsedAddr.data;
@@ -3473,7 +3506,7 @@ app.get("/economy/fee-pool", async (req, reply) => {
   return { accountId: NETWORK_FEE_POOL_ACCOUNT, earnedMsat, distributedMsat, availableMsat: Math.max(0, earnedMsat - distributedMsat), credits, networkFeeBps: NETWORK_FEE_BPS, lastDistribution: lastFeePoolDistribution };
 });
 app.post("/economy/fee-pool/distribute", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // manual override; the daily timer runs it automatically (audit econ#3)
   return runFeePoolDistribution();
 });
 

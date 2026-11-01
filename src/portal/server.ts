@@ -975,7 +975,7 @@ await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
 }); // end /internal plugin (#40)
 
-registerEscalationRoutes(app, { getCurrentUser });
+registerEscalationRoutes(app, { getCurrentUser, buildAccessContext });
 
 // DNS staleness sweep (src/portal/dns-sweep.ts).
 startDnsStaleSweep(store);

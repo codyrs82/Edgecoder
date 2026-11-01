@@ -171,8 +171,11 @@ describe("Cloudflare edge: client IP and origin lock", () => {
   it("uses cf-connecting-ip only when the request provably came through the edge", () => {
     const base = { ip: "203.0.113.9" };
     expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "none" })).toBe("203.0.113.9");
-    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "cloudflare" })).toBe("198.51.100.7");
+    // Without a configured origin-lock token, cf-connecting-ip is spoofable, so it is NOT trusted.
+    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "cloudflare" })).toBe("203.0.113.9");
+    // Lock token configured but the request did not carry it -> direct hit, fall back to req.ip.
     expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "cloudflare", originLockToken: "t" })).toBe("203.0.113.9");
+    // Lock token configured and present -> provably via Cloudflare, trust cf-connecting-ip.
     expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7", [ORIGIN_LOCK_HEADER]: "t" } }, { edge: "cloudflare", originLockToken: "t" })).toBe("198.51.100.7");
   });
 

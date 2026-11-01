@@ -39,9 +39,12 @@ export function cameThroughEdge(req: Pick<FastifyRequest, "headers">, originLock
 
 /** The address rate limits key on: cf-connecting-ip behind a locked Cloudflare edge, else req.ip. */
 export function clientIp(req: Pick<FastifyRequest, "headers" | "ip">, opts: { edge?: EdgeMode; originLockToken?: string }): string {
-  if (opts.edge === "cloudflare") {
+  // Only trust cf-connecting-ip when the origin lock proves the request actually came through
+  // Cloudflare. Without a configured lock token the header is attacker-spoofable on the Fly origin,
+  // so fall back to req.ip rather than let it forge the rate-limit key (audit auth#4).
+  if (opts.edge === "cloudflare" && opts.originLockToken) {
     const cf = req.headers["cf-connecting-ip"];
-    if (typeof cf === "string" && cf && (!opts.originLockToken || cameThroughEdge(req, opts.originLockToken))) return cf;
+    if (typeof cf === "string" && cf && cameThroughEdge(req, opts.originLockToken)) return cf;
   }
   return req.ip;
 }
