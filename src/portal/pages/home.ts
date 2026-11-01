@@ -7,6 +7,12 @@ import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 // #16: moved verbatim from src/portal/server.ts.
 export function registerHomePage(app: FastifyInstance): void {
 app.get("/portal", async (_req, reply) => {
+  // Only offer SSO for providers actually configured on this portal, so we never show a dead
+  // button (e.g. Microsoft after the tenant was dropped). Email + passkey are always available.
+  const googleOn = Boolean(process.env.OAUTH_GOOGLE_CLIENT_ID && process.env.OAUTH_GOOGLE_CLIENT_SECRET);
+  const microsoftOn = Boolean(process.env.OAUTH_MICROSOFT_CLIENT_ID && process.env.OAUTH_MICROSOFT_CLIENT_SECRET);
+  const ssoButtons = [googleOn ? `<a href="/auth/oauth/google/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4z"/></svg> Google</button></a>` : "", microsoftOn ? `<a href="/auth/oauth/microsoft/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" fill="#F25022"/><rect x="13" y="2" width="9" height="9" fill="#7FBA00"/><rect x="2" y="13" width="9" height="9" fill="#00A4EF"/><rect x="13" y="13" width="9" height="9" fill="#FFB900"/></svg> Microsoft 365</button></a>` : ""].filter(Boolean).join("");
+  const ssoBlock = ssoButtons ? `<div class="or">or continue with</div><div class="sso">${ssoButtons}</div>` : "";
   const html = `<!doctype html>
   <html lang="en">
     <head>
@@ -84,11 +90,7 @@ app.get("/portal", async (_req, reply) => {
                 <button id="passkeyLoginBtn">${icon("key", 14)} Passkey</button>
               </div>
               <div class="row" style="margin-top:10px;"><button class="link-btn" id="resendBtn">Resend verification email</button></div>
-              <div class="or">or continue with</div>
-              <div class="sso">
-                <a href="/auth/oauth/google/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4z"/></svg> Google</button></a>
-                <a href="/auth/oauth/microsoft/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" fill="#F25022"/><rect x="13" y="2" width="9" height="9" fill="#7FBA00"/><rect x="2" y="13" width="9" height="9" fill="#00A4EF"/><rect x="13" y="13" width="9" height="9" fill="#FFB900"/></svg> Microsoft 365</button></a>
-              </div>
+              ${ssoBlock}
             </div>
 
             <div class="pane" id="paneSignup">
