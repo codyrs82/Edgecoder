@@ -5,6 +5,9 @@ import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
 import { buildAnchorProxyApp } from "./anchor-proxy-app.js";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 
 /* ------------------------------------------------------------------ */
 /*  Bitcoin Anchor Proxy Service                                       */
@@ -48,8 +51,12 @@ const app = buildAnchorProxyApp({
   network: BITCOIN_NETWORK,
   maxBroadcastsPerMinute: Number(process.env.MAX_BROADCASTS_PER_MINUTE ?? "10"),
   maxReconcileCallsPerMinute: Number(process.env.MAX_RECONCILE_CALLS_PER_MINUTE ?? "30"),
-  logger: true
+  serverOptions: serviceLoggerOptions("anchor-proxy")
 });
+// #14: request ids, Prometheus /metrics and error tracking, like the other services.
+exposeRequestId(app);
+registerMetrics(app, "anchor-proxy");
+await registerErrorTracking(app, "anchor-proxy");
 
 app.listen({ port: PORT, host: LISTEN_HOST }).then((address) => {
   console.log(`[anchor-proxy] listening on ${address}`);

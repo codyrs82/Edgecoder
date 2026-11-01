@@ -38,7 +38,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed walkthrough of d
 | Portal | `https://portal.edgecoder.io/portal` |
 | Control Plane | `https://control.edgecoder.io` |
 | Coordinator | `https://coordinator.edgecoder.io` (mesh-auth required) |
-| Docs | `https://docs.edgecoder.io` |
+| Docs | `https://codyrs82.github.io/Edgecoder/` (GitHub Pages) |
 
 ## Quick Start
 

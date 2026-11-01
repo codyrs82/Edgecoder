@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import type { BitcoinAnchorProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
@@ -23,6 +23,8 @@ export interface AnchorProxyOptions {
   maxReconcileCallsPerMinute?: number;
   now?: () => number;
   logger?: boolean;
+  /** #14: logger/request-id options from serviceLoggerOptions(); overrides `logger` when set. */
+  serverOptions?: Pick<FastifyServerOptions, "logger" | "genReqId" | "requestIdLogLabel">;
 }
 
 const TXID_RE = /^[0-9a-fA-F]{64}$/;
@@ -55,7 +57,7 @@ export function buildAnchorProxyApp(opts: AnchorProxyOptions): FastifyInstance {
   const broadcastLimit = new SlidingWindow(maxBroadcasts, now);
   const reconcileLimit = new SlidingWindow(maxReconcile, now);
   // Fastify's default maxParamLength (100) would 414 a full 80-byte (160 hex) payload in /anchor/find.
-  const app = Fastify({ logger: opts.logger ?? false, maxParamLength: 256 });
+  const app = Fastify({ logger: opts.logger ?? false, maxParamLength: 256, ...opts.serverOptions });
 
   function requireAuth(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }): boolean {
     const authHeader = String(req.headers.authorization ?? "");
