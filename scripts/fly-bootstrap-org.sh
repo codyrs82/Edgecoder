@@ -141,8 +141,11 @@ if [ "${SKIP_PG:-0}" != "1" ]; then
   fi
   # `fly postgres attach` sets the connection string as a secret on the target app. It
   # fails if that app already has the variable, so re-runs just report "already attached".
+  has_secret() { # app name
+    fly secrets list -a "$1" --json 2>/dev/null | python3 -c 'import json,sys; names={(s.get("Name") or s.get("name")) for s in json.load(sys.stdin)}; sys.exit(0 if sys.argv[1] in names else 1)' "$2"
+  }
   attach() { # app variable database
-    if fly secrets list -a "$1" 2>/dev/null | awk '{print $1}' | grep -qx "$2"; then
+    if has_secret "$1" "$2"; then
       echo "$1: $2 already set"
     else
       fly postgres attach "$PG_APP" -a "$1" --variable-name "$2" --database-name "$3" --yes
