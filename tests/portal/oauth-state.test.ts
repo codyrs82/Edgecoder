@@ -9,7 +9,9 @@ import {
   oauthStateKey,
   oauthStateSecretProblem,
   assertOauthStateSecret,
-  oauthStateSetCookie
+  oauthStateSetCookie,
+  pkceChallenge,
+  pkceVerifier
 } from "../../src/portal/oauth-state-cookie.js";
 
 // Token exchange is stubbed to fail with 500, so "proceeds" = got past the state checks (502).
@@ -17,6 +19,7 @@ vi.mock("undici", () => ({
   request: vi.fn(async () => ({ statusCode: 500, body: { json: async () => ({}), text: async () => "", dump: async () => {} } }))
 }));
 const { registerAuthRoutes } = await import("../../src/portal/routes/auth.js");
+const { request: mockedRequest } = await import("undici");
 
 const PROVIDERS = ["google", "microsoft", "github"] as const;
 
@@ -165,5 +168,52 @@ describe("OAUTH_STATE_SECRET startup check (#88)", () => {
   it("is optional outside production", () => {
     expect(oauthStateSecretProblem({})).toBeNull();
     expect(oauthStateSecretProblem({ NODE_ENV: "test" })).toBeNull();
+  });
+});
+
+describe("PKCE S256 (#137)", () => {
+  it("verifier is 43 base64url chars, per provider and state; challenge is its S256", () => {
+    const key = oauthStateKey({ OAUTH_STATE_SECRET: "k".repeat(32) });
+    const v = pkceVerifier(key, "google", "s1");
+    expect(v).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(pkceVerifier(key, "google", "s1")).toBe(v);
+    expect(pkceVerifier(key, "github", "s1")).not.toBe(v);
+    expect(pkceVerifier(key, "google", "s2")).not.toBe(v);
+    expect(pkceVerifier(oauthStateKey({ OAUTH_STATE_SECRET: "o".repeat(32) }), "google", "s1")).not.toBe(v);
+    const c = pkceChallenge(v);
+    expect(c).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(c).not.toBe(v);
+  });
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: /start sends an S256 challenge and the token exchange sends the matching verifier`, async () => {
+      const ctx = build();
+      const res = await ctx.app.inject({ url: `/auth/oauth/${provider}/start` });
+      const authorize = new URL(String(res.headers.location));
+      const challenge = authorize.searchParams.get("code_challenge");
+      expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const state = authorize.searchParams.get("state")!;
+      const pair = ([] as string[]).concat(res.headers["set-cookie"] as string | string[]).find((c) => c.startsWith(`${OAUTH_STATE_COOKIE}=`))!.split(";")[0];
+
+      vi.mocked(mockedRequest).mockClear();
+      await ctx.app.inject({ url: `/auth/oauth/${provider}/callback?code=c&state=${state}`, headers: { cookie: pair } });
+      const call = vi.mocked(mockedRequest).mock.calls.at(-1)!;
+      const body = new URLSearchParams(String((call[1] as { body: string }).body));
+      const verifier = body.get("code_verifier")!;
+      expect(verifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(pkceChallenge(verifier)).toBe(challenge);
+      expect(authorize.searchParams.has("code_verifier")).toBe(false);
+    });
+  }
+
+  it("a rejected state never reaches the token endpoint", async () => {
+    const ctx = build();
+    const res = await ctx.app.inject({ url: "/auth/oauth/google/start" });
+    const state = new URL(String(res.headers.location)).searchParams.get("state")!;
+    vi.mocked(mockedRequest).mockClear();
+    const cb = await ctx.app.inject({ url: `/auth/oauth/google/callback?code=c&state=${state}` });
+    expect(cb.statusCode).toBe(403);
+    expect(vi.mocked(mockedRequest)).not.toHaveBeenCalled();
   });
 });
