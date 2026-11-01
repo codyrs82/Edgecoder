@@ -3,52 +3,51 @@
 //   npm run models:verify-catalog            # all entries
 //   npx tsx scripts/check-model-catalog.ts qwen3.5:9b gemma4:e4b   # specific tags
 //
-// Uses the registry's OCI tag list (https://registry.ollama.ai/v2/library/<name>/tags/list),
-// which is what `ollama pull` talks to, so a tag this script accepts is pullable. Needs
-// network access to registry.ollama.ai. Exit 1 when any tag is missing or the registry is
-// unreachable, so it can gate a catalog refresh.
+// Checks the registry's OCI manifest for each tag
+// (GET https://registry.ollama.ai/v2/library/<name>/manifests/<tag>), which is exactly what
+// `ollama pull` fetches, so a tag this script accepts is pullable. (The registry does not serve
+// the /tags/list endpoint, so tags are checked one by one.) Needs network access to
+// registry.ollama.ai. Exit 1 when any tag is missing or the registry is unreachable, so it can
+// gate a catalog refresh.
 import { MODEL_CATALOG } from "../src/model/catalog.js";
 
 const REGISTRY = process.env.OLLAMA_REGISTRY ?? "https://registry.ollama.ai";
 
-async function registryTags(name: string): Promise<string[] | null> {
-  const res = await fetch(`${REGISTRY}/v2/library/${encodeURIComponent(name)}/tags/list`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(15_000)
-  });
-  if (res.status === 404) return [];
-  if (!res.ok) throw new Error(`${name}: registry answered ${res.status}`);
-  const body = (await res.json()) as { tags?: string[] };
-  return body.tags ?? [];
+type Check = { id: string; status: "ok" | "missing" | "error"; detail?: string; sizeBytes?: number };
+
+async function checkTag(id: string): Promise<Check> {
+  const [name, tag = "latest"] = id.split(":");
+  try {
+    const res = await fetch(`${REGISTRY}/v2/library/${encodeURIComponent(name)}/manifests/${encodeURIComponent(tag)}`, {
+      headers: { accept: "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" },
+      signal: AbortSignal.timeout(20_000)
+    });
+    if (res.status === 404) return { id, status: "missing" };
+    if (!res.ok) return { id, status: "error", detail: `registry answered ${res.status}` };
+    const manifest = (await res.json()) as { layers?: Array<{ size?: number }> };
+    const sizeBytes = (manifest.layers ?? []).reduce((s, l) => s + (Number(l.size) || 0), 0);
+    return { id, status: "ok", sizeBytes };
+  } catch (err) {
+    return { id, status: "error", detail: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 async function main(): Promise<void> {
   const wanted = process.argv.slice(2).length ? process.argv.slice(2) : MODEL_CATALOG.map((m) => m.modelId);
-  const byName = new Map<string, string[]>();
-  for (const id of wanted) {
-    const [name, tag = "latest"] = id.split(":");
-    byName.set(name, [...(byName.get(name) ?? []), tag]);
+  const results = await Promise.all(wanted.map(checkTag));
+  let bad = 0;
+  for (const r of results) {
+    const entry = MODEL_CATALOG.find((m) => m.modelId === r.id);
+    const size = r.sizeBytes ? `${(r.sizeBytes / 1e9).toFixed(1)} GB` : "";
+    const listed = entry ? `(catalog says ${entry.diskSize})` : "";
+    const label = r.status === "ok" ? "ok     " : r.status === "missing" ? "MISSING" : "ERROR  ";
+    console.log(`  ${label} ${r.id.padEnd(24)} ${size.padEnd(9)} ${listed} ${r.detail ?? ""}`.trimEnd());
+    if (r.status !== "ok") bad++;
   }
-  let missing = 0;
-  for (const [name, tags] of byName) {
-    let available: string[] | null;
-    try {
-      available = await registryTags(name);
-    } catch (err) {
-      console.error(`  ERROR ${name}: ${err instanceof Error ? err.message : String(err)}`);
-      process.exitCode = 1;
-      continue;
-    }
-    for (const tag of tags) {
-      const ok = available?.includes(tag);
-      console.log(`  ${ok ? "ok     " : "MISSING"} ${name}:${tag}${available && !ok ? `   (registry has: ${available.slice(0, 12).join(", ")}${available.length > 12 ? ", ..." : ""})` : ""}`);
-      if (!ok) missing++;
-    }
-  }
-  if (missing) {
-    console.error(`check-model-catalog: ${missing} catalog tag(s) not found on ${REGISTRY}`);
+  if (bad) {
+    console.error(`check-model-catalog: ${bad} catalog tag(s) not found or not checkable on ${REGISTRY}`);
     process.exitCode = 1;
-  } else if (!process.exitCode) {
+  } else {
     console.log(`check-model-catalog: all ${wanted.length} tag(s) exist on ${REGISTRY}`);
   }
 }

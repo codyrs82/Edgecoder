@@ -5,7 +5,7 @@
 // tests/model/catalog-sync.test.ts fails when the two drift. At runtime the Model Manager
 // prefers GET /model/catalog from the inference service and falls back to this list.
 
-export const MODEL_CATALOG_VERSION = "2026-11-01";
+export const MODEL_CATALOG_VERSION = "2026-11-01.1";
 
 export type CatalogCategory = "coding" | "general" | "small";
 
@@ -62,7 +62,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     modelId: "qwen3.5:35b",
     name: "Qwen 3.5 35B MoE",
     paramSize: "35B (3B active)",
-    diskSize: "24 GB",
+    diskSize: "22 GB",
     description:
       "Qwen 3.5's mixture-of-experts flagship for local use: strong coding and reasoning, 256K context, tool use and thinking modes.",
     category: "coding",
@@ -117,7 +117,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     modelId: "gemma4:26b",
     name: "Gemma 4 26B",
     paramSize: "26B",
-    diskSize: "17 GB",
+    diskSize: "19 GB",
     description: "Google's Gemma 4 mid-size model: multimodal (text and image), tool use, long context.",
     category: "general",
     minMemoryGb: 24,
@@ -192,7 +192,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     modelId: "qwen3.5:0.8b",
     name: "Qwen 3.5 0.8B",
     paramSize: "0.8B",
-    diskSize: "1.0 GB",
+    diskSize: "1.3 GB",
     description: "Ultra-small Qwen 3.5 for edge devices and minimal-footprint deployments.",
     category: "small",
     minMemoryGb: 2,
