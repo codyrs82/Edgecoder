@@ -206,6 +206,20 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
 | `SUPPORT_EMAIL` | Contact address on the portal's privacy and terms pages (default `support@edgecoder.io`; plain address only) (#22). |
 | `MODEL_DOWNLOAD_DOMAINS` | Comma-separated exact hostnames that signed model manifests may download from; replaces the default `models.edgecoder.io,huggingface.co` (#22). See [Self-hosting](../operations/self-hosting.md). |
+| `EDGECODER_DISCOVERY` | Agent: `1` runs coordinator discovery (static + DNS + Nostr, scored selector) at startup even when `COORDINATOR_URL` is set. Discovery always runs when `COORDINATOR_URL` is unset. See `docs/discovery.md`. |
+| `EDGECODER_DISCOVERY_DOMAIN` | Domain(s) whose `_edgecoder._tcp` TXT/SRV records list coordinators (default `edgecoder.io`; comma list; `off` disables DNS discovery). |
+| `EDGECODER_NOSTR_RELAYS` | Comma list of Nostr relays used to publish and read coordinator announcements (default `wss://relay.damus.io,wss://nos.lol`; `off` disables Nostr on agents/portals). |
+| `EDGECODER_NOSTR_AUTHORS` | Optional comma list of hex Nostr pubkeys; when set, only their announcements are read. |
+| `EDGECODER_NOSTR_ANNOUNCE` | Coordinator: `1` publishes a signed self-announcement (kind 30078, d-tag `edgecoder-coordinator`) to the relays. Off by default. |
+| `EDGECODER_NOSTR_ANNOUNCE_INTERVAL_MS` | Coordinator announcement interval (default `300000`, minimum 15 s). |
+| `NOSTR_SECRET_KEY_HEX` | Coordinator: 64-hex secp256k1 secret used to sign Nostr events. When unset one is derived deterministically from the coordinator's Ed25519 private key. |
+| `COORDINATOR_REGION` | Region label in the coordinator's announcement (falls back to `FLY_REGION`, then `unknown`). |
+| `EDGECODER_COORDINATOR_PINS` | Comma list of coordinator public-key fingerprints (sha256 hex of the PEM), PEMs or peerIds that the selector prefers. |
+| `EDGECODER_COMPUTE_CLASS` | Compute class whose `/economy/market/book` price the selector scores (default `cpu.std`). |
+| `EDGECODER_DISCOVERY_TIMEOUT_MS` | Per-source and per-probe timeout for discovery (default `4000`). |
+| `EDGECODER_DISCOVERY_MARGIN` | Stickiness: switch coordinators only when a candidate scores better by this fraction (default `0.2`). |
+| `PORTAL_DISCOVERY` | Portal: `selector` replaces the ordered `COORDINATOR_DISCOVERY_URLS` picker with the scored selector. Default: ordered picker (unchanged). |
+| `PORTAL_DISCOVERY_SOURCES` | Portal selector sources, comma list of `static`, `dns`, `nostr` (default `static`). |
 
 ## Startup validation (#15)
 

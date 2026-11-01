@@ -29,6 +29,7 @@ import {
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
+import { registerDiscoveryRoutes, startCoordinatorAnnouncer } from "../discovery/announce.js";
 import { extractCode } from "../model/extract.js";
 import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
@@ -602,6 +603,10 @@ if (robotQueue) {
   });
 }
 
+// Architecture step 3: signed self-announcement + Nostr announcer (EDGECODER_NOSTR_ANNOUNCE=1), see docs/discovery.md.
+const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: process.env.EDGECODER_NOSTR_ANNOUNCE === "1", log: (msg, meta) => app.log.info(meta ?? {}, msg) });
+registerDiscoveryRoutes(app, discoveryAnnouncer);
+
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
   const agentId = headers["x-agent-id"];
   const timestampMs = headers["x-timestamp-ms"];
@@ -803,6 +808,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
+  if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
   // WARNING: register /admin/* routes ONLY inside the admin plugin below — a route added with
   // app.get("/admin/...") outside it would get no auth at all because of this skip.
