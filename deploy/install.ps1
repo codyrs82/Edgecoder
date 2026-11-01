@@ -51,6 +51,7 @@ Log "EdgeCoder source -> $InstallDir ($RepoRef)"
 if (Test-Path (Join-Path $InstallDir '.git')) {
     git -C $InstallDir fetch -q --all --tags; git -C $InstallDir checkout -q $RepoRef; git -C $InstallDir pull -q --ff-only
 } else {
+    if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
     New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) | Out-Null
     git clone -q --branch $RepoRef $RepoUrl $InstallDir
 }

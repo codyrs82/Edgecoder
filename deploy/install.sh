@@ -28,7 +28,15 @@ need_root
 
 # ----------------------------------------------------------------- Node ----
 ensure_node() {
-  if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge "$NODE_MAJOR" ]; then return; fi
+  # Find an existing Node >= NODE_MAJOR even when sudo reset PATH and hid the user's node
+  # (Homebrew on /opt/homebrew/bin, nvm, etc.). Put its dir on PATH so npm/node work below too.
+  for c in "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if [ "$("$c" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ]; then
+      case ":$PATH:" in *":$(dirname "$c"):"*) :;; *) export PATH="$(dirname "$c"):$PATH";; esac
+      return
+    fi
+  done
   log "Installing Node.js $NODE_MAJOR"
   if [ "$OS" = "Darwin" ]; then
     if command -v brew >/dev/null 2>&1; then sudo -u "${SUDO_USER:-$(whoami)}" brew install node@$NODE_MAJOR >/dev/null && brew link --overwrite node@$NODE_MAJOR >/dev/null 2>&1 || true
@@ -89,6 +97,8 @@ ensure_app() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" fetch -q --all --tags && git -C "$INSTALL_DIR" checkout -q "$REPO_REF" && git -C "$INSTALL_DIR" pull -q --ff-only || true
   else
+    # A non-git directory here (old app, half-done clone) makes git clone fail "already exists".
+    [ -e "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
     mkdir -p "$(dirname "$INSTALL_DIR")" && git clone -q --branch "$REPO_REF" "$REPO_URL" "$INSTALL_DIR"
   fi
   ( cd "$INSTALL_DIR" && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent )
