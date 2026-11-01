@@ -81,7 +81,8 @@ import { hashRecordPayload } from "../ledger/record.js";
 import { accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
-import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
+import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
+import { isRateEpochStale, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
 import {
   computeDailyPoolTokens,
   computeHourlyIssuanceAllocations,
@@ -515,6 +516,78 @@ const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>(
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
+
+// ── Rate oracle: sats per CPU-hour from market data, recalibrated daily ──
+const RATE_RECALIBRATION_MS = CC.RATE_RECALIBRATION_MS;
+const RATE_ORACLE_ENABLED = CC.RATE_ORACLE_ENABLED;
+const rateOracleConfig = rateOracleConfigFromEnv();
+let latestRateEpoch: RateEpoch | null = null;
+
+async function recalibrateRateEpoch(): Promise<RateEpoch> {
+  const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: latestRateEpoch });
+  latestRateEpoch = epoch;
+  await pgStore?.upsertRateEpoch(epoch);
+  app.log.info(
+    {
+      epochId: epoch.epochId,
+      status: epoch.status,
+      btcUsd: epoch.btcUsd,
+      satsPerCpuHour: epoch.satsPerCpuHour,
+      satsPerGpuHour: epoch.satsPerGpuHour,
+      msatPerCredit: epoch.msatPerCredit,
+      clamped: Boolean(epoch.clamped),
+      sources: epoch.btcUsdSources.map((s) => `${s.name}:${s.ok ? (s.outlier ? "outlier" : "ok") : "fail"}`)
+    },
+    "rate_epoch_recalibrated"
+  );
+  return epoch;
+}
+
+export interface CreditQuote {
+  satsPerCredit: number;
+  msatPerCredit: number;
+  loadMultiplier: number;
+  quoteSource: "rate_oracle" | "price_epoch" | "default_floor";
+  rateEpochId?: string;
+  rateEpochAtMs?: number;
+  stale: boolean;
+}
+
+/**
+ * What one credit (one CPU-second) costs right now: the oracle's market rate × the scarcity
+ * multiplier. Falls back to the legacy mesh price epoch, then to the legacy 30-sat floor, when
+ * the oracle has never produced an epoch (e.g. RATE_ORACLE_ENABLED=false or offline dev).
+ */
+function quoteSatsPerCredit(resourceClass: ResourceClass = "cpu"): CreditQuote {
+  const status = queue.status();
+  const cpuCapacity = Math.max(1, [...agentCapabilities.values()].reduce((sum, a) => sum + Math.max(1, a.maxConcurrentTasks), 0));
+  const gpuCapacity = Math.max(1, [...agentCapabilities.values()].filter((a) => a.localModelProvider === "ollama-local").length);
+  const loadMultiplier = Number(
+    dynamicLoadMultiplier(resourceClass, { cpuCapacity, gpuCapacity, queuedTasks: status.queued, activeAgents: status.agents }).toFixed(4)
+  );
+  if (latestRateEpoch) {
+    const perHour = resourceClass === "gpu" ? latestRateEpoch.satsPerGpuHour : latestRateEpoch.satsPerCpuHour;
+    const satsPerCredit = Number(((perHour / 3600) * loadMultiplier).toFixed(6));
+    return {
+      satsPerCredit,
+      msatPerCredit: Math.max(1, Math.round(satsPerCredit * 1000)),
+      loadMultiplier,
+      quoteSource: "rate_oracle",
+      rateEpochId: latestRateEpoch.epochId,
+      rateEpochAtMs: latestRateEpoch.createdAtMs,
+      stale: isRateEpochStale(latestRateEpoch, rateOracleConfig)
+    };
+  }
+  const legacy = latestPriceEpochByResource.get(resourceClass);
+  const satsPerCredit = legacy?.pricePerComputeUnitSats ?? (resourceClass === "gpu" ? 120 : 30);
+  return {
+    satsPerCredit,
+    msatPerCredit: Math.round(satsPerCredit * 1000),
+    loadMultiplier,
+    quoteSource: legacy ? "price_epoch" : "default_floor",
+    stale: true
+  };
+}
 /** Routes that need a Lightning provider: payment intents/webhook and robot task creation (invoices). */
 function isPaymentGatedRequest(method: string, url: string): boolean {
   const path = url.split("?")[0];
@@ -2944,21 +3017,64 @@ app.get("/economy/price/current", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const cpu = latestPriceEpochByResource.get("cpu");
   const gpu = latestPriceEpochByResource.get("gpu");
-  return { cpu, gpu };
+  return { cpu, gpu, quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") } };
+});
+
+/** Current rate-oracle epoch (market sats per CPU/GPU hour, sources, hashprice signal) and the live credit quote. */
+app.get("/economy/rates/current", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  return {
+    enabled: RATE_ORACLE_ENABLED,
+    recalibrationMs: RATE_RECALIBRATION_MS,
+    epoch: latestRateEpoch,
+    stale: isRateEpochStale(latestRateEpoch, rateOracleConfig),
+    quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") },
+    config: {
+      usdPerCpuHourReference: rateOracleConfig.usdPerCpuHourReference,
+      usdPerGpuHourReference: rateOracleConfig.usdPerGpuHourReference,
+      networkMarkupBps: rateOracleConfig.networkMarkupBps,
+      maxDailyMovePct: rateOracleConfig.maxDailyMovePct,
+      maxSourceSpreadPct: rateOracleConfig.maxSourceSpreadPct,
+      minSources: rateOracleConfig.minSources,
+      btcUsdSources: rateOracleConfig.btcUsdSources.map((s) => s.name),
+      computeSources: rateOracleConfig.computeSources.map((s) => `${s.name}(${s.resourceClass ?? "cpu"})`)
+    }
+  };
+});
+
+app.get("/economy/rates/history", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const query = z.object({ limit: z.coerce.number().int().min(1).max(365).default(30) }).parse(req.query);
+  const epochs = pgStore ? await pgStore.listRateEpochs(query.limit) : latestRateEpoch ? [latestRateEpoch] : [];
+  return { epochs };
+});
+
+/** Admin: force a recalibration now (e.g. after changing sources). Daily-move clamp still applies. */
+app.post("/economy/rates/recalibrate", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  try {
+    const epoch = await recalibrateRateEpoch();
+    return { ok: true, epoch };
+  } catch (err) {
+    return reply.code(502).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.get("/economy/credits/:accountId/quote", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const currentCpu = latestPriceEpochByResource.get("cpu");
-  const satsPerCredit = currentCpu?.pricePerComputeUnitSats ?? 30;
+  const quote = quoteSatsPerCredit("cpu");
   const balance = pgStore ? await pgStore.creditBalance(params.accountId) : creditEngine.balance(params.accountId);
   return {
     accountId: params.accountId,
     credits: Number(balance.toFixed(3)),
-    satsPerCredit,
-    estimatedSats: satsForCredits(balance, satsPerCredit),
-    quoteSource: currentCpu ? "price_epoch" : "default_floor",
+    satsPerCredit: quote.satsPerCredit,
+    msatPerCredit: quote.msatPerCredit,
+    estimatedSats: satsForCredits(balance, quote.satsPerCredit),
+    quoteSource: quote.quoteSource,
+    rateEpochId: quote.rateEpochId,
+    loadMultiplier: quote.loadMultiplier,
+    stale: quote.stale,
     quotedAtMs: Date.now()
   };
 });
@@ -3127,8 +3243,9 @@ app.post("/economy/payments/intents", async (req, reply) => {
       amountSats: z.number().int().positive().max(100000000)
     })
     .parse(req.body);
-  const currentCpu = latestPriceEpochByResource.get("cpu");
-  const satsPerCredit = currentCpu?.pricePerComputeUnitSats ?? 30;
+  // Price locked at intent creation from the daily market rate (× current load), never re-quoted.
+  const quote = quoteSatsPerCredit("cpu");
+  const satsPerCredit = quote.satsPerCredit;
   const { feeSats, netSats } = computeIntentFee(body.amountSats, COORDINATOR_FEE_BPS);
   const invoice = await lightningProvider.createInvoice({
     amountSats: body.amountSats,
@@ -5309,6 +5426,7 @@ export async function initCoordinator(): Promise<void> {
       const latestGpu = await storeRef.latestPriceEpoch("gpu");
       if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
       if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
+      latestRateEpoch = await storeRef.latestRateEpoch();
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {
@@ -5342,6 +5460,15 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void runIssuanceTick().catch((error) => app.log.warn({ error }, "issuance_tick_failed"));
       }, ISSUANCE_RECALC_MS);
+      // Rate oracle: recalibrate at startup when there is no fresh epoch, then on the daily timer.
+      if (RATE_ORACLE_ENABLED) {
+        if (isRateEpochStale(latestRateEpoch, rateOracleConfig)) {
+          void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));
+        }
+        setInterval(() => {
+          void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));
+        }, RATE_RECALIBRATION_MS);
+      }
       setInterval(() => {
         void maybeAnchorLatestFinalizedEpoch().catch((error) => app.log.warn({ error }, "anchor_tick_failed"));
       }, ANCHOR_INTERVAL_MS);

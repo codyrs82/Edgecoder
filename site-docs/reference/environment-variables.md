@@ -196,6 +196,28 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `BLE_SYNC_ALLOW_V1` | Set `1` (non-production only, one release) to accept legacy v1 BLE signatures that do not cover `credits`. |
 | `ECONOMY_PAYMENTS_ENABLED` | Default `true`. Set `0`, `false`, `off` or `no` (case-insensitive) to run without a Lightning node: no provider is created, and `/economy/payments/*` and `POST /robot/tasks` return 503. |
 
+### Rate oracle (sats per CPU-hour from market data)
+
+The coordinator recalibrates the sats price of compute from verifiable public APIs (default daily) and
+locks it into every payment intent. See `docs/economy-math.md` §2.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RATE_ORACLE_ENABLED` | `true` | `false` keeps the legacy 30-sat floor / mesh price epochs. |
+| `RATE_RECALIBRATION_MS` | `86400000` | Recalibration interval (min 60000). Also runs at startup when no fresh epoch exists. |
+| `COMPUTE_REFERENCE_USD_PER_VCPU_HOUR` | `0.02` | Fiat reference for one sandboxed vCPU-hour (spot/bare-metal class). |
+| `COMPUTE_REFERENCE_USD_PER_GPU_HOUR` | `0.35` | Fiat reference for one consumer-GPU hour. |
+| `RATE_COMPUTE_SOURCES_JSON` | unset | JSON array of `{name, url (https), path, resourceClass?}` live sources whose median overrides the references (USD/hour). |
+| `RATE_BTC_USD_SOURCES_JSON` | Coinbase, Kraken, Bitstamp, mempool.space | Override the BTC/USD source list (same shape, no `resourceClass`). |
+| `RATE_NETWORK_MARKUP_BPS` | `2000` | Network take over the market reference (20 %). |
+| `RATE_MAX_DAILY_MOVE_PCT` | `25` | Max change of sats/CPU-hour per recalibration; the unclamped value is recorded on the epoch. |
+| `RATE_MAX_SOURCE_SPREAD_PCT` | `5` | BTC/USD quotes further than this from the median are dropped as outliers. |
+| `RATE_MIN_SOURCES` | `2` | Agreeing BTC/USD quotes needed for a fresh epoch; otherwise the previous epoch is carried. |
+| `RATE_STALE_AFTER_MS` | `172800000` | Quotes report `stale: true` after 48 h without a fresh epoch. |
+| `BTC_USD_FALLBACK` | unset | Used only when there is no previous epoch and every source failed (offline dev). |
+| `RATE_HASHPRICE_ENABLED` | `true` | Also compute hashprice (sats/TH/day) from mempool.space chain data as an informational signal on the epoch. Never enters the CPU price. |
+| `RATE_MEMPOOL_BASE_URL` | `https://mempool.space` | Self-hosted mempool instance for the hashprice signal and BTC/USD. |
+
 ## Network and infrastructure
 
 | Variable | Description |

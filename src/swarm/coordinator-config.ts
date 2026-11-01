@@ -32,6 +32,9 @@ export const coordinatorConfigSchema = z.object({
   ISSUANCE_COORDINATOR_SHARE: envNumber(0.05, { min: 0 }),
   ISSUANCE_RESERVE_SHARE: envNumber(0.05, { min: 0 }),
   ANCHOR_INTERVAL_MS: envInt(7200000, { min: 1 }),
+  /** Rate oracle: how often sats-per-CPU-hour is recalibrated from market data (default daily). */
+  RATE_RECALIBRATION_MS: envInt(86400000, { min: 60000 }),
+  RATE_ORACLE_ENABLED: envBool(true),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),

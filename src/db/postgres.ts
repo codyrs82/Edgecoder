@@ -3,6 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import type { RateEpoch } from "../economy/rate-oracle.js";
 import {
   AccountMembership,
   AgentOwnership,
@@ -231,6 +232,21 @@ CREATE TABLE IF NOT EXISTS price_epochs (
   signature TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS rate_epochs (
+  epoch_id TEXT PRIMARY KEY,
+  created_at_ms BIGINT NOT NULL,
+  btc_usd DOUBLE PRECISION NOT NULL,
+  usd_per_cpu_hour DOUBLE PRECISION NOT NULL,
+  usd_per_gpu_hour DOUBLE PRECISION NOT NULL,
+  sats_per_cpu_hour DOUBLE PRECISION NOT NULL,
+  sats_per_gpu_hour DOUBLE PRECISION NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  markup_bps INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  payload_json JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_epochs_created ON rate_epochs (created_at_ms DESC);
 
 CREATE TABLE IF NOT EXISTS coordinator_fee_events (
   event_id TEXT PRIMARY KEY,
@@ -1998,6 +2014,41 @@ export class PostgresStore {
         record.createdAtMs
       ]
     );
+  }
+
+  /** Daily rate oracle epochs (sats per CPU/GPU hour from market data). Full epoch kept as JSON. */
+  async upsertRateEpoch(epoch: RateEpoch): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO rate_epochs (
+         epoch_id, created_at_ms, btc_usd, usd_per_cpu_hour, usd_per_gpu_hour, sats_per_cpu_hour,
+         sats_per_gpu_hour, msat_per_credit, markup_bps, status, payload_json
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (epoch_id) DO NOTHING`,
+      [
+        epoch.epochId,
+        epoch.createdAtMs,
+        epoch.btcUsd,
+        epoch.usdPerCpuHour,
+        epoch.usdPerGpuHour,
+        epoch.satsPerCpuHour,
+        epoch.satsPerGpuHour,
+        epoch.msatPerCredit,
+        epoch.markupBps,
+        epoch.status,
+        JSON.stringify(epoch)
+      ]
+    );
+  }
+
+  async latestRateEpoch(): Promise<RateEpoch | null> {
+    const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT 1`);
+    const row = result.rows[0];
+    return row ? (row.payload_json as RateEpoch) : null;
+  }
+
+  async listRateEpochs(limit = 30): Promise<RateEpoch[]> {
+    const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT $1`, [limit]);
+    return result.rows.map((r) => r.payload_json as RateEpoch);
   }
 
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {

@@ -43,11 +43,11 @@ nothing calls them.
 ```
 feeSats      = floor(amountSats × COORDINATOR_FEE_BPS / 10000)      # default 150 bps = 1.5 %
 netSats      = amountSats − feeSats
-satsPerCredit = latest CPU price epoch, else 30
+satsPerCredit = rate oracle (see below) × load multiplier, locked at intent creation
 quotedCredits = round3(netSats / satsPerCredit)
 ```
 
-Example: 10,000 sats → fee 150, net 9,850, at 30 sats/credit → **328.333 credits**.
+Example: 10,000 sats → fee 150, net 9,850, at 0.00667 sats/credit → **1,477,500 credits** (about 410 CPU-hours).
 
 Credits are granted only when the Lightning node reports the invoice settled
 (`src/economy/payment-settlement.ts`, #42): LND by `r_hash` with preimage, amount and state checks;
@@ -62,18 +62,39 @@ multiplier = clamp(0.65 + 0.35 × scarcity, 0.35, 4.0)
 price      = max(1, round(base × multiplier))        # base 30 sats (cpu), 120 sats (gpu)
 ```
 
-so the CPU price floats between 30 sats (idle, multiplier 1.0 at scarcity 1) and 120 sats.
+This multiplier (0.65 idle floor, 4.0 cap) is applied on top of the oracle's market rate. The 30/120-sat
+bases survive only as the legacy fallback when the oracle has never produced an epoch.
 
-### The unit problem
+### Price level: market-anchored, recalibrated daily
 
-One credit is one CPU-second at base rate, and one credit costs 30 sats. That prices a CPU-hour at
-108,000 sats. At 60,000 USD/BTC that is about 65 USD per CPU-hour; at 100,000 USD/BTC about 108
-USD. Cloud vCPU-hours cost cents. Either the base rate per second is far too low, or the sats per
-credit is far too high, or a credit was never meant to equal a second. This is a product decision,
-not a bug, so the code is unchanged, but the numbers as configured are not sellable.
+`satsPerCredit` is no longer a 30-sat constant. `src/economy/rate-oracle.ts` recalibrates it
+(default daily, `RATE_RECALIBRATION_MS`) from two verifiable inputs:
 
-There is also no price history: a buyer's `quotedCredits` is locked at intent creation, which is
-correct, but the "quote" endpoint and the intent use only the **CPU** epoch even for GPU work.
+```
+btcUsd          = median of agreeing spot quotes (Coinbase, Kraken, Bitstamp, mempool.space;
+                  quotes > RATE_MAX_SOURCE_SPREAD_PCT from the median are dropped; >= RATE_MIN_SOURCES must remain)
+usdPerCpuHour   = median of RATE_COMPUTE_SOURCES_JSON (cpu) if configured, else COMPUTE_REFERENCE_USD_PER_VCPU_HOUR (0.02)
+satsPerCpuHour  = usdPerCpuHour / btcUsd × 1e8 × (1 + RATE_NETWORK_MARKUP_BPS / 10000)
+satsPerCredit   = satsPerCpuHour / 3600 × loadMultiplier        # loadMultiplier 0.65..4.0 from queue depth vs capacity
+```
+
+Worked example at 100,000 USD/BTC with the defaults: 0.02 USD/h → 20 sats/h → +20 % → **24 sats
+per CPU-hour**, 0.00667 sats (7 msat) per credit at balanced load. A 10,000-sat purchase (net
+9,850) buys about 1.48 million credits, i.e. 410 CPU-hours. Compare the previous constant: 30 sats
+per CPU-**second**, 108,000 sats per hour, 4,500× higher.
+
+Guards: a fresh epoch may move at most `RATE_MAX_DAILY_MOVE_PCT` (25 %) from the previous one and the
+unclamped value is recorded; if sources fail the previous epoch is carried and flagged; quotes
+report `stale: true` after 48 h. Epochs persist in `rate_epochs`; `GET /economy/rates/current` and
+`/economy/rates/history` expose them; `POST /economy/rates/recalibrate` (admin) forces one.
+
+Why not hashprice: hashprice (sats per TH/s per day) is Bitcoin mining revenue and tracks
+difficulty and block fees, not the cost of a CPU-second. The oracle computes it from mempool.space
+chain data (144 × (subsidy + 24 h average fees) / network TH) and stores it on each epoch as a
+signal for operators, but it never enters the compute price.
+
+Open point: the quote and every intent still use the **CPU** rate even when the buyer intends GPU
+work; a per-resource-class purchase is a follow-up.
 
 ## 3. Contribute-first policy (who may submit)
 
@@ -158,7 +179,7 @@ Each ledger checkpoint is an OP_RETURN transaction. Guards (`src/economy/anchori
 | Buy credits with Lightning (LND) | Working against a node; fail-closed settlement; not deployable on Fly until a node exists (`ECONOMY_PAYMENTS_ENABLED=false`) |
 | Buy credits with Lightning (CLN) | Hardened in this change; needs a regtest run before trusting it with money |
 | Contribute-first gate for buyers | Fixed in this change |
-| Price discovery | Works mechanically; the sats-per-credit level is not sellable (see §2) |
+| Price discovery | Market-anchored via the daily rate oracle (§2); live verification needs the exchange hosts reachable |
 | Token issuance | Records only; tokens redeem for nothing |
 | Sats payouts to contributors | Records only; no on-chain or Lightning sends |
 | Ledger anchoring | Working with bitcoind / anchor proxy; mock in dev |
