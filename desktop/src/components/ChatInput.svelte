@@ -40,7 +40,6 @@
     aria-label={placeholder || "Message"}
     {disabled}
     rows="1"
-    aria-label="Message"
     onkeydown={handleKeydown}
     oninput={autoResize}
   ></textarea>
