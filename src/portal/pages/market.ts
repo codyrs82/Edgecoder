@@ -26,7 +26,7 @@ export function registerMarketPage(app: FastifyInstance): void {
       .mkt-depth { height:160px; width:100%; }
       .mkt-toolbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
       .mkt-toolbar button { padding:4px 10px; font-size:12px; }
-      .mkt-toolbar button.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+      .mkt-toolbar button.active { background:var(--brand); color:#111; border-color:var(--brand); }
       .book { font-family:var(--font-mono); font-size:12px; }
       .book table { width:100%; border-collapse:collapse; }
       .book td, .book th { padding:3px 6px; text-align:right; }
@@ -44,7 +44,7 @@ export function registerMarketPage(app: FastifyInstance): void {
       .order-tabs button.sell.active { background:var(--danger); color:#000; border-color:var(--danger); }
       .field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
       .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
-      .field input, .field select { background:var(--bg-input); color:var(--text); border:1px solid var(--border-strong); border-radius:var(--radius-sm); padding:8px; font-family:var(--font-mono); }
+      .field input { font-family:var(--font-mono); }
       .hint { font-size:11px; color:var(--muted); }
       .pos { color:var(--ok); } .neg { color:var(--danger); }
       .agents-list { font-size:12px; }
@@ -52,7 +52,7 @@ export function registerMarketPage(app: FastifyInstance): void {
     </style>
 
     <div class="mkt-top">
-      <select id="pairSelect" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 10px;font-size:14px;"></select>
+      <select id="pairSelect" style="width:auto;min-width:260px;font-size:14px;font-weight:600;"></select>
       <div class="mkt-pair" id="pairLabel">…/BTC</div>
       <div class="mkt-stat"><span class="k">Last</span><span class="v" id="statLast">–</span></div>
       <div class="mkt-stat"><span class="k">24h change</span><span class="v" id="statChange">–</span></div>

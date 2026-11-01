@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
+import { icon } from "./design-system.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
@@ -11,7 +12,7 @@ app.get("/portal/chat", async (_req, reply) => {
     <style>
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
-      .chat-layout { display:flex; height:calc(100vh - 52px); }
+      .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
       .conv-sidebar {
         width:280px; min-width:260px; border-right:1px solid var(--card-border);
         background:var(--bg-soft); display:flex; flex-direction:column; padding:14px;
@@ -19,13 +20,11 @@ app.get("/portal/chat", async (_req, reply) => {
       .conv-sidebar h3 { margin:0 0 8px 0; font-size:14px; }
       .new-chat-btn {
         display:flex; align-items:center; justify-content:center; gap:6px;
-        width:100%; padding:10px 14px; margin-bottom:12px;
-        border-radius:var(--radius-md); font-size:13px; font-weight:600;
-        background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border:1px solid rgba(193,120,80,0.75); color:white;
-        cursor:pointer; transition:all var(--transition-fast);
+        width:100%; padding:9px 14px; margin-bottom:12px;
+        border-radius:var(--radius-sm); font-size:13px; font-weight:600;
+        background:var(--brand); border:1px solid var(--brand); color:#111; cursor:pointer;
       }
-      .new-chat-btn:hover { filter:brightness(1.1); box-shadow:0 2px 12px rgba(193,120,80,0.3); transform:translateY(-1px); }
+      .new-chat-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
       .conv-item {
         position:relative; padding:10px 30px 10px 12px; border-radius:var(--radius-sm); cursor:pointer;
         margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden;
@@ -41,11 +40,11 @@ app.get("/portal/chat", async (_req, reply) => {
       .conv-item:hover .conv-delete { opacity:0.6; }
       .conv-delete:hover { opacity:1 !important; color:#e74c3c; }
       .conv-item:hover { background:var(--bg-surface); color:var(--text); }
-      .conv-item.active { background:var(--bg-surface); color:var(--brand); border-color:rgba(193,120,80,0.2); }
+      .conv-item.active { background:var(--brand-soft); color:var(--brand-2); border-color:var(--brand-border); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
       .chat-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
       .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
-      .chat-msg { padding:18px 0; line-height:1.7; font-size:15px; animation:fadeSlideIn 0.3s ease both; }
+      .chat-msg { padding:18px 0; line-height:1.7; font-size:15px; }
       .chat-msg + .chat-msg { border-top:1px solid var(--card-border); }
       .chat-msg .msg-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
       .chat-msg .msg-role {
@@ -100,9 +99,7 @@ app.get("/portal/chat", async (_req, reply) => {
         border-radius:var(--radius-md); padding:6px 6px 6px 14px;
         transition:border-color var(--transition-fast), box-shadow var(--transition-fast);
       }
-      .chat-input-row:focus-within {
-        border-color:var(--brand); box-shadow:0 0 0 2px rgba(193,120,80,0.15);
-      }
+      .chat-input-row:focus-within { border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
       .chat-input-row textarea {
         flex:1; resize:none; max-height:200px; border:none; padding:6px 0;
         background:transparent; font-family:inherit; font-size:15px;
@@ -111,12 +108,10 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-input-row textarea:focus { box-shadow:none; }
       .chat-send-btn {
         padding:8px 18px; border-radius:var(--radius-sm);
-        background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border:none; color:white; font-size:13px; font-weight:600;
-        cursor:pointer; transition:all var(--transition-fast);
-        white-space:nowrap;
+        background:var(--brand); border:1px solid var(--brand); color:#111; font-size:13px; font-weight:600;
+        cursor:pointer; white-space:nowrap;
       }
-      .chat-send-btn:hover { filter:brightness(1.1); box-shadow:0 2px 8px rgba(193,120,80,0.3); }
+      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
       .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
       /* ── Model picker ── */
       .model-picker-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
@@ -157,13 +152,13 @@ app.get("/portal/chat", async (_req, reply) => {
       @keyframes spin { to { transform:rotate(360deg); } }
       @media (max-width:680px) {
         .conv-sidebar { display:none; }
-        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:52px; bottom:0; width:85vw; box-shadow:4px 0 20px rgba(0,0,0,0.3); }
+        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:var(--topbar-h); bottom:0; width:85vw; box-shadow:var(--shadow-2); }
       }
     </style>
     <div class="chat-layout">
       <!-- Left: Conversation sidebar -->
       <div class="conv-sidebar" id="convSidebar">
-        <button class="new-chat-btn" id="newChatBtn">&#10010; New Conversation</button>
+        <button class="new-chat-btn" id="newChatBtn">${icon("plus", 14)} New conversation</button>
         <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:10px; font-size:12px;" />
         <div id="convList" style="flex:1; overflow-y:auto;"></div>
       </div>
@@ -172,7 +167,7 @@ app.get("/portal/chat", async (_req, reply) => {
         <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
             <div style="padding:60px 0; text-align:center;">
-              <div style="font-size:36px; margin-bottom:12px;">&#9993;</div>
+              <div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div>
               <h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2>
               <div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
             </div>
@@ -270,7 +265,7 @@ app.get("/portal/chat", async (_req, reply) => {
       for (var i = 0; i < filtered.length; i++) {
         var c = filtered[i];
         var cls = "conv-item" + (c.conversationId === activeConvId ? " active" : "");
-        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&#128465;</button></div>";
+        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&times;</button></div>";
       }
       if (filtered.length === 0) {
         html = "<div class=\\"muted\\" style=\\"padding:8px; font-size:12px;\\">No conversations yet</div>";
@@ -282,7 +277,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var container = document.getElementById("chatMessages");
       var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="font-size:36px; margin-bottom:12px;">&#9993;</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
+        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
         return;
       }
       var html = "";
