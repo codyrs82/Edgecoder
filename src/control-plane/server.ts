@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { loadConfigOrExit } from "../common/config.js";
+import { controlPlaneConfigSchema } from "./config.js";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { request } from "undici";
@@ -20,18 +22,16 @@ await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
 });
-const coordinatorUrl = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 requireProdEnv("control-plane", ["ADMIN_API_TOKEN"]);
-if (!process.env.ADMIN_API_TOKEN) {
-  console.error("[control-plane] FATAL: ADMIN_API_TOKEN must be set");
-  process.exit(1);
-}
-const ADMIN_API_TOKEN: string = process.env.ADMIN_API_TOKEN;
-const COORDINATOR_MESH_TOKEN = process.env.COORDINATOR_MESH_TOKEN ?? process.env.MESH_AUTH_TOKEN ?? "";
-const PORTAL_SERVICE_URL = process.env.PORTAL_SERVICE_URL ?? "";
-const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
+// #15: validated once; a missing ADMIN_API_TOKEN or a malformed URL exits with every problem listed.
+const CP = loadConfigOrExit("control-plane", controlPlaneConfigSchema);
+const coordinatorUrl = CP.COORDINATOR_URL;
+const ADMIN_API_TOKEN: string = CP.ADMIN_API_TOKEN;
+const COORDINATOR_MESH_TOKEN = CP.COORDINATOR_MESH_TOKEN ?? CP.MESH_AUTH_TOKEN ?? "";
+const PORTAL_SERVICE_URL = CP.PORTAL_SERVICE_URL ?? "";
+const PORTAL_SERVICE_TOKEN = CP.PORTAL_SERVICE_TOKEN ?? "";
 const UI_RETIRE_REDIRECT_URL =
-  process.env.UI_RETIRE_REDIRECT_URL ??
+  CP.UI_RETIRE_REDIRECT_URL ??
   (PORTAL_SERVICE_URL ? `${PORTAL_SERVICE_URL.replace(/\/$/, "")}/portal/coordinator-ops` : "/");
 
 function parseAllowedIps(raw: string | undefined): Set<string> {
@@ -1203,11 +1203,9 @@ app.get("/economy/treasury", async (req, reply) => {
 
 app.post("/bootstrap/coordinator", async (_req, reply) => {
   if (!authorizeAdmin(_req as any, reply)) return;
-  const provider = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
-    | "edgecoder-local"
-    | "ollama-local";
-  const autoInstall = process.env.OLLAMA_AUTO_INSTALL === "true";
-  const model = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
+  const provider = CP.LOCAL_MODEL_PROVIDER;
+  const autoInstall = CP.OLLAMA_AUTO_INSTALL;
+  const model = CP.OLLAMA_MODEL;
   try {
     if (pgStore) {
       await pgStore.migrate();
@@ -1217,7 +1215,7 @@ app.post("/bootstrap/coordinator", async (_req, reply) => {
       autoInstall,
       model,
       role: "coordinator",
-      host: process.env.OLLAMA_HOST
+      host: CP.OLLAMA_HOST
     });
     return reply.send({
       ok: true,
