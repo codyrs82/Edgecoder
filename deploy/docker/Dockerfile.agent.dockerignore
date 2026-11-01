@@ -9,3 +9,6 @@ dist
 .git
 .github
 *.md
+
+# local Fly bootstrap output (generated secrets)
+.fly-bootstrap/

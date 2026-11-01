@@ -207,7 +207,9 @@ fi
 # ----------------------------------------------------------------- render ----
 # deploy/fly/*.toml hardcode the original app names, edgecoder.io and relative Dockerfile
 # paths. Render copies for this org: app names/URLs get the prefix, the portal's public and
-# passkey origin become PORTAL_DOMAIN, Dockerfile paths become absolute.
+# passkey origin become PORTAL_DOMAIN. flyctl resolves `dockerfile` relative to the config
+# file's directory (and the build context is the cwd, the repo root), so the rendered copies
+# in .fly-bootstrap/<org>/ point two levels up.
 log "Rendering Fly configs -> $RENDER_DIR"
 python3 - "$REPO_ROOT" "$RENDER_DIR" "$APP_PREFIX" "$PORTAL_DOMAIN" <<'PY'
 import re, sys, pathlib
@@ -215,8 +217,8 @@ root, out, prefix, domain = sys.argv[1:5]
 src = pathlib.Path(root, "deploy", "fly")
 for name in ["fly.seed-node.toml", "fly.seed-eu.toml", "fly.portal.toml", "fly.anchor-proxy.toml"]:
     s = (src / name).read_text()
-    s = s.replace('dockerfile = "../docker/', f'dockerfile = "{root}/deploy/docker/')
-    s = s.replace('dockerfile = "../../Dockerfile.anchor-proxy"', f'dockerfile = "{root}/Dockerfile.anchor-proxy"')
+    s = s.replace('dockerfile = "../docker/', 'dockerfile = "../../deploy/docker/')
+    s = s.replace('dockerfile = "../../Dockerfile.anchor-proxy"', 'dockerfile = "../../Dockerfile.anchor-proxy"')
     s = re.sub(r'\bedgecoder-(seed-eu|seed|portal|anchor-proxy)\b', lambda m: f"{prefix}-{m.group(1)}", s)
     if name == "fly.portal.toml":
         s = s.replace('PORTAL_PUBLIC_URL = "https://edgecoder.io"', f'PORTAL_PUBLIC_URL = "https://{domain}"')
