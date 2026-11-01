@@ -1,0 +1,63 @@
+{
+  "description": "Cross-platform agent request-signing vectors (#64). Signed canonical string: `${timestampMs}\\n${nonce}\\n${method}\\n${path}\\n${bodySha256Hex}` (UTF-8). bodySha256Hex = lowercase hex SHA-256 of the exact body bytes. Signature = Ed25519 over the canonical string, base64. Keys are deterministic 32-byte Ed25519 seeds; publicKeyPem is the SPKI PEM registered via /register. Checked by tests/security/request-signing-vectors.test.ts and ios/EdgeCoderIOS/EdgeCoderIOSTests/RequestSigningVectorsTests.swift.",
+  "headers": {
+    "agentId": "x-agent-id",
+    "timestampMs": "x-timestamp-ms",
+    "nonce": "x-nonce",
+    "bodySha256": "x-body-sha256",
+    "signature": "x-signature"
+  },
+  "vectors": [
+    {
+      "name": "heartbeat",
+      "privateKeySeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n",
+      "agentId": "ios-test-agent-01",
+      "method": "POST",
+      "path": "/heartbeat",
+      "timestampMs": "1761955200000",
+      "nonce": "0f4a5c2b-7d1e-4c3a-9b8f-2e6d1a0c5b7e",
+      "body": "{\"agentId\":\"ios-test-agent-01\",\"powerTelemetry\":{\"onExternalPower\":true,\"batteryLevelPct\":87,\"lowPowerMode\":false,\"updatedAtMs\":1761955200000},\"activeModel\":\"qwen2.5-coder:1.5b\",\"activeModelParamSize\":1.5,\"modelSwapInProgress\":false}",
+      "expected": {
+        "canonicalString": "1761955200000\n0f4a5c2b-7d1e-4c3a-9b8f-2e6d1a0c5b7e\nPOST\n/heartbeat\n6df7c8a04c879491798718cf44c85196d61edcec54a6c0f380db5a37e20bdac0",
+        "bodySha256": "6df7c8a04c879491798718cf44c85196d61edcec54a6c0f380db5a37e20bdac0",
+        "signatureBase64": "iKuX/fHW25HwImkYVO6EqA/DRwqYbXq4ghLMShnEWGOc2NApSpOxySbB5R9NihqCVZKiHLUzQyP/q+fz6gZhCA=="
+      }
+    },
+    {
+      "name": "pull",
+      "privateKeySeedHex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=\n-----END PUBLIC KEY-----\n",
+      "agentId": "ios-test-agent-02",
+      "method": "POST",
+      "path": "/pull",
+      "timestampMs": "1761955260500",
+      "nonce": "ab12cd34-ef56-4a78-9b01-23c45d67e89f",
+      "body": "{\"agentId\":\"ios-test-agent-02\"}",
+      "expected": {
+        "canonicalString": "1761955260500\nab12cd34-ef56-4a78-9b01-23c45d67e89f\nPOST\n/pull\nfb3b986665d6ecadda0cd6a5c126f92c3adbf60a56441cc0d0c89672677acdb7",
+        "bodySha256": "fb3b986665d6ecadda0cd6a5c126f92c3adbf60a56441cc0d0c89672677acdb7",
+        "signatureBase64": "K8jdYn+Ml9mfDOdV1K3srArhcX2dnXXYDZwT7dhldTox+04yiPZIRm8OsGwFMMnbKBypK1XkV3CEtkDiPa1rBg=="
+      }
+    },
+    {
+      "name": "result-unicode",
+      "privateKeySeedHex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      "publicKeyHex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU=\n-----END PUBLIC KEY-----\n",
+      "agentId": "ios-test-agent-03",
+      "method": "POST",
+      "path": "/result",
+      "timestampMs": "1761955321999",
+      "nonce": "5e1d2c3b-4a59-4687-b7c6-d5e4f3a2b1c0",
+      "body": "{\"subtaskId\":\"st-0001\",\"taskId\":\"task-0001\",\"agentId\":\"ios-test-agent-03\",\"ok\":true,\"output\":\"def fib(n):\\n    return n if n < 2 else fib(n-1) + fib(n-2)  # ✓ \\\"done\\\"\",\"durationMs\":1234}",
+      "expected": {
+        "canonicalString": "1761955321999\n5e1d2c3b-4a59-4687-b7c6-d5e4f3a2b1c0\nPOST\n/result\n14c8ed5027ed359514ab1ea963d91b5adf9f329b4fca10d390e49e5144c9bd60",
+        "bodySha256": "14c8ed5027ed359514ab1ea963d91b5adf9f329b4fca10d390e49e5144c9bd60",
+        "signatureBase64": "CgMV2cQonPhhS/hMRciA9/KYcPbVQdvzvSnOL1Ja3y+zgswHfwUJ2UVQakp6ha4MnH33RtpVP2dsoTCRfGwiBQ=="
+      }
+    }
+  ]
+}

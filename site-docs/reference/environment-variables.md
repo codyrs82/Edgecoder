@@ -56,7 +56,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
 | `ENABLE_DEBUG_ROUTES` | Set `1` to register coordinator `/debug/*` routes (dev/e2e only; never registered in production). |
 | `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
-| `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-signature`, …). Set `false` only for local dev with legacy unsigned agents. |
+| `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-timestamp-ms`, `x-nonce`, `x-body-sha256`, `x-signature`); the declared body hash must match the raw request bytes. The TS worker and the iOS app (#64, `RequestSigner.swift`, Keychain-held key registered via `publicKeyPem` in `/register`) both sign this way; shared vectors live in `tests/security/fixtures/request-signing-vectors.json`. Set `false` only for local dev with legacy unsigned agents. |
 
 ## Result verification (#50, #106)
 

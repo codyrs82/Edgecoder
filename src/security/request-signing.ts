@@ -9,6 +9,10 @@ export interface SignRequestParams {
   bodyHash: string;
   privateKeyPem: string;
   agentId: string;
+  /** Test-vector override; production callers leave this unset (defaults to Date.now()). */
+  timestampMs?: string;
+  /** Test-vector override; production callers leave this unset (defaults to a random UUID). */
+  nonce?: string;
 }
 
 export interface SignedHeaders {
@@ -34,7 +38,15 @@ export interface VerifyResult {
   reason?: string;
 }
 
-function canonicalize(
+/**
+ * Canonical string signed by every agent (TS worker, iOS app):
+ *   `${timestampMs}\n${nonce}\n${method}\n${path}\n${bodySha256Hex}`
+ * `path` is the route path only (no host, no query string); `bodySha256Hex` is the lowercase hex
+ * SHA-256 of the exact body bytes sent. The Ed25519 signature is sent base64-encoded in
+ * `x-signature`. Any change here must be mirrored in ios/EdgeCoderIOS/EdgeCoderIOS/Security/RequestSigner.swift
+ * and in tests/security/fixtures/request-signing-vectors.json.
+ */
+export function canonicalize(
   timestampMs: string,
   nonce: string,
   method: string,
@@ -45,8 +57,8 @@ function canonicalize(
 }
 
 export function signRequest(params: SignRequestParams): SignedHeaders {
-  const timestampMs = String(Date.now());
-  const nonce = randomUUID();
+  const timestampMs = params.timestampMs ?? String(Date.now());
+  const nonce = params.nonce ?? randomUUID();
   const payload = canonicalize(timestampMs, nonce, params.method, params.path, params.bodyHash);
   const signature = sign(null, Buffer.from(payload, "utf8"), params.privateKeyPem).toString("base64");
 

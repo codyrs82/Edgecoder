@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -39,6 +40,8 @@ final class SwarmRuntimeController: ObservableObject {
     let modelManager = LocalModelManager()
     private var runtimeTask: Task<Void, Never>?
     @Published var autoStartEnabled: Bool = true
+    /// #64: Ed25519 key that signs every coordinator request; its public key is sent in /register.
+    private var signingKey: Curve25519.Signing.PrivateKey?
 
     var isLocalCoordinator: Bool {
         let url = selectedCoordinatorURL.lowercased()
@@ -300,6 +303,26 @@ final class SwarmRuntimeController: ObservableObject {
         return state == .charging || state == .full
     }
 
+    /// The persistent Keychain signing key (#64). If the Keychain is unavailable the runtime falls
+    /// back to an in-memory key for this process so registration and signing still agree.
+    private func resolveSigningKey() -> Curve25519.Signing.PrivateKey {
+        if let key = signingKey { return key }
+        let key: Curve25519.Signing.PrivateKey
+        do {
+            key = try KeychainEd25519.loadOrCreate()
+        } catch {
+            key = Curve25519.Signing.PrivateKey()
+            appendEvent("Keychain signing key unavailable (\(error.localizedDescription)); using an in-memory key until restart.")
+        }
+        signingKey = key
+        return key
+    }
+
+    /// SPKI PEM of the signing key, exactly as the coordinator stores it from /register.
+    var signingPublicKeyPem: String {
+        Ed25519PEM.publicKeyPEM(resolveSigningKey().publicKey)
+    }
+
     func persistRuntimeSettings() {
         UserDefaults.standard.set(agentId, forKey: DefaultsKey.agentId)
         UserDefaults.standard.set(registrationToken, forKey: DefaultsKey.registrationToken)
@@ -346,7 +369,10 @@ final class SwarmRuntimeController: ObservableObject {
             "localModelProvider": "ollama-local",
             "clientType": "edgecoder-ios",
             "maxConcurrentTasks": 1,
-            "powerTelemetry": currentPowerTelemetry()
+            "powerTelemetry": currentPowerTelemetry(),
+            // #64: the key RequestSigner signs with; the coordinator verifies /heartbeat, /pull,
+            // /result and /credits/ble-sync against it.
+            "publicKeyPem": signingPublicKeyPem
         ]
         do {
             let response = try await postCoordinator(path: "/register", payload: payload)
@@ -582,7 +608,18 @@ final class SwarmRuntimeController: ObservableObject {
         if !meshToken.isEmpty {
             request.setValue(meshToken, forHTTPHeaderField: "x-mesh-token")
         }
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        // #64: sign the exact bytes that go on the wire (never a re-encoded copy) with the
+        // Keychain Ed25519 key; `path` is the route path the coordinator verifies against.
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
+        request.httpBody = bodyData
+        let signed = try RequestSigner.sign(
+            method: "POST",
+            path: path,
+            body: bodyData,
+            agentId: agentId,
+            privateKey: resolveSigningKey()
+        )
+        signed.apply(to: &request)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw APIClientError.invalidResponse

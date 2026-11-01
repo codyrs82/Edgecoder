@@ -221,6 +221,16 @@ jobs:
               exit 1
             }
           tail -5 "$RUNNER_TEMP/xcodebuild.log"
+      # #64: prove the Swift request signer reproduces the TypeScript vectors byte for byte.
+      # Plain swiftc on the macOS host (CryptoKit is available there), no Xcode test target needed.
+      - name: Check request-signing vectors against the Swift signer
+        run: |
+          set -eu
+          swiftc -O -o "$RUNNER_TEMP/request-signing-vectors" \
+            EdgeCoderIOS/Security/RequestSigner.swift \
+            EdgeCoderIOSTests/RequestSigningVectorCheck.swift \
+            Scripts/request-signing-vectors/main.swift
+          "$RUNNER_TEMP/request-signing-vectors" ../../tests/security/fixtures/request-signing-vectors.json
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

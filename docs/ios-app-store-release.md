@@ -49,6 +49,23 @@ xcrun simctl install booted ~/Library/Developer/Xcode/DerivedData/*/Build/Produc
 xcrun simctl launch booted io.edgecoder.ios
 ```
 
+Request-signing unit check (#64; the Swift signer must match the TypeScript
+vectors in `tests/security/fixtures/request-signing-vectors.json`). CI runs it
+with plain `swiftc`; locally, either:
+
+```bash
+cd ios/EdgeCoderIOS
+swiftc -o /tmp/request-signing-vectors \
+  EdgeCoderIOS/Security/RequestSigner.swift \
+  EdgeCoderIOSTests/RequestSigningVectorCheck.swift \
+  Scripts/request-signing-vectors/main.swift
+/tmp/request-signing-vectors ../../tests/security/fixtures/request-signing-vectors.json
+```
+
+or regenerate the project with the `EdgeCoderIOSTests` target from `project.yml`
+(`xcodegen generate`) and run `xcodebuild test -scheme EdgeCoderIOSTests ...`
+(the checked-in `.xcodeproj` does not yet contain the test target).
+
 Core smoke checklist:
 
 - Auth:

@@ -630,7 +630,7 @@ async function verifyAgentRequest(
   headers: Record<string, unknown>,
   routePath: string,
   sourceIp?: string,
-  opts?: { allowUnsigned?: boolean }
+  opts?: { allowUnsigned?: boolean; rawBody?: string }
 ): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
   const signed = extractSignedHeaders(headers);
   // #44: unsigned requests are rejected unless the policy is explicitly relaxed (non-prod),
@@ -694,6 +694,25 @@ async function verifyAgentRequest(
     });
     behaviorTracker.recordProtocolViolation(agentId, sigResult.reason === "timestamp_skew" ? "replay_attempt" : "signature_failure");
     return "rejected";
+  }
+
+  // 3b. #64: the signature covers x-body-sha256, so the declared hash must also match the exact
+  //     request bytes (rawBody is captured by the JSON parser above); otherwise a signed header set
+  //     could be replayed onto a different body within the skew window.
+  if (typeof opts?.rawBody === "string") {
+    const actualHash = createHash("sha256").update(opts.rawBody).digest("hex");
+    if (actualHash !== signed["x-body-sha256"]) {
+      securityLog.log({
+        level: securityLog.severity("invalid_signature"),
+        event: "invalid_signature",
+        source: { type: "agent", id: agentId },
+        details: { reason: "body_hash_mismatch", route: routePath },
+        action: "reject_request",
+        coordinatorId: identity.peerId,
+      });
+      behaviorTracker.recordProtocolViolation(agentId, "signature_failure");
+      return "rejected";
+    }
   }
 
   // 4. Nonce replay detection
@@ -1967,7 +1986,7 @@ app.post("/register", async (req, reply) => {
 });
 
 app.post("/heartbeat", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip);
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip, { rawBody: (req as any).rawBody });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = heartbeatSchema.parse(req.body);
@@ -2266,7 +2285,7 @@ app.post("/submit", async (req, reply) => {
 });
 
 app.post("/pull", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip);
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip, { rawBody: (req as any).rawBody });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = pullSchema.parse(req.body);
@@ -2639,7 +2658,7 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
 app.post("/result", async (req, reply) => {
   // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
   // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true });
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true, rawBody: (req as any).rawBody });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const rawBody = req.body as Record<string, unknown>;
@@ -5191,7 +5210,7 @@ const inMemoryBleTransfer = createInMemoryBleTransfer(creditEngine, syncedBLETxI
 
 app.post("/credits/ble-sync", async (req, reply) => {
   // Unsigned callers fall through to the (configured) mesh-token check below.
-  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip, { allowUnsigned: true });
+  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip, { allowUnsigned: true, rawBody: (req as any).rawBody });
   if (!isBleSyncAuthorized(verified, MESH_AUTH_TOKEN !== "", hasMeshToken(req.headers as any))) {
     return reply.code(401).send({ error: "unauthorized" });
   }
