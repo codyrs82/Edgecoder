@@ -69,7 +69,7 @@
   .update-btn {
     padding: 3px 12px;
     background: var(--accent-secondary, #4a90d9);
-    color: white;
+    color: var(--on-accent, #fff);
     border: none;
     border-radius: 4px;
     cursor: pointer;
