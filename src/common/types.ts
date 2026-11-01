@@ -398,9 +398,10 @@ export interface BitcoinAnchorRecord {
   /**
    * #46: "pending" = broadcast (real txid in txRef), below the required confirmation
    * depth or reorged out; "anchored" = at least the required confirmations on chain;
-   * "broadcasting" = written just before broadcast, so a crash mid-broadcast is visible.
+   * "broadcasting" = written just before broadcast, so a crash mid-broadcast is visible;
+   * "needs_admin" = #103 reconciliation gave up after N attempts; an operator must resolve it.
    */
-  status: "pending" | "anchored" | "failed" | "broadcasting";
+  status: "pending" | "anchored" | "failed" | "broadcasting" | "needs_admin";
   anchoredAtMs?: number;
   createdAtMs: number;
   /** #46: confirmations seen at the last check. */
@@ -409,6 +410,13 @@ export interface BitcoinAnchorRecord {
   blockHash?: string;
   blockHeight?: number;
   lastCheckedAtMs?: number;
+  /** #103: failed reconciliation attempts (lookup errors) for broadcasting/stuck rows. */
+  reconcileAttempts?: number;
+  /**
+   * #109 review: when reconciliation abandoned this row's tx (abandontransaction) and marked it
+   * failed. The txid is kept and watched; if it confirms anyway the row is re-marked anchored.
+   */
+  abandonedAtMs?: number;
 }
 
 export interface CoordinatorFeeEvent {

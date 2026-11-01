@@ -6,6 +6,9 @@ import {
   isTxid,
   refreshAnchor,
   refreshAnchors,
+  reconcileAnchor,
+  reconcileAnchors,
+  reconcileConfigFromEnv,
   requiredConfirmationsFromEnv,
   type AnchorStore
 } from "../../src/economy/anchoring.js";
@@ -295,5 +298,119 @@ describe("anchoring review fixes (#46)", () => {
     const r = applyConfirmation(anchored(), { confirmed: false, confirmations: -1 }, 6, 2_000);
     expect(r.event).toBe("conflicted");
     expect(r.record.status).toBe("failed");
+  });
+});
+
+describe("reconciliation (#103)", () => {
+  const CFG = { maxAttempts: 3, stuckAfterMs: 60_000, abandonWatchMs: 10 * 60_000 };
+  const inflight = (over: Partial<BitcoinAnchorRecord> = {}): BitcoinAnchorRecord => ({
+    anchorId: "b1", epochId: "e", checkpointHash: CHECKPOINT, anchorNetwork: "signet",
+    txRef: "broadcasting:x", status: "broadcasting", createdAtMs: 1, confirmations: 0, ...over
+  });
+  const withLookup = (find: () => Promise<string | null>, conf: AnchorConfirmationResult = { confirmed: false, confirmations: 0 }) => ({
+    ...scriptedProvider([conf]).provider,
+    findCheckpointTx: find
+  });
+
+  it("recovers the txid of a crash-left broadcast and refreshes it (straight to anchored when deep)", async () => {
+    const store = memStore([inflight()]);
+    let asked = "";
+    const provider = withLookup(async () => TXID, { confirmed: true, confirmations: 6, blockHash: BLOCK_A, blockHeight: 9 });
+    provider.findCheckpointTx = async (hex: string) => { asked = hex; return TXID; };
+    expect(await reconcileAnchor(deps(provider, store), inflight(), 6, CFG)).toBe("recovered");
+    expect(decodeOpReturnCheckpoint(asked)).toEqual({ version: 1, checkpointHash: CHECKPOINT });
+    expect(store.rows.get("b1")).toMatchObject({ txRef: TXID, status: "anchored", confirmations: 6 });
+  });
+
+  it("a broadcast the wallet never sent is marked failed so it is re-anchored", async () => {
+    const store = memStore([inflight()]);
+    expect(await reconcileAnchor(deps(withLookup(async () => null), store), inflight(), 6, CFG)).toBe("failed");
+    expect(store.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("lookup errors count attempts; after maxAttempts the row is flagged needs_admin and never re-broadcast", async () => {
+    const store = memStore([inflight()]);
+    const provider = withLookup(async () => { throw new Error("ECONNREFUSED"); });
+    const events: string[] = [];
+    for (let i = 0; i < 4; i += 1) events.push(await reconcileAnchor(deps(provider, store), store.rows.get("b1")!, 6, CFG));
+    expect(events).toEqual(["retry_later", "retry_later", "needs_admin", "skipped"]);
+    expect(store.rows.get("b1")).toMatchObject({ status: "needs_admin", reconcileAttempts: 3 });
+    const sp = scriptedProvider([]);
+    await expect(anchorCheckpoint(deps(sp.provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/unreconciled/);
+    expect(sp.broadcasts).toHaveLength(0);
+  });
+
+  it("a stuck pending tx that left the mempool is marked failed; one still in the mempool is kept", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const mk = (inMempool: boolean) => ({ ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => inMempool, abandonTx: async () => undefined });
+    const d = (p: BitcoinAnchorProvider, st: AnchorStore) => ({ ...deps(p, st), now: () => 1 + CFG.stuckAfterMs });
+    const s1 = memStore([stuck]);
+    expect(await reconcileAnchor(d(mk(true), s1), stuck, 6, CFG)).toBe("still_pending");
+    expect(s1.rows.get("b1")?.status).toBe("pending");
+    const s2 = memStore([stuck]);
+    expect(await reconcileAnchor(d(mk(false), s2), stuck, 6, CFG)).toBe("failed");
+    expect(s2.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("a dropped tx is not marked failed unless abandontransaction succeeds (#109 review)", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const base = scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider;
+    const d = (p: BitcoinAnchorProvider, st: AnchorStore) => ({ ...deps(p, st), now: () => 1 + CFG.stuckAfterMs });
+    const s1 = memStore([stuck]);
+    const failing = { ...base, isInMempool: async () => false, abandonTx: async () => { throw new Error("rpc down"); } };
+    expect(await reconcileAnchor(d(failing, s1), stuck, 6, CFG)).toBe("retry_later");
+    expect(s1.rows.get("b1")).toMatchObject({ status: "pending", reconcileAttempts: 1 });
+    const s2 = memStore([stuck]);
+    expect(await reconcileAnchor(d({ ...base, isInMempool: async () => false }, s2), stuck, 6, CFG)).toBe("retry_later");
+    expect(s2.rows.get("b1")?.status).toBe("pending");
+  });
+
+  it("reconcileAnchors skips a row that changed between listing and locking (#109 review)", async () => {
+    const listed = inflight();
+    const store = Object.assign(memStore([{ ...listed, status: "pending", txRef: TXID }]), {
+      async listAnchorsToReconcile() { return [listed]; }
+    });
+    const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
+    expect(out).toEqual([{ anchorId: "b1", event: "skipped" }]);
+    expect(store.rows.get("b1")?.status).toBe("pending");
+  });
+
+  it("an abandoned tx that confirms anyway is re-marked anchored (#109 review)", async () => {
+    const stuck: BitcoinAnchorRecord = { ...inflight(), txRef: TXID, status: "pending" };
+    const now = 1 + CFG.stuckAfterMs;
+    const s1 = memStore([stuck]);
+    const dropped = { ...scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider, isInMempool: async () => false, abandonTx: async () => undefined };
+    expect(await reconcileAnchor({ ...deps(dropped, s1), now: () => now }, stuck, 6, CFG)).toBe("failed");
+    const failed = s1.rows.get("b1")!;
+    expect(failed).toMatchObject({ status: "failed", txRef: TXID, abandonedAtMs: now });
+
+    // Still unconfirmed: keep watching, row unchanged.
+    const quiet = scriptedProvider([{ confirmed: false, confirmations: 0 }]).provider;
+    expect(await reconcileAnchor({ ...deps(quiet, s1), now: () => now + 1000 }, failed, 6, CFG)).toBe("still_pending");
+    expect(s1.rows.get("b1")?.status).toBe("failed");
+
+    // It confirms after all: back to anchored, abandonment kept so the budget charges it.
+    const later = now + 2000;
+    const confirmedP = scriptedProvider([{ confirmed: true, confirmations: 6, blockHash: "h", blockHeight: 10 }]).provider;
+    expect(await reconcileAnchor({ ...deps(confirmedP, s1), now: () => later }, failed, 6, CFG)).toBe("resurrected");
+    expect(s1.rows.get("b1")).toMatchObject({ status: "anchored", txRef: TXID, abandonedAtMs: now });
+
+    // Outside the watch window it is left alone.
+    const s2 = memStore([failed]);
+    expect(await reconcileAnchor({ ...deps(confirmedP, s2), now: () => now + CFG.abandonWatchMs + 1 }, failed, 6, CFG)).toBe("skipped");
+    expect(s2.rows.get("b1")?.status).toBe("failed");
+  });
+
+  it("reconcileAnchors walks the store's reconcile list", async () => {
+    const store = Object.assign(memStore([inflight()]), {
+      async listAnchorsToReconcile() { return [...store.rows.values()].filter((r) => r.status === "broadcasting"); }
+    });
+    const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
+    expect(out).toEqual([{ anchorId: "b1", event: "failed" }]);
+  });
+
+  it("config from env", () => {
+    expect(reconcileConfigFromEnv({})).toEqual({ maxAttempts: 5, stuckAfterMs: 6 * 60 * 60 * 1000, abandonWatchMs: 72 * 60 * 60 * 1000 });
+    expect(reconcileConfigFromEnv({ ANCHOR_RECONCILE_MAX_ATTEMPTS: "2", ANCHOR_STUCK_AFTER_MS: "120000" })).toEqual({ maxAttempts: 2, stuckAfterMs: 120_000, abandonWatchMs: 72 * 60 * 60 * 1000 });
   });
 });
