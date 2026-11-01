@@ -256,7 +256,7 @@ This installs Node.js, clones the repo, builds, and installs a systemd service. 
 ## Security
 
 - **Passkey authentication** (WebAuthn) with challenge TTL and replay protection
-- **OAuth 2.0 SSO** via Google and Microsoft with PKCE
+- **OAuth 2.0 SSO** via Google, Microsoft and GitHub, with `state` bound to the browser by a signed `__Host-` cookie (PKCE is tracked in #137)
 - **Mesh authentication** via shared `MESH_AUTH_TOKEN` on all coordinator routes
 - **Request signing** (Ed25519) on agent-to-coordinator communication with nonce and timestamp validation
 - **Task envelope encryption** (X25519 ECDH + AES-256-GCM) for subtask payloads
@@ -273,7 +273,73 @@ This installs Node.js, clones the repo, builds, and installs a systemd service. 
 ```bash
 npm test            # run all tests (vitest)
 npm run test:watch  # watch mode
+npm run build       # type-check and compile (tsc)
 ```
+
+Other useful scripts:
+
+- `npm run bootstrap:coordinator` -- DB/schema and readiness bootstrap
+- `npm run verify:blacklist-audit` -- verify the tamper-evident blacklist chain
+- `npm run docs:dev` / `docs:build` / `docs:preview` -- the VitePress docs site (`site-docs`, `:5173`)
+
+## Developer Guide
+
+This section was merged in from the old `README.dev.md` (#21). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to send changes.
+
+### Useful checks
+
+- `GET /status` and `GET /health/runtime` on the coordinator (require `x-mesh-token`)
+- `GET /health` on inference; `POST /decompose` requires `x-inference-token` when `INFERENCE_AUTH_TOKEN` is set
+- `GET /models` on the IDE provider
+- `GET /network/summary` and `GET /network/coordinators` (public discovery feed) on the control plane
+- `GET /portal/coordinator-ops` in the portal (authenticated coordinator-owner operations page)
+
+### Portal routes
+
+- `GET /portal` -- portal frontend
+- `POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`
+- `GET /auth/oauth/:provider/start` for `google`, `microsoft`, `github`
+- `GET /auth/verify-email`, `POST /auth/resend-verification`
+- `POST /auth/passkey/register/options` + `/verify`, `POST /auth/passkey/login/options` + `/verify`
+- `POST /nodes/enroll`, `GET /dashboard/summary`, `POST /me/theme`
+- `GET /ios/dashboard`; `GET /wallet/onboarding` + `POST /wallet/onboarding/acknowledge`
+
+The full list is in [API endpoints](site-docs/reference/api-endpoints-detailed.md).
+
+### Coordinator exposure model
+
+- Coordinator APIs are mesh-internal and require `x-mesh-token`; the public internet can't call them without mesh auth.
+- Inference routes can be token-gated with `INFERENCE_AUTH_TOKEN` (the coordinator forwards `x-inference-token`), and coordinator-to-inference requests can be signature-gated with timestamp and nonce replay protection.
+- The Ollama daemon listens on `127.0.0.1:11434` inside the coordinator runtime and isn't a public API.
+- IDE integrations go through the local agent runtime, not directly to coordinator model endpoints.
+- The control plane's legacy `/ui*` routes are retired; use the portal's coordinator operations pages.
+
+### Coordinator discovery and failover
+
+- Agents resolve coordinators in this order: discovery registry, then local cache, then bootstrap URL.
+- Coordinators find mesh peers in this order: discovery registry, then local cache, then `COORDINATOR_BOOTSTRAP_URLS`.
+- Keep DNS or static config only for bootstrap and control-plane endpoints; don't ship hard-coded coordinator IPs.
+
+### Configuration
+
+The full reference is [Environment variables](site-docs/reference/environment-variables.md). Self-hosters should also read [Self-hosting](site-docs/operations/self-hosting.md). In production the portal refuses to start when a required secret or https URL is missing; #127 (#15) extends startup validation to every service.
+
+### Native iOS app
+
+```bash
+xcodebuild -project "ios/EdgeCoderIOS/EdgeCoderIOS.xcodeproj" \
+  -scheme "EdgeCoderIOS" \
+  -sdk iphonesimulator \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  build
+```
+
+### Design principles
+
+- Keep the split between the interactive agent path and the worker path.
+- Keep the coordinator and inference services separate.
+- Keep security and audit behavior explicit and testable.
+- Update docs when adding endpoints, env vars or startup scripts.
 
 ## Repository Structure
 
@@ -307,7 +373,7 @@ scripts/
   windows/        - .msi builder (WiX)
 desktop/          - Tauri + Svelte desktop app
 ios/              - native Swift iOS app
-docs/             - operational docs and design plans
+docs/             - operational docs
 site-docs/        - VitePress documentation site
 tests/            - test suites
 ```
@@ -317,7 +383,7 @@ tests/            - test suites
 - **API reference:** [docs/API.md](docs/API.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Deployment:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-- **Developer guide:** [README.dev.md](README.dev.md)
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Security:** [SECURITY.md](SECURITY.md) · **Code of conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - **Public mesh operations:** [docs/public-mesh-operations.md](docs/public-mesh-operations.md)
 - **Agent install runbook:** [docs/agent-and-coordinator-install.md](docs/agent-and-coordinator-install.md)
 - **macOS deployment:** [docs/macos-installer.md](docs/macos-installer.md)
