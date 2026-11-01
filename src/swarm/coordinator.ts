@@ -5,6 +5,9 @@ import { loadConfigOrExit } from "../common/config.js";
 import { coordinatorConfigSchema } from "./coordinator-config.js";
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
+import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { registerMetrics } from "../common/metrics.js";
+import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
@@ -155,7 +158,10 @@ import { PullTracker } from "../model/pull-tracker.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
 import { ollamaTags, listModels } from "../model/swap.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ ...serviceLoggerOptions("coordinator") });
+exposeRequestId(app);
+registerMetrics(app, "coordinator");
+await registerErrorTracking(app, "coordinator");
 // #118 review: keep the exact request bytes so signed bodies (forwarded /result) are verified
 // against what was sent, not a re-serialization. Parsing itself is Fastify's default (safe) parser.
 {
@@ -788,6 +794,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/register") return;
   // Health check must be unauthenticated for Fly health probes
   if (reqPath === "/health/runtime") return;
+  // #14: /metrics has its own METRICS_TOKEN check (src/common/metrics.ts)
+  if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.

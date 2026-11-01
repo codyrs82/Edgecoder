@@ -80,6 +80,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `120000` | Passkey challenge expiry (ms). |
+| `PORTAL_TRUST_FLY_CLIENT_IP` | unset | When `true` and Fly's runtime `FLY_APP_NAME` is set, the rate-limit client IP is read from the `Fly-Client-IP` header that the Fly edge proxy sets ([Fly request headers](https://fly.io/docs/networking/request-headers/)). Otherwise it is the socket address, and `X-Forwarded-*` is never trusted (`trustProxy: false`). **Keep unset until #31.** Until it is set, all portal traffic on Fly shares the proxy's rate-limit bucket. `PORTAL_TRUST_PROXY_HOPS` is gone, because Fastify 5.12 ignores hop counts. |
 
 ## Key provider and rotation
 
@@ -288,6 +289,46 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `UI_RETIRE_REDIRECT_URL` | string | unset |
 | `ALLOWED_ADMIN_IPS` | string | unset |
 | `ALLOWED_UI_IPS` | string | unset |
+
+## Observability (#14)
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `info` | pino log level for every service. |
+| `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). In production, `/metrics` is not served at all unless this is set. Outside production it is open. |
+| `REQUEST_ID_FORWARD_ORIGINS` | unset | Extra comma-separated origins that receive `x-request-id` on outbound calls. The service URLs (`COORDINATOR_URL`, `CONTROL_PLANE_URL`, `INFERENCE_URL`, `PORTAL_SERVICE_URL`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_DISCOVERY_URLS`) are included automatically; third-party APIs never get it. |
+| `SENTRY_DSN` | unset | Optional error tracking. Unset: off, nothing is loaded. Set: 5xx errors go to Sentry, tagged with service, route and request id, with no request bodies, headers or cookies. Needs `@sentry/node` in the image; if it's missing, the service logs one warning and runs without it. |
+| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Sentry environment name. |
+| `SENTRY_RELEASE` | unset | Sentry release (for example the git SHA). |
+
+### Alerting on 5xx without Sentry
+
+Every service exports `edgecoder_http_requests_total{service,method,route,status}`. Example Prometheus rules:
+
+```yaml
+groups:
+  - name: edgecoder-http
+    rules:
+      - alert: EdgeCoderHigh5xxRate
+        # more than 5% of requests failing with 5xx for 10 minutes, per service
+        expr: |
+          sum by (service) (rate(edgecoder_http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(edgecoder_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+      - alert: EdgeCoder5xxOnRoute
+        # any single route returning 5xx steadily (catches a broken endpoint on a busy service)
+        expr: sum by (service, route) (rate(edgecoder_http_requests_total{status=~"5.."}[5m])) > 0.1
+        for: 15m
+        labels: { severity: ticket }
+      - alert: EdgeCoderMetricsMissing
+        # the scrape itself failing usually means the service is down or METRICS_TOKEN is wrong
+        expr: up{job=~"edgecoder-.*"} == 0
+        for: 5m
+        labels: { severity: page }
+```
+
+Scrape `/metrics` (inference: `/metrics/prometheus`) with `authorization: Bearer $METRICS_TOKEN`. `route` is the route pattern, so these rules stay low-cardinality.
 
 ## Common profiles
 
