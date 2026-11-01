@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
+import { icon } from "./design-system.js";
 import { DOCS_SITE_URL } from "./urls.js";
 
 // #16: moved verbatim from src/portal/server.ts.
@@ -347,17 +348,14 @@ app.get("/portal/settings", async (_req, reply) => {
         display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:12px;
       }
       .settings-nav-card {
-        display:flex; flex-direction:column; align-items:center; gap:6px;
-        padding:18px 12px; text-align:center; text-decoration:none;
+        display:flex; flex-direction:column; align-items:flex-start; gap:6px;
+        padding:14px; text-align:left; text-decoration:none;
         background:var(--card); border:1px solid var(--card-border);
         border-radius:var(--radius-md); color:var(--text);
-        transition:all var(--transition-fast);
+        transition:border-color var(--transition-fast), background var(--transition-fast);
       }
-      .settings-nav-card:hover {
-        border-color:var(--brand); transform:translateY(-2px);
-        box-shadow:0 4px 16px rgba(0,0,0,0.2);
-      }
-      .settings-nav-card .snc-icon { font-size:22px; margin-bottom:2px; }
+      .settings-nav-card:hover { border-color:var(--border-strong); background:var(--bg-surface); color:var(--text); }
+      .settings-nav-card .snc-icon { width:32px; height:32px; border-radius:var(--radius-sm); border:1px solid var(--card-border); background:var(--bg-surface); display:inline-flex; align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:4px; }
       .settings-nav-card h3 { margin:0; font-size:13px; font-weight:600; }
       .settings-nav-card .muted { font-size:11px; }
       @media (max-width:680px) {
@@ -366,42 +364,42 @@ app.get("/portal/settings", async (_req, reply) => {
     </style>
     <div class="settings-nav-grid">
       <a href="/portal/dashboard" class="settings-nav-card">
-        <div class="snc-icon">&#9632;</div>
+        <div class="snc-icon">${icon("dashboard", 15)}</div>
         <h3>Dashboard</h3>
         <div class="muted">Account and network overview</div>
       </a>
       <a href="/portal/wallet" class="settings-nav-card">
-        <div class="snc-icon">&#9733;</div>
+        <div class="snc-icon">${icon("wallet", 15)}</div>
         <h3>Wallet & Credits</h3>
         <div class="muted">Manage credits and seeds</div>
       </a>
       <a href="/portal/download" class="settings-nav-card">
-        <div class="snc-icon">&#11015;</div>
+        <div class="snc-icon">${icon("download", 15)}</div>
         <h3>Get EdgeCoder</h3>
         <div class="muted">Download for all platforms</div>
       </a>
       <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer" class="settings-nav-card">
-        <div class="snc-icon">&#128214;</div>
+        <div class="snc-icon">${icon("docs", 15)}</div>
         <h3>Documentation</h3>
         <div class="muted">Guides and API reference</div>
       </a>
     </div>
     <div class="grid2">
       <div class="card">
-        <h2 style="margin-top:0;">&#128100; Account</h2>
+        <h2 style="margin-top:0;">Account</h2>
         <div id="accountLine" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
         <label>Theme</label>
         <select id="themeSelect" style="max-width:220px;">
-          <option value="warm">Warm</option>
+          <option value="warm">Graphite (default)</option>
           <option value="midnight">Midnight</option>
-          <option value="emerald">Emerald</option>
+          <option value="emerald">Evergreen</option>
         </select>
         <div class="row" style="margin-top:10px;">
           <button class="primary" id="saveThemeBtn">Save theme</button>
         </div>
       </div>
       <div class="card">
-        <h2 style="margin-top:0;">&#128272; Passkey</h2>
+        <h2 style="margin-top:0;">Passkey</h2>
         <p class="muted" style="margin-bottom:12px;">Enroll a passkey while logged in for passwordless sign-in on future visits.</p>
         <div class="row">
           <button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>
@@ -521,25 +519,25 @@ app.get("/portal/download", async (req, reply) => {
           `<div class="step"><span class="step-num">${i + 1}</span><div class="step-content">${s}</div></div>`
       )
       .join("");
-    return `<div class="${cls}" id="card-${id}">${badge}<h3 style="margin:0 0 14px;font-size:15px;">${icon}&nbsp; ${title}</h3>${stepsHtml}</div>`;
+    return `<div class="${cls}" id="card-${id}">${badge}<h3 style="margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon}</span>${title}</h3>${stepsHtml}</div>`;
   }
 
   /* ── platform card builders ──────────────────────────────────────── */
-  const macCard = wizardCard("macos", "&#127822;", "macOS", [
+  const macCard = wizardCard("macos", icon("apple", 15), "macOS", [
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_aarch64.dmg">Download Desktop App (.dmg)</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
     `Open the <strong>.dmg</strong> and drag EdgeCoder to Applications. The app bundles the agent — no separate install needed.`,
     `Sign in with your EdgeCoder account. The app auto-discovers local models and connects to the mesh.`
   ], detectedOS === "macos");
 
-  const winCard = wizardCard("windows", "&#128187;", "Windows", [
+  const winCard = wizardCard("windows", icon("windows", 15), "Windows", [
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_x64-setup.exe">Download installer (.exe)</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
     `Run the installer. Allow admin access if prompted.`,
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "windows");
 
-  const linuxCard = wizardCard("linux", "&#128039;", "Linux (Debian / Ubuntu)", [
+  const linuxCard = wizardCard("linux", icon("terminal", 15), "Linux (Debian / Ubuntu)", [
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.deb">Download .deb package</a>
      <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.AppImage" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download AppImage</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
@@ -547,20 +545,20 @@ app.get("/portal/download", async (req, reply) => {
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "linux");
 
-  const iosCard = wizardCard("ios", "&#128241;", "iOS (iPhone / iPad)", [
+  const iosCard = wizardCard("ios", icon("phone", 15), "iOS (iPhone / iPad)", [
     `<a class="dl-btn" href="#">Download from App Store</a>
      <span style="font-size:10px;color:var(--muted);margin-left:8px;">TestFlight available now</span>`,
     `Sign in with your <strong>EdgeCoder account</strong>.`,
     `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('ios-token')">Copy</button></div>`
   ], detectedOS === "ios");
 
-  const vscodeCard = wizardCard("vscode", "&#9881;&#65039;", "VS Code Extension", [
+  const vscodeCard = wizardCard("vscode", icon("code", 15), "VS Code Extension", [
     `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" onclick="copyCmd('vscode-cmd')">Copy</button></div>
      <span style="font-size:10px;color:var(--muted);">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
     `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
   ], false);
 
-  const dockerCard = wizardCard("docker", "&#128051;", "Docker", [
+  const dockerCard = wizardCard("docker", icon("box", 15), "Docker", [
     `<div class="code-block" id="docker-cmd"><code>docker run -d --restart unless-stopped \\
   --name edgecoder \\
   -e EDGE_RUNTIME_MODE=worker \\
@@ -581,31 +579,33 @@ app.get("/portal/download", async (req, reply) => {
 
   const content = `
     <style>
-      .hero-dl{text-align:center;padding:28px 0 18px;}
-      .hero-dl h1{font-size:28px;font-weight:700;margin:0 0 6px;color:var(--text);}
+      .hero-dl{padding:4px 0 20px;}
+      .hero-dl h1{font-size:22px;font-weight:600;margin:0 0 6px;color:var(--text);letter-spacing:-0.02em;}
       .hero-dl p{font-size:14px;color:var(--muted);margin:0 0 10px;}
-      .hero-dl .os-badge{display:inline-block;background:var(--brand);color:#fff;font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;}
+      .hero-dl .os-badge{display:inline-flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand-2);border:1px solid var(--brand-border);font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;}
       .feature-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 24px;}
       @media(max-width:720px){.feature-row{grid-template-columns:repeat(2,1fr);}}
-      .feature-card{background:var(--card);border:1px solid var(--card-border);border-radius:10px;padding:14px;text-align:center;}
-      .feature-card .fc-icon{font-size:22px;margin-bottom:6px;}
+      .feature-card{background:var(--card);border:1px solid var(--card-border);border-radius:var(--radius-md);padding:14px;text-align:left;}
+      .feature-card .fc-icon{width:30px;height:30px;border-radius:var(--radius-sm);border:1px solid var(--card-border);background:var(--bg-surface);display:inline-flex;align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:8px;}
       .feature-card .fc-title{font-size:12px;font-weight:700;margin-bottom:4px;color:var(--text);}
       .feature-card .fc-desc{font-size:11px;color:var(--muted);line-height:1.45;}
-      .wizard-card{position:relative;background:var(--card);border:2px solid var(--brand);border-radius:12px;padding:22px 20px;margin-bottom:18px;}
+      .wz-icon{width:28px;height:28px;border-radius:var(--radius-sm);border:1px solid var(--card-border);background:var(--bg-surface);display:inline-flex;align-items:center;justify-content:center;color:var(--brand-2);flex:none;}
+      .wizard-card{position:relative;background:var(--card);border:1px solid var(--brand-border);border-radius:var(--radius-md);padding:22px 20px;margin-bottom:18px;}
       .wizard-card.secondary{border:1px solid var(--card-border);}
-      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:#fff;font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;}
+      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:#111;font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.04em;}
       .step{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
       .step:last-child{margin-bottom:0;}
-      .step-num{flex-shrink:0;width:28px;height:28px;border-radius:50%;background:linear-gradient(140deg,var(--brand),var(--brand-2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;margin-top:1px;}
+      .step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--brand);color:#111;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-top:1px;font-family:var(--font-mono);}
       .step-content{font-size:13px;color:var(--text);line-height:1.55;flex:1;}
       .step-content strong{font-weight:600;}
       .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:linear-gradient(140deg,var(--brand),var(--brand-2));color:#fff;text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
       .dl-btn:hover{opacity:.88;}
-      .code-block{position:relative;background:var(--bg-soft);border:1px dashed var(--card-border);border-radius:8px;padding:9px 60px 9px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;line-height:1.55;}
+      .code-block{position:relative;background:var(--bg-input);border:1px solid var(--card-border);border-radius:var(--radius-sm);padding:9px 60px 9px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;line-height:1.55;}
       .code-block code{background:none;padding:0;font-size:inherit;color:inherit;}
-      .copy-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:rgba(193,120,80,0.1);color:var(--brand);border:1px solid rgba(193,120,80,0.25);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:600;transition:background .15s;}
-      .copy-btn:hover{background:rgba(193,120,80,0.18);}
-      .toggle-link{background:none;border:none;color:var(--brand);cursor:pointer;font-size:13px;font-weight:600;padding:0;margin:10px 0 16px;display:inline-block;}
+      .copy-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:var(--bg-elevated);color:var(--text-secondary);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:3px 10px;min-height:0;font-size:11px;cursor:pointer;font-weight:600;}
+      .copy-btn:hover{color:var(--text);}
+      .toggle-link{background:none;border:none;color:var(--brand-2);cursor:pointer;font-size:13px;font-weight:600;padding:0;min-height:0;margin:10px 0 16px;display:inline-block;}
+      .toggle-link:hover{background:none;}
       .toggle-link:hover{text-decoration:underline;}
       .other-platforms{display:none;}
       .other-platforms.show{display:block;}
@@ -623,22 +623,22 @@ app.get("/portal/download", async (req, reply) => {
     <!-- ── Feature cards ─────────────────────────────────────────────── -->
     <div class="feature-row">
       <div class="feature-card">
-        <div class="fc-icon">&#127760;</div>
+        <div class="fc-icon">${icon("globe", 14)}</div>
         <div class="fc-title">P2P Mesh Network</div>
         <div class="fc-desc">Your device joins a global peer-to-peer mesh for distributed AI inference.</div>
       </div>
       <div class="feature-card">
-        <div class="fc-icon">&#9889;</div>
+        <div class="fc-icon">${icon("zap", 14)}</div>
         <div class="fc-title">Earn Credits</div>
         <div class="fc-desc">Contribute idle compute and earn EdgeCoder credits automatically.</div>
       </div>
       <div class="feature-card">
-        <div class="fc-icon">&#128274;</div>
+        <div class="fc-icon">${icon("shield", 14)}</div>
         <div class="fc-title">Private &amp; Local-First</div>
         <div class="fc-desc">Code and prompts stay on your machine. Inference runs locally when possible.</div>
       </div>
       <div class="feature-card">
-        <div class="fc-icon">&#128421;</div>
+        <div class="fc-icon">${icon("server", 14)}</div>
         <div class="fc-title">Multi-Platform</div>
         <div class="fc-desc">macOS, Windows, Linux, iOS, Docker, and VS Code — one mesh everywhere.</div>
       </div>

@@ -5,6 +5,26 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import type { RateEpoch } from "../economy/rate-oracle.js";
 import type { MarketOrder, MarketTick, MarketTrade } from "../economy/market-history.js";
+
+function rowToPayout(row: Record<string, unknown>): PayoutRecord {
+  return {
+    payoutId: String(row.payout_id),
+    accountId: String(row.account_id),
+    coordinatorId: String(row.coordinator_id),
+    kind: row.kind as PayoutRecord["kind"],
+    bolt11: String(row.bolt11),
+    paymentHash: String(row.payment_hash),
+    amountMsat: Number(row.amount_msat),
+    feeMsat: Number(row.fee_msat ?? 0),
+    maxFeeMsat: Number(row.max_fee_msat ?? 0),
+    status: row.status as PayoutRecord["status"],
+    preimage: (row.preimage as string | null) ?? undefined,
+    error: (row.error as string | null) ?? undefined,
+    destination: (row.destination as string | null) ?? undefined,
+    createdAtMs: Number(row.created_at_ms),
+    settledAtMs: row.settled_at_ms === null || row.settled_at_ms === undefined ? undefined : Number(row.settled_at_ms)
+  };
+}
 import {
   AccountMembership,
   AgentOwnership,
@@ -31,7 +51,9 @@ import {
   Subtask,
   SubtaskResult,
   CreditTransaction,
-  WalletAccount
+  WalletAccount,
+  InfrastructureHost,
+  PayoutRecord
 } from "../common/types.js";
 
 export const SCHEMA_SQL = `
@@ -248,6 +270,37 @@ CREATE TABLE IF NOT EXISTS rate_epochs (
   payload_json JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rate_epochs_created ON rate_epochs (created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS payouts (
+  payout_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  bolt11 TEXT NOT NULL,
+  payment_hash TEXT NOT NULL UNIQUE,
+  amount_msat BIGINT NOT NULL,
+  fee_msat BIGINT NOT NULL DEFAULT 0,
+  max_fee_msat BIGINT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  preimage TEXT,
+  error TEXT,
+  destination TEXT,
+  created_at_ms BIGINT NOT NULL,
+  settled_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_payouts_account ON payouts (account_id, created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS infrastructure_hosts (
+  host_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  coordinator_url TEXT,
+  region TEXT,
+  services_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  lightning_address TEXT,
+  first_seen_ms BIGINT NOT NULL,
+  last_seen_ms BIGINT NOT NULL,
+  heartbeats_in_window INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS market_ticks (
   at_ms BIGINT NOT NULL,
@@ -2093,6 +2146,139 @@ export class PostgresStore {
   async listRateEpochs(limit = 30): Promise<RateEpoch[]> {
     const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT $1`, [limit]);
     return result.rows.map((r) => r.payload_json as RateEpoch);
+  }
+
+  // ── Payouts ──
+  /** Sats (msat) the node received from settled purchases (gross; the fee share is credited to the fee pool separately). */
+  async receivedPurchaseMsat(): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(amount_sats), 0) AS sats FROM payment_intents WHERE status = 'settled'`);
+    return Number(r.rows[0]?.sats ?? 0) * 1000;
+  }
+
+  async payoutsTotalMsat(filter: { accountId?: string; statuses: Array<PayoutRecord["status"]> }): Promise<number> {
+    const params: unknown[] = [filter.statuses];
+    let where = `status = ANY($1)`;
+    if (filter.accountId) {
+      params.push(filter.accountId);
+      where += ` AND account_id = $2`;
+    }
+    const r = await this.pool.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE ${where}`, params);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /**
+   * Reserve a payout atomically: under a per-account advisory lock, recheck payable
+   * (earned − paid/pending) and the coordinator's capacity, then insert the pending row.
+   * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
+   */
+  async reservePayout(
+    payout: PayoutRecord,
+    capacityMsat: (paidOrPendingAllMsat: number) => number
+  ): Promise<{ ok: true } | { ok: false; code: "insufficient_payable" | "coordinator_capacity" | "duplicate_invoice"; payableMsat?: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`payout:${payout.accountId}`]);
+      const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
+      const spent = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
+      const payable = Number(earned.rows[0]?.msat ?? 0) - Number(spent.rows[0]?.msat ?? 0);
+      if (payout.amountMsat > payable) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "insufficient_payable", payableMsat: Math.max(0, payable) };
+      }
+      const all = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE status IN ('paid','pending')`);
+      if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(Number(all.rows[0]?.msat ?? 0))) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "coordinator_capacity" };
+      }
+      const ins = await client.query(
+        `INSERT INTO payouts (payout_id, account_id, coordinator_id, kind, bolt11, payment_hash, amount_msat, fee_msat, max_fee_msat, status, destination, created_at_ms)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,'pending',$9,$10) ON CONFLICT (payment_hash) DO NOTHING RETURNING payout_id`,
+        [payout.payoutId, payout.accountId, payout.coordinatorId, payout.kind, payout.bolt11, payout.paymentHash, payout.amountMsat, payout.maxFeeMsat, payout.destination ?? null, payout.createdAtMs]
+      );
+      if ((ins.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "duplicate_invoice" };
+      }
+      await client.query("COMMIT");
+      return { ok: true };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void> {
+    if (outcome.status === "paid") {
+      await this.pool.query(`UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending'`, [
+        payoutId,
+        Math.max(0, Math.floor(outcome.feeMsat)),
+        outcome.preimage ?? null,
+        Date.now()
+      ]);
+    } else {
+      await this.pool.query(`UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending'`, [payoutId, outcome.error.slice(0, 500), Date.now()]);
+    }
+  }
+
+  async listPayouts(accountId: string, limit = 50): Promise<PayoutRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE account_id = $1 ORDER BY created_at_ms DESC LIMIT $2`, [accountId, limit]);
+    return r.rows.map(rowToPayout);
+  }
+
+  async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE status = 'pending' ORDER BY created_at_ms ASC LIMIT $1`, [limit]);
+    return r.rows.map(rowToPayout);
+  }
+
+  /** Accounts that registered a Lightning address (wallet payout_address or infrastructure host) for automatic payouts. */
+  async listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>> {
+    const r = await this.pool.query(
+      `SELECT account_id, payout_address AS addr FROM wallet_accounts WHERE payout_address IS NOT NULL AND (payout_address LIKE '%@%' OR payout_address LIKE 'https://%')
+       UNION SELECT account_id, lightning_address AS addr FROM infrastructure_hosts WHERE lightning_address IS NOT NULL`
+    );
+    return r.rows.map((row) => ({ accountId: row.account_id, lightningAddress: row.addr }));
+  }
+
+  // ── Infrastructure hosts ──
+  async upsertInfrastructureHost(host: InfrastructureHost): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO infrastructure_hosts (host_id, account_id, coordinator_url, region, services_json, lightning_address, first_seen_ms, last_seen_ms, heartbeats_in_window)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (host_id) DO UPDATE SET
+         account_id = EXCLUDED.account_id,
+         coordinator_url = COALESCE(EXCLUDED.coordinator_url, infrastructure_hosts.coordinator_url),
+         region = COALESCE(EXCLUDED.region, infrastructure_hosts.region),
+         services_json = EXCLUDED.services_json,
+         lightning_address = COALESCE(EXCLUDED.lightning_address, infrastructure_hosts.lightning_address),
+         last_seen_ms = GREATEST(EXCLUDED.last_seen_ms, infrastructure_hosts.last_seen_ms)`,
+      [host.hostId, host.accountId, host.coordinatorUrl ?? null, host.region ?? null, JSON.stringify(host.services), host.lightningAddress ?? null, host.firstSeenMs, host.lastSeenMs, host.heartbeatsInWindow]
+    );
+  }
+
+  async recordHostHeartbeat(hostId: string, nowMs: number): Promise<void> {
+    await this.pool.query(`UPDATE infrastructure_hosts SET last_seen_ms = GREATEST(last_seen_ms, $2), heartbeats_in_window = heartbeats_in_window + 1 WHERE host_id = $1`, [hostId, nowMs]);
+  }
+
+  async resetHostHeartbeatWindow(): Promise<void> {
+    await this.pool.query(`UPDATE infrastructure_hosts SET heartbeats_in_window = 0`);
+  }
+
+  async listInfrastructureHosts(): Promise<InfrastructureHost[]> {
+    const r = await this.pool.query(`SELECT * FROM infrastructure_hosts ORDER BY first_seen_ms ASC`);
+    return r.rows.map((row) => ({
+      hostId: row.host_id,
+      accountId: row.account_id,
+      coordinatorUrl: row.coordinator_url ?? undefined,
+      region: row.region ?? undefined,
+      services: Array.isArray(row.services_json) ? row.services_json : [],
+      lightningAddress: row.lightning_address ?? undefined,
+      firstSeenMs: Number(row.first_seen_ms),
+      lastSeenMs: Number(row.last_seen_ms),
+      heartbeatsInWindow: Number(row.heartbeats_in_window)
+    }));
   }
 
   // ── Compute market history ──
