@@ -26,6 +26,7 @@
     "test:integration": "vitest run --config vitest.e2e.config.ts",
     "docs:dev": "vitepress dev site-docs",
     "docs:build": "vitepress build site-docs",
+    "site:export": "tsx scripts/export-static-site.ts",
     "docs:preview": "vitepress preview site-docs",
     "model:list": "tsx bin/swap-model.ts list",
     "model:swap": "tsx bin/swap-model.ts swap",

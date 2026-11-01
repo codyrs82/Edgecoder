@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import { registerPortalSecurity, rateLimitFor, trustProxyHops } from "../../src/portal/security.js";
+import { ORIGIN_LOCK_HEADER, clientIp, edgeModeFrom, registerPortalSecurity, rateLimitFor, trustProxyHops } from "../../src/portal/security.js";
 import { clearCookies, cookieName, encodeCookie, readCookie } from "../../src/portal/portal-utils.js";
 
 // #10: security headers, CSRF origin check, rate limits and cookie hardening.
@@ -142,5 +142,61 @@ describe("session cookie hardening (#10)", () => {
     expect(cleared).toHaveLength(2);
     expect(cleared[0]).toMatch(/^__Host-s=;/);
     expect(cleared[1]).toMatch(/^s=;/);
+  });
+});
+
+describe("Cloudflare edge: client IP and origin lock", () => {
+  async function edgeApp(lock?: string) {
+    const app = Fastify({ trustProxy: 1 });
+    await registerPortalSecurity(app, {
+      publicOrigin: "https://edgecoder.io",
+      trustedOrigins: [],
+      edge: "cloudflare",
+      originLockToken: lock,
+      serviceToken: "svc-token",
+    });
+    app.get("/health", async () => ({ ok: true }));
+    app.get("/portal", async () => "ok");
+    app.post("/auth/login", async () => ({ ok: true }));
+    await app.ready();
+    return app;
+  }
+
+  it("parses the edge mode", () => {
+    expect(edgeModeFrom(undefined)).toBe("none");
+    expect(edgeModeFrom("cloudflare")).toBe("cloudflare");
+    expect(edgeModeFrom("akamai")).toBe("none");
+  });
+
+  it("uses cf-connecting-ip only when the request provably came through the edge", () => {
+    const base = { ip: "203.0.113.9" };
+    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "none" })).toBe("203.0.113.9");
+    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "cloudflare" })).toBe("198.51.100.7");
+    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7" } }, { edge: "cloudflare", originLockToken: "t" })).toBe("203.0.113.9");
+    expect(clientIp({ ...base, headers: { "cf-connecting-ip": "198.51.100.7", [ORIGIN_LOCK_HEADER]: "t" } }, { edge: "cloudflare", originLockToken: "t" })).toBe("198.51.100.7");
+  });
+
+  it("with a lock token: refuses direct requests, allows the edge header, the service token and /health", async () => {
+    const app = await edgeApp("lock-123");
+    expect((await app.inject({ method: "GET", url: "/portal" })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/portal", headers: { [ORIGIN_LOCK_HEADER]: "wrong" } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/portal", headers: { [ORIGIN_LOCK_HEADER]: "lock-123" } })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/portal", headers: { "x-portal-service-token": "svc-token" } })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/health?x=1" })).statusCode).toBe(200);
+  });
+
+  it("without a lock token nothing is refused", async () => {
+    const app = await edgeApp(undefined);
+    expect((await app.inject({ method: "GET", url: "/portal" })).statusCode).toBe(200);
+  });
+
+  it("rate limits key on the Cloudflare client IP, not the shared edge address", async () => {
+    const app = await edgeApp("lock-123");
+    const hit = (cfIp: string) =>
+      app.inject({ method: "POST", url: "/auth/login", remoteAddress: "172.64.0.1", headers: { [ORIGIN_LOCK_HEADER]: "lock-123", "cf-connecting-ip": cfIp }, payload: {} });
+    for (let i = 0; i < 10; i++) expect((await hit("198.51.100.1")).statusCode).toBe(200);
+    expect((await hit("198.51.100.1")).statusCode).toBe(429);
+    expect((await hit("198.51.100.2")).statusCode).toBe(200);
   });
 });

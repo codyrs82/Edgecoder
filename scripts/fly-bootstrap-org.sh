@@ -30,6 +30,11 @@
 #   RESEND_FROM_EMAIL        default: noreply@<PORTAL_DOMAIN>
 #   OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET / OAUTH_MICROSOFT_CLIENT_ID /
 #   OAUTH_MICROSOFT_CLIENT_SECRET   optional SSO, forwarded to the portal when set
+#   PORTAL_REGIONS           comma-separated Fly regions for the portal (default: ord). More than one
+#                            runs a portal machine per region behind Fly's anycast address, so a
+#                            region outage does not take the front door down (docs/edge-and-redundancy.md).
+#   PORTAL_EDGE / PORTAL_ORIGIN_LOCK_TOKEN   set when the portal sits behind Cloudflare
+#                            (scripts/cloudflare-bootstrap.sh); forwarded to the portal as secrets.
 #   BITCOIND_RPC_URL / BITCOIND_RPC_USER / BITCOIND_RPC_PASSWORD / BITCOIND_WALLET_NAME
 #                            when set, the anchor proxy is deployed and the seeds get
 #                            BITCOIN_ANCHOR_PROVIDER=anchor-proxy pointed at it
@@ -195,7 +200,7 @@ PORTAL_SECRETS=(
   # Portal -> seed privileged calls (the control plane lives inside the all-in-one seed).
   "CONTROL_PLANE_ADMIN_TOKEN=${ADMIN_API_TOKEN}"
 )
-for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET; do
+for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET PORTAL_EDGE PORTAL_ORIGIN_LOCK_TOKEN; do
   [ -n "${!v:-}" ] && PORTAL_SECRETS+=("$v=${!v}")
 done
 fly secrets set -a "$PORTAL" --stage "${PORTAL_SECRETS[@]}"
@@ -256,6 +261,13 @@ smoke() { # url
 deploy "$SEED" fly.seed-node.toml;  post_deploy_seed "$SEED"
 deploy "$SEED_EU" fly.seed-eu.toml; post_deploy_seed "$SEED_EU"
 deploy "$PORTAL" fly.portal.toml
+# Multi-region portal: one machine per listed region behind the app's anycast IP.
+PORTAL_REGIONS="${PORTAL_REGIONS:-ord}"
+if [[ "$PORTAL_REGIONS" == *,* ]]; then
+  n=$(awk -F, '{print NF}' <<<"$PORTAL_REGIONS")
+  log "Portal regions: $PORTAL_REGIONS"
+  fly scale count "$n" --region "$PORTAL_REGIONS" --max-per-region 1 -a "$PORTAL" --yes || echo "portal: scale to $PORTAL_REGIONS failed (fix with: fly scale count $n --region $PORTAL_REGIONS --max-per-region 1 -a $PORTAL)"
+fi
 [ "$WITH_ANCHOR" = 1 ] && deploy "$ANCHOR" fly.anchor-proxy.toml
 
 if [ "$PORTAL_DOMAIN" != "${PORTAL}.fly.dev" ]; then

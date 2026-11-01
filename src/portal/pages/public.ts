@@ -3,10 +3,40 @@
 
 import type { FastifyInstance } from "fastify";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
+import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPricing } from "../public-pricing.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
 
 // #16: moved verbatim from src/portal/server.ts.
-export function marketingHomeHtml(): string {
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
+function priceCell(c: PublicPricing["classes"][number]): string {
+  if (c.satsPerHour === undefined) {
+    return `<span class="sats muted">${escapeHtml(formatUsd(c.usdPerHour))}/h</span><span class="usd">sats rate on the live portal</span>`;
+  }
+  return `<span class="sats">${formatSats(c.satsPerHour)} <small>sats/h</small></span><span class="usd">≈ ${escapeHtml(formatUsd(c.usdPerHour))}/h</span>`;
+}
+
+function pricingMeta(p: PublicPricing): string {
+  if (p.mode !== "live" || !p.btcUsd) return `<span class="status-badge warn">reference prices</span>`;
+  const asOf = p.asOfMs ? new Date(p.asOfMs).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "";
+  return `<span class="status-badge info" title="BTC/USD median of four sources${asOf ? ", rate epoch " + asOf : ""}">BTC ${escapeHtml(formatUsd(p.btcUsd))}</span>`;
+}
+
+export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): string {
+  const byId = new Map(pricing.classes.map((c) => [c.id, c]));
+  const heroRows = HERO_CLASSES.map((id) => byId.get(id))
+    .filter((c): c is NonNullable<typeof c> => Boolean(c))
+    .map((c) => `<div class="ticker-row"><span class="pair">${escapeHtml(c.label)} / BTC<span class="cls">${escapeHtml(c.hardware)}</span></span><span class="px">${priceCell(c)}</span><span class="px mono-id">${c.id}</span></div>`)
+    .join("");
+  const tableRows = pricing.classes
+    .map((c) => `<tr><td class="mono">${c.id}</td><td>${escapeHtml(c.hardware)}</td><td class="num">${priceCell(c)}</td></tr>`)
+    .join("");
+  const liveNote = pricing.mode === "live"
+    ? "Sats per hour are today's rate epoch: the class's USD reference divided by the BTC/USD median of four exchanges, plus the network markup. Agents' asks and requesters' bids trade around it on the Market page."
+    : "Reference USD prices per class. The live sats rate is recalibrated daily from four BTC/USD sources and shown on the portal.";
   return `<!doctype html>
   <html lang="en">
     <head>
@@ -50,7 +80,11 @@ export function marketingHomeHtml(): string {
         .ticker-row .pair { font-weight: 600; }
         .ticker-row .cls { color: var(--muted); font-size: 11px; display: block; }
         .ticker-row .px { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
-        .ticker-row .usd { color: var(--muted); font-size: 11px; display: block; }
+        .ticker-row .mono-id { color: var(--muted); font-size: 11px; }
+        .sats { display: block; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); white-space: nowrap; }
+        .sats small { font-size: 10px; font-weight: 500; color: var(--brand-2); }
+        .sats.muted { color: var(--text-secondary); font-weight: 500; }
+        .usd { display: block; color: var(--muted); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
         .ticker-foot { font-size: 11px; color: var(--muted); margin-top: 10px; }
         .section { padding: 48px 0 0; }
         .section-head { max-width: 640px; margin-bottom: 24px; }
@@ -120,12 +154,9 @@ export function marketingHomeHtml(): string {
             </div>
           </div>
           <aside class="ticker" aria-label="Reference compute prices">
-            <div class="ticker-head"><span class="eyebrow">Reference rates</span><span class="status-badge info">oracle · daily</span></div>
-            <div class="ticker-row"><span class="pair">CPU / BTC<span class="cls">commodity core, spot class</span></span><span class="px">0.02 USD/h</span><span class="px">cpu.std</span></div>
-            <div class="ticker-row"><span class="pair">Apple silicon / BTC<span class="cls">≥ 32 GB unified memory</span></span><span class="px">0.30 USD/h</span><span class="px">apple.m.hi</span></div>
-            <div class="ticker-row"><span class="pair">GPU 24 GB / BTC<span class="cls">RTX 4090 class</span></span><span class="px">0.35 USD/h</span><span class="px">gpu.c24</span></div>
-            <div class="ticker-row"><span class="pair">Datacenter GPU / BTC<span class="cls">H100 class, &gt; 48 GB</span></span><span class="px">1.80 USD/h</span><span class="px">gpu.dc80</span></div>
-            <div class="ticker-foot">Converted to sats every day from the median of four BTC/USD sources, then traded around by agents' asks and requesters' bids. Live prices are on the Market page after sign-in.</div>
+            <div class="ticker-head"><span class="eyebrow">Compute / BTC</span>${pricingMeta(pricing)}</div>
+            ${heroRows}
+            <div class="ticker-foot">${liveNote}</div>
           </aside>
         </section>
 
@@ -146,8 +177,8 @@ export function marketingHomeHtml(): string {
         <section class="section" id="market">
           <div class="section-head">
             <div class="eyebrow">Pricing</div>
-            <h2>Every hardware class has its own pair.</h2>
-            <p>Prices are anchored to public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then discovered on the order book.</p>
+            <h2>Every hardware class has its own pair, priced in sats.</h2>
+            <p>Each class is quoted in sats per unit-hour, converted from public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then discovered on the order book.</p>
           </div>
           <div class="split">
             <div class="formula">
@@ -159,13 +190,9 @@ export function marketingHomeHtml(): string {
             </div>
             <div class="classes">
               <table>
-                <thead><tr><th>Class</th><th>Hardware</th><th class="num">Reference</th></tr></thead>
+                <thead><tr><th>Class</th><th>Hardware</th><th class="num">Unit-hour</th></tr></thead>
                 <tbody>
-                  <tr><td class="mono">cpu.std</td><td>Commodity cores, &lt; 32 GB</td><td class="num">0.02 USD/h</td></tr>
-                  <tr><td class="mono">cpu.hi</td><td>≥ 32 cores or ≥ 128 GB</td><td class="num">0.08 USD/h</td></tr>
-                  <tr><td class="mono">apple.m / .hi</td><td>Apple silicon, by unified memory</td><td class="num">0.12 / 0.30 USD/h</td></tr>
-                  <tr><td class="mono">gpu.c8 / c16 / c24</td><td>Consumer GPU by VRAM</td><td class="num">0.10 / 0.20 / 0.35 USD/h</td></tr>
-                  <tr><td class="mono">gpu.dc40 / dc80</td><td>Datacenter GPU by VRAM</td><td class="num">0.70 / 1.80 USD/h</td></tr>
+                  ${tableRows}
                 </tbody>
               </table>
             </div>
@@ -494,8 +521,16 @@ export function termsOfServiceHtml(): string {
   </html>`;
 }
 
-export function registerPublicPages(app: FastifyInstance): void {
-app.get("/", async (_req, reply) => reply.type("text/html").send(marketingHomeHtml()));
+export interface PublicPagesDeps {
+  /** Current public pricing (src/portal/public-pricing.ts); omitted = reference prices. */
+  getPricing?: () => Promise<PublicPricing>;
+}
+
+export function registerPublicPages(app: FastifyInstance, deps: PublicPagesDeps = {}): void {
+app.get("/", async (_req, reply) => {
+  const pricing = deps.getPricing ? await deps.getPricing().catch(() => referencePricing()) : referencePricing();
+  return reply.type("text/html").send(marketingHomeHtml(pricing));
+});
 app.get("/privacy", async (_req, reply) => reply.type("text/html").send(privacyPolicyHtml()));
 app.get("/terms", async (_req, reply) => reply.type("text/html").send(termsOfServiceHtml()));
 }

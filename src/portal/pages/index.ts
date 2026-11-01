@@ -8,12 +8,12 @@ import { registerDashboardPages } from "./dashboard.js";
 import { registerHomePage } from "./home.js";
 import { registerLegacyPage } from "./legacy.js";
 import { registerMarketPage } from "./market.js";
-import { registerPublicPages } from "./public.js";
+import { registerPublicPages, type PublicPagesDeps } from "./public.js";
 import { registerReviewsPage } from "./reviews.js";
 
 /** #16: every server-rendered HTML page of the portal (API routes stay in server.ts for now). */
-export function registerPortalPages(app: FastifyInstance): void {
-  registerPublicPages(app);
+export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps = {}): void {
+  registerPublicPages(app, deps);
   registerLegacyPage(app);
   registerHomePage(app);
   registerChatPage(app);

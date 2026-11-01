@@ -76,6 +76,9 @@ Consolidated reference for all environment controls. The primary config file on 
 |---|---|---|
 | `PORTAL_PUBLIC_URL` | `https://portal.edgecoder.io` | Public-facing portal URL (used in email links, OAuth redirect). |
 | `PORTAL_DATABASE_URL` | `postgres://...` | Portal PostgreSQL connection string. |
+| `PORTAL_EDGE` | `cloudflare` | Proxy in front of Fly. With `cloudflare`, rate limits key on `cf-connecting-ip` (only trusted when the origin lock passes). See `docs/edge-and-redundancy.md`. |
+| `PORTAL_ORIGIN_LOCK_TOKEN` | random hex | When set, every request must carry it in `x-edgecoder-origin` (added by a Cloudflare Transform Rule); direct hits on the Fly hostname get 403. `/health` and callers with the portal service token are exempt. |
+| `PORTAL_REGIONS` | `ord,ams` | Bootstrap-script only: Fly regions to run a portal machine in (one per region). |
 | `PASSKEY_RP_ID` | `portal.edgecoder.io` | WebAuthn relying party ID (must match origin domain). |
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |

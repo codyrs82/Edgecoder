@@ -5,6 +5,7 @@ import { loadConfigOrExit } from "../common/config.js";
 import { portalConfigSchema, portalProductionProblems } from "./config.js";
 import Fastify from "fastify";
 import { registerPortalPages } from "./pages/index.js";
+import { coordinatorPricingSource } from "./public-pricing.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -56,7 +57,7 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
+import { edgeModeFrom, parseOriginList, registerPortalSecurity, trustProxyHops } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
@@ -82,6 +83,10 @@ await registerPortalSecurity(app, {
   trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
   connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
   enforceCsp: process.env.PORTAL_CSP_ENFORCE === "1",
+  // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
+  edge: edgeModeFrom(process.env.PORTAL_EDGE),
+  originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
+  serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
 });
 
 const store = PortalStore.fromEnv();
@@ -960,8 +965,8 @@ export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
 
 
-// #16: HTML pages live in src/portal/pages/.
-registerPortalPages(app);
+// #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
+registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
 const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
