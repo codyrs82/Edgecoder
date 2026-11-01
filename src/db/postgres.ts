@@ -3,6 +3,8 @@
 
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import type { WorkReceipt } from "../receipts/receipt.js";
+import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
 import type { MarketOrder, MarketTick, MarketTrade } from "../economy/market-history.js";
 
@@ -509,6 +511,44 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
+-- Signed work receipts (architecture step 2): replicated between coordinators, batched into
+-- Merkle epochs whose roots are anchored on Bitcoin. receipt_json keeps the full signed
+-- receipt (PEM keys and both signatures); the columns are for indexing.
+CREATE TABLE IF NOT EXISTS work_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  seq BIGSERIAL,
+  task_id TEXT NOT NULL,
+  subtask_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  credits DOUBLE PRECISION NOT NULL,
+  msat BIGINT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  finished_at_ms BIGINT NOT NULL,
+  result_hash TEXT NOT NULL,
+  receipt_json JSONB NOT NULL,
+  epoch_id TEXT,
+  stored_at_ms BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_receipts_seq ON work_receipts (seq);
+CREATE INDEX IF NOT EXISTS idx_work_receipts_open ON work_receipts (coordinator_id, finished_at_ms) WHERE epoch_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_work_receipts_epoch ON work_receipts (epoch_id);
+CREATE TABLE IF NOT EXISTS receipt_epochs (
+  epoch_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  from_ms BIGINT NOT NULL,
+  to_ms BIGINT NOT NULL,
+  count INTEGER NOT NULL,
+  merkle_root TEXT NOT NULL,
+  previous_root TEXT,
+  signature TEXT NOT NULL,
+  closed_at_ms BIGINT NOT NULL,
+  anchor_tx_ref TEXT,
+  anchor_network TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_receipt_epochs_coordinator ON receipt_epochs (coordinator_id, to_ms DESC, closed_at_ms DESC);
 `;
 
 export class PostgresStore {
@@ -523,6 +563,11 @@ export class PostgresStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
+  }
+
+  /** Work receipts and Merkle epochs (src/receipts) on the same pool. */
+  receiptStore(): PostgresReceiptStore {
+    return new PostgresReceiptStore(this.pool);
   }
 
   async close(): Promise<void> {
@@ -2531,3 +2576,144 @@ export class PostgresStore {
   }
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Work receipts + Merkle epochs (architecture step 2)                */
+/* ------------------------------------------------------------------ */
+
+const RECEIPT_EPOCH_COLUMNS =
+  "epoch_id, coordinator_id, from_ms, to_ms, count, merkle_root, previous_root, signature, closed_at_ms, anchor_tx_ref, anchor_network";
+
+export class PostgresReceiptStore implements ReceiptStore {
+  constructor(private readonly pool: Pool) {}
+
+  private static receiptFromRow(row: Record<string, any>): WorkReceipt {
+    const json = row.receipt_json;
+    return (typeof json === "string" ? JSON.parse(json) : json) as WorkReceipt;
+  }
+
+  private static epochFromRow(row: Record<string, any>): ReceiptEpoch {
+    return {
+      epochId: row.epoch_id,
+      coordinatorId: row.coordinator_id,
+      fromMs: Number(row.from_ms),
+      toMs: Number(row.to_ms),
+      count: Number(row.count),
+      merkleRoot: row.merkle_root,
+      previousRoot: row.previous_root ?? null,
+      signature: row.signature,
+      closedAtMs: Number(row.closed_at_ms),
+      anchorTxRef: row.anchor_tx_ref ?? undefined,
+      anchorNetwork: row.anchor_network ?? undefined
+    };
+  }
+
+  async append(receipt: WorkReceipt): Promise<boolean> {
+    const result = await this.pool.query(
+      `INSERT INTO work_receipts (
+         receipt_id, task_id, subtask_id, agent_id, coordinator_id, compute_class, credits, msat, msat_per_credit,
+         started_at_ms, finished_at_ms, result_hash, receipt_json, epoch_id, stored_at_ms
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULL,$14)
+       ON CONFLICT (receipt_id) DO NOTHING`,
+      [
+        receipt.receiptId,
+        receipt.taskId,
+        receipt.subtaskId,
+        receipt.agentId,
+        receipt.coordinatorId,
+        receipt.computeClass,
+        receipt.credits,
+        receipt.msat,
+        receipt.msatPerCredit,
+        receipt.startedAtMs,
+        receipt.finishedAtMs,
+        receipt.resultHash,
+        JSON.stringify(receipt),
+        Date.now()
+      ]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async get(receiptId: string): Promise<WorkReceipt | null> {
+    const result = await this.pool.query(`SELECT receipt_json FROM work_receipts WHERE receipt_id = $1`, [receiptId]);
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.receiptFromRow(row) : null;
+  }
+
+  async listSince(cursor: string | null, limit?: number): Promise<ReceiptPage> {
+    const after = parseCursor(cursor);
+    const result = await this.pool.query(
+      `SELECT seq, receipt_json FROM work_receipts WHERE seq > $1 ORDER BY seq ASC LIMIT $2`,
+      [after, clampLimit(limit)]
+    );
+    const receipts = result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+    const last = result.rows.length > 0 ? String(result.rows[result.rows.length - 1].seq) : String(after);
+    return { receipts, nextCursor: last };
+  }
+
+  async listUnassigned(coordinatorId: string, untilMs: number, limit?: number): Promise<WorkReceipt[]> {
+    const result = await this.pool.query(
+      `SELECT receipt_json FROM work_receipts
+       WHERE coordinator_id = $1 AND epoch_id IS NULL AND finished_at_ms < $2
+       ORDER BY seq ASC LIMIT $3`,
+      [coordinatorId, untilMs, clampLimit(limit, 10_000)]
+    );
+    return result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+  }
+
+  async listByEpoch(epochId: string): Promise<WorkReceipt[]> {
+    const result = await this.pool.query(
+      `SELECT receipt_json FROM work_receipts WHERE epoch_id = $1 ORDER BY seq ASC`,
+      [epochId]
+    );
+    return result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+  }
+
+  async epochIdForReceipt(receiptId: string): Promise<string | null> {
+    const result = await this.pool.query(`SELECT epoch_id FROM work_receipts WHERE receipt_id = $1`, [receiptId]);
+    return result.rows[0]?.epoch_id ?? null;
+  }
+
+  async latestEpoch(coordinatorId: string): Promise<ReceiptEpoch | null> {
+    const result = await this.pool.query(
+      `SELECT ${RECEIPT_EPOCH_COLUMNS} FROM receipt_epochs WHERE coordinator_id = $1
+       ORDER BY to_ms DESC, closed_at_ms DESC LIMIT 1`,
+      [coordinatorId]
+    );
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.epochFromRow(row) : null;
+  }
+
+  async getEpoch(epochId: string): Promise<ReceiptEpoch | null> {
+    const result = await this.pool.query(`SELECT ${RECEIPT_EPOCH_COLUMNS} FROM receipt_epochs WHERE epoch_id = $1`, [epochId]);
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.epochFromRow(row) : null;
+  }
+
+  async persistEpoch(epoch: ReceiptEpoch, receiptIds?: string[]): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO receipt_epochs (${RECEIPT_EPOCH_COLUMNS})
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (epoch_id) DO UPDATE SET
+         anchor_tx_ref = COALESCE(EXCLUDED.anchor_tx_ref, receipt_epochs.anchor_tx_ref),
+         anchor_network = COALESCE(EXCLUDED.anchor_network, receipt_epochs.anchor_network)`,
+      [
+        epoch.epochId,
+        epoch.coordinatorId,
+        epoch.fromMs,
+        epoch.toMs,
+        epoch.count,
+        epoch.merkleRoot,
+        epoch.previousRoot ?? null,
+        epoch.signature,
+        epoch.closedAtMs,
+        epoch.anchorTxRef ?? null,
+        epoch.anchorNetwork ?? null
+      ]
+    );
+    if (receiptIds && receiptIds.length > 0) {
+      await this.pool.query(`UPDATE work_receipts SET epoch_id = $1 WHERE receipt_id = ANY($2::text[])`, [epoch.epochId, receiptIds]);
+    }
+  }
+}
