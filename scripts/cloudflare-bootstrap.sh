@@ -73,7 +73,15 @@ check() { # label json
 # ------------------------------------------------------------------ zone ----
 log "Zone $DOMAIN"
 VERIFY="$(cf GET "/user/tokens/verify")"
-printf '%s' "$VERIFY" | ok || { echo "API token rejected: $(printf '%s' "$VERIFY" | jq -c '.errors')" >&2; exit 1; }
+if ! printf '%s' "$VERIFY" | ok; then
+  # A user/OAuth token (cfat_...) is not a scoped API token, so /user/tokens/verify
+  # rejects it, but it can still drive the API. Fall back to an account probe.
+  if printf '%s' "$(cf GET "/accounts?per_page=1")" | ok; then
+    echo "  (user/OAuth token: /user/tokens/verify N/A, account probe ok)"
+  else
+    echo "API token rejected: $(printf '%s' "$VERIFY" | jq -c '.errors')" >&2; exit 1
+  fi
+fi
 ZONE_JSON="$(cf GET "/zones?name=$DOMAIN")"
 ZONE_ID="$(printf '%s' "$ZONE_JSON" | jq -r '.result[0].id // empty')"
 if [ -z "$ZONE_ID" ]; then
@@ -117,7 +125,8 @@ upsert_dns CNAME "www.$DOMAIN" "$DOMAIN" true
 # Fly issues the origin certificate over DNS-01; the challenge record must NOT be proxied.
 if [ -z "${ACME_CNAME_TARGET:-}" ] && command -v fly >/dev/null 2>&1; then
   fly certs add "$DOMAIN" -a "$FLY_PORTAL_APP" >/dev/null 2>&1 || true
-  ACME_CNAME_TARGET="$(fly certs show "$DOMAIN" -a "$FLY_PORTAL_APP" --json 2>/dev/null | jq -r '.DNSValidationTarget // empty')"
+  # Don't let a fly error (wrong account, app not found) abort the script under pipefail.
+  ACME_CNAME_TARGET="$(fly certs show "$DOMAIN" -a "$FLY_PORTAL_APP" --json 2>/dev/null | jq -r '.DNSValidationTarget // empty' 2>/dev/null || true)"
 fi
 if [ -n "${ACME_CNAME_TARGET:-}" ]; then
   upsert_dns CNAME "_acme-challenge.$DOMAIN" "$ACME_CNAME_TARGET" false
