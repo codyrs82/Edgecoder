@@ -29,6 +29,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
+import { checkProject } from "./diagnostics.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -543,6 +544,15 @@ app.post("/v1/ide/network/tasks", async (req, reply) => {
 });
 
 app.get("/v1/ide/network/tasks", async (_req, reply) => reply.send({ tasks: networkTasks.list() }));
+
+// Problems: the project's own checkers on save (diagnostics.ts).
+app.post("/v1/ide/diagnostics", async (req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  const { paths } = z.object({ paths: z.array(z.string().max(4096)).min(1).max(200) }).parse(req.body);
+  const fs = new ProjectFs(activeProjectRoot);
+  const inside = paths.filter((p) => { try { fs.resolve(p); return true; } catch { return false; } });
+  return reply.send(await checkProject(activeProjectRoot, inside));
+});
 
 const toolApprovalSchema = z.object({
   id: z.string().min(1),

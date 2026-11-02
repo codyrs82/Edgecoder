@@ -1100,11 +1100,11 @@ export type CompletionResponse =
   | { completion: ""; model: string; reason: "model_missing" | "unsupported" | "error"; message: string };
 
 /** Tab autocomplete at the cursor (fill-in-the-middle). Aborting cancels the model call. */
-export async function ideComplete(prefix: string, suffix: string, signal?: AbortSignal): Promise<CompletionResponse> {
+export async function ideComplete(prefix: string, suffix: string, signal?: AbortSignal, model?: string): Promise<CompletionResponse> {
   const res = await ideFetch(`${ideBase()}/v1/ide/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prefix, suffix }),
+    body: JSON.stringify({ prefix, suffix, ...(model ? { model } : {}) }),
     signal,
   });
   return (await res.json()) as CompletionResponse;
@@ -1172,3 +1172,17 @@ export interface NetworkTask {
 export const networkSubmit = (prompt: string, language: "python" | "javascript" = "python") =>
   fsCall<NetworkTask>("POST", "/v1/ide/network/tasks", { prompt, language });
 export const networkTasks = () => fsCall<{ tasks: NetworkTask[] }>("GET", "/v1/ide/network/tasks").then((r) => r.tasks);
+
+// Problems from the project's own checkers (:4304 /v1/ide/diagnostics)
+export interface Diagnostic {
+  path: string;
+  line: number;
+  column: number;
+  endLine?: number;
+  endColumn?: number;
+  severity: "error" | "warning" | "info";
+  message: string;
+  source: string;
+}
+export const ideDiagnostics = (paths: string[]) =>
+  fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[] }>("POST", "/v1/ide/diagnostics", { paths });

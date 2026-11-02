@@ -6,8 +6,9 @@
   import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, type Diagnostic } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
+  import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
   import { monacoThemeDataOrBase } from "../lib/monaco-theme";
@@ -52,6 +53,104 @@
   let autocompleteOn = $state(true);
   let quickOpen = $state(false);
   let sidebarView = $state<"files" | "git">("files");
+  let editorSettings = $state<EditorSettings>(loadEditorSettings());
+  let settingsOpen = $state(false);
+
+  function updateSettings(patch: Partial<EditorSettings>) {
+    editorSettings = { ...editorSettings, ...patch };
+    saveEditorSettings(editorSettings);
+    const opts = monacoOptions(editorSettings);
+    editor?.updateOptions(opts);
+    splitEditor?.updateOptions(opts);
+    for (const m of models.values()) m.updateOptions({ tabSize: editorSettings.tabSize });
+  }
+  /** Split view: a second editor on the same models (edits show in both). */
+  let splitPath = $state<string | null>(null);
+  let splitContainer: HTMLDivElement | undefined = $state(undefined);
+  let splitEditor: any = null;
+
+  function openSplit() {
+    if (!activeFilePath || !monaco) return;
+    splitPath = activeFilePath;
+  }
+
+  function closeSplit() {
+    splitEditor?.dispose();
+    splitEditor = null;
+    splitPath = null;
+  }
+
+  // Create the split editor once its container exists, and follow splitPath.
+  $effect(() => {
+    const path = splitPath;
+    const host = splitContainer;
+    if (!path || !host || !monaco) return;
+    const file = untrack(() => files.find((f) => f.path === path));
+    if (!file) return;
+    if (!splitEditor) {
+      splitEditor = monaco.editor.create(host, {
+        model: null,
+        theme: `edgecoder-${resolvedTheme()}`,
+        ...monacoOptions(editorSettings),
+        fontFamily: tokens.font.mono,
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        padding: { top: 12 },
+      });
+      splitEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        const f = files.find((x) => x.path === splitPath);
+        if (f) void (f.path.startsWith(UNTITLED) ? saveUntitled(f) : saveFile(f, false));
+      });
+    }
+    splitEditor.setModel(untrack(() => modelFor(file)));
+  });
+  /** Problems from the project's checkers, by project-relative path. */
+  let problems = $state<Record<string, Diagnostic[]>>({});
+  let problemCount = $derived(Object.values(problems).reduce((n, ds) => n + ds.filter((d) => d.severity !== "info").length, 0));
+  let checking = $state(false);
+  const CHECKED = /\.((m|c)?[jt]sx?|py|rs)$/;
+
+  /** Run the checkers for these files and show their problems on every open file. */
+  async function runDiagnostics(paths: string[]) {
+    if (!editorSettings.diagnostics) return;
+    const targets = paths.filter((p) => CHECKED.test(p) && !p.startsWith(UNTITLED));
+    if (!projectRoot || targets.length === 0 || !monaco) return;
+    checking = true;
+    try {
+      const r = await ideDiagnostics(targets);
+      // A whole-project checker (tsc) reports every file: the count is the project's, and the
+      // checked files' old problems are replaced by this run's.
+      const next: Record<string, Diagnostic[]> = { ...problems };
+      for (const p of targets) delete next[p];
+      for (const [p, ds] of Object.entries(r.byPath)) next[p] = ds;
+      problems = next;
+      for (const f of files) {
+        const model = models.get(f.path);
+        if (!model) continue;
+        const ds = problems[f.path] ?? [];
+        monaco.editor.setModelMarkers(model, "edgecoder", ds.map((d) => ({
+          startLineNumber: d.line,
+          startColumn: d.column,
+          endLineNumber: d.endLine ?? d.line,
+          endColumn: d.endColumn ?? model.getLineMaxColumn(Math.min(d.line, model.getLineCount())),
+          message: `${d.message} [${d.source}]`,
+          severity: d.severity === "error" ? monaco.MarkerSeverity.Error : d.severity === "warning" ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info,
+        })));
+      }
+    } catch {
+      // checkers are best effort
+    } finally {
+      checking = false;
+    }
+  }
+
+  /** Jump to the next problem in the open files. */
+  function nextProblem() {
+    const entries = Object.entries(problems).filter(([, ds]) => ds.length);
+    if (!entries.length) return;
+    const [path, ds] = entries.find(([p]) => p !== activeFilePath) ?? entries[0];
+    void openPath(path, ds[0].line);
+  }
   let changeCount = $derived(Object.keys(gitFiles).length);
   /** Bottom terminal panel: mounted on first open, then kept (hidden) so the shell survives. */
   let terminalOpen = $state(false);
@@ -89,6 +188,11 @@
     const mon = await import("monaco-editor");
     monaco = mon;
 
+    // The project's tsc reports type errors (runDiagnostics); Monaco only sees open files, so its own
+    // semantic checks would flag every import. Keep its syntax checks.
+    const tsApi = (mon as any).typescript ?? (mon as any).languages?.typescript;
+    for (const d of [tsApi?.typescriptDefaults, tsApi?.javascriptDefaults]) d?.setDiagnosticsOptions?.({ noSemanticValidation: true, noSyntaxValidation: false });
+
     // #25: both editor themes come from the shared design tokens.
     mon.editor.defineTheme("edgecoder-dark", monacoThemeDataOrBase(tokens, "dark"));
     mon.editor.defineTheme("edgecoder-light", monacoThemeDataOrBase(tokens, "light"));
@@ -98,8 +202,7 @@
       editor = mon.editor.create(editorContainer, {
         model: null,
         theme: `edgecoder-${resolvedTheme()}`,
-        minimap: { enabled: false },
-        fontSize: 14,
+        ...monacoOptions(editorSettings),
         fontFamily: tokens.font.mono,
         lineNumbers: "on",
         renderLineHighlight: "line",
@@ -121,7 +224,7 @@
       );
       try { autocompleteOn = localStorage.getItem("edgecoder-autocomplete") !== "off"; } catch { /* storage unavailable */ }
       autocomplete = registerAutocomplete(mon, editor, {
-        request: (prefix, suffix, signal) => ideComplete(prefix, suffix, signal),
+        request: (prefix, suffix, signal) => ideComplete(prefix, suffix, signal, editorSettings.completionModel || undefined),
         enabled: () => autocompleteOn && Boolean(activeFilePath),
         onUnavailable: (m) => showNotice(m, "info"),
       });
@@ -132,6 +235,7 @@
   onDestroy(() => {
     offTheme?.();
     autocomplete?.dispose();
+    splitEditor?.dispose();
     if (pollTimer) clearInterval(pollTimer);
     for (const m of models.values()) m.dispose();
     models.clear();
@@ -164,6 +268,7 @@
     if (!model && monaco) {
       const uri = monaco.Uri.from({ scheme: file.path.startsWith(UNTITLED) ? "untitled" : "file", path: `/${file.path.replace(UNTITLED, "")}` });
       model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(file.content, file.language, uri);
+      model.updateOptions({ tabSize: editorSettings.tabSize });
       model.onDidChangeContent(() => {
         if (applyingExternal) return;
         const f = files.find((x) => x.path === file.path);
@@ -182,7 +287,17 @@
     activeFilePath = path;
     const file = files.find((f) => f.path === path);
     if (!file || !editor) return;
-    editor.setModel(modelFor(file));
+    const model = modelFor(file);
+    editor.setModel(model);
+    const ds = problems[path];
+    if (ds && monaco && monaco.editor.getModelMarkers({ resource: model.uri, owner: "edgecoder" }).length === 0 && ds.length) {
+      monaco.editor.setModelMarkers(model, "edgecoder", ds.map((d) => ({
+        startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine ?? d.line,
+        endColumn: d.endColumn ?? model.getLineMaxColumn(Math.min(d.line, model.getLineCount())),
+        message: `${d.message} [${d.source}]`,
+        severity: d.severity === "error" ? monaco.MarkerSeverity.Error : d.severity === "warning" ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info,
+      })));
+    }
     const vs = viewStates.get(path);
     if (vs) editor.restoreViewState(vs);
     editor.focus();
@@ -194,6 +309,7 @@
       try {
         const disk = await fsRead(path);
         files = [...files, createFile(path, disk.content, disk.mtimeMs)];
+        if (!problems[path]) setTimeout(() => void runDiagnostics([path]), 0);
       } catch (e) {
         showNotice(e instanceof FsError && e.code === "binary" ? `${path} is a binary file.` : `Couldn't open ${path}: ${(e as Error).message}`);
         return;
@@ -223,6 +339,7 @@
       file.missing = false;
       void refreshGit();
       treeRefresh++;
+      void runDiagnostics([file.path]);
     } catch (e) {
       if (e instanceof FsError && e.code === "conflict") {
         file.diskChanged = true;
@@ -281,6 +398,7 @@
       });
       if (!discard) return;
     }
+    if (splitPath === path) closeSplit();
     const idx = files.findIndex((f) => f.path === path);
     files = files.filter((f) => f.path !== path);
     models.get(path)?.dispose();
@@ -551,7 +669,29 @@
       {/each}
       <div class="tab-bar-spacer"></div>
       {#if gitBranch}<span class="branch" title="Git branch">⎇ {gitBranch}</span>{/if}
+      {#if checking}
+        <span class="branch" title="Running the project's checkers">checking…</span>
+      {:else if problemCount}
+        <button class="ac-toggle problems" title="{problemCount} problem(s) from the project's checkers. Click for the next one." onclick={nextProblem}>⚠ {problemCount}</button>
+      {/if}
+      {#if activeFile}
+        <button class="ac-toggle" class:on={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} onclick={() => (splitPath ? closeSplit() : openSplit())}>Split</button>
+      {/if}
       <button class="ac-toggle" class:on={terminalOpen} title="Terminal (Ctrl+`)" onclick={toggleTerminal}>Terminal</button>
+      <div class="settings-wrap">
+        <button class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+        {#if settingsOpen}
+          <div class="settings-pop" role="dialog" aria-label="Editor settings">
+            <label>Font size <input type="number" min="10" max="28" value={editorSettings.fontSize} onchange={(e) => updateSettings({ fontSize: Number((e.target as HTMLInputElement).value) })} /></label>
+            <label>Tab size <input type="number" min="1" max="8" value={editorSettings.tabSize} onchange={(e) => updateSettings({ tabSize: Number((e.target as HTMLInputElement).value) })} /></label>
+            <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
+            <label class="check"><input type="checkbox" checked={editorSettings.minimap} onchange={(e) => updateSettings({ minimap: (e.target as HTMLInputElement).checked })} /> Minimap</label>
+            <label class="check"><input type="checkbox" checked={editorSettings.diagnostics} onchange={(e) => updateSettings({ diagnostics: (e.target as HTMLInputElement).checked })} /> Check files on open and save</label>
+            <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
+            <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
+          </div>
+        {/if}
+      </div>
       <button
         class="ac-toggle"
         class:on={autocompleteOn}
@@ -585,6 +725,17 @@
     {/if}
     <div class="monaco-wrap" style={terminalOpen ? `flex: 1 1 0; min-height: 80px` : ""}>
       <div class="monaco-container" bind:this={editorContainer}></div>
+      {#if splitPath}
+        <div class="split-pane">
+          <div class="split-bar">
+            <select aria-label="File in split view" value={splitPath} onchange={(e) => (splitPath = (e.target as HTMLSelectElement).value)}>
+              {#each files as f (f.path)}<option value={f.path}>{tabName(f.path)}{f.dirty ? " ●" : ""}</option>{/each}
+            </select>
+            <button title="Close split" aria-label="Close split" onclick={closeSplit}>×</button>
+          </div>
+          <div class="split-editor" bind:this={splitContainer}></div>
+        </div>
+      {/if}
       {#if files.length === 0}
         <div class="editor-empty">
           {#if projectRoot}
@@ -782,6 +933,59 @@
     cursor: pointer;
     white-space: nowrap;
   }
+  .settings-wrap {
+    position: relative;
+  }
+  .settings-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 8px;
+    z-index: 40;
+    width: 270px;
+    padding: 10px 12px;
+    background: var(--bg-elevated);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .settings-pop label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .settings-pop label.check {
+    justify-content: flex-start;
+  }
+  .settings-pop input[type="number"] {
+    width: 56px;
+  }
+  .settings-pop input[type="text"] {
+    width: 140px;
+  }
+  .settings-pop input[type="number"],
+  .settings-pop input[type="text"] {
+    background: var(--bg-base);
+    color: var(--text-primary);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    font-size: 12px;
+  }
+  .settings-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .ac-toggle.problems {
+    color: var(--warning, #d29922);
+    border-color: var(--warning, #d29922);
+  }
   .ac-toggle.on {
     color: var(--accent);
     border-color: var(--accent);
@@ -878,6 +1082,43 @@
   }
   .monaco-container {
     flex: 1;
+    min-width: 0;
+  }
+  .split-pane {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 0.5px solid var(--border);
+  }
+  .split-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-bottom: 0.5px solid var(--border);
+    background: var(--bg-surface);
+  }
+  .split-bar select {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px 4px;
+  }
+  .split-bar button {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .split-editor {
+    flex: 1;
+    min-height: 0;
   }
   .editor-empty {
     position: absolute;
