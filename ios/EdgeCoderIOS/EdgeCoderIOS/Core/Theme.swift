@@ -5,38 +5,38 @@ import UIKit
 // packages/tokens/tests/ios-theme.test.ts fails CI if a value drifts.
 enum Theme {
     // Backgrounds
-    static let bgBase = Color.adaptive(dark: 0x2f2f2d, light: 0xf7f5f0)
-    static let bgSurface = Color.adaptive(dark: 0x3a3a37, light: 0xffffff)
-    static let bgElevated = Color.adaptive(dark: 0x454542, light: 0xefece6)
-    static let bgInput = Color.adaptive(dark: 0x262624, light: 0xffffff)
-    static let bgDeep = Color.adaptive(dark: 0x1a1a18, light: 0xebe7e0)
-    static let card = Color.adaptive(dark: 0x3a3a37, light: 0xffffff, darkOpacity: 0.96, lightOpacity: 0.96)
+    static let bgBase = Color.adaptive(dark: 0x12161c, light: 0xf3f5f8)
+    static let bgSurface = Color.adaptive(dark: 0x171c23, light: 0xffffff)
+    static let bgElevated = Color.adaptive(dark: 0x1e242d, light: 0xeef1f5)
+    static let bgInput = Color.adaptive(dark: 0x0f1318, light: 0xffffff)
+    static let bgDeep = Color.adaptive(dark: 0x0d1014, light: 0xe9edf2)
+    static let card = Color.adaptive(dark: 0x12161c, light: 0xffffff, darkOpacity: 0.96, lightOpacity: 0.96)
 
     // Accent
-    static let accent = Color.adaptive(dark: 0xd8ab92, light: 0x9a542f)
-    static let accentHover = Color.adaptive(dark: 0xdfa889, light: 0x8f4a27)
+    static let accent = Color.adaptive(dark: 0xf7931a, light: 0x8a4f08)
+    static let accentHover = Color.adaptive(dark: 0xffad4a, light: 0x7a450a)
     /// Text/icons on an accent fill (buttons, selected rows).
-    static let onAccent = Color.adaptive(dark: 0x1a1a18, light: 0xffffff)
-    static let accentSecondary = Color.adaptive(dark: 0x8bb8e7, light: 0x2a64a8)
+    static let onAccent = Color.adaptive(dark: 0x0d1014, light: 0xffffff)
+    static let accentSecondary = Color.adaptive(dark: 0x5aa9ff, light: 0x1f5bb5)
 
     // Text
-    static let textPrimary = Color.adaptive(dark: 0xf7f5f0, light: 0x1f1f1d)
-    static let textSecondary = Color.adaptive(dark: 0xbbb4a8, light: 0x57524a)
-    static let textMuted = Color.adaptive(dark: 0xb7b3ac, light: 0x6b665c)
+    static let textPrimary = Color.adaptive(dark: 0xe8ecf1, light: 0x10151c)
+    static let textSecondary = Color.adaptive(dark: 0xaab3c0, light: 0x46505e)
+    static let textMuted = Color.adaptive(dark: 0x8b96a4, light: 0x596470)
 
     // Status
-    static let green = Color.adaptive(dark: 0x4ade80, light: 0x137538)
-    static let red = Color.adaptive(dark: 0xfa9a9a, light: 0xb91c1c)
-    static let yellow = Color.adaptive(dark: 0xfbbf24, light: 0x925906)
+    static let green = Color.adaptive(dark: 0x3ecf8e, light: 0x0f6e3a)
+    static let red = Color.adaptive(dark: 0xf0616d, light: 0xc23442)
+    static let yellow = Color.adaptive(dark: 0xe9b949, light: 0x7d5205)
 
-    // Border (warm grey, not white, to match the desktop tokens)
-    static let border = Color.adaptive(dark: 0xd6ccc2, light: 0x2f2f2d, darkOpacity: 0.08, lightOpacity: 0.10)
-    static let borderStrong = Color.adaptive(dark: 0xd6ccc2, light: 0x2f2f2d, darkOpacity: 0.15, lightOpacity: 0.18)
+    // Border (cool grey, matches the desktop tokens)
+    static let border = Color.adaptive(dark: 0xaab3c0, light: 0x0d1014, darkOpacity: 0.10, lightOpacity: 0.10)
+    static let borderStrong = Color.adaptive(dark: 0xaab3c0, light: 0x0d1014, darkOpacity: 0.18, lightOpacity: 0.16)
     // Edges of inputs and other controls, and focus rings: 3:1 on every background (WCAG 1.4.11).
-    static let borderControl = Color.adaptive(dark: 0x99928b, light: 0x87817a)
-    static let focusRing = Color.adaptive(dark: 0xd8ab92, light: 0x9a542f)
+    static let borderControl = Color.adaptive(dark: 0x6b7684, light: 0x7c8591)
+    static let focusRing = Color.adaptive(dark: 0xf7931a, light: 0x8a4f08)
     /// #25: selected-text background (the desktop Monaco selection colour).
-    static let selection = Color.adaptive(dark: 0x5a4a3a, light: 0xf0d9c8)
+    static let selection = Color.adaptive(dark: 0x2a2114, light: 0xfce4c4)
 }
 
 /// #151: System / Light / Dark, matching the desktop's theme setting (desktop/src/lib/theme.ts).
