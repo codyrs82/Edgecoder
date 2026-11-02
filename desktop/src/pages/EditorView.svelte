@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import FileTree from "../components/FileTree.svelte";
+  import QuickOpen from "../components/QuickOpen.svelte";
+  import TerminalPanel from "../components/TerminalPanel.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
   import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete } from "../lib/api";
@@ -47,6 +49,22 @@
   let inlineEdit: InlineEditController | undefined;
   let autocomplete: { dispose: () => void } | undefined;
   let autocompleteOn = $state(true);
+  let quickOpen = $state(false);
+  /** Bottom terminal panel: mounted on first open, then kept (hidden) so the shell survives. */
+  let terminalOpen = $state(false);
+  let terminalMounted = $state(false);
+  let terminalHeight = $state(240);
+  let terminalPanel: TerminalPanel | undefined = $state(undefined);
+
+  function toggleTerminal() {
+    terminalOpen = !terminalOpen;
+    if (terminalOpen) {
+      terminalMounted = true;
+      setTimeout(() => terminalPanel?.focus(), 30);
+    } else {
+      editor?.focus();
+    }
+  }
   /** Suppresses the dirty flag while the editor itself loads content into a model. */
   let applyingExternal = false;
 
@@ -89,6 +107,8 @@
       });
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => void saveActive());
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyW, () => { if (activeFilePath) void closeFile(activeFilePath); });
+      editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyP, () => { if (projectRoot) quickOpen = true; });
+      editor.addCommand(mon.KeyMod.WinCtrl | mon.KeyCode.Backquote, () => toggleTerminal());
       inlineEdit = new InlineEditController(
         editor,
         mon,
@@ -437,10 +457,38 @@
     window.addEventListener("mouseup", onMouseUp);
   }
 
+  function startTerminalResize(e: MouseEvent) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const start = terminalHeight;
+    const move = (ev: MouseEvent) => { terminalHeight = Math.max(100, Math.min(start + (startY - ev.clientY), window.innerHeight * 0.7)); };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
   function tabName(path: string): string {
     return path.replace(UNTITLED, "").split("/").pop() ?? path;
   }
 </script>
+
+<svelte:window onkeydown={(e) => {
+  // Cmd/Ctrl+P anywhere in the editor tab (the Monaco command covers the editor itself).
+  // The editor stays mounted (hidden) while another tab shows; only act when it is visible.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p" && projectRoot && !quickOpen && editorContainer?.offsetParent) {
+    e.preventDefault();
+    quickOpen = true;
+  }
+  // Ctrl+` toggles the terminal (from the terminal itself too).
+  if (e.ctrlKey && e.key === "`" && editorContainer?.offsetParent) {
+    e.preventDefault();
+    toggleTerminal();
+  }
+}} />
+
+{#if quickOpen}
+  <QuickOpen onOpen={(p) => void openPath(p)} onClose={() => { quickOpen = false; editor?.focus(); }} />
+{/if}
 
 <div class="editor-layout" class:resizing={isResizing}>
   <div class="explorer-panel" style="width: {explorerWidth}px">
@@ -462,6 +510,8 @@
       </div>
     {/if}
   </div>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
+
   <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "explorer")}></div>
   <div class="editor-panel">
     <div class="tab-bar">
@@ -477,6 +527,7 @@
       {/each}
       <div class="tab-bar-spacer"></div>
       {#if gitBranch}<span class="branch" title="Git branch">⎇ {gitBranch}</span>{/if}
+      <button class="ac-toggle" class:on={terminalOpen} title="Terminal (Ctrl+`)" onclick={toggleTerminal}>Terminal</button>
       <button
         class="ac-toggle"
         class:on={autocompleteOn}
@@ -508,13 +559,13 @@
     {:else if activeFile?.missing}
       <div class="notice" role="status"><span>{activeFile.path} was deleted or moved on disk. Save to recreate it.</span></div>
     {/if}
-    <div class="monaco-wrap">
+    <div class="monaco-wrap" style={terminalOpen ? `flex: 1 1 0; min-height: 80px` : ""}>
       <div class="monaco-container" bind:this={editorContainer}></div>
       {#if files.length === 0}
         <div class="editor-empty">
           {#if projectRoot}
             <p>Open a file from the tree, or ask the agent in the chat panel.</p>
-            <p class="hint">⌘K edit with AI · Tab accepts suggestions · ⌘S save · ⌘W close</p>
+            <p class="hint">⌘P go to file · ⌘K edit with AI · Tab accepts suggestions · Ctrl+` terminal · ⌘S save</p>
           {:else}
             <p>Open a folder to start.</p>
             <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
@@ -522,8 +573,22 @@
         </div>
       {/if}
     </div>
+    {#if terminalMounted}
+      <div class="terminal-section" class:hidden={!terminalOpen} style="height: {terminalHeight}px">
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
+
+        <div class="terminal-resize" role="separator" aria-orientation="horizontal" onmousedown={startTerminalResize}></div>
+        <div class="terminal-bar">
+          <span>Terminal</span>
+          <button title="Hide (Ctrl+`)" aria-label="Hide terminal" onclick={toggleTerminal}>×</button>
+        </div>
+        <div class="terminal-body"><TerminalPanel bind:this={terminalPanel} cwd={projectRoot} /></div>
+      </div>
+    {/if}
   </div>
   {#if chatPanelVisible}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
+
     <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "chat")}></div>
     <div class="chat-panel" style="width: {chatPanelWidth}px">
       <EditorChatPanel
@@ -709,6 +774,46 @@
     flex: 1;
     position: relative;
     display: flex;
+  }
+  .terminal-section {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-top: 0.5px solid var(--border);
+    position: relative;
+  }
+  .terminal-section.hidden {
+    display: none;
+  }
+  .terminal-resize {
+    position: absolute;
+    top: -3px;
+    left: 0;
+    right: 0;
+    height: 6px;
+    cursor: row-resize;
+    z-index: 2;
+  }
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 8px 2px 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .terminal-bar button {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .terminal-body {
+    flex: 1;
+    min-height: 0;
   }
   .monaco-container {
     flex: 1;

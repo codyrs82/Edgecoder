@@ -16,6 +16,7 @@ use glob::glob;
 
 mod agent_guard;
 mod network_enrollment;
+mod terminal;
 mod token;
 use agent_guard::{port_in_use, reclaim_stale_agent, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
@@ -892,7 +893,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(LocalToken(local_token.clone()))
         .manage(ProjectRoot(Arc::new(Mutex::new(None))))
+        .manage(terminal::Terminals::default())
         .invoke_handler(tauri::generate_handler![
+            terminal::term_spawn,
+            terminal::term_write,
+            terminal::term_resize,
+            terminal::term_kill,
             get_system_metrics,
             get_local_token,
             get_agent_status,
@@ -967,6 +973,9 @@ fn main() {
             // Quit and the updater's relaunch end the app without destroying its window, which
             // left the agent running and holding the port for the next launch.
             if let tauri::RunEvent::Exit = event {
+                if let Some(terms) = app.try_state::<terminal::Terminals>() {
+                    terminal::kill_all(&terms);
+                }
                 if let Some(state) = app.try_state::<AgentProcess>() {
                     if let Ok(mut guard) = state.0.lock() {
                         if let Some(ref mut child) = *guard {
