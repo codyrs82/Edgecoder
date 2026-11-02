@@ -181,6 +181,7 @@ export interface QueueEventRecord {
     | "network_fee"
     | "payout_settled"
     | "fee_pool_distribution"
+    | "payouts_pause_changed"
     | "stats_checkpoint_proposal"
     | "stats_checkpoint_signature"
     | "stats_checkpoint_commit";
@@ -271,11 +272,22 @@ export interface InfrastructureHost {
   accountId: string;
   coordinatorUrl?: string;
   region?: string;
-  /** What the host runs, self-declared and reflected in the weight: coordinator, bitcoind, lightning, electrs. */
+  /**
+   * Services that count in the weight: the declared ones the receiving coordinator attested
+   * (src/economy/host-attestation.ts). coordinator, bitcoind, lightning, electrs.
+   */
   services: string[];
+  /** What the host declared in its heartbeat, attested or not (display / diagnostics). */
+  declaredServices?: string[];
+  /** When `services` was last attested. */
+  attestedAtMs?: number;
+  /** Lightning node id the host declared (needed to attest the lightning service). */
+  lightningNodeId?: string;
   lightningAddress?: string;
   firstSeenMs: number;
   lastSeenMs: number;
+  /** Last heartbeat that counted toward uptime (at most one per heartbeat interval). */
+  lastCountedMs?: number;
   /** Heartbeats observed in the current distribution window. */
   heartbeatsInWindow: number;
 }

@@ -13,6 +13,18 @@ export function requireSignedAgentRequests(env: NodeJS.ProcessEnv = process.env)
   return (env.REQUIRE_SIGNED_AGENT_REQUESTS ?? "true").trim().toLowerCase() !== "false";
 }
 
+/**
+ * What an agent route does with an unsigned request: "rejected", or null (proceed unsigned).
+ * - requireSigned: the route speaks for a named agent with no other auth (e.g. /benchmark/response),
+ *   so it is signed-only whatever the policy;
+ * - allowUnsigned: the route has its own auth for unsigned callers (mesh-token peer forwards);
+ * - otherwise the REQUIRE_SIGNED_AGENT_REQUESTS policy decides.
+ */
+export function unsignedRequestDecision(input: { requireSignedPolicy: boolean; allowUnsigned?: boolean; requireSigned?: boolean }): "rejected" | null {
+  if (input.requireSigned) return "rejected";
+  return input.requireSignedPolicy && !input.allowUnsigned ? "rejected" : null;
+}
+
 export interface ClaimRecord {
   subtask: { id: string; timeoutMs: number };
   claimedBy?: string;

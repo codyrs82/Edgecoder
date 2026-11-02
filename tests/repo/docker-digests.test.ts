@@ -19,9 +19,33 @@ const froms = DOCKERFILES.flatMap((f) =>
     .map((l) => ({ file: f, image: l.split(/\s+/)[1] }))
 );
 
+// Compose `image:` lines pull from a registry at `docker compose up`, so they are pinned the same way.
+// The tag stays in front of the digest for readability; locally built images are exempt.
+const COMPOSE_FILES = [
+  "deploy/infra/docker-compose.yml",
+  "docker-compose.yml",
+  "tests/e2e/docker-compose.e2e.yml",
+  "tests/e2e/docker-compose.scale.yml"
+];
+
+const composeImages = COMPOSE_FILES.flatMap((f) =>
+  [...readFileSync(f, "utf8").matchAll(/^\s+image:\s*(\S+)\s*$/gm)].map((m) => ({ file: f, image: m[1] }))
+);
+
 describe("Docker base image pins (#84)", () => {
   it("pins every FROM by sha256 digest", () => {
     expect(froms.filter((f) => !/@sha256:[0-9a-f]{64}$/.test(f.image))).toEqual([]);
+  });
+
+  it("pins every compose image by sha256 digest (except locally built :local images)", () => {
+    const pulled = composeImages.filter((c) => !/^edgecoder-infra\/[^:]+:local$/.test(c.image));
+    expect(pulled.length).toBeGreaterThanOrEqual(9);
+    expect(pulled.filter((c) => !/^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$/.test(c.image))).toEqual([]);
+  });
+
+  it("uses one postgres digest across every compose file", () => {
+    const pg = new Set(composeImages.filter((c) => c.image.startsWith("postgres:")).map((c) => c.image));
+    expect(pg.size).toBe(1);
   });
 
   it("uses one node:22-bookworm-slim digest everywhere", () => {

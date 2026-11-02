@@ -4,8 +4,8 @@
 // Coordinator discovery: the announcement record a coordinator publishes (DNS, Nostr,
 // /discovery/announcement) and the candidate record the selector ranks.
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
+import { fingerprintMatches } from "../security/key-fingerprint.js";
 import { signPayload, verifyPayload } from "../mesh/peer.js";
 
 /** A coordinator's self-description, signed with its Ed25519 mesh identity. */
@@ -119,17 +119,15 @@ export function parseAnnouncement(input: unknown): CoordinatorAnnouncement | nul
   return r.data;
 }
 
-/** sha256 hex of the PEM with whitespace normalized; used for operator key pins. */
-export function publicKeyFingerprint(publicKeyPem: string): string {
-  const normalized = publicKeyPem.replace(/\r/g, "").trim();
-  return createHash("sha256").update(normalized).digest("hex");
-}
+/** Operator key pins use the system-wide fingerprint (sha256 of SPKI DER; src/security/key-fingerprint.ts). */
+export { publicKeyFingerprint } from "../security/key-fingerprint.js";
 
 /** True when `pin` matches the PEM either verbatim (whitespace-insensitive) or by fingerprint. */
 export function pinMatchesKey(pin: string, publicKeyPem: string): boolean {
   const p = pin.trim();
   if (!p) return false;
-  if (/^[0-9a-f]{64}$/i.test(p)) return p.toLowerCase() === publicKeyFingerprint(publicKeyPem);
+  // Canonical or pre-unification (PEM-text) fingerprint, so existing pins keep matching.
+  if (/^[0-9a-f]{64}$/i.test(p)) return fingerprintMatches(p, publicKeyPem);
   return p.replace(/\s+/g, "") === publicKeyPem.replace(/\s+/g, "");
 }
 

@@ -15,6 +15,9 @@ The bundle is a Docker Compose project, `deploy/infra/docker-compose.yml`:
 | `electrs` | `getumbrel/electrs:v0.10.10`, compose profile `indexer` | Electrum index over the local chain; optional. |
 | `postgres` | `postgres:16` | Coordinator database. |
 
+Every pulled image is pinned by sha256 digest in the compose file (`image: <name>:<tag>@sha256:...`);
+`tests/repo/docker-digests.test.ts` fails on an unpinned one.
+
 `scripts/infra-bootstrap.sh` writes the configuration, starts the stack and creates the two
 wallets without prompting. The variable table it works from is `src/install/infra-role.ts`
 (`renderInfraEnv`, `servicesFromCompose`); `tests/install/infra-role.test.ts` keeps
@@ -117,13 +120,30 @@ weighs 3.0 (3.5 with `electrs`), a bare coordinator at 80% weighs 0.8, and a ful
 down more than half the window weighs 0. Your share is your weight divided by the sum of every
 host's weight; amounts are floored to whole msat and the remainder stays in the pool.
 
-The coordinator sends the heartbeat itself (`POST /economy/hosts/heartbeat` with its mesh token):
-`hostId`, `accountId = INFRA_HOST_ACCOUNT_ID`, `services = INFRA_HOST_SERVICES`,
+The coordinator records its own heartbeat every `HOST_HEARTBEAT_MS`: `hostId` (its peer id),
+`accountId = INFRA_HOST_ACCOUNT_ID`, `services = INFRA_HOST_SERVICES`,
 `coordinatorUrl = COORDINATOR_PUBLIC_URL` and `lightningAddress = INFRA_HOST_LIGHTNING_ADDRESS`.
 The bootstrap derives `INFRA_HOST_SERVICES` from what is actually running
-(`coordinator,bitcoind,lightning`, plus `electrs` with the `indexer` profile); do not declare a
-service you are not running: the network verifies it and a false declaration costs the
-window. Payouts go to the Lightning address, which can be one your own lnd serves.
+(`coordinator,bitcoind,lightning`, plus `electrs` with the `indexer` profile). Declared services
+are checked before they count (`src/economy/host-attestation.ts`); a service that does not pass
+earns nothing until it does, and `GET /economy/hosts` shows `services` (counted) next to
+`declaredServices`:
+
+- On its own pool the coordinator checks the backends it uses: `lightning` if its Lightning node
+  answers a balance query, `bitcoind` if `BITCOIN_ANCHOR_PROVIDER=bitcoind` answers
+  `getblockchaininfo`, `electrs` if `INFRA_HOST_ELECTRS_ENDPOINT` (default `electrs:50001`)
+  answers Electrum `server.version`.
+- To be paid from another coordinator's pool, list it in `INFRA_HOST_REPORT_URLS`. The heartbeat
+  is then signed with this coordinator's key (`COORDINATOR_PRIVATE_KEY_PEM`), and the receiver
+  accepts it only from the key its mesh admitted for that peer id (you must be in its
+  `MESH_PEER_ALLOWLIST`), once per signature, and counts at most one per heartbeat interval.
+  It then probes the host of the URL it knows for you: `/identity` must answer with your key,
+  bitcoind must answer a Bitcoin P2P `version` on `BITCOIN_P2P_PORT`, lnd must complete the
+  BOLT 8 handshake on 9735 for the node id in `INFRA_HOST_LIGHTNING_NODE_ID`
+  (`lncli getinfo` → `identity_pubkey`), and electrs is counted only if published on 50001.
+  Passing probes are cached for 6 h; a failed one is retried after 15 min.
+
+Payouts go to the Lightning address, which can be one your own lnd serves.
 
 ## Security
 

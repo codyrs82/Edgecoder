@@ -7,6 +7,9 @@ import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
+import type { NonceStore } from "../security/nonce-verifier.js";
+import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import type { PayoutPauseState } from "../economy/payout-safeguards.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 function rowToPayout(row: Record<string, unknown>): PayoutRecord {
@@ -71,6 +74,14 @@ export const CREDIT_LOCK_NAMESPACE = 0x45430001;
  */
 export const SCHEMA_LOCK_NAMESPACE = 0x45430000;
 export const SCHEMA_LOCK_KEY = 1;
+/** Fee-pool distribution: one coordinator at a time across every instance on this database. */
+export const FEE_POOL_LOCK_NAMESPACE = 0x45430002;
+export const FEE_POOL_LOCK_KEY = 1;
+/** Payout reservations: one at a time, so the global 24 h cap and node capacity are checked exactly. */
+export const PAYOUT_LOCK_NAMESPACE = 0x45430003;
+export const PAYOUT_GLOBAL_LOCK_KEY = 0;
+/** What a payout row has or may still move: pending rows count at their fee cap. */
+const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fee_msat, max_fee_msat) ELSE fee_msat END`;
 
 export const SCHEMA_SQL = `
 SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});
@@ -307,6 +318,13 @@ CREATE TABLE IF NOT EXISTS payouts (
   settled_at_ms BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_payouts_account ON payouts (account_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_payouts_created ON payouts (created_at_ms DESC);
+-- Payout kill switch and other shared payout controls (one row per key; both seeds read it).
+CREATE TABLE IF NOT EXISTS payout_controls (
+  control_key TEXT PRIMARY KEY,
+  value_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS infrastructure_hosts (
   host_id TEXT PRIMARY KEY,
@@ -319,6 +337,11 @@ CREATE TABLE IF NOT EXISTS infrastructure_hosts (
   last_seen_ms BIGINT NOT NULL,
   heartbeats_in_window INTEGER NOT NULL DEFAULT 0
 );
+-- Pentest (host weight self-reported): declared vs attested services, rate-limited uptime counting.
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS declared_services_json JSONB;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS attested_at_ms BIGINT;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS last_counted_ms BIGINT;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS lightning_node_id TEXT;
 
 CREATE TABLE IF NOT EXISTS market_ticks (
   at_ms BIGINT NOT NULL,
@@ -598,6 +621,15 @@ CREATE TABLE IF NOT EXISTS receipt_epochs (
   anchor_network TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_receipt_epochs_coordinator ON receipt_epochs (coordinator_id, to_ms DESC, closed_at_ms DESC);
+
+-- Signed agent request nonces (replay protection), shared by every coordinator on this database.
+-- The primary key is the atomic replay check; rows are pruned after expires_at_ms.
+CREATE TABLE IF NOT EXISTS request_nonces (
+  nonce TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_request_nonces_expiry ON request_nonces (expires_at_ms);
 `;
 
 /** Balance and "enough to cover $2" computed in SQL on NUMERIC, so no float comparison (#108). */
@@ -622,6 +654,11 @@ export class PostgresStore {
   /** Work receipts and Merkle epochs (src/receipts) on the same pool. */
   receiptStore(): PostgresReceiptStore {
     return new PostgresReceiptStore(this.pool);
+  }
+
+  /** Request-signing nonces (src/security/nonce-verifier.ts) on the same pool. */
+  nonceStore(): PostgresNonceStore {
+    return new PostgresNonceStore(this.pool);
   }
 
   async close(): Promise<void> {
@@ -2324,13 +2361,13 @@ export class PostgresStore {
    * (earned − paid/pending) and the coordinator's capacity, then insert the pending row.
    * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
    */
-  async reservePayout(
-    payout: PayoutRecord,
-    capacityMsat: (paidOrPendingAllMsat: number) => number
-  ): Promise<{ ok: true } | { ok: false; code: "insufficient_payable" | "coordinator_capacity" | "duplicate_invoice"; payableMsat?: number }> {
+  async reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Global first, then per account (fixed order, no deadlock). The global lock makes the capacity
+      // and 24 h cap sums exact across concurrent requests and coordinators sharing this database.
+      await client.query("SELECT pg_advisory_xact_lock($1, $2)", [PAYOUT_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY]);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`payout:${payout.accountId}`]);
       const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
       const spent = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
@@ -2343,6 +2380,18 @@ export class PostgresStore {
       if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(Number(all.rows[0]?.msat ?? 0))) {
         await client.query("ROLLBACK");
         return { ok: false, code: "coordinator_capacity" };
+      }
+      if (limits) {
+        const w = await client.query(
+          `SELECT COALESCE(SUM(${OUTFLOW_SQL}) FILTER (WHERE account_id = $2), 0) AS account_msat, COALESCE(SUM(${OUTFLOW_SQL}), 0) AS global_msat
+           FROM payouts WHERE status IN ('paid','pending') AND created_at_ms >= $1`,
+          [limits.sinceMs, payout.accountId]
+        );
+        const violation = limits.check({ accountWindowMsat: Number(w.rows[0]?.account_msat ?? 0), globalWindowMsat: Number(w.rows[0]?.global_msat ?? 0) });
+        if (violation) {
+          await client.query("ROLLBACK");
+          return { ok: false, code: violation.code, violation };
+        }
       }
       const ins = await client.query(
         `INSERT INTO payouts (payout_id, account_id, coordinator_id, kind, bolt11, payment_hash, amount_msat, fee_msat, max_fee_msat, status, destination, created_at_ms)
@@ -2381,6 +2430,69 @@ export class PostgresStore {
     return r.rows.map(rowToPayout);
   }
 
+  // ── Payout safeguards: kill switch, fee-pool lock, reconciliation reads ──
+  async getPayoutPause(): Promise<PayoutPauseState | null> {
+    const r = await this.pool.query(`SELECT value_json FROM payout_controls WHERE control_key = 'pause'`);
+    return (r.rows[0]?.value_json as PayoutPauseState | undefined) ?? null;
+  }
+
+  async setPayoutPause(state: PayoutPauseState): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ('pause', $1, $2)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [JSON.stringify(state), Date.now()]
+    );
+  }
+
+  /**
+   * Session advisory lock on a dedicated connection; try-lock, so a second coordinator returns at
+   * once instead of queueing a duplicate run. Released in finally (and by Postgres if the connection dies).
+   */
+  async withFeePoolLock<T>(fn: () => Promise<T>): Promise<FeePoolLockResult<T>> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const r = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [FEE_POOL_LOCK_NAMESPACE, FEE_POOL_LOCK_KEY]);
+      held = r.rows[0]?.got === true;
+      if (!held) return { acquired: false };
+      return { acquired: true, value: await fn() };
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, $2)", [FEE_POOL_LOCK_NAMESPACE, FEE_POOL_LOCK_KEY]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  async lastPoolDistributionMs(accountId: string): Promise<number | null> {
+    const r = await this.pool.query(
+      `SELECT MAX(timestamp_ms) AS ts FROM credit_transactions WHERE account_id = $1 AND tx_type = 'spend' AND reason LIKE 'fee_pool_distribution%'`,
+      [accountId]
+    );
+    const ts = r.rows[0]?.ts;
+    return ts === null || ts === undefined ? null : Number(ts);
+  }
+
+  async payoutsByPaymentHash(hashes: string[]): Promise<Map<string, PayoutRecord>> {
+    const out = new Map<string, PayoutRecord>();
+    if (hashes.length === 0) return out;
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE payment_hash = ANY($1)`, [hashes.map((h) => h.toLowerCase())]);
+    for (const row of r.rows) out.set(String(row.payment_hash).toLowerCase(), rowToPayout(row));
+    return out;
+  }
+
+  async payoutsOutflowMsat(): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE status IN ('paid','pending')`);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /** Σ earn msat − Σ spend msat (pool distributions) − paid/pending payouts: sats the ledger still owes. */
+  async liabilitiesMsat(): Promise<number> {
+    const r = await this.pool.query(
+      `SELECT (SELECT COALESCE(SUM(CASE WHEN tx_type = 'earn' THEN msat ELSE -msat END), 0) FROM credit_transactions WHERE msat IS NOT NULL)
+            - (SELECT COALESCE(SUM(amount_msat + fee_msat), 0) FROM payouts WHERE status IN ('paid','pending')) AS msat`
+    );
+    return Math.max(0, Number(r.rows[0]?.msat ?? 0));
+  }
+
   async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {
     const r = await this.pool.query(`SELECT * FROM payouts WHERE status = 'pending' ORDER BY created_at_ms ASC LIMIT $1`, [limit]);
     return r.rows.map(rowToPayout);
@@ -2415,6 +2527,49 @@ export class PostgresStore {
     await this.pool.query(`UPDATE infrastructure_hosts SET last_seen_ms = GREATEST(last_seen_ms, $2), heartbeats_in_window = heartbeats_in_window + 1 WHERE host_id = $1`, [hostId, nowMs]);
   }
 
+  /**
+   * One heartbeat, atomically: upsert the host with its attested services and add one to the
+   * window only if the last counted heartbeat is at least `minCountIntervalMs` old (the row lock
+   * of ON CONFLICT serialises concurrent heartbeats, including from two seeds on this database).
+   */
+  async recordAttestedHostHeartbeat(host: InfrastructureHost, nowMs: number, minCountIntervalMs: number): Promise<{ counted: boolean; heartbeatsInWindow: number }> {
+    const r = await this.pool.query(
+      `INSERT INTO infrastructure_hosts (host_id, account_id, coordinator_url, region, services_json, lightning_address, first_seen_ms, last_seen_ms,
+         heartbeats_in_window, declared_services_json, attested_at_ms, last_counted_ms, lightning_node_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$7,1,$8,$9,$7,$10)
+       ON CONFLICT (host_id) DO UPDATE SET
+         account_id = EXCLUDED.account_id,
+         coordinator_url = COALESCE(EXCLUDED.coordinator_url, infrastructure_hosts.coordinator_url),
+         region = COALESCE(EXCLUDED.region, infrastructure_hosts.region),
+         services_json = EXCLUDED.services_json,
+         declared_services_json = EXCLUDED.declared_services_json,
+         attested_at_ms = COALESCE(EXCLUDED.attested_at_ms, infrastructure_hosts.attested_at_ms),
+         lightning_address = COALESCE(EXCLUDED.lightning_address, infrastructure_hosts.lightning_address),
+         lightning_node_id = COALESCE(EXCLUDED.lightning_node_id, infrastructure_hosts.lightning_node_id),
+         last_seen_ms = GREATEST(EXCLUDED.last_seen_ms, infrastructure_hosts.last_seen_ms),
+         heartbeats_in_window = infrastructure_hosts.heartbeats_in_window
+           + CASE WHEN infrastructure_hosts.last_counted_ms IS NULL OR EXCLUDED.last_seen_ms - infrastructure_hosts.last_counted_ms >= $11 THEN 1 ELSE 0 END,
+         last_counted_ms = CASE WHEN infrastructure_hosts.last_counted_ms IS NULL OR EXCLUDED.last_seen_ms - infrastructure_hosts.last_counted_ms >= $11
+           THEN EXCLUDED.last_seen_ms ELSE infrastructure_hosts.last_counted_ms END
+       RETURNING heartbeats_in_window, last_counted_ms`,
+      [
+        host.hostId,
+        host.accountId,
+        host.coordinatorUrl ?? null,
+        host.region ?? null,
+        JSON.stringify(host.services),
+        host.lightningAddress ?? null,
+        nowMs,
+        JSON.stringify(host.declaredServices ?? host.services),
+        host.attestedAtMs ?? null,
+        host.lightningNodeId ?? null,
+        minCountIntervalMs
+      ]
+    );
+    const row = r.rows[0] ?? {};
+    return { counted: Number(row.last_counted_ms) === nowMs, heartbeatsInWindow: Number(row.heartbeats_in_window ?? 0) };
+  }
+
   async resetHostHeartbeatWindow(): Promise<void> {
     await this.pool.query(`UPDATE infrastructure_hosts SET heartbeats_in_window = 0`);
   }
@@ -2427,9 +2582,13 @@ export class PostgresStore {
       coordinatorUrl: row.coordinator_url ?? undefined,
       region: row.region ?? undefined,
       services: Array.isArray(row.services_json) ? row.services_json : [],
+      declaredServices: Array.isArray(row.declared_services_json) ? row.declared_services_json : undefined,
+      attestedAtMs: row.attested_at_ms != null ? Number(row.attested_at_ms) : undefined,
+      lightningNodeId: row.lightning_node_id ?? undefined,
       lightningAddress: row.lightning_address ?? undefined,
       firstSeenMs: Number(row.first_seen_ms),
       lastSeenMs: Number(row.last_seen_ms),
+      lastCountedMs: row.last_counted_ms != null ? Number(row.last_counted_ms) : undefined,
       heartbeatsInWindow: Number(row.heartbeats_in_window)
     }));
   }
@@ -2803,5 +2962,35 @@ export class PostgresReceiptStore implements ReceiptStore {
     if (receiptIds && receiptIds.length > 0) {
       await this.pool.query(`UPDATE work_receipts SET epoch_id = $1 WHERE receipt_id = ANY($2::text[])`, [epoch.epochId, receiptIds]);
     }
+  }
+}
+
+/** Durable, cross-instance replay protection for signed agent requests (`request_nonces`). */
+export class PostgresNonceStore implements NonceStore {
+  constructor(private readonly pool: Pool) {}
+
+  async exists(nonce: string): Promise<boolean> {
+    const r = await this.pool.query(`SELECT 1 FROM request_nonces WHERE nonce = $1 AND expires_at_ms >= $2`, [nonce, Date.now()]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async insert(nonce: string, sourceId: string, expiresAtMs: number): Promise<void> {
+    await this.insertIfAbsent(nonce, sourceId, expiresAtMs);
+  }
+
+  /** One statement: a fresh nonce inserts (or takes over an expired row); a live duplicate does not. */
+  async insertIfAbsent(nonce: string, sourceId: string, expiresAtMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO request_nonces (nonce, source_id, expires_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (nonce) DO UPDATE SET source_id = EXCLUDED.source_id, expires_at_ms = EXCLUDED.expires_at_ms
+         WHERE request_nonces.expires_at_ms < $4
+       RETURNING nonce`,
+      [nonce, sourceId, expiresAtMs, Date.now()]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async prune(): Promise<void> {
+    await this.pool.query(`DELETE FROM request_nonces WHERE expires_at_ms < $1`, [Date.now()]);
   }
 }

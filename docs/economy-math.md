@@ -229,6 +229,45 @@ Automatic payouts: an account with a Lightning address (`POST /economy/payouts/a
 infrastructure host's `INFRA_HOST_LIGHTNING_ADDRESS`) is paid every `PAYOUT_AUTO_INTERVAL_MS`
 once payable ≥ `PAYOUT_AUTO_MIN_SATS`, by requesting an invoice over LNURL-pay.
 
+### Hot-wallet safeguards
+
+Three guards sit in front of every payment out of the node (`src/economy/payout-safeguards.ts`,
+`src/economy/payout-reconcile.ts`; operator steps in [Going to mainnet](going-to-mainnet.md)):
+
+- **Caps.** `PAYOUT_MAX_SINGLE_SATS`, `PAYOUT_MAX_ACCOUNT_DAILY_SATS` and
+  `PAYOUT_MAX_GLOBAL_DAILY_SATS` bound one payout and the rolling 24 h total per account and for
+  the coordinator, all counted as amount + routing-fee cap (pending rows at their cap). Unset on
+  mainnet they default to 100k / 500k / 2M sats; elsewhere to no cap. The 24 h check runs inside
+  the reservation transaction under one global advisory lock, so concurrent requests and both
+  seeds see each other. A payout over a cap is rejected (`payout_limit_*`, security event
+  `payout_limit_exceeded`): the balance stays payable and an auto payout simply waits for the
+  window to roll. Nothing is queued for later approval.
+- **Kill switch.** While paused, withdrawals (`503 payouts_paused`), auto payouts and fee-pool
+  distribution do nothing; invoice purchases keep settling. `POST /admin/payouts/pause
+  {paused, reason}` (admin token) sets a flag stored in Postgres (`payout_controls`), so every
+  instance and every restart honours it; each change is a security event and a
+  `payouts_pause_changed` ledger record. `PAYOUTS_PAUSED=1` forces one instance paused and cannot
+  be lifted over the API. If the flag cannot be read, payouts count as paused. The provider used
+  for payouts also refuses `payInvoice` while paused, and the service re-checks right before paying.
+- **Reconciliation.** Every `PAYOUT_RECONCILE_MS` the node's balances and outgoing payments
+  (`LightningProvider.getBalances` / `listPayments`; LND REST and c-lightning-REST) are compared with
+  the ledger. Each check allows `PAYOUT_RECONCILE_TOLERANCE_SATS` of slack:
+
+  | Check | Fails when | Effect |
+  |---|---|---|
+  | `unknown_payments` | the node sent (or has in flight) payments with no payout row | pause |
+  | `ledger_freed` | a payout marked failed was sent by the node | pause |
+  | `paid_mismatch` | node amount + fee ≠ ledger amount + fee for paid payouts | pause |
+  | `balance_drop` | node total fell more than purchases in − payouts out since the last run | pause |
+  | `liability_shortfall` | earned-but-unpaid sats exceed what the node holds | alert only |
+
+  A trip pauses payouts through the kill switch (source `reconciliation`, until an admin resumes),
+  logs `payout_reconciliation_mismatch`, and POSTs a JSON summary to `PAYOUT_ALERT_WEBHOOK_URL`
+  when set (counts, msat amounts and payment hashes; never invoices, preimages or credentials). An
+  unreadable node is an alert, not a pause. `GET /admin/payouts/reconciliation` shows the last
+  result; `POST /admin/payouts/reconciliation/run` runs one now. Dedicate the node to the
+  coordinator: any other spending from it trips `unknown_payments` by design.
+
 ### The network fee pool pays infrastructure hosts
 
 Two inflows to `network:fee_pool`:
@@ -236,8 +275,11 @@ Two inflows to `network:fee_pool`:
 - `NETWORK_FEE_BPS` of every accrual (credits and msat, split in the same transaction);
 - the coordinator fee of every settled purchase (`purchase_fee:<intent>` rows: sats only).
 
-Hosts heartbeat every `HOST_HEARTBEAT_MS` (`POST /economy/hosts/heartbeat`; a coordinator
-heartbeats for itself) declaring the services they run. Every `FEE_POOL_DISTRIBUTION_MS`:
+Hosts heartbeat every `HOST_HEARTBEAT_MS` (a coordinator records its own; a remote host sends
+`POST /economy/hosts/heartbeat` signed with its mesh key) declaring the services they run. A
+heartbeat counts toward `heartbeats_h` at most once per 0.8 × `HOST_HEARTBEAT_MS`, and only
+services the receiving coordinator attested count in the weight (probes over each service's own
+protocol; see [infra-node.md](infra-node.md) "How you are paid"). Every `FEE_POOL_DISTRIBUTION_MS`:
 
 ```
 uptime_h  = min(1, heartbeats_h / expectedHeartbeats)          (0 below 50 %)
@@ -249,10 +291,18 @@ Each share becomes an `earn` row on the host's account (msat, plus credits pro r
 pool holds any), the pool gets a matching `spend`, the ledger records `fee_pool_distribution`,
 and the heartbeat window resets. Hosts withdraw like anyone else.
 
-Routes: `GET /economy/payouts/:accountId`, `POST /economy/payouts/withdraw`,
-`POST /economy/payouts/address`, `POST /economy/hosts/heartbeat`, `GET /economy/hosts`,
-`GET /economy/fee-pool`, `POST /economy/fee-pool/distribute` (mesh token or portal service
-token; the portal exposes them to users as `/wallet/payouts*`).
+Distribution holds a Postgres session advisory lock (`pg_try_advisory_lock`; in memory, an
+in-process flag), so when two seeds share a database a second run returns `skipped: "locked"`
+instead of splitting the same pool. The timer also skips a window that another instance
+distributed less than 90 % of `FEE_POOL_DISTRIBUTION_MS` ago (`skipped: "recent"`), so two
+timers do not split the day into two half-windows in which hosts miss the 50 % uptime bar. The
+admin route `POST /economy/fee-pool/distribute` bypasses only that second check.
+
+Routes: `GET /economy/payouts/:accountId`, `POST /economy/payouts/withdraw` and
+`POST /economy/payouts/address` take the portal service token only (the portal exposes them to
+users as `/wallet/payouts*`); `POST /economy/hosts/heartbeat` takes the mesh token plus the host's
+signature; `GET /economy/hosts` and `GET /economy/fee-pool` take the mesh or portal service token;
+`POST /economy/fee-pool/distribute` takes the admin token.
 
 The older issuance records (`issuance_payout_events`, `coordinator_fee_events`) are still
 written for bookkeeping but pay nothing; the pool and payouts above are the live path.

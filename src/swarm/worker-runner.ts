@@ -14,6 +14,7 @@ import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../in
 import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
+import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
 import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
@@ -21,7 +22,7 @@ import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
-import { signRequest } from "../security/request-signing.js";
+import { hashRequestBody, signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
 import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
@@ -36,9 +37,16 @@ const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
 // Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
-const coordinatorTrust = new CoordinatorTrustGate({
-  store: PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` })
-});
+const coordinatorTrustStore = PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` });
+const coordinatorTrust = new CoordinatorTrustGate({ store: coordinatorTrustStore });
+{
+  // Strict mode with nothing listed would refuse every coordinator: say so once and stop.
+  const problem = coordinatorTrustStore.configProblem();
+  if (problem) {
+    console.error(`[worker] ${problem}`);
+    process.exit(1);
+  }
+}
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
@@ -163,7 +171,11 @@ let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 // Attempt portal-based coordinator discovery at startup
 (async () => {
   if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
-    const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined });
+    // Strict trust: never pick an announced coordinator whose key is not listed (key-less
+    // candidates are still checked against /identity by the trust gate before registering).
+    const acceptCandidate =
+      coordinatorTrustStore.mode === "strict" ? (c: { peerId?: string; publicKeyPem?: string }) => !c.publicKeyPem || coordinatorTrustStore.wouldTrust(c.peerId, c.publicKeyPem) : undefined;
+    const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined, acceptCandidate });
     if (picked) {
       console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
       activeCoordinatorUrl = picked.url;
@@ -277,9 +289,13 @@ function meshHeaders(): Record<string, string> {
   return { "x-mesh-token": meshAuthToken };
 }
 
+/**
+ * Request-signing headers. The coordinator checks `x-body-sha256` against the raw bytes it
+ * receives, so pass the exact serialized body that goes on the wire (post() does this).
+ */
 function signedHeaders(path: string, body: unknown): Record<string, string> {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  const bodyHash = createHash("sha256").update(raw).digest("hex");
+  const bodyHash = hashRequestBody(raw);
   return signRequest({
     method: "POST",
     path,
@@ -358,7 +374,7 @@ const LEASE_HEARTBEAT_MS = Math.max(1_000, Number(process.env.LEASE_HEARTBEAT_MS
 function startLeaseHeartbeat(): () => void {
   const timer = setInterval(() => {
     const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE, leaseOnly: true };
-    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", body) }).catch(
+    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, signed: true }).catch(
       (e) => console.warn(`[agent:${AGENT_ID}] lease heartbeat failed: ${e}`)
     );
   }, LEASE_HEARTBEAT_MS);
@@ -369,19 +385,24 @@ function startLeaseHeartbeat(): () => void {
 async function post(
   path: string,
   body: unknown,
-  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string> }
+  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string>; signed?: boolean }
 ): Promise<any> {
   const retries = Math.max(0, options?.retries ?? COORDINATOR_POST_RETRIES);
   const timeoutMs = Math.max(1000, options?.timeoutMs ?? COORDINATOR_HTTP_TIMEOUT_MS);
+  // Serialize once: the signature's body hash covers exactly these bytes.
+  const payload = JSON.stringify(body);
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
+      // Signed requests get a fresh nonce per attempt; a retry of a request the coordinator
+      // already saw would otherwise be refused as a replay.
+      const signature = options?.signed ? signedHeaders(path, payload) : {};
       const res = await request(`${activeCoordinatorUrl}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}) },
+        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
         headersTimeout: timeoutMs,
         bodyTimeout: timeoutMs,
-        body: JSON.stringify(body)
+        body: payload
       });
       const parsed = (await parseJsonBodySafe(res)) as unknown;
       const rawText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
@@ -429,7 +450,7 @@ async function flushPendingResults(): Promise<void> {
   for (const row of pending) {
     try {
       const resultPayload = JSON.parse(row.payload);
-      await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
+      await post("/result", resultPayload, { signed: true });
       localStore.markResultSynced(row.subtaskId);
       console.log(`[agent:${AGENT_ID}] flushed result: ${row.subtaskId}`);
     } catch {
@@ -459,7 +480,7 @@ async function flushOfflineLedger(): Promise<void> {
       providerSignature: row.providerSig,
     }));
     const bleSyncBody = { transactions };
-    await post("/credits/ble-sync", bleSyncBody, { extraHeaders: signedHeaders("/credits/ble-sync", bleSyncBody) });
+    await post("/credits/ble-sync", bleSyncBody, { signed: true });
     localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
     console.log(`[agent:${AGENT_ID}] BLE credits synced`);
   } catch (e) {
@@ -488,8 +509,10 @@ function connectMeshWebSocket(
     }
     // Build URL on each connect so it picks up the latest meshAuthToken
     // (token may be provisioned from coordinator after initial registration)
+    // Token in a header (not the URL), and a signed bind so the coordinator ties this connection to
+    // AGENT_ID's registered key (src/mesh/ws-auth.ts). The query token stays for older coordinators.
     const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken)}&peerId=${encodeURIComponent(AGENT_ID)}`;
-    const ws = new WebSocket(fullUrl);
+    const ws = new WebSocket(fullUrl, { headers: { "x-mesh-token": meshAuthToken, ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
 
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
@@ -768,8 +791,10 @@ async function loop(): Promise<void> {
         const trust = await coordinatorTrust.check(activeCoordinatorUrl);
         if (!trust.trusted) {
           console.error(`[agent:${AGENT_ID}] refusing to work for ${activeCoordinatorUrl}: ${describeTrustFailure(trust)}`);
-          if (trust.decision) process.exit(1); // key mismatch or unlisted: a policy refusal, not a transient error
-          throw new Error("coordinator_identity_unavailable"); // transient: backoff and failover below
+          // A key mismatch for a pinned id is a possible impersonation: stop. An unlisted coordinator
+          // (strict mode) is just not ours to work for: back off and fail over to another one.
+          if (trust.decision?.reason === "pinned_mismatch") process.exit(1);
+          throw new Error(trust.decision ? "coordinator_not_trusted" : "coordinator_identity_unavailable");
         }
         // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
         if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
@@ -804,7 +829,7 @@ async function loop(): Promise<void> {
             ...(binaryIntegrity ? { binaryIntegrity } : {})
           };
           const registerResponse = (await post("/register", registerBody, {
-            extraHeaders: signedHeaders("/register", registerBody),
+            signed: true,
           })) as {
             accepted?: boolean;
             meshToken?: string;
@@ -823,7 +848,7 @@ async function loop(): Promise<void> {
 
         const hbStart = Date.now();
         const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
-        const hb = (await post("/heartbeat", hbBody, { extraHeaders: signedHeaders("/heartbeat", hbBody) })) as {
+        const hb = (await post("/heartbeat", hbBody, { signed: true })) as {
           ok?: boolean;
           blacklisted?: boolean;
           reason?: string;
@@ -864,7 +889,7 @@ async function loop(): Promise<void> {
           const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST });
           const answerBody = { agentId: AGENT_ID, ...answer };
           try {
-            const res = (await post("/benchmark/response", answerBody, { retries: 0, extraHeaders: signedHeaders("/benchmark/response", answerBody) })) as {
+            const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
               verification?: { status?: string; grantedTier?: string; claimedTier?: string } | null;
             };
             const v = res?.verification;
@@ -975,7 +1000,7 @@ async function loop(): Promise<void> {
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
         }
         const pulled = (SWARM_EXECUTION_ENABLED
-          ? await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })
+          ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
           envelope?: TaskEnvelope;
@@ -1021,7 +1046,7 @@ async function loop(): Promise<void> {
                   ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
                   durationMs: 0,
                 };
-                await post("/result", snapshotRejection, { extraHeaders: signedHeaders("/result", snapshotRejection) });
+                await post("/result", snapshotRejection, { signed: true });
               } catch { /* best effort */ }
               continue;
             }
@@ -1095,7 +1120,7 @@ async function loop(): Promise<void> {
           );
 
           try {
-            await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
+            await post("/result", resultPayload, { signed: true });
           } catch (resultErr) {
             try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
             console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
@@ -1136,7 +1161,7 @@ async function loop(): Promise<void> {
             );
             result.reportNonce = reportNonce;
             result.reportSignature = reportSignature;
-            await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
+            await post("/result", result, { signed: true });
           } catch { /* mesh broadcast is primary delivery */ }
           console.log(`[agent:${AGENT_ID}] mesh task ${st.id} complete: ok=${result.ok}`);
           continue;
@@ -1273,9 +1298,9 @@ async function loop(): Promise<void> {
               powerTelemetry,
               publicKeyPem: keys.publicKeyPem
             };
-            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/register", registerBody) });
+            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
-            await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", probeBody) });
+            await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;
             try { localStore.recordHeartbeat(activeCoordinatorUrl, "reconnected", probeLatency); } catch {}
             // Probe succeeded — back online

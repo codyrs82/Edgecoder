@@ -4,6 +4,8 @@
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../common/types.js";
 import type { LightningProvider } from "./lightning.js";
+import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
+import type { ReconcileLedger } from "./payout-reconcile.js";
 import {
   distributeFeePool,
   payableMsat,
@@ -22,14 +24,28 @@ import {
  * lock) or in memory (dev, tests). The provider is the coordinator's Lightning node; its
  * `payInvoice` is the only thing that moves sats.
  */
-export interface PayoutStore {
+/** Rolling-window cap check run inside the reservation (under the store's lock). */
+export interface ReservationLimits {
+  sinceMs: number;
+  check: (window: { accountWindowMsat: number; globalWindowMsat: number }) => PayoutLimitViolation | null;
+}
+
+export type ReserveResult =
+  | { ok: true }
+  | { ok: false; code: "insufficient_payable" | "coordinator_capacity" | "duplicate_invoice"; payableMsat?: number }
+  | { ok: false; code: PayoutLimitCode; violation: PayoutLimitViolation };
+
+export type FeePoolLockResult<T> = { acquired: true; value: T } | { acquired: false };
+
+export interface PayoutStore extends ReconcileLedger, PayoutPauseStore {
   earnedMsat(accountId: string): Promise<number>;
   receivedPurchaseMsat(): Promise<number>;
   payoutsTotalMsat(filter: { accountId?: string; statuses: Array<PayoutRecord["status"]> }): Promise<number>;
-  reservePayout(
-    payout: PayoutRecord,
-    capacityMsat: (paidOrPendingAllMsat: number) => number
-  ): Promise<{ ok: true } | { ok: false; code: "insufficient_payable" | "coordinator_capacity" | "duplicate_invoice"; payableMsat?: number }>;
+  /**
+   * Insert the pending row if payable, capacity and (when given) the 24 h caps all hold. Postgres
+   * serialises every reservation under one advisory lock so the global cap and capacity are exact.
+   */
+  reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult>;
   settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void>;
   listPayouts(accountId: string, limit?: number): Promise<PayoutRecord[]>;
   listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>>;
@@ -40,6 +56,18 @@ export interface PayoutStore {
   creditBalance(accountId: string): Promise<number>;
   /** msat already moved out of an account by spend rows (the pool's past distributions). */
   distributedMsat(accountId: string): Promise<number>;
+  /**
+   * Run `fn` holding the fee-pool lock, or return `acquired: false` at once if another holder has it.
+   * Postgres: a session advisory lock, so two coordinators sharing a database never distribute together.
+   */
+  withFeePoolLock<T>(fn: () => Promise<T>): Promise<FeePoolLockResult<T>>;
+  /** Time of the pool's most recent distribution (its newest spend row), or null. */
+  lastPoolDistributionMs(accountId: string): Promise<number | null>;
+}
+
+/** msat a payout row has or may still move: pending rows count at their fee cap. */
+function rowOutflowMsat(p: Pick<PayoutRecord, "status" | "amountMsat" | "feeMsat" | "maxFeeMsat">): number {
+  return p.amountMsat + (p.status === "pending" ? Math.max(p.feeMsat, p.maxFeeMsat) : p.feeMsat);
 }
 
 /** In-memory store for dev and tests; same semantics, no durability. */
@@ -61,11 +89,22 @@ export class MemoryPayoutStore implements PayoutStore {
     for (const p of this.payouts.values()) if (filter.statuses.includes(p.status) && (!filter.accountId || p.accountId === filter.accountId)) sum += p.amountMsat + p.feeMsat;
     return sum;
   }
-  async reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number) {
+  private pause: PayoutPauseState | null = null;
+  private poolLock = false;
+  async reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
     if ([...this.payouts.values()].some((p) => p.paymentHash === payout.paymentHash)) return { ok: false as const, code: "duplicate_invoice" as const };
     const payable = payableMsat(await this.earnedMsat(payout.accountId), await this.payoutsTotalMsat({ accountId: payout.accountId, statuses: ["paid", "pending"] }));
     if (payout.amountMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
     if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(await this.payoutsTotalMsat({ statuses: ["paid", "pending"] }))) return { ok: false as const, code: "coordinator_capacity" as const };
+    if (limits) {
+      // Synchronous from here to the insert, so concurrent in-process reservations cannot both pass.
+      const recent = [...this.payouts.values()].filter((p) => (p.status === "paid" || p.status === "pending") && p.createdAtMs >= limits.sinceMs);
+      const violation = limits.check({
+        accountWindowMsat: recent.filter((p) => p.accountId === payout.accountId).reduce((s, p) => s + rowOutflowMsat(p), 0),
+        globalWindowMsat: recent.reduce((s, p) => s + rowOutflowMsat(p), 0)
+      });
+      if (violation) return { ok: false as const, code: violation.code, violation };
+    }
     this.payouts.set(payout.payoutId, { ...payout, status: "pending" });
     return { ok: true as const };
   }
@@ -96,6 +135,42 @@ export class MemoryPayoutStore implements PayoutStore {
   async distributedMsat(accountId: string) {
     return this.rows.filter((r) => r.accountId === accountId && r.type === "spend").reduce((s, r) => s + (r.msat ?? 0), 0);
   }
+  /** In-process only (no database to share): a second caller is turned away while one runs. */
+  async withFeePoolLock<T>(fn: () => Promise<T>): Promise<FeePoolLockResult<T>> {
+    if (this.poolLock) return { acquired: false };
+    this.poolLock = true;
+    try {
+      return { acquired: true, value: await fn() };
+    } finally {
+      this.poolLock = false;
+    }
+  }
+  async lastPoolDistributionMs(accountId: string) {
+    const ts = this.rows.filter((r) => r.accountId === accountId && r.type === "spend" && r.reason.startsWith("fee_pool_distribution")).map((r) => r.timestampMs);
+    return ts.length ? Math.max(...ts) : null;
+  }
+  async payoutsByPaymentHash(hashes: string[]) {
+    const want = new Set(hashes.map((h) => h.toLowerCase()));
+    const out = new Map<string, PayoutRecord>();
+    for (const p of this.payouts.values()) if (want.has(p.paymentHash.toLowerCase())) out.set(p.paymentHash.toLowerCase(), p);
+    return out;
+  }
+  async payoutsOutflowMsat() {
+    let sum = 0;
+    for (const p of this.payouts.values()) if (p.status === "paid" || p.status === "pending") sum += rowOutflowMsat(p);
+    return sum;
+  }
+  /** Earn msat on this store's rows minus pool spends and paid/pending payouts. Engine-held earnings are not visible here. */
+  async liabilitiesMsat(): Promise<number | undefined> {
+    const earned = this.rows.reduce((s, r) => s + (r.type === "earn" ? (r.msat ?? 0) : -(r.msat ?? 0)), 0);
+    return Math.max(0, earned - (await this.payoutsTotalMsat({ statuses: ["paid", "pending"] })));
+  }
+  async getPayoutPause() {
+    return this.pause ? { ...this.pause } : null;
+  }
+  async setPayoutPause(state: PayoutPauseState) {
+    this.pause = { ...state };
+  }
 }
 
 export interface PayoutServiceDeps {
@@ -110,7 +185,20 @@ export interface PayoutServiceDeps {
   onDistributed?: (rows: CreditTransaction[], hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }>) => Promise<void>;
   log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void };
   now?: () => number;
+  /** Hot-wallet caps (payout-safeguards.ts); omitted = none. */
+  limits?: PayoutLimits;
+  /** Kill switch; when paused nothing leaves the node and the fee pool is not distributed. */
+  pause?: PayoutPauseControl;
+  /** Security events (cap hits, payments refused while paused). */
+  onSecurityEvent?: (event: "payout_limit_exceeded" | "payout_blocked_paused", details: Record<string, unknown>) => void;
 }
+
+export type FeePoolDistribution = {
+  distributedMsat: number;
+  hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }>;
+  /** Why nothing ran: another instance holds the lock, the window was distributed recently, or payouts are paused. */
+  skipped?: "locked" | "recent" | "payouts_paused";
+};
 
 export type PayoutResult =
   | { ok: true; payout: PayoutRecord }
@@ -144,6 +232,13 @@ export class PayoutService {
     const v = validatePayoutRequest({ bolt11, payableMsat: bal.payableMsat, capacityMsat: bal.capacityMsat, nowMs: now() }, this.d.policy);
     if (!v.ok) return { ok: false, code: v.code, detail: v.detail, payableMsat: bal.payableMsat };
     if (this.inflight.has(v.decoded.paymentHash)) return { ok: false, code: "payout_in_progress" };
+    if (await this.d.pause?.isPaused()) {
+      this.d.onSecurityEvent?.("payout_blocked_paused", { accountId, kind, amountMsat: v.amountMsat });
+      return { ok: false, code: "payouts_paused" };
+    }
+    const limits = this.d.limits && payoutLimitsActive(this.d.limits) ? this.d.limits : undefined;
+    const single = limits ? checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat }, limits) : null;
+    if (single) return this.limitRejected(accountId, kind, v.amountMsat, single);
     const payout: PayoutRecord = {
       payoutId: randomUUID(),
       accountId,
@@ -159,10 +254,23 @@ export class PayoutService {
       createdAtMs: now()
     };
     const received = await this.d.store.receivedPurchaseMsat();
-    const reserved = await this.d.store.reservePayout(payout, (allOut) => payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy));
-    if (!reserved.ok) return { ok: false, code: reserved.code, payableMsat: reserved.payableMsat };
+    const reserved = await this.d.store.reservePayout(
+      payout,
+      (allOut) => payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy),
+      limits ? { sinceMs: now() - PAYOUT_LIMIT_WINDOW_MS, check: (w) => checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat, ...w }, limits) } : undefined
+    );
+    if (!reserved.ok) {
+      if ("violation" in reserved) return this.limitRejected(accountId, kind, v.amountMsat, reserved.violation);
+      return { ok: false, code: reserved.code, payableMsat: reserved.payableMsat };
+    }
     this.inflight.add(payout.paymentHash);
     try {
+      // Last look at the kill switch right before money moves (a pause may have landed meanwhile).
+      if (await this.d.pause?.isPaused()) {
+        await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: "payouts_paused" });
+        this.d.onSecurityEvent?.("payout_blocked_paused", { accountId, kind, payoutId: payout.payoutId, amountMsat: payout.amountMsat });
+        return { ok: false, code: "payouts_paused" };
+      }
       const res = await this.d.provider.payInvoice({ bolt11, maxFeeSats: Math.ceil(v.maxFeeMsat / 1000), timeoutSeconds: 60 });
       if (res.status !== "succeeded") {
         // Transport errors may leave an in-flight HTLC; the row stays pending for reconciliation.
@@ -185,9 +293,16 @@ export class PayoutService {
     }
   }
 
+  private limitRejected(accountId: string, kind: PayoutRecord["kind"], amountMsat: number, v: PayoutLimitViolation): PayoutResult {
+    this.d.onSecurityEvent?.("payout_limit_exceeded", { accountId, kind, amountMsat, code: v.code, limitSats: v.limitSats, wouldBeMsat: v.wouldBeMsat });
+    this.d.log?.warn({ accountId, kind, amountMsat, code: v.code, limitSats: v.limitSats }, "payout_limit_exceeded");
+    return { ok: false, code: v.code, detail: `limit ${v.limitSats} sats (would reach ${Math.ceil(v.wouldBeMsat / 1000)} sats incl. fee cap)` };
+  }
+
   /** Pay every account with a registered Lightning address whose payable balance clears the auto minimum. */
   async runAutoPayouts(): Promise<Array<{ accountId: string; result: PayoutResult | { ok: false; code: string; detail?: string } }>> {
     if (!this.d.policy.enabled) return [];
+    if (await this.d.pause?.isPaused()) return [];
     const fetcher = this.d.fetcher;
     if (!fetcher) return [];
     const out: Array<{ accountId: string; result: PayoutResult | { ok: false; code: string; detail?: string } }> = [];
@@ -213,7 +328,25 @@ export class PayoutService {
    * spend row on the pool and an earn row (credits + msat) per host, then resets the heartbeat
    * window. The pool's msat is pro-rated from its credits so hosts receive sats, not just credits.
    */
-  async distributeFeePool(expectedHeartbeats: number): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
+  async distributeFeePool(expectedHeartbeats: number, opts: { minIntervalMs?: number } = {}): Promise<FeePoolDistribution> {
+    if (await this.d.pause?.isPaused()) return { distributedMsat: 0, hosts: [], skipped: "payouts_paused" };
+    const locked = await this.d.store.withFeePoolLock(async (): Promise<FeePoolDistribution> => {
+      // Two seeds each run a timer; whichever fires second in a window finds the first one's spend
+      // row and skips, so the pool is split once per window instead of twice on half-windows.
+      if (opts.minIntervalMs && opts.minIntervalMs > 0) {
+        const last = await this.d.store.lastPoolDistributionMs(this.d.feePoolAccountId);
+        if (last !== null && (this.d.now ?? Date.now)() - last < opts.minIntervalMs) return { distributedMsat: 0, hosts: [], skipped: "recent" };
+      }
+      return this.distributeFeePoolLocked(expectedHeartbeats);
+    });
+    if (!locked.acquired) {
+      this.d.log?.info({}, "fee_pool_distribution_skipped_locked");
+      return { distributedMsat: 0, hosts: [], skipped: "locked" };
+    }
+    return locked.value;
+  }
+
+  private async distributeFeePoolLocked(expectedHeartbeats: number): Promise<FeePoolDistribution> {
     const now = this.d.now ?? Date.now;
     const [poolCredits, poolMsat] = await Promise.all([this.d.store.creditBalance(this.d.feePoolAccountId), this.d.store.earnedMsat(this.d.feePoolAccountId)]);
     const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);

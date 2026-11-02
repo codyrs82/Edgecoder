@@ -3,6 +3,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { Agent, request, type Dispatcher } from "undici";
+import { decodeBolt11 } from "./bolt11.js";
 
 export interface CreateInvoiceInput {
   amountSats: number;
@@ -53,6 +54,43 @@ export interface LightningProvider {
   checkSettlement(invoiceRef: string, paymentHash?: string): Promise<SettlementResult>;
   /** Pay a BOLT11 invoice from the node's wallet (payouts to workers and infrastructure hosts). */
   payInvoice(input: PayInvoiceInput): Promise<PayInvoiceResult>;
+  /** Wallet + channel balances, for payout reconciliation. Optional: absent means unsupported. */
+  getBalances?(): Promise<NodeBalances | ProviderUnsupported>;
+  /** Outgoing payments created since `sinceMs`, for payout reconciliation. Optional: absent means unsupported. */
+  listPayments?(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList | ProviderUnsupported>;
+}
+
+/** A provider (or provider build) that cannot answer a reconciliation query. Never an error. */
+export interface ProviderUnsupported {
+  supported: false;
+  reason: string;
+}
+
+/** Sats the node holds. `totalSats` is what reconciliation compares between runs. */
+export interface NodeBalances {
+  supported: true;
+  onchainConfirmedSats: number;
+  onchainUnconfirmedSats: number;
+  /** Spendable local channel balance. */
+  channelLocalSats: number;
+  /** Local balance in channels still opening plus outgoing HTLCs in flight. */
+  channelPendingSats: number;
+  totalSats: number;
+}
+
+export interface NodePayment {
+  paymentHash: string;
+  status: "succeeded" | "failed" | "in_flight";
+  valueMsat: number;
+  feeMsat: number;
+  createdAtMs: number;
+}
+
+export interface NodePaymentList {
+  supported: true;
+  payments: NodePayment[];
+  /** The node returned `limit` rows; older/newer payments may be missing from this page. */
+  truncated: boolean;
 }
 
 /** Normalise LND's base64 hashes / preimages (also accepts hex). */
@@ -63,11 +101,42 @@ function lndBytesToHex(value: string | undefined, bytes: number): string | undef
   return buf.length === bytes ? buf.toString("hex") : undefined;
 }
 
-class MockLightningProvider implements LightningProvider {
+export class MockLightningProvider implements LightningProvider {
+  /** Dev only: a pretend wallet so reconciliation has something to compare. */
+  private balanceMsat: number;
+  private readonly payments: NodePayment[] = [];
+  private readonly settledRefs = new Set<string>();
+
+  constructor(startingBalanceSats = 0) {
+    this.balanceMsat = Math.max(0, Math.floor(startingBalanceSats)) * 1000;
+  }
+
   async payInvoice(input: PayInvoiceInput): Promise<PayInvoiceResult> {
     // Dev only: "pays" instantly. No preimage (none exists for a foreign invoice); callers
     // see status succeeded and a zero fee.
+    let paymentHash: string | undefined;
+    let amountMsat = input.amountMsat;
+    try {
+      const d = decodeBolt11(input.bolt11);
+      paymentHash = d.paymentHash;
+      amountMsat = d.amountMsat ?? amountMsat;
+    } catch {
+      /* foreign/garbage invoice in dev: still "pays" */
+    }
+    this.balanceMsat -= amountMsat ?? 0;
+    if (paymentHash) this.payments.push({ paymentHash, status: "succeeded", valueMsat: amountMsat ?? 0, feeMsat: 0, createdAtMs: Date.now() });
     return { status: "succeeded", feeMsat: 0, amountMsat: input.amountMsat, error: undefined };
+  }
+
+  async getBalances(): Promise<NodeBalances> {
+    const sats = Math.floor(this.balanceMsat / 1000);
+    return { supported: true, onchainConfirmedSats: 0, onchainUnconfirmedSats: 0, channelLocalSats: sats, channelPendingSats: 0, totalSats: sats };
+  }
+
+  async listPayments(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList> {
+    const limit = input.limit ?? 1000;
+    const rows = this.payments.filter((p) => p.createdAtMs >= input.sinceMs);
+    return { supported: true, payments: rows.slice(0, limit), truncated: rows.length > limit };
   }
 
   async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
@@ -80,6 +149,11 @@ class MockLightningProvider implements LightningProvider {
   }
 
   async checkSettlement(invoiceRef: string): Promise<SettlementResult> {
+    const amountSats = Number(/^mockln:[^:]+:(\d+)$/.exec(invoiceRef)?.[1] ?? 0);
+    if (!this.settledRefs.has(invoiceRef)) {
+      this.settledRefs.add(invoiceRef);
+      this.balanceMsat += amountSats * 1000;
+    }
     return {
       settled: true,
       txRef: `mock-settlement-${randomUUID()}`,
@@ -195,6 +269,36 @@ export class LndRestProvider implements LightningProvider {
     };
   }
 
+  /** GET /v1/balance/blockchain + /v1/balance/channels. Throws on HTTP errors or malformed bodies. */
+  async getBalances(): Promise<NodeBalances> {
+    const [chain, channels] = await Promise.all([this.getJson("/v1/balance/blockchain"), this.getJson("/v1/balance/channels")]);
+    return interpretLndBalances(chain as LndWalletBalance, channels as LndChannelBalance);
+  }
+
+  /** GET /v1/payments (incomplete included, so in-flight HTLCs are visible). */
+  async listPayments(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList> {
+    const limit = Math.max(1, Math.min(10_000, Math.floor(input.limit ?? 1000)));
+    const start = Math.max(0, Math.floor(input.sinceMs / 1000));
+    const body = (await this.getJson(`/v1/payments?include_incomplete=true&max_payments=${limit}&creation_date_start=${start}`)) as { payments?: LndPayment[] };
+    const payments = interpretLndPayments(body);
+    return { supported: true, payments, truncated: payments.length >= limit };
+  }
+
+  private async getJson(path: string): Promise<unknown> {
+    const res = await request(`${this.baseUrl}${path}`, {
+      dispatcher: this.dispatcher,
+      method: "GET",
+      headers: { "Grpc-Metadata-macaroon": this.macaroonHex },
+      headersTimeout: 15_000,
+      bodyTimeout: 15_000
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      await res.body.dump();
+      throw new Error(`lnd_http_${res.statusCode}:${path.split("?")[0]}`);
+    }
+    return res.body.json();
+  }
+
   async checkSettlement(_invoiceRef: string, paymentHash?: string): Promise<SettlementResult> {
     // #42 review: LND's GET /v1/invoice/{r_hash_str} takes the hex payment hash, not the bolt11.
     const hashHex = lndHashToHex(paymentHash);
@@ -258,7 +362,131 @@ export function interpretLndInvoice(body: LndInvoice, hashHex: string): Settleme
   return { settled: true, txRef: `lnd:${hashHex}`, paymentHash: hashHex, preimage };
 }
 
-class ClnRestProvider implements LightningProvider {
+/* ------------------------------------------------------------------ */
+/*  Reconciliation reads (balances, outgoing payments)                  */
+/* ------------------------------------------------------------------ */
+
+/** Non-negative integer from an int64-as-string / number field; anything else is malformed. */
+function satsField(value: unknown, what: string): number {
+  const v = typeof value === "number" ? String(value) : value;
+  if (typeof v !== "string" || !/^\d+$/.test(v.trim())) throw new Error(`balance_malformed:${what}`);
+  const n = Number(v.trim());
+  if (!Number.isSafeInteger(n)) throw new Error(`balance_malformed:${what}`);
+  return n;
+}
+
+function optionalSats(value: unknown, what: string): number {
+  return value === undefined || value === null ? 0 : satsField(value, what);
+}
+
+/** Subsets of LND's WalletBalanceResponse / ChannelBalanceResponse REST JSON. */
+export interface LndWalletBalance {
+  confirmed_balance?: string;
+  unconfirmed_balance?: string;
+}
+export interface LndChannelBalance {
+  local_balance?: { sat?: string };
+  pending_open_local_balance?: { sat?: string };
+  unsettled_local_balance?: { sat?: string };
+}
+
+/** Fails closed: the fields every LND >= 0.13 returns must be present and numeric. */
+export function interpretLndBalances(chain: LndWalletBalance, channels: LndChannelBalance): NodeBalances {
+  const onchainConfirmedSats = satsField(chain?.confirmed_balance, "confirmed_balance");
+  const onchainUnconfirmedSats = optionalSats(chain?.unconfirmed_balance, "unconfirmed_balance");
+  const channelLocalSats = satsField(channels?.local_balance?.sat, "local_balance");
+  const channelPendingSats =
+    optionalSats(channels?.pending_open_local_balance?.sat, "pending_open_local_balance") + optionalSats(channels?.unsettled_local_balance?.sat, "unsettled_local_balance");
+  return {
+    supported: true,
+    onchainConfirmedSats,
+    onchainUnconfirmedSats,
+    channelLocalSats,
+    channelPendingSats,
+    totalSats: onchainConfirmedSats + onchainUnconfirmedSats + channelLocalSats + channelPendingSats
+  };
+}
+
+/** Subset of LND's `lnrpc.Payment` REST JSON. */
+export interface LndPayment {
+  payment_hash?: string;
+  value_msat?: string;
+  fee_msat?: string;
+  status?: string;
+  creation_time_ns?: string;
+  creation_date?: string;
+}
+
+function paymentHashField(value: unknown): string {
+  const hex = typeof value === "string" ? lndHashToHex(value) : undefined;
+  if (!hex) throw new Error("payments_malformed:payment_hash");
+  return hex;
+}
+
+export function interpretLndPayments(body: { payments?: LndPayment[] }): NodePayment[] {
+  if (!body || !Array.isArray(body.payments)) throw new Error("payments_malformed:payments");
+  return body.payments.map((p) => {
+    const status = p.status === "SUCCEEDED" ? "succeeded" : p.status === "FAILED" ? "failed" : "in_flight"; // IN_FLIGHT, INITIATED, UNKNOWN: money may still move
+    const ns = p.creation_time_ns !== undefined ? satsField(p.creation_time_ns, "creation_time_ns") : undefined;
+    const createdAtMs = ns !== undefined ? Math.floor(ns / 1e6) : optionalSats(p.creation_date, "creation_date") * 1000;
+    return { paymentHash: paymentHashField(p.payment_hash), status, valueMsat: satsField(p.value_msat, "value_msat"), feeMsat: optionalSats(p.fee_msat, "fee_msat"), createdAtMs };
+  });
+}
+
+/** c-lightning-REST /v1/getBalance and /v1/channel/localremotebal (sats). */
+export interface ClnWalletBalance {
+  confBalance?: number | string;
+  unconfBalance?: number | string;
+}
+export interface ClnChannelBalance {
+  localBalance?: number | string;
+  pendingBalance?: number | string;
+}
+
+export function interpretClnBalances(wallet: ClnWalletBalance, channels: ClnChannelBalance): NodeBalances {
+  const onchainConfirmedSats = satsField(wallet?.confBalance, "confBalance");
+  const onchainUnconfirmedSats = optionalSats(wallet?.unconfBalance, "unconfBalance");
+  const channelLocalSats = satsField(channels?.localBalance, "localBalance");
+  const channelPendingSats = optionalSats(channels?.pendingBalance, "pendingBalance");
+  return {
+    supported: true,
+    onchainConfirmedSats,
+    onchainUnconfirmedSats,
+    channelLocalSats,
+    channelPendingSats,
+    totalSats: onchainConfirmedSats + onchainUnconfirmedSats + channelLocalSats + channelPendingSats
+  };
+}
+
+/** Core Lightning `listpays` entry via c-lightning-REST /v1/pay/listPays. */
+export interface ClnPay {
+  payment_hash?: string;
+  status?: "complete" | "failed" | "pending" | string;
+  amount_msat?: string | number;
+  amount_sent_msat?: string | number;
+  created_at?: number | string;
+}
+
+export function interpretClnPays(body: { pays?: ClnPay[] }, sinceMs: number): NodePayment[] {
+  if (!body || !Array.isArray(body.pays)) throw new Error("payments_malformed:pays");
+  const out: NodePayment[] = [];
+  for (const p of body.pays) {
+    const hash = typeof p.payment_hash === "string" && /^[0-9a-fA-F]{64}$/.test(p.payment_hash) ? p.payment_hash.toLowerCase() : undefined;
+    if (!hash) throw new Error("payments_malformed:payment_hash");
+    const createdAtMs = optionalSats(p.created_at, "created_at") * 1000;
+    if (createdAtMs < sinceMs) continue;
+    const status = p.status === "complete" ? "succeeded" : p.status === "failed" ? "failed" : "in_flight";
+    const value = clnMsat(p.amount_msat);
+    const sent = clnMsat(p.amount_sent_msat);
+    // A failed pay may carry no amounts; a complete or pending one must.
+    if (status !== "failed" && (value === undefined || sent === undefined)) throw new Error("payments_malformed:amount");
+    const valueMsat = Number(value ?? 0n);
+    out.push({ paymentHash: hash, status, valueMsat, feeMsat: Math.max(0, Number(sent ?? 0n) - valueMsat), createdAtMs });
+  }
+  return out;
+}
+
+export class ClnRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
     private readonly apiToken: string
@@ -335,6 +563,32 @@ class ClnRestProvider implements LightningProvider {
       amountMsat: amount,
       feeMsat: amount !== undefined && sent !== undefined ? Math.max(0, sent - amount) : undefined
     };
+  }
+
+  async getBalances(): Promise<NodeBalances> {
+    const [wallet, channels] = await Promise.all([this.getJson("/v1/getBalance"), this.getJson("/v1/channel/localremotebal")]);
+    return interpretClnBalances(wallet as ClnWalletBalance, channels as ClnChannelBalance);
+  }
+
+  /** listpays has no server-side date filter; rows older than `sinceMs` are dropped here. */
+  async listPayments(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList> {
+    const limit = Math.max(1, Math.floor(input.limit ?? 1000));
+    const payments = interpretClnPays((await this.getJson("/v1/pay/listPays")) as { pays?: ClnPay[] }, input.sinceMs);
+    return { supported: true, payments: payments.slice(-limit), truncated: payments.length > limit };
+  }
+
+  private async getJson(path: string): Promise<unknown> {
+    const res = await request(`${this.baseUrl}${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.apiToken}` },
+      headersTimeout: 15_000,
+      bodyTimeout: 15_000
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      await res.body.dump();
+      throw new Error(`cln_http_${res.statusCode}:${path}`);
+    }
+    return res.body.json();
   }
 
   async checkSettlement(invoiceRef: string, paymentHash?: string): Promise<SettlementResult> {
@@ -438,5 +692,5 @@ export function createLightningProviderFromEnv(): LightningProvider {
     throw new Error("mock_lightning_disabled: set ALLOW_MOCK_LIGHTNING=1 for local dev");
   }
   console.warn("[lightning] using MockLightningProvider — all invoices auto-settle");
-  return new MockLightningProvider();
+  return new MockLightningProvider(Number(process.env.MOCK_LIGHTNING_BALANCE_SATS ?? 0) || 0);
 }

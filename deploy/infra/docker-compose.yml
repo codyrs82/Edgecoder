@@ -23,7 +23,7 @@ services:
   # Named volumes are created root-owned; give them to uid 1000 once (top level only, so a
   # multi-hundred-GB chain is not re-walked at every start).
   volume-init:
-    image: alpine:3.21
+    image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
     user: "0:0"
     command: ["sh", "-c", "chown 1000:1000 /vol/bitcoin /vol/lnd /vol/electrs /vol/edgecoder && chmod 700 /vol/bitcoin /vol/lnd"]
     volumes:
@@ -35,7 +35,7 @@ services:
     logging: *logging
 
   bitcoind:
-    image: btcpayserver/bitcoinknots:29.3.knots20260210
+    image: btcpayserver/bitcoinknots:29.3.knots20260210@sha256:ff6b196d4e4c7cd3d84036d3110c3a5134e7e9eb686d0b343ea11183ddac2024
     user: *uid
     # Bypass the image entrypoint (it wants root to chown): bitcoind reads the rendered conf.
     entrypoint: ["bitcoind"]
@@ -61,7 +61,7 @@ services:
     networks: [infra]
 
   lnd:
-    image: lightninglabs/lnd:v0.21.4-beta
+    image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
     user: *uid
     command:
       - lnd
@@ -96,7 +96,7 @@ services:
     networks: [infra]
 
   electrs:
-    image: getumbrel/electrs:v0.10.10
+    image: getumbrel/electrs:v0.10.10@sha256:c991fd3d8b19614fa7309525e8ccb6c0a87464f8bf6bd4dff1479b493f7308f2
     profiles: ["indexer"]
     user: *uid
     command:
@@ -129,7 +129,7 @@ services:
     networks: [infra]
 
   postgres:
-    image: postgres:16
+    image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

@@ -107,11 +107,17 @@ export async function discoverCoordinators(opts: DiscoverOptions = {}): Promise<
   return merged.slice(0, opts.maxCandidates ?? 32);
 }
 
-export type SelectOptions = DiscoverOptions & Omit<SelectorOptions, "candidates"> & { stickinessMargin?: number };
+export type SelectOptions = DiscoverOptions &
+  Omit<SelectorOptions, "candidates"> & {
+    stickinessMargin?: number;
+    /** Drop candidates before ranking (strict trust mode: only coordinators whose key is listed). */
+    acceptCandidate?: (c: CoordinatorCandidate) => boolean;
+  };
 
 /** Discover, rank and pick one coordinator (stickiness against `currentUrl`). Null when none is healthy. */
 export async function selectCoordinator(opts: SelectOptions = {}): Promise<RankedCoordinator | null> {
-  const candidates = await discoverCoordinators(opts);
+  const accept = opts.acceptCandidate;
+  const candidates = (await discoverCoordinators(opts)).filter((c) => !accept || accept(c));
   if (candidates.length === 0) return null;
   const ranked = await rankCoordinators({ ...opts, candidates });
   return applyStickiness(ranked, opts.currentUrl, opts.stickinessMargin);
@@ -127,6 +133,7 @@ export interface EnvDiscoveryOptions {
   resolver?: DnsResolver;
   connect?: WsConnect;
   now?: () => number;
+  acceptCandidate?: (c: CoordinatorCandidate) => boolean;
 }
 
 /**
@@ -168,7 +175,8 @@ export function selectOptionsFromEnv(o: EnvDiscoveryOptions = {}): SelectOptions
     fetch: o.fetch,
     resolver: o.resolver,
     connect: o.connect,
-    now: o.now
+    now: o.now,
+    acceptCandidate: o.acceptCandidate
   };
 }
 

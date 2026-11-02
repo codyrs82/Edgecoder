@@ -1,14 +1,15 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fingerprintMatches, publicKeyFingerprint } from "../security/key-fingerprint.js";
 
 /*
  * Architecture step 4: pinned-key trust. An agent only works for coordinators whose
- * Ed25519 public key it trusts. Keys are identified by `peerId:sha256(publicKeyPem)`.
+ * Ed25519 public key it trusts. Keys are identified by `peerId:fingerprint`, the system-wide
+ * sha256 of the SPKI DER (src/security/key-fingerprint.ts; GET /identity reports it).
  *
  *   TRUSTED_COORDINATOR_KEYS   comma-separated peerId:fingerprint entries (always pinned)
  *   EDGECODER_TRUST_FILE       file with one entry per line ("#" comments); in tofu mode
@@ -44,10 +45,12 @@ export interface TrustDecision {
 
 export const DEFAULT_TRUST_FILE = join(homedir(), ".edgecoder", "trusted-coordinators");
 
-/** sha256 hex of the normalized PEM (CRLF folded, surrounding whitespace trimmed). */
+/**
+ * The system-wide key fingerprint: sha256 hex of the SPKI DER (src/security/key-fingerprint.ts).
+ * Pins written by older builds (sha256 of the PEM text) still match; see fingerprintMatches.
+ */
 export function fingerprint(publicKeyPem: string): string {
-  const normalized = publicKeyPem.replace(/\r\n/g, "\n").trim() + "\n";
-  return createHash("sha256").update(normalized).digest("hex");
+  return publicKeyFingerprint(publicKeyPem);
 }
 
 export function parseTrustMode(value: string | undefined, fallback: TrustMode = "tofu"): TrustMode {
@@ -122,12 +125,39 @@ export class PinnedKeyStore {
     return this.staticEntries.get(peerId) ?? this.pinned.get(peerId);
   }
 
+  /** Number of keys this store can match (static entries plus file pins). */
+  size(): number {
+    return this.list().length;
+  }
+
+  /**
+   * Configuration that cannot work, reported at startup instead of refusing every coordinator:
+   * strict mode with nothing listed.
+   */
+  configProblem(): string | null {
+    if (this.mode === "strict" && this.size() === 0) {
+      return "EDGECODER_TRUST_MODE=strict but no coordinator keys are listed: set TRUSTED_COORDINATOR_KEYS=peerId:fingerprint[,...] (GET /identity on each coordinator reports its trustEntry) or list them in EDGECODER_TRUST_FILE";
+    }
+    return null;
+  }
+
+  /**
+   * Whether `isTrusted` would accept this key, without pinning anything (candidate filtering).
+   * A key-less candidate is not known to be trusted.
+   */
+  wouldTrust(peerId: string | undefined, publicKeyPem: string | undefined): boolean {
+    if (!peerId || !publicKeyPem) return false;
+    const known = this.knownFingerprint(peerId);
+    if (known !== undefined) return this.mode === "open" || fingerprintMatches(known, publicKeyPem);
+    return this.mode !== "strict";
+  }
+
   isTrusted(peerId: string, publicKeyPem: string): TrustDecision {
     const fp = fingerprint(publicKeyPem);
     const base = { mode: this.mode, peerId, fingerprint: fp };
     const known = this.knownFingerprint(peerId);
     if (known !== undefined) {
-      if (known === fp) return { ...base, trusted: true, reason: "pinned_match" };
+      if (known === fp || fingerprintMatches(known, publicKeyPem)) return { ...base, trusted: true, reason: "pinned_match" };
       if (this.mode === "open") return { ...base, trusted: true, reason: "open_mismatch", pinnedFingerprint: known };
       return { ...base, trusted: false, reason: "pinned_mismatch", pinnedFingerprint: known };
     }

@@ -78,12 +78,16 @@ import {
   type PeerAllowlist
 } from "../mesh/peer-trust.js";
 import { MeshProtocol } from "../mesh/protocol.js";
+import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
+import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
 import { NETWORK_FEE_POOL_ACCOUNT, accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
-import { MemoryPayoutStore, PayoutService, type PayoutStore } from "../economy/payout-service.js";
+import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
+import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
+import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
 import { payoutPolicyFromEnv } from "../economy/payouts.js";
 import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
@@ -113,6 +117,18 @@ import {
   smoothLoadIndex
 } from "../economy/issuance.js";
 import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
+import {
+  HOST_HEARTBEAT_MAX_SKEW_MS,
+  HostServiceAttestor,
+  attestSelfServices,
+  heartbeatCounts,
+  networkServiceProbes,
+  normalizeServices,
+  signHostHeartbeat,
+  verifyHostHeartbeat,
+  type AttestationResult
+} from "../economy/host-attestation.js";
+import { probeElectrum } from "../economy/service-probes.js";
 import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningProvider } from "../economy/lightning.js";
 import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
 import {
@@ -135,7 +151,8 @@ import {
   classifyResultAuth,
   creditedDurationMs,
   requireSignedAgentRequests,
-  resultReportId
+  resultReportId,
+  unsignedRequestDecision
 } from "./result-integrity.js";
 import {
   ResultVerifier,
@@ -174,8 +191,8 @@ import { EscalationRequest, EscalationResult } from "../escalation/types.js";
 import { EscalationResolver, createEscalationResolverFromEnv } from "../escalation/server.js";
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
 import { createTaskEnvelope, decryptResult as decryptEnvelopeResult, type TaskEnvelope, type EncryptedResult } from "../security/envelope.js";
-import { verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
-import { InMemoryNonceStore, verifyNonce } from "../security/nonce-verifier.js";
+import { installRawBodyCapture, rawBodyOf, verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
+import { FallbackNonceStore, InMemoryNonceStore, verifyNonce, type NonceStore } from "../security/nonce-verifier.js";
 import { AgentRateLimiter } from "../security/agent-rate-limiter.js";
 import { SecurityEventLogger, type SecurityEventType } from "../audit/security-events.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
@@ -193,16 +210,9 @@ const app = Fastify({ ...serviceLoggerOptions("coordinator") });
 exposeRequestId(app);
 registerMetrics(app, "coordinator");
 await registerErrorTracking(app, "coordinator");
-// #118 review: keep the exact request bytes so signed bodies (forwarded /result) are verified
-// against what was sent, not a re-serialization. Parsing itself is Fastify's default (safe) parser.
-{
-  const defaultJsonParser = app.getDefaultJsonParser("error", "error");
-  app.removeContentTypeParser("application/json");
-  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
-    (req as unknown as { rawBody?: string }).rawBody = body as string;
-    defaultJsonParser(req, body as string, done);
-  });
-}
+// #118 review: keep the exact request bytes so signed bodies (forwarded /result, agent requests)
+// are verified against what was sent, not a re-serialization.
+installRawBodyCapture(app);
 await app.register(cors, {
   origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
   credentials: true,
@@ -346,7 +356,11 @@ const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
 const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
 const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
 const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
-const nonceStore = new InMemoryNonceStore();
+// Replay protection: Postgres when configured, so nonces survive restarts and are shared by every
+// coordinator on the database (a replay to the other seed is caught); in memory otherwise.
+const nonceStore: NonceStore = pgStore
+  ? new FallbackNonceStore(pgStore.nonceStore(), (error) => app.log.warn({ error: String(error) }, "nonce_store_degraded_to_memory"))
+  : new InMemoryNonceStore();
 const securityLog = new SecurityEventLogger((event) => {
   const level = event.level === "CRITICAL" || event.level === "HIGH" ? "warn" : "info";
   app.log[level]({ securityEvent: event }, `security:${event.event}`);
@@ -775,6 +789,12 @@ const disabledLightningProvider: LightningProvider = {
   },
   async payInvoice() {
     return { status: "failed" as const, error: "economy_payments_disabled" };
+  },
+  async getBalances() {
+    return { supported: false as const, reason: "economy_payments_disabled" };
+  },
+  async listPayments() {
+    return { supported: false as const, reason: "economy_payments_disabled" };
   }
 };
 const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
@@ -794,14 +814,64 @@ class EnginePayoutStore extends MemoryPayoutStore {
   override async creditBalance(accountId: string): Promise<number> {
     return creditEngine.balance(accountId) + (await super.creditBalance(accountId));
   }
+  /** Engine-held earnings can't be totalled across accounts, so the liability check is skipped in memory mode. */
+  override async liabilitiesMsat(): Promise<number | undefined> {
+    return undefined;
+  }
 }
 const memoryPayoutStore = pgStore ? null : new EnginePayoutStore();
 const payoutStore: PayoutStore = pgStore ?? (memoryPayoutStore as PayoutStore);
 let lastFeePoolDistribution: { atMs: number; distributedMsat: number; hosts: number } | null = null;
+// Hot-wallet safeguards (docs/going-to-mainnet.md): caps, the kill switch and reconciliation.
+const payoutLimits = payoutLimitsFromEnv(BITCOIN_NETWORK);
+const payoutPause = new PayoutPauseControl({
+  store: payoutStore,
+  envPaused: payoutsPausedByEnv(),
+  onChange: (state, previous) => {
+    securityLog.log({
+      level: securityLog.severity(state.paused ? "payouts_paused" : "payouts_resumed"),
+      event: state.paused ? "payouts_paused" : "payouts_resumed",
+      source: { type: state.source === "reconciliation" ? "system" : "coordinator", id: state.changedBy ?? identity.peerId },
+      details: { reason: state.reason, source: state.source, wasPaused: previous.paused },
+      action: state.paused ? "halt_outbound_payments" : "resume_outbound_payments",
+      coordinatorId: identity.peerId
+    });
+    ordering.append({
+      eventType: "payouts_pause_changed",
+      taskId: `payouts_pause:${state.changedAtMs ?? Date.now()}`,
+      actorId: state.changedBy ?? identity.peerId,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({ paused: state.paused, reason: state.reason, source: state.source, changedAtMs: state.changedAtMs })
+    });
+  }
+});
+// Defense in depth: even a caller that skipped PayoutService's checks cannot pay while paused.
+const payoutProvider: LightningProvider = {
+  createInvoice: (input) => lightningProvider.createInvoice(input),
+  checkSettlement: (ref, hash) => lightningProvider.checkSettlement(ref, hash),
+  async payInvoice(input) {
+    if (await payoutPause.isPaused()) return { status: "failed", error: "payouts_paused" };
+    return lightningProvider.payInvoice(input);
+  },
+  getBalances: lightningProvider.getBalances ? () => lightningProvider.getBalances!() : undefined,
+  listPayments: lightningProvider.listPayments ? (input) => lightningProvider.listPayments!(input) : undefined
+};
 const payoutService = new PayoutService({
   store: payoutStore,
-  provider: lightningProvider,
+  provider: payoutProvider,
   policy: payoutPolicy,
+  limits: payoutLimits,
+  pause: payoutPause,
+  onSecurityEvent: (event, details) => {
+    securityLog.log({
+      level: securityLog.severity(event),
+      event,
+      source: { type: "system", id: String(details.accountId ?? "payouts") },
+      details,
+      action: "reject_payout",
+      coordinatorId: identity.peerId
+    });
+  },
   coordinatorId: identity.peerId,
   feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT,
   fetcher: async (url: string) => {
@@ -833,33 +903,65 @@ const payoutService = new PayoutService({
   }
 });
 
-/** Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime × services. */
-async function recordInfraHeartbeat(input: { hostId: string; accountId?: string; services: string[]; region?: string; coordinatorUrl?: string; lightningAddress?: string }): Promise<InfrastructureHost> {
+/**
+ * Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime ×
+ * attested services (src/economy/host-attestation.ts). A heartbeat counts toward the window at
+ * most once per ~HOST_HEARTBEAT_MS, and only attested services are stored in `services`.
+ */
+async function recordInfraHeartbeat(input: {
+  hostId: string;
+  accountId?: string;
+  declaredServices: string[];
+  attestation: AttestationResult;
+  region?: string;
+  coordinatorUrl?: string;
+  lightningAddress?: string;
+  lightningNodeId?: string;
+}): Promise<{ host: InfrastructureHost; counted: boolean }> {
   const now = Date.now();
+  const minCountIntervalMs = Math.floor(CC.HOST_HEARTBEAT_MS * 0.8);
   const host: InfrastructureHost = {
     hostId: input.hostId,
     accountId: input.accountId ?? `host:${input.hostId}`,
     coordinatorUrl: input.coordinatorUrl,
     region: input.region,
-    services: [...new Set(input.services.map((x) => x.trim().toLowerCase()).filter(Boolean))],
+    services: input.attestation.attested,
+    declaredServices: normalizeServices(input.declaredServices),
+    attestedAtMs: input.attestation.atMs,
+    lightningNodeId: input.lightningNodeId,
     lightningAddress: input.lightningAddress,
     firstSeenMs: now,
     lastSeenMs: now,
+    lastCountedMs: now,
     heartbeatsInWindow: 1
   };
   if (pgStore) {
-    await pgStore.upsertInfrastructureHost(host);
-    await pgStore.recordHostHeartbeat(host.hostId, now);
-  } else if (memoryPayoutStore) {
-    const existing = memoryPayoutStore.hosts.get(host.hostId);
-    if (existing) {
-      Object.assign(existing, { accountId: host.accountId, services: host.services, lastSeenMs: now, heartbeatsInWindow: existing.heartbeatsInWindow + 1, region: host.region ?? existing.region, coordinatorUrl: host.coordinatorUrl ?? existing.coordinatorUrl, lightningAddress: host.lightningAddress ?? existing.lightningAddress });
-    } else {
-      memoryPayoutStore.hosts.set(host.hostId, host);
-    }
-    if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
+    const r = await pgStore.recordAttestedHostHeartbeat(host, now, minCountIntervalMs);
+    return { host: { ...host, heartbeatsInWindow: r.heartbeatsInWindow }, counted: r.counted };
   }
-  return host;
+  if (!memoryPayoutStore) return { host, counted: false };
+  const existing = memoryPayoutStore.hosts.get(host.hostId);
+  let counted = true;
+  if (existing) {
+    counted = heartbeatCounts(existing.lastCountedMs, now, CC.HOST_HEARTBEAT_MS);
+    Object.assign(existing, {
+      accountId: host.accountId,
+      services: host.services,
+      declaredServices: host.declaredServices,
+      attestedAtMs: host.attestedAtMs,
+      lastSeenMs: now,
+      lastCountedMs: counted ? now : existing.lastCountedMs,
+      heartbeatsInWindow: existing.heartbeatsInWindow + (counted ? 1 : 0),
+      region: host.region ?? existing.region,
+      coordinatorUrl: host.coordinatorUrl ?? existing.coordinatorUrl,
+      lightningAddress: host.lightningAddress ?? existing.lightningAddress,
+      lightningNodeId: host.lightningNodeId ?? existing.lightningNodeId
+    });
+  } else {
+    memoryPayoutStore.hosts.set(host.hostId, host);
+  }
+  if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
+  return { host: memoryPayoutStore.hosts.get(host.hostId) ?? host, counted };
 }
 const INFRA_HOST_ENABLED = (process.env.INFRA_HOST_ENABLED ?? "1") !== "0";
 const INFRA_HOST_SERVICES: string[] = (process.env.INFRA_HOST_SERVICES ?? "")
@@ -869,28 +971,102 @@ if (INFRA_HOST_SERVICES.length === 0) {
   if (process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind") INFRA_HOST_SERVICES.push("bitcoind");
   if (["lnd", "cln"].includes((process.env.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
 }
+/** Systems accounts a host record may never name as its payee. */
+const RESERVED_HOST_ACCOUNTS = [NETWORK_FEE_POOL_ACCOUNT, COORDINATOR_FEE_ACCOUNT];
+// Remote hosts: probes run against the host of the URL the mesh admitted (service-probes.ts).
+// HOST_ATTEST_ALLOW_PRIVATE=1 lets local test networks probe private addresses.
+const hostAttestor = new HostServiceAttestor({
+  network: BITCOIN_NETWORK,
+  probes: networkServiceProbes({ allowPrivate: process.env.HOST_ATTEST_ALLOW_PRIVATE === "1" })
+});
+/** Our own services: each counts only if the backend this process uses answers (cached 10 min). */
+let selfAttestation: AttestationResult | null = null;
+async function attestOwnServices(): Promise<AttestationResult> {
+  if (selfAttestation && Date.now() - selfAttestation.atMs < 10 * 60_000) return selfAttestation;
+  const electrs = (process.env.INFRA_HOST_ELECTRS_ENDPOINT || "electrs:50001").split(":");
+  selfAttestation = await attestSelfServices(INFRA_HOST_SERVICES, {
+    lightning: async () => {
+      if (!ECONOMY_PAYMENTS_ENABLED || !lightningProvider.getBalances) return { ok: false, detail: "lightning_unavailable" };
+      const b = await lightningProvider.getBalances();
+      return b.supported ? { ok: true } : { ok: false, detail: b.reason };
+    },
+    bitcoind: async () => {
+      const provider = process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind" ? anchorDeps()?.provider : undefined;
+      if (!provider) return { ok: false, detail: "bitcoind_not_configured" };
+      const h = await provider.healthCheck();
+      return h.reachable ? { ok: true, detail: h.chain } : { ok: false, detail: h.error ?? "unreachable" };
+    },
+    electrs: () => probeElectrum(electrs[0], Number(electrs[1] ?? 50001))
+  });
+  const missing = normalizeServices(INFRA_HOST_SERVICES).filter((x) => !selfAttestation!.attested.includes(x));
+  if (missing.length) app.log.warn({ missing, results: selfAttestation.results }, "infra_host_services_not_attested");
+  return selfAttestation;
+}
+/** Other coordinators whose fee pool this host also reports to (signed POST /economy/hosts/heartbeat). */
+const INFRA_HOST_REPORT_URLS = (process.env.INFRA_HOST_REPORT_URLS ?? "").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
 async function selfInfraHeartbeat(): Promise<void> {
   if (!INFRA_HOST_ENABLED) return;
-  await recordInfraHeartbeat({
+  const fields = {
     hostId: identity.peerId,
     accountId: process.env.INFRA_HOST_ACCOUNT_ID || undefined,
     services: INFRA_HOST_SERVICES,
     region: process.env.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
     coordinatorUrl: COORDINATOR_PUBLIC_URL,
-    lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined
-  });
+    lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined,
+    lightningNodeId: process.env.INFRA_HOST_LIGHTNING_NODE_ID || undefined
+  };
+  await recordInfraHeartbeat({ ...fields, declaredServices: fields.services, attestation: await attestOwnServices() });
+  for (const url of INFRA_HOST_REPORT_URLS) {
+    // Fresh signature per target: each heartbeat is single-use on the receiver.
+    const body = signHostHeartbeat(fields, coordinatorKeys.privateKeyPem);
+    void fetch(`${url}/economy/hosts/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000)
+    })
+      .then(async (res) => {
+        if (!res.ok) app.log.warn({ url, status: res.status, body: await res.text().catch(() => "") }, "infra_heartbeat_report_rejected");
+      })
+      .catch((error) => app.log.warn({ url, error: String(error) }, "infra_heartbeat_report_failed"));
+  }
 }
-let feePoolDistributing: Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> | null = null;
-async function runFeePoolDistribution(): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
+let feePoolDistributing: Promise<FeePoolDistribution> | null = null;
+async function runFeePoolDistribution(opts: { manual?: boolean } = {}): Promise<FeePoolDistribution> {
   // Single-flight: concurrent callers (a flooded endpoint, overlapping timers) share one run so
-  // the pool is not distributed twice for the same window (audit econ#3). NOTE: this guards one
-  // process only; a multi-instance deployment sharing one database still needs a DB advisory lock
-  // inside distributeFeePool — tracked as a follow-up.
+  // the pool is not distributed twice for the same window (audit econ#3). Across instances sharing
+  // one database, distributeFeePool holds a Postgres advisory lock (a second coordinator skips with
+  // "locked"), and the timer skips a window another instance already distributed ("recent", at
+  // 90% of FEE_POOL_DISTRIBUTION_MS). The admin route is a manual override of the latter only.
   if (feePoolDistributing) return feePoolDistributing;
   const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
-  feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats).finally(() => { feePoolDistributing = null; });
+  const minIntervalMs = opts.manual ? 0 : Math.floor(CC.FEE_POOL_DISTRIBUTION_MS * 0.9);
+  feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats, { minIntervalMs }).finally(() => { feePoolDistributing = null; });
   return feePoolDistributing;
 }
+const payoutReconcileConfig = payoutReconcileConfigFromEnv();
+const payoutReconciler = new PayoutReconciler({
+  provider: lightningProvider,
+  ledger: payoutStore,
+  config: payoutReconcileConfig,
+  coordinatorId: identity.peerId,
+  webhookUrl: process.env.PAYOUT_ALERT_WEBHOOK_URL?.trim() || undefined,
+  log: app.log,
+  pause: async (reason) => {
+    await payoutPause.pause(reason, "reconciliation", identity.peerId);
+  },
+  onAlert: (r) => {
+    const event = r.status === "error" ? "payout_reconciliation_error" : "payout_reconciliation_mismatch";
+    securityLog.log({
+      level: securityLog.severity(event),
+      event,
+      source: { type: "system", id: "payout_reconciler" },
+      details: { status: r.status, failed: r.checks.filter((c) => !c.ok).map((c) => ({ name: c.name, detail: c.detail, msat: c.msat })), error: r.error },
+      action: r.status === "tripped" ? "pause_payouts" : "alert",
+      coordinatorId: identity.peerId
+    });
+  }
+});
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
@@ -1066,12 +1242,14 @@ async function verifyAgentRequest(
   headers: Record<string, unknown>,
   routePath: string,
   sourceIp?: string,
-  opts?: { allowUnsigned?: boolean }
+  opts?: { allowUnsigned?: boolean; requireSigned?: boolean; rawBody?: string }
 ): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
   const signed = extractSignedHeaders(headers);
   // #44: unsigned requests are rejected unless the policy is explicitly relaxed (non-prod),
   // or the route has its own alternative auth for unsigned callers (allowUnsigned).
-  if (!signed) return REQUIRE_SIGNED_AGENT_REQUESTS && !opts?.allowUnsigned ? "rejected" : null;
+  // requireSigned: the route acts on behalf of a named agent and has no other auth, so it is
+  // signed-only whatever the policy (an unsigned caller could otherwise speak for any agent).
+  if (!signed) return unsignedRequestDecision({ requireSignedPolicy: REQUIRE_SIGNED_AGENT_REQUESTS, ...opts });
 
   const agentId = signed["x-agent-id"];
 
@@ -1115,11 +1293,15 @@ async function verifyAgentRequest(
     headers: signed,
     publicKeyPem: cap.publicKeyPem,
     maxSkewMs: SECURITY_MAX_SKEW_MS,
+    // Body binding: x-body-sha256 must be the hash of the bytes actually received. Every agent
+    // build since signing shipped hashes JSON.stringify(body), the same bytes it sends.
+    rawBody: opts?.rawBody ?? "",
   });
 
   if (!sigResult.valid) {
-    const eventType: SecurityEventType =
-      sigResult.reason === "timestamp_skew" ? "replay_attempt" : "invalid_signature";
+    // A valid signature over a different body is a captured request being replayed with a new payload.
+    const replayLike = sigResult.reason === "timestamp_skew" || sigResult.reason === "body_hash_mismatch";
+    const eventType: SecurityEventType = replayLike ? "replay_attempt" : "invalid_signature";
     securityLog.log({
       level: securityLog.severity(eventType),
       event: eventType,
@@ -1128,7 +1310,7 @@ async function verifyAgentRequest(
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, sigResult.reason === "timestamp_skew" ? "replay_attempt" : "signature_failure");
+    behaviorTracker.recordProtocolViolation(agentId, replayLike ? "replay_attempt" : "signature_failure");
     return "rejected";
   }
 
@@ -2545,7 +2727,7 @@ app.post("/register", async (req, reply) => {
 });
 
 app.post("/heartbeat", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip);
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip, { rawBody: rawBodyOf(req) });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const parsedHeartbeat = heartbeatSchema.safeParse(req.body);
@@ -2576,7 +2758,8 @@ app.post("/heartbeat", async (req, reply) => {
     return reply.send({ ok: true, leaseOnly: true });
   }
   behaviorTracker.recordHeartbeat(body.agentId);
-  if (body.benchmark) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
+  // A tier claim starts (or resets) hardware verification, so only a signed heartbeat may make one.
+  if (body.benchmark && verified) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
   if (body.powerTelemetry) {
     const existing = agentCapabilities.get(body.agentId);
     if (existing) {
@@ -2651,12 +2834,14 @@ app.post("/heartbeat", async (req, reply) => {
 });
 
 app.post("/benchmark/response", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/benchmark/response", req.ip);
-  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  // Signed-only (any trust policy): an answer settles that agent's tier, or a witness check on
+  // another agent's, so an unsigned caller naming a registered agentId could demote it.
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/benchmark/response", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (verified === "rejected" || !verified) return reply.code(401).send({ error: "signature_invalid" });
   const parsed = benchmarkResponseSchema.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: "invalid_benchmark_response", issues: parsed.error.issues });
   const { agentId, ...response } = parsed.data;
-  if (verified && verified.agentId !== agentId) return reply.code(401).send({ error: "agent_id_mismatch" });
+  if (verified.agentId !== agentId) return reply.code(401).send({ error: "agent_id_mismatch" });
   if (!agentCapabilities.has(agentId)) return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
   if (activeBlacklistRecord(agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
   const result = hardwareVerifier.submit(agentId, response as ChallengeResponse, Date.now());
@@ -2906,7 +3091,7 @@ app.post("/submit", async (req, reply) => {
 });
 
 app.post("/pull", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip);
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip, { rawBody: rawBodyOf(req) });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const body = pullSchema.parse(req.body);
@@ -3365,7 +3550,7 @@ async function refundTaskSubmit(taskId: string): Promise<boolean> {
 app.post("/result", async (req, reply) => {
   // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
   // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true });
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req) });
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
   const rawBody = req.body as Record<string, unknown>;
@@ -3709,7 +3894,7 @@ app.get("/economy/payouts/:accountId", async (req, reply) => {
   if (!requirePortalServiceToken(req as any, reply)) return;
   const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
   const [balance, payouts] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100)]);
-  return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED } };
+  return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused() } };
 });
 app.post("/economy/payouts/withdraw", async (req, reply) => {
   if (!requirePortalServiceToken(req as any, reply)) return;
@@ -3717,7 +3902,7 @@ app.post("/economy/payouts/withdraw", async (req, reply) => {
   if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
   const body = parsed.data;
   const result = await payoutService.withdraw(body.accountId, body.bolt11.trim());
-  if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : 400).send(result);
+  if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : result.code === "payouts_paused" ? 503 : 400).send(result);
   return result;
 });
 app.post("/economy/payouts/address", async (req, reply) => {
@@ -3736,20 +3921,65 @@ app.post("/economy/payouts/address", async (req, reply) => {
   }
   return { accountId: body.accountId, lightningAddress: address };
 });
+// Remote infrastructure hosts: signed by the host's coordinator key (the one the mesh admitted for
+// hostId), single-use, and only attested services count (src/economy/host-attestation.ts).
 app.post("/economy/hosts/heartbeat", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const body = z
+  const parsed = z
     .object({
       hostId: z.string().min(3).max(128),
       accountId: z.string().min(1).max(128).optional(),
       services: z.array(z.string().min(1).max(32)).min(1).max(8),
       region: z.string().max(32).optional(),
       coordinatorUrl: z.string().url().optional(),
-      lightningAddress: z.string().max(256).optional()
+      lightningAddress: z.string().max(256).optional(),
+      lightningNodeId: z.string().regex(/^0[23][0-9a-fA-F]{64}$/).optional(),
+      ports: z.object({ bitcoind: z.number().int().min(1).max(65535), lightning: z.number().int().min(1).max(65535), electrs: z.number().int().min(1).max(65535) }).partial().optional(),
+      issuedAtMs: z.number().int(),
+      signature: z.string().min(16).max(512)
     })
-    .parse(req.body ?? {});
-  const host = await recordInfraHeartbeat(body);
-  return { ok: true, host, heartbeatMs: CC.HOST_HEARTBEAT_MS };
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_heartbeat", detail: parsed.error.issues.map((i) => i.message).join("; ") });
+  const body = parsed.data;
+  // Our own heartbeat is recorded in-process; a remote one claiming our id is an impersonation.
+  const peer = body.hostId === identity.peerId ? undefined : mesh.listPeers().find((p) => p.peerId === body.hostId);
+  const verdict = verifyHostHeartbeat(body, peer?.publicKeyPem, { reservedAccounts: RESERVED_HOST_ACCOUNTS });
+  const replayed = verdict.ok && !(await verifyNonce(nonceStore, { nonce: `host-hb:${body.signature}`, sourceId: body.hostId, timestampMs: body.issuedAtMs, maxSkewMs: HOST_HEARTBEAT_MAX_SKEW_MS, ttlMs: SECURITY_NONCE_TTL_MS })).valid;
+  if (!verdict.ok || replayed || !peer) {
+    const reason = !verdict.ok ? verdict.reason : replayed ? "replayed_heartbeat" : "host_unknown";
+    securityLog.log({
+      level: securityLog.severity("host_heartbeat_rejected"),
+      event: "host_heartbeat_rejected",
+      source: { type: "coordinator", id: body.hostId, ip: req.ip },
+      details: { reason },
+      action: "reject_request",
+      coordinatorId: identity.peerId
+    });
+    return reply.code(reason === "host_unknown" ? 403 : 401).send({ ok: false, error: reason });
+  }
+  const attestation = await hostAttestor.attest({
+    hostId: body.hostId,
+    publicKeyPem: peer.publicKeyPem,
+    coordinatorUrl: peer.coordinatorUrl,
+    services: body.services,
+    lightningNodeId: body.lightningNodeId,
+    ports: body.ports
+  });
+  // Uptime means reachable: a host whose coordinator does not answer for its key earns nothing.
+  if (!attestation.attested.includes("coordinator")) {
+    return reply.code(409).send({ ok: false, error: "coordinator_unreachable", attestation: attestation.results });
+  }
+  const { host, counted } = await recordInfraHeartbeat({
+    hostId: body.hostId,
+    accountId: body.accountId,
+    declaredServices: body.services,
+    attestation,
+    region: body.region,
+    coordinatorUrl: peer.coordinatorUrl,
+    lightningAddress: body.lightningAddress,
+    lightningNodeId: body.lightningNodeId
+  });
+  return { ok: true, counted, host, attestation: attestation.results, heartbeatMs: CC.HOST_HEARTBEAT_MS };
 });
 app.get("/economy/hosts", async (req, reply) => {
   if (!requireMeshOrPortalToken(req as any, reply)) return;
@@ -3768,7 +3998,7 @@ app.get("/economy/fee-pool", async (req, reply) => {
 });
 app.post("/economy/fee-pool/distribute", async (req, reply) => {
   if (!authorizeAdmin(req, reply)) return; // manual override; the daily timer runs it automatically (audit econ#3)
-  return runFeePoolDistribution();
+  return runFeePoolDistribution({ manual: true });
 });
 
 app.get("/economy/market/book", async (req, reply) => {
@@ -4360,7 +4590,15 @@ app.post("/economy/issuance/reconcile", async (req, reply) => {
   return { ok: true, scannedIntents: intents.length, settledIntentCount, payoutEvents: payoutEvents.length, drift };
 });
 
-app.get("/identity", async () => identity);
+// `fingerprint` (sha256 of the SPKI DER) is what operators list in TRUSTED_COORDINATOR_KEYS and
+// MESH_PEER_ALLOWLIST; `legacyFingerprints` are the PEM-text forms older agent builds compare.
+const IDENTITY_FINGERPRINT = publicKeyFingerprint(identity.publicKeyPem);
+app.get("/identity", async () => ({
+  ...identity,
+  fingerprint: IDENTITY_FINGERPRINT,
+  trustEntry: `${identity.peerId}:${IDENTITY_FINGERPRINT}`,
+  legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem)
+}));
 app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
 
 const peerSchema = z.object({
@@ -4816,21 +5054,75 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
 // ── WebSocket endpoint for NAT traversal ──
 // Agents behind NAT open an outbound WebSocket to this endpoint.
 // The coordinator pushes gossip messages down the persistent connection.
-app.get("/mesh/ws", { websocket: true }, (socket, req) => {
+// Each connection is bound to one peerId (src/mesh/ws-auth.ts): signed binds prove the peer's
+// key, unsigned (older agents) binds are allowed until MESH_WS_REQUIRE_SIGNED=true and never
+// displace an authenticated one, and every message must come from the bound peer.
+const MESH_WS_REQUIRE_SIGNED = (process.env.MESH_WS_REQUIRE_SIGNED ?? "false").trim().toLowerCase() === "true";
+const meshWsBindings = new Map<string, { socket: unknown; authenticated: boolean }>();
+app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
-  const token = url.searchParams.get("token");
+  // Header first; the query parameter is kept for agents that predate it (it can end up in logs).
+  const token = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-token") || url.searchParams.get("token");
   const peerId = url.searchParams.get("peerId");
   if (!peerId || (MESH_AUTH_TOKEN && (!token || !safeTokenEqual(token, MESH_AUTH_TOKEN)))) {
     socket.close(4001, "mesh_unauthorized");
     return;
   }
+  const signature = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-signature") || null;
+  const issuedAtMs = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-ts") || null;
+  const bind = decideMeshWsBind({
+    peerId,
+    signature,
+    issuedAtMs,
+    knownPublicKeyPem: agentCapabilities.get(peerId)?.publicKeyPem ?? mesh.listPeers().find((p) => p.peerId === peerId)?.publicKeyPem,
+    existingAuthenticated: meshWsBindings.get(peerId)?.authenticated === true,
+    requireSigned: MESH_WS_REQUIRE_SIGNED
+  });
+  // A signed bind is single-use: the same headers cannot bind a second connection.
+  const replayed =
+    bind.ok && bind.authenticated &&
+    !(await verifyNonce(nonceStore, { nonce: `mesh-ws:${signature}`, sourceId: peerId, timestampMs: Number(issuedAtMs), maxSkewMs: MESH_WS_BIND_MAX_SKEW_MS, ttlMs: SECURITY_NONCE_TTL_MS })).valid;
+  if (!bind.ok || replayed) {
+    const reason = bind.ok ? "replayed_bind" : bind.reason;
+    securityLog.log({
+      level: securityLog.severity("agent_trust_violation"),
+      event: "agent_trust_violation",
+      source: { type: "agent", id: peerId, ip: req.ip },
+      details: { route: "/mesh/ws", reason },
+      action: "reject_connection",
+      coordinatorId: identity.peerId
+    });
+    socket.close(4003, reason);
+    return;
+  }
+  const previous = meshWsBindings.get(peerId);
+  meshWsBindings.set(peerId, { socket, authenticated: bind.authenticated });
+  if (previous && previous.socket !== socket) {
+    try {
+      (previous.socket as { close: (code: number, reason: string) => void }).close(4004, "replaced_by_new_connection");
+    } catch {
+      /* already closed */
+    }
+  }
 
-  console.log(`[ws] mesh peer connected: ${peerId}`);
+  console.log(`[ws] mesh peer connected: ${peerId}${bind.authenticated ? "" : " (unsigned bind)"}`);
   mesh.setWebSocketForPeer(peerId, socket);
 
   socket.on("message", async (data) => {
     try {
       const message = meshIngestSchema.parse(JSON.parse(data.toString()));
+      // The socket speaks for its bound peer only.
+      if (!meshWsSenderMatches(peerId, message)) {
+        securityLog.log({
+          level: securityLog.severity("agent_trust_violation"),
+          event: "agent_trust_violation",
+          source: { type: "agent", id: peerId },
+          details: { route: "/mesh/ws", reason: "from_peer_mismatch", claimedFromPeerId: message.fromPeerId },
+          action: "drop_message",
+          coordinatorId: identity.peerId
+        });
+        return;
+      }
       const result = await handleMeshIngest(message);
       // Fan-out WS-received gossip to other WS-connected peers.
       // This lets NATed agents gossip to each other through the coordinator.
@@ -4840,14 +5132,20 @@ app.get("/mesh/ws", { websocket: true }, (socket, req) => {
     }
   });
 
+  // Only the connection that currently holds the binding may release it.
+  const release = () => {
+    if (meshWsBindings.get(peerId)?.socket !== socket) return;
+    meshWsBindings.delete(peerId);
+    mesh.removeWebSocketForPeer(peerId);
+  };
   socket.on("close", () => {
     console.log(`[ws] mesh peer disconnected: ${peerId}`);
-    mesh.removeWebSocketForPeer(peerId);
+    release();
   });
 
   socket.on("error", (err) => {
     console.warn(`[ws] error from ${peerId}: ${err.message}`);
-    mesh.removeWebSocketForPeer(peerId);
+    release();
   });
 });
 
@@ -6203,7 +6501,7 @@ const inMemoryBleTransfer = createInMemoryBleTransfer(creditEngine, syncedBLETxI
 
 app.post("/credits/ble-sync", async (req, reply) => {
   // Unsigned callers fall through to the (configured) mesh-token check below.
-  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip, { allowUnsigned: true });
+  const verified = await verifyAgentRequest(req.headers as any, "/credits/ble-sync", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req) });
   if (!isBleSyncAuthorized(verified, MESH_AUTH_TOKEN !== "", hasMeshToken(req.headers as any))) {
     return reply.code(401).send({ error: "unauthorized" });
   }
@@ -6352,6 +6650,13 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void runFeePoolDistribution().catch((error) => app.log.warn({ error: String(error) }, "fee_pool_distribution_failed"));
       }, CC.FEE_POOL_DISTRIBUTION_MS);
+      // Ledger vs Lightning node; a mismatch pauses payouts (payout-reconcile.ts).
+      if (ECONOMY_PAYMENTS_ENABLED && payoutReconcileConfig.intervalMs > 0) {
+        void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
+        setInterval(() => {
+          void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
+        }, payoutReconcileConfig.intervalMs);
+      }
       if (RATE_ORACLE_ENABLED) {
         if (isRateEpochStale(latestRateEpoch, rateOracleConfig)) {
           void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));
@@ -6541,6 +6846,30 @@ admin.get("/admin/dashboard/api/overview", async (req, reply) => {
     memoryMB: Math.round(process.memoryUsage.rss() / 1_048_576),
     meshPeers: mesh.listPeers().length
   });
+});
+
+// Payout kill switch: halts withdrawals, auto payouts and fee-pool distribution (purchases keep working).
+admin.get("/admin/payouts/pause", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  return { ...(await payoutPause.state()), envForced: payoutsPausedByEnv(), limits: payoutLimits };
+});
+admin.post("/admin/payouts/pause", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  const parsed = z.object({ paused: z.boolean(), reason: z.string().max(500).optional(), actor: z.string().max(128).optional() }).safeParse(req.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
+  const actor = `admin:${parsed.data.actor ?? "token"}@${req.ip}`;
+  if (parsed.data.paused) return { ok: true, state: await payoutPause.pause(parsed.data.reason ?? "paused by operator", "admin", actor) };
+  const resumed = await payoutPause.resume(actor, parsed.data.reason);
+  if (!resumed.ok) return reply.code(409).send({ ok: false, code: resumed.code, state: resumed.state });
+  return resumed;
+});
+admin.get("/admin/payouts/reconciliation", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  return { config: payoutReconcileConfig, webhookConfigured: Boolean(process.env.PAYOUT_ALERT_WEBHOOK_URL?.trim()), last: payoutReconciler.last() };
+});
+admin.post("/admin/payouts/reconciliation/run", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  return payoutReconciler.run();
 });
 
 admin.get("/admin/agents/:agentId/behavior", async (req, reply) => {

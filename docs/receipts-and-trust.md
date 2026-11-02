@@ -97,7 +97,11 @@ idempotent by `receiptId`. All `/receipts/*` routes require the mesh token.
 ## Agent trust: pinned coordinator keys
 
 An agent only works for coordinators whose Ed25519 key it trusts. Keys are identified by
-`peerId:sha256(publicKeyPem)` (the `fingerprint` function; the value an operator lists).
+`peerId:fingerprint`, where the fingerprint is the sha256 of the key's SPKI DER encoding
+(`src/security/key-fingerprint.ts`, the one fingerprint used by agent pins, `MESH_PEER_ALLOWLIST`
+and discovery pins). `GET /identity` reports it as `fingerprint` and the ready-made `trustEntry`.
+Pins written by older builds (sha256 of the PEM text) still match, and are listed as
+`legacyFingerprints`; newly pinned keys are written in the DER form.
 
 | `EDGECODER_TRUST_MODE` | Unknown coordinator id | Known id, same key | Known id, different key |
 |---|---|---|---|
@@ -110,10 +114,12 @@ An agent only works for coordinators whose Ed25519 key it trusts. Keys are ident
   in `tofu` mode first-seen keys are appended with a timestamp comment.
 
 Before registering with a coordinator URL the worker fetches `GET /identity` (`peerId`,
-`publicKeyPem`) and runs it through the store (`CoordinatorTrustGate`, once per URL). A policy
-refusal (mismatch, or unlisted in strict mode) is logged and the agent exits with status 1; a
-transport failure (identity unreachable) is treated as a transient error and goes through the
-normal backoff/failover path.
+`publicKeyPem`) and runs it through the store (`CoordinatorTrustGate`, once per URL). A key
+mismatch for a known id (possible impersonation) is logged and the agent exits with status 1. A
+coordinator that is merely unlisted in strict mode is refused and the agent backs off and fails
+over to another; a transport failure (identity unreachable) goes through the same path. In strict
+mode discovery also drops announced coordinators whose key is not listed, and strict mode with no
+keys listed at all is a startup error. Switch-over steps: [going-to-mainnet.md](going-to-mainnet.md).
 
 To rotate a coordinator key, publish the new fingerprint to operators and either add it to
 `TRUSTED_COORDINATOR_KEYS` or edit the trust file; tofu agents will not accept it silently.

@@ -187,7 +187,13 @@ const ADMIN_ROUTES: Array<{ method: "GET" | "POST"; url: string; route: string }
   { method: "POST", url: "/security/blacklist", route: "/security/blacklist" },
   // #100: manual anchor triggers spend sats.
   { method: "POST", url: "/economy/issuance/anchor", route: "/economy/issuance/anchor" },
-  { method: "POST", url: "/stats/anchors/anchor-latest", route: "/stats/anchors/anchor-latest" }
+  { method: "POST", url: "/stats/anchors/anchor-latest", route: "/stats/anchors/anchor-latest" },
+  // Payout kill switch and reconciliation (docs/going-to-mainnet.md).
+  { method: "GET", url: "/admin/payouts/pause", route: "/admin/payouts/pause" },
+  { method: "POST", url: "/admin/payouts/pause", route: "/admin/payouts/pause" },
+  { method: "GET", url: "/admin/payouts/reconciliation", route: "/admin/payouts/reconciliation" },
+  { method: "POST", url: "/admin/payouts/reconciliation/run", route: "/admin/payouts/reconciliation/run" },
+  { method: "POST", url: "/economy/fee-pool/distribute", route: "/economy/fee-pool/distribute" }
 ];
 
 describe("coordinator admin/debug/webhook/ble-sync auth (#40)", () => {

@@ -23,7 +23,14 @@ export type SecurityEventType =
   | "auto_blacklist_triggered"
   | "result_verification_mismatch"
   | "result_verification_replica_abandoned"
-  | "hardware_challenge_invalid";
+  | "hardware_challenge_invalid"
+  | "host_heartbeat_rejected"
+  | "payout_limit_exceeded"
+  | "payout_blocked_paused"
+  | "payouts_paused"
+  | "payouts_resumed"
+  | "payout_reconciliation_mismatch"
+  | "payout_reconciliation_error";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -55,7 +62,14 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   result_verification_replica_abandoned: "HIGH",
   behavioral_anomaly_detected: "WARN",
   auto_blacklist_triggered: "CRITICAL",
-  hardware_challenge_invalid: "WARN"
+  hardware_challenge_invalid: "WARN",
+  host_heartbeat_rejected: "HIGH",
+  payout_limit_exceeded: "HIGH",
+  payout_blocked_paused: "WARN",
+  payouts_paused: "CRITICAL",
+  payouts_resumed: "HIGH",
+  payout_reconciliation_mismatch: "CRITICAL",
+  payout_reconciliation_error: "WARN"
 };
 
 export class SecurityEventLogger {
