@@ -33,7 +33,10 @@ export const IDE_ROUTES = [
   { method: "GET", path: "/v1/ide/checkpoints/:turnId", auth: true },
   { method: "POST", path: "/v1/ide/checkpoints/:turnId/revert", auth: true },
   { method: "POST", path: "/v1/ide/inline-edit", auth: true },
-  { method: "POST", path: "/v1/ide/complete", auth: true }
+  { method: "POST", path: "/v1/ide/complete", auth: true },
+  { method: "POST", path: "/v1/ide/index/build", auth: true },
+  { method: "GET", path: "/v1/ide/index/status", auth: true },
+  { method: "POST", path: "/v1/ide/index/search", auth: true }
 ] as const;
 
 export type IdeRoute = (typeof IDE_ROUTES)[number];

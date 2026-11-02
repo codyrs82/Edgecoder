@@ -26,6 +26,7 @@ import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
+import { codebaseIndexFor } from "./codebase-index.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -458,6 +459,39 @@ app.post("/v1/ide/complete", async (req, reply) => {
   }
 });
 
+// Codebase index (codebase-index.ts): build in the background, status, search by meaning.
+const ollamaHostForIndex = () => process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+
+app.post("/v1/ide/index/build", async (_req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  const idx = codebaseIndexFor(activeProjectRoot, ollamaHostForIndex());
+  void idx.build().catch(() => undefined); // the error is kept in the status
+  return reply.send(idx.getStatus());
+});
+
+app.get("/v1/ide/index/status", async (_req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  return reply.send(codebaseIndexFor(activeProjectRoot, ollamaHostForIndex()).getStatus());
+});
+
+app.post("/v1/ide/index/search", async (req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  const { query, k } = z.object({ query: z.string().min(1).max(2_000), k: z.number().int().min(1).max(30).default(8) }).parse(req.body);
+  const idx = codebaseIndexFor(activeProjectRoot, ollamaHostForIndex());
+  if (idx.getStatus().state !== "ready") return reply.status(409).send({ error: "index_not_ready", status: idx.getStatus() });
+  try {
+    return reply.send({ hits: await idx.search(query, k) });
+  } catch (err) {
+    return reply.status(503).send({ error: "embedding_failed", message: (err as Error).message });
+  }
+});
+
+/** search_codebase results as the agent sees them. */
+function formatSearchHits(hits: Awaited<ReturnType<ReturnType<typeof codebaseIndexFor>["search"]>>): string {
+  if (hits.length === 0) return "No matches.";
+  return hits.map((h) => `${h.path}:${h.startLine}-${h.endLine} (score ${h.score})\n${h.snippet}`).join("\n\n---\n\n");
+}
+
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
@@ -493,7 +527,12 @@ app.post("/v1/ide/chat", async (req, reply) => {
     });
   }
 
-  const executor = new ToolExecutor(projectRoot, body.githubToken);
+  const index = codebaseIndexFor(projectRoot, ollamaHostForIndex());
+  const executor = new ToolExecutor(
+    projectRoot,
+    body.githubToken,
+    index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined,
+  );
   const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
   const chatModel =
     body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";

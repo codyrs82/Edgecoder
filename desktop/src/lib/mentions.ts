@@ -1,6 +1,6 @@
 // @-mentions in chat: "@src/lib/api.ts" or "@src/lib/" in a message attaches that file's content
 // (or the folder's listing) for the agent, read from the open project when the message is sent.
-import { fsList, fsRead } from "./api";
+import { fsList, fsRead, indexSearch } from "./api";
 
 const MENTION_RE = /(?:^|\s)@([^\s@]+)/g;
 /** Per file, and for all attachments of one message together. */
@@ -25,6 +25,21 @@ export async function expandMentions(text: string): Promise<string> {
   const parts: string[] = [];
   let total = 0;
   for (const raw of mentionedPaths(text)) {
+    if (raw === "codebase") {
+      // Search the project by meaning with the rest of the message as the query.
+      const query = text.replace(MENTION_RE, " ").trim() || text;
+      try {
+        const hits = await indexSearch(query, 6);
+        const body = hits.map((h) => `${h.path}:${h.startLine}-${h.endLine}\n\`\`\`\n${h.snippet}\n\`\`\``).join("\n\n");
+        if (body) {
+          parts.push(`[Relevant code found in the project for this message]\n${body}`);
+          total += body.length;
+        }
+      } catch {
+        parts.push("[@codebase: the project has no search index yet; build it from the file tree header]");
+      }
+      continue;
+    }
     if (total >= MAX_TOTAL_CHARS) break;
     const path = raw.replace(/\/+$/, "");
     try {
@@ -45,4 +60,13 @@ export async function expandMentions(text: string): Promise<string> {
     }
   }
   return parts.join("\n\n");
+}
+
+export type MentionSuggestion = { path: string; kind: "file" | "dir" | "codebase" };
+
+/** Picker suggestions for "@query": @codebase (search by meaning) first when it fits, then paths. */
+export async function mentionSuggestions(query: string, find: (q: string) => Promise<Array<{ path: string; kind: "file" | "dir" }>>): Promise<MentionSuggestion[]> {
+  const paths = await find(query);
+  const codebase: MentionSuggestion[] = "codebase".startsWith(query.toLowerCase()) ? [{ path: "codebase", kind: "codebase" }] : [];
+  return [...codebase, ...paths];
 }

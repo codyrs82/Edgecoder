@@ -1109,3 +1109,24 @@ export async function ideComplete(prefix: string, suffix: string, signal?: Abort
   });
   return (await res.json()) as CompletionResponse;
 }
+
+// Codebase index (:4304 /v1/ide/index/*): search the project by meaning.
+export interface IndexStatus {
+  state: "none" | "building" | "ready" | "error";
+  files: number;
+  chunks: number;
+  indexedAtMs?: number;
+  progress?: { done: number; total: number };
+  error?: string;
+  model: string;
+}
+export interface SearchHit {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+export const indexStatus = () => fsCall<IndexStatus>("GET", "/v1/ide/index/status");
+export const indexBuild = () => fsCall<IndexStatus>("POST", "/v1/ide/index/build", {});
+export const indexSearch = (query: string, k = 8) => fsCall<{ hits: SearchHit[] }>("POST", "/v1/ide/index/search", { query, k }).then((r) => r.hits);

@@ -9,3 +9,13 @@ describe("mentionedPaths", () => {
     expect(mentionedPaths("mail me at cody@example.com about @a.ts and @a.ts")).toEqual(["a.ts"]);
   });
 });
+
+describe("mentionSuggestions", () => {
+  it("offers @codebase first while the query fits it", async () => {
+    const { mentionSuggestions } = await import("../src/lib/mentions");
+    const find = async () => [{ path: "src/a.ts", kind: "file" as const }];
+    expect((await mentionSuggestions("", find))[0]).toEqual({ path: "codebase", kind: "codebase" });
+    expect((await mentionSuggestions("cod", find)).map((m) => m.path)).toEqual(["codebase", "src/a.ts"]);
+    expect((await mentionSuggestions("src", find)).map((m) => m.path)).toEqual(["src/a.ts"]);
+  });
+});

@@ -6,7 +6,7 @@
   import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
-  import { expandMentions } from "../lib/mentions";
+  import { expandMentions, mentionSuggestions } from "../lib/mentions";
   import { fsFind } from "../lib/api";
   import {
     createConversation,
@@ -397,7 +397,7 @@
       placeholder={projectRoot ? "Ask the agent… (@ to mention a file)" : "Ask about your code…"}
       streaming={isStreaming}
       onStop={stop}
-      mentions={projectRoot ? (q) => fsFind(q, 8) : undefined}
+      mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}
     />
   </div>
 </div>

@@ -9,7 +9,7 @@
     streaming?: boolean;
     onStop?: () => void;
     /** Project path search; when set, typing @ offers files and folders to mention. */
-    mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" }>>;
+    mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
   }
   let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions }: Props = $props();
 
@@ -18,7 +18,7 @@
 
   // @-mention picker: the "@query" token ending at the caret, and its matches.
   let mention = $state<{ start: number; query: string } | null>(null);
-  let matches = $state<Array<{ path: string; kind: "file" | "dir" }>>([]);
+  let matches = $state<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>([]);
   let picked = $state(0);
   let searchSeq = 0;
 
@@ -116,8 +116,13 @@
           class:picked={i === picked}
           onmousedown={(e) => { e.preventDefault(); void choose(i); }}
         >
-          <span class="kind">{m.kind === "dir" ? "▸" : "·"}</span>
-          <span class="mpath">{m.path}{m.kind === "dir" ? "/" : ""}</span>
+          {#if m.kind === "codebase"}
+            <span class="kind">⌕</span>
+            <span class="mpath">@codebase</span><span class="hint">search the project by meaning</span>
+          {:else}
+            <span class="kind">{m.kind === "dir" ? "▸" : "·"}</span>
+            <span class="mpath">{m.path}{m.kind === "dir" ? "/" : ""}</span>
+          {/if}
         </button>
       {/each}
     </div>
@@ -180,6 +185,10 @@
   .kind {
     color: var(--text-muted);
     width: 10px;
+  }
+  .hint {
+    color: var(--text-muted);
+    margin-left: auto;
   }
   .mpath {
     font-family: var(--font-mono, monospace);

@@ -256,7 +256,11 @@ export class ToolExecutor {
   /** #17: symlink-resolved root (e.g. /tmp -> /private/tmp on macOS), for real-path checks. */
   private readonly rootReal: string;
 
-  constructor(projectRoot: string, githubToken?: string | null) {
+  /** Search by meaning (the project's codebase index), when available. */
+  private readonly codebaseSearch: ((query: string) => Promise<string>) | null;
+
+  constructor(projectRoot: string, githubToken?: string | null, codebaseSearch?: (query: string) => Promise<string>) {
+    this.codebaseSearch = codebaseSearch ?? null;
     this.root = resolve(projectRoot);
     let rootReal = this.root;
     try {
@@ -305,6 +309,9 @@ export class ToolExecutor {
           return await this.listDirectory(args);
         case "search_files":
           return await this.searchFiles(args);
+        case "search_codebase":
+          if (!this.codebaseSearch) return { error: "No codebase index for this project yet. Use search_files instead." };
+          return { result: await this.codebaseSearch(String(args.query ?? "")) };
         case "write_file":
           return await this.writeFileImpl(args);
         case "edit_file":

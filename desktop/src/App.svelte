@@ -4,6 +4,7 @@
   import ChatInput from "./components/ChatInput.svelte";
   import ChatView from "./pages/ChatView.svelte";
   import EditorView from "./pages/EditorView.svelte";
+  import { mentionSuggestions } from "./lib/mentions";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
@@ -246,7 +247,7 @@
             <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
           </svg>
         </button>
-        <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => fsFind(q, 8) : undefined} />
+        <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined} />
       </footer>
     {:else}
       <footer class="bottom-bar minimal">

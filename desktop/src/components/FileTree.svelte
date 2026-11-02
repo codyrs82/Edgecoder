@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { fsList, fsCreate, fsRename, fsDelete, type FsEntry, FsError } from "../lib/api";
+  import { fsList, fsCreate, fsRename, fsDelete, indexStatus, indexBuild, type FsEntry, type IndexStatus, FsError } from "../lib/api";
+  import { onDestroy } from "svelte";
   import { joinPath, parentDir } from "../lib/editor-store";
 
   interface Props {
@@ -146,12 +147,58 @@
   }
 
   let projectName = $derived(projectRoot.split(/[\\/]/).filter(Boolean).pop() ?? projectRoot);
+
+  // Codebase index (search by meaning for @codebase and the agent): built in the background the
+  // first time a project is opened, and on request.
+  let index = $state<IndexStatus | null>(null);
+  let indexTimer: ReturnType<typeof setTimeout> | undefined;
+  async function pollIndex() {
+    try {
+      index = await indexStatus();
+    } catch {
+      index = null;
+    }
+    clearTimeout(indexTimer);
+    if (index?.state === "building") indexTimer = setTimeout(pollIndex, 2000);
+  }
+  async function buildIndex() {
+    try {
+      index = await indexBuild();
+    } catch (e) {
+      onError(`Couldn't start indexing: ${(e as Error).message}`);
+    }
+    void pollIndex();
+  }
+  $effect(() => {
+    void projectRoot;
+    void (async () => {
+      await pollIndex();
+      if (index?.state === "none") await buildIndex();
+    })();
+  });
+  onDestroy(() => clearTimeout(indexTimer));
+
+  let indexLabel = $derived(
+    !index ? "" :
+    index.state === "building" ? `indexing ${index.progress && index.progress.total > 0 ? Math.round((100 * index.progress.done) / index.progress.total) : 0}%` :
+    index.state === "ready" ? `⌕ ${index.files} files` :
+    index.state === "error" ? "⌕ index failed" : "⌕ index",
+  );
+  let indexTitle = $derived(
+    !index ? "" :
+    index.state === "ready" ? `Codebase index (${index.model}): ${index.files} files, ${index.chunks} chunks. @codebase searches it. Click to update.` :
+    index.state === "error" ? `Indexing failed: ${index.error}. Click to retry.` :
+    index.state === "building" ? "Building the codebase index (local embeddings)…" : "Build the codebase index for @codebase",
+  );
 </script>
 
 <div class="tree">
   <div class="tree-header">
     <span class="project" title={projectRoot}>{projectName}</span>
     <div class="actions">
+      {#if index}
+        <button class="index" class:failed={index.state === "error"} title={indexTitle} disabled={index.state === "building"} onclick={buildIndex}>{indexLabel}</button>
+      {/if}
       <button title="New file" onclick={() => startCreate("file")} aria-label="New file">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/></svg>
       </button>
@@ -254,6 +301,14 @@
   .row-actions button:hover {
     color: var(--text-primary);
     background: var(--bg-elevated);
+  }
+  .actions button.index {
+    font-size: 10px;
+    padding: 2px 4px;
+    white-space: nowrap;
+  }
+  .actions button.index.failed {
+    color: var(--danger, #f85149);
   }
   .row {
     display: flex;
