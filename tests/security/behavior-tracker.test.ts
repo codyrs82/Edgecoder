@@ -95,6 +95,22 @@ describe("AgentBehaviorTracker", () => {
     expect(stats.rateLimitHitCount).toBe(1);
   });
 
+  it("counts registrations for the storm rule over 10 minutes, not the hour window", () => {
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    // A healthy worker re-registers every 4 minutes: 15 an hour, at most 3 in any 10 minutes.
+    for (let i = 0; i < 15; i++) tracker.recordRegistration("agent-1", now + i * 4 * 60_000);
+    const stats = tracker.getStats("agent-1", now + 14 * 4 * 60_000)!;
+    expect(stats.registrationCount).toBe(3);
+  });
+
+  it("reset forgets an agent", () => {
+    const tracker = new AgentBehaviorTracker();
+    tracker.recordRegistration("agent-1");
+    tracker.reset("agent-1");
+    expect(tracker.getStats("agent-1")).toBeNull();
+  });
+
   it("tracks registrations", () => {
     const tracker = new AgentBehaviorTracker();
     const now = Date.now();

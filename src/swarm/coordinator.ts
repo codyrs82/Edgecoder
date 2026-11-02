@@ -494,40 +494,69 @@ let lastBlacklistEventHash = "BLACKLIST_GENESIS";
 // ── Behavioral monitoring ──
 const behaviorTracker = new AgentBehaviorTracker();
 const anomalyDetector = new AnomalyDetector();
-const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
+/** Append a blacklist record this coordinator issues itself (signed with its key) and gossip it. */
+function issueCoordinatorBlacklistRecord(input: {
+  agentId: string;
+  reasonCode: BlacklistReasonCode;
+  reason: string;
+  evidenceHashSha256: string;
+  reportedBy: string;
+  expiresAtMs?: number;
+}): BlacklistRecord {
   const now = Date.now();
   const eventId = randomUUID();
   const evidenceSignatureVerified = false;
   const prevEventHash = lastBlacklistEventHash;
   const eventHash = buildBlacklistEventHash({
     eventId,
-    agentId: action.agentId,
-    reasonCode: action.reasonCode,
-    reason: action.reason,
-    evidenceHashSha256: action.evidenceHashSha256,
+    agentId: input.agentId,
+    reasonCode: input.reasonCode,
+    reason: input.reason,
+    evidenceHashSha256: input.evidenceHashSha256,
     reporterId: identity.peerId,
     sourceCoordinatorId: identity.peerId,
     timestampMs: now,
+    expiresAtMs: input.expiresAtMs,
     prevEventHash,
     evidenceSignatureVerified,
   });
   const coordinatorSignature = signPayload(eventHash, coordinatorKeys.privateKeyPem);
   const record: BlacklistRecord = {
     eventId,
-    agentId: action.agentId,
-    reasonCode: action.reasonCode,
-    reason: action.reason,
-    evidenceHashSha256: action.evidenceHashSha256,
+    agentId: input.agentId,
+    reasonCode: input.reasonCode,
+    reason: input.reason,
+    evidenceHashSha256: input.evidenceHashSha256,
     reporterId: identity.peerId,
     evidenceSignatureVerified,
     sourceCoordinatorId: identity.peerId,
-    reportedBy: "behavioral_monitoring",
+    reportedBy: input.reportedBy,
     timestampMs: now,
+    expiresAtMs: input.expiresAtMs,
     prevEventHash,
     eventHash,
     coordinatorSignature,
   };
   appendBlacklistRecord(record);
+  const gossipMessage = protocol.createMessage(
+    "blacklist_update",
+    identity.peerId,
+    record as unknown as Record<string, unknown>,
+    coordinatorKeys.privateKeyPem
+  );
+  void mesh.broadcast(gossipMessage);
+  return record;
+}
+
+const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
+  issueCoordinatorBlacklistRecord({
+    agentId: action.agentId,
+    reasonCode: action.reasonCode,
+    reason: action.reason,
+    evidenceHashSha256: action.evidenceHashSha256,
+    reportedBy: "behavioral_monitoring",
+    expiresAtMs: CC.AUTO_BLACKLIST_TTL_MS > 0 ? Date.now() + CC.AUTO_BLACKLIST_TTL_MS : undefined,
+  });
   securityLog.log({
     level: "CRITICAL",
     event: "auto_blacklist_triggered",
@@ -536,13 +565,6 @@ const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
     action: "agent_blacklisted",
     coordinatorId: identity.peerId,
   });
-  const gossipMessage = protocol.createMessage(
-    "blacklist_update",
-    identity.peerId,
-    record as unknown as Record<string, unknown>,
-    coordinatorKeys.privateKeyPem
-  );
-  void mesh.broadcast(gossipMessage);
 });
 
 function evaluateAndEnforce(agentId: string): void {
@@ -5552,6 +5574,25 @@ app.post("/security/blacklist", async (req, reply) => {
   );
   void mesh.broadcast(gossipMessage);
   return { ok: true, record, version: blacklistVersion, chainHead: lastBlacklistEventHash };
+});
+/** Lift an agent's blacklist (admin). Appends an already-expired record, which supersedes the
+ *  earlier one here, on reload and on peers that receive the gossip. */
+app.post("/security/blacklist/:agentId/lift", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
+  const body = z.object({ reason: z.string().min(3).default("lifted by admin") }).parse(req.body ?? {});
+  if (!activeBlacklistRecord(params.agentId)) return reply.code(404).send({ error: "not_blacklisted" });
+  const record = issueCoordinatorBlacklistRecord({
+    agentId: params.agentId,
+    reasonCode: "manual_review",
+    reason: `lifted: ${body.reason}`,
+    evidenceHashSha256: createHash("sha256").update(`lift:${params.agentId}`).digest("hex"),
+    reportedBy: "admin",
+    expiresAtMs: Date.now(),
+  });
+  behaviorTracker.reset(params.agentId);
+  autoBlacklister.clearStrikes(params.agentId);
+  return { ok: true, record, version: blacklistVersion };
 });
 app.get("/agent-mesh/peers/:agentId", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });

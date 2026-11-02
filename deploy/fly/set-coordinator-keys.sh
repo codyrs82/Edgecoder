@@ -11,11 +11,12 @@ for app in edgecoder-seed edgecoder-seed-eu; do
     echo "$app: already has COORDINATOR_PRIVATE_KEY_PEM, left alone"
     continue
   fi
-  # fly secrets import reads NAME="value" lines; the PEM's newlines must survive inside the quotes.
+  # fly secrets import takes a multi-line value inside triple quotes. Its errors can quote the
+  # input, so they are replaced with a fixed message.
   node -e 'const { generateKeyPairSync } = require("node:crypto");
     const pem = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" });
-    process.stdout.write(`COORDINATOR_PRIVATE_KEY_PEM="${pem.trim()}"\n`);' \
-    | fly secrets import -a "$app" >/dev/null
+    process.stdout.write(`COORDINATOR_PRIVATE_KEY_PEM="""${pem.trim()}"""\n`);' \
+    | fly secrets import -a "$app" >/dev/null 2>&1 || { echo "$app: fly secrets import failed" >&2; exit 1; }
   echo "$app: key set"
 done
 sleep 20
