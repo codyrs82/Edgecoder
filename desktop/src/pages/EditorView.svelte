@@ -3,7 +3,8 @@
   import FileTree from "../components/FileTree.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit } from "../lib/api";
+  import { InlineEditController } from "../lib/inline-edit-session";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
   import { monacoThemeDataOrBase } from "../lib/monaco-theme";
   import tokens from "@edgecoder/tokens/tokens.json";
@@ -42,6 +43,7 @@
 
   let offTheme: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let inlineEdit: InlineEditController | undefined;
   /** Suppresses the dirty flag while the editor itself loads content into a model. */
   let applyingExternal = false;
 
@@ -83,6 +85,13 @@
       });
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => void saveActive());
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyW, () => { if (activeFilePath) void closeFile(activeFilePath); });
+      inlineEdit = new InlineEditController(
+        editor,
+        mon,
+        (body) => ideInlineEdit(body),
+        () => activeFilePath?.replace(UNTITLED, "") ?? null,
+        (m) => showNotice(m),
+      );
     }
     pollTimer = setInterval(() => void pollDisk(), POLL_MS);
   });
@@ -134,6 +143,7 @@
   }
 
   function showFile(path: string) {
+    inlineEdit?.cancel();
     if (editor && activeFilePath && models.has(activeFilePath)) viewStates.set(activeFilePath, editor.saveViewState());
     activeFilePath = path;
     const file = files.find((f) => f.path === path);
@@ -487,7 +497,7 @@
         <div class="editor-empty">
           {#if projectRoot}
             <p>Open a file from the tree, or ask the agent in the chat panel.</p>
-            <p class="hint">⌘S save · ⌘W close</p>
+            <p class="hint">⌘K edit with AI · ⌘S save · ⌘W close</p>
           {:else}
             <p>Open a folder to start.</p>
             <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>

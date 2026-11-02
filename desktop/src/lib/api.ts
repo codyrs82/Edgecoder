@@ -1086,3 +1086,7 @@ export const ideTurnChanges = (turnId: string) =>
   fsCall<{ turnId: string; changes: FileChange[] }>("GET", `/v1/ide/checkpoints/${q(turnId)}`).then((r) => r.changes);
 export const ideRevertTurn = (turnId: string, paths?: string[]) =>
   fsCall<{ ok: true; reverted: string[] }>("POST", `/v1/ide/checkpoints/${q(turnId)}/revert`, paths ? { paths } : {}).then((r) => r.reverted);
+
+/** Inline edit (Cmd+K): the replacement for the selection, from the local model. */
+export const ideInlineEdit = (body: { path: string; language: string; prefix: string; selection: string; suffix: string; instruction: string; model?: string }) =>
+  fsCall<{ model: string; replacement: string }>("POST", "/v1/ide/inline-edit", body).then((r) => r.replacement);

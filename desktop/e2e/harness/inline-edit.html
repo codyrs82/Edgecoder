@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>harness</title></head>
+<body style="margin:0;background:#0d1117">
+<div id="ed" style="width:1000px;height:500px"></div>
+<script type="module">
+  await import("/src/lib/monaco-setup.ts");
+  const monaco = await import("monaco-editor");
+  const { InlineEditController } = await import("/src/lib/inline-edit-session.ts");
+  const editor = monaco.editor.create(document.getElementById("ed"), {
+    value: "def f(x):\n    return x\n\nprint(f(1))\n",
+    language: "python",
+  });
+  window.requests = [];
+  window.reply = "def f(x: int) -> int:\n    # double it\n    return 2 * x\n";
+  window.errors = [];
+  window.ctrl = new InlineEditController(editor, monaco, async (b) => { window.requests.push(b); return window.reply; }, () => "f.py", (m) => window.errors.push(m));
+  window.editor = editor;
+  window.ready = true;
+</script>
+</body></html>

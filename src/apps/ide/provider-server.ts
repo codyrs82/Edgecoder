@@ -23,6 +23,7 @@ import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
+import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -388,6 +389,47 @@ app.post("/v1/ide/checkpoints/:turnId/revert", async (req, reply) => {
     if (err instanceof ProjectFsError) return reply.status(FS_ERROR_STATUS[err.code]).send({ error: err.code, message: err.message });
     throw err;
   }
+});
+
+// Inline edit (Cmd+K): the local model rewrites the selection (or writes code at the cursor).
+const inlineEditSchema = z.object({
+  path: z.string().max(4096),
+  language: z.string().max(64),
+  prefix: z.string().max(20_000),
+  selection: z.string().max(40_000),
+  suffix: z.string().max(10_000),
+  instruction: z.string().min(1).max(2_000),
+  model: z.string().max(200).optional(),
+});
+
+app.post("/v1/ide/inline-edit", async (req, reply) => {
+  const body = inlineEditSchema.parse(req.body);
+  const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+  const model = body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
+  const { request: httpRequest } = await import("undici");
+  let res: Awaited<ReturnType<typeof httpRequest>>;
+  try {
+    res = await httpRequest(`${ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: inlineEditMessages(body),
+        stream: false,
+        think: false,
+        options: { temperature: 0.2 },
+      }),
+      headersTimeout: 120_000,
+      bodyTimeout: 120_000,
+    });
+  } catch (err) {
+    return reply.status(503).send({ error: "model_unreachable", message: `Ollama at ${ollamaHost}: ${(err as Error).message}` });
+  }
+  const payload = (await res.body.json().catch(() => ({}))) as { message?: { content?: string }; error?: string };
+  if (res.statusCode >= 400 || payload.error) {
+    return reply.status(502).send({ error: "model_error", message: payload.error ?? `HTTP ${res.statusCode}` });
+  }
+  return reply.send({ model, replacement: cleanInlineEdit(payload.message?.content ?? "", body.selection) });
 });
 
 const toolApprovalSchema = z.object({
