@@ -80,7 +80,9 @@ function projectHeadCommit(): string | undefined {
   }
 }
 const router = new IntelligentRouter({
-  resolveSnapshotRef: () => process.env.IDE_SWARM_SNAPSHOT_REF?.trim() || projectHeadCommit()
+  resolveSnapshotRef: () => process.env.IDE_SWARM_SNAPSHOT_REF?.trim() || projectHeadCommit(),
+  // The local agent's forwarder accepts the same IDE token this server does.
+  localAgentToken: () => (ideToken ??= resolveIdeToken())
 });
 
 // #36: the VS Code extension polls /status; alias of /v1/router/status.
@@ -692,7 +694,7 @@ async function handleRun(mode: "auto" | "local" | "swarm", req: { body: unknown;
 
   if (mode === "swarm") {
     if (!router.swarmEnabled) {
-      return reply.code(503).send({ error: "swarm_unavailable", message: "Swarm routing is not configured (MESH_AUTH_TOKEN unset)." });
+      return reply.code(503).send({ error: "swarm_unavailable", message: "Swarm routing is not configured (no local agent forwarder or MESH_AUTH_TOKEN)." });
     }
     const budget = swarmBudget.reserve();
     if (!budget.ok) {

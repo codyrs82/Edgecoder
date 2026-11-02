@@ -32,6 +32,8 @@ export function agentStatusMessage(status: LocalAgentStatus): string | null {
   if (status === "port_occupied") {
     return "Another process is already using port 4301, so EdgeCoder didn't start its local agent and won't send it your token. Stop that process (for example an agent left over from an earlier launch), then retry.";
   }
-  if (status === "not_started") return "The local agent isn't running.";
+  if (status === "not_started") {
+    return "The local agent isn't running. Its output is in ~/.edgecoder/agent.log; check it, then retry.";
+  }
   return null;
 }

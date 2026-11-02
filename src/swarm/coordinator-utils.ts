@@ -130,3 +130,32 @@ export function computeIntentFee(amountSats: number, feeBps: number): { feeSats:
   const netSats = Math.max(0, amountSats - feeSats);
   return { feeSats, netSats };
 }
+
+/**
+ * Whose credits a POST /submit spends. The shared mesh token says nothing about the caller's
+ * account, so naming one takes the portal service token (the portal binds it from the session),
+ * a request signed by a registered agent (it spends its owner's account, linked at registration,
+ * or its own id when unowned), or a loopback caller (the desktop app's own coordinator).
+ * Anyone else may only submit anonymously.
+ */
+export function submitterAccountDecision(input: {
+  requested: string;
+  portalService: boolean;
+  signature: { agentId: string } | "rejected" | null;
+  ownerAccountId?: string;
+  loopback: boolean;
+}): { accountId: string } | { status: number; error: string } {
+  const { requested } = input;
+  if (input.portalService) return { accountId: requested };
+  if (input.signature === "rejected") return { status: 401, error: "invalid_signature" };
+  if (input.signature) {
+    const owner = input.ownerAccountId ?? input.signature.agentId;
+    if (requested === "anonymous") return { accountId: "anonymous" };
+    if (requested !== owner && requested !== input.signature.agentId) {
+      return { status: 403, error: "submitter_account_mismatch" };
+    }
+    return { accountId: owner };
+  }
+  if (requested === "anonymous" || input.loopback) return { accountId: requested };
+  return { status: 403, error: "submitter_signature_required" };
+}

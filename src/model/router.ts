@@ -62,6 +62,13 @@ export interface RouterConfig {
   coordinatorUrl: string;
   /** Mesh auth token for coordinator API. */
   meshAuthToken: string;
+  /**
+   * The user's own agent (its loopback forwarder, src/swarm/local-forwarder.ts). When set, swarm
+   * work goes through it: the agent signs the submission, so it spends the agent owner's account.
+   */
+  localAgentUrl?: string;
+  /** Bearer token for the local forwarder (the IDE token). */
+  localAgentToken?: () => string;
   /** Agent account ID used for credit billing on swarm submissions. */
   agentAccountId: string;
   /** Bluetooth transport status endpoint (localhost). Default: disabled */
@@ -175,6 +182,7 @@ export class IntelligentRouter {
       localLatencyThresholdMs: 8000,
       coordinatorUrl: process.env.COORDINATOR_URL ?? "https://coordinator.edgecoder.io",
       meshAuthToken: process.env.MESH_AUTH_TOKEN ?? "",
+      localAgentUrl: process.env.SWARM_VIA_LOCAL_AGENT_URL?.trim() || undefined,
       agentAccountId: process.env.AGENT_ACCOUNT_ID ?? process.env.AGENT_ID ?? "local-agent",
       bluetoothStatusUrl: process.env.BT_STATUS_URL,
       swarmLanguage: "python",
@@ -216,7 +224,7 @@ export class IntelligentRouter {
     }
 
     // 3. Swarm — submit to coordinator task queue
-    if (this.cfg.meshAuthToken) {
+    if (this.swarmEnabled) {
       try {
         const result = await this.runViaSwarm(prompt);
         return { ...result, route: "swarm", latencyMs: Date.now() - started };
@@ -230,14 +238,14 @@ export class IntelligentRouter {
     return { text: res.text, route: "edgecoder-local", latencyMs: Date.now() - started };
   }
 
-  /** True when swarm routing is configured (a mesh token is set). */
+  /** True when swarm routing is configured (the local agent forwarder or a mesh token). */
   get swarmEnabled(): boolean {
-    return !!this.cfg.meshAuthToken;
+    return !!this.cfg.localAgentUrl || !!this.cfg.meshAuthToken;
   }
 
   /** #36: explicit swarm route for the IDE /run/swarm endpoint. Throws if swarm is not configured. */
   async routeSwarm(prompt: string, maxTokens?: number): Promise<RouterResult> {
-    if (!this.cfg.meshAuthToken) throw new Error("swarm_unavailable");
+    if (!this.swarmEnabled) throw new Error("swarm_unavailable");
     const started = Date.now();
     const result = await this.runViaSwarm(prompt, undefined, maxTokens);
     return { ...result, route: "swarm", latencyMs: Date.now() - started };
@@ -316,11 +324,12 @@ export class IntelligentRouter {
     requestedModel?: string,
     maxTokens?: number
   ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
-    const coordinatorUrl = this.cfg.coordinatorUrl.replace(/\/$/, "");
-    const headers = {
-      "content-type": "application/json",
-      "x-mesh-token": this.cfg.meshAuthToken
-    };
+    // Through the local agent, its forwarder mirrors the coordinator routes under /forward.
+    const viaAgent = this.cfg.localAgentUrl?.replace(/\/$/, "");
+    const coordinatorUrl = viaAgent ? `${viaAgent}/forward` : this.cfg.coordinatorUrl.replace(/\/$/, "");
+    const headers: Record<string, string> = viaAgent
+      ? { "content-type": "application/json", authorization: `Bearer ${this.cfg.localAgentToken?.() ?? ""}` }
+      : { "content-type": "application/json", "x-mesh-token": this.cfg.meshAuthToken };
 
     // The coordinator's submit route is POST /submit (not /tasks) and it requires a
     // frozen snapshot reference (#8). Without one the request is rejected before any
@@ -485,7 +494,7 @@ export class IntelligentRouter {
     }
 
     // 3. Swarm — submit the last user message as a task to the coordinator
-    if (this.cfg.meshAuthToken) {
+    if (this.swarmEnabled) {
       const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
       if (lastUserMsg) {
         try {
@@ -559,7 +568,7 @@ export class IntelligentRouter {
       latencyThresholdMs: this.cfg.localLatencyThresholdMs,
       latencySamples: this.latency.sampleCount,
       bluetoothEnabled: !!this.cfg.bluetoothStatusUrl,
-      swarmEnabled: !!this.cfg.meshAuthToken
+      swarmEnabled: this.swarmEnabled
     };
   }
 }

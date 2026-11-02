@@ -13,6 +13,9 @@ import { LISTEN_HOST } from "./common/env-guard.js";
 const INFERENCE_PORT = Number(process.env.INFERENCE_PORT) || 4302;
 const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT) || 4301;
 const CONTROL_PLANE_PORT = Number(process.env.CONTROL_PLANE_PORT) || 4303;
+const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT) || 4305;
+// The worker joins the network coordinator once the desktop app has enrolled this machine.
+const NETWORK_COORDINATOR_URL = process.env.AGENT_NETWORK_COORDINATOR_URL?.trim() || "";
 
 function isEaddrInUse(err: unknown): err is NodeJS.ErrnoException {
   return typeof err === "object" && err !== null && "code" in err && (err as NodeJS.ErrnoException).code === "EADDRINUSE";
@@ -30,7 +33,7 @@ function startWorkerProcess(): void {
   const agentId = process.env.AGENT_ID || `node-${hostname().slice(0, 8)}`;
   // The desktop app sets AGENT_NETWORK_COORDINATOR_URL once the signed-in user has enrolled this
   // machine, so the worker contributes to the network; otherwise it stays on the local coordinator.
-  const coordinatorUrl = process.env.AGENT_NETWORK_COORDINATOR_URL?.trim() || `http://127.0.0.1:${COORDINATOR_PORT}`;
+  const coordinatorUrl = NETWORK_COORDINATOR_URL || `http://127.0.0.1:${COORDINATOR_PORT}`;
 
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
@@ -39,6 +42,8 @@ function startWorkerProcess(): void {
     AGENT_MODE: process.env.AGENT_MODE ?? "swarm-only",
     AGENT_OS: process.env.AGENT_OS ?? "macos",
     LOCAL_MODEL_PROVIDER: process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local",
+    // A networked worker relays the IDE's swarm work (signed, billed to this machine's owner).
+    ...(NETWORK_COORDINATOR_URL ? { LOCAL_FORWARD_PORT: String(LOCAL_FORWARD_PORT) } : {}),
   };
 
   // Forward optional env vars if set
@@ -63,6 +68,26 @@ function startWorkerProcess(): void {
 
   child.unref();
   console.log(`[unified-agent] worker started as pid=${child.pid} (agent=${agentId}, coordinator=${coordinatorUrl})`);
+}
+
+/** The IDE provider (:4304, OpenAI-compatible) the app's IDE and local coding agents talk to. */
+function startIdeProvider(): void {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    // Swarm work goes through this machine's own agent rather than to a coordinator directly.
+    ...(NETWORK_COORDINATOR_URL ? { SWARM_VIA_LOCAL_AGENT_URL: `http://127.0.0.1:${LOCAL_FORWARD_PORT}` } : {}),
+  };
+  const child = fork(join(__dirname, "apps", "ide", "provider-server.js"), [], {
+    env,
+    stdio: ["ignore", "inherit", "inherit", "ipc"],
+  });
+  child.on("exit", (code) => {
+    console.warn(`[unified-agent] IDE provider exited (code=${code}), restarting in 5s...`);
+    setTimeout(startIdeProvider, 5000);
+  });
+  child.unref();
+  console.log(`[unified-agent] IDE provider started as pid=${child.pid}`);
 }
 
 async function boot(): Promise<void> {
@@ -93,6 +118,7 @@ async function boot(): Promise<void> {
   } else {
     startWorkerProcess();
   }
+  if (process.env.DISABLE_IDE_PROVIDER !== "1") startIdeProvider();
 }
 
 boot().catch((error) => {

@@ -26,7 +26,8 @@ import {
   weightedMedian,
   parseRecordPayload,
   computeIntentFee,
-  contributionPolicyDecision
+  contributionPolicyDecision,
+  submitterAccountDecision,
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
@@ -1114,6 +1115,23 @@ function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, rep
 }
 
 /**
+ * The portal owns node enrollment, so a portal-validated agent's earnings and spending belong to
+ * the enrolling user's account (acct-<userId>, as the portal names it). Linked on every validated
+ * registration: re-enrolling a node is the owner's alone (portal upsertNodeEnrollment).
+ */
+async function linkPortalOwnership(agentId: string, ownerUserId: string): Promise<void> {
+  if (!pgStore) return;
+  const accountId = `acct-${ownerUserId}`;
+  try {
+    const existing = await pgStore.getAgentOwnership(agentId);
+    if (existing?.accountId === accountId && existing.ownerUserId === ownerUserId) return;
+    await pgStore.linkAgentOwnership({ agentId, accountId, ownerUserId });
+  } catch (err) {
+    app.log.warn({ err, agentId }, "agent_ownership_link_failed");
+  }
+}
+
+/**
  * Account-scoped money routes (withdraw, set payout address, read a user's balance) require the
  * PORTAL service token specifically. The portal binds accountId = acct-<userId> from the session
  * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents hold
@@ -1729,6 +1747,7 @@ async function validatePortalNode(input: {
       allowed?: boolean;
       reason?: string;
       node?: {
+        ownerUserId?: string;
         ownerEmail?: string;
         sourceIp?: string;
         countryCode?: string;
@@ -1750,6 +1769,9 @@ async function validatePortalNode(input: {
       reason: payload.reason,
       ownerEmail: payload.node?.ownerEmail
     });
+    if (payload.allowed === true && input.nodeKind === "agent" && payload.node?.ownerUserId) {
+      await linkPortalOwnership(input.nodeId, payload.node.ownerUserId);
+    }
     return {
       allowed: payload.allowed === true,
       reason: payload.reason,
@@ -2910,8 +2932,31 @@ app.get("/agent/diagnostics/:agentId", async (req, reply) => {
   });
 });
 
+/** Whose credits a submitted task spends: see submitterAccountDecision. */
+async function resolveSubmitterAccount(
+  req: { headers: Record<string, unknown>; ip: string },
+  requested: string
+): Promise<{ accountId: string } | { status: number; error: string }> {
+  const headers = (req.headers ?? {}) as Record<string, unknown>;
+  const portalService = hasPortalServiceToken(headers);
+  const verified = portalService
+    ? null
+    : await verifyAgentRequest(headers, "/submit", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req as any) });
+  const signer = verified && verified !== "rejected" ? verified.agentId : null;
+  return submitterAccountDecision({
+    requested,
+    portalService,
+    signature: verified === "rejected" ? "rejected" : signer ? { agentId: signer } : null,
+    ownerAccountId: signer ? (await pgStore?.getAgentOwnership(signer))?.accountId : undefined,
+    loopback: req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1"
+  });
+}
+
 app.post("/submit", async (req, reply) => {
   const body = taskSchema.parse(req.body);
+  const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId);
+  if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
+  body.submitterAccountId = submitter.accountId;
   if (body.submitterAccountId !== "anonymous") {
     const policy = await enforceContributionFirstPolicy(body.submitterAccountId);
     if (!policy.ok) {

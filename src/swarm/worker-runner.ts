@@ -32,6 +32,8 @@ import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
+import { createLocalForwarder } from "./local-forwarder.js";
+import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
@@ -206,6 +208,25 @@ let lastReconnectProbeMs = 0;
 const REGISTER_REFRESH_MS = registerRefreshMsFromEnv();
 let registeredWithUrl: string | null = null;
 let lastRegisteredAtMs = 0;
+/** SANDBOX_MODE=docker but the daemon isn't reachable right now. */
+let sandboxDown = false;
+
+// The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
+const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT ?? "");
+if (LOCAL_FORWARD_PORT > 0) {
+  let forwardToken: string | undefined;
+  createLocalForwarder({
+    token: () => (forwardToken ??= resolveIdeToken()),
+    coordinatorUrl: () => registeredWithUrl,
+    meshHeaders,
+    signedHeaders,
+    agentId: AGENT_ID
+  })
+    .on("error", (err) => console.warn(`[agent:${AGENT_ID}] local forwarder unavailable: ${String(err)}`))
+    .listen(LOCAL_FORWARD_PORT, "127.0.0.1", () =>
+      console.log(`[agent:${AGENT_ID}] local forwarder on 127.0.0.1:${LOCAL_FORWARD_PORT}`)
+    );
+}
 
 function backoffMs(): number {
   return Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveFailures, 10), BACKOFF_MAX_MS);
@@ -781,10 +802,16 @@ async function loop(): Promise<void> {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
         // ── Sandbox policy enforcement ──
         const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
-        if (sandboxError) {
+        if (sandboxError?.startsWith("sandbox_required")) {
           console.error(`[agent:${AGENT_ID}] ${sandboxError}`);
           await new Promise((r) => setTimeout(r, 5000));
           continue;
+        }
+        // Docker configured but not running: stay registered (the IDE forwarder and heartbeats
+        // keep working) but pull nothing until it is back.
+        if (Boolean(sandboxError) !== sandboxDown) {
+          sandboxDown = Boolean(sandboxError);
+          console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxError}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
         }
 
         // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).
@@ -999,7 +1026,7 @@ async function loop(): Promise<void> {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
         }
-        const pulled = (SWARM_EXECUTION_ENABLED
+        const pulled = (SWARM_EXECUTION_ENABLED && !sandboxDown
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;

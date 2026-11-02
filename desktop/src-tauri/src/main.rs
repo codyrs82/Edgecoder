@@ -624,13 +624,23 @@ fn node_major(node: &PathBuf) -> Option<u32> {
 /// Apps launched from Finder/the Dock get a bare PATH (/usr/bin:/bin:...), so a Homebrew or nvm
 /// Node is invisible to `Command::new("node")` and the agent never starts. Look where Node
 /// actually lives (EDGECODER_NODE wins), require >= 22, then fall back to the user's login shell.
-fn resolve_node_binary() -> Option<PathBuf> {
+/// The Node runtime shipped inside the bundle (scripts/bundle-agent-resources.sh), if present.
+fn bundled_node(agent_dir: &PathBuf) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    Some(agent_dir.join("node").join(name)).filter(|p| p.exists())
+}
+
+fn resolve_node_binary(agent_dir: &PathBuf) -> Option<PathBuf> {
     const MIN_MAJOR: u32 = 22;
     if let Ok(p) = std::env::var("EDGECODER_NODE") {
         let p = PathBuf::from(p);
         if p.exists() {
             return Some(p);
         }
+    }
+    // The bundled runtime matches the native modules it was built with, so it comes first.
+    if let Some(p) = bundled_node(agent_dir) {
+        return Some(p);
     }
     let home = std::env::var("HOME").unwrap_or_default();
     let mut candidates: Vec<PathBuf> = [
@@ -671,13 +681,25 @@ fn resolve_node_binary() -> Option<PathBuf> {
 }
 
 fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
-    let Some(node) = resolve_node_binary() else {
-        eprintln!("Node.js 22+ not found (Homebrew, nvm, /usr/local, PATH, login shell); not starting the agent");
+    let log = agent_log();
+    let Some(node) = resolve_node_binary(agent_dir) else {
+        let msg = "Node.js 22+ not found (bundle, Homebrew, nvm, /usr/local, PATH, login shell); not starting the agent";
+        eprintln!("{msg}");
+        if let Some(mut f) = log {
+            let _ = writeln!(f, "{msg}");
+        }
         return None;
     };
     eprintln!("Starting agent with {:?}", node);
-    Command::new(node)
-        .arg("dist/index.js")
+    let mut cmd = Command::new(node);
+    // Agent output goes to ~/.edgecoder/agent.log so a failed start can be diagnosed from a
+    // Finder launch, where stderr goes nowhere.
+    if let Some(f) = log {
+        if let Ok(err) = f.try_clone() {
+            cmd.stdout(f).stderr(err);
+        }
+    }
+    cmd.arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
         // The app's local coordinator never pays out (payouts run on the network seeds), so it
@@ -689,6 +711,21 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
         .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
         .spawn()
+        .ok()
+}
+
+/// ~/.edgecoder/agent.log, truncated at each spawn once it passes 5 MB.
+fn agent_log() -> Option<fs::File> {
+    let dir = PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?).join(".edgecoder");
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("agent.log");
+    let too_big = fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false);
+    fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(&path)
         .ok()
 }
 

@@ -34,5 +34,15 @@ cd "$RESOURCE_DIR" && npx --yes node-gyp-build node_modules/better-sqlite3 2>/de
   || npm rebuild better-sqlite3 --prefix "$RESOURCE_DIR"
 cd "$ROOT_DIR"
 
+# Ship the Node runtime the native modules were just built against, so the app doesn't depend
+# on a Node install on the user's machine (the desktop shell prefers this one).
+NODE_BIN="$(node -p 'process.execPath')"
+mkdir -p "$RESOURCE_DIR/node"
+case "$NODE_BIN" in
+  *.exe) cp "$NODE_BIN" "$RESOURCE_DIR/node/node.exe" ;;
+  *) cp "$NODE_BIN" "$RESOURCE_DIR/node/node" && chmod 755 "$RESOURCE_DIR/node/node" ;;
+esac
+echo "Bundled Node $(node -v) from $NODE_BIN"
+
 echo "Agent bundled to: $RESOURCE_DIR"
 du -sh "$RESOURCE_DIR"
