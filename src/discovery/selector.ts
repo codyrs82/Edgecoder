@@ -6,6 +6,7 @@
 
 import type { CoordinatorCandidate, CandidateSource } from "./types.js";
 import { pinMatchesKey } from "./types.js";
+import { normalizeComputeClass } from "../economy/compute-classes.js";
 
 export interface FetchResponseLike {
   status: number;
@@ -29,7 +30,7 @@ export interface SelectorOptions {
   now?: () => number;
   /** Per-request timeout (default 3 s). */
   timeoutMs?: number;
-  /** Compute class whose market price is scored (default cpu.std). */
+  /** Compute class whose market price is scored (default cpu). A legacy id (gpu.c8, ...) is sent as-is; new coordinators map it. */
   computeClass?: string;
   /** Sent as x-mesh-token to /capacity and /economy/market/book when set. */
   meshToken?: string;
@@ -118,7 +119,7 @@ export async function probeCoordinator(url: string, opts: Omit<SelectorOptions, 
   const [capacity, book] = await Promise.all([
     getJson(fetchImpl, `${base}/capacity`, tokenHeaders, timeoutMs),
     opts.meshToken || opts.portalToken
-      ? getJson(fetchImpl, `${base}/economy/market/book?computeClass=${encodeURIComponent(opts.computeClass ?? "cpu.std")}`, tokenHeaders, timeoutMs)
+      ? getJson(fetchImpl, `${base}/economy/market/book?computeClass=${encodeURIComponent(opts.computeClass ?? "cpu")}`, tokenHeaders, timeoutMs)
       : Promise.resolve(null)
   ]);
 
@@ -133,8 +134,10 @@ export async function probeCoordinator(url: string, opts: Omit<SelectorOptions, 
   let price: number | null = null;
   if (book && book.status >= 200 && book.status < 300) {
     const bb = (book.body ?? {}) as { books?: Array<{ computeClass?: unknown; clearingMsatPerCredit?: unknown; midMsatPerCredit?: unknown; referenceMsatPerCredit?: unknown }> };
-    const wanted = opts.computeClass ?? "cpu.std";
-    const entry = (bb.books ?? []).find((b) => b.computeClass === wanted) ?? bb.books?.[0];
+    const wanted = opts.computeClass ?? "cpu";
+    // A new coordinator answers a legacy id with the mapped class, so compare on the current class.
+    const target = normalizeComputeClass(wanted) ?? wanted;
+    const entry = (bb.books ?? []).find((b) => b.computeClass === wanted) ?? (bb.books ?? []).find((b) => typeof b.computeClass === "string" && normalizeComputeClass(b.computeClass) === target) ?? bb.books?.[0];
     if (entry) price = asNumber(entry.clearingMsatPerCredit) ?? asNumber(entry.midMsatPerCredit) ?? asNumber(entry.referenceMsatPerCredit);
   }
   return { healthy: true, latencyMs, queued, agents, capacity: totalCapacity, priceMsatPerCredit: price };

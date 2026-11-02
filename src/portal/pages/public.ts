@@ -14,7 +14,7 @@ function escapeHtml(s: string): string {
 }
 
 /** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
-function priceCell(c: PublicPricing["classes"][number]): string {
+function priceCell(c: { satsPerHour?: number; usdPerHour: number }): string {
   if (c.satsPerHour === undefined) {
     return `<span class="sats muted">${escapeHtml(formatUsd(c.usdPerHour))}/h</span><span class="usd">sats rate on the live portal</span>`;
   }
@@ -33,8 +33,15 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
     .map((c) => `<div class="ticker-row"><span class="pair">${escapeHtml(c.label)} / BTC<span class="cls">${escapeHtml(c.hardware)}</span></span><span class="px">${priceCell(c)}</span><span class="px mono-id">${c.id}</span></div>`)
     .join("");
+  // One row per class (its credit-hour), then its weight table: a tier's hour = credit-hour × weight.
   const tableRows = pricing.classes
-    .map((c) => `<tr><td class="mono">${c.id}</td><td>${escapeHtml(c.hardware)}</td><td class="num">${priceCell(c)}</td></tr>`)
+    .map(
+      (c) =>
+        `<tr><td class="mono"><b>${c.id}</b></td><td><b>${escapeHtml(c.label)}</b> · ${escapeHtml(c.hardware)}</td><td class="num">1 credit/s</td><td class="num">${priceCell(c)}</td></tr>` +
+        c.tiers
+          .map((t) => `<tr><td class="mono muted">${t.id}</td><td>${escapeHtml(t.label)}</td><td class="num">${t.creditsPerSecond}×</td><td class="num">${priceCell(t)}</td></tr>`)
+          .join("")
+    )
     .join("");
   const liveNote = pricing.mode === "live"
     ? "Sats per hour are today's rate epoch: the class's USD reference divided by the BTC/USD median of four exchanges, plus the network markup. Agents' asks and requesters' bids trade around it on the Market page."
@@ -179,20 +186,21 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
         <section class="section" id="market">
           <div class="section-head">
             <div class="eyebrow">Pricing</div>
-            <h2>Every hardware class has its own pair, priced in sats.</h2>
-            <p>Each class is quoted in sats per unit-hour, converted from public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then discovered on the order book.</p>
+            <h2>Four capability classes, one pair each, priced in sats.</h2>
+            <p>Each class has one flat price per credit, converted from public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then discovered on the order book. Faster hardware in a class earns more credits per second: a 24 GB GPU-hour is 3.5 GPU credit-hours.</p>
           </div>
           <div class="split">
             <div class="formula">
               <div><b>btcUsd</b> = median(Coinbase, Kraken, Bitstamp, mempool.space)</div>
-              <div><b>satsPerUnitHour</b> = usdPerHour(class) / btcUsd × 1e8 × (1 + markup)</div>
-              <div><b>satsPerCredit</b> = satsPerUnitHour / (creditsPerSecond × 3600)</div>
+              <div><b>satsPerCreditHour</b> = usdPerHour(class) / btcUsd × 1e8 × (1 + markup)</div>
+              <div><b>satsPerCredit</b> = satsPerCreditHour / 3600 <span style="color:var(--muted);">(flat within a class)</span></div>
+              <div><b>credits</b> = seconds × weight(tier) <span style="color:var(--muted);">(base tier 1)</span></div>
               <div style="margin-top:8px;color:var(--muted);">× model size (≤3B 1.0 … &gt;35B 4.0) × modality (vision, thinking) × scarcity</div>
               <div style="margin-top:8px;"><b>trade</b> = agent ask ≤ task bid → priced at the ask, locked on the ledger</div>
             </div>
             <div class="classes">
               <table>
-                <thead><tr><th>Class</th><th>Hardware</th><th class="num">Unit-hour</th></tr></thead>
+                <thead><tr><th>Class / tier</th><th>Hardware</th><th class="num">Weight</th><th class="num">Hour</th></tr></thead>
                 <tbody>
                   ${tableRows}
                 </tbody>

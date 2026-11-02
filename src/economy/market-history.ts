@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import type { ComputeClassId } from "./compute-classes.js";
+import { BASE_TIER, isLegacyComputeClassId, legacyMsatToCurrent, normalizeComputeClass, type ComputeClassId } from "./compute-classes.js";
 import type { Trade } from "./order-book.js";
 
 /**
@@ -14,6 +14,8 @@ import type { Trade } from "./order-book.js";
  * - Trades (claims matched at an ask) are kept for the trade tape and candle volume.
  * - Everything lives in memory with a bounded window; the coordinator persists ticks and trades
  *   to Postgres when configured and reloads the window at startup.
+ * - History written under the nine legacy class ids is mapped onto the four current classes at
+ *   read time (normalizeLegacyTicks / Trades / Order below), never rewritten in the database.
  */
 
 export interface MarketTick {
@@ -169,4 +171,94 @@ export interface MarketOrder {
   computeClass: ComputeClassId | "any";
   msatPerCredit: number;
   updatedAtMs: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Legacy rows (pre four-class model), mapped at read time            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Why read time and not a migration: the rows stay byte-for-byte what was recorded (the mapping
+ * is reversible and can be corrected later), there is no UPDATE that could collide on the
+ * market_ticks (compute_class, at_ms) primary key when cpu.std and cpu.hi ticks share a minute,
+ * and during a rolling deploy a coordinator still on the old build keeps writing legacy ids,
+ * which a one-shot migration would miss but a read-time mapping keeps covering.
+ *
+ * Prices are converted to the current unit with legacyMsatToCurrent (preserves each tier's
+ * per-hour value), so cpu.std and cpu.hi ticks from the same minute land on the same price
+ * instead of a 4x saw-tooth on the cpu chart.
+ */
+type RawRow<T> = Omit<T, "computeClass"> & { computeClass: string };
+
+const scale = (id: string, n: number | undefined): number | undefined => (n === undefined ? undefined : Math.max(1, Math.round(legacyMsatToCurrent(id, n))));
+
+/** Map and merge legacy ticks: one tick per (class, minute), prices from the base tier when present, agents and open tasks summed. Unknown ids are dropped. */
+export function normalizeLegacyTicks(rows: Array<RawRow<MarketTick>>): MarketTick[] {
+  const out: MarketTick[] = [];
+  const byKey = new Map<string, { tick: MarketTick; fromBase: boolean }>();
+  for (const row of rows) {
+    const cls = normalizeComputeClass(row.computeClass);
+    if (!cls) continue;
+    const legacy = isLegacyComputeClassId(row.computeClass);
+    const tick: MarketTick = legacy
+      ? {
+          ...row,
+          computeClass: cls,
+          referenceMsat: scale(row.computeClass, row.referenceMsat)!,
+          bestAskMsat: scale(row.computeClass, row.bestAskMsat),
+          bestBidMsat: scale(row.computeClass, row.bestBidMsat),
+          midMsat: scale(row.computeClass, row.midMsat)!,
+          clearingMsat: scale(row.computeClass, row.clearingMsat)!
+        }
+      : { ...row, computeClass: cls };
+    if (tick.bestAskMsat === undefined) delete tick.bestAskMsat;
+    if (tick.bestBidMsat === undefined) delete tick.bestBidMsat;
+    const fromBase = !legacy || BASE_TIER[cls] === row.computeClass;
+    const key = `${cls}|${row.atMs}`;
+    const seen = byKey.get(key);
+    if (!seen) {
+      byKey.set(key, { tick, fromBase });
+      out.push(tick);
+      continue;
+    }
+    const agents = seen.tick.agents + tick.agents;
+    const openTasks = seen.tick.openTasks + tick.openTasks;
+    if (fromBase && !seen.fromBase) {
+      const t = seen.tick;
+      t.referenceMsat = tick.referenceMsat;
+      t.midMsat = tick.midMsat;
+      t.clearingMsat = tick.clearingMsat;
+      if (tick.bestAskMsat === undefined) delete t.bestAskMsat;
+      else t.bestAskMsat = tick.bestAskMsat;
+      if (tick.bestBidMsat === undefined) delete t.bestBidMsat;
+      else t.bestBidMsat = tick.bestBidMsat;
+      seen.fromBase = true;
+    }
+    seen.tick.agents = agents;
+    seen.tick.openTasks = openTasks;
+  }
+  return out;
+}
+
+/** Map legacy trades onto the current class with the price in the current unit. Credits stay as recorded. */
+export function normalizeLegacyTrades(rows: Array<RawRow<MarketTrade>>): MarketTrade[] {
+  const out: MarketTrade[] = [];
+  for (const row of rows) {
+    const cls = normalizeComputeClass(row.computeClass);
+    if (!cls) continue;
+    out.push({ ...row, computeClass: cls, msatPerCredit: isLegacyComputeClassId(row.computeClass) ? scale(row.computeClass, row.msatPerCredit)! : row.msatPerCredit });
+  }
+  return out;
+}
+
+/**
+ * Map a standing order placed under a legacy class id, and the price with it (0 = track the
+ * reference stays 0). Returns undefined for an unknown class.
+ */
+export function normalizeLegacyOrder(row: Omit<MarketOrder, "computeClass"> & { computeClass: string }): MarketOrder | undefined {
+  if (row.computeClass === "any") return { ...row, computeClass: "any" };
+  const cls = normalizeComputeClass(row.computeClass);
+  if (!cls) return undefined;
+  const msat = isLegacyComputeClassId(row.computeClass) && row.msatPerCredit > 0 ? scale(row.computeClass, row.msatPerCredit)! : row.msatPerCredit;
+  return { ...row, computeClass: cls, msatPerCredit: msat };
 }

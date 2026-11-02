@@ -89,9 +89,20 @@ import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
-import { isRateEpochStale, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
-import { COMPUTE_CLASS_IDS, classifyHardware, modalityMultiplier, type ComputeClassId, type HardwareProfile } from "../economy/compute-classes.js";
-import { ComputeOrderBook } from "../economy/order-book.js";
+import { isRateEpochStale, normalizeRateEpoch, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
+import {
+  ACCEPTED_COMPUTE_CLASS_IDS,
+  COMPUTE_CLASS_IDS,
+  classifyHardware,
+  modalityMultiplier,
+  normalizeComputeClass,
+  resolveRequestedClass,
+  settlementClassFor,
+  type ComputeClassId,
+  type HardwareClassification,
+  type HardwareProfile
+} from "../economy/compute-classes.js";
+import { ComputeOrderBook, capabilityConstraints, clampToClassReference, meetsCapability, type AskCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
 import {
@@ -237,8 +248,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
-/** Market price agreed at claim time per subtask (msat per credit on the agent's class). */
-const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId }>();
+/** Market price agreed at claim time per subtask (msat per credit on the agent's class) and the tier weight the credits mint at. */
+const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId; creditsPerSecond: number }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
 const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
@@ -429,8 +440,10 @@ const agentCapabilities = new Map<
     sandboxMode: SandboxMode;
     lastSeenMs: number;
     hardwareProfile?: HardwareProfile;
-    /** Derived from hardwareProfile at registration; prices the agent's seconds. */
+    /** Derived from hardwareProfile at registration: the class-market whose flat price values the agent's credits. */
     computeClass: ComputeClassId;
+    /** Tier, weight (credits per measured second) and capability (vramGb / memoryGb) from the same classification. */
+    hardwareClass?: HardwareClassification;
   }
 >();
 const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
@@ -563,6 +576,11 @@ const marketHistory = new MarketHistory();
 const MARKET_TICK_MS = 60_000;
 /** Standing orders from the portal keyed by `${accountId}:${side}`. */
 const marketOrders = new Map<string, MarketOrder>();
+/** What an agent's ask advertises to the matcher: tier, weight and capability (VRAM, memory). */
+function askCapabilityOf(cap: { hardwareClass?: HardwareClassification } | undefined): AskCapability | undefined {
+  const h = cap?.hardwareClass;
+  return h ? { tier: h.tier, creditsPerSecond: h.creditsPerSecond, vramGb: h.vramGb, memoryGb: h.memoryGb } : undefined;
+}
 
 const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
 function recordMarketTicks(nowMs = Date.now()): void {
@@ -597,7 +615,7 @@ async function applyMarketOrder(order: MarketOrder): Promise<void> {
     for (const agentId of ids) {
       const cap = agentCapabilities.get(agentId);
       if (cap && (order.computeClass === "any" || order.computeClass === cap.computeClass)) {
-        orderBook.postAsk(agentId, cap.computeClass, order.msatPerCredit > 0 ? order.msatPerCredit : undefined);
+        orderBook.postAsk(agentId, cap.computeClass, order.msatPerCredit > 0 ? order.msatPerCredit : undefined, Date.now(), askCapabilityOf(cap));
       }
     }
   }
@@ -658,7 +676,7 @@ function quoteSatsPerCredit(resourceClass: ResourceClass = "cpu"): CreditQuote {
     dynamicLoadMultiplier(resourceClass, { cpuCapacity, gpuCapacity, queuedTasks: status.queued, activeAgents: status.agents }).toFixed(4)
   );
   if (latestRateEpoch) {
-    const classRate = latestRateEpoch.classRates?.[resourceClass === "gpu" ? "gpu.c24" : "cpu.std"];
+    const classRate = latestRateEpoch.classRates?.[resourceClass === "gpu" ? "gpu" : "cpu"];
     const perCreditBase = classRate ? classRate.satsPerCredit : (resourceClass === "gpu" ? latestRateEpoch.satsPerGpuHour : latestRateEpoch.satsPerCpuHour) / 3600;
     const satsPerCredit = Number((perCreditBase * loadMultiplier).toFixed(6));
     return {
@@ -904,9 +922,15 @@ registerReceiptRoutes(app, {
   coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
   log: app.log
 });
-async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number): Promise<void> {
-  const computeClass = r.meta.subtask.projectMeta.resourceClass;
-  const satsPerCredit = latestPriceEpochByResource.get(computeClass)?.pricePerComputeUnitSats ?? 30;
+/**
+ * `computeClass` is the class the credits were valued in (cpu | apple | gpu | gpu.dc) and
+ * `msatPerCredit` the price locked on the earn row. Receipts issued before the four-class model
+ * carry the resource class ("cpu" / "gpu") and the legacy price-epoch rate; they verify unchanged
+ * because the field is a free string inside the signed body.
+ */
+async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number, computeClass: ComputeClassId, msatPerCredit: number | undefined): Promise<void> {
+  const resourceClass = r.meta.subtask.projectMeta.resourceClass;
+  const legacyMsat = (latestPriceEpochByResource.get(resourceClass)?.pricePerComputeUnitSats ?? 30) * 1000;
   const outcome = issueReceiptForAccrual({
     claim: (r.meta.report as { receipt?: SignedAgentReceiptClaim }).receipt,
     result: { taskId: r.meta.taskId, subtaskId: r.subtaskId, agentId: r.agentId, output: r.output },
@@ -914,7 +938,7 @@ async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number
     coordinator: { coordinatorId: identity.peerId, publicKeyPem: identity.publicKeyPem, privateKeyPem: coordinatorKeys.privateKeyPem },
     computeClass,
     credits,
-    msatPerCredit: satsPerCredit * 1000
+    msatPerCredit: msatPerCredit ?? legacyMsat
   });
   if (!outcome.receipt) {
     app.log.debug({ subtaskId: r.subtaskId, agentId: r.agentId, reason: outcome.skipped }, "work_receipt_skipped");
@@ -2202,6 +2226,17 @@ const diagnosticsSchema = z.object({
   modelState: z.string().optional()
 });
 
+/**
+ * API edge for a class parameter: the four current ids plus the nine legacy ones, which are mapped
+ * (never rejected) so stale clients, scripts and bookmarked portal URLs keep working.
+ */
+const classParam = z
+  .string()
+  .refine((v) => normalizeComputeClass(v) !== undefined, { message: `computeClass must be one of ${COMPUTE_CLASS_IDS.join(", ")}` })
+  .transform((v) => normalizeComputeClass(v) as ComputeClassId);
+/** Capability constraint (GB): positive and bounded. */
+const minGbParam = z.number().positive().max(4096).optional();
+
 const taskSchema = z.object({
   taskId: z.string(),
   prompt: z.string().min(1),
@@ -2216,10 +2251,17 @@ const taskSchema = z.object({
   priority: z.number().min(0).max(100).default(50),
   requestedModel: z.string().optional(),
   sandboxRequired: z.boolean().default(false),
-  /** Which hardware class should run it; "any" matches by resourceClass only. */
-  computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+  /**
+   * Which class-market should run it (cpu | apple | gpu | gpu.dc), or "any". A legacy id
+   * (gpu.c24, ...) is mapped onto its class with the capability it implied (see /submit).
+   */
+  computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
   /** Requester's ceiling in msat per credit. Default: class reference × (1 + MARKET_DEFAULT_BID_PREMIUM_BPS). */
-  maxBidMsatPerCredit: z.number().positive().max(1e9).optional()
+  maxBidMsatPerCredit: z.number().positive().max(1e9).optional(),
+  /** Only agents with at least this much discrete GPU VRAM may claim (e.g. 24 for a 30B model). Default: no constraint. */
+  minVramGb: minGbParam,
+  /** Only agents with at least this much system / unified memory may claim. Default: no constraint. */
+  minMemoryGb: minGbParam
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -2245,6 +2287,7 @@ app.post("/register", async (req, reply) => {
   }
   const body = parsedRegister.data;
   const now = Date.now();
+  const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
   const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
   const activation = await validatePortalNode({
     nodeId: body.agentId,
@@ -2296,7 +2339,8 @@ app.post("/register", async (req, reply) => {
     x25519PublicKey: body.x25519PublicKey,
     sandboxMode: body.sandboxMode as SandboxMode,
     hardwareProfile: body.hardwareProfile,
-    computeClass: classifyHardware(body.hardwareProfile),
+    computeClass: hardwareClass.computeClass,
+    hardwareClass,
     lastSeenMs: now
   });
   // ── Binary integrity verification ──
@@ -2341,9 +2385,9 @@ app.post("/register", async (req, reply) => {
   {
     const ownerAccount = await rewardAccountForAgent(body.agentId);
     const standing = marketOrders.get(`${ownerAccount}:sell`);
-    const cls = classifyHardware(body.hardwareProfile);
+    const cls = hardwareClass.computeClass;
     const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
-    orderBook.postAsk(body.agentId, cls, ask, now);
+    orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf({ hardwareClass }));
   }
   const approvalRecord = ordering.append({
     eventType: "node_approval",
@@ -2440,7 +2484,7 @@ app.post("/heartbeat", async (req, reply) => {
   }
   if (body.askMsatPerCredit !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
-    if (existing) orderBook.postAsk(body.agentId, existing.computeClass, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now);
+    if (existing) orderBook.postAsk(body.agentId, existing.computeClass, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(existing));
   }
   if (body.sandboxMode !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
@@ -2607,10 +2651,16 @@ app.post("/submit", async (req, reply) => {
   const hasMeshPeers = mesh.listPeers().length > 0;
   const GOSSIP_CLAIM_DELAY_MS = 3_000;
 
-  // Market: register the requester's bid for this task (default = reference × premium).
+  // Market: register the requester's bid for this task (default = reference × premium). A legacy
+  // class id maps onto its class, its explicit price into the current unit, and the capability it
+  // implied (gpu.c24 => minVramGb 17) so an under-spec card cannot fill it; explicit constraints win.
+  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, { minVramGb: body.minVramGb, minMemoryGb: body.minMemoryGb }, rateOracleConfig.computeClasses);
+  const taskClass = resolved.computeClass as ComputeClassId | "any"; // validated by taskSchema
+  const explicitBid = resolved.msatPerCredit;
+  const constraints = capabilityConstraints(resolved.constraints);
   const standingBuy = marketOrders.get(`${body.submitterAccountId}:buy`);
-  const bidCeiling = body.maxBidMsatPerCredit ?? (standingBuy && (standingBuy.computeClass === "any" || standingBuy.computeClass === body.computeClass) ? standingBuy.msatPerCredit : undefined);
-  const marketBid = orderBook.postBid(body.taskId, body.computeClass, bidCeiling, MARKET_DEFAULT_BID_PREMIUM_BPS);
+  const bidCeiling = explicitBid ?? (standingBuy && (standingBuy.computeClass === "any" || standingBuy.computeClass === taskClass) ? standingBuy.msatPerCredit : undefined);
+  const marketBid = orderBook.postBid(body.taskId, taskClass, bidCeiling, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), constraints);
 
   // Assign stable IDs before scheduling so dependsOn references resolve
   const subtasksWithIds = payload.subtasks.map((s) => ({
@@ -2622,8 +2672,9 @@ app.post("/submit", async (req, reply) => {
       tenantId: body.tenantId,
       resourceClass: body.resourceClass as ResourceClass,
       priority: body.priority,
-      computeClass: body.computeClass,
-      maxBidMsatPerCredit: marketBid.maxMsatPerCredit
+      computeClass: taskClass,
+      maxBidMsatPerCredit: marketBid.maxMsatPerCredit,
+      ...constraints
     }
   }));
 
@@ -2738,13 +2789,15 @@ app.post("/pull", async (req, reply) => {
     body.agentId,
     capability?.activeModel,
     await rewardAccountForAgent(body.agentId),
-    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok
+    // The book enforces the bid's class, price and constraints. The subtask's own constraints are
+    // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
+    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(capability), subtask.projectMeta)
   );
   if (task) {
     // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
     const match = orderBook.canMatch(body.agentId, task.taskId);
     if (match.ok) {
-      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass });
+      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass, creditsPerSecond: capability?.hardwareClass?.creditsPerSecond ?? 1 });
       const trade = { taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() };
       orderBook.recordTrade(trade);
       marketHistory.recordTrade(trade);
@@ -2868,18 +2921,24 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   const cap = agentCapabilities.get(r.agentId);
   const trade = claimedTradePrice.get(r.subtaskId);
   claimedTradePrice.delete(r.subtaskId);
-  const computeClass = trade?.computeClass ?? cap?.computeClass ?? "cpu.std";
+  // Throughput: the agent's tier mints creditsPerSecond credits per measured second (weight 1 on a
+  // class's base tier), so credits × the class's flat price per credit is the tier's hour price.
+  // CPU tasks are always paid as CPU work, since hardware is self-reported (settlementClassFor).
+  const { computeClass, creditsPerSecond: hardwareWeight } = settlementClassFor(
+    subtask.projectMeta.resourceClass,
+    trade?.computeClass ?? cap?.computeClass ?? "cpu",
+    trade?.creditsPerSecond ?? cap?.hardwareClass?.creditsPerSecond ?? 1
+  );
   const modelParamSizeB = subtask.requestedModel ? cap?.activeModelParamSize : undefined;
   const modality = modalityMultiplier(catalogEntryForTag(cap?.activeModel ?? "")?.capabilities);
   // Sats per credit: the market price agreed at claim (agent's ask), else the oracle's class rate.
   // The msat value locked on an earn row is withdrawable as real sats, so the trade price must not
   // be trustable to inflate it. Clamp it to [0.25x, 4x] the oracle class reference, which a
   // self-dealing ask/bid cannot move (audit econ#2). Falls back to the reference when no trade.
+  // One reference per class (cpu | apple | gpu | gpu.dc); epochs persisted under the legacy ids
+  // are normalized at load (normalizeRateEpoch), so the clamp always has a reference.
   const classRef = latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
-  let basePerCredit = trade?.msatPerCredit ?? classRef;
-  if (basePerCredit !== undefined && classRef !== undefined && classRef > 0) {
-    basePerCredit = Math.min(Math.max(basePerCredit, classRef * 0.25), classRef * 4);
-  }
+  const basePerCredit = clampToClassReference(trade?.msatPerCredit, classRef);
   const valuation = basePerCredit !== undefined ? { msatPerCredit: Math.round(basePerCredit * modality), networkFeeBps: NETWORK_FEE_BPS } : undefined;
   const accrued = await accrueCredits(
     {
@@ -2893,7 +2952,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
       success: r.ok,
       qualityScore: r.ok ? 1.0 : 0.6,
       timestampMs: Date.now(),
-      modelParamSizeB
+      modelParamSizeB,
+      hardwareWeight
     },
     {
       queuedTasks: queue.status().queued,
@@ -2918,6 +2978,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         msatPerCredit: valuation?.msatPerCredit,
         networkFeeBps: valuation?.networkFeeBps,
         computeClass,
+        hardwareTier: cap?.hardwareClass?.tier,
+        creditsPerSecond: hardwareWeight,
         modelParamSizeB,
         durationMs,
         reportedDurationMs,
@@ -2928,7 +2990,7 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
     await pgStore?.persistLedgerRecord(earningsRecord);
     await persistStatsLedgerRecord(earningsRecord);
     // Work receipt (architecture step 2): countersign the agent's claim for what was just credited.
-    await recordWorkReceipt(r, accrued.credits).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
+    await recordWorkReceipt(r, accrued.credits, computeClass, valuation?.msatPerCredit).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
   }
 }
 
@@ -3538,7 +3600,7 @@ app.post("/economy/fee-pool/distribute", async (req, reply) => {
 
 app.get("/economy/market/book", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).optional() }).parse(req.query);
+  const query = z.object({ computeClass: classParam.optional() }).parse(req.query);
   const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
   return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
 });
@@ -3548,7 +3610,7 @@ app.get("/economy/market/candles", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
   const query = z
     .object({
-      computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"),
+      computeClass: classParam.default("cpu"),
       interval: z.enum(Object.keys(CANDLE_INTERVALS) as [string, ...string[]]).default("5m"),
       limit: z.coerce.number().int().min(1).max(2000).default(500)
     })
@@ -3564,14 +3626,14 @@ app.get("/economy/market/candles", async (req, reply) => {
 app.get("/economy/market/trades", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
   const query = z
-    .object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"), limit: z.coerce.number().int().min(1).max(500).default(50) })
+    .object({ computeClass: classParam.default("cpu"), limit: z.coerce.number().int().min(1).max(500).default(50) })
     .parse(req.query);
   return { computeClass: query.computeClass, trades: marketHistory.recentTrades(query.computeClass, query.limit) };
 });
 
 app.get("/economy/market/depth", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std") }).parse(req.query);
+  const query = z.object({ computeClass: classParam.default("cpu") }).parse(req.query);
   const snap = orderBook.snapshot(query.computeClass);
   return { computeClass: query.computeClass, ...MarketHistory.depth(snap.asks, snap.bids), snapshot: snap };
 });
@@ -3586,11 +3648,13 @@ app.post("/economy/market/orders", async (req, reply) => {
     .object({
       accountId: z.string().min(1).max(128),
       side: z.enum(["buy", "sell"]),
-      computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+      computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
       msatPerCredit: z.number().min(0).max(1e9)
     })
     .parse(req.body);
-  const order: MarketOrder = { ...body, updatedAtMs: Date.now() };
+  // A legacy class id maps onto its class and its price into the current unit (0 = track stays 0).
+  const resolved = resolveRequestedClass(body.computeClass, body.msatPerCredit, {}, rateOracleConfig.computeClasses);
+  const order: MarketOrder = { ...body, computeClass: resolved.computeClass as ComputeClassId | "any", msatPerCredit: resolved.msatPerCredit ?? 0, updatedAtMs: Date.now() };
   await applyMarketOrder(order);
   return { ok: true, order };
 });
@@ -3603,23 +3667,43 @@ app.get("/economy/market/orders/:accountId", async (req, reply) => {
   const agents = [...new Set([...owned.map((o) => o.agentId), params.accountId])]
     .map((agentId) => ({ agentId, capability: agentCapabilities.get(agentId), ask: orderBook.askFor(agentId) }))
     .filter((a) => a.capability)
-    .map((a) => ({ agentId: a.agentId, computeClass: a.capability!.computeClass, ask: a.ask?.msatPerCredit ?? null, tracking: a.ask?.tracking ?? true }));
+    .map((a) => ({
+      agentId: a.agentId,
+      computeClass: a.capability!.computeClass,
+      tier: a.capability!.hardwareClass?.tier ?? null,
+      creditsPerSecond: a.capability!.hardwareClass?.creditsPerSecond ?? 1,
+      ask: a.ask?.msatPerCredit ?? null,
+      tracking: a.ask?.tracking ?? true
+    }));
   return { accountId: params.accountId, orders, agents };
 });
 
-/** Compute class definitions with the current oracle rate and connected agents per class. */
+/**
+ * Compute class definitions (with the tier weight table) with the current oracle rate and
+ * connected agents per class and per tier. `creditsPerSecond: 1` is the base tier, kept for
+ * portal pages built before tiers existed.
+ */
 app.get("/economy/market/classes", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
   const agentsByClass = new Map<string, number>();
-  for (const cap of agentCapabilities.values()) agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
+  const agentsByTier = new Map<string, number>();
+  for (const cap of agentCapabilities.values()) {
+    agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
+    if (cap.hardwareClass) agentsByTier.set(cap.hardwareClass.tier, (agentsByTier.get(cap.hardwareClass.tier) ?? 0) + 1);
+  }
   return {
     rateEpochId: latestRateEpoch?.epochId ?? null,
-    classes: COMPUTE_CLASS_IDS.map((id) => ({
-      ...rateOracleConfig.computeClasses[id],
-      rate: latestRateEpoch?.classRates?.[id] ?? null,
-      referenceMsatPerCredit: orderBook.referenceFor(id),
-      agents: agentsByClass.get(id) ?? 0
-    }))
+    classes: COMPUTE_CLASS_IDS.map((id) => {
+      const spec = rateOracleConfig.computeClasses[id];
+      return {
+        ...spec,
+        creditsPerSecond: 1,
+        tiers: spec.tiers.map((t) => ({ ...t, agents: agentsByTier.get(t.id) ?? 0 })),
+        rate: latestRateEpoch?.classRates?.[id] ?? null,
+        referenceMsatPerCredit: orderBook.referenceFor(id),
+        agents: agentsByClass.get(id) ?? 0
+      };
+    })
   };
 });
 
@@ -4324,7 +4408,7 @@ async function handleMeshIngest(
             connectedPeers: new Set<string>(),
             activeModel: payload.models[0],
             activeModelParamSize: 0,
-            computeClass: "cpu.std" as ComputeClassId,
+            computeClass: "cpu" as ComputeClassId,
             sandboxMode: "none" as SandboxMode,
             lastSeenMs: Date.now(),
           });
@@ -4350,6 +4434,9 @@ async function handleMeshIngest(
         tenantId: z.string().optional(),
         resourceClass: z.enum(["cpu", "gpu"]),
         priority: z.number(),
+        // Capability constraints travel with the task so a peer cannot hand it to an under-spec agent.
+        minVramGb: z.number().positive().max(4096).optional(),
+        minMemoryGb: z.number().positive().max(4096).optional(),
       }),
       originCoordinatorId: z.string(),
       originCoordinatorUrl: z.string(),
@@ -6004,7 +6091,8 @@ export async function initCoordinator(): Promise<void> {
       const latestGpu = await storeRef.latestPriceEpoch("gpu");
       if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
       if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
-      latestRateEpoch = await storeRef.latestRateEpoch();
+      const storedEpoch = await storeRef.latestRateEpoch();
+      latestRateEpoch = storedEpoch ? normalizeRateEpoch(storedEpoch, rateOracleConfig.computeClasses) : null;
       syncOrderBookReference(latestRateEpoch);
       for (const t of await storeRef.listMarketTicks(7 * 24 * 60)) marketHistory.recordTick(t);
       for (const t of await storeRef.listMarketTrades(5_000)) marketHistory.recordTrade(t);

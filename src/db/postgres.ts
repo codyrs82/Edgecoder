@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
-import type { MarketOrder, MarketTick, MarketTrade } from "../economy/market-history.js";
+import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 function rowToPayout(row: Record<string, unknown>): PayoutRecord {
   return {
@@ -2435,6 +2435,7 @@ export class PostgresStore {
     );
   }
 
+  /** Rows under legacy class ids are mapped (and merged per minute) onto the current classes at read time; see market-history.ts. */
   async listMarketTicks(limitPerClass = 10_080): Promise<MarketTick[]> {
     const r = await this.pool.query(
       `SELECT * FROM (
@@ -2442,7 +2443,7 @@ export class PostgresStore {
        ) x WHERE rn <= $1 ORDER BY at_ms ASC`,
       [limitPerClass]
     );
-    return r.rows.map((row) => ({
+    return normalizeLegacyTicks(r.rows.map((row) => ({
       atMs: Number(row.at_ms),
       computeClass: row.compute_class,
       referenceMsat: Number(row.reference_msat),
@@ -2452,7 +2453,7 @@ export class PostgresStore {
       clearingMsat: Number(row.clearing_msat),
       agents: Number(row.agents),
       openTasks: Number(row.open_tasks)
-    }));
+    })));
   }
 
   async persistMarketTrade(t: MarketTrade): Promise<void> {
@@ -2465,7 +2466,7 @@ export class PostgresStore {
 
   async listMarketTrades(limit = 5_000): Promise<MarketTrade[]> {
     const r = await this.pool.query(`SELECT * FROM market_trades ORDER BY at_ms DESC LIMIT $1`, [limit]);
-    return r.rows.reverse().map((row) => ({
+    return normalizeLegacyTrades(r.rows.reverse().map((row) => ({
       subtaskId: row.subtask_id,
       taskId: row.task_id,
       agentId: row.agent_id,
@@ -2473,7 +2474,7 @@ export class PostgresStore {
       msatPerCredit: Number(row.msat_per_credit),
       credits: row.credits === null ? undefined : Number(row.credits),
       atMs: Number(row.at_ms)
-    }));
+    })));
   }
 
   async upsertMarketOrder(o: MarketOrder): Promise<void> {
@@ -2486,7 +2487,9 @@ export class PostgresStore {
 
   async listMarketOrders(): Promise<MarketOrder[]> {
     const r = await this.pool.query(`SELECT * FROM market_orders`);
-    return r.rows.map((row) => ({ accountId: row.account_id, side: row.side, computeClass: row.compute_class, msatPerCredit: Number(row.msat_per_credit), updatedAtMs: Number(row.updated_at_ms) }));
+    return r.rows
+      .map((row) => normalizeLegacyOrder({ accountId: row.account_id, side: row.side, computeClass: row.compute_class, msatPerCredit: Number(row.msat_per_credit), updatedAtMs: Number(row.updated_at_ms) }))
+      .filter((o): o is MarketOrder => o !== undefined);
   }
 
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {

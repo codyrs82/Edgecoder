@@ -6,8 +6,9 @@ import { portalAuthedPageHtml } from "./layout.js";
 
 /**
  * /portal/market: exchange-style view of compute priced in Bitcoin. One "pair" per compute
- * class (e.g. GPU 24 GB / BTC), quoted in msat per credit (one credit = one measured second on
- * that class). Candlesticks from the coordinator's minute ticks, a depth chart and order book
+ * class (CPU, Apple silicon, GPU, Datacenter GPU / BTC), quoted in msat per credit. The price is
+ * flat within a class; one credit is one measured second on the class's base tier and faster
+ * tiers mint more credits per second (the weight table under the order book). Candlesticks from the coordinator's minute ticks, a depth chart and order book
  * from live asks/bids, the trade tape, and a panel to place standing buy/sell orders.
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
@@ -60,7 +61,7 @@ export function registerMarketPage(app: FastifyInstance): void {
       <div class="mkt-stat"><span class="k">Best ask</span><span class="v ask" id="statAsk">–</span></div>
       <div class="mkt-stat"><span class="k">Spread</span><span class="v" id="statSpread">–</span></div>
       <div class="mkt-stat"><span class="k">Oracle ref</span><span class="v" id="statRef">–</span></div>
-      <div class="mkt-stat"><span class="k">Unit-hour</span><span class="v" id="statHour">–</span></div>
+      <div class="mkt-stat"><span class="k">Credit-hour</span><span class="v" id="statHour">–</span></div>
       <div class="mkt-stat"><span class="k">BTC/USD</span><span class="v" id="statBtc">–</span></div>
     </div>
 
@@ -70,7 +71,7 @@ export function registerMarketPage(app: FastifyInstance): void {
           <div class="mkt-toolbar">
             <span class="hint" style="margin-right:6px;">Interval</span>
             ${["1m", "5m", "15m", "1h", "4h", "1d"].map((i) => `<button data-interval="${i}" class="${i === "5m" ? "active" : ""}">${i}</button>`).join("")}
-            <span class="hint" style="margin-left:auto;" id="chartMeta">msat per credit · 1 credit = 1 measured second on this class</span>
+            <span class="hint" style="margin-left:auto;" id="chartMeta">msat per credit · 1 credit = 1 measured second on the base tier of this class</span>
           </div>
           <div id="priceChart" class="mkt-chart"></div>
           <div class="hint" style="margin:8px 0 4px;">Depth (cumulative agents asking / tasks bidding)</div>
@@ -92,6 +93,14 @@ export function registerMarketPage(app: FastifyInstance): void {
           <table>
             <tbody id="bidsBody"></tbody>
             <tfoot><tr><th>Price (msat/credit)</th><th>Tasks</th><th>Cum.</th></tr></tfoot>
+          </table>
+        </div>
+        <div class="card book" style="padding:12px;margin-top:12px;">
+          <h3 style="margin:0 0 4px;font-family:system-ui;">Hardware tiers</h3>
+          <div class="hint" id="tierExplain" style="font-family:system-ui;margin-bottom:6px;"></div>
+          <table>
+            <thead><tr><th style="text-align:left;">Tier</th><th>Credits/s</th><th>sats/h</th><th>Agents</th></tr></thead>
+            <tbody id="tiersBody"></tbody>
           </table>
         </div>
         <div class="card" style="padding:12px;margin-top:12px;">
@@ -119,10 +128,11 @@ export function registerMarketPage(app: FastifyInstance): void {
 
     const script = `
       (function () {
-        var state = { cls: "cpu.std", interval: "5m", side: "buy", classes: [], rates: null, chart: null, candles: null, volume: null, depth: null, askSeries: null, bidSeries: null, timer: null };
+        var state = { cls: "cpu", interval: "5m", side: "buy", classes: [], rates: null, chart: null, candles: null, volume: null, depth: null, askSeries: null, bidSeries: null, timer: null };
         var $ = function (id) { return document.getElementById(id); };
         var fmt = function (n, d) { return n === undefined || n === null ? "–" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 0 : d }); };
         var satsHour = function (msatPerCredit, cps) { return msatPerCredit / 1000 * cps * 3600; };
+        var esc = function (s) { return String(s).replace(/[&<>"']/g, function (ch) { return "&#" + ch.charCodeAt(0) + ";"; }); };
 
         function api(path) { return fetch("/portal/api/market" + path, { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error(path + " " + r.status); return r.json(); }); }
 
@@ -152,6 +162,7 @@ export function registerMarketPage(app: FastifyInstance): void {
         function renderTop(book, latest) {
           var spec = classSpec(state.cls) || { label: state.cls, creditsPerSecond: 1 };
           $("pairLabel").textContent = spec.label + " / BTC";
+          renderTiers(spec, book.referenceMsatPerCredit);
           var last = latest ? latest.midMsat : book.midMsatPerCredit;
           $("statLast").textContent = fmt(last) + " msat";
           $("statBid").textContent = book.bestBid === undefined ? "–" : fmt(book.bestBid);
@@ -161,7 +172,18 @@ export function registerMarketPage(app: FastifyInstance): void {
           $("statHour").textContent = fmt(satsHour(last, spec.creditsPerSecond), 1) + " sats/h";
           var btc = state.rates && state.rates.epoch ? state.rates.epoch.btcUsd : null;
           $("statBtc").textContent = btc ? "$" + fmt(btc) : "–";
-          $("orderPriceHint").textContent = "Reference " + fmt(book.referenceMsatPerCredit) + " msat/credit (" + fmt(satsHour(book.referenceMsatPerCredit, spec.creditsPerSecond), 1) + " sats per unit-hour)" + (btc ? " ≈ $" + fmt(satsHour(book.referenceMsatPerCredit, spec.creditsPerSecond) / 1e8 * btc, 4) + "/h" : "");
+          $("orderPriceHint").textContent = "Reference " + fmt(book.referenceMsatPerCredit) + " msat/credit (" + fmt(satsHour(book.referenceMsatPerCredit, spec.creditsPerSecond), 1) + " sats per credit-hour)" + (btc ? " ≈ $" + fmt(satsHour(book.referenceMsatPerCredit, spec.creditsPerSecond) / 1e8 * btc, 4) + "/h" : "");
+        }
+
+        // Weight table: one price per credit in the class; a tier's hour is the credit-hour × its weight.
+        function renderTiers(spec, refMsat) {
+          var tiers = spec.tiers || [];
+          if (!tiers.length) { $("tiersBody").innerHTML = "<tr><td colspan='4' class='hint' style='text-align:center'>one tier</td></tr>"; $("tierExplain").textContent = ""; return; }
+          var top = tiers[tiers.length - 1];
+          $("tierExplain").textContent = "Same price per credit for every tier. Faster hardware earns more credits per second, so one hour of " + top.label + " costs " + top.creditsPerSecond + " " + spec.label + " credit-hours. Tasks can require minVramGb / minMemoryGb; under-spec agents cannot fill them.";
+          $("tiersBody").innerHTML = tiers.map(function (t) {
+            return "<tr><td style='text-align:left;'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + t.creditsPerSecond + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + (t.agents || 0) + "</td></tr>";
+          }).join("");
         }
 
         function renderBook(book) {
@@ -208,7 +230,7 @@ export function registerMarketPage(app: FastifyInstance): void {
           var mine = (data.orders || []).map(function (o) { return o.side.toUpperCase() + " " + (o.msatPerCredit ? fmt(o.msatPerCredit) + " msat/credit" : "track reference") + " on " + o.computeClass; });
           $("myOrders").innerHTML = mine.length ? "<strong>Your standing orders:</strong> " + mine.join(" · ") : "No standing orders. Your tasks bid the reference + premium; your agents ask the reference.";
           var ag = data.agents || [];
-          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + a.agentId + " <span class='hint'>" + a.computeClass + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
+          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + a.agentId + " <span class='hint'>" + a.computeClass + (a.tier ? " · " + a.tier + " " + (a.creditsPerSecond || 1) + "×" : "") + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
         }
 
         function refresh() {
@@ -269,7 +291,7 @@ export function registerMarketPage(app: FastifyInstance): void {
         title: "EdgeCoder Portal | Market",
         activeTab: "market",
         heading: "Compute market",
-        subtitle: "Compute priced in Bitcoin: one pair per hardware class, quoted in msat per credit (one credit is one measured second on that class). Agents ask, tasks bid, trades clear at the ask.",
+        subtitle: "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.",
         content,
         script
       })

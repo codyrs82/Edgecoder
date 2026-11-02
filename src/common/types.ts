@@ -101,10 +101,14 @@ export interface TaskProjectMeta {
   tenantId?: string;
   resourceClass: ResourceClass;
   priority: number;
-  /** Compute class the requester wants ("any" = whatever is cheapest and matches resourceClass). */
+  /** Compute class the requester wants: cpu | apple | gpu | gpu.dc, or "any" (legacy ids are mapped on the way in). */
   computeClass?: string;
   /** Requester's maximum price in msat per credit; an agent may claim only if its ask is at or below it. */
   maxBidMsatPerCredit?: number;
+  /** Capability constraints: only an agent with at least this much discrete GPU VRAM (GB) may claim. */
+  minVramGb?: number;
+  /** Capability constraints: only an agent with at least this much system / unified memory (GB) may claim. */
+  minMemoryGb?: number;
 }
 
 export interface MeshPeerIdentity {
@@ -213,6 +217,12 @@ export interface ComputeContributionReport {
   timestampMs: number;
   /** Parameter count (billions) of the model that served the task; sizes the credit rate (0/undefined = plain code execution). */
   modelParamSizeB?: number;
+  /**
+   * Credits per measured second of the agent's hardware tier (src/economy/compute-classes.ts).
+   * Set by the coordinator; replaces the cpu/gpu base rate so credits × the class's flat price per
+   * credit is the tier's hour price. Undefined (BLE mesh, older callers) keeps the base rate.
+   */
+  hardwareWeight?: number;
 }
 
 export interface CreditTransaction {

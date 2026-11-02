@@ -167,7 +167,7 @@ with `EDGECODER_NOSTR_ANNOUNCE=1`.
 | `NOSTR_SECRET_KEY_HEX` | coordinator | derived | secp256k1 secret for the Nostr event signature |
 | `COORDINATOR_REGION` | coordinator | `FLY_REGION` or `unknown` | Region in the announcement |
 | `EDGECODER_COORDINATOR_PINS` | agent, portal | unset | Comma list of key fingerprints (sha256 hex of the PEM), PEMs or peerIds to prefer |
-| `EDGECODER_COMPUTE_CLASS` | agent | `cpu.std` | Compute class whose market price is scored |
+| `EDGECODER_COMPUTE_CLASS` | agent | `cpu` | Compute class whose market price is scored (`cpu`, `apple`, `gpu`, `gpu.dc`; legacy ids are mapped) |
 | `EDGECODER_DISCOVERY_TIMEOUT_MS` | agent | `4000` | Per-source and per-probe timeout |
 | `EDGECODER_DISCOVERY_MARGIN` | agent | `0.2` | Stickiness margin |
 | `PORTAL_DISCOVERY` | portal | `ordered` | `selector` enables the scored picker |

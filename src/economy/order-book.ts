@@ -1,18 +1,20 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import type { ComputeClassId } from "./compute-classes.js";
+import type { CapabilityConstraints, ComputeClassId, ComputeTierId } from "./compute-classes.js";
 
 /**
  * Per-class order book for compute, priced in msat per credit (one credit = one measured second
- * on the class, before model multipliers).
+ * on the class's base tier, before model multipliers; faster tiers mint more credits per second,
+ * so the price per credit is flat within a class). Four books: cpu, apple, gpu, gpu.dc.
  *
  * - Asks: each connected agent posts the minimum it will work for on its class. Default is the
  *   oracle reference for the class; an agent may set its own, and it moves with every heartbeat.
  * - Bids: a task carries the maximum its requester will pay per credit (default: the reference
  *   x a configurable premium so a default task clears at the reference).
- * - Matching happens at claim time: an agent may claim a task only if its ask <= the task's bid.
- *   The trade prices at the ask (the requester never pays more than its bid; the agent gets at
+ * - Matching happens at claim time: an agent may claim a task only if its ask <= the task's bid
+ *   and its hardware satisfies the bid's capability constraints (minVramGb / minMemoryGb; e.g.
+ *   a 30B task bids in gpu with minVramGb 24 and a 12 GB card cannot fill it). The trade prices at the ask (the requester never pays more than its bid; the agent gets at
  *   least its ask). The last N trade prices per class give the clearing price; the best ask and
  *   best bid give the spread.
  * - Repricing: the oracle recalibrates the reference daily (and on demand). Agents whose ask is
@@ -21,7 +23,21 @@ import type { ComputeClassId } from "./compute-classes.js";
  *   cheapest or stops matching, which is exactly the signal a market should send.
  */
 
-export interface Ask {
+/**
+ * The hardware behind an ask (from classifyHardware): what the constraints of a bid are checked against.
+ * Planned SLA / reputation score: add it here (set from uptime / completion history at register and
+ * heartbeat), add a matching `minReliability` to CapabilityConstraints, and check it in meetsCapability;
+ * gpu.dc admission can then require a score instead of only a datacenter part.
+ */
+export interface AskCapability {
+  tier?: ComputeTierId;
+  /** Credits per measured second (tier weight). */
+  creditsPerSecond?: number;
+  vramGb?: number;
+  memoryGb?: number;
+}
+
+export interface Ask extends AskCapability {
   agentId: string;
   computeClass: ComputeClassId;
   msatPerCredit: number;
@@ -30,11 +46,32 @@ export interface Ask {
   updatedAtMs: number;
 }
 
-export interface Bid {
+export interface Bid extends CapabilityConstraints {
   taskId: string;
   computeClass: ComputeClassId | "any";
+  /** The ceiling. For a default "any" bid: the highest class reference × premium at post time (informational; see premiumBps). */
   maxMsatPerCredit: number;
   createdAtMs: number;
+  /**
+   * Set on an "any" bid posted without an explicit price: its ceiling in each class is that
+   * class's live reference × (1 + premiumBps). Class prices differ ~35x (cpu vs gpu.dc), so one
+   * msat number cannot be a sensible default ceiling for every class.
+   */
+  premiumBps?: number;
+}
+
+/** Sanitize requester constraints: finite positive numbers only; anything else means "no constraint". */
+export function capabilityConstraints(input: CapabilityConstraints | undefined): CapabilityConstraints {
+  const ok = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
+  return { ...(ok(input?.minVramGb) ? { minVramGb: input!.minVramGb } : {}), ...(ok(input?.minMemoryGb) ? { minMemoryGb: input!.minMemoryGb } : {}) };
+}
+
+/** True when the hardware meets every constraint. Unknown capability never satisfies a constraint. */
+export function meetsCapability(cap: AskCapability | undefined, req: CapabilityConstraints | undefined): boolean {
+  const c = capabilityConstraints(req);
+  if (c.minVramGb !== undefined && !((cap?.vramGb ?? 0) >= c.minVramGb)) return false;
+  if (c.minMemoryGb !== undefined && !((cap?.memoryGb ?? 0) >= c.minMemoryGb)) return false;
+  return true;
 }
 
 export interface Trade {
@@ -69,6 +106,18 @@ export interface BookSnapshot {
   openTasks: number;
 }
 
+/**
+ * Audit econ#2: the msat value locked on an earn row is withdrawable as real sats, so a trade price
+ * (an agent's ask, which a self-dealing ask/bid pair controls) is clamped to [0.25x, 4x] the oracle
+ * reference of the class the credits are valued in. No trade => the reference. No reference => the
+ * trade price unclamped (no oracle epoch yet, e.g. offline dev).
+ */
+export function clampToClassReference(tradeMsatPerCredit: number | undefined, classRefMsatPerCredit: number | undefined): number | undefined {
+  const base = tradeMsatPerCredit ?? classRefMsatPerCredit;
+  if (base === undefined || classRefMsatPerCredit === undefined || !(classRefMsatPerCredit > 0)) return base;
+  return Math.min(Math.max(base, classRefMsatPerCredit * 0.25), classRefMsatPerCredit * 4);
+}
+
 export class ComputeOrderBook {
   private readonly asks = new Map<string, Ask>(); // by agentId
   private readonly bids = new Map<string, Bid>(); // by taskId
@@ -94,15 +143,25 @@ export class ComputeOrderBook {
     return this.reference.has(computeClass);
   }
 
-  /** Post or update an agent's ask. `msatPerCredit` undefined => track the class reference. */
-  postAsk(agentId: string, computeClass: ComputeClassId, msatPerCredit: number | undefined, nowMs = Date.now()): Ask {
+  /**
+   * Post or update an agent's ask. `msatPerCredit` undefined => track the class reference.
+   * `capability` omitted keeps the agent's previous capability on the same class (a re-priced ask
+   * is still the same hardware).
+   */
+  postAsk(agentId: string, computeClass: ComputeClassId, msatPerCredit: number | undefined, nowMs = Date.now(), capability?: AskCapability): Ask {
     const tracking = msatPerCredit === undefined || !Number.isFinite(msatPerCredit) || msatPerCredit <= 0;
+    const prev = this.asks.get(agentId);
+    const cap: AskCapability = capability ?? (prev && prev.computeClass === computeClass ? { tier: prev.tier, creditsPerSecond: prev.creditsPerSecond, vramGb: prev.vramGb, memoryGb: prev.memoryGb } : {});
     const ask: Ask = {
       agentId,
       computeClass,
       msatPerCredit: tracking ? this.referenceFor(computeClass) : Math.max(1, Math.round(msatPerCredit as number)),
       tracking,
-      updatedAtMs: nowMs
+      updatedAtMs: nowMs,
+      ...(cap.tier !== undefined ? { tier: cap.tier } : {}),
+      ...(cap.creditsPerSecond !== undefined ? { creditsPerSecond: cap.creditsPerSecond } : {}),
+      ...(cap.vramGb !== undefined ? { vramGb: cap.vramGb } : {}),
+      ...(cap.memoryGb !== undefined ? { memoryGb: cap.memoryGb } : {})
     };
     this.asks.set(agentId, ask);
     return ask;
@@ -116,18 +175,44 @@ export class ComputeOrderBook {
     return this.asks.get(agentId);
   }
 
-  /** Register a task's bid. `maxMsatPerCredit` undefined => reference × (1 + defaultPremiumBps). */
-  postBid(taskId: string, computeClass: ComputeClassId | "any", maxMsatPerCredit: number | undefined, defaultPremiumBps = 0, nowMs = Date.now()): Bid {
+  /**
+   * Register a task's bid. `maxMsatPerCredit` undefined => reference × (1 + defaultPremiumBps).
+   * `constraints` (minVramGb / minMemoryGb) restrict which asks can fill it; default none.
+   */
+  postBid(
+    taskId: string,
+    computeClass: ComputeClassId | "any",
+    maxMsatPerCredit: number | undefined,
+    defaultPremiumBps = 0,
+    nowMs = Date.now(),
+    constraints?: CapabilityConstraints
+  ): Bid {
     let max: number;
-    if (maxMsatPerCredit !== undefined && Number.isFinite(maxMsatPerCredit) && maxMsatPerCredit > 0) {
-      max = Math.round(maxMsatPerCredit);
+    const explicit = maxMsatPerCredit !== undefined && Number.isFinite(maxMsatPerCredit) && maxMsatPerCredit > 0;
+    if (explicit) {
+      max = Math.round(maxMsatPerCredit as number);
     } else {
       const ref = computeClass === "any" ? Math.max(...[...this.reference.values()], 1) : this.referenceFor(computeClass);
       max = Math.max(1, Math.round(ref * (1 + defaultPremiumBps / 10_000)));
     }
-    const bid: Bid = { taskId, computeClass, maxMsatPerCredit: max, createdAtMs: nowMs };
+    const bid: Bid = {
+      taskId,
+      computeClass,
+      maxMsatPerCredit: max,
+      createdAtMs: nowMs,
+      ...(computeClass === "any" && !explicit ? { premiumBps: defaultPremiumBps } : {}),
+      ...capabilityConstraints(constraints)
+    };
     this.bids.set(taskId, bid);
     return bid;
+  }
+
+  /** The most `bid` pays per credit on `computeClass`: class-relative for a default "any" bid, else its fixed ceiling. */
+  bidCeilingFor(bid: Bid, computeClass: ComputeClassId): number {
+    if (bid.computeClass === "any" && bid.premiumBps !== undefined) {
+      return Math.max(1, Math.round(this.referenceFor(computeClass) * (1 + bid.premiumBps / 10_000)));
+    }
+    return bid.maxMsatPerCredit;
   }
 
   removeBid(taskId: string): void {
@@ -152,16 +237,20 @@ export class ComputeOrderBook {
 
   /**
    * May `agentId` take `taskId`? True when the task has no bid (legacy) or the agent's ask is
-   * within the bid and the class matches (or the bid accepts any class). Returns the trade
-   * price (the ask) when it can.
+   * within the bid, the class matches (or the bid accepts any class) and the agent's hardware
+   * meets the bid's capability constraints. Returns the trade price (the ask) when it can.
    */
-  canMatch(agentId: string, taskId: string): { ok: true; msatPerCredit: number; computeClass: ComputeClassId } | { ok: false; reason: "no_ask" | "class_mismatch" | "ask_above_bid" } {
+  canMatch(
+    agentId: string,
+    taskId: string
+  ): { ok: true; msatPerCredit: number; computeClass: ComputeClassId } | { ok: false; reason: "no_ask" | "class_mismatch" | "below_min_spec" | "ask_above_bid" } {
     const ask = this.asks.get(agentId);
     if (!ask) return { ok: false, reason: "no_ask" };
     const bid = this.bids.get(taskId);
     if (!bid) return { ok: true, msatPerCredit: ask.msatPerCredit, computeClass: ask.computeClass };
     if (bid.computeClass !== "any" && bid.computeClass !== ask.computeClass) return { ok: false, reason: "class_mismatch" };
-    if (ask.msatPerCredit > bid.maxMsatPerCredit) return { ok: false, reason: "ask_above_bid" };
+    if (!meetsCapability(ask, bid)) return { ok: false, reason: "below_min_spec" };
+    if (ask.msatPerCredit > this.bidCeilingFor(bid, ask.computeClass)) return { ok: false, reason: "ask_above_bid" };
     return { ok: true, msatPerCredit: ask.msatPerCredit, computeClass: ask.computeClass };
   }
 
@@ -183,7 +272,7 @@ export class ComputeOrderBook {
     const ref = this.referenceFor(computeClass);
     const askLevels = levels([...this.asks.values()].filter((a) => a.computeClass === computeClass).map((a) => a.msatPerCredit), "asc");
     const bidLevels = levels(
-      [...this.bids.values()].filter((b) => b.computeClass === computeClass || b.computeClass === "any").map((b) => b.maxMsatPerCredit),
+      [...this.bids.values()].filter((b) => b.computeClass === computeClass || b.computeClass === "any").map((b) => this.bidCeilingFor(b, computeClass)),
       "desc"
     );
     const bestAsk = askLevels[0]?.msatPerCredit;

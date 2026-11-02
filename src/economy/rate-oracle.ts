@@ -4,11 +4,17 @@
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import {
+  BASE_TIER,
   COMPUTE_CLASS_IDS,
+  LEGACY_COMPUTE_CLASSES,
   computeClassesFromEnv,
+  isLegacyComputeClassId,
+  normalizeComputeClass,
   satsPerCreditForClass,
+  tierSpec,
   type ComputeClassId,
-  type ComputeClassSpec
+  type ComputeClassSpec,
+  type ComputeTierId
 } from "./compute-classes.js";
 
 /**
@@ -40,8 +46,11 @@ export interface JsonNumberSource {
   path: string;
   /** For compute sources: which resource class the number prices (USD per hour). */
   resourceClass?: "cpu" | "gpu";
-  /** For compute sources: the exact compute class this USD/hour prices (overrides that class's reference). */
-  computeClass?: ComputeClassId;
+  /**
+   * For compute sources: the class whose reference this USD/hour sets (base-tier hour). A tier or
+   * legacy id (e.g. "gpu.c24") prices that tier's hour instead and is divided by the tier weight.
+   */
+  computeClass?: string;
 }
 
 export const DEFAULT_BTC_USD_SOURCES: JsonNumberSource[] = [
@@ -74,18 +83,31 @@ export interface RateOracleConfig {
   /** Compute and report hashprice from mempool.space (informational). */
   hashpriceEnabled: boolean;
   mempoolBaseUrl: string;
-  /** Per-class reference USD/hour and credits/second (src/economy/compute-classes.ts). */
+  /** Per-class reference USD/hour and tier weights (src/economy/compute-classes.ts). */
   computeClasses: Record<ComputeClassId, ComputeClassSpec>;
+}
+
+export interface TierRate {
+  tier: ComputeTierId;
+  /** Credits per measured second on this tier (its weight). */
+  creditsPerSecond: number;
+  /** Sats for one hour of this tier: satsPerUnitHour × creditsPerSecond. */
+  satsPerHour: number;
 }
 
 export interface ClassRate {
   computeClass: ComputeClassId;
+  /** USD per credit-hour (base-tier hour) of the class. */
   usdPerHour: number;
+  /** Sats per credit-hour (3600 credits; one hour of the base tier). */
   satsPerUnitHour: number;
+  /** Flat within the class. */
   satsPerCredit: number;
   msatPerCredit: number;
   /** "reference" (configured) or the name of the live source that set usdPerHour. */
   source: string;
+  /** Per-tier hour prices at this rate. Absent on epochs written before the four-class model. */
+  tiers?: TierRate[];
 }
 
 export const DEFAULT_RATE_ORACLE_CONFIG: RateOracleConfig = {
@@ -145,7 +167,7 @@ export interface RateEpoch {
   /** "ok": fresh market data. "carried": sources failed, previous epoch re-stamped. "fallback": static BTC_USD_FALLBACK. */
   status: "ok" | "carried" | "fallback";
   hashprice?: HashpriceSignal;
-  /** Sats per credit for every compute class (CPU tiers, Apple silicon, GPU VRAM tiers). */
+  /** Sats per credit for every compute class (cpu, apple, gpu, gpu.dc). See normalizeRateEpoch for epochs persisted under the legacy ids. */
   classRates: Partial<Record<ComputeClassId, ClassRate>>;
 }
 
@@ -236,8 +258,12 @@ export function computeRateEpoch(
     }
   }
 
-  const cpuQuotes = inputs.computeQuotes.filter((q) => (q as SourceQuote & { resourceClass?: string }).resourceClass !== "gpu");
-  const gpuQuotes = inputs.computeQuotes.filter((q) => (q as SourceQuote & { resourceClass?: string }).resourceClass === "gpu");
+  // The resource-class medians price a vCPU-hour and a 4090-class GPU-hour (the legacy epoch fields).
+  // A source tagged with another class or tier (e.g. gpu.dc) prices something else and only feeds its class below.
+  const tagOf = (q: SourceQuote) => (q as SourceQuote & { computeClass?: string }).computeClass;
+  const resOf = (q: SourceQuote) => (q as SourceQuote & { resourceClass?: string }).resourceClass;
+  const cpuQuotes = inputs.computeQuotes.filter((q) => resOf(q) !== "gpu" && [undefined, "cpu", "cpu.std"].includes(tagOf(q)));
+  const gpuQuotes = inputs.computeQuotes.filter((q) => resOf(q) === "gpu" && [undefined, "gpu.c24"].includes(tagOf(q)));
   const cpuLive = agreeingMedian(cpuQuotes, cfg.maxSourceSpreadPct * 4, 1).value;
   const gpuLive = agreeingMedian(gpuQuotes, cfg.maxSourceSpreadPct * 4, 1).value;
   const usdPerCpuHour = cpuLive ?? cfg.usdPerCpuHourReference;
@@ -251,22 +277,33 @@ export function computeRateEpoch(
   const satsPerCredit = cpu.value / 3600;
 
   // Per-class rates: a live source tagged with a computeClass overrides that class's reference.
+  // Untagged cpu sources price the cpu class; untagged gpu sources price a 4090-class hour
+  // (gpu.c24 tier), so the gpu class reference is that hour over the gpu.c24 weight.
   const classRates: Partial<Record<ComputeClassId, ClassRate>> = {};
-  const classMoveFactor = previous && status === "ok" && rawCpu > 0 ? cpu.value / rawCpu : 1; // same clamp ratio as cpu.std
+  const classMoveFactor = previous && status === "ok" && rawCpu > 0 ? cpu.value / rawCpu : 1; // same clamp ratio as cpu
   for (const id of COMPUTE_CLASS_IDS) {
     const spec = cfg.computeClasses[id];
     if (!spec) continue;
-    const live = inputs.computeQuotes.filter((q) => (q as SourceQuote & { computeClass?: string }).computeClass === id);
+    const live = inputs.computeQuotes
+      .filter((q) => normalizeComputeClass((q as SourceQuote & { computeClass?: string }).computeClass) === id)
+      .map((q) => {
+        const tag = (q as SourceQuote & { computeClass?: string }).computeClass as string;
+        const weight = tag === id ? 1 : (tierSpec(cfg.computeClasses, tag as ComputeTierId)?.creditsPerSecond ?? 1);
+        return typeof q.value === "number" ? { ...q, value: q.value / weight } : q;
+      });
     const liveValue = agreeingMedian(live, cfg.maxSourceSpreadPct * 4, 1).value;
-    const usdPerHour = liveValue ?? (id === "cpu.std" ? usdPerCpuHour : id === "gpu.c24" ? usdPerGpuHour : spec.usdPerHourReference);
-    const perCredit = Number((satsPerCreditForClass(spec, usdPerHour, btcUsd, cfg.networkMarkupBps) * classMoveFactor).toFixed(9));
+    const c24 = tierSpec(cfg.computeClasses, "gpu.c24")?.creditsPerSecond ?? 1;
+    const usdPerHour = Number((liveValue ?? (id === "cpu" ? usdPerCpuHour : id === "gpu" ? usdPerGpuHour / c24 : spec.usdPerHourReference)).toFixed(9));
+    const perCredit = Number((satsPerCreditForClass(usdPerHour, btcUsd, cfg.networkMarkupBps) * classMoveFactor).toFixed(9));
+    const satsPerUnitHour = Number((perCredit * 3600).toFixed(3));
     classRates[id] = {
       computeClass: id,
       usdPerHour,
-      satsPerUnitHour: Number((perCredit * spec.creditsPerSecond * 3600).toFixed(3)),
+      satsPerUnitHour,
       satsPerCredit: perCredit,
       msatPerCredit: Math.max(1, Math.round(perCredit * 1000)),
-      source: liveValue !== undefined ? (live.find((q) => q.ok)?.name ?? "live") : "reference"
+      source: liveValue !== undefined ? (live.find((q) => q.ok)?.name ?? "live") : "reference",
+      tiers: tierRates(spec, satsPerUnitHour)
     };
   }
 
@@ -289,6 +326,47 @@ export function computeRateEpoch(
     ...(inputs.hashprice ? { hashprice: inputs.hashprice } : {}),
     classRates
   };
+}
+
+function tierRates(spec: ComputeClassSpec, satsPerUnitHour: number): TierRate[] {
+  return spec.tiers.map((t) => ({ tier: t.id, creditsPerSecond: t.creditsPerSecond, satsPerHour: Number((satsPerUnitHour * t.creditsPerSecond).toFixed(3)) }));
+}
+
+/**
+ * Epochs persisted before the four-class model carry classRates keyed by the nine legacy ids,
+ * priced per old credit. Derive the current classes from each class's legacy base tier (cpu.std,
+ * apple.m, gpu.c8, gpu.dc40), whose hour is exactly the new class reference, so the accrual clamp
+ * and the order book have a reference per current class from the moment the coordinator boots.
+ * Pure: returns a copy, the stored row is never rewritten. Current epochs pass through.
+ */
+export function normalizeRateEpoch(epoch: RateEpoch, classes: Record<ComputeClassId, ComputeClassSpec> = DEFAULT_RATE_ORACLE_CONFIG.computeClasses): RateEpoch {
+  const stored = (epoch.classRates ?? {}) as Record<string, ClassRate | undefined>;
+  const hasLegacy = Object.keys(stored).some((k) => isLegacyComputeClassId(k));
+  if (!hasLegacy) return epoch;
+  const classRates: Partial<Record<ComputeClassId, ClassRate>> = {};
+  for (const id of COMPUTE_CLASS_IDS) {
+    const current = stored[id];
+    if (current) {
+      classRates[id] = current;
+      continue;
+    }
+    const base = BASE_TIER[id];
+    const old = isLegacyComputeClassId(base) ? stored[base] : undefined;
+    if (!old || !Number.isFinite(old.satsPerCredit)) continue;
+    // Old per-credit × old credits/s = sats per base-tier second = new per-credit (base weight 1).
+    const perCredit = Number((old.satsPerCredit * LEGACY_COMPUTE_CLASSES[base as keyof typeof LEGACY_COMPUTE_CLASSES].creditsPerSecond).toFixed(9));
+    const satsPerUnitHour = Number((perCredit * 3600).toFixed(3));
+    classRates[id] = {
+      computeClass: id,
+      usdPerHour: old.usdPerHour,
+      satsPerUnitHour,
+      satsPerCredit: perCredit,
+      msatPerCredit: Math.max(1, Math.round(perCredit * 1000)),
+      source: old.source,
+      tiers: classes[id] ? tierRates(classes[id], satsPerUnitHour) : undefined
+    };
+  }
+  return { ...epoch, classRates };
 }
 
 export function isRateEpochStale(epoch: RateEpoch | null | undefined, cfg: RateOracleConfig, nowMs: number = Date.now()): boolean {
@@ -422,10 +500,11 @@ export function rateOracleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): R
         throw new Error(`[rate-oracle] RATE_COMPUTE_SOURCES_JSON[${i}] needs name, https url and path`);
       }
       const cc = (s as { computeClass?: string }).computeClass;
-      if (cc !== undefined && !(COMPUTE_CLASS_IDS as string[]).includes(cc)) {
-        throw new Error(`[rate-oracle] RATE_COMPUTE_SOURCES_JSON[${i}].computeClass must be one of ${COMPUTE_CLASS_IDS.join(", ")}`);
+      const isTier = cc !== undefined && cc !== normalizeComputeClass(cc) && tierSpec(DEFAULT_RATE_ORACLE_CONFIG.computeClasses, cc as ComputeTierId) !== undefined;
+      if (cc !== undefined && !(COMPUTE_CLASS_IDS as string[]).includes(cc) && !isTier) {
+        throw new Error(`[rate-oracle] RATE_COMPUTE_SOURCES_JSON[${i}].computeClass must be one of ${COMPUTE_CLASS_IDS.join(", ")} (or a tier id such as gpu.c24)`);
       }
-      return { name: s.name, url: s.url, path: s.path, resourceClass: s.resourceClass === "gpu" ? "gpu" : "cpu", ...(cc ? { computeClass: cc as ComputeClassId } : {}) };
+      return { name: s.name, url: s.url, path: s.path, resourceClass: s.resourceClass === "gpu" ? "gpu" : "cpu", ...(cc ? { computeClass: cc } : {}) };
     });
   }
   let btcUsdSources = DEFAULT_BTC_USD_SOURCES;

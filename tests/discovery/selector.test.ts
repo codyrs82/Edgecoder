@@ -60,6 +60,21 @@ describe("probeCoordinator", () => {
     expect(f.calls.some((u) => u.includes("computeClass=gpu.c8"))).toBe(true);
   });
 
+  it("defaults to the cpu market and matches a legacy class id against the mapped book", async () => {
+    const calls: string[] = [];
+    const f = fakeFetch({ "https://a": { price: 900 } }, { offset: 0 }, calls);
+    await probeCoordinator("https://a/", { fetch: f.fetch, now: f.now, meshToken: "t" });
+    expect(calls.some((u) => u.includes("computeClass=cpu") && !u.includes("cpu.std"))).toBe(true);
+    // A new coordinator answers ?computeClass=gpu.c8 with the gpu book (and may list others first).
+    const mapped: FetchLike = async (url) =>
+      url.endsWith("/health/runtime")
+        ? { status: 200, json: async () => ({ ok: true, coordinator: { queued: 0, agents: 1 } }) }
+        : url.includes("/economy/market/book")
+          ? { status: 200, json: async () => ({ books: [{ computeClass: "cpu", clearingMsatPerCredit: 9 }, { computeClass: "gpu", clearingMsatPerCredit: 33 }] }) }
+          : { status: 404, json: async () => ({}) };
+    expect((await probeCoordinator("https://b", { fetch: mapped, meshToken: "t", computeClass: "gpu.c8" })).priceMsatPerCredit).toBe(33);
+  });
+
   it("works without a token (capacity/price unknown) and reports unreachable or unhealthy nodes", async () => {
     const f = fakeFetch({ "https://a": { queued: 1 }, "https://b": { down: true }, "https://c": { healthOk: false } }, { offset: 0 });
     expect(await probeCoordinator("https://a", { fetch: f.fetch, now: f.now })).toMatchObject({ healthy: true, queued: 1, capacity: null, priceMsatPerCredit: null });

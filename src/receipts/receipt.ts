@@ -31,7 +31,13 @@ export interface WorkReceipt {
   agentPublicKeyPem: string;
   coordinatorId: string;
   coordinatorPublicKeyPem: string;
-  /** Resource class the work was priced as ("cpu" | "gpu" today). */
+  /**
+   * Class the credits were valued in. Free string inside the signed body, never rewritten:
+   * receipts issued since the four-class model carry cpu | apple | gpu | gpu.dc; earlier ones
+   * carry the resource class ("cpu" | "gpu") they were priced as. Readers that aggregate by
+   * class map legacy ids with normalizeComputeClass (src/economy/compute-classes.ts); note an
+   * old "gpu" receipt means resource class gpu (any GPU or Apple silicon), not the consumer-GPU class.
+   */
   computeClass: string;
   credits: number;
   /** Millisatoshi value of the credits at the price epoch in force when they accrued. */

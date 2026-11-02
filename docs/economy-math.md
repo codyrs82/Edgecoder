@@ -18,18 +18,22 @@ Three units appear in the code and they are not interchangeable:
 (`accrueResultCredits`).
 
 ```
-credits = seconds × baseRate(resourceClass) × quality × loadMultiplier(load)
+credits = seconds × weight(tier) × modelSize × quality × loadMultiplier(load)
 ```
 
 - `seconds` is **server-measured**: `creditedDurationMs = min(reported, now − claimedAt, subtask.timeoutMs)`
   (`src/swarm/result-integrity.ts`). An agent cannot report more time than the coordinator observed.
-- `baseRate` = 1.0 credit/s (cpu) or 4.0 credit/s (gpu).
+- `weight(tier)` = credits per measured second of the agent's hardware tier inside its compute
+  class (1 on each class's base tier; see "Compute classes" below). Callers without a tier (the
+  BLE mesh path) fall back to `baseRate` = 1.0 credit/s (cpu) or 4.0 credit/s (gpu).
+- `modelSize` = 1.0 (≤3B / plain code) … 4.0 (>35B).
 - `quality` = 1.0 for an accepted result, clamped to [0.5, 1.5]. Nothing sets it to anything else today.
 - `loadMultiplier` from `queued / activeAgents`: 0.8 (≤ 0.5), 1.0 (≤ 1), 1.25 (≤ 2), 1.6 (> 2); 1.6 when no agents.
 - **Failed results earn 0** (#38). Rounded to 3 decimals. Idempotent per subtask via the report id.
 
-Example: a 12.4 s CPU subtask with 3 queued tasks and 4 agents (pressure 0.75 → 1.0) earns
-`12.4 × 1.0 × 1.0 × 1.0 = 12.400` credits.
+Example: a 12.4 s CPU subtask on a standard CPU with 3 queued tasks and 4 agents (pressure
+0.75 → 1.0) earns `12.4 × 1.0 × 1.0 × 1.0 = 12.400` credits; the same run on a 24 GB GPU (weight
+3.5) earns 43.4 GPU credits.
 
 Submitting a task costs a flat **1 credit** (`spendCredits(…, 1, "task_submit")`), refunded once if
 the task fails permanently (#160). The cost does not depend on the model, prompt size or
@@ -102,13 +106,27 @@ A credit is a measured second, but seconds are priced by what ran them. Three fa
 dynamic:
 
 1. **Compute class** (`src/economy/compute-classes.ts`). Agents report a hardware profile at
-   registration (cores, RAM, arch, platform, GPU vendor/model/VRAM) and are classified into
-   `cpu.std`, `cpu.hi`, `apple.m`, `apple.m.hi`, `gpu.c8`, `gpu.c16`, `gpu.c24`, `gpu.dc40` or
-   `gpu.dc80`. Each class has a reference USD/hour (0.02 for a commodity CPU up to 1.80 for an
-   H100-class GPU) and a credits-per-second rate (1 to 10). The oracle converts every class to
-   sats per credit daily so that one unit-hour of the class is worth its market price:
-   `satsPerCredit = usdPerHour / btcUsd × 1e8 × (1 + markup) / (creditsPerSecond × 3600)`.
-   Live sources tagged with a `computeClass` override that class's reference.
+   registration (cores, RAM, arch, platform, GPU vendor/model/VRAM) and are classified into one
+   of four class-markets and a tier inside it. Each class has ONE reference (the base tier's
+   USD/hour), one order book and one clearing price; faster tiers mint more credits per second:
+
+   | class | reference | tiers (credits per second) |
+   |---|---|---|
+   | `cpu` | $0.02/h | `cpu.std` 1, `cpu.hi` (≥ 32 cores or ≥ 128 GB) 4 |
+   | `apple` | $0.12/h | `apple.m` (< 32 GB) 1, `apple.m.hi` (≥ 32 GB) 2.5 |
+   | `gpu` | $0.10/h | `gpu.c8` (≤ 8 GB) 1, `gpu.c16` 2, `gpu.c24` 3.5, `gpu.c32` (> 24 GB consumer) 4.5 |
+   | `gpu.dc` | $0.70/h | `gpu.dc40` (≤ 48 GB) 1, `gpu.dc80` (> 48 GB) 2.9 |
+
+   `satsPerCredit = usdPerHour(class) / btcUsd × 1e8 × (1 + markup) / 3600`, flat within the
+   class, and a tier's hour is `satsPerCredit × 3600 × weight` (a 24 GB GPU-hour is 3.5 GPU
+   credit-hours). Live sources tagged with a `computeClass` override that class's reference (a
+   tier id prices that tier's hour and is divided by its weight); weights are overridable with
+   `COMPUTE_TIER_WEIGHTS_JSON`, references with `COMPUTE_REFERENCE_USD_PER_HOUR_JSON`.
+   Capability needs are bid constraints, not markets: a task may set `minVramGb` / `minMemoryGb`
+   and only agents that meet them can claim it. The nine pre-2026-11 class ids (`cpu.std` …
+   `gpu.dc80`) are the tier ids now; APIs accept them and map them onto their class, history
+   stored under them is mapped at read time, and signed receipts that carry them are never
+   rewritten.
 2. **Model profile** (`src/credits/pricing.ts`). The per-second rate is multiplied by the size of
    the model that served the task (≤3B 1.0, ≤10B 1.5, ≤35B 2.5, >35B 4.0) and the sats value by
    its modality (vision +25 %, thinking +10 %), from the catalog's capability labels.

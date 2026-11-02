@@ -34,9 +34,15 @@ export function modelSizeMultiplier(modelParamSizeB: number | undefined): number
   return 4.0;
 }
 
-/** Credits per second for a compute class and model size (before quality and load). */
-export function creditRatePerSecond(resourceClass: ResourceClass, modelParamSizeB?: number): number {
-  return baseRatePerSecond(resourceClass) * modelSizeMultiplier(modelParamSizeB);
+/**
+ * Credits per second for a resource class and model size (before quality and load). With a
+ * `hardwareWeight` (the agent's tier creditsPerSecond, compute-classes.ts) the weight replaces the
+ * cpu/gpu base rate: the hardware dimension is priced once, by the class, and the weight carries
+ * the throughput within it.
+ */
+export function creditRatePerSecond(resourceClass: ResourceClass, modelParamSizeB?: number, hardwareWeight?: number): number {
+  const base = typeof hardwareWeight === "number" && Number.isFinite(hardwareWeight) && hardwareWeight > 0 ? hardwareWeight : baseRatePerSecond(resourceClass);
+  return base * modelSizeMultiplier(modelParamSizeB);
 }
 
 /**
@@ -62,14 +68,14 @@ export function estimateReserveCredits(input: {
  * must be server-measured (coordinator: creditedDurationMs, #44), never self-reported.
  */
 export function contributionCredits(
-  report: { resourceClass: ResourceClass; cpuSeconds: number; gpuSeconds: number; qualityScore: number; success: boolean; modelParamSizeB?: number },
+  report: { resourceClass: ResourceClass; cpuSeconds: number; gpuSeconds: number; qualityScore: number; success: boolean; modelParamSizeB?: number; hardwareWeight?: number },
   load: LoadSnapshot
 ): number {
   if (!report.success) return 0;
   const seconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
   if (!Number.isFinite(seconds) || seconds <= 0) return 0;
   const quality = Math.max(0.5, Math.min(1.5, Number.isFinite(report.qualityScore) ? report.qualityScore : 1));
-  return Number((seconds * creditRatePerSecond(report.resourceClass, report.modelParamSizeB) * quality * loadMultiplier(load)).toFixed(3));
+  return Number((seconds * creditRatePerSecond(report.resourceClass, report.modelParamSizeB, report.hardwareWeight) * quality * loadMultiplier(load)).toFixed(3));
 }
 
 /** Split gross credits into the worker's share and the network fee (basis points) that funds infrastructure hosts. */

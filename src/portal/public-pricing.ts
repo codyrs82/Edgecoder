@@ -2,24 +2,36 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /*
- * Public pricing for the marketing page: sats per unit-hour of every compute class, with the USD
- * conversion, taken from the coordinator's current rate epoch (docs/economy-math.md). The page is
+ * Public pricing for the marketing page: sats per credit-hour of the four compute classes and
+ * per hour of every hardware tier (credit-hour × tier weight), with the USD conversion, taken from
+ * the coordinator's current rate epoch (docs/economy-math.md). The page is
  * server-rendered (no inline script under the CSP), so the portal fetches the epoch with its
  * service token and caches it briefly. Without a coordinator the reference USD figures are shown
  * and the sats column says so.
  */
 import { request } from "undici";
-import { DEFAULT_COMPUTE_CLASSES, type ComputeClassId } from "../economy/compute-classes.js";
+import { BASE_TIER, DEFAULT_COMPUTE_CLASSES, type ComputeClassId, type ComputeTierId } from "../economy/compute-classes.js";
+
+export interface PublicTierPrice {
+  id: ComputeTierId;
+  label: string;
+  /** Credits per measured second: one hour of this tier is this many credit-hours of the class. */
+  creditsPerSecond: number;
+  satsPerHour?: number;
+  usdPerHour: number;
+}
 
 export interface PublicClassPrice {
   id: ComputeClassId;
   label: string;
   hardware: string;
-  /** Sats for one hour of one unit of this class; undefined when no rate epoch is available. */
+  /** Sats per credit-hour (one hour of the base tier); undefined when no rate epoch is available. */
   satsPerHour?: number;
   usdPerHour: number;
   /** "reference" or the live source name from the oracle. */
   source: string;
+  /** The weight table, base tier first. */
+  tiers: PublicTierPrice[];
 }
 
 export interface PublicPricing {
@@ -33,25 +45,34 @@ export interface PublicPricing {
 
 /** Hardware descriptions shown next to each class on the public page. */
 export const CLASS_HARDWARE: Record<ComputeClassId, string> = {
-  "cpu.std": "Commodity cores, < 32 GB",
-  "cpu.hi": "≥ 32 cores or ≥ 128 GB",
-  "apple.m": "Apple silicon, < 32 GB unified memory",
-  "apple.m.hi": "Apple silicon, ≥ 32 GB unified memory",
-  "gpu.c8": "Consumer GPU, ≤ 8 GB VRAM",
-  "gpu.c16": "Consumer GPU, ≤ 16 GB VRAM",
-  "gpu.c24": "Consumer GPU, ≤ 24 GB VRAM (RTX 4090 class)",
-  "gpu.dc40": "Datacenter GPU, ≤ 48 GB",
-  "gpu.dc80": "Datacenter GPU, > 48 GB (H100 class)"
+  cpu: "x86 / ARM cores, by core count and memory",
+  apple: "M-series Macs, by unified memory",
+  gpu: "Consumer cards, by VRAM",
+  "gpu.dc": "A6000 / L40 / A100 / H100, a separate reliability tier"
 };
 
 /** The four pairs shown in the hero ticker, in order. */
-export const HERO_CLASSES: ComputeClassId[] = ["cpu.std", "apple.m.hi", "gpu.c24", "gpu.dc80"];
+export const HERO_CLASSES: ComputeClassId[] = ["cpu", "apple", "gpu", "gpu.dc"];
 
 /** Minimal view of a rate epoch (the coordinator's /economy/rates/current response). */
 export interface RateEpochView {
   btcUsd: number;
   createdAtMs: number;
-  classRates: Partial<Record<string, { usdPerHour: number; satsPerUnitHour: number; source: string }>>;
+  classRates: Partial<Record<string, { usdPerHour: number; satsPerUnitHour: number; source: string; tiers?: Array<{ tier: string; creditsPerSecond: number; satsPerHour: number }> }>>;
+}
+
+function tiersOf(id: ComputeClassId, usdPerHour: number, satsPerUnitHour: number | undefined, live?: Array<{ tier: string; creditsPerSecond: number }>): PublicTierPrice[] {
+  return DEFAULT_COMPUTE_CLASSES[id].tiers.map((t) => {
+    // The coordinator's weights win (they are env-overridable); the defaults label the tiers.
+    const weight = live?.find((x) => x.tier === t.id)?.creditsPerSecond ?? t.creditsPerSecond;
+    return {
+      id: t.id,
+      label: t.label,
+      creditsPerSecond: weight,
+      satsPerHour: satsPerUnitHour === undefined ? undefined : Number((satsPerUnitHour * weight).toFixed(3)),
+      usdPerHour: Number((usdPerHour * weight).toFixed(6))
+    };
+  });
 }
 
 export function referencePricing(): PublicPricing {
@@ -62,21 +83,28 @@ export function referencePricing(): PublicPricing {
       label: spec.label,
       hardware: CLASS_HARDWARE[spec.id],
       usdPerHour: spec.usdPerHourReference,
-      source: "reference"
+      source: "reference",
+      tiers: tiersOf(spec.id, spec.usdPerHourReference, undefined)
     }))
   };
 }
 
+/**
+ * A coordinator still on the nine-class build keys its rates by the legacy ids; the legacy base
+ * tier (cpu.std, apple.m, gpu.c8, gpu.dc40) has exactly the class's credit-hour, so it stands in.
+ */
 export function pricingFromRateEpoch(epoch: RateEpochView): PublicPricing {
   const classes: PublicClassPrice[] = Object.values(DEFAULT_COMPUTE_CLASSES).map((spec) => {
-    const rate = epoch.classRates[spec.id];
+    const rate = epoch.classRates[spec.id] ?? epoch.classRates[BASE_TIER[spec.id]];
+    const usdPerHour = rate ? rate.usdPerHour : spec.usdPerHourReference;
     return {
       id: spec.id,
       label: spec.label,
       hardware: CLASS_HARDWARE[spec.id],
       satsPerHour: rate ? rate.satsPerUnitHour : undefined,
-      usdPerHour: rate ? rate.usdPerHour : spec.usdPerHourReference,
-      source: rate ? rate.source : "reference"
+      usdPerHour,
+      source: rate ? rate.source : "reference",
+      tiers: tiersOf(spec.id, usdPerHour, rate?.satsPerUnitHour, rate?.tiers)
     };
   });
   return { mode: "live", btcUsd: epoch.btcUsd, asOfMs: epoch.createdAtMs, classes };
