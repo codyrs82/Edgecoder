@@ -62,7 +62,7 @@ rewrites the env files and restarts the services; nothing else changes.
 
 | Option | Meaning |
 | --- | --- |
-| `--coordinator-url URL` | Coordinator to join (default `https://edgecoder-seed.fly.dev`). |
+| `--coordinator-url URL` | Coordinator to join (default `https://coordinator.edgecoder.io`). |
 | `--portal-url URL` | Portal for enrolment and discovery (default `https://edgecoder.io`). |
 | `--mesh-token TOKEN` | Mesh auth token for the coordinator. |
 | `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. Without `AGENT_ID=` it applies to every instance. |

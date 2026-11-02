@@ -6,7 +6,7 @@ import { createDiscoveringSelector, type FetchLike } from "../discovery/index.js
 import { discoveryDomainsFromEnv } from "../discovery/dns.js";
 import { nostrRelaysFromEnv } from "../discovery/nostr.js";
 
-export const DEFAULT_DISCOVERY_URL = "https://edgecoder-seed-eu.fly.dev";
+export const DEFAULT_DISCOVERY_URL = "https://coordinator.edgecoder.io";
 
 export function parseDiscoveryUrls(env: NodeJS.ProcessEnv = process.env): string[] {
   const raw = env.COORDINATOR_DISCOVERY_URLS ?? env.COORDINATOR_DISCOVERY_URL ?? DEFAULT_DISCOVERY_URL;

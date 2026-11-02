@@ -137,7 +137,7 @@ export interface InfraEnvOptions {
 export const INFRA_DEFAULTS = {
   dbcacheMib: 2000,
   portalServiceUrl: "https://edgecoder.io",
-  coordinatorBootstrapUrls: ["https://edgecoder-seed.fly.dev"],
+  coordinatorBootstrapUrls: ["https://coordinator.edgecoder.io"],
   lndAlias: "edgecoder-infra",
   lndRestBind: "127.0.0.1:8080",
   electrsBind: "127.0.0.1:50001",

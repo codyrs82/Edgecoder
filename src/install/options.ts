@@ -37,7 +37,7 @@ export interface OptionSpec {
   description: string;
 }
 
-export const DEFAULT_COORDINATOR_URL = "https://edgecoder-seed.fly.dev";
+export const DEFAULT_COORDINATOR_URL = "https://coordinator.edgecoder.io";
 export const DEFAULT_PORTAL_URL = "https://edgecoder.io";
 
 export const INSTALL_COMMANDS: Array<{ name: InstallOptions["command"]; description: string }> = [
