@@ -62,13 +62,34 @@ impl NetworkEnrollment {
 
     /// Environment for the bundled agent (read by src/index.ts and the worker).
     pub fn agent_env(&self) -> Vec<(String, String)> {
-        vec![
+        let mut env = vec![
             ("AGENT_ID".into(), self.node_id.clone()),
             ("AGENT_REGISTRATION_TOKEN".into(), self.registration_token.clone()),
             ("AGENT_NETWORK_COORDINATOR_URL".into(), self.coordinator_url.trim_end_matches('/').to_string()),
             ("PORTAL_URL".into(), self.portal_url.trim_end_matches('/').to_string()),
-        ]
+        ];
+        // On the edgecoder.io network the worker trusts only the seeds' published keys (strict),
+        // instead of pinning whatever key it meets first (tofu).
+        if is_edgecoder_network(&self.coordinator_url) {
+            env.push(("TRUSTED_COORDINATOR_KEYS".into(), EDGECODER_SEED_KEYS.join(",")));
+            env.push(("EDGECODER_TRUST_MODE".into(), "strict".into()));
+        }
+        env
     }
+}
+
+/// The edgecoder.io seeds' identity keys (`peerId:sha256 of the SPKI DER`, as `GET /identity`
+/// reports `trustEntry`), permanent since deploy/fly/set-coordinator-keys.sh (2026-11-02).
+/// Rotation: add the new entry here and release, rotate the seed, then drop the old entry
+/// (docs/going-to-mainnet.md, "Switching agents to strict").
+pub const EDGECODER_SEED_KEYS: [&str; 2] = [
+    "coord-25bacdd7b3f3:ef50370733f0c02751c1617e6e66eca1bcb641542c82098a3479eac7ef59b3a8",
+    "coord-b17fb990ea6b:df0500ee7020c4f3ea0676762b8dbe66a4ac7f4820707b00ee17b1cf36637ed9",
+];
+
+fn is_edgecoder_network(url: &str) -> bool {
+    let host = url.trim_start_matches("https://").split(['/', ':']).next().unwrap_or("");
+    host == "edgecoder.io" || host.ends_with(".edgecoder.io")
 }
 
 pub fn load() -> Option<NetworkEnrollment> {
@@ -149,6 +170,17 @@ mod tests {
         let env = e.agent_env();
         assert!(env.contains(&("AGENT_NETWORK_COORDINATOR_URL".into(), "https://coordinator.edgecoder.io".into())));
         assert!(env.contains(&("AGENT_ID".into(), "desktop-mac-1a2b3c4d".into())));
+        assert!(env.contains(&("EDGECODER_TRUST_MODE".into(), "strict".into())));
+        assert!(env.iter().any(|(k, v)| k == "TRUSTED_COORDINATOR_KEYS" && v.contains("coord-25bacdd7b3f3:")));
+    }
+
+    #[test]
+    fn other_networks_keep_trust_on_first_use() {
+        let mut e = sample();
+        e.coordinator_url = "https://coordinator.example.org".into();
+        assert!(!e.agent_env().iter().any(|(k, _)| k == "EDGECODER_TRUST_MODE"));
+        assert!(!is_edgecoder_network("https://edgecoder.io.evil.example"));
+        assert!(is_edgecoder_network("https://coordinator-eu.edgecoder.io/"));
     }
 
     #[test]

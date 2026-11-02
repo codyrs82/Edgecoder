@@ -32,6 +32,11 @@ primary_region = "ord"
   # check (SANDBOX_MODE=docker). Seeds are coordinator + Ollama chat only; compute comes
   # from enrolled agents. Ollama itself is started by the agent image entrypoint (#9).
   DISABLE_SELF_AGENT = "1"
+  # Every agent build since 1.4.7 signs its /mesh/ws bind; unsigned binds are refused.
+  MESH_WS_REQUIRE_SIGNED = "true"
+  # Fee-pool payouts for this seed's infrastructure go to the Lightning node it pays out from.
+  # Regtest: the edgecoder-lnd-test hub. Changes with LND_REST_URL at mainnet (docs/going-to-mainnet.md).
+  INFRA_HOST_LIGHTNING_NODE_ID = "03787c6d8d1b0a4b2abb79f4ba18cf89e333f59911cc84c69e06132b78c3f19878"
 
 [http_service]
   internal_port = 4301
