@@ -144,6 +144,36 @@ mod tests {
     }
 
     #[test]
+    fn login_shell_starts_in_the_given_folder() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::Read;
+        let dir = std::env::temp_dir().join("ec-pty-cwd-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let pty = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+        // Same as term_spawn (login shell, cwd), but non-interactive so the test ends.
+        let mut cmd = CommandBuilder::new(super::user_shell());
+        cmd.args(["-l", "-c", "echo CWD=$(pwd -P)"]);
+        cmd.cwd(&dir);
+        let mut child = pty.slave.spawn_command(cmd).unwrap();
+        drop(pty.slave);
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap();
+        let want = format!("CWD={}", real.display());
+        let mut out = String::new();
+        let mut buf = [0u8; 4096];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if out.contains(&want) { break; }
+        }
+        let _ = child.kill();
+        assert!(out.contains(&want), "got {out:?}");
+    }
+
+    #[test]
     fn runs_a_command_in_a_pty_and_reads_its_output() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         use std::io::Read;

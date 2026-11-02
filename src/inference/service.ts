@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { writeSseHead } from "../common/sse.js";
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
@@ -329,11 +330,7 @@ app.post("/chat", async (req, reply) => {
     return reply.code(502).send({ error: "ollama_unavailable", model: chatModel, detail: errText });
   }
 
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive"
-  });
+  writeSseHead(reply);
 
   for await (const chunk of ollamaRes.body) {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");

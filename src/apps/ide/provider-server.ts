@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { writeSseHead } from "../../common/sse.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging.js";
 import { registerMetrics } from "../../common/metrics.js";
@@ -200,11 +201,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
   // --- Streaming via Ollama (local or bluetooth) ---
   if (result.stream) {
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    });
+    writeSseHead(reply);
 
     // Send route metadata as first event so the UI can show it immediately
     const routeLabels: Record<string, string> = {
@@ -643,11 +640,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   const projectRules = readProjectRules(projectRoot);
 
   // SSE setup
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
+  writeSseHead(reply);
 
   let clientDisconnected = false;
   // The response closing before the stream ended means the client went away (the request's own

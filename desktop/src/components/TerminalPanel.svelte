@@ -15,6 +15,8 @@
   let term: any = null;
   let fit: any = null;
   let id: number | null = null;
+  /** Folder the running shell was started in. */
+  let startedIn: string | null = null;
   const unlisten: Array<() => void> = [];
   let resizeObserver: ResizeObserver | undefined;
 
@@ -36,6 +38,7 @@
     error = null;
     fit?.fit();
     try {
+      startedIn = cwd;
       id = await invoke<number>("term_spawn", { cwd, cols: term.cols, rows: term.rows });
     } catch (e) {
       error = String(e);
@@ -99,6 +102,20 @@
       void invoke("term_kill", { id });
     }
     term?.dispose();
+  });
+
+  // A different project: end the old shell and start one in the new folder.
+  $effect(() => {
+    const dir = cwd;
+    if (!term || dir === startedIn) return;
+    void (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const old = id;
+      id = null;
+      if (old !== null) await invoke("term_kill", { id: old });
+      term.write(`\r\n\x1b[2m[project changed: new shell in ${dir ?? "home"}]\x1b[0m\r\n`);
+      await start();
+    })();
   });
 
   /** Focus the terminal (after the panel is shown). */

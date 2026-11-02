@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { writeSseHead } from "../../common/sse.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
@@ -138,11 +139,7 @@ export function registerChatApiRoutes(app: FastifyInstance, { PORTAL_SERVICE_TOK
     }
 
     // Stream SSE response from coordinator to browser
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive"
-    });
+    writeSseHead(reply);
 
     let fullContent = "";
     try {
