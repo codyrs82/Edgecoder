@@ -21,7 +21,7 @@ import { buildChatSystemPrompt, buildIdeAgentSystemPrompt, type SystemPromptCont
 import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
-import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, readProjectRules } from "./project-fs.js";
+import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
@@ -365,6 +365,11 @@ app.post("/v1/ide/fs/delete", (req, reply) =>
   }));
 app.post("/v1/ide/fs/stat", (req, reply) =>
   withProjectFs(reply, (fs) => ({ mtimes: fs.stat(z.object({ paths: z.array(fsPath).max(200) }).parse(req.body).paths) })));
+app.get("/v1/ide/fs/find", (req, reply) =>
+  withProjectFs(reply, () => {
+    const { q, limit } = z.object({ q: z.string().max(256).default(""), limit: z.coerce.number().int().min(1).max(100).default(20) }).parse(req.query);
+    return { matches: findPaths(activeProjectRoot!, q, limit) };
+  }));
 app.get("/v1/ide/fs/git-status", (_req, reply) =>
   withProjectFs(reply, (fs) => fs.gitStatus() ?? { branch: null, files: {} }));
 

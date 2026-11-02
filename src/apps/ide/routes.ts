@@ -29,6 +29,7 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/fs/delete", auth: true },
   { method: "POST", path: "/v1/ide/fs/stat", auth: true },
   { method: "GET", path: "/v1/ide/fs/git-status", auth: true },
+  { method: "GET", path: "/v1/ide/fs/find", auth: true },
   { method: "GET", path: "/v1/ide/checkpoints/:turnId", auth: true },
   { method: "POST", path: "/v1/ide/checkpoints/:turnId/revert", auth: true },
   { method: "POST", path: "/v1/ide/inline-edit", auth: true }

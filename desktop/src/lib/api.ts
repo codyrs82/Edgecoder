@@ -1090,3 +1090,7 @@ export const ideRevertTurn = (turnId: string, paths?: string[]) =>
 /** Inline edit (Cmd+K): the replacement for the selection, from the local model. */
 export const ideInlineEdit = (body: { path: string; language: string; prefix: string; selection: string; suffix: string; instruction: string; model?: string }) =>
   fsCall<{ model: string; replacement: string }>("POST", "/v1/ide/inline-edit", body).then((r) => r.replacement);
+
+/** Fuzzy project path search (@-mentions, quick open). */
+export const fsFind = (q: string, limit = 20) =>
+  fsCall<{ matches: Array<{ path: string; kind: "file" | "dir" }> }>("GET", `/v1/ide/fs/find?q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.matches);

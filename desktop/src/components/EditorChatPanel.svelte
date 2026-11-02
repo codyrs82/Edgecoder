@@ -6,6 +6,8 @@
   import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
+  import { expandMentions } from "../lib/mentions";
+  import { fsFind } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -152,8 +154,10 @@
       } else if (projectRoot) {
         // Agent mode: tools for reading, editing and searching the project and running commands.
         const ctx = getFileContext?.();
+        const attached = await expandMentions(text);
         const apiMessages = conversation.messages.map((m) => ({ role: m.role, content: m.content }));
-        if (ctx) apiMessages[apiMessages.length - 1] = { role: "user", content: `${editorContextNote(ctx)}\n\n${text}` };
+        const preface = [ctx ? editorContextNote(ctx) : "", attached].filter(Boolean).join("\n\n");
+        if (preface) apiMessages[apiMessages.length - 1] = { role: "user", content: `${preface}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingChanged = [];
@@ -390,9 +394,10 @@
   <div class="panel-input">
     <ChatInput
       onSend={handleSend}
-      placeholder={projectRoot ? "Ask the agent to read, change or run things in this project…" : "Ask about your code…"}
+      placeholder={projectRoot ? "Ask the agent… (@ to mention a file)" : "Ask about your code…"}
       streaming={isStreaming}
       onStop={stop}
+      mentions={projectRoot ? (q) => fsFind(q, 8) : undefined}
     />
   </div>
 </div>

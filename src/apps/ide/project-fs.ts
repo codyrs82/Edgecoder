@@ -250,3 +250,77 @@ export function readProjectRules(projectRoot: string): string {
   }
   return parts.join("\n\n");
 }
+
+/** Directories never walked when searching paths (still openable from the tree). */
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "target", ".next", ".svelte-kit", "__pycache__", ".venv", "venv", ".turbo", "coverage", ".cache"]);
+const MAX_INDEXED_PATHS = 50_000;
+const pathIndexCache = new Map<string, { atMs: number; paths: Array<{ path: string; kind: "file" | "dir" }> }>();
+const PATH_INDEX_TTL_MS = 10_000;
+
+/** Every file and folder in the project (minus SKIP_DIRS), cached for a few seconds. */
+export function projectPaths(projectRoot: string): Array<{ path: string; kind: "file" | "dir" }> {
+  const cached = pathIndexCache.get(projectRoot);
+  if (cached && Date.now() - cached.atMs < PATH_INDEX_TTL_MS) return cached.paths;
+  const root = resolve(projectRoot);
+  const out: Array<{ path: string; kind: "file" | "dir" }> = [];
+  const stack = [""];
+  while (stack.length > 0 && out.length < MAX_INDEXED_PATHS) {
+    const rel = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(rel ? join(root, rel) : root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of entries) {
+      if (d.isSymbolicLink()) continue;
+      const p = rel ? `${rel}/${d.name}` : d.name;
+      if (d.isDirectory()) {
+        if (SKIP_DIRS.has(d.name)) continue;
+        out.push({ path: p, kind: "dir" });
+        stack.push(p);
+      } else if (d.isFile() && d.name !== ".DS_Store") {
+        out.push({ path: p, kind: "file" });
+      }
+      if (out.length >= MAX_INDEXED_PATHS) break;
+    }
+  }
+  pathIndexCache.set(projectRoot, { atMs: Date.now(), paths: out });
+  return out;
+}
+
+/**
+ * Fuzzy path search for @-mentions and quick open: the query's characters must appear in order;
+ * matches in the file name, at word starts and contiguous runs rank higher, shorter paths first.
+ */
+export function findPaths(projectRoot: string, query: string, limit = 20): Array<{ path: string; kind: "file" | "dir" }> {
+  const q = query.toLowerCase().replace(/\s+/g, "");
+  const all = projectPaths(projectRoot);
+  if (!q) return all.filter((p) => p.kind === "file").slice(0, limit);
+  const scored: Array<{ p: { path: string; kind: "file" | "dir" }; score: number }> = [];
+  for (const p of all) {
+    const s = fuzzyScore(p.path.toLowerCase(), q);
+    if (s !== null) scored.push({ p, score: s - p.path.length * 0.01 - (p.kind === "dir" ? 0.5 : 0) });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((x) => x.p);
+}
+
+function fuzzyScore(path: string, q: string): number | null {
+  const nameStart = path.lastIndexOf("/") + 1;
+  let score = 0;
+  let pi = 0;
+  let prev = -2;
+  for (const ch of q) {
+    const i = path.indexOf(ch, pi);
+    if (i < 0) return null;
+    score += 1;
+    if (i === prev + 1) score += 2;
+    if (i >= nameStart) score += 1.5;
+    if (i === 0 || "/_-. ".includes(path[i - 1])) score += 2;
+    prev = i;
+    pi = i + 1;
+  }
+  if (path.slice(nameStart).startsWith(q)) score += 5;
+  return score;
+}

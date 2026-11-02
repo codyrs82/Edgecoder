@@ -1,5 +1,6 @@
 <script lang="ts">
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
+  import { expandMentions } from "../lib/mentions";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ModelPicker from "../components/ModelPicker.svelte";
@@ -151,6 +152,8 @@
           role: m.role,
           content: m.content,
         }));
+        const attached = await expandMentions(text);
+        if (attached) apiMessages[apiMessages.length - 1] = { role: "user", content: `${attached}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingChanged = [];

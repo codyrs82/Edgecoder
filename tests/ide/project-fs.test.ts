@@ -121,3 +121,18 @@ describe("readProjectRules", () => {
     expect(r.endsWith("(truncated)")).toBe(true);
   });
 });
+
+describe("findPaths", () => {
+  it("ranks file-name matches first and skips node_modules", async () => {
+    const { findPaths } = await import("../../src/apps/ide/project-fs.js");
+    mkdirSync(join(root, "src", "lib"), { recursive: true });
+    writeFileSync(join(root, "src", "lib", "api.ts"), "");
+    writeFileSync(join(root, "src", "apples.ts"), "");
+    mkdirSync(join(root, "node_modules", "x"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "x", "api.ts"), "");
+    const r = findPaths(root, "api", 5).map((m) => m.path);
+    expect(r[0]).toBe("src/lib/api.ts");
+    expect(r.some((p) => p.startsWith("node_modules"))).toBe(false);
+    expect(findPaths(root, "zzz", 5)).toEqual([]);
+  });
+});
