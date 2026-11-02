@@ -44,6 +44,16 @@ describe("desktop endpoints (#35)", () => {
     expect(coordinatorUrl(mem({ [LEGACY_SEED_KEY]: "https://" + "edgecoder-seed" + ".fly.dev/" }), {})).toBe(FALLBACK_COORDINATOR_URL);
   });
 
+  it("ignores saved overrides that point at retired raw Fly origins (origin lock)", () => {
+    // A Portal URL saved before the Cloudflare origin lock would make sign-in fail with origin_locked.
+    expect(portalUrl(mem({ [PORTAL_KEY]: "https://edgecoder-portal" + ".fly.dev/" }), {})).toBe(FALLBACK_PORTAL_URL);
+    expect(portalSignupUrl(mem({ [PORTAL_KEY]: "https://edgecoder-portal" + ".fly.dev/portal" }), {})).toBe(`${FALLBACK_PORTAL_URL}/portal`);
+    expect(coordinatorUrl(mem({ [COORDINATOR_KEY]: "https://edgecoder-seed-eu" + ".fly.dev" }), {})).toBe(FALLBACK_COORDINATOR_URL);
+    expect(FALLBACK_COORDINATOR_URL).toBe("https://coordinator.edgecoder.io");
+    // Anything else (self-hosted, local) still wins.
+    expect(portalUrl(mem({ [PORTAL_KEY]: "https://portal.example" }), {})).toBe("https://portal.example");
+  });
+
   it("rejects invalid schemes and ignores invalid stored values", () => {
     for (const bad of ["http://evil.example", "ftp://x", "javascript:alert(1)", "not a url", "https://u:p@x.example"]) {
       expect(validateEndpointUrl(bad), bad).toBeNull();
