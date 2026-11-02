@@ -1130,3 +1130,29 @@ export interface SearchHit {
 export const indexStatus = () => fsCall<IndexStatus>("GET", "/v1/ide/index/status");
 export const indexBuild = () => fsCall<IndexStatus>("POST", "/v1/ide/index/build", {});
 export const indexSearch = (query: string, k = 8) => fsCall<{ hits: SearchHit[] }>("POST", "/v1/ide/index/search", { query, k }).then((r) => r.hits);
+
+// Source control (:4304 /v1/ide/git/*)
+export interface GitFile {
+  path: string;
+  status: string;
+  from?: string;
+}
+export interface GitState {
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: GitFile[];
+  unstaged: GitFile[];
+  branches: string[];
+}
+export const gitState = () => fsCall<GitState | { notARepo: true }>("GET", "/v1/ide/git/state");
+export const gitHeadContent = (path: string) =>
+  fsCall<{ content: string | null }>("GET", `/v1/ide/git/head-content?path=${encodeURIComponent(path)}`).then((r) => r.content);
+export const gitStage = (paths: string[]) => fsCall("POST", "/v1/ide/git/stage", { paths });
+export const gitUnstage = (paths: string[]) => fsCall("POST", "/v1/ide/git/unstage", { paths });
+export const gitDiscard = (paths: string[]) => fsCall("POST", "/v1/ide/git/discard", { paths });
+export const gitCommit = (message: string, all = false) => fsCall<{ commit: string }>("POST", "/v1/ide/git/commit", { message, all }).then((r) => r.commit);
+export const gitCheckout = (branch: string, create = false) => fsCall("POST", "/v1/ide/git/checkout", { branch, create });
+export const gitPull = () => fsCall<{ output: string }>("POST", "/v1/ide/git/pull").then((r) => r.output);
+export const gitPush = () => fsCall<{ output: string }>("POST", "/v1/ide/git/push").then((r) => r.output);

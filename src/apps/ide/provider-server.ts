@@ -27,6 +27,7 @@ import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
+import { GitError, GitOps } from "./git-ops.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -491,6 +492,40 @@ function formatSearchHits(hits: Awaited<ReturnType<ReturnType<typeof codebaseInd
   if (hits.length === 0) return "No matches.";
   return hits.map((h) => `${h.path}:${h.startLine}-${h.endLine} (score ${h.score})\n${h.snippet}`).join("\n\n---\n\n");
 }
+
+// Source control panel (git-ops.ts): the user's own git actions from the UI.
+async function withGit(reply: FastifyReply, fn: (git: GitOps) => Promise<unknown>): Promise<unknown> {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  try {
+    return reply.send(await fn(new GitOps(activeProjectRoot)));
+  } catch (err) {
+    if (err instanceof GitError) return reply.status(400).send({ error: "git", message: err.message });
+    if (err instanceof ProjectFsError) return reply.status(FS_ERROR_STATUS[err.code]).send({ error: err.code, message: err.message });
+    if (err instanceof z.ZodError) return reply.status(400).send({ error: "invalid", message: err.message });
+    throw err;
+  }
+}
+const gitPaths = z.object({ paths: z.array(z.string().max(4096)).min(1).max(1000) });
+
+app.get("/v1/ide/git/state", (_req, reply) => withGit(reply, async (g) => (await g.state()) ?? { notARepo: true }));
+app.get("/v1/ide/git/head-content", (req, reply) =>
+  withGit(reply, async (g) => ({ content: await g.headContent(z.object({ path: z.string().min(1).max(4096) }).parse(req.query).path) })));
+app.post("/v1/ide/git/stage", (req, reply) => withGit(reply, async (g) => { await g.stage(gitPaths.parse(req.body).paths); return { ok: true }; }));
+app.post("/v1/ide/git/unstage", (req, reply) => withGit(reply, async (g) => { await g.unstage(gitPaths.parse(req.body).paths); return { ok: true }; }));
+app.post("/v1/ide/git/discard", (req, reply) => withGit(reply, async (g) => { await g.discard(gitPaths.parse(req.body).paths); return { ok: true }; }));
+app.post("/v1/ide/git/commit", (req, reply) =>
+  withGit(reply, async (g) => {
+    const b = z.object({ message: z.string().max(20_000), all: z.boolean().default(false) }).parse(req.body);
+    return { commit: await g.commit(b.message, { all: b.all }) };
+  }));
+app.post("/v1/ide/git/checkout", (req, reply) =>
+  withGit(reply, async (g) => {
+    const b = z.object({ branch: z.string().min(1).max(255), create: z.boolean().default(false) }).parse(req.body);
+    await g.checkout(b.branch, b.create);
+    return { ok: true };
+  }));
+app.post("/v1/ide/git/pull", (_req, reply) => withGit(reply, async (g) => ({ output: await g.pull() })));
+app.post("/v1/ide/git/push", (_req, reply) => withGit(reply, async (g) => ({ output: await g.push() })));
 
 const toolApprovalSchema = z.object({
   id: z.string().min(1),

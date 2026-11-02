@@ -3,6 +3,7 @@
   import FileTree from "../components/FileTree.svelte";
   import QuickOpen from "../components/QuickOpen.svelte";
   import TerminalPanel from "../components/TerminalPanel.svelte";
+  import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
   import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete } from "../lib/api";
@@ -50,6 +51,8 @@
   let autocomplete: { dispose: () => void } | undefined;
   let autocompleteOn = $state(true);
   let quickOpen = $state(false);
+  let sidebarView = $state<"files" | "git">("files");
+  let changeCount = $derived(Object.keys(gitFiles).length);
   /** Bottom terminal panel: mounted on first open, then kept (hidden) so the shell survives. */
   let terminalOpen = $state(false);
   let terminalMounted = $state(false);
@@ -219,6 +222,7 @@
       file.diskChanged = false;
       file.missing = false;
       void refreshGit();
+      treeRefresh++;
     } catch (e) {
       if (e instanceof FsError && e.code === "conflict") {
         file.diskChanged = true;
@@ -493,6 +497,25 @@
 <div class="editor-layout" class:resizing={isResizing}>
   <div class="explorer-panel" style="width: {explorerWidth}px">
     {#if projectRoot}
+      <div class="sidebar-tabs" role="tablist">
+        <button role="tab" aria-selected={sidebarView === "files"} class:active={sidebarView === "files"} onclick={() => (sidebarView = "files")}>Files</button>
+        <button role="tab" aria-selected={sidebarView === "git"} class:active={sidebarView === "git"} onclick={() => (sidebarView = "git")}>
+          Source Control{#if changeCount}<span class="count">{changeCount}</span>{/if}
+        </button>
+      </div>
+    {/if}
+    {#if projectRoot && sidebarView === "git"}
+      <div class="sidebar-body">
+        <SourceControl
+          refreshKey={treeRefresh}
+          onOpen={(p) => void openPath(p)}
+          onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
+          onError={(m) => showNotice(m)}
+          onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
+        />
+      </div>
+    {:else if projectRoot}
+      <div class="sidebar-body">
       <FileTree
         {projectRoot}
         activePath={activeFilePath}
@@ -503,6 +526,7 @@
         onDeleted={handleDeleted}
         onError={(m) => showNotice(m)}
       />
+      </div>
     {:else}
       <div class="no-project">
         <p>No folder open</p>
@@ -617,6 +641,43 @@
     flex-shrink: 0;
     overflow: hidden;
     background: var(--bg-base);
+  }
+  .explorer-panel {
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 6px 8px 0;
+    border-bottom: 0.5px solid var(--border);
+    flex-shrink: 0;
+  }
+  .sidebar-tabs button {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 4px 8px 6px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sidebar-tabs button.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
+  }
+  .count {
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 0 5px;
+    font-size: 10px;
+  }
+  .sidebar-body {
+    flex: 1;
+    min-height: 0;
   }
   .no-project {
     padding: 24px 16px;
