@@ -9,7 +9,7 @@ import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
-import { isDockerAvailable } from "../executor/docker-sandbox.js";
+import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
@@ -218,6 +218,10 @@ let registeredWithUrl: string | null = null;
 let lastRegisteredAtMs = 0;
 /** SANDBOX_MODE=docker but the daemon isn't reachable right now. */
 let sandboxDown = false;
+// The sandbox images are built locally on first use (see ensureSandboxImages); until then the
+// sandbox counts as down. The build runs in the background so heartbeats keep flowing.
+let sandboxImagesReady = SANDBOX_MODE !== "docker";
+let sandboxImagesBuilding = false;
 
 // The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
 const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT ?? "");
@@ -830,9 +834,19 @@ async function loop(): Promise<void> {
         }
         // Docker configured but not running: stay registered (the IDE forwarder and heartbeats
         // keep working) but pull nothing until it is back.
-        if (Boolean(sandboxError) !== sandboxDown) {
-          sandboxDown = Boolean(sandboxError);
-          console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxError}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
+        if (!sandboxError && !sandboxImagesReady && !sandboxImagesBuilding) {
+          sandboxImagesBuilding = true;
+          console.log(`[agent:${AGENT_ID}] preparing sandbox images (first run builds them; this can take a few minutes)`);
+          void ensureSandboxImages().then((r) => {
+            sandboxImagesBuilding = false;
+            sandboxImagesReady = r.ok;
+            if (!r.ok) console.warn(`[agent:${AGENT_ID}] sandbox images not ready: ${r.error}`);
+          });
+        }
+        const sandboxProblem = sandboxError ?? (sandboxImagesReady ? null : "sandbox images not ready");
+        if (Boolean(sandboxProblem) !== sandboxDown) {
+          sandboxDown = Boolean(sandboxProblem);
+          console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxProblem}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
         }
 
         // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).

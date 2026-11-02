@@ -25,6 +25,26 @@ function helpForPorts(): string {
   return `One of the EdgeCoder ports is already in use (inference: ${INFERENCE_PORT}, coordinator: ${COORDINATOR_PORT}, control-plane: ${CONTROL_PLANE_PORT}).\nStop other EdgeCoder processes (e.g. another "npm run dev" or separate dev:inference/coordinator/control) or free the port:\n  lsof -i :${INFERENCE_PORT} -i :${COORDINATOR_PORT} -i :${CONTROL_PLANE_PORT}\n  kill <pid>`;
 }
 
+/**
+ * Provider for the embedded worker when LOCAL_MODEL_PROVIDER is unset: Ollama if it answers on
+ * this machine, else the edgecoder-local stub (which only echoes the task, so a stub worker
+ * cannot do real swarm work). Decided once at boot.
+ */
+let workerModelProvider = process.env.LOCAL_MODEL_PROVIDER;
+async function detectWorkerModelProvider(): Promise<void> {
+  if (workerModelProvider) return;
+  const host = (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
+    workerModelProvider = res.ok ? "ollama-local" : "edgecoder-local";
+  } catch {
+    workerModelProvider = "edgecoder-local";
+  }
+  if (workerModelProvider === "edgecoder-local") {
+    console.warn(`[unified-agent] Ollama not reachable at ${host}; the worker uses the edgecoder-local stub and cannot do real swarm work`);
+  }
+}
+
 function startWorkerProcess(): void {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
@@ -41,7 +61,7 @@ function startWorkerProcess(): void {
     COORDINATOR_URL: coordinatorUrl,
     AGENT_MODE: process.env.AGENT_MODE ?? "swarm-only",
     AGENT_OS: process.env.AGENT_OS ?? "macos",
-    LOCAL_MODEL_PROVIDER: process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local",
+    LOCAL_MODEL_PROVIDER: workerModelProvider ?? "edgecoder-local",
     // A networked worker relays the IDE's swarm work (signed, billed to this machine's owner).
     ...(NETWORK_COORDINATOR_URL ? { LOCAL_FORWARD_PORT: String(LOCAL_FORWARD_PORT) } : {}),
   };
@@ -116,6 +136,7 @@ async function boot(): Promise<void> {
   if (process.env.DISABLE_SELF_AGENT === "1") {
     console.log("[unified-agent] self-agent disabled (DISABLE_SELF_AGENT=1)");
   } else {
+    await detectWorkerModelProvider();
     startWorkerProcess();
   }
   if (process.env.DISABLE_IDE_PROVIDER !== "1") startIdeProvider();
