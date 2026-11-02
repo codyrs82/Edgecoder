@@ -923,7 +923,7 @@ app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
 
-const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword };
+const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
