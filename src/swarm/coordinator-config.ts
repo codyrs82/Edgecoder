@@ -49,7 +49,9 @@ export const coordinatorConfigSchema = z.object({
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),
   STATS_ANCHOR_INTERVAL_MS: envInt(600000, { min: 1 }),
   STATS_ANCHOR_MIN_CONFIRMATIONS: envInt(1, { min: 0 }),
-  AGENT_RATE_LIMIT_MAX: envInt(30, { min: 0 }),
+  // Signed requests per agent per window. An idle worker heartbeats and pulls every ~1.2 s
+  // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
+  AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
   SECURITY_NONCE_TTL_MS: envInt(300000, { min: 1 }),
   SECURITY_MAX_SKEW_MS: envInt(120000, { min: 1 }),
