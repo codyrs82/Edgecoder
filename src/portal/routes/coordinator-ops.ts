@@ -373,9 +373,7 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLA
     if (!access.canManageCoordinatorOps) {
       return reply.code(403).send({ error: "coordinator_operations_forbidden" });
     }
-    if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
-      return reply.code(503).send({ error: "control_plane_not_configured" });
-    }
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z
       .object({
         nodeId: z.string().min(3),
@@ -383,25 +381,33 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLA
         approved: z.boolean()
       })
       .parse(req.body);
-    const pathSegment = body.nodeKind === "agent" ? "agents" : "coordinators";
-    try {
-      const res = await request(`${CONTROL_PLANE_URL}/${pathSegment}/${body.nodeId}/approval`, {
-        method: "POST",
-        headers: controlPlaneHeaders(true),
-        body: JSON.stringify({ approved: body.approved })
-      });
-      const payload = await res.body.json();
-      if (res.statusCode >= 200 && res.statusCode < 300 && !body.approved && store) {
-        const existing = await store.getNodeEnrollment(body.nodeId);
-        // "Reject" on a pending request should remove it from enrollment queue.
-        if (existing && existing.nodeApproved !== true) {
-          await store.deleteNodeEnrollment(body.nodeId);
-        }
-      }
-      return reply.code(res.statusCode).send(payload);
-    } catch {
-      return reply.code(502).send({ error: "control_plane_unreachable" });
+    const existing = await store.getNodeEnrollment(body.nodeId);
+    if (!existing) return reply.code(404).send({ error: "node_not_found" });
+    // The portal's enrollment record is what coordinators validate against, so it is written first.
+    // "Reject" on a pending request removes it from the enrollment queue.
+    if (!body.approved && existing.nodeApproved !== true) {
+      await store.deleteNodeEnrollment(body.nodeId);
+    } else {
+      await store.setNodeApproval(body.nodeId, body.approved);
     }
+    // Mirror to a separately run control plane when one is configured; its failure does not undo
+    // the portal decision.
+    let controlPlane: "skipped" | "ok" | "failed" = "skipped";
+    if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
+      const pathSegment = body.nodeKind === "agent" ? "agents" : "coordinators";
+      try {
+        const res = await request(`${CONTROL_PLANE_URL}/${pathSegment}/${body.nodeId}/approval`, {
+          method: "POST",
+          headers: controlPlaneHeaders(true),
+          body: JSON.stringify({ approved: body.approved })
+        });
+        await res.body.dump();
+        controlPlane = res.statusCode >= 200 && res.statusCode < 300 ? "ok" : "failed";
+      } catch {
+        controlPlane = "failed";
+      }
+    }
+    return reply.send({ ok: true, nodeId: body.nodeId, approved: body.approved, controlPlane });
   });
 
   app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
