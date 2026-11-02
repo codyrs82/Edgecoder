@@ -10,7 +10,7 @@ import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
-import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomInt, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -146,6 +146,8 @@ import {
   type ReplicaRequest,
   type VerificationOutcome
 } from "./verification.js";
+import { HardwareVerifier, hardwareVerificationConfigFromEnv, type HardwareVerificationRecord } from "./hardware-verification.js";
+import type { ChallengeResponse } from "./benchmark.js";
 import {
   applyBleSyncBatch,
   bleSyncAllowV1,
@@ -576,10 +578,65 @@ const marketHistory = new MarketHistory();
 const MARKET_TICK_MS = 60_000;
 /** Standing orders from the portal keyed by `${accountId}:${side}`. */
 const marketOrders = new Map<string, MarketOrder>();
-/** What an agent's ask advertises to the matcher: tier, weight and capability (VRAM, memory). */
-function askCapabilityOf(cap: { hardwareClass?: HardwareClassification } | undefined): AskCapability | undefined {
-  const h = cap?.hardwareClass;
-  return h ? { tier: h.tier, creditsPerSecond: h.creditsPerSecond, vramGb: h.vramGb, memoryGb: h.memoryGb } : undefined;
+/**
+ * Hardware verification (src/swarm/hardware-verification.ts): hardware is self-reported, so a tier
+ * above the class base is paid only after the agent passes a coordinator-issued benchmark
+ * challenge; until then (and for agents without benchmark support) it earns base weight 1.
+ */
+const hardwareVerifier = new HardwareVerifier({
+  config: hardwareVerificationConfigFromEnv(),
+  classes: rateOracleConfig.computeClasses,
+  persist: (r) => pgStore?.upsertHardwareVerification(r)
+});
+/** The class, tier and weight an agent is paid and matched at (its verified grant); undefined for an unknown agent. */
+function effectiveHardware(agentId: string, cap?: { hardwareClass?: HardwareClassification }): HardwareClassification | undefined {
+  const c = cap ?? agentCapabilities.get(agentId);
+  return c?.hardwareClass ? hardwareVerifier.effective(agentId, c.hardwareClass) : undefined;
+}
+/** What an agent's ask advertises to the matcher: verified tier and weight, capability (VRAM, memory), reliability. */
+function askCapabilityOf(agentId: string, cap: { hardwareClass?: HardwareClassification } | undefined): AskCapability | undefined {
+  const h = effectiveHardware(agentId, cap);
+  const reliability = hardwareVerifier.reliability(agentId);
+  return h ? { tier: h.tier, creditsPerSecond: h.creditsPerSecond, vramGb: h.vramGb, memoryGb: h.memoryGb, ...(reliability !== undefined ? { reliability } : {}) } : undefined;
+}
+/** Re-post an agent's ask after its grant changed; an explicit price survives only within the same class. */
+function repostAsk(agentId: string, nowMs = Date.now()): void {
+  const cap = agentCapabilities.get(agentId);
+  const eff = effectiveHardware(agentId, cap);
+  if (!cap || !eff) return;
+  const prev = orderBook.askFor(agentId);
+  const keepPrice = prev && !prev.tracking && prev.computeClass === eff.computeClass ? prev.msatPerCredit : undefined;
+  orderBook.postAsk(agentId, eff.computeClass, keepPrice, nowMs, askCapabilityOf(agentId, cap));
+}
+/** Short verification state for the agent / portal. */
+function verificationSummary(r: HardwareVerificationRecord | undefined): Record<string, unknown> | null {
+  if (!r) return null;
+  return { status: r.status, claimedTier: r.claimed.tier, grantedTier: r.granted.tier, grantedClass: r.granted.computeClass, measured: r.measured ?? null, reliability: hardwareVerifier.reliability(r.agentId) ?? null, flags: r.flags };
+}
+/** The Ollama model a GPU challenge runs on: the agent's active model, else the one it benchmarked. */
+function benchmarkModelFor(agentId: string): string | undefined {
+  const rec = hardwareVerifier.get(agentId);
+  return agentCapabilities.get(agentId)?.activeModel || rec?.selfReport?.gpu?.model || rec?.selfReport?.loaded?.model || undefined;
+}
+/**
+ * A second agent to run the same GPU challenge (cross-check): online, same model, not the subject's
+ * owner or IP, preferring agents that are themselves cross-checked. Sybils across owners are the
+ * residual risk; ongoing evidence and re-challenges with a fresh random witness bound it.
+ */
+function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number): string | undefined {
+  const subject = agentCapabilities.get(subjectId);
+  const candidates: Array<{ id: string; rank: number }> = [];
+  for (const [id, cap] of agentCapabilities) {
+    if (id === subjectId || nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
+    if (subject?.ownerEmail && cap.ownerEmail === subject.ownerEmail) continue;
+    if (subject?.sourceIp && cap.sourceIp === subject.sourceIp) continue;
+    const rec = hardwareVerifier.get(id);
+    if (!rec?.challengeKinds.includes("gpu") || benchmarkModelFor(id) !== model) continue;
+    candidates.push({ id, rank: rec.measured?.crossChecked ? 2 : rec.status === "verified" ? 1 : 0 });
+  }
+  const best = Math.max(-1, ...candidates.map((c) => c.rank));
+  const top = candidates.filter((c) => c.rank === best);
+  return top.length ? top[randomInt(top.length)].id : undefined;
 }
 
 const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -614,8 +671,9 @@ async function applyMarketOrder(order: MarketOrder): Promise<void> {
     const ids = new Set<string>([...owned.map((o) => o.agentId), order.accountId]);
     for (const agentId of ids) {
       const cap = agentCapabilities.get(agentId);
-      if (cap && (order.computeClass === "any" || order.computeClass === cap.computeClass)) {
-        orderBook.postAsk(agentId, cap.computeClass, order.msatPerCredit > 0 ? order.msatPerCredit : undefined, Date.now(), askCapabilityOf(cap));
+      const cls = cap ? (effectiveHardware(agentId, cap)?.computeClass ?? cap.computeClass) : undefined;
+      if (cap && cls && (order.computeClass === "any" || order.computeClass === cls)) {
+        orderBook.postAsk(agentId, cls, order.msatPerCredit > 0 ? order.msatPerCredit : undefined, Date.now(), askCapabilityOf(agentId, cap));
       }
     }
   }
@@ -2142,8 +2200,41 @@ const hardwareProfileSchema = z.object({
       datacenter: z.boolean().optional()
     })
     .optional(),
-  benchmarkScore: z.number().min(0).optional()
+  benchmarkScore: z.number().min(0).optional(),
+  overridden: z.boolean().optional()
 });
+
+/** The agent's self-benchmark (src/swarm/benchmark.ts). Plausibility evidence only; a malformed one is dropped, never a 400. */
+const benchmarkReportSchema = z
+  .object({
+    version: z.literal(1),
+    ranAtMs: z.number().nonnegative(),
+    durationMs: z.number().nonnegative().max(3_600_000),
+    cpu: z
+      .object({
+        workUnitsPerSec: z.number().nonnegative().max(1e9),
+        threads: z.number().int().min(1).max(4096),
+        processed: z.number().int().nonnegative(),
+        elapsedMs: z.number().nonnegative(),
+        digest: z.string().max(64)
+      })
+      .optional(),
+    gpu: z
+      .object({
+        model: z.string().max(128),
+        tokensPerSec: z.number().nonnegative().max(1e6),
+        evalTokens: z.number().int().nonnegative().max(1e7),
+        weightsGb: z.number().nonnegative().max(4096).optional(),
+        bandwidthGbps: z.number().nonnegative().max(1e6).optional()
+      })
+      .optional(),
+    loaded: z.object({ model: z.string().max(128), vramGb: z.number().nonnegative().max(8192) }).optional(),
+    errors: z.array(z.string().max(120)).max(8).optional()
+  })
+  .optional()
+  .catch(undefined);
+/** Challenge kinds the agent can answer; absent (older agents) = none, so they stay at base tier. */
+const challengeKindsSchema = z.array(z.string().max(16)).max(8).optional().catch(undefined);
 
 const registerSchema = z.object({
   agentId: z.string(),
@@ -2176,6 +2267,8 @@ const registerSchema = z.object({
   hardwareProfile: hardwareProfileSchema.optional(),
   /** Minimum price the agent will work for (msat per credit). Omit to track the class reference. */
   askMsatPerCredit: z.number().positive().max(1e9).optional(),
+  benchmark: benchmarkReportSchema,
+  challengeKinds: challengeKindsSchema,
   binaryIntegrity: z
     .object({
       distHash: z.string(),
@@ -2209,7 +2302,21 @@ const heartbeatSchema = z.object({
   modelSwapInProgress: z.boolean().optional(),
   sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
   /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
-  askMsatPerCredit: z.number().min(0).max(1e9).optional()
+  askMsatPerCredit: z.number().min(0).max(1e9).optional(),
+  /** A new self-benchmark (periodic). */
+  benchmark: benchmarkReportSchema
+});
+/** Answer to a benchmark challenge handed out in a heartbeat response. */
+const benchmarkResponseSchema = z.object({
+  agentId: z.string(),
+  challengeId: z.string().min(1).max(128),
+  kind: z.enum(["cpu", "gpu"]),
+  solutions: z.array(z.number().int().nonnegative()).max(4096).optional(),
+  output: z.string().max(16_000).optional(),
+  evalCount: z.number().nonnegative().max(1e7).optional(),
+  evalDurationMs: z.number().nonnegative().max(3_600_000).optional(),
+  elapsedMs: z.number().nonnegative().max(3_600_000),
+  declined: z.string().max(120).optional()
 });
 const diagnosticsSchema = z.object({
   agentId: z.string(),
@@ -2261,7 +2368,9 @@ const taskSchema = z.object({
   /** Only agents with at least this much discrete GPU VRAM may claim (e.g. 24 for a 30B model). Default: no constraint. */
   minVramGb: minGbParam,
   /** Only agents with at least this much system / unified memory may claim. Default: no constraint. */
-  minMemoryGb: minGbParam
+  minMemoryGb: minGbParam,
+  /** Only agents with a rolling reliability score (0..1) at least this high may claim; agents without enough evidence never do. */
+  minReliability: z.number().positive().max(1).optional()
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -2381,13 +2490,22 @@ app.post("/register", async (req, reply) => {
 
   behaviorTracker.recordRegistration(body.agentId, now);
   evaluateAndEnforce(body.agentId);
-  // Market: post the agent's ask on its compute class (tracking the oracle reference unless explicit).
+  // Hardware verification: the claim is paid at its class base tier until a challenge proves it.
+  const hardwareRecord = hardwareVerifier.register({
+    agentId: body.agentId,
+    claimed: hardwareClass,
+    profile: body.hardwareProfile,
+    benchmark: body.benchmark,
+    challengeKinds: body.challengeKinds,
+    nowMs: now
+  });
+  // Market: post the agent's ask on its (verified) compute class (tracking the oracle reference unless explicit).
   {
     const ownerAccount = await rewardAccountForAgent(body.agentId);
     const standing = marketOrders.get(`${ownerAccount}:sell`);
-    const cls = hardwareClass.computeClass;
+    const cls = (effectiveHardware(body.agentId, { hardwareClass }) ?? hardwareClass).computeClass;
     const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
-    orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf({ hardwareClass }));
+    orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf(body.agentId, { hardwareClass }));
   }
   const approvalRecord = ordering.append({
     eventType: "node_approval",
@@ -2421,7 +2539,8 @@ app.post("/register", async (req, reply) => {
     accepted: true,
     policy: defaultPolicy,
     mode: body.mode,
-    meshToken: MESH_AUTH_TOKEN || undefined
+    meshToken: MESH_AUTH_TOKEN || undefined,
+    hardwareVerification: verificationSummary(hardwareRecord)
   });
 });
 
@@ -2457,6 +2576,7 @@ app.post("/heartbeat", async (req, reply) => {
     return reply.send({ ok: true, leaseOnly: true });
   }
   behaviorTracker.recordHeartbeat(body.agentId);
+  if (body.benchmark) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
   if (body.powerTelemetry) {
     const existing = agentCapabilities.get(body.agentId);
     if (existing) {
@@ -2484,7 +2604,8 @@ app.post("/heartbeat", async (req, reply) => {
   }
   if (body.askMsatPerCredit !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
-    if (existing) orderBook.postAsk(body.agentId, existing.computeClass, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(existing));
+    const cls = existing ? (effectiveHardware(body.agentId, existing)?.computeClass ?? existing.computeClass) : undefined;
+    if (existing && cls) orderBook.postAsk(body.agentId, cls, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(body.agentId, existing));
   }
   if (body.sandboxMode !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
@@ -2506,8 +2627,16 @@ app.post("/heartbeat", async (req, reply) => {
   const directWorkOffers = directOfferIds
     .map((id) => directWorkById.get(id))
     .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered"));
+  // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
+  const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
+    nowMs: now,
+    model: benchmarkModelFor(body.agentId),
+    pickWitness: (model) => pickBenchmarkWitness(body.agentId, model, now)
+  });
   return reply.send({
     ok: true,
+    ...(benchmarkChallenge ? { benchmarkChallenge } : {}),
+    hardwareVerification: verificationSummary(hardwareVerifier.get(body.agentId)),
     requeued,
     policy: defaultPolicy,
     orchestration: agentOrchestration.get(body.agentId) ?? null,
@@ -2519,6 +2648,36 @@ app.post("/heartbeat", async (req, reply) => {
       agents: [...blacklistByAgent.keys()]
     }
   });
+});
+
+app.post("/benchmark/response", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/benchmark/response", req.ip);
+  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  const parsed = benchmarkResponseSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_benchmark_response", issues: parsed.error.issues });
+  const { agentId, ...response } = parsed.data;
+  if (verified && verified.agentId !== agentId) return reply.code(401).send({ error: "agent_id_mismatch" });
+  if (!agentCapabilities.has(agentId)) return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+  if (activeBlacklistRecord(agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
+  const result = hardwareVerifier.submit(agentId, response as ChallengeResponse, Date.now());
+  if (!result.accepted) return reply.code(409).send({ ok: false, error: result.reason });
+  // A witness's answer can settle the subject's cross-check: act on the record it changed.
+  const subjectId = result.record?.agentId ?? agentId;
+  if (result.invalid) {
+    securityLog.log({
+      level: securityLog.severity("hardware_challenge_invalid"),
+      event: "hardware_challenge_invalid",
+      source: { type: "agent", id: subjectId },
+      details: { reason: result.invalid, claimedTier: result.record?.claimed.tier, reportedBy: agentId },
+      action: "grant_base_tier",
+      coordinatorId: identity.peerId
+    });
+  }
+  if (result.changed) repostAsk(subjectId);
+  if (result.record) {
+    app.log.info({ agentId: subjectId, status: result.record.status, granted: result.record.granted.tier, measured: result.record.measured?.value, unit: result.record.measured?.unit }, "hardware_challenge_result");
+  }
+  return reply.send({ ok: true, verification: subjectId === agentId ? verificationSummary(result.record) : null });
 });
 
 app.post("/agent/diagnostics", async (req, reply) => {
@@ -2654,7 +2813,7 @@ app.post("/submit", async (req, reply) => {
   // Market: register the requester's bid for this task (default = reference × premium). A legacy
   // class id maps onto its class, its explicit price into the current unit, and the capability it
   // implied (gpu.c24 => minVramGb 17) so an under-spec card cannot fill it; explicit constraints win.
-  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, { minVramGb: body.minVramGb, minMemoryGb: body.minMemoryGb }, rateOracleConfig.computeClasses);
+  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, { minVramGb: body.minVramGb, minMemoryGb: body.minMemoryGb, minReliability: body.minReliability }, rateOracleConfig.computeClasses);
   const taskClass = resolved.computeClass as ComputeClassId | "any"; // validated by taskSchema
   const explicitBid = resolved.msatPerCredit;
   const constraints = capabilityConstraints(resolved.constraints);
@@ -2791,13 +2950,13 @@ app.post("/pull", async (req, reply) => {
     await rewardAccountForAgent(body.agentId),
     // The book enforces the bid's class, price and constraints. The subtask's own constraints are
     // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(capability), subtask.projectMeta)
+    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(body.agentId, capability), subtask.projectMeta)
   );
   if (task) {
     // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
     const match = orderBook.canMatch(body.agentId, task.taskId);
     if (match.ok) {
-      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass, creditsPerSecond: capability?.hardwareClass?.creditsPerSecond ?? 1 });
+      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass, creditsPerSecond: effectiveHardware(body.agentId, capability)?.creditsPerSecond ?? 1 });
       const trade = { taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() };
       orderBook.recordTrade(trade);
       marketHistory.recordTrade(trade);
@@ -2898,6 +3057,7 @@ interface ResultMeta {
 }
 const verificationConfig = verificationConfigFromEnv();
 const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfig);
+if (!hardwareVerifier.config.enabled) app.log.warn("HARDWARE_VERIFICATION=0: self-reported hardware tiers are paid unverified");
 {
   const warning = verificationStartupWarning(verificationConfig);
   if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards }, warning);
@@ -2919,16 +3079,20 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   // records the credits actually accrued by the pricing formula, so balances reconcile.
   if (!r.ok) return;
   const cap = agentCapabilities.get(r.agentId);
+  const eff = effectiveHardware(r.agentId, cap);
   const trade = claimedTradePrice.get(r.subtaskId);
   claimedTradePrice.delete(r.subtaskId);
-  // Throughput: the agent's tier mints creditsPerSecond credits per measured second (weight 1 on a
-  // class's base tier), so credits × the class's flat price per credit is the tier's hour price.
-  // CPU tasks are always paid as CPU work, since hardware is self-reported (settlementClassFor).
-  const { computeClass, creditsPerSecond: hardwareWeight } = settlementClassFor(
-    subtask.projectMeta.resourceClass,
-    trade?.computeClass ?? cap?.computeClass ?? "cpu",
-    trade?.creditsPerSecond ?? cap?.hardwareClass?.creditsPerSecond ?? 1
-  );
+  // Throughput: the agent's verified tier mints creditsPerSecond credits per measured second (weight
+  // 1 on a class's base tier), so credits × the class's flat price per credit is the tier's hour price.
+  // The trade carries the grant at claim time; a grant that moved since (demotion mid-task) wins, and
+  // the weight never exceeds the current grant. CPU tasks are always paid as CPU work (settlementClassFor).
+  let agentClass: ComputeClassId = trade?.computeClass ?? eff?.computeClass ?? "cpu";
+  let agentWeight = trade?.creditsPerSecond ?? eff?.creditsPerSecond ?? 1;
+  if (trade && eff) {
+    if (eff.computeClass !== trade.computeClass) [agentClass, agentWeight] = [eff.computeClass, eff.creditsPerSecond];
+    else agentWeight = Math.min(agentWeight, eff.creditsPerSecond);
+  }
+  const { computeClass, creditsPerSecond: hardwareWeight } = settlementClassFor(subtask.projectMeta.resourceClass, agentClass, agentWeight);
   const modelParamSizeB = subtask.requestedModel ? cap?.activeModelParamSize : undefined;
   const modality = modalityMultiplier(catalogEntryForTag(cap?.activeModel ?? "")?.capabilities);
   // Sats per credit: the market price agreed at claim (agent's ask), else the oracle's class rate.
@@ -2978,7 +3142,9 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         msatPerCredit: valuation?.msatPerCredit,
         networkFeeBps: valuation?.networkFeeBps,
         computeClass,
-        hardwareTier: cap?.hardwareClass?.tier,
+        hardwareTier: eff?.tier ?? cap?.hardwareClass?.tier,
+        claimedTier: cap?.hardwareClass?.tier,
+        hardwareVerification: hardwareVerifier.get(r.agentId)?.status,
         creditsPerSecond: hardwareWeight,
         modelParamSizeB,
         durationMs,
@@ -3287,6 +3453,13 @@ app.post("/result", async (req, reply) => {
   const subtask = isPeerForward ? undefined : claim?.subtask;
   // Server-side duration: never more than measured since claim or the subtask timeout.
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
+  // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
+  // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
+  if (!isPeerForward && claim?.claimedAt) {
+    const nowMs = Date.now();
+    hardwareVerifier.recordTask(body.agentId, { ok: body.ok, outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt }, nowMs);
+    repostAsk(body.agentId, nowMs);
+  }
 
   // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
   if (!isPeerForward) {
@@ -3667,14 +3840,21 @@ app.get("/economy/market/orders/:accountId", async (req, reply) => {
   const agents = [...new Set([...owned.map((o) => o.agentId), params.accountId])]
     .map((agentId) => ({ agentId, capability: agentCapabilities.get(agentId), ask: orderBook.askFor(agentId) }))
     .filter((a) => a.capability)
-    .map((a) => ({
-      agentId: a.agentId,
-      computeClass: a.capability!.computeClass,
-      tier: a.capability!.hardwareClass?.tier ?? null,
-      creditsPerSecond: a.capability!.hardwareClass?.creditsPerSecond ?? 1,
-      ask: a.ask?.msatPerCredit ?? null,
-      tracking: a.ask?.tracking ?? true
-    }));
+    .map((a) => {
+      // tier / weight are what the agent is paid at (the verified grant); claimedTier is what it reported.
+      const eff = effectiveHardware(a.agentId, a.capability);
+      return {
+        agentId: a.agentId,
+        computeClass: eff?.computeClass ?? a.capability!.computeClass,
+        tier: eff?.tier ?? null,
+        creditsPerSecond: eff?.creditsPerSecond ?? 1,
+        claimedTier: a.capability!.hardwareClass?.tier ?? null,
+        verification: hardwareVerifier.get(a.agentId)?.status ?? "unverified",
+        reliability: hardwareVerifier.reliability(a.agentId) ?? null,
+        ask: a.ask?.msatPerCredit ?? null,
+        tracking: a.ask?.tracking ?? true
+      };
+    });
   return { accountId: params.accountId, orders, agents };
 });
 
@@ -3687,9 +3867,13 @@ app.get("/economy/market/classes", async (req, reply) => {
   if (!requireMeshOrPortalToken(req, reply)) return;
   const agentsByClass = new Map<string, number>();
   const agentsByTier = new Map<string, number>();
-  for (const cap of agentCapabilities.values()) {
+  /** Agents paid at the tier: verified there, or at a base tier with nothing to prove. */
+  const verifiedByTier = new Map<string, number>();
+  for (const [agentId, cap] of agentCapabilities) {
     agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
     if (cap.hardwareClass) agentsByTier.set(cap.hardwareClass.tier, (agentsByTier.get(cap.hardwareClass.tier) ?? 0) + 1);
+    const v = hardwareVerifier.get(agentId);
+    if (v && (v.status === "verified" || v.status === "base")) verifiedByTier.set(v.granted.tier, (verifiedByTier.get(v.granted.tier) ?? 0) + 1);
   }
   return {
     rateEpochId: latestRateEpoch?.epochId ?? null,
@@ -3698,13 +3882,30 @@ app.get("/economy/market/classes", async (req, reply) => {
       return {
         ...spec,
         creditsPerSecond: 1,
-        tiers: spec.tiers.map((t) => ({ ...t, agents: agentsByTier.get(t.id) ?? 0 })),
+        tiers: spec.tiers.map((t) => ({ ...t, agents: agentsByTier.get(t.id) ?? 0, verifiedAgents: verifiedByTier.get(t.id) ?? 0 })),
         rate: latestRateEpoch?.classRates?.[id] ?? null,
         referenceMsatPerCredit: orderBook.referenceFor(id),
         agents: agentsByClass.get(id) ?? 0
       };
     })
   };
+});
+
+/**
+ * Hardware verification records (claimed vs granted tier, last measurement, rolling evidence score):
+ * the seed of the published SLA / reputation score.
+ */
+app.get("/economy/hardware/verifications", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  return { enabled: hardwareVerifier.config.enabled, records: hardwareVerifier.list() };
+});
+
+app.get("/economy/hardware/verifications/:agentId", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const params = z.object({ agentId: z.string().min(1).max(128) }).parse(req.params);
+  const record = hardwareVerifier.get(params.agentId);
+  if (!record) return reply.code(404).send({ error: "not_found" });
+  return { record };
 });
 
 /** Admin: force a recalibration now (e.g. after changing sources). Daily-move clamp still applies. */
@@ -6097,6 +6298,7 @@ export async function initCoordinator(): Promise<void> {
       for (const t of await storeRef.listMarketTicks(7 * 24 * 60)) marketHistory.recordTick(t);
       for (const t of await storeRef.listMarketTrades(5_000)) marketHistory.recordTrade(t);
       for (const o of await storeRef.listMarketOrders()) marketOrders.set(`${o.accountId}:${o.side}`, o);
+      hardwareVerifier.load(await storeRef.listHardwareVerifications());
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {
@@ -6115,6 +6317,10 @@ export async function initCoordinator(): Promise<void> {
   {
       setInterval(() => {
         cleanupStaleTunnels();
+      }, 15_000);
+      // Hardware verification: expire unanswered challenges and missing witnesses, re-post changed asks.
+      setInterval(() => {
+        for (const agentId of hardwareVerifier.tick(Date.now())) repostAsk(agentId);
       }, 15_000);
       setInterval(async () => {
         try {

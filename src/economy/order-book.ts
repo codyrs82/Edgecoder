@@ -24,10 +24,11 @@ import type { CapabilityConstraints, ComputeClassId, ComputeTierId } from "./com
  */
 
 /**
- * The hardware behind an ask (from classifyHardware): what the constraints of a bid are checked against.
- * Planned SLA / reputation score: add it here (set from uptime / completion history at register and
- * heartbeat), add a matching `minReliability` to CapabilityConstraints, and check it in meetsCapability;
- * gpu.dc admission can then require a score instead of only a datacenter part.
+ * The hardware behind an ask: what the constraints of a bid are checked against. Tier and weight are
+ * the verified grant (src/swarm/hardware-verification.ts), vramGb / memoryGb the reported capability.
+ * `reliability` is the agent's rolling evidence score (0..1, the seed of the SLA / reputation score),
+ * set once there is enough evidence; a bid's `minReliability` admits only asks at or above it, so
+ * gpu.dc admission can require a score instead of only a datacenter part.
  */
 export interface AskCapability {
   tier?: ComputeTierId;
@@ -35,6 +36,7 @@ export interface AskCapability {
   creditsPerSecond?: number;
   vramGb?: number;
   memoryGb?: number;
+  reliability?: number;
 }
 
 export interface Ask extends AskCapability {
@@ -63,7 +65,11 @@ export interface Bid extends CapabilityConstraints {
 /** Sanitize requester constraints: finite positive numbers only; anything else means "no constraint". */
 export function capabilityConstraints(input: CapabilityConstraints | undefined): CapabilityConstraints {
   const ok = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
-  return { ...(ok(input?.minVramGb) ? { minVramGb: input!.minVramGb } : {}), ...(ok(input?.minMemoryGb) ? { minMemoryGb: input!.minMemoryGb } : {}) };
+  return {
+    ...(ok(input?.minVramGb) ? { minVramGb: input!.minVramGb } : {}),
+    ...(ok(input?.minMemoryGb) ? { minMemoryGb: input!.minMemoryGb } : {}),
+    ...(ok(input?.minReliability) ? { minReliability: Math.min(1, input!.minReliability) } : {})
+  };
 }
 
 /** True when the hardware meets every constraint. Unknown capability never satisfies a constraint. */
@@ -71,6 +77,7 @@ export function meetsCapability(cap: AskCapability | undefined, req: CapabilityC
   const c = capabilityConstraints(req);
   if (c.minVramGb !== undefined && !((cap?.vramGb ?? 0) >= c.minVramGb)) return false;
   if (c.minMemoryGb !== undefined && !((cap?.memoryGb ?? 0) >= c.minMemoryGb)) return false;
+  if (c.minReliability !== undefined && !((cap?.reliability ?? 0) >= c.minReliability)) return false;
   return true;
 }
 
@@ -151,7 +158,7 @@ export class ComputeOrderBook {
   postAsk(agentId: string, computeClass: ComputeClassId, msatPerCredit: number | undefined, nowMs = Date.now(), capability?: AskCapability): Ask {
     const tracking = msatPerCredit === undefined || !Number.isFinite(msatPerCredit) || msatPerCredit <= 0;
     const prev = this.asks.get(agentId);
-    const cap: AskCapability = capability ?? (prev && prev.computeClass === computeClass ? { tier: prev.tier, creditsPerSecond: prev.creditsPerSecond, vramGb: prev.vramGb, memoryGb: prev.memoryGb } : {});
+    const cap: AskCapability = capability ?? (prev && prev.computeClass === computeClass ? { tier: prev.tier, creditsPerSecond: prev.creditsPerSecond, vramGb: prev.vramGb, memoryGb: prev.memoryGb, reliability: prev.reliability } : {});
     const ask: Ask = {
       agentId,
       computeClass,
@@ -161,7 +168,8 @@ export class ComputeOrderBook {
       ...(cap.tier !== undefined ? { tier: cap.tier } : {}),
       ...(cap.creditsPerSecond !== undefined ? { creditsPerSecond: cap.creditsPerSecond } : {}),
       ...(cap.vramGb !== undefined ? { vramGb: cap.vramGb } : {}),
-      ...(cap.memoryGb !== undefined ? { memoryGb: cap.memoryGb } : {})
+      ...(cap.memoryGb !== undefined ? { memoryGb: cap.memoryGb } : {}),
+      ...(cap.reliability !== undefined ? { reliability: cap.reliability } : {})
     };
     this.asks.set(agentId, ask);
     return ask;

@@ -230,7 +230,9 @@ export function registerMarketPage(app: FastifyInstance): void {
           var mine = (data.orders || []).map(function (o) { return o.side.toUpperCase() + " " + (o.msatPerCredit ? fmt(o.msatPerCredit) + " msat/credit" : "track reference") + " on " + o.computeClass; });
           $("myOrders").innerHTML = mine.length ? "<strong>Your standing orders:</strong> " + mine.join(" · ") : "No standing orders. Your tasks bid the reference + premium; your agents ask the reference.";
           var ag = data.agents || [];
-          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + a.agentId + " <span class='hint'>" + a.computeClass + (a.tier ? " · " + a.tier + " " + (a.creditsPerSecond || 1) + "×" : "") + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
+          // tier = what the agent is paid at (verified grant); claimedTier = what it reported, shown when different.
+          function vlabel(a) { var v = a.verification || "unverified"; return v === "base" ? "" : " · " + (v === "verified" ? "verified" : v === "pending" ? "verifying" : v === "demoted" ? "demoted from " + esc(a.claimedTier || "?") : "unverified" + (a.claimedTier && a.claimedTier !== a.tier ? " (claims " + esc(a.claimedTier) + ")" : "")); }
+          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + esc(a.agentId) + " <span class='hint'>" + esc(a.computeClass) + (a.tier ? " · " + esc(a.tier) + " " + (a.creditsPerSecond || 1) + "×" : "") + vlabel(a) + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
         }
 
         function refresh() {

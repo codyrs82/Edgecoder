@@ -109,6 +109,8 @@ export interface TaskProjectMeta {
   minVramGb?: number;
   /** Capability constraints: only an agent with at least this much system / unified memory (GB) may claim. */
   minMemoryGb?: number;
+  /** Only an agent whose rolling reliability score (0..1) is at least this may claim. */
+  minReliability?: number;
 }
 
 export interface MeshPeerIdentity {

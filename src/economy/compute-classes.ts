@@ -77,6 +77,8 @@ export interface HardwareProfile {
   };
   /** Optional benchmark the agent ran (single-thread score); reserved for future tiering. */
   benchmarkScore?: number;
+  /** Profile came from env overrides (AGENT_GPU_*), not detection. Such claims are re-proven every session. */
+  overridden?: boolean;
 }
 
 export interface ComputeTierSpec {
@@ -191,6 +193,8 @@ export interface CapabilityConstraints {
   minVramGb?: number;
   /** Minimum system / unified memory in GB. */
   minMemoryGb?: number;
+  /** Minimum rolling reliability score (0..1, src/swarm/hardware-verification.ts); agents without enough evidence never qualify. */
+  minReliability?: number;
 }
 
 /**
@@ -346,6 +350,7 @@ export function resolveRequestedClass(
   const explicit: CapabilityConstraints = {};
   if (constraints.minVramGb !== undefined) explicit.minVramGb = constraints.minVramGb;
   if (constraints.minMemoryGb !== undefined) explicit.minMemoryGb = constraints.minMemoryGb;
+  if (constraints.minReliability !== undefined) explicit.minReliability = constraints.minReliability;
   return {
     computeClass: requested === "any" ? "any" : normalizeComputeClass(requested),
     msatPerCredit: price,
@@ -357,8 +362,9 @@ export function resolveRequestedClass(
  * The class and throughput weight a finished task is paid at. Hardware is self-reported, so a
  * CPU task is always paid as CPU work: an agent claiming a GPU or Apple tier earns the cpu base
  * rate (weight 1) on it, and only a real cpu-class agent keeps its own cpu tier weight. This
- * bounds what overstating hardware gains on the commonest task type until hardware is verified
- * (benchmarks / the SLA score). GPU tasks are paid at the agent's own class and tier.
+ * bounds what overstating hardware gains on the commonest task type. GPU tasks are paid at the
+ * agent's own class and tier, which the coordinator passes in as the verified grant
+ * (src/swarm/hardware-verification.ts), not the claim.
  */
 export function settlementClassFor(
   resourceClass: "cpu" | "gpu",

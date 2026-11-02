@@ -30,6 +30,7 @@ import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
+import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
@@ -75,7 +76,8 @@ const hardwareProbe: Probe = (cmd, args) => {
  * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
  * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
  * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
- * override detection (containers and unusual hardware).
+ * override detection (containers and unusual hardware); such a profile is marked `overridden` and
+ * the coordinator re-proves it with a benchmark challenge every session.
  */
 function buildHardwareProfile(): Record<string, unknown> {
   const hw = detectHardware({ probe: hardwareProbe });
@@ -89,12 +91,30 @@ function buildHardwareProfile(): Record<string, unknown> {
         model: gpuModel || undefined,
         vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
         datacenter: process.env.AGENT_GPU_DATACENTER === "1"
-      }
+      },
+      overridden: true
     };
   }
   return hardwareProfileFor(hw, selectGpu(hw, process.env));
 }
 const HARDWARE_PROFILE = buildHardwareProfile();
+/**
+ * Throughput benchmark (src/swarm/benchmark.ts): a < ~30 s self-benchmark at startup and every
+ * AGENT_BENCHMARK_INTERVAL_MS (default 6 h), reported with the profile, plus answers to the
+ * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
+ * (the agent then earns at its class base tier).
+ */
+const BENCHMARK_ENABLED = process.env.AGENT_BENCHMARK !== "0";
+const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, Number(process.env.AGENT_BENCHMARK_INTERVAL_MS ?? 6 * 60 * 60_000) || 6 * 60 * 60_000);
+let lastBenchmark: AgentBenchmarkReport | undefined;
+let benchmarkDueAtMs = 0;
+let benchmarkUnreported = false;
+/** Refuse challenges no honest tier needs (a trusted coordinator never sends these; this bounds a bad config). */
+function challengeAcceptable(c: BenchmarkChallenge): boolean {
+  if (!c || typeof c.challengeId !== "string" || !(c.deadlineMs > 0 && c.deadlineMs <= 15 * 60_000)) return false;
+  if (c.kind === "cpu") return typeof c.seed === "string" && Number.isInteger(c.workUnits) && c.workUnits > 0 && c.workUnits <= 2_000_000 && c.target > 0;
+  return c.kind === "gpu" && typeof c.model === "string" && typeof c.nonce === "string" && c.numPredict > 0 && c.numPredict <= 4096 && c.lines > 0 && c.lines <= 200;
+}
 /** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
 const ASK_MSAT_PER_CREDIT = (() => {
   const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
@@ -751,6 +771,17 @@ async function loop(): Promise<void> {
           if (trust.decision) process.exit(1); // key mismatch or unlisted: a policy refusal, not a transient error
           throw new Error("coordinator_identity_unavailable"); // transient: backoff and failover below
         }
+        // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
+        if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
+          benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
+          try {
+            lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL } : undefined });
+            benchmarkUnreported = true;
+            console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
+          } catch (e) {
+            console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
+          }
+        }
         if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, activeCoordinatorUrl, Date.now(), REGISTER_REFRESH_MS)) {
           const registerBody = {
             agentId: AGENT_ID,
@@ -767,6 +798,8 @@ async function loop(): Promise<void> {
             publicKeyPem: keys.publicKeyPem,
             x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
             hardwareProfile: HARDWARE_PROFILE,
+            ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
+            ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
             ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
             ...(binaryIntegrity ? { binaryIntegrity } : {})
           };
@@ -789,7 +822,7 @@ async function loop(): Promise<void> {
         }
 
         const hbStart = Date.now();
-        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE };
+        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
         const hb = (await post("/heartbeat", hbBody, { extraHeaders: signedHeaders("/heartbeat", hbBody) })) as {
           ok?: boolean;
           blacklisted?: boolean;
@@ -811,7 +844,10 @@ async function loop(): Promise<void> {
             input: string;
           }>;
           blacklist?: { version: number; agents: string[] };
+          benchmarkChallenge?: BenchmarkChallenge;
+          hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
         };
+        if ("benchmark" in hbBody) benchmarkUnreported = false;
         try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 
         // Heartbeat succeeded — reset failure counter and cache proven URL
@@ -822,6 +858,20 @@ async function loop(): Promise<void> {
           console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
           await new Promise((r) => setTimeout(r, 5000));
           continue;
+        }
+        // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
+        if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
+          const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST });
+          const answerBody = { agentId: AGENT_ID, ...answer };
+          try {
+            const res = (await post("/benchmark/response", answerBody, { retries: 0, extraHeaders: signedHeaders("/benchmark/response", answerBody) })) as {
+              verification?: { status?: string; grantedTier?: string; claimedTier?: string } | null;
+            };
+            const v = res?.verification;
+            console.log(`[agent:${AGENT_ID}] benchmark challenge ${answer.kind}${answer.declined ? ` declined (${answer.declined})` : ""}: ${v ? `${v.status} ${v.grantedTier}/${v.claimedTier}` : "answered"}`);
+          } catch (e) {
+            console.warn(`[agent:${AGENT_ID}] benchmark challenge answer failed: ${e}`);
+          }
         }
         const blacklistSet = new Set(hb.blacklist?.agents ?? []);
         for (const notice of hb.tunnelCloseNotices ?? []) {

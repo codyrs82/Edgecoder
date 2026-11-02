@@ -123,10 +123,26 @@ dynamic:
    tier id prices that tier's hour and is divided by its weight); weights are overridable with
    `COMPUTE_TIER_WEIGHTS_JSON`, references with `COMPUTE_REFERENCE_USD_PER_HOUR_JSON`.
    Capability needs are bid constraints, not markets: a task may set `minVramGb` / `minMemoryGb`
-   and only agents that meet them can claim it. The nine pre-2026-11 class ids (`cpu.std` …
+   (and `minReliability`, below) and only agents that meet them can claim it. The nine pre-2026-11 class ids (`cpu.std` …
    `gpu.dc80`) are the tier ids now; APIs accept them and map them onto their class, history
    stored under them is mapped at read time, and signed receipts that carry them are never
    rewritten.
+
+   **Verified tiers** (`src/swarm/hardware-verification.ts`, `src/swarm/benchmark.ts`). The
+   profile is self-reported, so a tier above the class base is paid only after the agent passes
+   a coordinator-issued challenge; until then it earns the class base weight 1 (older agents that
+   cannot answer challenges keep working there). CPU tiers: a memory-hard scrypt proof of work
+   over a fresh random seed, sample-verified by the coordinator; GPU / Apple tiers: a fixed-seed
+   greedy generation of a nonce-tagged prompt on the agent's Ollama model, measured as effective
+   bandwidth (tokens/s × weight GB) and, by default, cross-checked against a second agent running
+   the same model (`HARDWARE_GPU_REQUIRE_CROSS_CHECK`). The deadline is
+   `allowance + work × slack / tierMinimum`; speed is `work / max(server time − allowance, agent
+   time)`. Slow or late answers demote to the tier the speed supports (a "GPU" that measures like
+   a CPU settles as `cpu`); invalid answers grant the base tier. Passes are re-proven every 6 h;
+   real-task speed far below the challenge baseline demotes again. Tier minimums
+   (`HARDWARE_TIER_MIN_JSON`) need calibrating on the fleet. The per-agent record, including the
+   rolling `evidence.score` that a bid's `minReliability` checks, is on
+   `GET /economy/hardware/verifications`.
 2. **Model profile** (`src/credits/pricing.ts`). The per-second rate is multiplied by the size of
    the model that served the task (≤3B 1.0, ≤10B 1.5, ≤35B 2.5, >35B 4.0) and the sats value by
    its modality (vision +25 %, thinking +10 %), from the catalog's capability labels.

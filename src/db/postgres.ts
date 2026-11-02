@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
+import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 function rowToPayout(row: Record<string, unknown>): PayoutRecord {
@@ -348,6 +349,13 @@ CREATE TABLE IF NOT EXISTS market_orders (
   msat_per_credit BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   PRIMARY KEY (account_id, side)
+);
+-- Hardware verification (src/swarm/hardware-verification.ts): one self-contained JSON record per
+-- agent (claimed vs granted tier, last challenge measurement, rolling evidence score), publishable as is.
+CREATE TABLE IF NOT EXISTS hardware_verifications (
+  agent_id TEXT PRIMARY KEY,
+  record_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS coordinator_fee_events (
@@ -2490,6 +2498,21 @@ export class PostgresStore {
     return r.rows
       .map((row) => normalizeLegacyOrder({ accountId: row.account_id, side: row.side, computeClass: row.compute_class, msatPerCredit: Number(row.msat_per_credit), updatedAtMs: Number(row.updated_at_ms) }))
       .filter((o): o is MarketOrder => o !== undefined);
+  }
+
+  // ── Hardware verification ──
+  async upsertHardwareVerification(r: HardwareVerificationRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO hardware_verifications (agent_id, record_json, updated_at_ms) VALUES ($1,$2,$3)
+       ON CONFLICT (agent_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE hardware_verifications.updated_at_ms <= EXCLUDED.updated_at_ms`,
+      [r.agentId, JSON.stringify(r), r.updatedAtMs]
+    );
+  }
+
+  async listHardwareVerifications(limit = 100_000): Promise<HardwareVerificationRecord[]> {
+    const r = await this.pool.query(`SELECT record_json FROM hardware_verifications ORDER BY updated_at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as HardwareVerificationRecord);
   }
 
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {
