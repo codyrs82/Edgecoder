@@ -649,6 +649,9 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
+        // The app's local coordinator never pays out (payouts run on the network seeds), so it
+        // needs no Lightning node; without this it refuses to start (mock Lightning is disabled).
+        .env("ECONOMY_PAYMENTS_ENABLED", "0")
         .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
         .env("ADMIN_API_TOKEN", &tokens.admin)
         .spawn()

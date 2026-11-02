@@ -27,3 +27,10 @@ describe("auto-update", () => {
     expect(app).toMatch(/\$effect\(\(\) => \{\s*\/\/[^\n]*\n\s*startPeriodicCheck\(\);/);
   });
 });
+
+describe("bundled agent spawn", () => {
+  it("starts the local coordinator with payments off (no Lightning node on desktops)", () => {
+    const main = readFileSync(new URL("../src-tauri/src/main.rs", import.meta.url), "utf8");
+    expect(main).toMatch(/\.env\("ECONOMY_PAYMENTS_ENABLED", "0"\)/);
+  });
+});
