@@ -7,6 +7,7 @@
   import MeshTopology from "../pages/MeshTopology.svelte";
   import ModelManager from "../pages/ModelManager.svelte";
   import Credits from "../pages/Credits.svelte";
+  import Compute from "../pages/Compute.svelte";
   import TaskQueue from "../pages/TaskQueue.svelte";
   import Settings from "../pages/Settings.svelte";
   import LogViewer from "../pages/LogViewer.svelte";
@@ -22,6 +23,7 @@
 
   const sections = [
     { id: "account", label: "Account", component: Account },
+    { id: "compute", label: "Compute", component: Compute },
     { id: "integrations", label: "Integrations", component: Integrations },
     { id: "active-work", label: "Active Work", component: ActiveWork },
     { id: "dashboard", label: "Dashboard", component: Dashboard },

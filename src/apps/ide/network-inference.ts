@@ -137,3 +137,34 @@ export function contentToText(content: unknown): string {
   }
   return "";
 }
+
+export interface ComputeOverview {
+  connected: boolean;
+  account?: { accountId: string; cSats: number; earnedSats: number; recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }> };
+  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
+  models?: Array<{ model: string; agents: number; classes: string[] }>;
+}
+
+/** Balance, prices per class and the network's models, for the app's Compute page. */
+export async function computeOverview(d: NetworkDeps): Promise<ComputeOverview> {
+  const [acct, cat] = await Promise.all([
+    call(d, "POST", "/forward/account/summary", {}).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+    call(d, "GET", "/forward/inference/models").catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+  ]);
+  if (acct.status !== 200 && cat.status !== 200) return { connected: false };
+  return {
+    connected: true,
+    ...(acct.status === 200 ? { account: acct.json as unknown as ComputeOverview["account"] } : {}),
+    ...(cat.status === 200 ? { classes: cat.json.classes as ComputeOverview["classes"], models: cat.json.models as ComputeOverview["models"] } : {}),
+  };
+}
+
+/** Ask for a Lightning invoice that buys cSats for this machine's owner. */
+export async function buyCSats(d: NetworkDeps, amountSats: number) {
+  return call(d, "POST", "/forward/account/buy", { amountSats });
+}
+
+/** Whether a purchase has been paid (checks with the coordinator's Lightning node). */
+export async function purchaseStatus(d: NetworkDeps, intentId: string) {
+  return call(d, "POST", "/forward/account/intent", { intentId });
+}

@@ -27,6 +27,9 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/submit": "/submit",
   "/forward/inference/submit": "/inference/submit",
   "/forward/inference/stream": "/inference/stream",
+  "/forward/account/summary": "/account/summary",
+  "/forward/account/buy": "/account/buy",
+  "/forward/account/intent": "/account/intent",
 };
 const MAX_BODY_BYTES = 1024 * 1024;
 const RESULT_PATH_RE = /^\/forward\/tasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/subtasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/result$/;

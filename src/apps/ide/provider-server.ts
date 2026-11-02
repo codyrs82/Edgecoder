@@ -30,7 +30,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
-import { contentToText, listNetworkModels, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, computeOverview, contentToText, listNetworkModels, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
@@ -643,6 +643,26 @@ app.post("/v1/ide/projects/new", async (req, reply) => {
   const projectRoot = createNewProject(name);
   activeProjectRoot = projectRoot;
   return reply.send({ projectRoot });
+});
+
+// Compute page: cSats balance, prices per class, network models (through this machine's agent).
+app.get("/v1/ide/compute", async (_req, reply) => {
+  if (!networkDeps) return reply.send({ connected: false, reason: "not_enrolled" });
+  return reply.send(await computeOverview(networkDeps));
+});
+
+app.post("/v1/ide/compute/buy", async (req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const { amountSats } = z.object({ amountSats: z.number().int().min(100).max(1_000_000) }).parse(req.body);
+  const r = await buyCSats(networkDeps, amountSats);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
+});
+
+app.post("/v1/ide/compute/intent", async (req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const { intentId } = z.object({ intentId: z.string().min(1).max(100) }).parse(req.body);
+  const r = await purchaseStatus(networkDeps, intentId);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
 });
 
 const toolApprovalSchema = z.object({

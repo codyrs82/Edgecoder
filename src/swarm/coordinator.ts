@@ -85,7 +85,7 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { clampToBand, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
 import { InferenceStreams } from "./inference-streams.js";
 import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
@@ -3894,6 +3894,19 @@ const inferenceSubmitSchema = z.object({
   timeoutMs: z.number().int().min(10_000).max(INFERENCE_MAX_TIMEOUT_MS).default(180_000),
 });
 
+/** The signing agent's owner account: cSats balance, earnings and recent activity (for the app's Compute page). */
+app.post("/account/summary", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/summary", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const balance = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
+  const history = pgStore ? await pgStore.creditHistory(accountId) : creditEngine.history(accountId);
+  const recent = [...history].sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 25).map((t) => ({
+    type: t.type, cSats: Number(t.credits), reason: t.reason, taskId: t.relatedTaskId, atMs: t.timestampMs,
+  }));
+  return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent });
+});
+
 /** Models agents on the network can run now, with how many agents and the price per class. */
 app.get("/inference/models", async () => {
   const now = Date.now();
@@ -4607,24 +4620,26 @@ app.post("/economy/payments/intents", async (req, reply) => {
       amountSats: z.number().int().positive().max(100000000)
     })
     .parse(req.body);
-  // Price locked at intent creation from the daily market rate (× current load), never re-quoted.
-  const quote = quoteSatsPerCredit("cpu");
-  const satsPerCredit = quote.satsPerCredit;
-  const { feeSats, netSats } = computeIntentFee(body.amountSats, COORDINATOR_FEE_BPS);
+  return { ok: true, intent: await createPaymentIntent(body.accountId, body.amountSats, body.walletType as WalletType) };
+});
+
+/** A Lightning invoice that buys cSats for an account: 1 cSat per sat, after the coordinator fee. */
+async function createPaymentIntent(accountId: string, amountSats: number, walletType: WalletType = "lightning"): Promise<PaymentIntent> {
+  const { feeSats, netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);
   const invoice = await lightningProvider.createInvoice({
-    amountSats: body.amountSats,
-    memo: `edgecoder_credits:${body.accountId}`,
+    amountSats,
+    memo: `edgecoder_credits:${accountId}`,
     expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000)
   });
   const intent: PaymentIntent = {
     intentId: randomUUID(),
-    accountId: body.accountId,
+    accountId,
     coordinatorId: identity.peerId,
-    walletType: body.walletType as WalletType,
+    walletType,
     network: BITCOIN_NETWORK,
     invoiceRef: invoice.invoiceRef,
     paymentHash: invoice.paymentHash,
-    amountSats: body.amountSats,
+    amountSats,
     coordinatorFeeBps: COORDINATOR_FEE_BPS,
     coordinatorFeeSats: feeSats,
     netSats,
@@ -4635,7 +4650,31 @@ app.post("/economy/payments/intents", async (req, reply) => {
   };
   paymentIntents.set(intent.intentId, intent);
   await pgStore?.upsertPaymentIntent(intent);
-  return { ok: true, intent };
+  return intent;
+}
+
+/** Buy cSats for the signing agent's owner: returns the invoice to pay. */
+app.post("/account/buy", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/buy", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  if (!ECONOMY_PAYMENTS_ENABLED) return reply.code(503).send({ error: "payments_disabled" });
+  const { amountSats } = z.object({ amountSats: z.number().int().min(100).max(1_000_000) }).parse(req.body);
+  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const intent = await createPaymentIntent(accountId, amountSats);
+  return reply.send({ intentId: intent.intentId, invoice: intent.invoiceRef, amountSats: intent.amountSats, cSats: intent.quotedCredits, feeSats: intent.coordinatorFeeSats, network: intent.network, expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000) });
+});
+
+/** State of one of the owner's purchases; checks with the Lightning node while it is unpaid. */
+app.post("/account/intent", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/intent", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  const { intentId } = z.object({ intentId: z.string().min(1).max(100) }).parse(req.body);
+  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const intent = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? undefined;
+  if (!intent || intent.accountId !== accountId) return reply.code(404).send({ error: "unknown_intent" });
+  if (intent.status === "created") await reconcileIntent(intent);
+  const now = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? intent;
+  return reply.send({ intentId, status: now.status, cSats: now.quotedCredits });
 });
 
 app.get("/economy/payments/intents/:intentId", async (req, reply) => {

@@ -50,7 +50,10 @@ export const IDE_ROUTES = [
   { method: "GET", path: "/v1/ide/network/tasks", auth: true },
   { method: "POST", path: "/v1/ide/diagnostics", auth: true },
   { method: "GET", path: "/v1/ide/preview", auth: true },
-  { method: "POST", path: "/v1/ide/projects/new", auth: true }
+  { method: "POST", path: "/v1/ide/projects/new", auth: true },
+  { method: "GET", path: "/v1/ide/compute", auth: true },
+  { method: "POST", path: "/v1/ide/compute/buy", auth: true },
+  { method: "POST", path: "/v1/ide/compute/intent", auth: true }
 ] as const;
 
 export type IdeRoute = (typeof IDE_ROUTES)[number];

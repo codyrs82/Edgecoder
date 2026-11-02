@@ -1194,3 +1194,19 @@ export const ideDiagnostics = (paths: string[]) =>
 export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
 /** Preview URL of a project file (default index.html) on the IDE server's preview origin. */
 export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/ide/preview?path=${encodeURIComponent(path)}`).then((r) => r.url);
+
+// Compute: cSats balance, prices per class, network models, buying cSats (:4304 /v1/ide/compute*)
+export interface ComputeOverview {
+  connected: boolean;
+  reason?: string;
+  account?: { accountId: string; cSats: number; earnedSats: number; recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }> };
+  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
+  models?: Array<{ model: string; agents: number; classes: string[] }>;
+}
+export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
+export const computeBuy = (amountSats: number) =>
+  fsCall<{ intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number }>("POST", "/v1/ide/compute/buy", { amountSats });
+export const computeIntent = (intentId: string) => fsCall<{ intentId: string; status: string; cSats: number }>("POST", "/v1/ide/compute/intent", { intentId });
+/** The key external tools use for http://localhost:4304/v1 (this computer's IDE token). */
+export const ideApiKey = () => getIdeToken();
+export const IDE_API_BASE = "http://localhost:4304/v1";
