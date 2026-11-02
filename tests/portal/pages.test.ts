@@ -14,6 +14,8 @@ const PAGES: Record<string, string> = {
   "/portal/dashboard": "EdgeCoder Portal | Dashboard",
   "/portal/wallet": "EdgeCoder Portal | Wallet",
   "/portal/settings": "EdgeCoder Portal | Settings",
+  "/portal/settings/nodes": "EdgeCoder Portal | Settings",
+  "/portal/settings/admin": "EdgeCoder Portal | Settings",
   "/portal/download": "EdgeCoder Portal | Get EdgeCoder",
   "/portal/reviews": "EdgeCoder Portal | Reviews",
   "/portal/market": "EdgeCoder Portal | Market"
@@ -32,14 +34,50 @@ describe("portal pages module (#16)", () => {
     await app.close();
   });
 
-  it("keeps the old /portal/nodes and /portal/coordinator-ops redirects", async () => {
+  it("redirects the old /portal/nodes and /portal/coordinator-ops paths into Settings", async () => {
     const app = Fastify();
     registerPortalPages(app);
-    for (const url of ["/portal/nodes", "/portal/coordinator-ops"]) {
+    const expected: Record<string, string> = {
+      "/portal/nodes": "/portal/settings/nodes",
+      "/portal/coordinator-ops": "/portal/settings/admin"
+    };
+    for (const [url, location] of Object.entries(expected)) {
       const res = await app.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(302);
-      expect(res.headers.location, url).toBe("/portal/dashboard");
+      expect(res.headers.location, url).toBe(location);
     }
+    await app.close();
+  });
+
+  it("keeps the dashboard to an overview and moves management into Settings", async () => {
+    const app = Fastify();
+    registerPortalPages(app);
+    const dashboard = (await app.inject({ url: "/portal/dashboard" })).body;
+    for (const gone of ["quick-action", 'id="enrollBtn"', 'id="nodesBody"', 'id="userMgmtBody"', 'id="opsPendingBody"', 'id="opsApprovedBody"']) {
+      expect(dashboard, gone).not.toContain(gone);
+    }
+    expect(dashboard).toContain('id="activityFeed"');
+    expect(dashboard).toContain('id="opsAgentsValue"');
+
+    const settings = (await app.inject({ url: "/portal/settings" })).body;
+    expect(settings).not.toContain("settings-nav-card");
+    expect(settings).toContain('id="passkeyEnrollBtn"');
+    expect(settings).toContain('href="/portal/settings/nodes"');
+    // Admin tab is rendered hidden and only revealed client-side for system admins.
+    expect(settings).toMatch(/class="btn hidden" href="\/portal\/settings\/admin" id="settingsAdminTab"/);
+
+    const nodes = (await app.inject({ url: "/portal/settings/nodes" })).body;
+    expect(nodes).toContain('id="enrollBtn"');
+    expect(nodes).toContain('id="nodesBody"');
+    expect(nodes).toContain('"/nodes/enroll"');
+
+    const admin = (await app.inject({ url: "/portal/settings/admin" })).body;
+    for (const id of ["userMgmtBody", "opsPendingBody", "opsApprovedBody", "filterCoordinatorBtn", "approvedFilterActiveBtn"]) {
+      expect(admin, id).toContain(`id="${id}"`);
+    }
+    expect(admin).toContain('"/coordinator/ops/node-approval"');
+    expect(admin).toContain('"/portal/api/admin/users"');
+    expect(admin).toContain("isSystemAdmin");
     await app.close();
   });
 

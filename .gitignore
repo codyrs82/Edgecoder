@@ -48,3 +48,6 @@ deploy/infra/.env
 deploy/infra/generated/
 deploy/infra/secrets/
 .claude/settings.local.json
+
+# bundled agent runtime copied in by scripts/bundle-agent-resources.sh at build time
+desktop/src-tauri/resources/agent/
