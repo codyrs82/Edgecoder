@@ -58,9 +58,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4Mjc5RTJFMEJGNUVFQTIKUldTaTd2VUxMcDRuR0poY1A5WVlkMmtpMnh4eUVya1lqeUE1TmtHTXlZNUZGWWdSVE5NUVNXS2IK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3MkQxMDI2RDM0NjgyOTMKUldTVGdrYlRKaEF0Ri96enlQZzhvQU5tclkzMmUwMEdRbkdvYmRXSzlnb1dIblovWUg4cmRwMkwK",
       "endpoints": [
-        "https://github.com/codyrs82/Edgecoder/releases/latest/download/latest.json"
+        "https://github.com/codyrs82/Edgecoder/releases/download/desktop-updates/latest.json"
       ]
     }
   }

@@ -28,8 +28,10 @@
   let gitBranch: string | null = $state(null);
 
   $effect(() => {
+    // Updates run whether or not anyone is signed in, so a broken sign-in can be fixed by an update.
+    startPeriodicCheck();
     getMe()
-      .then((u) => { user = u; startPeriodicCheck(); })
+      .then((u) => { user = u; })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
     return () => stopPeriodicCheck();
