@@ -26,6 +26,11 @@ describe("validatePayoutRequest", () => {
     expect(validatePayoutRequest({ bolt11: "nope", payableMsat: 1, capacityMsat: 1 }, policy)).toMatchObject({ ok: false, code: "invalid_invoice" });
     expect(validatePayoutRequest({ bolt11: good.bolt11, payableMsat: 5_000_000, capacityMsat: 10_000_000 }, { ...policy, enabled: false })).toMatchObject({ ok: false, code: "payouts_disabled" });
   });
+  it("pays regtest invoices only when configured for regtest", () => {
+    const bolt11 = encodeTestBolt11({ network: "bcrt", amountMsat: 2_000_000, paymentHashHex: "ab".repeat(32) });
+    expect(validatePayoutRequest({ bolt11, payableMsat: 5_000_000, capacityMsat: 10_000_000 }, { ...policy, network: "regtest" })).toMatchObject({ ok: true });
+    expect(validatePayoutRequest({ bolt11, payableMsat: 5_000_000, capacityMsat: 10_000_000 }, { ...policy, network: "testnet" })).toMatchObject({ ok: false, code: "wrong_network" });
+  });
 });
 
 describe("PayoutService.withdraw", () => {

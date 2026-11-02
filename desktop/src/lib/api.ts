@@ -160,7 +160,7 @@ const SESSION_TOKEN_KEY = "edgecoder_session_token";
 function saveSessionToken(token: string): void {
   try { localStorage.setItem(SESSION_TOKEN_KEY, token); } catch {}
 }
-function loadSessionToken(): string | null {
+export function loadSessionToken(): string | null {
   try { return localStorage.getItem(SESSION_TOKEN_KEY); } catch { return null; }
 }
 export function clearSessionToken(): void {

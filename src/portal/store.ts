@@ -556,7 +556,7 @@ export class PortalStore {
     ownerEmail: string;
     registrationTokenHash: string;
     emailVerified: boolean;
-  }): Promise<NodeEnrollment> {
+  }): Promise<NodeEnrollment | null> {
     const now = Date.now();
     const normalizedDeviceId = input.deviceId?.trim().toLowerCase() || undefined;
     let targetNodeId = input.nodeId;
@@ -583,6 +583,8 @@ export class PortalStore {
           ELSE FALSE
         END,
         updated_at_ms = EXCLUDED.updated_at_ms
+      -- Re-enrolling (token rotation) is the owner's alone; another user gets no row back.
+      WHERE portal_node_enrollments.owner_user_id = EXCLUDED.owner_user_id
       RETURNING
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
@@ -600,7 +602,7 @@ export class PortalStore {
       ]
     );
     const row = result.rows[0];
-    return this.mapNodeRow(row);
+    return row ? this.mapNodeRow(row) : null;
   }
 
   async getNodeEnrollment(nodeId: string): Promise<NodeEnrollment | null> {

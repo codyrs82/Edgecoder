@@ -15,9 +15,11 @@ use serde::Serialize;
 use glob::glob;
 
 mod agent_guard;
+mod network_enrollment;
 mod token;
 use agent_guard::{port_in_use, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
+use network_enrollment::{NetworkEnrollment, NetworkEnrollmentSummary};
 
 struct AgentProcess(Arc<Mutex<Option<Child>>>);
 struct LocalToken(String);
@@ -165,6 +167,35 @@ fn retry_local_agent(
         *guard = child;
     }
     control.guard.apply(event).as_str().to_string()
+}
+
+/// This machine's network node id: the enrolled one, else a stable proposal for enrolling.
+#[tauri::command]
+fn get_network_node_id() -> Result<String, String> {
+    network_enrollment::node_id()
+}
+
+/// Whether this machine is enrolled (never returns the registration token).
+#[tauri::command]
+fn get_network_enrollment() -> Option<NetworkEnrollmentSummary> {
+    network_enrollment::load().map(|e| e.summary())
+}
+
+/// Store the portal's enrollment for this machine and restart the agent on it
+/// (the monitor thread respawns the agent, which then reads the new enrollment).
+#[tauri::command]
+fn save_network_enrollment(
+    enrollment: NetworkEnrollment,
+    process: tauri::State<'_, AgentProcess>,
+) -> Result<NetworkEnrollmentSummary, String> {
+    enrollment.validate()?;
+    network_enrollment::save(&enrollment)?;
+    if let Ok(mut guard) = process.0.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
+    }
+    Ok(enrollment.summary())
 }
 
 /// Path of the IDE provider token written by the IDE server (#4): ~/.edgecoder/ide-token.
@@ -654,6 +685,9 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .env("ECONOMY_PAYMENTS_ENABLED", "0")
         .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
         .env("ADMIN_API_TOKEN", &tokens.admin)
+        // Once the signed-in user has enrolled this machine, its worker joins the network
+        // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
+        .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
         .spawn()
         .ok()
 }
@@ -796,6 +830,9 @@ fn main() {
             get_local_token,
             get_agent_status,
             retry_local_agent,
+            get_network_node_id,
+            get_network_enrollment,
+            save_network_enrollment,
             get_ide_token,
             set_project_root,
             get_project_root,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ensureNetworkEnrollment } from "./lib/network-enrollment";
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import ChatInput from "./components/ChatInput.svelte";
   import ChatView from "./pages/ChatView.svelte";
@@ -35,6 +36,15 @@
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
     return () => stopPeriodicCheck();
+  });
+
+  // Join this machine to the network once someone is signed in (no-op when already enrolled).
+  $effect(() => {
+    if (user) {
+      ensureNetworkEnrollment(user).then((status) => {
+        if (status.state === "error") console.warn("[network] enrollment failed:", status.message);
+      });
+    }
   });
 
   // Restore existing IDE project on startup

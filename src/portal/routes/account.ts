@@ -164,6 +164,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_A
       registrationTokenHash: sha256Hex(registrationToken),
       emailVerified: user.emailVerified
     });
+    if (!record) return reply.code(409).send({ error: "node_owned_by_another_user" });
     if (body.nodeKind === "agent" && user.emailVerified && !record.nodeApproved) {
       const approved = await store.setNodeApproval(record.nodeId, true);
       if (approved) {

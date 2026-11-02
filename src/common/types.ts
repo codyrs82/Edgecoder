@@ -357,7 +357,7 @@ export interface AgentRolloutState {
   error?: string;
 }
 
-export type BitcoinNetwork = "bitcoin" | "testnet" | "signet";
+export type BitcoinNetwork = "bitcoin" | "testnet" | "signet" | "regtest";
 export type WalletType = "lightning" | "onchain";
 
 export interface WalletAccount {

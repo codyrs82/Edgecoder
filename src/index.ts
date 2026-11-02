@@ -28,7 +28,9 @@ function startWorkerProcess(): void {
   const workerScript = join(__dirname, "swarm", "worker-runner.js");
 
   const agentId = process.env.AGENT_ID || `node-${hostname().slice(0, 8)}`;
-  const coordinatorUrl = `http://127.0.0.1:${COORDINATOR_PORT}`;
+  // The desktop app sets AGENT_NETWORK_COORDINATOR_URL once the signed-in user has enrolled this
+  // machine, so the worker contributes to the network; otherwise it stays on the local coordinator.
+  const coordinatorUrl = process.env.AGENT_NETWORK_COORDINATOR_URL?.trim() || `http://127.0.0.1:${COORDINATOR_PORT}`;
 
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,

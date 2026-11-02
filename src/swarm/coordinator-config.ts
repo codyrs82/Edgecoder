@@ -65,7 +65,7 @@ export const coordinatorConfigSchema = z.object({
   ROBOT_QUEUE_ENABLED: envBool(false),
   OLLAMA_AUTO_INSTALL: envBool(false),
   REQUIRE_VERIFIED_AGENTS: envBool(false),
-  BITCOIN_NETWORK: z.enum(["bitcoin", "testnet", "signet"], { message: "must be bitcoin, testnet or signet" }).default("testnet"),
+  BITCOIN_NETWORK: z.enum(["bitcoin", "testnet", "signet", "regtest"], { message: "must be bitcoin, testnet, signet or regtest" }).default("testnet"),
   LOCAL_MODEL_PROVIDER: z.enum(["edgecoder-local", "ollama-local"], { message: "must be edgecoder-local or ollama-local" }).default("edgecoder-local"),
   COORDINATOR_PUBLIC_URL: envUrl("http://127.0.0.1:4301"),
   INFERENCE_URL: envUrl("http://127.0.0.1:4302"),
