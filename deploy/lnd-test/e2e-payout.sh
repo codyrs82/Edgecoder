@@ -6,6 +6,7 @@
 #   3. withdrawal: the payee node issues an invoice and the coordinator pays it out over Lightning.
 # Prints invoices, statuses and balances only; no tokens or macaroons.
 set -euo pipefail
+trap 'echo "e2e-payout: stopped at line $LINENO" >&2' ERR
 export FLY_API_TOKEN="${FLY_API_TOKEN:-$(cat ~/.config/edgecoder/fly.token)}"
 ACCOUNT=${ACCOUNT:-regtest-e2e-test}
 BUY_SATS=${BUY_SATS:-50000}
@@ -15,9 +16,15 @@ SEED=edgecoder-seed
 LT=edgecoder-lnd-test
 here=$(cd "$(dirname "$0")" && pwd)
 js=$(base64 < "$here/e2e-seed.mjs" | tr -d '\n')
-seed() { fly ssh console -a "$SEED" -q -C "sh -c 'echo $js | base64 -d > /tmp/e2e-seed.mjs && cd /app && node /tmp/e2e-seed.mjs $*'" 2>/dev/null | grep '^{'; }
+# Remote output is shown in full when it is not the expected JSON line, so a failure is never silent.
+seed() {
+  local raw; raw=$(fly ssh console -a "$SEED" -q -C "sh -c 'echo $js | base64 -d > /tmp/e2e-seed.mjs && cd /app && node /tmp/e2e-seed.mjs $*'" 2>&1 || true)
+  local line; line=$(grep '^{' <<<"$raw" | tail -1 || true)
+  if [ -z "$line" ]; then echo "seed $1 failed; remote output:" >&2; sed 's/^/  | /' <<<"$raw" >&2; exit 1; fi
+  printf '%s\n' "$line"
+}
 PAYEE=$(fly machines list -a "$LT" --json | jq -r '.[] | select(.config.metadata.fly_process_group=="payee") | .id')
-payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/data --network=regtest $*" 2>/dev/null | grep -v '^Connecting'; }
+payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/data --network=regtest $*" 2>&1 | { grep -v '^Connecting' || true; }; }
 
 echo "== 1. purchase $BUY_SATS sats for $ACCOUNT"
 intent=$(seed intent "$ACCOUNT" "$BUY_SATS")
