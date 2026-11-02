@@ -43,7 +43,10 @@ export abstract class AgentBase {
     const res = await this.provider.generate({
       prompt: codePrompt(task, plan ?? task, language)
     });
-    return extractCode(res.text, language);
+    const code = extractCode(res.text, language);
+    // Empty code "runs" successfully and prints nothing; report it as the failure it is.
+    if (!code.trim()) throw new Error("model returned no code");
+    return code;
   }
 
   protected async reflectOnFailure(
@@ -52,7 +55,7 @@ export abstract class AgentBase {
     runResult: RunResult
   ): Promise<string> {
     const res = await this.provider.generate({
-      prompt: reflectPrompt(task, code, runResult.stderr)
+      prompt: reflectPrompt(task, code, runResult.stderr, runResult.language)
     });
     return extractCode(res.text, runResult.language);
   }

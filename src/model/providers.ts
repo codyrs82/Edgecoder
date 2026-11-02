@@ -147,7 +147,12 @@ export class OllamaLocalProvider implements ModelProvider {
       })
     });
 
-    const payload = (await response.body.json()) as { response?: string };
+    const payload = (await response.body.json().catch(() => ({}))) as { response?: string; error?: string };
+    // Ollama answers a missing model or a bad request with an error body; returning "" made the
+    // worker run empty code and report success with no output.
+    if (response.statusCode >= 400 || payload.error) {
+      throw new Error(`ollama (${this.model}): ${payload.error ?? `HTTP ${response.statusCode}`}`);
+    }
     return {
       text: payload.response ?? "",
       provider: this.kind

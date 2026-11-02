@@ -7,6 +7,7 @@
 # SKIP_SETUP=1 runs only the withdrawal (after a run that already bought and earned).
 # BUY_ONLY=1 runs only the purchase (buyer credits for a proof-of-concept job).
 # OWNER_OF=<agentId> prints the account that agent is linked to, then exits.
+# BALANCE=1 prints ACCOUNT's earnings balance, then exits.
 # AGENTS=1 lists the agents registered with the US seed, then exits.
 # Prints invoices, statuses and balances only; no tokens or macaroons.
 set -euo pipefail
@@ -31,6 +32,7 @@ PAYEE=$(fly machines list -a "$LT" --json | jq -r '.[] | select(.config.metadata
 payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/data --network=regtest $*" 2>&1 | { grep -v '^Connecting' || true; }; }
 
 if [ -n "${OWNER_OF:-}" ]; then seed owner "$OWNER_OF"; exit 0; fi
+if [ "${BALANCE:-0}" = 1 ]; then seed payouts "$ACCOUNT" | jq -c '.body.balance'; exit 0; fi
 if [ "${AGENTS:-0}" = 1 ]; then seed agents | jq -c '.[]'; exit 0; fi
 
 if [ "${SKIP_SETUP:-0}" != 1 ]; then
