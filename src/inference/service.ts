@@ -195,13 +195,13 @@ app.post("/decompose", async (req, reply) => {
   const prompt = decomposePrompt(parsed.prompt);
 
   try {
+    if (config.DECOMPOSE_MODEL_TIMEOUT_MS === 0) throw new Error("decompose_model_disabled");
     metrics.decomposeModelCalls++;
     const ollamaRes = await request(`${ollamaHost}/api/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, prompt, stream: false }),
-      headersTimeout: 120_000,
-      bodyTimeout: 0,
+      signal: AbortSignal.timeout(config.DECOMPOSE_MODEL_TIMEOUT_MS),
     });
 
     const payload = (await ollamaRes.body.json()) as { response?: string };

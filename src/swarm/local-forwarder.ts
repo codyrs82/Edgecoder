@@ -91,8 +91,9 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
           method: "POST",
           headers: { "content-type": "application/json", ...deps.meshHeaders(), ...deps.signedHeaders("/submit", raw) },
           body: raw,
-          headersTimeout: timeoutMs,
-          bodyTimeout: timeoutMs
+          // The coordinator splits the prompt into subtasks before it answers.
+          headersTimeout: Math.max(timeoutMs, 60_000),
+          bodyTimeout: Math.max(timeoutMs, 60_000)
         });
         return send(res, upstream.statusCode, await upstream.body.text());
       }
@@ -110,7 +111,7 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       return send(res, 404, { error: "not_found" });
     } catch (err) {
       if (err instanceof Error && err.message === "body_too_large") return send(res, 413, { error: "body_too_large" });
-      return send(res, 502, { error: "coordinator_unreachable" });
+      return send(res, 502, { error: "coordinator_unreachable", detail: err instanceof Error ? err.message : String(err) });
     }
   });
 }

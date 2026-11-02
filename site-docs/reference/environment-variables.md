@@ -165,6 +165,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | An http(s) URL. |
 | `OLLAMA_MODEL` | `qwen3.5:9b` | The model that is active at startup. |
 | `OLLAMA_COORDINATOR_MODEL` | `qwen3.5:9b` (decompose and reflect); falls back to `OLLAMA_MODEL` for chat | The model used for coordinator prompts. |
+| `DECOMPOSE_MODEL_TIMEOUT_MS` | `10000` | Cap on the model call that splits a submitted prompt into subtasks; past it the task runs as one subtask. `0` skips the model. |
 
 ## IDE provider server (port 4304)
 
