@@ -97,6 +97,32 @@ function gitUnapprovedReason(args: string[]): string | null {
 }
 
 /** #17: `child` is `root` or inside it (no prefix confusion: /proj-evil is not inside /proj). */
+/**
+ * Where edit_file applies: old_string must occur exactly once. When it doesn't occur, extra
+ * trailing newlines (a common model slip) are dropped from old_string, and as many from
+ * new_string when it ends with them too, before giving up.
+ */
+export function locateEdit(
+  content: string,
+  oldString: string,
+  newString: string,
+): { index: number; oldString: string; newString: string } | { error: string } {
+  let o = oldString;
+  let n = newString;
+  for (;;) {
+    const first = content.indexOf(o);
+    if (first !== -1) {
+      if (content.indexOf(o, first + 1) !== -1) {
+        return { error: "old_string matches multiple locations in the file. Provide a more specific string." };
+      }
+      return { index: first, oldString: o, newString: n };
+    }
+    if (!o.endsWith("\n") || o.length <= 1) return { error: "old_string not found in file" };
+    o = o.slice(0, -1);
+    if (n.endsWith("\n")) n = n.slice(0, -1);
+  }
+}
+
 export function isWithin(root: string, child: string): boolean {
   const rel = relative(root, child);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
@@ -327,7 +353,9 @@ export class ToolExecutor {
   ): Promise<ToolResult> {
     const filePath = this.resolvePath(String(args.path ?? ""));
     const raw = await readFile(filePath, "utf-8");
-    const allLines = raw.split("\n");
+    // A final newline ends the last line; it is not an extra empty line (numbering one made the
+    // model add a blank line to old_string and miss on edit_file).
+    const allLines = (raw.endsWith("\n") ? raw.slice(0, -1) : raw).split("\n");
 
     const offset = typeof args.offset === "number" ? args.offset : 1;
     const limit =
@@ -474,25 +502,15 @@ export class ToolExecutor {
     }
 
     const original = await readFile(filePath, "utf-8");
-    const firstIdx = original.indexOf(oldString);
-    if (firstIdx === -1) {
-      return { error: "old_string not found in file" };
-    }
+    const match = locateEdit(original, oldString, newString);
+    if ("error" in match) return { error: match.error };
 
-    // Check uniqueness — there should be exactly one occurrence
-    const secondIdx = original.indexOf(oldString, firstIdx + 1);
-    if (secondIdx !== -1) {
-      return {
-        error:
-          "old_string matches multiple locations in the file. Provide a more specific string.",
-      };
-    }
-
-    const updated = original.replace(oldString, newString);
+    // Splice rather than String.replace, which would expand $&, $' and $` in the new code.
+    const updated = original.slice(0, match.index) + match.newString + original.slice(match.index + match.oldString.length);
     await writeFile(filePath, updated, "utf-8");
 
     const relPath = relative(this.root, filePath);
-    return { result: `Edited ${relPath} — replaced ${oldString.length} chars` };
+    return { result: `Edited ${relPath} — replaced ${match.oldString.length} chars` };
   }
 
   // -----------------------------------------------------------------------

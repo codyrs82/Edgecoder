@@ -24,7 +24,8 @@ import { ToolExecutor } from "./tool-executor.js";
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
-import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
+import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
+import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
@@ -478,7 +479,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
     body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
 
   // Build system prompt
-  let systemContent = "";
+  let promptCtx: SystemPromptContext | null = null;
   try {
     let ollamaHealthy = true;
     let installedModels: Array<{ name: string; paramSize: number }> = [];
@@ -514,10 +515,11 @@ app.post("/v1/ide/chat", async (req, reply) => {
       queueDepth: 0,
       connectedAgents: 0,
     };
-    systemContent = buildIdeAgentSystemPrompt(ctx, projectRoot, readProjectRules(projectRoot));
+    promptCtx = ctx;
   } catch {
     // Non-critical — proceed without system prompt
   }
+  const projectRules = readProjectRules(projectRoot);
 
   // SSE setup
   reply.raw.writeHead(200, {
@@ -545,166 +547,19 @@ app.post("/v1/ide/chat", async (req, reply) => {
   checkpoints.begin(turnId, projectRoot);
   sendEvent({ type: "turn", id: turnId });
 
-  // Build message history for the agentic loop
-  const messageHistory: Array<{ role: string; content: string }> = [
-    ...(systemContent ? [{ role: "system", content: systemContent }] : []),
-    ...body.messages,
-  ];
-
-  const MAX_ITERATIONS = 20;
-
-  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    if (clientDisconnected) break;
-    // Call Ollama (non-streaming to parse full response)
-    let assistantContent: string;
-    try {
-      const { request: httpRequest } = await import("undici");
-      const ollamaRes = await httpRequest(`${ollamaHost}/api/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: chatModel,
-          messages: messageHistory.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          stream: false,
-          // Each agent step is a model call; a thinking model's reasoning pass made them ~17x slower.
-          think: process.env.OLLAMA_THINK === "1",
-        }),
-        headersTimeout: 120_000,
-        bodyTimeout: 120_000,
-      });
-
-      const ollamaBody = (await ollamaRes.body.json()) as {
-        message?: { content?: string };
-      };
-      assistantContent = ollamaBody.message?.content ?? "";
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Ollama request failed";
-      sendEvent({ type: "text", content: `Error contacting model: ${msg}` });
-      break;
-    }
-
-    if (!assistantContent.trim()) {
-      break;
-    }
-
-    // Parse tool_call and plan blocks
-    const toolCallRegex = /```tool_call\s*\n([\s\S]*?)\n```/g;
-    const planRegex = /```plan\s*\n([\s\S]*?)\n```/g;
-
-    // Collect all matches with their positions
-    interface BlockMatch {
-      kind: "tool_call" | "plan";
-      start: number;
-      end: number;
-      body: string;
-    }
-    const matches: BlockMatch[] = [];
-
-    let m: RegExpExecArray | null;
-    while ((m = toolCallRegex.exec(assistantContent)) !== null) {
-      matches.push({
-        kind: "tool_call",
-        start: m.index,
-        end: m.index + m[0].length,
-        body: m[1],
-      });
-    }
-    while ((m = planRegex.exec(assistantContent)) !== null) {
-      matches.push({
-        kind: "plan",
-        start: m.index,
-        end: m.index + m[0].length,
-        body: m[1],
-      });
-    }
-
-    // Sort by position
-    matches.sort((a, b) => a.start - b.start);
-
-    // If no tool calls or plans, send the whole text and break
-    if (matches.length === 0) {
-      sendEvent({ type: "text", content: assistantContent });
-      break;
-    }
-
-    // Send text between / around matches, and process each match
-    let cursor = 0;
-    let hadToolCall = false;
-    const toolResults: string[] = [];
-
-    for (const match of matches) {
-      // Send text before this match
-      if (match.start > cursor) {
-        const textBefore = assistantContent.slice(cursor, match.start).trim();
-        if (textBefore) {
-          sendEvent({ type: "text", content: textBefore });
-        }
-      }
-      cursor = match.end;
-
-      if (match.kind === "plan") {
-        try {
-          const steps = JSON.parse(match.body) as Array<{
-            index: number;
-            description: string;
-            status: string;
-          }>;
-          sendEvent({
-            type: "plan",
-            steps: steps.map((s) => ({
-              index: s.index,
-              description: s.description,
-              status: (s.status as "pending" | "in_progress" | "completed" | "failed") || "pending",
-            })),
-            status: "proposed",
-          });
-        } catch {
-          // Malformed plan — send as text
-          sendEvent({ type: "text", content: match.body });
-        }
-        continue;
-      }
-
-      // tool_call
-      hadToolCall = true;
-      let toolName: ToolName;
-      let toolArgs: Record<string, unknown>;
-
-      try {
-        const parsed = JSON.parse(match.body) as {
-          tool: string;
-          args?: Record<string, unknown>;
-        };
-        toolName = parsed.tool as ToolName;
-        toolArgs = parsed.args ?? {};
-      } catch {
-        sendEvent({
-          type: "text",
-          content: `(malformed tool call: ${match.body})`,
-        });
-        continue;
-      }
-
-      const callId = `tc_${randomUUID().slice(0, 8)}`;
-      // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
-      // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
-      const shellAutoApprove = toolName === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
-      const requiresApproval = !READ_TOOLS.has(toolName) && !shellAutoApprove;
-
-      sendEvent({
-        type: "tool_call",
-        id: callId,
-        tool: toolName,
-        args: toolArgs,
-        requires_approval: requiresApproval,
-      });
-
-      // If write tool — wait for approval
-      if (requiresApproval) {
-        const approved = await new Promise<boolean>((resolveApproval) => {
+  const abort = new AbortController();
+  req.raw.on("close", () => abort.abort());
+  await runAgentLoop({
+    chat: ollamaChat(ollamaHost, chatModel, abort.signal),
+    systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
+    messages: body.messages,
+    sendEvent,
+    isCancelled: () => clientDisconnected,
+    runTool: makeToolRunner({
+      execute: (tool, args, opts) => executor.execute(tool, args, opts),
+      sendEvent,
+      waitForApproval: (callId, tool, args) =>
+        new Promise<boolean>((resolveApproval) => {
           // 5-minute timeout — auto-reject
           const timer = setTimeout(() => {
             if (pendingApprovals.has(callId)) {
@@ -712,97 +567,19 @@ app.post("/v1/ide/chat", async (req, reply) => {
               resolveApproval(false);
             }
           }, 5 * 60 * 1000);
-
           pendingApprovals.set(callId, {
             resolve: (val: boolean) => {
               clearTimeout(timer);
               resolveApproval(val);
             },
-            tool: toolName,
-            args: toolArgs,
+            tool,
+            args,
           });
-        });
-
-        if (!approved) {
-          const rejectionMsg = `Tool call ${toolName} was rejected by the user.`;
-          sendEvent({
-            type: "tool_result",
-            id: callId,
-            error: rejectionMsg,
-          });
-          toolResults.push(`[Tool ${toolName} rejected]: ${rejectionMsg}`);
-          continue;
-        }
-      }
-
-      // Keep the original of a file before the turn first writes it (review / undo).
-      const writesFile = toolName === "write_file" || toolName === "edit_file";
-      const tracked = writesFile ? checkpoints.capture(turnId, String(toolArgs.path ?? "")) : null;
-
-      // Execute the tool
-      const result = await executor.execute(toolName, toolArgs, { approved: requiresApproval });
-      if (tracked && !result.error) sendEvent({ type: "file_change", turnId, path: tracked });
-
-      // For run_shell results, parse and send as shell_output
-      if (toolName === "run_shell" && result.result) {
-        try {
-          const shellData = JSON.parse(result.result) as {
-            stdout: string;
-            stderr: string;
-            exit_code: number;
-          };
-          sendEvent({
-            type: "shell_output",
-            id: callId,
-            stdout: shellData.stdout,
-            stderr: shellData.stderr,
-            exit_code: shellData.exit_code,
-          });
-        } catch {
-          sendEvent({
-            type: "tool_result",
-            id: callId,
-            result: result.result,
-            error: result.error,
-          });
-        }
-      } else {
-        sendEvent({
-          type: "tool_result",
-          id: callId,
-          result: result.result,
-          error: result.error,
-        });
-      }
-
-      const resultText = result.error
-        ? `[Error]: ${result.error}`
-        : result.result ?? "(no output)";
-      toolResults.push(`[Tool ${toolName} result]: ${resultText}`);
-    }
-
-    // Send any trailing text after the last match
-    if (cursor < assistantContent.length) {
-      const trailing = assistantContent.slice(cursor).trim();
-      if (trailing) {
-        sendEvent({ type: "text", content: trailing });
-      }
-    }
-
-    // Add assistant message + tool results to history for next iteration
-    messageHistory.push({ role: "assistant", content: assistantContent });
-    if (toolResults.length > 0) {
-      messageHistory.push({
-        role: "user",
-        content: toolResults.join("\n\n"),
-      });
-    }
-
-    // If no tool calls were found in this iteration, we're done
-    if (!hadToolCall) {
-      break;
-    }
-  }
+        }),
+      captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
+      turnId,
+    }),
+  });
 
   sendEvent({ type: "done" });
   reply.raw.end();

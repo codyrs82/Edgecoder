@@ -136,3 +136,24 @@ describe("findPaths", () => {
     expect(findPaths(root, "zzz", 5)).toEqual([]);
   });
 });
+
+describe("edit_file matching", () => {
+  it("drops extra trailing newlines a model adds, and keeps $ patterns literal", async () => {
+    const { locateEdit } = await import("../../src/apps/ide/tool-executor.js");
+    const content = "def area(r):\n    return 3.14159 * r * r\n";
+    const m = locateEdit(content, "def area(r):\n    return 3.14159 * r * r\n\n", "def area(r):\n    return 1\n\n");
+    expect(m).toEqual({ index: 0, oldString: "def area(r):\n    return 3.14159 * r * r\n", newString: "def area(r):\n    return 1\n" });
+    expect(locateEdit("a\na\n", "a\n", "b")).toEqual({ error: expect.stringContaining("multiple") });
+    expect(locateEdit("abc", "zzz\n", "")).toEqual({ error: "old_string not found in file" });
+  });
+
+  it("read_file does not number a phantom line after the final newline; edits keep $ literal", async () => {
+    const { ToolExecutor } = await import("../../src/apps/ide/tool-executor.js");
+    writeFileSync(join(root, "p.sh"), "echo hi\n");
+    const ex = new ToolExecutor(root);
+    const r = await ex.execute("read_file", { path: "p.sh" });
+    expect(r.result).toBe("     1  echo hi");
+    await ex.execute("edit_file", { path: "p.sh", old_string: "echo hi", new_string: "echo \"$&$'\"" }, { approved: true });
+    expect(readFileSync(join(root, "p.sh"), "utf8")).toBe("echo \"$&$'\"\n");
+  });
+});

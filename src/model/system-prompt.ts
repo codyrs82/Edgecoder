@@ -73,11 +73,39 @@ export function buildChatSystemPrompt(ctx: SystemPromptContext): string {
 // instructions for the agentic coding loop.
 // ---------------------------------------------------------------------------
 
+const NATIVE_TOOLS_SECTION = `
+Call the tools you were given to read, search and change the project. Several calls in one reply run in order; their results come back to you before your next reply. Writes and shell commands wait for the user's approval.
+`;
+
+function textToolsSection(toolDocs: string): string {
+  return `
+## Available Tools
+
+${toolDocs}
+
+## Tool Call Format
+
+To invoke a tool, emit a fenced code block with the language tag \`tool_call\`:
+
+\`\`\`tool_call
+{"tool": "<tool_name>", "args": { ... }}
+\`\`\`
+
+You may include multiple tool_call blocks in a single response. Each will be executed in order.
+`;
+}
+
 export function buildIdeAgentSystemPrompt(
   ctx: SystemPromptContext,
   projectRoot: string,
   /** The project's own instructions (AGENTS.md and similar, see readProjectRules). */
   projectRules = "",
+  /**
+   * "native": tools are passed to the model as function definitions (Ollama `tools`), so the
+   * prompt leaves out the tool list and the fenced tool_call format. "text": the model writes
+   * fenced tool_call blocks (models without tool support).
+   */
+  toolFormat: "native" | "text" = "text",
 ): string {
   const base = buildChatSystemPrompt(ctx);
 
@@ -102,21 +130,7 @@ export function buildIdeAgentSystemPrompt(
 Project root: ${projectRoot}
 
 You are an autonomous coding agent operating inside the user's IDE. You have access to the following tools to read, edit, and manage files in the project.
-
-## Available Tools
-
-${toolDocs}
-
-## Tool Call Format
-
-To invoke a tool, emit a fenced code block with the language tag \`tool_call\`:
-
-\`\`\`tool_call
-{"tool": "<tool_name>", "args": { ... }}
-\`\`\`
-
-You may include multiple tool_call blocks in a single response. Each will be executed in order.
-
+${toolFormat === "native" ? NATIVE_TOOLS_SECTION : textToolsSection(toolDocs)}
 ## Plan Format
 
 To propose a multi-step plan before executing, emit a fenced code block with the language tag \`plan\`:
