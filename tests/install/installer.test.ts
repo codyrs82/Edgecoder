@@ -3,6 +3,7 @@ import { detectHardware, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGp
 import { helpText, parseInstallArgs, parseTokensFile, INSTALL_OPTIONS } from "../../src/install/options.js";
 import { pickModel, planInstall, renderEnvFile } from "../../src/install/plan.js";
 import { applyPlan, defaultPaths, launchdAgentPlist, removeServices, systemdAgentUnit, systemdOllamaUnit, windowsAgentCmd, type Host } from "../../src/install/services.js";
+import { enrollNodes, type HttpPost } from "../../src/install/cli.js";
 
 const NVIDIA_8X = Array.from({ length: 8 }, (_, i) => `${i}, NVIDIA RTX 6000 Ada Generation, 49140`).join("\n") + "\n";
 
@@ -162,5 +163,53 @@ describe("services: the same plan on every platform", () => {
     expect(r.files.length).toBeGreaterThan(0);
     expect(files.size).toBe(0);
     expect(commands).toEqual([]);
+  });
+});
+
+describe("enrolment: --enroll self-registers nodes with the portal", () => {
+  const probe: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n1, NVIDIA RTX 6000 Ada Generation, 49140\n" : null);
+  const twoGpu = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 256, cpuModel: "x", cpuCores: 32, hostname: "box" });
+
+  it("POSTs /nodes/enroll per un-tokened instance and lands the tokens in the services' env", async () => {
+    const opts = parseInstallArgs(["apply", "--enroll", "ptok", "--portal-url", "https://portal.example"]);
+    const plan = planInstall(twoGpu, opts, true);
+    expect(plan.instances).toHaveLength(2);
+    const calls: Array<{ url: string; headers: Record<string, string>; body: { nodeId: string; nodeKind: string } }> = [];
+    const post: HttpPost = async (url, init) => {
+      const body = JSON.parse(init.body) as { nodeId: string; nodeKind: string };
+      calls.push({ url, headers: init.headers, body });
+      return { status: 200, json: async () => ({ ok: true, nodeId: body.nodeId, registrationToken: `rt-${body.nodeId}`, nodeApproved: false }) };
+    };
+
+    const { enrolled, failed } = await enrollNodes(opts, plan.instances, post);
+    expect(enrolled).toEqual(["box-gpu0", "box-gpu1"]);
+    expect(failed).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].url).toBe("https://portal.example/nodes/enroll");
+    expect(calls[0].headers.authorization).toBe("Bearer ptok");
+    expect(calls[0].body).toEqual({ nodeId: "box-gpu0", nodeKind: "agent" });
+
+    // The normal plan/env wiring (plan.ts reads opts.tokens) now carries the tokens into every service.
+    const applied = planInstall(twoGpu, opts, true);
+    expect(applied.instances[0].env.AGENT_REGISTRATION_TOKEN).toBe("rt-box-gpu0");
+    expect(applied.instances[1].env.AGENT_REGISTRATION_TOKEN).toBe("rt-box-gpu1");
+    expect(renderEnvFile(applied.instances[1].env)).toContain("AGENT_REGISTRATION_TOKEN=rt-box-gpu1");
+    expect(applied.warnings.filter((w) => w.includes("no registration token"))).toHaveLength(0);
+  });
+
+  it("leaves an already-tokened instance alone and reports the ones that fail", async () => {
+    const opts = parseInstallArgs(["apply", "--enroll", "ptok", "--token", "box-gpu0=keep"]);
+    const plan = planInstall(twoGpu, opts, true);
+    const seen: string[] = [];
+    const post: HttpPost = async (_url, init) => {
+      seen.push((JSON.parse(init.body) as { nodeId: string }).nodeId);
+      return { status: 500, json: async () => ({}) };
+    };
+
+    const { enrolled, failed } = await enrollNodes(opts, plan.instances, post);
+    expect(seen).toEqual(["box-gpu1"]); // gpu0 already has --token, so it is skipped
+    expect(enrolled).toEqual([]);
+    expect(failed).toEqual(["box-gpu1"]);
+    expect(opts.tokens["box-gpu0"]).toBe("keep");
   });
 });

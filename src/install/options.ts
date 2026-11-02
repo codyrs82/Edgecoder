@@ -16,6 +16,8 @@ export interface InstallOptions {
   /** agentId -> registration token; "*" applies to every instance. */
   tokens: Record<string, string>;
   tokensFile?: string;
+  /** Portal session token: self-enrol every instance that has no --token and apply the returned registration token. */
+  enrollToken?: string;
   model?: string;
   perGpu: boolean;
   instances?: number;
@@ -55,6 +57,7 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--mesh-token", arg: "TOKEN", description: "Mesh auth token for the coordinator (MESH_AUTH_TOKEN)." },
   { flag: "--token", arg: "[AGENT_ID=]TOKEN", description: "Registration token from the portal Nodes page; repeatable. Without AGENT_ID= it applies to every instance." },
   { flag: "--tokens-file", arg: "PATH", description: "File of AGENT_ID=TOKEN lines (one per instance)." },
+  { flag: "--enroll", arg: "PORTAL_TOKEN", description: "Portal session token: self-enrol each un-tokened instance with the portal and apply the registration token it returns." },
   { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: largest coding model that fits each GPU)." },
   { flag: "--per-gpu", description: "One agent and one Ollama server per discrete GPU (default when GPUs are present)." },
   { flag: "--single", description: "One agent for the whole host, even with several GPUs." },
@@ -92,6 +95,7 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
   if (env.EDGECODER_PORTAL_URL) o.portalUrl = env.EDGECODER_PORTAL_URL;
   if (env.EDGECODER_MESH_TOKEN) o.meshToken = env.EDGECODER_MESH_TOKEN;
   if (env.EDGECODER_REGISTRATION_TOKEN) o.tokens["*"] = env.EDGECODER_REGISTRATION_TOKEN;
+  if (env.EDGECODER_ENROLL_TOKEN) o.enrollToken = env.EDGECODER_ENROLL_TOKEN;
   const args = [...argv];
   const next = (flag: string): string => {
     const v = args.shift();
@@ -120,6 +124,7 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
         break;
       }
       case "--tokens-file": o.tokensFile = val(); break;
+      case "--enroll": o.enrollToken = val(); break;
       case "--model": o.model = val(); break;
       case "--per-gpu": o.perGpu = true; break;
       case "--single": o.perGpu = false; break;
@@ -157,6 +162,6 @@ export function helpText(): string {
   for (const c of INSTALL_COMMANDS) lines.push(`  ${c.name.padEnd(10)} ${c.description}`);
   lines.push("", "Options (identical on macOS, Linux and Windows):");
   for (const o of INSTALL_OPTIONS) lines.push(`  ${(o.flag + (o.arg ? " " + o.arg : "")).padEnd(34)} ${o.description}`);
-  lines.push("", "Environment: EDGECODER_COORDINATOR_URL, EDGECODER_PORTAL_URL, EDGECODER_MESH_TOKEN, EDGECODER_REGISTRATION_TOKEN set the defaults.");
+  lines.push("", "Environment: EDGECODER_COORDINATOR_URL, EDGECODER_PORTAL_URL, EDGECODER_MESH_TOKEN, EDGECODER_REGISTRATION_TOKEN, EDGECODER_ENROLL_TOKEN set the defaults.");
   return lines.join("\n");
 }

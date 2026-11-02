@@ -12,7 +12,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
 import { helpText, parseInstallArgs, parseTokensFile, type InstallOptions } from "./options.js";
-import { planInstall, type InstallPlan } from "./plan.js";
+import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { applyPlan, defaultPaths, removeServices, serviceStatus, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -54,6 +54,53 @@ const realHost: Host = {
   exists: (path) => existsSync(path)
 };
 
+/**
+ * The one HTTP call the installer makes: POST a node to the portal's /nodes/enroll. Injected so
+ * tests can run the enroll path without a network; the default uses the global fetch (undici).
+ */
+export type HttpPost = (url: string, init: { headers: Record<string, string>; body: string }) => Promise<{ status: number; json: () => Promise<unknown> }>;
+
+const fetchPost: HttpPost = async (url, init) => {
+  const res = await fetch(url, { method: "POST", headers: init.headers, body: init.body });
+  return { status: res.status, json: () => res.json() };
+};
+
+export interface EnrollResult {
+  enrolled: string[];
+  failed: string[];
+}
+
+/**
+ * Self-register each instance with the portal using the user's session token and apply the
+ * returned registration token to opts.tokens, so the normal plan/env wiring (plan.ts sets
+ * AGENT_REGISTRATION_TOKEN from opts.tokens) picks it up. A node that already has a token
+ * (explicit or via the "*" catch-all) is left alone. Per-node failures warn and continue.
+ */
+export async function enrollNodes(opts: InstallOptions, instances: AgentInstance[], post: HttpPost = fetchPost): Promise<EnrollResult> {
+  const base = opts.portalUrl.replace(/\/+$/, "");
+  const url = `${base}/nodes/enroll`;
+  const enrolled: string[] = [];
+  const failed: string[] = [];
+  for (const inst of instances) {
+    if (opts.tokens[inst.agentId] || opts.tokens["*"]) continue;
+    try {
+      const res = await post(url, {
+        headers: { "content-type": "application/json", authorization: `Bearer ${opts.enrollToken ?? ""}` },
+        body: JSON.stringify({ nodeId: inst.agentId, nodeKind: "agent" })
+      });
+      if (res.status < 200 || res.status >= 300) throw new Error(`portal returned HTTP ${res.status}`);
+      const body = (await res.json()) as { registrationToken?: string };
+      if (!body.registrationToken) throw new Error("response had no registrationToken");
+      opts.tokens[inst.agentId] = body.registrationToken;
+      enrolled.push(inst.agentId);
+    } catch (e) {
+      console.error(`warning: could not enrol ${inst.agentId} at ${url}: ${(e as Error).message}`);
+      failed.push(inst.agentId);
+    }
+  }
+  return { enrolled, failed };
+}
+
 function describeHardware(hw: HostHardware): string {
   const lines = [`Host ${hw.hostname}: ${hw.platform}/${hw.arch}, ${hw.cpuCores} cores (${hw.cpuModel}), ${hw.ramGb} GB RAM${hw.unifiedMemory ? " (unified)" : ""}`];
   if (hw.gpus.length === 0) lines.push("GPUs: none detected (CPU class)");
@@ -71,7 +118,7 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
   return lines.join("\n");
 }
 
-export function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost): number {
+export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost): Promise<number> {
   let opts: InstallOptions;
   try {
     opts = parseInstallArgs(argv, env);
@@ -115,7 +162,8 @@ export function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.en
     return 0;
   }
 
-  const plan = planInstall(hw, opts, opts.sandbox === "docker" ? true : dockerAvailable());
+  const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
+  let plan = planInstall(hw, opts, dockerPresent);
   if (opts.command === "plan") {
     console.log(opts.json ? JSON.stringify({ hardware: hw, plan, paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
     return 0;
@@ -129,6 +177,18 @@ export function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.en
   if (!opts.dryRun && !existsSync(p.ollamaBin) && !opts.fromPackage) {
     console.error(`ollama not found at ${p.ollamaBin}; install it (https://ollama.com/download) or pass --ollama-bin`);
     return 1;
+  }
+  if (opts.enrollToken && !opts.dryRun) {
+    const candidates = plan.instances.filter((i) => !opts.tokens[i.agentId] && !opts.tokens["*"]);
+    if (candidates.length) {
+      const { enrolled, failed } = await enrollNodes(opts, candidates, post);
+      if (enrolled.length === 0) {
+        console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll token and portal URL`);
+        return 1;
+      }
+      // Re-plan so the env files and warnings reflect the registration tokens just applied.
+      plan = planInstall(hw, opts, dockerPresent);
+    }
   }
   if (!opts.dryRun) {
     for (const dir of [p.configDir, p.modelsDir, p.logDir]) mkdirSync(dir, { recursive: true });
@@ -160,5 +220,5 @@ export function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.en
 }
 
 if (process.argv[1] && /cli\.(js|ts)$/.test(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  process.exit(runInstaller(process.argv.slice(2)));
+  runInstaller(process.argv.slice(2)).then((code) => process.exit(code));
 }

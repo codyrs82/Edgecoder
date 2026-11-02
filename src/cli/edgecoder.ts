@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   }
   if (resolved.role === "install") {
     const { runInstaller } = await import("../install/cli.js");
-    process.exit(runInstaller(resolved.rest));
+    process.exit(await runInstaller(resolved.rest));
   }
   // The services only start when they are the main script (import.meta.url === file://argv[1]).
   const target = fileURLToPath(new URL(ROLES[resolved.role], import.meta.url));

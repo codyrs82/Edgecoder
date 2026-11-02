@@ -47,6 +47,13 @@ the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repe
 `--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
 rewrites the env files and restarts the services; nothing else changes.
 
+To do it in one run, pass `--enroll <portal-token>` instead of fetching tokens by hand: the
+installer self-registers every instance that has no `--token` with the portal
+(`POST /nodes/enroll`, authenticated as `Authorization: Bearer <portal-token>` where the token is
+your portal session token) and applies each returned registration token automatically. A node
+that already has a `--token` is left alone, and a node whose enrolment fails is skipped with a
+warning so the rest still install.
+
 ## Commands
 
 | Command | Does |
@@ -67,6 +74,7 @@ rewrites the env files and restarts the services; nothing else changes.
 | `--mesh-token TOKEN` | Mesh auth token for the coordinator. |
 | `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. Without `AGENT_ID=` it applies to every instance. |
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
+| `--enroll PORTAL_TOKEN` | Portal session token: self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: largest coding model that fits). |
 | `--per-gpu` | One agent and one Ollama server per discrete GPU (default when GPUs are present). |
 | `--single` | One agent for the whole host. |
@@ -83,7 +91,7 @@ rewrites the env files and restarts the services; nothing else changes.
 | `--ollama-bin PATH` | Ollama binary. |
 
 Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
-`EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`.
+`EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`.
 
 ## Example: an 8× RTX 6000 Ada host
 
