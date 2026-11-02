@@ -61,7 +61,7 @@ export interface AgentRegistration {
 export interface Subtask {
   id: string;
   taskId: string;
-  kind: "micro_loop" | "single_step";
+  kind: "micro_loop" | "single_step" | "inference";
   language: Language;
   input: string;
   timeoutMs: number;

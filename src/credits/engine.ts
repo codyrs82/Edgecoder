@@ -34,6 +34,13 @@ export class CreditEngine {
     return (this.txByAccount.get(accountId) ?? []).reduce((sum, tx) => sum + (tx.type === "earn" ? Math.floor(tx.msat ?? 0) : 0), 0);
   }
 
+  /** Mark a contribution report as recorded; false when it already was (#44 idempotency). */
+  claimReport(reportId: string): boolean {
+    if (this.seenReports.has(reportId)) return false;
+    this.seenReports.add(reportId);
+    return true;
+  }
+
   accrue(report: ComputeContributionReport, load: LoadSnapshot, valuation?: { msatPerCredit: number }): CreditTransaction {
     if (this.seenReports.has(report.reportId)) {
       throw new Error("duplicate_contribution_report");

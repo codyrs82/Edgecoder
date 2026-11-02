@@ -27,6 +27,62 @@ export interface AccrualValuation {
  * the network fee share is split off into NETWORK_FEE_POOL_ACCOUNT in the same transaction.
  * The returned row is the worker's (net) row.
  */
+/**
+ * Accrue a priced job (job-pricing.ts): the agent earns `agentMsat` and the fee pool `feeMsat`,
+ * both in cSats (1 cSat = 1 sat, credits column) with their msat value. Idempotent on
+ * `report.reportId` like accrueCredits. Returns the agent's row, or null when already recorded or
+ * there is nothing to pay.
+ */
+export async function accruePricedJob(
+  report: ComputeContributionReport,
+  priced: { agentMsat: number; feeMsat: number }
+): Promise<CreditTransaction | null> {
+  if (!(priced.agentMsat > 0)) return null;
+  const now = Date.now();
+  const tx: CreditTransaction = {
+    txId: randomUUID(),
+    accountId: report.agentId,
+    type: "earn",
+    credits: roundCredits(priced.agentMsat / 1000),
+    reason: "compute_contribution",
+    relatedTaskId: report.taskId,
+    timestampMs: now,
+    msat: Math.round(priced.agentMsat),
+  };
+  const feeTx: CreditTransaction | undefined =
+    priced.feeMsat > 0
+      ? {
+          txId: randomUUID(),
+          accountId: NETWORK_FEE_POOL_ACCOUNT,
+          type: "earn",
+          credits: roundCredits(priced.feeMsat / 1000),
+          reason: `network_fee:${report.taskId}`,
+          relatedTaskId: report.taskId,
+          timestampMs: now,
+          msat: Math.round(priced.feeMsat),
+        }
+      : undefined;
+  if (pgStore) {
+    const seconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
+    const inserted = await pgStore.persistContributionWithCredit(
+      {
+        report,
+        accountId: report.agentId,
+        sourceAgentId: report.sourceAgentId ?? report.agentId,
+        reliabilityScore: report.success ? 1 : 0.75,
+        weightedContribution: Number((seconds * (report.hardwareWeight ?? 1)).toFixed(6)),
+      },
+      tx,
+      feeTx
+    );
+    return inserted ? tx : null;
+  }
+  if (!creditEngine.claimReport(report.reportId)) return null;
+  creditEngine.record(tx);
+  if (feeTx) creditEngine.record(feeTx);
+  return tx;
+}
+
 export async function accrueCredits(
   report: ComputeContributionReport,
   load: LoadSnapshot,

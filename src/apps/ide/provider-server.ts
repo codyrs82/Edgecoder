@@ -30,6 +30,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
+import { contentToText, listNetworkModels, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
@@ -120,15 +121,36 @@ const pendingApprovals = new Map<
 
 // --- OpenAI-compatible endpoints ---
 
+/** This machine's agent forwarder, when the machine is on the network (network models need it). */
+const networkDeps: NetworkDeps | null = process.env.SWARM_VIA_LOCAL_AGENT_URL
+  ? { forwarder: process.env.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: process.env.AGENT_ACCOUNT_ID ?? process.env.AGENT_ID ?? "local-agent" }
+  : null;
+
 app.get("/v1/models", async () => {
-  return formatOpenAiModelsResponse(providers.availableProviders());
+  // Providers, this machine's Ollama models, and models agents on the network have
+  // ("network/<model>", optionally "@<class>"): one list for tools that pick a model.
+  const ids = new Set<string>(providers.availableProviders());
+  try {
+    for (const m of (await ollamaTags()).models) ids.add(m.name);
+  } catch {
+    // Ollama not running
+  }
+  if (networkDeps) {
+    try {
+      for (const m of await listNetworkModels(networkDeps)) ids.add(m.id);
+    } catch {
+      // not connected right now
+    }
+  }
+  return formatOpenAiModelsResponse([...ids]);
 });
 
 const chatRequestSchema = z.object({
   model: z.string().default("edgecoder-local"),
   messages: z.array(z.object({
     role: z.string(),
-    content: z.string()
+    // OpenAI clients send a string or a list of content parts.
+    content: z.union([z.string(), z.array(z.unknown()), z.null()]).transform((c) => contentToText(c))
   })).min(1),
   stream: z.boolean().optional().default(false),
   temperature: z.number().optional(),
@@ -138,6 +160,59 @@ const chatRequestSchema = z.object({
 app.post("/v1/chat/completions", async (req, reply) => {
   const body = chatRequestSchema.parse(req.body);
   const requestId = `chatcmpl-${randomUUID()}`;
+
+  // "network/<model>[@class]": run on an agent on the network, billed per second by class.
+  const network = parseNetworkModel(body.model);
+  if (network) {
+    if (!networkDeps) {
+      return reply.status(503).send({ error: { message: "Network models need this computer to be signed in to EdgeCoder and connected to the network.", type: "network_unavailable" } });
+    }
+    const abort = new AbortController();
+    reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
+    const pieces = streamNetworkCompletion(networkDeps, { ...network, messages: body.messages, maxTokens: body.max_tokens, temperature: body.temperature }, abort.signal);
+    if (!body.stream) {
+      let text = "";
+      let spent: number | undefined;
+      try {
+        for await (const p of pieces) {
+          if (p.delta) text += p.delta;
+          if (p.done) {
+            spent = p.creditsSpent;
+            if (p.error && !text) throw new NetworkInferenceError(`The model failed: ${p.error}`, 502);
+          }
+        }
+      } catch (err) {
+        const status = err instanceof NetworkInferenceError ? err.status : 502;
+        return reply.status(status).send({ error: { message: (err as Error).message, type: "network_error" } });
+      }
+      return reply.send({ ...formatOpenAiResponse(requestId, body.model, text), ...(spent !== undefined ? { edgecoder: { cSatsSpent: spent } } : {}) });
+    }
+    // Streaming: report a submit failure as an HTTP error before the stream starts.
+    let first: IteratorResult<CompletionPiece>;
+    try {
+      first = await pieces.next();
+    } catch (err) {
+      const status = err instanceof NetworkInferenceError ? err.status : 502;
+      return reply.status(status).send({ error: { message: (err as Error).message, type: "network_error" } });
+    }
+    writeSseHead(reply);
+    const emit = (p: CompletionPiece) => {
+      if (p.delta) reply.raw.write(`data: ${JSON.stringify(formatOpenAiStreamChunk(requestId, body.model, p.delta))}\n\n`);
+      if (p.done) {
+        if (p.error) reply.raw.write(`data: ${JSON.stringify(formatOpenAiStreamChunk(requestId, body.model, `\n\n[network error: ${p.error}]`))}\n\n`);
+        reply.raw.write(`data: ${JSON.stringify({ ...formatOpenAiStreamChunk(requestId, body.model, "", "stop"), ...(p.creditsSpent !== undefined ? { edgecoder: { cSatsSpent: p.creditsSpent } } : {}) })}\n\n`);
+      }
+    };
+    try {
+      if (!first.done) emit(first.value);
+      for await (const p of pieces) emit(p);
+    } catch (err) {
+      reply.raw.write(`data: ${JSON.stringify(formatOpenAiStreamChunk(requestId, body.model, `\n\n[network error: ${(err as Error).message}]`, "stop"))}\n\n`);
+    }
+    reply.raw.write("data: [DONE]\n\n");
+    reply.raw.end();
+    return reply;
+  }
 
   // Build system prompt from live state
   let systemPromptMsg: { role: string; content: string } | null = null;

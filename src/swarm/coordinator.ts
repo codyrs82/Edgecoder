@@ -85,7 +85,9 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { NETWORK_FEE_POOL_ACCOUNT, accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { clampToBand, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
+import { InferenceStreams } from "./inference-streams.js";
 import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
@@ -105,8 +107,7 @@ import {
   settlementClassFor,
   type ComputeClassId,
   type HardwareClassification,
-  type HardwareProfile
-} from "../economy/compute-classes.js";
+  type HardwareProfile, satsPerCreditForClass } from "../economy/compute-classes.js";
 import { ComputeOrderBook, capabilityConstraints, clampToClassReference, meetsCapability, type AskCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
@@ -260,7 +261,54 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
-const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
+/**
+ * What a task's requester was charged: cSats set aside at submit (reservedMsat, the worst case),
+ * the actual cost of its finished subtasks (costMsat, job-pricing.ts), and whether the difference
+ * went back (refunded). Settled when the last subtask finishes; a failed task refunds what it
+ * didn't use.
+ */
+interface TaskBilling {
+  accountId: string;
+  reservedMsat: number;
+  /** Worst case per subtask; charged in full for a subtask run elsewhere (cost unknown here). */
+  perSubtaskReserveMsat: number;
+  costMsat: number;
+  refunded: boolean;
+}
+const taskBilling = new Map<string, TaskBilling>();
+
+/** Longest a subtask may run (the envelope default): the time the worst case is set aside for. */
+const SUBTASK_RESERVE_TIMEOUT_MS = 60_000;
+
+/** BTC price used for class references until the rate oracle has published. */
+const FALLBACK_BTC_USD = 100_000;
+
+/** msat per credit (base-tier second) of a class: the oracle's rate, else its USD reference. */
+function classRefMsatPerCredit(cls: ComputeClassId): number {
+  const oracle = latestRateEpoch?.classRates?.[cls]?.msatPerCredit;
+  if (oracle && oracle > 0) return oracle;
+  const spec = rateOracleConfig.computeClasses[cls];
+  return satsPerCreditForClass(spec?.usdPerHourReference ?? 0.02, FALLBACK_BTC_USD, 0) * 1000;
+}
+
+/**
+ * Worst-case msat to set aside for one subtask: CPU work is paid as CPU (settlementClassFor); GPU
+ * work at the requested class, or the dearest GPU-type class for "any".
+ */
+function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: ComputeClassId | "any", timeoutMs: number, bidCeiling?: number): number {
+  const classes: ComputeClassId[] =
+    resourceClass === "cpu" ? ["cpu"] : taskClass === "any" ? (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).filter((c) => c !== "cpu") : [taskClass];
+  return Math.max(
+    ...classes.map((c) =>
+      reserveMsat({
+        timeoutMs,
+        classRefMsatPerCredit: classRefMsatPerCredit(c),
+        maxTierWeight: Math.max(1, ...(rateOracleConfig.computeClasses[c]?.tiers ?? []).map((t) => t.creditsPerSecond)),
+        bidCeilingMsatPerCredit: bidCeiling,
+      })
+    )
+  );
+}
 /** Market price agreed at claim time per subtask (msat per credit on the agent's class) and the tier weight the credits mint at. */
 const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId; creditsPerSecond: number }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
@@ -2470,6 +2518,9 @@ const registerSchema = z.object({
   mode: z.enum(["swarm-only", "ide-enabled"]),
   registrationToken: z.string().optional(),
   localModelProvider: z.enum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
+  /** Models installed in the agent's Ollama (network inference runs only on agents that have the model). */
+  installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
+  activeModel: z.string().min(1).max(200).optional(),
   clientType: z.string().min(1).max(64).default("edgecoder-native"),
   maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
   powerTelemetry: z
@@ -2653,7 +2704,9 @@ app.post("/register", async (req, reply) => {
     mode: body.mode,
     localModelEnabled: true,
     localModelProvider: body.localModelProvider,
-    localModelCatalog: body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
+    // What the agent reports it has installed; older agents don't say, so assume the default model.
+    localModelCatalog: body.installedModels?.length ? body.installedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
+    ...(body.activeModel || body.installedModels?.length ? { activeModel: body.activeModel ?? body.installedModels![0] } : {}),
     clientType: body.clientType,
     swarmEnabled: true,
     ideEnabled: body.mode === "ide-enabled",
@@ -2957,13 +3010,14 @@ app.get("/agent/diagnostics/:agentId", async (req, reply) => {
 /** Whose credits a submitted task spends: see submitterAccountDecision. */
 async function resolveSubmitterAccount(
   req: { headers: Record<string, unknown>; ip: string },
-  requested: string
+  requested: string,
+  routePath = "/submit"
 ): Promise<{ accountId: string } | { status: number; error: string }> {
   const headers = (req.headers ?? {}) as Record<string, unknown>;
   const portalService = hasPortalServiceToken(headers);
   const verified = portalService
     ? null
-    : await verifyAgentRequest(headers, "/submit", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req as any) });
+    : await verifyAgentRequest(headers, routePath, req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req as any) });
   const signer = verified && verified !== "rejected" ? verified.agentId : null;
   return submitterAccountDecision({
     requested,
@@ -2985,8 +3039,12 @@ app.post("/submit", async (req, reply) => {
       return reply.code(403).send({ error: "contribute_first_required", detail: policy.reason });
     }
     try {
-      // Spend credits when using public mesh resources.
-      await spendCredits(body.submitterAccountId, 1, "task_submit", body.taskId);
+      // Set aside the worst case for one subtask now (topped up once the task is split), settled
+      // to the actual cost when it finishes (job-pricing.ts).
+      const early = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
+      const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
+      await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId);
+      taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.startsWith("insufficient_credits")) {
@@ -3030,6 +3088,7 @@ app.post("/submit", async (req, reply) => {
   });
 
   if (decompose.statusCode < 200 || decompose.statusCode >= 300) {
+    await refundTaskSubmit(body.taskId);
     return reply.code(502).send({ error: "inference_service_unavailable" });
   }
 
@@ -3053,8 +3112,17 @@ app.post("/submit", async (req, reply) => {
   });
   await pgStore?.persistLedgerRecord(enqueueRecord);
   await persistStatsLedgerRecord(enqueueRecord);
-  if (body.submitterAccountId !== "anonymous") {
-    taskBilling.set(body.taskId, { accountId: body.submitterAccountId, credits: 1, refunded: false });
+  const billingEntry = taskBilling.get(body.taskId);
+  if (billingEntry && payload.subtasks.length > 1) {
+    const extra = billingEntry.perSubtaskReserveMsat * (payload.subtasks.length - 1);
+    try {
+      await spendCredits(billingEntry.accountId, msatToCSats(extra), "task_reserve", body.taskId);
+      billingEntry.reservedMsat += extra;
+    } catch (err) {
+      await refundTaskSubmit(body.taskId);
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(message.startsWith("insufficient_credits") ? 402 : 500).send({ error: message.startsWith("insufficient_credits") ? "insufficient_credits" : "credit_debit_failed" });
+    }
   }
 
   // If mesh peers exist, delay local claiming to give peers a chance to claim
@@ -3202,7 +3270,11 @@ app.post("/pull", async (req, reply) => {
     await rewardAccountForAgent(body.agentId),
     // The book enforces the bid's class, price and constraints. The subtask's own constraints are
     // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(body.agentId, capability), subtask.projectMeta)
+    (subtask) =>
+      orderBook.canMatch(body.agentId, subtask.taskId).ok &&
+      meetsCapability(askCapabilityOf(body.agentId, capability), subtask.projectMeta) &&
+      // Inference runs the requested model as is: only an agent that has it may take the job.
+      (subtask.kind !== "inference" || agentHasModel(capability, subtask.requestedModel))
   );
   if (task) {
     // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
@@ -3244,7 +3316,7 @@ app.post("/pull", async (req, reply) => {
           { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
           agentPubKey,
           task.id,
-          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs }
+          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel }
         );
         envelopeSharedKeys.set(task.id, { key: sharedKey, createdAtMs: Date.now() });
         // Expire stale shared keys
@@ -3353,10 +3425,15 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   // self-dealing ask/bid cannot move (audit econ#2). Falls back to the reference when no trade.
   // One reference per class (cpu | apple | gpu | gpu.dc); epochs persisted under the legacy ids
   // are normalized at load (normalizeRateEpoch), so the clamp always has a reference.
-  const classRef = latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
-  const basePerCredit = clampToClassReference(trade?.msatPerCredit, classRef);
-  const valuation = basePerCredit !== undefined ? { msatPerCredit: Math.round(basePerCredit * modality), networkFeeBps: NETWORK_FEE_BPS } : undefined;
-  const accrued = await accrueCredits(
+  // Per-second pricing by class (job-pricing.ts): the matched price kept within the class band
+  // (a self-dealing ask/bid can't move the sats value, audit econ#2) times the tier weight.
+  void modality;
+  const perCredit = clampToBand(trade?.msatPerCredit, classRefMsatPerCredit(computeClass));
+  const rateMsat = ratePerSecondMsat(perCredit, hardwareWeight);
+  const costMsat = jobCostMsat(durationMs, rateMsat);
+  const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
+  const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
+  const accrued = await accruePricedJob(
     {
       reportId: resultReportId(r.subtaskId),
       agentId: rewardAccountId,
@@ -3371,15 +3448,13 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
       modelParamSizeB,
       hardwareWeight
     },
-    {
-      queuedTasks: queue.status().queued,
-      activeAgents: queue.status().agents
-    },
-    valuation
+    { agentMsat, feeMsat }
   );
   // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
   if (accrued) {
-    marketHistory.settleTrade(r.subtaskId, accrued.credits);
+    addTaskCost(taskId, costMsat);
+    // Market volume stays in credits of work (base-tier seconds).
+    marketHistory.settleTrade(r.subtaskId, Number(((durationMs / 1000) * hardwareWeight).toFixed(6)));
     const earningsRecord = ordering.append({
       eventType: "earnings_accrual",
       taskId,
@@ -3391,6 +3466,9 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         accountId: rewardAccountId,
         credits: accrued.credits,
         msat: accrued.msat,
+        costMsat,
+        feeMsat,
+        ratePerSecondMsat: rateMsat,
         msatPerCredit: valuation?.msatPerCredit,
         networkFeeBps: valuation?.networkFeeBps,
         computeClass,
@@ -3590,6 +3668,19 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
  * the store's primary key instead of paying twice; `refunded` is only set after the
  * grant succeeded, and the entry is pruned once settled.
  */
+/** Add a finished subtask's cost to its task's bill. */
+function addTaskCost(taskId: string, costMsat: number): void {
+  const billing = taskBilling.get(taskId);
+  if (billing && !billing.refunded) billing.costMsat = Math.min(billing.reservedMsat, billing.costMsat + Math.max(0, costMsat));
+}
+
+/** Once a task has no open subtasks: return what was set aside but not used. */
+async function settleTaskIfDone(taskId: string): Promise<void> {
+  if (!taskBilling.has(taskId)) return;
+  if (queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0) return;
+  await refundTaskSubmit(taskId);
+}
+
 const REFUND_RETRY_DELAYS_MS = [250, 1_000, 4_000];
 async function refundTaskSubmit(taskId: string): Promise<boolean> {
   const billing = taskBilling.get(taskId);
@@ -3598,7 +3689,8 @@ async function refundTaskSubmit(taskId: string): Promise<boolean> {
   const txId = refundTxId(taskId);
   for (let attempt = 0; ; attempt++) {
     try {
-      await grantCreditsIdempotent(billing.accountId, billing.credits, `task_submit_refund:${taskId}`, txId);
+      const unusedMsat = Math.max(0, billing.reservedMsat - billing.costMsat);
+      if (unusedMsat > 0) await grantCreditsIdempotent(billing.accountId, msatToCSats(unusedMsat), `task_submit_refund:${taskId}`, txId);
       billing.refunded = true;
       taskBilling.delete(taskId);
       return true;
@@ -3761,8 +3853,11 @@ app.post("/result", async (req, reply) => {
   }
 
   await publishResult(body);
+  inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
   // ── Dependency tracking: store output and release dependent subtasks ──
   releaseDependents(body.subtaskId, body.output ?? "");
+  // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
+  if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
 
   if (subtask) {
     await accrueResultCredits({
@@ -3773,7 +3868,118 @@ app.post("/result", async (req, reply) => {
       meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
     });
   }
+  await settleTaskIfDone(body.taskId);
   return reply.send({ ok: true });
+});
+
+// ── Network inference (chat completions on agents' local models, streamed) ──────────────────
+const inferenceStreams = new InferenceStreams();
+setInterval(() => inferenceStreams.prune(), 60_000).unref?.();
+const INFERENCE_MAX_TIMEOUT_MS = 300_000;
+
+function agentHasModel(cap: { activeModel?: string; localModelCatalog?: string[] } | undefined, model: string | undefined): boolean {
+  if (!cap || !model) return false;
+  return cap.activeModel === model || (cap.localModelCatalog ?? []).includes(model);
+}
+
+const inferenceSubmitSchema = z.object({
+  taskId: z.string().min(1).max(200),
+  submitterAccountId: z.string().min(1).max(200),
+  model: z.string().min(1).max(200),
+  messages: z.array(z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string().max(400_000) })).min(1).max(500),
+  maxTokens: z.number().int().positive().max(32_768).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
+  maxBidMsatPerCredit: z.number().positive().max(1e9).optional(),
+  timeoutMs: z.number().int().min(10_000).max(INFERENCE_MAX_TIMEOUT_MS).default(180_000),
+});
+
+/** Models agents on the network can run now, with how many agents and the price per class. */
+app.get("/inference/models", async () => {
+  const now = Date.now();
+  const byModel = new Map<string, { agents: number; classes: Set<ComputeClassId> }>();
+  for (const [id, cap] of agentCapabilities) {
+    if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
+    const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
+    for (const m of new Set([...(cap.localModelCatalog ?? []), ...(cap.activeModel ? [cap.activeModel] : [])])) {
+      if (!m || m === "edgecoder-default") continue;
+      const e = byModel.get(m) ?? { agents: 0, classes: new Set<ComputeClassId>() };
+      e.agents++;
+      e.classes.add(cls);
+      byModel.set(m, e);
+    }
+  }
+  const classes = Object.fromEntries(
+    (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).map((c) => [c, { label: rateOracleConfig.computeClasses[c].label, cSatsPerSecondBaseTier: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(c), 1)) }])
+  );
+  return {
+    models: [...byModel.entries()].map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes] })).sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
+    classes,
+  };
+});
+
+app.post("/inference/submit", async (req, reply) => {
+  const body = inferenceSubmitSchema.parse(req.body);
+  const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId, "/inference/submit");
+  if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
+  if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
+  const accountId = submitter.accountId;
+  const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
+  if (holders.length === 0) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
+  const taskClass = (resolved.computeClass ?? "any") as ComputeClassId | "any";
+  const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
+  const reserve = subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit);
+  try {
+    await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
+    req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
+    return reply.code(500).send({ error: "credit_debit_failed" });
+  }
+  taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
+  const marketBid = orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {});
+  const subtask = queue.enqueueSubtask({
+    taskId: body.taskId,
+    kind: "inference",
+    language: "python",
+    input: JSON.stringify({ messages: body.messages, maxTokens: body.maxTokens, temperature: body.temperature }),
+    timeoutMs: body.timeoutMs,
+    snapshotRef: "inference",
+    requestedModel: body.model,
+    projectMeta: { projectId: `inference:${accountId}`, resourceClass, priority: 60, computeClass: taskClass, maxBidMsatPerCredit: marketBid.maxMsatPerCredit },
+  });
+  inferenceStreams.open(subtask.id);
+  app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
+  return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve) });
+});
+
+app.post("/inference/chunks", async (req, reply) => {
+  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/inference/chunks", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  const body = z.object({ subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional() }).parse(req.body);
+  if (queue.getClaim(body.subtaskId)?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
+  const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error);
+  return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
+});
+
+/** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */
+app.post("/inference/stream", async (req, reply) => {
+  const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
+  const billing = taskBilling.get(body.taskId);
+  const reader = await resolveSubmitterAccount(req as any, billing?.accountId ?? "", "/inference/stream");
+  if ("error" in reader || !billing || reader.accountId !== billing.accountId) return reply.code(403).send({ error: "not_requester" });
+  const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
+  if (!r) return reply.code(404).send({ error: "unknown_stream" });
+  // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
+  let result = r.done ? queue.getResult(body.subtaskId) : undefined;
+  for (let i = 0; r.done && !result && i < 40; i++) {
+    await new Promise((res) => setTimeout(res, 100));
+    result = queue.getResult(body.subtaskId);
+  }
+  if (result) await settleTaskIfDone(body.taskId);
+  return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs } : {}) });
 });
 
 app.get("/status", async () => queue.status());
@@ -3798,7 +4004,8 @@ app.get("/tasks/:taskId/subtasks/:subtaskId/result", async (req, reply) => {
     error: result.error,
     durationMs: result.durationMs,
     // What /submit charged the submitter (0 once refunded or for anonymous tasks).
-    creditsSpent: billing && !billing.refunded ? billing.credits : 0
+    // cSats: the settled cost once the task finished, else what is set aside for it.
+    creditsSpent: billing ? msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat) : 0
   });
 });
 
@@ -4223,18 +4430,15 @@ app.post("/economy/rates/recalibrate", async (req, reply) => {
 app.get("/economy/credits/:accountId/quote", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const quote = quoteSatsPerCredit("cpu");
   const balance = pgStore ? await pgStore.creditBalance(params.accountId) : creditEngine.balance(params.accountId);
+  // The balance is in cSats: 1 cSat = 1 sat of prepaid compute.
   return {
     accountId: params.accountId,
     credits: Number(balance.toFixed(3)),
-    satsPerCredit: quote.satsPerCredit,
-    msatPerCredit: quote.msatPerCredit,
-    estimatedSats: satsForCredits(balance, quote.satsPerCredit),
-    quoteSource: quote.quoteSource,
-    rateEpochId: quote.rateEpochId,
-    loadMultiplier: quote.loadMultiplier,
-    stale: quote.stale,
+    cSats: Number(balance.toFixed(3)),
+    satsPerCredit: 1,
+    msatPerCredit: 1000,
+    estimatedSats: Math.floor(balance),
     quotedAtMs: Date.now()
   };
 });
@@ -4424,7 +4628,8 @@ app.post("/economy/payments/intents", async (req, reply) => {
     coordinatorFeeBps: COORDINATOR_FEE_BPS,
     coordinatorFeeSats: feeSats,
     netSats,
-    quotedCredits: creditsForSats(netSats, satsPerCredit),
+    // 1 cSat = 1 sat of prepaid compute: the net sats, after the coordinator fee.
+    quotedCredits: netSats,
     status: "created",
     createdAtMs: Date.now()
   };

@@ -10,6 +10,7 @@ import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
+import { runInferenceSubtask } from "./inference-runner.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
@@ -238,6 +239,17 @@ if (LOCAL_FORWARD_PORT > 0) {
     .listen(LOCAL_FORWARD_PORT, "127.0.0.1", () =>
       console.log(`[agent:${AGENT_ID}] local forwarder on 127.0.0.1:${LOCAL_FORWARD_PORT}`)
     );
+}
+
+/** Models in this machine's Ollama (embedding-only models left out); [] when it can't be reached. */
+async function listInstalledModels(): Promise<string[]> {
+  try {
+    const res = await request(`${OLLAMA_HOST ?? "http://127.0.0.1:11434"}/api/tags`, { method: "GET", headersTimeout: 3000, bodyTimeout: 3000 });
+    const body = (await res.body.json()) as { models?: Array<{ name: string }> };
+    return (body.models ?? []).map((m) => m.name).filter((n) => !/embed/i.test(n)).slice(0, 200);
+  } catch {
+    return [];
+  }
 }
 
 function backoffMs(): number {
@@ -870,7 +882,9 @@ async function loop(): Promise<void> {
           }
         }
         if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, activeCoordinatorUrl, Date.now(), REGISTER_REFRESH_MS)) {
+          const installedModels = currentProvider === "ollama-local" ? await listInstalledModels() : [];
           const registerBody = {
+            ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
             agentId: AGENT_ID,
             ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
             os: OS,
@@ -1077,7 +1091,8 @@ async function loop(): Promise<void> {
               id: pulled.envelope.subtaskId,
               // Coordinators before this change did not send taskId; they now correct it on /result.
               taskId: pulled.envelope.metadata.taskId ?? pulled.envelope.subtaskId,
-              kind: "single_step",
+              kind: (pulled.envelope.metadata.kind as Subtask["kind"] | undefined) ?? "single_step",
+              ...(pulled.envelope.metadata.requestedModel ? { requestedModel: pulled.envelope.metadata.requestedModel } : {}),
               input: decrypted.input,
               snapshotRef: decrypted.snapshotRef,
               language: decrypted.kind as Language,
@@ -1099,7 +1114,8 @@ async function loop(): Promise<void> {
           const st = pulled.subtask;
 
           // ── Frozen snapshot enforcement (Design Decision #8) ──
-          if (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef)) {
+          // Inference runs a model, not the project's code: no snapshot involved.
+          if (st.kind !== "inference" && (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef))) {
             if (SNAPSHOT_ENFORCEMENT === "strict") {
               console.error(`[agent:${AGENT_ID}] snapshot enforcement STRICT: refusing subtask ${st.id} — invalid snapshotRef: "${st.snapshotRef ?? ""}"`);
               try {
@@ -1114,7 +1130,7 @@ async function loop(): Promise<void> {
               continue;
             }
             console.warn(`[agent:${AGENT_ID}] snapshot warning: subtask ${st.id} has invalid snapshotRef: "${st.snapshotRef ?? ""}" — proceeding (enforcement=${SNAPSHOT_ENFORCEMENT})`);
-          } else {
+          } else if (st.kind !== "inference") {
             console.log(`[agent:${AGENT_ID}] snapshot verified for subtask ${st.id}: ${st.snapshotRef}`);
           }
 
@@ -1122,7 +1138,11 @@ async function loop(): Promise<void> {
           try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
           // #51: keep the coordinator's claim lease alive while the subtask runs.
           const stopLeaseHeartbeat = startLeaseHeartbeat();
-          const result = await worker.runSubtask(st, AGENT_ID).finally(stopLeaseHeartbeat);
+          const run = st.kind === "inference"
+            ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+            : worker.runSubtask(st, AGENT_ID);
+          if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
+          const result = await run.finally(stopLeaseHeartbeat);
           result.snapshotRef = st.snapshotRef;
           try {
             if (result.ok) {

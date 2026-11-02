@@ -8,6 +8,8 @@
  * account to the signer), so nothing local needs the shared mesh token or names an account.
  *
  *   POST /forward/submit                                      -> POST {coordinator}/submit (signed)
+ *   POST /forward/inference/submit | /forward/inference/stream -> the coordinator's (signed)
+ *   GET  /forward/inference/models                            -> GET  {coordinator}/inference/models
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
  *   GET  /forward/health                                      -> forwarder state
  *
@@ -20,6 +22,12 @@ import { request } from "undici";
 import { safeTokenEqual } from "../apps/ide/ide-auth.js";
 
 export const LOCAL_FORWARD_DEFAULT_PORT = 4305;
+/** POST routes relayed to the coordinator, signed by this agent over the exact body bytes. */
+const SIGNED_POSTS: Record<string, string> = {
+  "/forward/submit": "/submit",
+  "/forward/inference/submit": "/inference/submit",
+  "/forward/inference/stream": "/inference/stream",
+};
 const MAX_BODY_BYTES = 1024 * 1024;
 const RESULT_PATH_RE = /^\/forward\/tasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/subtasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/result$/;
 
@@ -80,21 +88,27 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       }
       if (!coordinator) return send(res, 503, { error: "agent_not_registered" });
 
-      if (req.method === "POST" && path === "/forward/submit") {
+      const target = req.method === "POST" ? SIGNED_POSTS[path] : undefined;
+      if (target) {
         const raw = await readBody(req);
         try {
           JSON.parse(raw);
         } catch {
           return send(res, 400, { error: "invalid_json" });
         }
-        const upstream = await request(`${coordinator}/submit`, {
+        const upstream = await request(`${coordinator}${target}`, {
           method: "POST",
-          headers: { "content-type": "application/json", ...deps.meshHeaders(), ...deps.signedHeaders("/submit", raw) },
+          headers: { "content-type": "application/json", ...deps.meshHeaders(), ...deps.signedHeaders(target, raw) },
           body: raw,
-          // The coordinator splits the prompt into subtasks before it answers.
+          // /submit splits the prompt into subtasks before it answers; a stream read long-polls.
           headersTimeout: Math.max(timeoutMs, 60_000),
           bodyTimeout: Math.max(timeoutMs, 60_000)
         });
+        return send(res, upstream.statusCode, await upstream.body.text());
+      }
+
+      if (req.method === "GET" && path === "/forward/inference/models") {
+        const upstream = await request(`${coordinator}/inference/models`, { method: "GET", headers: deps.meshHeaders(), headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
         return send(res, upstream.statusCode, await upstream.body.text());
       }
 
