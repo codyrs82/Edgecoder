@@ -60,7 +60,7 @@
     "@noble/curves": "2.0.1",
     "@scure/base": "^2.0.0",
     "@scure/bip32": "^2.0.1",
-    "@simplewebauthn/server": "^13.2.2",
+    "@simplewebauthn/server": "^14.0.3",
     "acorn": "^8.16.0",
     "better-sqlite3": "^12.6.2",
     "bip39": "^3.1.0",
