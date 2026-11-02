@@ -580,8 +580,72 @@ fn project_git_branch(
     }
 }
 
+/// Major version from `node -p process.versions.node` output ("22.23.4\n" -> 22).
+fn parse_node_major(out: &str) -> Option<u32> {
+    out.trim().split('.').next()?.parse().ok()
+}
+
+fn node_major(node: &PathBuf) -> Option<u32> {
+    let out = Command::new(node).args(["-p", "process.versions.node"]).output().ok()?;
+    parse_node_major(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Apps launched from Finder/the Dock get a bare PATH (/usr/bin:/bin:...), so a Homebrew or nvm
+/// Node is invisible to `Command::new("node")` and the agent never starts. Look where Node
+/// actually lives (EDGECODER_NODE wins), require >= 22, then fall back to the user's login shell.
+fn resolve_node_binary() -> Option<PathBuf> {
+    const MIN_MAJOR: u32 = 22;
+    if let Ok(p) = std::env::var("EDGECODER_NODE") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut candidates: Vec<PathBuf> = [
+        "/opt/homebrew/opt/node@22/bin/node",
+        "/usr/local/opt/node@22/bin/node",
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+        r"C:\Program Files\nodejs\node.exe",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Ok(entries) = std::fs::read_dir(format!("{home}/.nvm/versions/node")) {
+        let mut nvm: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("bin/node")).collect();
+        nvm.sort();
+        nvm.reverse();
+        candidates.extend(nvm);
+    }
+    if let Some(found) = candidates
+        .into_iter()
+        .find(|p| p.exists() && node_major(p).is_some_and(|m| m >= MIN_MAJOR))
+    {
+        return Some(found);
+    }
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        if let Ok(out) = Command::new(shell).args(["-lc", "command -v node"]).output() {
+            let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if p.exists() && node_major(&p).is_some_and(|m| m >= MIN_MAJOR) {
+                return Some(p);
+            }
+        }
+    }
+    // Last resort: whatever PATH has (fine on Windows/Linux desktops with a normal PATH).
+    Some(PathBuf::from("node")).filter(|p| node_major(p).is_some_and(|m| m >= MIN_MAJOR))
+}
+
 fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
-    Command::new("node")
+    let Some(node) = resolve_node_binary() else {
+        eprintln!("Node.js 22+ not found (Homebrew, nvm, /usr/local, PATH, login shell); not starting the agent");
+        return None;
+    };
+    eprintln!("Starting agent with {:?}", node);
+    Command::new(node)
         .arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
@@ -792,4 +856,17 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error running EdgeCoder desktop app");
+}
+
+#[cfg(test)]
+mod node_resolution_tests {
+    use super::parse_node_major;
+
+    #[test]
+    fn parses_node_major_versions() {
+        assert_eq!(parse_node_major("22.23.4\n"), Some(22));
+        assert_eq!(parse_node_major("v22.1.0"), None); // `-p process.versions.node` never prints a v
+        assert_eq!(parse_node_major("20.18.0"), Some(20));
+        assert_eq!(parse_node_major(""), None);
+    }
 }
