@@ -30,7 +30,7 @@ need_root
 ensure_node() {
   # Find an existing Node >= NODE_MAJOR even when sudo reset PATH and hid the user's node
   # (Homebrew on /opt/homebrew/bin, nvm, etc.). Put its dir on PATH so npm/node work below too.
-  for c in "$(command -v node 2>/dev/null)" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+  for c in "$(command -v node 2>/dev/null)" /opt/homebrew/opt/node@$NODE_MAJOR/bin/node /usr/local/opt/node@$NODE_MAJOR/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
     [ -n "$c" ] && [ -x "$c" ] || continue
     if [ "$("$c" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ]; then
       case ":$PATH:" in *":$(dirname "$c"):"*) :;; *) export PATH="$(dirname "$c"):$PATH";; esac
@@ -39,7 +39,10 @@ ensure_node() {
   done
   log "Installing Node.js $NODE_MAJOR"
   if [ "$OS" = "Darwin" ]; then
-    if command -v brew >/dev/null 2>&1; then sudo -u "${SUDO_USER:-$(whoami)}" brew install node@$NODE_MAJOR >/dev/null && brew link --overwrite node@$NODE_MAJOR >/dev/null 2>&1 || true
+    if command -v brew >/dev/null 2>&1; then
+      sudo -u "${SUDO_USER:-$(whoami)}" brew install node@$NODE_MAJOR >/dev/null 2>&1 || true
+      # node@NN is keg-only; put its bin on PATH (brew link needs --force) so npm/node below use v22, not a linked v20.
+      nbin="$(sudo -u "${SUDO_USER:-$(whoami)}" brew --prefix node@$NODE_MAJOR 2>/dev/null)/bin"; [ -x "$nbin/node" ] && export PATH="$nbin:$PATH"
     else
       pkg="/tmp/node-$NODE_MAJOR.pkg"; arch="$(uname -m)"; [ "$arch" = "arm64" ] || arch="x64"
       ver="$(curl -fsSL https://nodejs.org/dist/index.json | python3 -c 'import json,sys; print(next(v["version"] for v in json.load(sys.stdin) if v["version"].startswith("v'$NODE_MAJOR'.")))')"
