@@ -43,6 +43,12 @@ else if (cmd === "earn") {
   const r = await call("GET", "/capacity");
   out((r.body?.agents ?? []).map((a) => ({ agentId: a.agentId, version: a.version, sandboxMode: a.sandboxMode,
     activeModel: a.activeModel, blacklisted: a.blacklisted, lastSeenAgoS: Math.round((Date.now() - a.lastSeenMs) / 1000) })));
+} else if (cmd === "blacklist") {
+  // Blacklist history for one agent: why and when it was banned or lifted.
+  const r = await call("GET", "/security/blacklist/audit");
+  const events = r.body?.events ?? r.body?.records ?? r.body ?? [];
+  out((Array.isArray(events) ? events : []).filter((e) => e.agentId === args[0])
+    .map((e) => ({ at: new Date(e.timestampMs).toISOString(), reportedBy: e.reportedBy, reason: e.reason, expiresAt: e.expiresAtMs ? new Date(e.expiresAtMs).toISOString() : null })));
 } else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: args[0], bolt11: args[1] }));
 else if (cmd === "payouts") out(await call("GET", `/economy/payouts/${args[0]}`));
 else { out({ error: "unknown_command" }); process.exit(2); }

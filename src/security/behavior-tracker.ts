@@ -177,14 +177,18 @@ export class AgentBehaviorTracker {
     const totalTasks = tasks.length;
     const successCount = tasks.filter(t => t.ok).length;
     const successRate = totalTasks > 0 ? successCount / totalTasks : 1;
-    const emptyOutputCount = tasks.filter(t => t.outputLength === 0).length;
+    // The forgery signals (empty, identical or impossibly fast results) look only at results the
+    // agent reported as successful: a failed result earns nothing, and an agent whose model is
+    // broken fails fast with empty output, which is not fraud.
+    const okTasks = tasks.filter(t => t.ok);
+    const emptyOutputCount = okTasks.filter(t => t.outputLength === 0).length;
 
     // Identical output detection: count max consecutive identical hashes
     let identicalOutputCount = 0;
-    if (tasks.length >= 2) {
+    if (okTasks.length >= 2) {
       let consecutiveRun = 1;
-      for (let i = 1; i < tasks.length; i++) {
-        if (tasks[i].outputHash === tasks[i - 1].outputHash) {
+      for (let i = 1; i < okTasks.length; i++) {
+        if (okTasks[i].outputHash === okTasks[i - 1].outputHash) {
           consecutiveRun++;
           identicalOutputCount = Math.max(identicalOutputCount, consecutiveRun);
         } else {
@@ -206,7 +210,7 @@ export class AgentBehaviorTracker {
       : 0;
     const minDurationMs = durations.length > 0 ? Math.min(...durations) : 0;
     const durationStdDev = computeStdDev(durations, avgDurationMs);
-    const suspiciouslyFastCount = tasks.filter(t => t.durationMs < 500).length;
+    const suspiciouslyFastCount = okTasks.filter(t => t.durationMs < 500).length;
 
     // Protocol
     const signatureFailureCount = entry.protocolEvents.filter(e => e.type === "signature_failure").length;

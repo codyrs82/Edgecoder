@@ -20,8 +20,32 @@ describe("AgentBehaviorTracker", () => {
     expect(stats.totalTasks).toBe(3);
     expect(stats.successCount).toBe(2);
     expect(stats.successRate).toBeCloseTo(2 / 3);
-    expect(stats.emptyOutputCount).toBe(1);
+    // Only successful results count as empty output; the failed one earns nothing.
+    expect(stats.emptyOutputCount).toBe(0);
     expect(stats.avgDurationMs).toBe(2000);
+  });
+
+  it("fast, empty, identical failures are not forgery signals (an agent with a broken model)", () => {
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      tracker.recordTaskResult("agent-1", { ok: false, output: "", durationMs: 140 }, now + i);
+    }
+    const stats = tracker.getStats("agent-1", now + 10)!;
+    expect(stats.suspiciouslyFastCount).toBe(0);
+    expect(stats.identicalOutputCount).toBe(0);
+    expect(stats.emptyOutputCount).toBe(0);
+  });
+
+  it("fast, identical successful results still count", () => {
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      tracker.recordTaskResult("agent-1", { ok: true, output: "same", durationMs: 140 }, now + i);
+    }
+    const stats = tracker.getStats("agent-1", now + 10)!;
+    expect(stats.suspiciouslyFastCount).toBe(3);
+    expect(stats.identicalOutputCount).toBe(3);
   });
 
   it("tracks empty outputs correctly", () => {

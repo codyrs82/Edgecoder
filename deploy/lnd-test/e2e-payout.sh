@@ -8,6 +8,7 @@
 # BUY_ONLY=1 runs only the purchase (buyer credits for a proof-of-concept job).
 # OWNER_OF=<agentId> prints the account that agent is linked to, then exits.
 # BALANCE=1 prints ACCOUNT's earnings balance, then exits.
+# BLACKLIST_OF=<agentId> prints that agent's blacklist history, then exits.
 # AGENTS=1 lists the agents registered with the US seed, then exits.
 # Prints invoices, statuses and balances only; no tokens or macaroons.
 set -euo pipefail
@@ -33,6 +34,7 @@ payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/dat
 
 if [ -n "${OWNER_OF:-}" ]; then seed owner "$OWNER_OF"; exit 0; fi
 if [ "${BALANCE:-0}" = 1 ]; then seed payouts "$ACCOUNT" | jq -c '.body.balance'; exit 0; fi
+if [ -n "${BLACKLIST_OF:-}" ]; then seed blacklist "$BLACKLIST_OF" | jq -c '.[]'; exit 0; fi
 if [ "${AGENTS:-0}" = 1 ]; then seed agents | jq -c '.[]'; exit 0; fi
 
 if [ "${SKIP_SETUP:-0}" != 1 ]; then
