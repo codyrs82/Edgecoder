@@ -6,8 +6,8 @@ set -euo pipefail
 export FLY_API_TOKEN="${FLY_API_TOKEN:-$(cat ~/.config/edgecoder/fly.token)}"
 A=edgecoder-lnd-test
 HUB=$(fly machines list -a "$A" --json | jq -r '.[] | select(.config.metadata.fly_process_group=="hub") | .id')
-run() { fly ssh console -a "$A" --machine "$HUB" -q -C "$1" 2>/dev/null | grep -v '^Connecting'; }
-run "lncli --lnddir=/data --network=regtest bakemacaroon --save_to /data/payout.macaroon info:read invoices:read invoices:write offchain:read offchain:write" >/dev/null
+run() { fly ssh console -a "$A" --machine "$HUB" -q -C "$1" 2>/dev/null | { grep -v '^Connecting' || true; }; }
+run "lncli --lnddir=/data --network=regtest bakemacaroon --save_to /data/payout.macaroon info:read invoices:read invoices:write offchain:read offchain:write onchain:read" >/dev/null
 umask 077
 f=$(mktemp)
 trap 'rm -f "$f"' EXIT
