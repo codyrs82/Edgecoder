@@ -6,7 +6,7 @@
   import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, type Diagnostic } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, idePreviewUrl, type Diagnostic } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
   import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
@@ -53,6 +53,21 @@
   let autocompleteOn = $state(true);
   let quickOpen = $state(false);
   let sidebarView = $state<"files" | "git">("files");
+  /** Live preview of the project's web page, beside the editor; reloads when files change. */
+  let previewUrl = $state<string | null>(null);
+  let previewNonce = $state(0);
+
+  export async function openPreview(path = "") {
+    try {
+      previewUrl = await idePreviewUrl(path || (activeFilePath && /\.html?$/.test(activeFilePath) ? activeFilePath : ""));
+    } catch (e) {
+      showNotice(`Couldn't open the preview: ${(e as Error).message}`);
+    }
+  }
+  $effect(() => {
+    void treeRefresh;
+    if (previewUrl) previewNonce++;
+  });
   let editorSettings = $state<EditorSettings>(loadEditorSettings());
   let settingsOpen = $state(false);
 
@@ -674,6 +689,9 @@
       {:else if problemCount}
         <button class="ac-toggle problems" title="{problemCount} problem(s) from the project's checkers. Click for the next one." onclick={nextProblem}>⚠ {problemCount}</button>
       {/if}
+      {#if projectRoot}
+        <button class="ac-toggle" class:on={Boolean(previewUrl)} title={previewUrl ? "Close the preview" : "Preview the project's web page (index.html, or the open .html file)"} onclick={() => (previewUrl ? (previewUrl = null) : void openPreview())}>Preview</button>
+      {/if}
       {#if activeFile}
         <button class="ac-toggle" class:on={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} onclick={() => (splitPath ? closeSplit() : openSplit())}>Split</button>
       {/if}
@@ -725,6 +743,18 @@
     {/if}
     <div class="monaco-wrap" style={terminalOpen ? `flex: 1 1 0; min-height: 80px` : ""}>
       <div class="monaco-container" bind:this={editorContainer}></div>
+      {#if previewUrl}
+        <div class="split-pane">
+          <div class="split-bar">
+            <span class="preview-label" title={previewUrl}>Preview</span>
+            <button title="Reload" aria-label="Reload preview" onclick={() => previewNonce++}>↻</button>
+            <button title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}>×</button>
+          </div>
+          {#key previewNonce}
+            <iframe class="preview-frame" title="Preview" src={previewUrl}></iframe>
+          {/key}
+        </div>
+      {/if}
       {#if splitPath}
         <div class="split-pane">
           <div class="split-bar">
@@ -773,6 +803,7 @@
         getFileContext={getActiveFileContext}
         onFilesChanged={onAgentChangedFiles}
         onOpenPath={(p) => void openPath(p)}
+        onPreview={(p) => void openPreview(p)}
       />
     </div>
   {/if}
@@ -1115,6 +1146,19 @@
     color: var(--text-muted);
     cursor: pointer;
     font-size: 14px;
+  }
+  .preview-label {
+    flex: 1;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .preview-frame {
+    flex: 1;
+    width: 100%;
+    border: none;
+    background: #fff;
   }
   .split-editor {
     flex: 1;

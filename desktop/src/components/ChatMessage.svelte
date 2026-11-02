@@ -24,8 +24,9 @@
     onFilesReverted?: () => void;
     onOpenPath?: (path: string) => void;
     networkTaskId?: string;
+    onPreview?: (path: string) => void;
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -78,7 +79,7 @@
         <NetworkTaskCard taskId={networkTaskId} />
       {/if}
       {#if turnId && changedFiles && changedFiles.length > 0 && !streaming}
-        <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} />
+        <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} {onPreview} />
       {/if}
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />

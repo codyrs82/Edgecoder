@@ -9,13 +9,16 @@
     /** Files were put back: reload open buffers and the tree. */
     onReverted?: () => void;
     onOpenPath?: (path: string) => void;
+    /** Show a changed web page in the preview. */
+    onPreview?: (path: string) => void;
   }
-  let { turnId, files, onReverted, onOpenPath }: Props = $props();
+  let { turnId, files, onReverted, onOpenPath, onPreview }: Props = $props();
 
   let changes = $state<FileChange[] | null>(null);
   let error = $state<string | null>(null);
   let reviewing = $state<FileChange | null>(null);
   let busy = $state(false);
+  let htmlChanged = $derived(changes?.find((c) => c.after !== null && /\.html?$/i.test(c.path))?.path ?? null);
 
   async function load() {
     try {
@@ -64,7 +67,10 @@
   <div class="card">
     <div class="head">
       <span>{changes.length} file{changes.length === 1 ? "" : "s"} changed</span>
-      <button class="undo-all" disabled={busy} onclick={() => undo()}>Undo all</button>
+      <span class="head-actions">
+        {#if htmlChanged && onPreview}<button onclick={() => onPreview?.(htmlChanged!)}>Preview</button>{/if}
+        <button class="undo-all" disabled={busy} onclick={() => undo()}>Undo all</button>
+      </span>
     </div>
     {#each changes as c (c.path)}
       <div class="row">
@@ -107,6 +113,10 @@
     border-bottom: 0.5px solid var(--border);
     color: var(--text-secondary);
     font-weight: 600;
+  }
+  .head-actions {
+    display: flex;
+    gap: 6px;
   }
   .row {
     display: flex;

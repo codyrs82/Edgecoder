@@ -275,6 +275,8 @@ export interface ToolRunnerDeps {
   /** Keep a file's original before the turn first writes it; returns the tracked path or null. */
   captureBeforeWrite: (path: string) => string | null;
   turnId: string;
+  /** Apply write_file / edit_file without asking (the turn's checkpoint keeps them undoable). */
+  autoApproveEdits?: boolean;
 }
 
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
@@ -284,7 +286,8 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
     // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
     const shellAutoApprove = tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
-    const requiresApproval = !READ_TOOLS.has(tool) && !shellAutoApprove;
+    const editAutoApprove = d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file");
+    const requiresApproval = !READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove;
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
       const msg = `Tool call ${tool} was rejected by the user.`;
@@ -293,7 +296,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     }
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
-    const result = await d.execute(tool, args, { approved: requiresApproval });
+    const result = await d.execute(tool, args, { approved: requiresApproval || editAutoApprove });
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
     if (tool === "run_shell" && result.result) {
       try {

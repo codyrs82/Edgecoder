@@ -983,6 +983,8 @@ export async function streamIdeChat(
   signal?: AbortSignal,
   requestedModel?: string,
   githubToken?: string | null,
+  /** "edits": file edits apply without asking (undoable from the reply's changes card). */
+  autoApprove: "none" | "edits" = "none",
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -992,6 +994,7 @@ export async function streamIdeChat(
       messages,
       model: requestedModel,
       projectRoot,
+      autoApprove,
       ...(githubToken ? { githubToken } : {}),
     }),
     signal,
@@ -1186,3 +1189,8 @@ export interface Diagnostic {
 }
 export const ideDiagnostics = (paths: string[]) =>
   fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[] }>("POST", "/v1/ide/diagnostics", { paths });
+
+/** Create ~/EdgeCoder Projects/<name> (a git repo) and make it the open project. */
+export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
+/** Preview URL of a project file (default index.html) on the IDE server's preview origin. */
+export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/ide/preview?path=${encodeURIComponent(path)}`).then((r) => r.url);

@@ -31,6 +31,8 @@ import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
 import { checkProject } from "./diagnostics.js";
+import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
+import { createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -551,6 +553,23 @@ app.post("/v1/ide/diagnostics", async (req, reply) => {
   return reply.send(await checkProject(activeProjectRoot, inside));
 });
 
+// Live preview of web projects (preview-server.ts), on its own loopback origin.
+const previewPort = Number(process.env.IDE_PREVIEW_PORT ?? PREVIEW_DEFAULT_PORT) || PREVIEW_DEFAULT_PORT;
+const preview = createPreviewServer(() => activeProjectRoot);
+app.get("/v1/ide/preview", async (req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  const { path } = z.object({ path: z.string().max(4096).default("") }).parse(req.query);
+  return reply.send({ url: preview.urlFor(previewPort, path) });
+});
+
+// A new project for something the user asked to build from chat: ~/EdgeCoder Projects/<name>.
+app.post("/v1/ide/projects/new", async (req, reply) => {
+  const { name } = z.object({ name: z.string().max(200).default("") }).parse(req.body ?? {});
+  const projectRoot = createNewProject(name);
+  activeProjectRoot = projectRoot;
+  return reply.send({ projectRoot });
+});
+
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
@@ -574,6 +593,8 @@ const ideChatSchema = z.object({
   model: z.string().optional(),
   projectRoot: z.string().optional(),
   githubToken: z.string().optional(),
+  /** "edits": file writes and edits apply without asking (checkpoints keep them undoable); commands still ask. */
+  autoApprove: z.enum(["none", "edits"]).default("none"),
 });
 
 app.post("/v1/ide/chat", async (req, reply) => {
@@ -695,6 +716,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
         }),
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
       turnId,
+      autoApproveEdits: body.autoApprove === "edits",
     }),
   });
 
@@ -788,6 +810,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     app.log.error(error);
     process.exit(1);
   });
+  // Preview stays on loopback whatever the main server binds to.
+  preview.server.on("error", (err) => app.log.warn({ err: String(err) }, "preview_server_unavailable"));
+  preview.server.listen(previewPort, "127.0.0.1");
 }
 
 export { app as ideProviderServer };

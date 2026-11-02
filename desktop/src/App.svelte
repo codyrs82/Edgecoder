@@ -5,12 +5,14 @@
   import ChatView from "./pages/ChatView.svelte";
   import EditorView from "./pages/EditorView.svelte";
   import { mentionSuggestions } from "./lib/mentions";
+  import { isBuildRequest, setAutoApplyEdits } from "./lib/project-mode";
+  import { tick } from "svelte";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
   import OllamaSetup from "./components/OllamaSetup.svelte";
   import type { AuthUser } from "./lib/api";
-  import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind } from "./lib/api";
+  import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind, ideNewProject } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
@@ -123,6 +125,12 @@
     }
   }
 
+  /** Show a project web page in the editor tab's preview. */
+  function previewInEditor(path: string) {
+    activeTab = "editor";
+    setTimeout(() => void editorView?.openPreview(path), 50);
+  }
+
   /** Show a project file in the editor tab. */
   function openInEditor(path: string) {
     activeTab = "editor";
@@ -172,10 +180,24 @@
     }
   }
 
-  function handleSend(message: string) {
-    if (activeTab === "chat" && chatView) {
-      chatView.sendMessage(message);
+  async function handleSend(message: string) {
+    if (activeTab !== "chat" || !chatView) return;
+    // Asked to build something with no folder open: start a project for it, like other coding
+    // assistants do, and let the agent write the files there.
+    if (!projectRoot && isBuildRequest(message)) {
+      try {
+        const root = await ideNewProject(message);
+        projectRoot = root;
+        try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
+        // A fresh folder: apply the agent's edits as it goes (each reply stays undoable).
+        setAutoApplyEdits(root, true);
+        await tick();
+        chatView.addNote(`Started a new project in \`${root.replace(/^\/Users\/[^/]+/, "~")}\`. The agent writes its files there; open the EdgeCoder tab to see and edit them.`);
+      } catch (err) {
+        console.warn("Couldn't create a project:", err);
+      }
     }
+    chatView.sendMessage(message);
   }
 </script>
 
@@ -231,7 +253,7 @@
           />
         </div>
         <div class="chat-main">
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} />
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>

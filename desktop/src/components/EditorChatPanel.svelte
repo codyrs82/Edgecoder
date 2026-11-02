@@ -7,6 +7,7 @@
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
+  import { autoApplyEdits, setAutoApplyEdits } from "../lib/project-mode";
   import { fsFind, networkSubmit } from "../lib/api";
   import {
     createConversation,
@@ -31,12 +32,18 @@
     /** The agent wrote files (or ran a command that may have): reload open buffers and the tree. */
     onFilesChanged?: () => void;
     onOpenPath?: (path: string) => void;
+    onPreview?: (path: string) => void;
   }
-  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath }: Props = $props();
+  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview }: Props = $props();
 
   let streamingToolEvents: ToolEvent[] = $state([]);
   /** Where a message goes: the local agent, or a background job on the network. */
   let runOn = $state<"local" | "network">("local");
+  /** Apply the agent's file edits without asking, in this project (commands still ask). */
+  let autoApply = $state(false);
+  $effect(() => {
+    autoApply = autoApplyEdits(projectRoot);
+  });
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
   let githubToken: string | null = null;
@@ -200,6 +207,7 @@
           abortController.signal,
           conversation.selectedModel,
           githubToken,
+          autoApply ? "edits" : "none",
         );
       } else {
         // Stream through local IDE provider (OpenAI-compatible format)
@@ -395,6 +403,7 @@
             changedFiles={msg.changedFiles}
             onFilesReverted={onFilesChanged}
             {onOpenPath}
+            {onPreview}
             onOpenInEditor={onApplyCode}
           />
         {/each}
@@ -419,6 +428,10 @@
         <span>Run on</span>
         <button role="radio" aria-checked={runOn === "local"} class:on={runOn === "local"} onclick={() => (runOn = "local")} title="The agent on this computer, with your project files">This computer</button>
         <button role="radio" aria-checked={runOn === "network"} class:on={runOn === "network"} onclick={() => (runOn = "network")} title="A background job on the EdgeCoder network (1 credit): another machine writes and runs code for it in a sandbox and returns the output">Network</button>
+        <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
+          <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
+          Auto-apply edits
+        </label>
       </div>
     {/if}
     <ChatInput
@@ -596,6 +609,13 @@
     padding: 2px 8px;
     cursor: pointer;
     font-size: 11px;
+  }
+  .auto-apply {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
   }
   .run-on button.on {
     color: var(--accent);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions } from "../lib/mentions";
+  import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ModelPicker from "../components/ModelPicker.svelte";
@@ -33,8 +34,9 @@
     onStreamingChange?: (streaming: boolean) => void;
     /** Open a project file in the editor tab (from an agent reply's changes card). */
     onOpenPath?: (path: string) => void;
+    onPreview?: (path: string) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview }: Props = $props();
 
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
@@ -175,6 +177,7 @@
           abortController.signal,
           conversation.selectedModel,
           cachedGitHubToken,
+          autoApplyEdits(projectRoot) ? "edits" : "none",
         );
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
@@ -264,6 +267,12 @@
       lastMsg.turnId = streamingTurnId;
       lastMsg.changedFiles = [...streamingChanged];
     }
+  }
+
+  /** A note in the conversation from the app itself (e.g. that a project was created). */
+  export function addNote(text: string) {
+    addMessage(conversation, "assistant", text);
+    conversation = conversation;
   }
 
   /** Stop the reply that is streaming (the partial reply is kept). */
@@ -370,7 +379,7 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} {onOpenPath} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
         <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />

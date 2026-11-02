@@ -129,6 +129,17 @@ describe("makeToolRunner", () => {
     expect(b.events[1]).toEqual({ type: "file_change", turnId: "t1", path: "src/a.ts" });
   });
 
+  it("auto-approved edits skip the prompt but still checkpoint; commands still ask", async () => {
+    const b = base();
+    const asked: string[] = [];
+    const run = makeToolRunner({ ...b.deps, autoApproveEdits: true, waitForApproval: async (_id, tool) => { asked.push(tool); return true; } });
+    await run("write_file", { path: "index.html", content: "<h1>hi</h1>" });
+    await run("run_shell", { command: "ls" });
+    expect(asked).toEqual(["run_shell"]);
+    expect(b.events.find((e) => e.type === "tool_call")).toMatchObject({ tool: "write_file", requires_approval: false });
+    expect(b.events.some((e) => e.type === "file_change")).toBe(true);
+  });
+
   it("shell results go out as shell_output", async () => {
     const b = base();
     await makeToolRunner(b.deps)("run_shell", { command: "echo hi" });
