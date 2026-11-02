@@ -50,6 +50,9 @@ const coordinatorTrust = new CoordinatorTrustGate({ store: coordinatorTrustStore
   }
 }
 
+// Forked by the all-in-one agent: exit with it rather than linger as an orphan.
+if (process.send) process.on("disconnect", () => process.exit(0));
+
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
@@ -348,6 +351,15 @@ function normalizeUrl(value: string | undefined): string | null {
   }
 }
 
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
 function readCachedCoordinatorUrl(): string | null {
   const cached = localStore.getConfigWithTTL("coordinator_url", COORDINATOR_CACHE_TTL_MS);
   return cached ? normalizeUrl(cached) : null;
@@ -376,7 +388,11 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry
   const discovered = await discoverCoordinatorUrlFromRegistry();
   if (discovered) return { url: discovered, source: "registry" };
   const cached = readCachedCoordinatorUrl();
-  if (cached) return { url: cached, source: "cache" };
+  // A loopback URL cached by a local-only run must not override a network bootstrap URL:
+  // the local coordinator's key changes per run and would fail the pin forever.
+  if (cached && !(isLoopbackUrl(cached) && !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL))) {
+    return { url: cached, source: "cache" };
+  }
   return { url: COORDINATOR_BOOTSTRAP_URL, source: "bootstrap" };
 }
 

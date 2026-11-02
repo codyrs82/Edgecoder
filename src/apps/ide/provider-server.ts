@@ -25,6 +25,9 @@ import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js"
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
+// Forked by the agent: exit with it, so a restarted agent's provider can take the port.
+if (process.send) process.on("disconnect", () => process.exit(0));
+
 const app = Fastify({ ...serviceLoggerOptions("ide-provider") });
 exposeRequestId(app);
 registerMetrics(app, "ide-provider");
