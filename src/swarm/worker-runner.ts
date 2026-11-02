@@ -203,7 +203,12 @@ let coordinatorOnline = true;
 const OFFLINE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 1500;
 const BACKOFF_MAX_MS = 30_000;
-const RECONNECT_PROBE_INTERVAL_MS = 15_000;
+// Each failed probe doubles the wait (15 s .. 5 min). A probe registers, and registering every
+// 15 s while offline tripped the coordinator's registration-storm rule (BHV008), whose ban then
+// kept the agent offline for good.
+const RECONNECT_PROBE_MIN_MS = 15_000;
+const RECONNECT_PROBE_MAX_MS = 5 * 60_000;
+let reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
 const COORDINATOR_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let lastReconnectProbeMs = 0;
 
@@ -1325,10 +1330,15 @@ async function loop(): Promise<void> {
       } else {
         // ═══ OFFLINE PATH: periodic reconnect probe ═══
         const now = Date.now();
-        if (now - lastReconnectProbeMs > RECONNECT_PROBE_INTERVAL_MS) {
+        if (now - lastReconnectProbeMs > reconnectProbeIntervalMs) {
           lastReconnectProbeMs = now;
           try {
             const probeStart = Date.now();
+            // Only register once the coordinator answers at all: an unauthenticated read costs
+            // nothing against the registration-storm rule.
+            const reach = await request(`${activeCoordinatorUrl}/identity`, { method: "GET", headersTimeout: 5000, bodyTimeout: 5000 });
+            await reach.body.dump();
+            if (reach.statusCode < 200 || reach.statusCode >= 300) throw new Error(`coordinator unreachable (${reach.statusCode})`);
             // Re-register first (coordinator may have restarted and lost agent state)
             const registerBody = {
               agentId: AGENT_ID,
@@ -1354,11 +1364,13 @@ async function loop(): Promise<void> {
             // The probe just registered: don't register again on the next online tick.
             registeredWithUrl = activeCoordinatorUrl;
             lastRegisteredAtMs = Date.now();
+            reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
             await flushOfflineLedger();
-          } catch {
-            console.log(`[agent:${AGENT_ID}] offline probe failed, still offline`);
+          } catch (err) {
+            reconnectProbeIntervalMs = Math.min(reconnectProbeIntervalMs * 2, RECONNECT_PROBE_MAX_MS);
+            console.log(`[agent:${AGENT_ID}] offline probe failed (${String(err).slice(0, 200)}); next probe in ${Math.round(reconnectProbeIntervalMs / 1000)}s`);
           }
         }
 
