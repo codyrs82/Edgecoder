@@ -5,6 +5,8 @@
 #   2. a test earnings row for ACCOUNT (reason regtest_e2e_test, wiped before mainnet);
 #   3. withdrawal: the payee node issues an invoice and the coordinator pays it out over Lightning.
 # SKIP_SETUP=1 runs only the withdrawal (after a run that already bought and earned).
+# BUY_ONLY=1 runs only the purchase (buyer credits for a proof-of-concept job).
+# OWNER_OF=<agentId> prints the account that agent is linked to, then exits.
 # Prints invoices, statuses and balances only; no tokens or macaroons.
 set -euo pipefail
 trap 'echo "e2e-payout: stopped at line $LINENO" >&2' ERR
@@ -27,6 +29,8 @@ seed() {
 PAYEE=$(fly machines list -a "$LT" --json | jq -r '.[] | select(.config.metadata.fly_process_group=="payee") | .id')
 payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/data --network=regtest $*" 2>&1 | { grep -v '^Connecting' || true; }; }
 
+if [ -n "${OWNER_OF:-}" ]; then seed owner "$OWNER_OF"; exit 0; fi
+
 if [ "${SKIP_SETUP:-0}" != 1 ]; then
 echo "== 1. purchase $BUY_SATS sats for $ACCOUNT"
 intent=$(seed intent "$ACCOUNT" "$BUY_SATS")
@@ -36,6 +40,8 @@ echo "intent $id"
 payee payinvoice --force "$bolt" | grep -iE 'status|payment_error|fee' || true
 seed reconcile | jq -c '.body'
 seed intent-status "$id" | jq -c '.body.intent | {status, amountSats, netSats, quotedCredits}'
+
+if [ "${BUY_ONLY:-0}" = 1 ]; then seed balance "$ACCOUNT" | jq -c '.body'; exit 0; fi
 
 echo "== 2. test earnings: $EARN_SATS sats"
 seed earn "$ACCOUNT" "$EARN_SATS" | jq -c .

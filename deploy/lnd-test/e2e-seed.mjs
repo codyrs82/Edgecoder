@@ -31,6 +31,14 @@ else if (cmd === "earn") {
   );
   await pool.end();
   out({ ok: true, earnedSats: sats });
-} else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: args[0], bolt11: args[1] }));
+} else if (cmd === "owner") {
+  // Account an agent's earnings and signed submissions are billed to (linked at portal validation).
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const r = await pool.query(`SELECT agent_id, account_id FROM agent_ownership WHERE agent_id = $1`, [args[0]]);
+  await pool.end();
+  out({ agentId: args[0], accountId: r.rows[0]?.account_id ?? null });
+} else if (cmd === "balance") out(await call("GET", `/credits/${args[0]}/balance`));
+else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: args[0], bolt11: args[1] }));
 else if (cmd === "payouts") out(await call("GET", `/economy/payouts/${args[0]}`));
 else { out({ error: "unknown_command" }); process.exit(2); }

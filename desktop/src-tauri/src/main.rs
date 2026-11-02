@@ -680,6 +680,34 @@ fn resolve_node_binary(agent_dir: &PathBuf) -> Option<PathBuf> {
     Some(PathBuf::from("node")).filter(|p| node_major(p).is_some_and(|m| m >= MIN_MAJOR))
 }
 
+/// PATH for the agent. A Finder launch gets /usr/bin:/bin:..., where the `docker` CLI (Homebrew,
+/// Docker Desktop, OrbStack, Colima) is missing, so the agent would report Docker as down and never
+/// take swarm work. Prepend the usual install locations that exist.
+fn agent_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    if cfg!(windows) {
+        return current;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let extra: Vec<String> = [
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/Applications/Docker.app/Contents/Resources/bin".to_string(),
+        format!("{home}/.docker/bin"),
+        format!("{home}/.orbstack/bin"),
+    ]
+    .into_iter()
+    .filter(|d| PathBuf::from(d).is_dir() && !current.split(':').any(|c| c == d))
+    .collect();
+    if extra.is_empty() {
+        current
+    } else if current.is_empty() {
+        extra.join(":")
+    } else {
+        format!("{}:{current}", extra.join(":"))
+    }
+}
+
 fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
     let log = agent_log();
     let Some(node) = resolve_node_binary(agent_dir) else {
@@ -702,6 +730,7 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
     cmd.arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
+        .env("PATH", agent_path())
         // The app's local coordinator never pays out (payouts run on the network seeds), so it
         // needs no Lightning node; without this it refuses to start (mock Lightning is disabled).
         .env("ECONOMY_PAYMENTS_ENABLED", "0")
