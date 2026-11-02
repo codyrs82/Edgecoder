@@ -27,6 +27,20 @@ describe("applyAgentEvent", () => {
     expect(applyAgentEvent(empty, { type: "status", message: "thinking" }).turn).toBe(empty);
   });
 
+  it("records the turn id and each file the turn wrote, once", () => {
+    let t = applyAgentEvent(empty, { type: "turn", id: "turn-1" }).turn;
+    const a = applyAgentEvent(t, { type: "file_change", turnId: "turn-1", path: "src/a.ts" });
+    expect(a.filesChanged).toBe(true);
+    t = applyAgentEvent(a.turn, { type: "file_change", turnId: "turn-1", path: "src/a.ts" }).turn;
+    t = applyAgentEvent(t, { type: "file_change", turnId: "turn-1", path: "b.md" }).turn;
+    expect(t.turnId).toBe("turn-1");
+    expect(t.changedFiles).toEqual(["src/a.ts", "b.md"]);
+  });
+
+  it("treats shell output as a possible file change", () => {
+    expect(applyAgentEvent(empty, { type: "shell_output", id: "s", stdout: "", stderr: "", exit_code: 0 }).filesChanged).toBe(true);
+  });
+
   it("marks approvals", () => {
     const t = applyAgentEvent(empty, { type: "tool_call", id: "s", tool: "run_shell", args: {}, requires_approval: true }).turn;
     expect(markApproval(t.toolEvents, "s", false)[0].approval_status).toBe("rejected");

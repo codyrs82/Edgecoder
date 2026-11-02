@@ -7,6 +7,10 @@ import type { ToolEvent } from "./types";
 export interface AgentTurn {
   text: string;
   toolEvents: ToolEvent[];
+  /** Checkpoint id of the turn (review / undo of its file changes). */
+  turnId?: string;
+  /** Project files the turn wrote, in first-write order. */
+  changedFiles?: string[];
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -46,6 +50,13 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
       toolEvents[idx] = { ...call, result: event.result as string | undefined, error: event.error as string | undefined };
       return { turn: { ...turn, toolEvents }, filesChanged: !event.error && WRITE_TOOLS.has(call.tool ?? "") };
     }
+    case "turn":
+      return { turn: { ...turn, turnId: String(event.id) }, filesChanged: false };
+    case "file_change": {
+      const path = String(event.path);
+      const changed = turn.changedFiles ?? [];
+      return { turn: changed.includes(path) ? turn : { ...turn, changedFiles: [...changed, path] }, filesChanged: true };
+    }
     case "shell_output":
       return {
         turn: {
@@ -55,7 +66,8 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
             { type: "shell_output", id: event.id as string, stdout: event.stdout as string, stderr: event.stderr as string, exit_code: event.exit_code as number },
           ],
         },
-        filesChanged: false,
+        // A command may have changed files (not tracked by checkpoints): reload what's open.
+        filesChanged: true,
       };
     case "plan":
       return {

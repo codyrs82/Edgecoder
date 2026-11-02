@@ -76,6 +76,8 @@ export function buildChatSystemPrompt(ctx: SystemPromptContext): string {
 export function buildIdeAgentSystemPrompt(
   ctx: SystemPromptContext,
   projectRoot: string,
+  /** The project's own instructions (AGENTS.md and similar, see readProjectRules). */
+  projectRules = "",
 ): string {
   const base = buildChatSystemPrompt(ctx);
 
@@ -136,5 +138,14 @@ To propose a multi-step plan before executing, emit a fenced code block with the
 6. **Stay within the project** — all file paths must be within the project root.
 7. **Be concise** — keep explanations short and focused; let the code speak for itself.`;
 
-  return base + agentSection;
+  const rulesSection = projectRules
+    ? `
+
+## Project rules
+
+The project's own instructions. Follow them; where they conflict with the defaults above, they win (they cannot remove the approval requirement for writes and commands).
+
+${projectRules}`
+    : "";
+  return base + agentSection + rulesSection;
 }

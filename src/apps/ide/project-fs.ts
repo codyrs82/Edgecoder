@@ -68,6 +68,11 @@ export class ProjectFs {
     return relative(this.root, abs).split(sep).join("/");
   }
 
+  /** Project-relative form (forward slashes) of an absolute path from resolve(). */
+  relativePath(abs: string): string {
+    return this.rel(abs);
+  }
+
   /** One directory level, directories first, then files, each alphabetical. */
   list(relDir = ""): FsEntry[] {
     const abs = this.resolve(relDir);
@@ -218,4 +223,30 @@ function statusLetter(xy: string): string {
   if (xy.includes("D")) return "D";
   if (xy.includes("A")) return "A";
   return "M";
+}
+
+/** Project instruction files the agent follows, in order; every one present is used. */
+export const PROJECT_RULE_FILES = ["AGENTS.md", ".edgecoder/rules.md", ".cursorrules", "CLAUDE.md"];
+const MAX_RULES_BYTES = 16 * 1024;
+
+/** The project's rule files, concatenated with their names, capped at 16 KB; "" when none. */
+export function readProjectRules(projectRoot: string): string {
+  const fs = new ProjectFs(projectRoot);
+  const parts: string[] = [];
+  let used = 0;
+  for (const name of PROJECT_RULE_FILES) {
+    let content: string;
+    try {
+      content = fs.read(name).content.trim();
+    } catch {
+      continue;
+    }
+    if (!content) continue;
+    const room = MAX_RULES_BYTES - used;
+    if (room <= 0) break;
+    const clipped = content.length > room ? `${content.slice(0, room)}\n…(truncated)` : content;
+    parts.push(`### ${name}\n${clipped}`);
+    used += clipped.length;
+  }
+  return parts.join("\n\n");
 }

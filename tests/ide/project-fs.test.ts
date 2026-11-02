@@ -102,3 +102,22 @@ describe("ProjectFs", () => {
     expect(new ProjectFs(outside).gitStatus()).toBeNull();
   });
 });
+
+describe("readProjectRules", () => {
+  it("collects every rules file present, named, in order", async () => {
+    const { readProjectRules } = await import("../../src/apps/ide/project-fs.js");
+    expect(readProjectRules(root)).toBe("");
+    writeFileSync(join(root, "AGENTS.md"), "Use tabs.\n");
+    mkdirSync(join(root, ".edgecoder"));
+    writeFileSync(join(root, ".edgecoder", "rules.md"), "Never touch deploy/.\n");
+    expect(readProjectRules(root)).toBe("### AGENTS.md\nUse tabs.\n\n### .edgecoder/rules.md\nNever touch deploy/.");
+  });
+
+  it("caps the total size", async () => {
+    const { readProjectRules } = await import("../../src/apps/ide/project-fs.js");
+    writeFileSync(join(root, "AGENTS.md"), "x".repeat(40_000));
+    const r = readProjectRules(root);
+    expect(r.length).toBeLessThan(17_000);
+    expect(r.endsWith("(truncated)")).toBe(true);
+  });
+});

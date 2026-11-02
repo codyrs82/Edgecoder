@@ -33,6 +33,8 @@
   let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath }: Props = $props();
 
   let streamingToolEvents: ToolEvent[] = $state([]);
+  let streamingTurnId: string | undefined = $state(undefined);
+  let streamingChanged: string[] = $state([]);
   let githubToken: string | null = null;
 
   let conversation: Conversation = $state(createConversation("editor"));
@@ -153,13 +155,20 @@
         const apiMessages = conversation.messages.map((m) => ({ role: m.role, content: m.content }));
         if (ctx) apiMessages[apiMessages.length - 1] = { role: "user", content: `${editorContextNote(ctx)}\n\n${text}` };
         streamingToolEvents = [];
+        streamingTurnId = undefined;
+        streamingChanged = [];
         await streamIdeChat(
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
-            const { turn, filesChanged } = applyAgentEvent({ text: streamingContent, toolEvents: streamingToolEvents }, event);
+            const { turn, filesChanged } = applyAgentEvent(
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged },
+              event,
+            );
             if (turn.text !== streamingContent) streamingContent = turn.text;
             if (turn.toolEvents !== streamingToolEvents) streamingToolEvents = turn.toolEvents;
+            streamingTurnId = turn.turnId;
+            if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
             if (filesChanged) onFilesChanged?.();
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
@@ -220,6 +229,10 @@
     addMessage(conversation, "assistant", content);
     const last = conversation.messages[conversation.messages.length - 1];
     if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
+    if (last && streamingTurnId && streamingChanged.length > 0) {
+      last.turnId = streamingTurnId;
+      last.changedFiles = [...streamingChanged];
+    }
     conversation = conversation;
   }
 
@@ -352,6 +365,10 @@
             role={msg.role as "user" | "assistant"}
             content={msg.content}
             toolEvents={msg.toolEvents}
+            turnId={msg.turnId}
+            changedFiles={msg.changedFiles}
+            onFilesReverted={onFilesChanged}
+            {onOpenPath}
             onOpenInEditor={onApplyCode}
           />
         {/each}

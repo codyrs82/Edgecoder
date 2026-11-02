@@ -105,6 +105,10 @@ export type IdeStreamEvent =
       steps: PlanStep[];
       status: "proposed" | "approved" | "executing";
     }
+  /** First event of an agent turn: its id, for checkpoints (review and undo of its file changes). */
+  | { type: "turn"; id: string }
+  /** The turn wrote this project file (its original is kept under the turn's checkpoint). */
+  | { type: "file_change"; turnId: string; path: string }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------

@@ -30,8 +30,10 @@
     projectRoot?: string | null;
     /** Told when a reply starts and stops streaming (the page's input shows Stop meanwhile). */
     onStreamingChange?: (streaming: boolean) => void;
+    /** Open a project file in the editor tab (from an agent reply's changes card). */
+    onOpenPath?: (path: string) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath }: Props = $props();
 
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
@@ -46,6 +48,8 @@
 
   /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
+  let streamingTurnId: string | undefined = $state(undefined);
+  let streamingChanged: string[] = $state([]);
 
   /** Cached GitHub token for IDE agent remote operations */
   let cachedGitHubToken: string | null = $state(null);
@@ -148,14 +152,21 @@
           content: m.content,
         }));
         streamingToolEvents = [];
+        streamingTurnId = undefined;
+        streamingChanged = [];
 
         await streamIdeChat(
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
-            const next = applyAgentEvent({ text: streamingContent, toolEvents: streamingToolEvents }, event).turn;
+            const next = applyAgentEvent(
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged },
+              event,
+            ).turn;
             if (next.text !== streamingContent) streamingContent = next.text;
             if (next.toolEvents !== streamingToolEvents) streamingToolEvents = next.toolEvents;
+            streamingTurnId = next.turnId;
+            if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
           abortController.signal,
@@ -201,13 +212,7 @@
       }
 
       addMessage(conversation, "assistant", streamingContent);
-      // Attach tool events to the last assistant message if any
-      if (streamingToolEvents.length > 0) {
-        const lastMsg = conversation.messages[conversation.messages.length - 1];
-        if (lastMsg) {
-          lastMsg.toolEvents = [...streamingToolEvents];
-        }
-      }
+      attachTurn();
       conversation = conversation;
       await saveConversation(conversation);
       localStorage.setItem("edgecoder-last-chat-id", conversation.id);
@@ -230,8 +235,7 @@
         // Stopped: keep what arrived so far.
         if (streamingContent || streamingToolEvents.length > 0) {
           addMessage(conversation, "assistant", `${streamingContent}\n\n_(stopped)_`);
-          const lastMsg = conversation.messages[conversation.messages.length - 1];
-          if (lastMsg && streamingToolEvents.length > 0) lastMsg.toolEvents = [...streamingToolEvents];
+          attachTurn();
           conversation = conversation;
           await saveConversation(conversation);
         }
@@ -245,6 +249,17 @@
       streamProgress = undefined;
       streamingToolEvents = [];
       abortController = null;
+    }
+  }
+
+  /** Attach the streamed tool events and the turn's file changes to the last assistant message. */
+  function attachTurn() {
+    const lastMsg = conversation.messages[conversation.messages.length - 1];
+    if (!lastMsg) return;
+    if (streamingToolEvents.length > 0) lastMsg.toolEvents = [...streamingToolEvents];
+    if (streamingTurnId && streamingChanged.length > 0) {
+      lastMsg.turnId = streamingTurnId;
+      lastMsg.changedFiles = [...streamingChanged];
     }
   }
 
@@ -352,7 +367,7 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} {onOpenPath} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
         <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />

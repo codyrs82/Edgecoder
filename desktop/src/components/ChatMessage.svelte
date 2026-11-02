@@ -5,6 +5,7 @@
   import ShellBlock from "./ShellBlock.svelte";
   import DiffBlock from "./DiffBlock.svelte";
   import PlanBlock from "./PlanBlock.svelte";
+  import ChangesCard from "./ChangesCard.svelte";
   import type { StreamProgress } from "../lib/api";
   import type { ToolEvent } from "../lib/types";
 
@@ -16,8 +17,13 @@
     onOpenInEditor?: (code: string, language: string) => void;
     toolEvents?: ToolEvent[];
     onToolApproval?: (id: string, approved: boolean) => void;
+    /** Agent turn checkpoint and the files it wrote: shows the review / undo card. */
+    turnId?: string;
+    changedFiles?: string[];
+    onFilesReverted?: () => void;
+    onOpenPath?: (path: string) => void;
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -65,6 +71,9 @@
             {/if}
           {/each}
         </div>
+      {/if}
+      {#if turnId && changedFiles && changedFiles.length > 0 && !streaming}
+        <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} />
       {/if}
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />

@@ -28,7 +28,9 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/fs/rename", auth: true },
   { method: "POST", path: "/v1/ide/fs/delete", auth: true },
   { method: "POST", path: "/v1/ide/fs/stat", auth: true },
-  { method: "GET", path: "/v1/ide/fs/git-status", auth: true }
+  { method: "GET", path: "/v1/ide/fs/git-status", auth: true },
+  { method: "GET", path: "/v1/ide/checkpoints/:turnId", auth: true },
+  { method: "POST", path: "/v1/ide/checkpoints/:turnId/revert", auth: true }
 ] as const;
 
 export type IdeRoute = (typeof IDE_ROUTES)[number];

@@ -138,6 +138,9 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  /** Agent turn checkpoint id and the files that turn wrote (review / undo). */
+  turnId?: string;
+  changedFiles?: string[];
   toolEvents?: ToolEvent[];
 }
 

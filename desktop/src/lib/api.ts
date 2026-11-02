@@ -972,7 +972,7 @@ export async function ideSendToolApproval(id: string, approved: boolean): Promis
 }
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "done";
   [key: string]: unknown;
 }
 
@@ -1075,3 +1075,14 @@ export const fsRename = (from: string, to: string) => fsCall<{ from: string; to:
 export const fsDelete = (path: string) => fsCall<{ ok: true }>("POST", "/v1/ide/fs/delete", { path });
 export const fsStat = (paths: string[]) => fsCall<{ mtimes: Record<string, number | null> }>("POST", "/v1/ide/fs/stat", { paths }).then((r) => r.mtimes);
 export const fsGitStatus = () => fsCall<{ branch: string | null; files: Record<string, string> }>("GET", "/v1/ide/fs/git-status");
+
+// Agent turn checkpoints (:4304 /v1/ide/checkpoints): what a turn changed, and undo.
+export interface FileChange {
+  path: string;
+  before: string | null;
+  after: string | null;
+}
+export const ideTurnChanges = (turnId: string) =>
+  fsCall<{ turnId: string; changes: FileChange[] }>("GET", `/v1/ide/checkpoints/${q(turnId)}`).then((r) => r.changes);
+export const ideRevertTurn = (turnId: string, paths?: string[]) =>
+  fsCall<{ ok: true; reverted: string[] }>("POST", `/v1/ide/checkpoints/${q(turnId)}/revert`, paths ? { paths } : {}).then((r) => r.reverted);

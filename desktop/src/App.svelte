@@ -122,6 +122,12 @@
     }
   }
 
+  /** Show a project file in the editor tab. */
+  function openInEditor(path: string) {
+    activeTab = "editor";
+    setTimeout(() => void editorView?.openPath(path), 50);
+  }
+
   function handleOpenInEditor(code: string, language: string) {
     const extMap: Record<string, string> = {
       python: 'py', javascript: 'js', typescript: 'ts',
@@ -224,7 +230,7 @@
           />
         </div>
         <div class="chat-main">
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} />
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} />
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>

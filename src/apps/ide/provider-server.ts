@@ -21,7 +21,8 @@ import { buildChatSystemPrompt, buildIdeAgentSystemPrompt, type SystemPromptCont
 import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
-import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError } from "./project-fs.js";
+import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, readProjectRules } from "./project-fs.js";
+import { CheckpointStore } from "./checkpoints.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -366,6 +367,29 @@ app.post("/v1/ide/fs/stat", (req, reply) =>
 app.get("/v1/ide/fs/git-status", (_req, reply) =>
   withProjectFs(reply, (fs) => fs.gitStatus() ?? { branch: null, files: {} }));
 
+// Agent turn checkpoints: what a turn changed, and undo (checkpoints.ts).
+const checkpoints = new CheckpointStore();
+
+app.get("/v1/ide/checkpoints/:turnId", async (req, reply) => {
+  const { turnId } = z.object({ turnId: z.string().uuid() }).parse(req.params);
+  const changes = checkpoints.changes(turnId);
+  if (!changes) return reply.status(404).send({ error: "unknown_turn" });
+  return reply.send({ turnId, changes });
+});
+
+app.post("/v1/ide/checkpoints/:turnId/revert", async (req, reply) => {
+  const { turnId } = z.object({ turnId: z.string().uuid() }).parse(req.params);
+  const { paths } = z.object({ paths: z.array(z.string().max(4096)).max(500).optional() }).parse(req.body ?? {});
+  try {
+    const reverted = checkpoints.revert(turnId, paths);
+    if (!reverted) return reply.status(404).send({ error: "unknown_turn" });
+    return reply.send({ ok: true, reverted });
+  } catch (err) {
+    if (err instanceof ProjectFsError) return reply.status(FS_ERROR_STATUS[err.code]).send({ error: err.code, message: err.message });
+    throw err;
+  }
+});
+
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
@@ -443,7 +467,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
       queueDepth: 0,
       connectedAgents: 0,
     };
-    systemContent = buildIdeAgentSystemPrompt(ctx, projectRoot);
+    systemContent = buildIdeAgentSystemPrompt(ctx, projectRoot, readProjectRules(projectRoot));
   } catch {
     // Non-critical — proceed without system prompt
   }
@@ -469,6 +493,10 @@ app.post("/v1/ide/chat", async (req, reply) => {
     if (clientDisconnected) return;
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
   }
+
+  const turnId = randomUUID();
+  checkpoints.begin(turnId, projectRoot);
+  sendEvent({ type: "turn", id: turnId });
 
   // Build message history for the agentic loop
   const messageHistory: Array<{ role: string; content: string }> = [
@@ -660,8 +688,13 @@ app.post("/v1/ide/chat", async (req, reply) => {
         }
       }
 
+      // Keep the original of a file before the turn first writes it (review / undo).
+      const writesFile = toolName === "write_file" || toolName === "edit_file";
+      const tracked = writesFile ? checkpoints.capture(turnId, String(toolArgs.path ?? "")) : null;
+
       // Execute the tool
       const result = await executor.execute(toolName, toolArgs, { approved: requiresApproval });
+      if (tracked && !result.error) sendEvent({ type: "file_change", turnId, path: tracked });
 
       // For run_shell results, parse and send as shell_output
       if (toolName === "run_shell" && result.result) {
