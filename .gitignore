@@ -39,3 +39,4 @@ desktop/a11y-report/
 deploy/infra/.env
 deploy/infra/generated/
 deploy/infra/secrets/
+.claude/settings.local.json
