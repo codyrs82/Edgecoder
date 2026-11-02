@@ -1156,3 +1156,19 @@ export const gitCommit = (message: string, all = false) => fsCall<{ commit: stri
 export const gitCheckout = (branch: string, create = false) => fsCall("POST", "/v1/ide/git/checkout", { branch, create });
 export const gitPull = () => fsCall<{ output: string }>("POST", "/v1/ide/git/pull").then((r) => r.output);
 export const gitPush = () => fsCall<{ output: string }>("POST", "/v1/ide/git/push").then((r) => r.output);
+
+// Background jobs on the network (:4304 /v1/ide/network/tasks)
+export interface NetworkTask {
+  id: string;
+  prompt: string;
+  language: "python" | "javascript";
+  state: "running" | "done" | "failed" | "timed_out";
+  submittedAtMs: number;
+  finishedAtMs?: number;
+  output?: string;
+  error?: string;
+  creditsSpent?: number;
+}
+export const networkSubmit = (prompt: string, language: "python" | "javascript" = "python") =>
+  fsCall<NetworkTask>("POST", "/v1/ide/network/tasks", { prompt, language });
+export const networkTasks = () => fsCall<{ tasks: NetworkTask[] }>("GET", "/v1/ide/network/tasks").then((r) => r.tasks);

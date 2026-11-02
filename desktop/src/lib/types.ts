@@ -141,6 +141,8 @@ export interface ChatMessage {
   /** Agent turn checkpoint id and the files that turn wrote (review / undo). */
   turnId?: string;
   changedFiles?: string[];
+  /** A background job sent to the network from this message (its card shows progress and output). */
+  networkTaskId?: string;
   toolEvents?: ToolEvent[];
 }
 

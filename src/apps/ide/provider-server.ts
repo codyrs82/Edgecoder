@@ -28,6 +28,7 @@ import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
+import { NetworkTasks } from "./network-tasks.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -526,6 +527,22 @@ app.post("/v1/ide/git/checkout", (req, reply) =>
   }));
 app.post("/v1/ide/git/pull", (_req, reply) => withGit(reply, async (g) => ({ output: await g.pull() })));
 app.post("/v1/ide/git/push", (_req, reply) => withGit(reply, async (g) => ({ output: await g.push() })));
+
+// Background jobs on the network (network-tasks.ts).
+const networkTasks = new NetworkTasks(router);
+
+app.post("/v1/ide/network/tasks", async (req, reply) => {
+  const b = z.object({ prompt: z.string().min(1).max(20_000), language: z.enum(["python", "javascript"]).default("python") }).parse(req.body);
+  try {
+    return reply.send(await networkTasks.submit(b.prompt, b.language));
+  } catch (err) {
+    const msg = (err as Error).message;
+    const status = msg.startsWith("swarm_snapshot_ref_required") ? 409 : 502;
+    return reply.status(status).send({ error: status === 409 ? "snapshot_required" : "network_submit_failed", message: msg });
+  }
+});
+
+app.get("/v1/ide/network/tasks", async (_req, reply) => reply.send({ tasks: networkTasks.list() }));
 
 const toolApprovalSchema = z.object({
   id: z.string().min(1),

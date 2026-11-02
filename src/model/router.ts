@@ -319,18 +319,21 @@ export class IntelligentRouter {
   // Swarm route — submit task to coordinator queue, poll for result
   // -------------------------------------------------------------------------
 
-  private async runViaSwarm(
-    prompt: string,
-    requestedModel?: string,
-    maxTokens?: number
-  ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
+  /** Where swarm requests go: through this machine's agent (signed, billed to its owner) or a coordinator. */
+  private swarmEndpoint(): { base: string; headers: Record<string, string> } {
     // Through the local agent, its forwarder mirrors the coordinator routes under /forward.
     const viaAgent = this.cfg.localAgentUrl?.replace(/\/$/, "");
-    const coordinatorUrl = viaAgent ? `${viaAgent}/forward` : this.cfg.coordinatorUrl.replace(/\/$/, "");
-    const headers: Record<string, string> = viaAgent
-      ? { "content-type": "application/json", authorization: `Bearer ${this.cfg.localAgentToken?.() ?? ""}` }
-      : { "content-type": "application/json", "x-mesh-token": this.cfg.meshAuthToken };
+    return viaAgent
+      ? { base: `${viaAgent}/forward`, headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.localAgentToken?.() ?? ""}` } }
+      : { base: this.cfg.coordinatorUrl.replace(/\/$/, ""), headers: { "content-type": "application/json", "x-mesh-token": this.cfg.meshAuthToken } };
+  }
 
+  /**
+   * Submit a task to the swarm (one credit). Returns its ids; poll with pollSwarm. Errors before
+   * the request was written are plain Errors (nothing charged); later ones are SwarmPostSubmitError.
+   */
+  async submitSwarm(prompt: string, opts: { language?: "python" | "javascript" } = {}): Promise<{ taskId: string; subtaskId: string }> {
+    const { base, headers } = this.swarmEndpoint();
     // The coordinator's submit route is POST /submit (not /tasks) and it requires a
     // frozen snapshot reference (#8). Without one the request is rejected before any
     // charge, so fail here with an actionable message instead of a coordinator 500.
@@ -343,32 +346,25 @@ export class IntelligentRouter {
     }
 
     const taskId = `ide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    // Submit task
     let submitRes: Awaited<ReturnType<typeof request>>;
     try {
-      submitRes = await request(`${coordinatorUrl}/submit`, {
+      submitRes = await request(`${base}/submit`, {
         method: "POST",
         headers,
         body: JSON.stringify({
           taskId,
           prompt,
-          language: this.cfg.swarmLanguage ?? "python",
+          language: opts.language ?? this.cfg.swarmLanguage ?? "python",
           snapshotRef,
           submitterAccountId: this.cfg.agentAccountId,
-          projectId: "ide-requests",
-          resourceClass: "cpu",
-          priority: 60,
-          requestedModel,
-          // #71: forwarded so the coordinator can price and limit the request.
-          ...(maxTokens !== undefined ? { maxTokens } : {})
         }),
-        headersTimeout: 15_000,
-        bodyTimeout: 15_000
+        headersTimeout: 70_000,
+        bodyTimeout: 70_000
       });
     } catch (err) {
-      // #159: a connect-phase failure never reached the coordinator, so nothing was
+      // A connection failure before the request was written: nothing was submitted or
       // charged. A headers/body timeout after the request was written may have been
-      // accepted (and billed), so the caller must count the estimate, not release it.
+      // processed, so report it as an outcome-unknown post-submit failure.
       if (submitErrorWasNeverSent(err)) throw err;
       throw new SwarmPostSubmitError(
         `Swarm submit outcome unknown (${err instanceof Error ? err.message : String(err)})`,
@@ -388,33 +384,42 @@ export class IntelligentRouter {
       throw new SwarmPostSubmitError("Swarm: unreadable submit response", taskId);
     }
     const subtaskId = submitBody.subtasks?.[0];
-
     if (!subtaskId) throw new SwarmPostSubmitError("Swarm: no subtaskId returned", taskId);
+    return { taskId, subtaskId };
+  }
 
+  /** One look at a swarm task's result; null while it is still queued or running. */
+  async pollSwarm(taskId: string, subtaskId: string): Promise<{ output: string; ok?: boolean; error?: string; creditsSpent?: number } | null> {
+    const { base, headers } = this.swarmEndpoint();
+    const pollUrl = `${base}/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}/result`;
+    const pollRes = await request(pollUrl, { method: "GET", headers, headersTimeout: 10_000, bodyTimeout: 10_000 });
+    if (pollRes.statusCode !== 200) {
+      await pollRes.body.dump();
+      return null;
+    }
+    const result = (await pollRes.body.json()) as { output?: string; ok?: boolean; error?: string; creditsSpent?: number };
+    return result.output !== undefined ? { output: result.output, ok: result.ok, error: result.error, creditsSpent: result.creditsSpent } : null;
+  }
+
+  private async runViaSwarm(
+    prompt: string,
+    _requestedModel?: string,
+    _maxTokens?: number
+  ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
+    const { taskId, subtaskId } = await this.submitSwarm(prompt);
     // Poll for result — up to 90s
-    const pollUrl = `${coordinatorUrl}/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}/result`;
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
-        const pollRes = await request(pollUrl, { method: "GET", headers, headersTimeout: 10_000, bodyTimeout: 10_000 });
-        if (pollRes.statusCode === 200) {
-          const result = (await pollRes.body.json()) as {
-            output?: string;
-            ok?: boolean;
-            error?: string;
-            creditsSpent?: number;
+        const result = await this.pollSwarm(taskId, subtaskId);
+        if (result) {
+          return {
+            text: result.output,
+            creditsSpent: result.creditsSpent,
+            swarmTaskId: taskId,
+            ...(result.ok === false && result.error ? { error: result.error } : {})
           };
-          if (result.output !== undefined) {
-            return {
-              text: result.output,
-              creditsSpent: result.creditsSpent,
-              swarmTaskId: taskId,
-              ...(result.ok === false && result.error ? { error: result.error } : {})
-            };
-          }
-        } else {
-          await pollRes.body.dump();
         }
       } catch {
         // continue polling

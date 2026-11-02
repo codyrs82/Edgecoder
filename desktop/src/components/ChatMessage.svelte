@@ -6,6 +6,7 @@
   import DiffBlock from "./DiffBlock.svelte";
   import PlanBlock from "./PlanBlock.svelte";
   import ChangesCard from "./ChangesCard.svelte";
+  import NetworkTaskCard from "./NetworkTaskCard.svelte";
   import type { StreamProgress } from "../lib/api";
   import type { ToolEvent } from "../lib/types";
 
@@ -22,8 +23,9 @@
     changedFiles?: string[];
     onFilesReverted?: () => void;
     onOpenPath?: (path: string) => void;
+    networkTaskId?: string;
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -71,6 +73,9 @@
             {/if}
           {/each}
         </div>
+      {/if}
+      {#if networkTaskId}
+        <NetworkTaskCard taskId={networkTaskId} />
       {/if}
       {#if turnId && changedFiles && changedFiles.length > 0 && !streaming}
         <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} />
