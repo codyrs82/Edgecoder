@@ -25,6 +25,7 @@ import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjec
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
+import { completeAt } from "./complete.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -438,6 +439,25 @@ app.post("/v1/ide/inline-edit", async (req, reply) => {
   return reply.send({ model, replacement: cleanInlineEdit(payload.message?.content ?? "", body.selection) });
 });
 
+// Tab autocomplete: fill-in-the-middle from a small coder model (complete.ts).
+app.post("/v1/ide/complete", async (req, reply) => {
+  const body = z.object({
+    prefix: z.string().max(20_000),
+    suffix: z.string().max(10_000),
+    model: z.string().max(200).optional(),
+  }).parse(req.body);
+  const abort = new AbortController();
+  // The editor cancels stale requests as the user keeps typing. The response closing before it
+  // was sent means the client went away (the request's own "close" fires once its body is read).
+  reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
+  try {
+    return reply.send(await completeAt(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", body, abort.signal));
+  } catch (err) {
+    if (abort.signal.aborted) return reply.status(499).send({ error: "cancelled" });
+    return reply.status(503).send({ completion: "", reason: "error", message: (err as Error).message });
+  }
+});
+
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
@@ -529,7 +549,10 @@ app.post("/v1/ide/chat", async (req, reply) => {
   });
 
   let clientDisconnected = false;
-  req.raw.on("close", () => {
+  // The response closing before the stream ended means the client went away (the request's own
+  // "close" fires as soon as its body has been read).
+  reply.raw.on("close", () => {
+    if (reply.raw.writableEnded) return;
     clientDisconnected = true;
     // Clean up any pending approvals for this request
     for (const [id, entry] of pendingApprovals) {
@@ -548,7 +571,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   sendEvent({ type: "turn", id: turnId });
 
   const abort = new AbortController();
-  req.raw.on("close", () => abort.abort());
+  reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   await runAgentLoop({
     chat: ollamaChat(ollamaHost, chatModel, abort.signal),
     systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),

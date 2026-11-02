@@ -1094,3 +1094,18 @@ export const ideInlineEdit = (body: { path: string; language: string; prefix: st
 /** Fuzzy project path search (@-mentions, quick open). */
 export const fsFind = (q: string, limit = 20) =>
   fsCall<{ matches: Array<{ path: string; kind: "file" | "dir" }> }>("GET", `/v1/ide/fs/find?q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.matches);
+
+export type CompletionResponse =
+  | { completion: string; model: string }
+  | { completion: ""; model: string; reason: "model_missing" | "unsupported" | "error"; message: string };
+
+/** Tab autocomplete at the cursor (fill-in-the-middle). Aborting cancels the model call. */
+export async function ideComplete(prefix: string, suffix: string, signal?: AbortSignal): Promise<CompletionResponse> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prefix, suffix }),
+    signal,
+  });
+  return (await res.json()) as CompletionResponse;
+}

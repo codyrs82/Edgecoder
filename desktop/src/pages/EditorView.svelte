@@ -3,7 +3,8 @@
   import FileTree from "../components/FileTree.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete } from "../lib/api";
+  import { registerAutocomplete } from "../lib/autocomplete";
   import { InlineEditController } from "../lib/inline-edit-session";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
   import { monacoThemeDataOrBase } from "../lib/monaco-theme";
@@ -44,6 +45,8 @@
   let offTheme: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let inlineEdit: InlineEditController | undefined;
+  let autocomplete: { dispose: () => void } | undefined;
+  let autocompleteOn = $state(true);
   /** Suppresses the dirty flag while the editor itself loads content into a model. */
   let applyingExternal = false;
 
@@ -82,6 +85,7 @@
         scrollBeyondLastLine: false,
         automaticLayout: true,
         padding: { top: 12 },
+        inlineSuggest: { enabled: true, mode: "subwordSmart" },
       });
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => void saveActive());
       editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyW, () => { if (activeFilePath) void closeFile(activeFilePath); });
@@ -92,12 +96,19 @@
         () => activeFilePath?.replace(UNTITLED, "") ?? null,
         (m) => showNotice(m),
       );
+      try { autocompleteOn = localStorage.getItem("edgecoder-autocomplete") !== "off"; } catch { /* storage unavailable */ }
+      autocomplete = registerAutocomplete(mon, editor, {
+        request: (prefix, suffix, signal) => ideComplete(prefix, suffix, signal),
+        enabled: () => autocompleteOn && Boolean(activeFilePath),
+        onUnavailable: (m) => showNotice(m, "info"),
+      });
     }
     pollTimer = setInterval(() => void pollDisk(), POLL_MS);
   });
 
   onDestroy(() => {
     offTheme?.();
+    autocomplete?.dispose();
     if (pollTimer) clearInterval(pollTimer);
     for (const m of models.values()) m.dispose();
     models.clear();
@@ -467,6 +478,12 @@
       <div class="tab-bar-spacer"></div>
       {#if gitBranch}<span class="branch" title="Git branch">⎇ {gitBranch}</span>{/if}
       <button
+        class="ac-toggle"
+        class:on={autocompleteOn}
+        title={autocompleteOn ? "AI autocomplete on (Tab accepts). Click to turn off." : "AI autocomplete off. Click to turn on."}
+        onclick={() => { autocompleteOn = !autocompleteOn; try { localStorage.setItem("edgecoder-autocomplete", autocompleteOn ? "on" : "off"); } catch { /* storage unavailable */ } }}
+      >AI {autocompleteOn ? "✓" : "–"}</button>
+      <button
         class="toggle-chat-btn"
         class:chat-active={chatPanelVisible}
         onclick={toggleChatPanel}
@@ -497,7 +514,7 @@
         <div class="editor-empty">
           {#if projectRoot}
             <p>Open a file from the tree, or ask the agent in the chat panel.</p>
-            <p class="hint">⌘K edit with AI · ⌘S save · ⌘W close</p>
+            <p class="hint">⌘K edit with AI · Tab accepts suggestions · ⌘S save · ⌘W close</p>
           {:else}
             <p>Open a folder to start.</p>
             <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
@@ -627,6 +644,21 @@
     color: var(--text-muted);
     margin-right: 10px;
     white-space: nowrap;
+  }
+  .ac-toggle {
+    border: 0.5px solid var(--border);
+    background: none;
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    padding: 2px 6px;
+    margin-right: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ac-toggle.on {
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .toggle-chat-btn {
     width: 28px;
