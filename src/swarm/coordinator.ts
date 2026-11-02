@@ -3244,7 +3244,7 @@ app.post("/pull", async (req, reply) => {
           { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
           agentPubKey,
           task.id,
-          { resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language }
+          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs }
         );
         envelopeSharedKeys.set(task.id, { key: sharedKey, createdAtMs: Date.now() });
         // Expire stale shared keys
@@ -3703,6 +3703,10 @@ app.post("/result", async (req, reply) => {
     if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
   }
   const subtask = isPeerForward ? undefined : claim?.subtask;
+  // The claimed subtask says which task this result belongs to. Workers before 1.4.12 derived the
+  // task id of an encrypted (envelope) task from the subtask id, so the requester's poll, which
+  // matches on task id, never found the result.
+  if (subtask && body.taskId !== subtask.taskId) body = { ...body, taskId: subtask.taskId };
   // Server-side duration: never more than measured since claim or the subtask timeout.
   const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
   // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).

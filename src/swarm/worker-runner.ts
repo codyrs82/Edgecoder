@@ -1075,7 +1075,8 @@ async function loop(): Promise<void> {
             const decrypted = decryptTaskEnvelope(pulled.envelope, envelopeKeys.privateKey);
             pulled.subtask = {
               id: pulled.envelope.subtaskId,
-              taskId: pulled.envelope.subtaskId.split(":")[0] ?? pulled.envelope.subtaskId,
+              // Coordinators before this change did not send taskId; they now correct it on /result.
+              taskId: pulled.envelope.metadata.taskId ?? pulled.envelope.subtaskId,
               kind: "single_step",
               input: decrypted.input,
               snapshotRef: decrypted.snapshotRef,

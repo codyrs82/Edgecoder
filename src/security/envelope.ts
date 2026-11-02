@@ -18,6 +18,8 @@ export interface X25519KeyPair {
 }
 
 export interface EnvelopeMetadata {
+  /** The subtask's parent task (the requester polls results by task id). */
+  taskId?: string;
   resourceClass?: string;
   priority?: number;
   language?: string;
