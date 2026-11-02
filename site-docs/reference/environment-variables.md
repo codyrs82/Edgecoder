@@ -34,6 +34,20 @@ Consolidated reference for all environment controls. The primary config file on 
 | `COORDINATOR_HTTP_TIMEOUT_MS` | `15000` | HTTP timeout for coordinator API calls (ms). |
 | `COORDINATOR_POST_RETRIES` | `2` | Retry count for coordinator POST requests on transient failure. |
 
+## Economy, payouts and receipts (coordinator)
+
+| Variable | Default | Description |
+|---|---|---|
+| `RATE_ORACLE_ENABLED` | `true` | Enable the BTC/USD rate oracle (median of sources, daily clamp). Set `false` to freeze class reference pricing. |
+| `RATE_RECALIBRATION_MS` | `86400000` | How often the rate oracle recalibrates its per-class reference rates (ms; min 60000). |
+| `MARKET_DEFAULT_BID_PREMIUM_BPS` | `1000` | Default order-book bid premium over the oracle reference, in basis points. |
+| `NETWORK_FEE_BPS` | `500` | Network fee skimmed into the fee pool on each settled trade, in basis points. |
+| `HOST_HEARTBEAT_MS` | `60000` | Interval at which a host reports its uptime/services heartbeat (ms; min 1000). |
+| `FEE_POOL_DISTRIBUTION_MS` | `86400000` | Interval for distributing the network fee pool to hosts by uptime × services (ms; min 60000). |
+| `PAYOUT_AUTO_INTERVAL_MS` | `21600000` | Interval for the LNURL auto-payout sweep (ms; min 60000). |
+| `RECEIPT_EPOCH_MS` | `3600000` | Length of a signed-work-receipt Merkle epoch before it is sealed and anchored (ms). |
+| `RECEIPT_REPLICATION_MS` | `60000` | How often sealed receipt epochs are replicated to peers (ms). |
+
 ## Model provider
 
 | Variable | Values / Example | Description |

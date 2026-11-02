@@ -36,3 +36,15 @@ desktop/src-tauri/tauri.csp.json
 # #29 Playwright a11y output
 desktop/test-results/
 desktop/a11y-report/
+
+# Fly bootstrap output (generated secrets per org; see scripts/fly-bootstrap-org.sh)
+.fly-bootstrap/
+
+# Claude Code agent worktrees
+.claude/worktrees/
+
+# Infrastructure node bundle: operator config and secrets (scripts/infra-bootstrap.sh)
+deploy/infra/.env
+deploy/infra/generated/
+deploy/infra/secrets/
+.claude/settings.local.json

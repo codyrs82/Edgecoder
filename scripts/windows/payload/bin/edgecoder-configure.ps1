@@ -40,6 +40,16 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+# Shared installer (same options on macOS, Linux and Windows): `edgecoder install <args>` and
+# `edgecoder-install <args>` both run dist\install\cli.js, which detects GPUs and creates one
+# agent + Ollama task per GPU.
+if ($args.Count -gt 0 -and ($args[0] -eq 'install' -or $args[0] -eq 'detect' -or $args[0] -eq 'plan' -or $args[0] -eq 'apply' -or $args[0] -eq 'status' -or $args[0] -eq 'remove')) {
+    $cli = Join-Path $env:ProgramFiles 'EdgeCoder\app\dist\install\cli.js'
+    $rest = if ($args[0] -eq 'install') { $args[1..($args.Count - 1)] } else { $args }
+    & node $cli @rest
+    exit $LASTEXITCODE
+}
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------

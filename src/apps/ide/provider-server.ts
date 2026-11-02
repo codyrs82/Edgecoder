@@ -6,6 +6,7 @@ import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging
 import { registerMetrics } from "../../common/metrics.js";
 import { registerErrorTracking } from "../../common/error-tracking.js";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { ProviderRegistry } from "../../model/providers.js";
@@ -60,7 +61,27 @@ const PKG_VERSION = (() => {
 app.get("/health", async () => ({ ok: true, service: "ide-provider", version: PKG_VERSION }));
 
 const providers = new ProviderRegistry();
-const router = new IntelligentRouter();
+
+/**
+ * Frozen snapshot for swarm submissions (#8): the active project's git HEAD, so the
+ * coordinator's /submit accepts the task. IDE_SWARM_SNAPSHOT_REF overrides (router).
+ */
+function projectHeadCommit(): string | undefined {
+  if (!activeProjectRoot) return undefined;
+  try {
+    const head = execFileSync("git", ["-C", activeProjectRoot, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      timeout: 3_000,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return /^[0-9a-f]{40}$/i.test(head) ? head.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+const router = new IntelligentRouter({
+  resolveSnapshotRef: () => process.env.IDE_SWARM_SNAPSHOT_REF?.trim() || projectHeadCommit()
+});
 
 // #36: the VS Code extension polls /status; alias of /v1/router/status.
 // #71: per-request / per-session swarm spend caps.

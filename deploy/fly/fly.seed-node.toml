@@ -2,7 +2,7 @@ app = "edgecoder-seed"
 primary_region = "ord"
 
 [processes]
-  app = "node dist/index.js"
+  app = "node dist/cli/edgecoder.js all-in-one"
 
 [build]
   dockerfile = "../docker/Dockerfile.agent"
@@ -16,10 +16,13 @@ primary_region = "ord"
   ECONOMY_PAYMENTS_ENABLED = "false"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
-  COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
+  COORDINATOR_PUBLIC_URL = "https://coordinator.edgecoder.io"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen2.5:7b"
+  OLLAMA_MODEL = "qwen3.5:9b"
+  # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
+  # check (SANDBOX_MODE=docker). Seeds are coordinator + Ollama chat only; compute comes
+  # from enrolled agents. Ollama itself is started by the agent image entrypoint (#9).
   DISABLE_SELF_AGENT = "1"
 
 [http_service]

@@ -32,6 +32,18 @@ export const coordinatorConfigSchema = z.object({
   ISSUANCE_COORDINATOR_SHARE: envNumber(0.05, { min: 0 }),
   ISSUANCE_RESERVE_SHARE: envNumber(0.05, { min: 0 }),
   ANCHOR_INTERVAL_MS: envInt(7200000, { min: 1 }),
+  /** Rate oracle: how often sats-per-CPU-hour is recalibrated from market data (default daily). */
+  RATE_RECALIBRATION_MS: envInt(86400000, { min: 60000 }),
+  RATE_ORACLE_ENABLED: envBool(true),
+  /** Default bid for tasks that don't set maxBidMsatPerCredit: class reference × (1 + premium). */
+  MARKET_DEFAULT_BID_PREMIUM_BPS: envInt(1000, { min: 0 }),
+  /** Share of every accrual (bps) moved to the network fee pool that pays infrastructure hosts. */
+  NETWORK_FEE_BPS: envInt(500, { min: 0 }),
+  /** Infrastructure hosts heartbeat this often; the fee pool is distributed by heartbeats per window. */
+  HOST_HEARTBEAT_MS: envInt(60_000, { min: 1000 }),
+  FEE_POOL_DISTRIBUTION_MS: envInt(86_400_000, { min: 60_000 }),
+  /** Automatic Lightning-address payouts run this often. */
+  PAYOUT_AUTO_INTERVAL_MS: envInt(21_600_000, { min: 60_000 }),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),
@@ -47,6 +59,9 @@ export const coordinatorConfigSchema = z.object({
   DIRECT_WORK_OFFERS_PER_10S: envInt(20, { min: 0 }),
   PAYMENT_INTENT_EXPIRY_GRACE_MS: envInt(120000, { min: 1 }),
   AGENT_ORCHESTRATION_ONLINE_WINDOW_MS: envInt(120000, { min: 1 }),
+  // Work receipts: epoch close/anchor cadence and peer replication pull interval (docs/receipts-and-trust.md).
+  RECEIPT_EPOCH_MS: envInt(3600000, { min: 1 }),
+  RECEIPT_REPLICATION_MS: envInt(60000, { min: 1 }),
   ROBOT_QUEUE_ENABLED: envBool(false),
   OLLAMA_AUTO_INSTALL: envBool(false),
   REQUIRE_VERIFIED_AGENTS: envBool(false),

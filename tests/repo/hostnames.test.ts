@@ -10,6 +10,8 @@ const HOST = /edgecoder\.io|fly\.dev/;
 // Lines that are config defaults by construction (named constant overridable via env).
 const ALLOWED = [
   /export const DEFAULT_DISCOVERY_URL = /, // COORDINATOR_DISCOVERY_URLS overrides
+  /export const DEFAULT_COORDINATOR_URL = /, // --coordinator-url / EDGECODER_COORDINATOR_URL overrides
+  /export const DEFAULT_PORTAL_URL = /, // --portal-url / EDGECODER_PORTAL_URL overrides
   /export const DEFAULT_DOWNLOAD_DOMAINS = /, // MODEL_DOWNLOAD_DOMAINS overrides
   /: "support@edgecoder\.io";$/ // SUPPORT_EMAIL overrides (supportEmail fallback)
 ];

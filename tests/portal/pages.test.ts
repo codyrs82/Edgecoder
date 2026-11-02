@@ -15,7 +15,8 @@ const PAGES: Record<string, string> = {
   "/portal/wallet": "EdgeCoder Portal | Wallet",
   "/portal/settings": "EdgeCoder Portal | Settings",
   "/portal/download": "EdgeCoder Portal | Get EdgeCoder",
-  "/portal/reviews": "EdgeCoder Portal | Reviews"
+  "/portal/reviews": "EdgeCoder Portal | Reviews",
+  "/portal/market": "EdgeCoder Portal | Market"
 };
 
 describe("portal pages module (#16)", () => {

@@ -25,10 +25,12 @@ import {
   pairKey,
   weightedMedian,
   parseRecordPayload,
-  computeIntentFee
+  computeIntentFee,
+  contributionPolicyDecision
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
+import { registerDiscoveryRoutes, startCoordinatorAnnouncer } from "../discovery/announce.js";
 import { extractCode } from "../model/extract.js";
 import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
@@ -80,10 +82,18 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { accrueCredits, creditEngine, grantCredits, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { NETWORK_FEE_POOL_ACCOUNT, accrueCredits, creditEngine, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { MemoryPayoutStore, PayoutService, type PayoutStore } from "../economy/payout-service.js";
+import { payoutPolicyFromEnv } from "../economy/payouts.js";
+import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
-import { computeDynamicPricePerComputeUnitSats, creditsForSats, satsForCredits } from "../economy/pricing.js";
+import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
+import { isRateEpochStale, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
+import { COMPUTE_CLASS_IDS, classifyHardware, modalityMultiplier, type ComputeClassId, type HardwareProfile } from "../economy/compute-classes.js";
+import { ComputeOrderBook } from "../economy/order-book.js";
+import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
+import { catalogEntryForTag } from "../model/catalog.js";
 import {
   computeDailyPoolTokens,
   computeHourlyIssuanceAllocations,
@@ -103,6 +113,12 @@ import {
   requiredConfirmationsFromEnv,
   type AnchorDeps
 } from "../economy/anchoring.js";
+// ── Work receipts + replication (architecture step 2; src/receipts) ──
+import { MemoryReceiptStore, type ReceiptStore } from "../receipts/store.js";
+import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
+import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
+import { agentReceiptClaimSchema, issueReceiptForAccrual } from "../receipts/issue.js";
+import type { SignedAgentReceiptClaim } from "../receipts/receipt.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -221,6 +237,8 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 const taskBilling = new Map<string, { accountId: string; credits: number; refunded: boolean }>();
+/** Market price agreed at claim time per subtask (msat per credit on the agent's class). */
+const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId }>();
 const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
 const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
@@ -410,6 +428,9 @@ const agentCapabilities = new Map<
     x25519PublicKey?: string;
     sandboxMode: SandboxMode;
     lastSeenMs: number;
+    hardwareProfile?: HardwareProfile;
+    /** Derived from hardwareProfile at registration; prices the agent's seconds. */
+    computeClass: ComputeClassId;
   }
 >();
 const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
@@ -525,6 +546,141 @@ const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>(
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
+
+// ── Rate oracle: sats per CPU-hour from market data, recalibrated daily ──
+const RATE_RECALIBRATION_MS = CC.RATE_RECALIBRATION_MS;
+const RATE_ORACLE_ENABLED = CC.RATE_ORACLE_ENABLED;
+const rateOracleConfig = rateOracleConfigFromEnv();
+let latestRateEpoch: RateEpoch | null = null;
+
+/**
+ * Compute market: agents' asks and tasks' bids per compute class, in msat per credit. The
+ * oracle sets the reference each epoch; tracking asks follow it (see order-book.ts).
+ */
+const orderBook = new ComputeOrderBook();
+/** Minute ticks + trade tape per class: candles, depth and the trade list for the market page. */
+const marketHistory = new MarketHistory();
+const MARKET_TICK_MS = 60_000;
+/** Standing orders from the portal keyed by `${accountId}:${side}`. */
+const marketOrders = new Map<string, MarketOrder>();
+
+const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
+function recordMarketTicks(nowMs = Date.now()): void {
+  // Bids are per task; drop any that outlived their task (failed, abandoned, lost on restart).
+  orderBook.pruneBids((bid) => nowMs - bid.createdAtMs > MARKET_BID_MAX_AGE_MS || (queue.openSubtaskCount(bid.taskId) === 0 && nowMs - bid.createdAtMs > 10 * 60_000));
+  for (const id of COMPUTE_CLASS_IDS) {
+    if (!orderBook.hasReference(id)) continue; // no oracle rate yet: nothing meaningful to chart
+    const snap = orderBook.snapshot(id, nowMs);
+    const tick = {
+      atMs: nowMs,
+      computeClass: id,
+      referenceMsat: snap.referenceMsatPerCredit,
+      bestAskMsat: snap.bestAsk,
+      bestBidMsat: snap.bestBid,
+      midMsat: snap.midMsatPerCredit,
+      clearingMsat: snap.clearingMsatPerCredit,
+      agents: snap.agents,
+      openTasks: snap.openTasks
+    };
+    marketHistory.recordTick(tick);
+    void pgStore?.persistMarketTick(tick).catch(() => undefined);
+  }
+}
+
+/** A seller's standing order applies to every agent the account owns; a buyer's becomes the default bid for its tasks. */
+async function applyMarketOrder(order: MarketOrder): Promise<void> {
+  marketOrders.set(`${order.accountId}:${order.side}`, order);
+  await pgStore?.upsertMarketOrder(order);
+  if (order.side === "sell") {
+    const owned = (await pgStore?.listAgentOwnershipByAccount(order.accountId)) ?? [];
+    const ids = new Set<string>([...owned.map((o) => o.agentId), order.accountId]);
+    for (const agentId of ids) {
+      const cap = agentCapabilities.get(agentId);
+      if (cap && (order.computeClass === "any" || order.computeClass === cap.computeClass)) {
+        orderBook.postAsk(agentId, cap.computeClass, order.msatPerCredit > 0 ? order.msatPerCredit : undefined);
+      }
+    }
+  }
+}
+const MARKET_DEFAULT_BID_PREMIUM_BPS = CC.MARKET_DEFAULT_BID_PREMIUM_BPS;
+const NETWORK_FEE_BPS = CC.NETWORK_FEE_BPS;
+
+function syncOrderBookReference(epoch: RateEpoch | null): void {
+  if (!epoch) return;
+  for (const id of COMPUTE_CLASS_IDS) {
+    const r = epoch.classRates?.[id];
+    if (r) orderBook.setReference(id, r.msatPerCredit);
+  }
+}
+
+async function recalibrateRateEpoch(): Promise<RateEpoch> {
+  const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: latestRateEpoch });
+  latestRateEpoch = epoch;
+  syncOrderBookReference(epoch);
+  recordMarketTicks();
+  await pgStore?.upsertRateEpoch(epoch);
+  app.log.info(
+    {
+      epochId: epoch.epochId,
+      status: epoch.status,
+      btcUsd: epoch.btcUsd,
+      satsPerCpuHour: epoch.satsPerCpuHour,
+      satsPerGpuHour: epoch.satsPerGpuHour,
+      msatPerCredit: epoch.msatPerCredit,
+      clamped: Boolean(epoch.clamped),
+      sources: epoch.btcUsdSources.map((s) => `${s.name}:${s.ok ? (s.outlier ? "outlier" : "ok") : "fail"}`)
+    },
+    "rate_epoch_recalibrated"
+  );
+  return epoch;
+}
+
+export interface CreditQuote {
+  satsPerCredit: number;
+  msatPerCredit: number;
+  loadMultiplier: number;
+  quoteSource: "rate_oracle" | "price_epoch" | "default_floor";
+  rateEpochId?: string;
+  rateEpochAtMs?: number;
+  stale: boolean;
+}
+
+/**
+ * What one credit (one CPU-second) costs right now: the oracle's market rate × the scarcity
+ * multiplier. Falls back to the legacy mesh price epoch, then to the legacy 30-sat floor, when
+ * the oracle has never produced an epoch (e.g. RATE_ORACLE_ENABLED=false or offline dev).
+ */
+function quoteSatsPerCredit(resourceClass: ResourceClass = "cpu"): CreditQuote {
+  const status = queue.status();
+  const cpuCapacity = Math.max(1, [...agentCapabilities.values()].reduce((sum, a) => sum + Math.max(1, a.maxConcurrentTasks), 0));
+  const gpuCapacity = Math.max(1, [...agentCapabilities.values()].filter((a) => a.localModelProvider === "ollama-local").length);
+  const loadMultiplier = Number(
+    dynamicLoadMultiplier(resourceClass, { cpuCapacity, gpuCapacity, queuedTasks: status.queued, activeAgents: status.agents }).toFixed(4)
+  );
+  if (latestRateEpoch) {
+    const classRate = latestRateEpoch.classRates?.[resourceClass === "gpu" ? "gpu.c24" : "cpu.std"];
+    const perCreditBase = classRate ? classRate.satsPerCredit : (resourceClass === "gpu" ? latestRateEpoch.satsPerGpuHour : latestRateEpoch.satsPerCpuHour) / 3600;
+    const satsPerCredit = Number((perCreditBase * loadMultiplier).toFixed(6));
+    return {
+      satsPerCredit,
+      msatPerCredit: Math.max(1, Math.round(satsPerCredit * 1000)),
+      loadMultiplier,
+      quoteSource: "rate_oracle",
+      rateEpochId: latestRateEpoch.epochId,
+      rateEpochAtMs: latestRateEpoch.createdAtMs,
+      stale: isRateEpochStale(latestRateEpoch, rateOracleConfig)
+    };
+  }
+  const legacy = latestPriceEpochByResource.get(resourceClass);
+  const satsPerCredit = legacy?.pricePerComputeUnitSats ?? (resourceClass === "gpu" ? 120 : 30);
+  return {
+    satsPerCredit,
+    msatPerCredit: Math.round(satsPerCredit * 1000),
+    loadMultiplier,
+    quoteSource: legacy ? "price_epoch" : "default_floor",
+    stale: true
+  };
+}
 /** Routes that need a Lightning provider: payment intents/webhook and robot task creation (invoices). */
 function isPaymentGatedRequest(method: string, url: string): boolean {
   const path = url.split("?")[0];
@@ -540,11 +696,125 @@ const disabledLightningProvider: LightningProvider = {
   },
   async checkSettlement() {
     return { settled: false };
+  },
+  async payInvoice() {
+    return { status: "failed" as const, error: "economy_payments_disabled" };
   }
 };
 const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
   ? createLightningProviderFromEnv()
   : disabledLightningProvider;
+
+// ── Payouts and the network fee pool (docs/economy-math.md "Payouts") ──
+// Earned sats leave the ledger only through PayoutService: a withdrawal pays a BOLT11 invoice from
+// the coordinator's Lightning node, auto payouts pay Lightning addresses, and the fee pool (network
+// fee on every accrual + the coordinator fee on every purchase) is distributed to infrastructure
+// hosts by uptime. In-memory mode (no Postgres) keeps the same semantics without durability.
+const payoutPolicy = payoutPolicyFromEnv(BITCOIN_NETWORK);
+class EnginePayoutStore extends MemoryPayoutStore {
+  constructor() {
+    super((accountId) => creditEngine.earnedMsat(accountId));
+  }
+  override async creditBalance(accountId: string): Promise<number> {
+    return creditEngine.balance(accountId) + (await super.creditBalance(accountId));
+  }
+}
+const memoryPayoutStore = pgStore ? null : new EnginePayoutStore();
+const payoutStore: PayoutStore = pgStore ?? (memoryPayoutStore as PayoutStore);
+let lastFeePoolDistribution: { atMs: number; distributedMsat: number; hosts: number } | null = null;
+const payoutService = new PayoutService({
+  store: payoutStore,
+  provider: lightningProvider,
+  policy: payoutPolicy,
+  coordinatorId: identity.peerId,
+  feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT,
+  fetcher: async (url: string) => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`lnurl_http_${res.status}`);
+    return res.json();
+  },
+  log: app.log,
+  onPaid: async (p) => {
+    ordering.append({
+      eventType: "payout_settled",
+      taskId: p.payoutId,
+      subtaskId: p.paymentHash,
+      actorId: p.accountId,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({ payoutId: p.payoutId, accountId: p.accountId, kind: p.kind, amountMsat: p.amountMsat, feeMsat: p.feeMsat, paymentHash: p.paymentHash, destination: p.destination, settledAtMs: p.settledAtMs })
+    });
+  },
+  onDistributed: async (rows, hosts) => {
+    lastFeePoolDistribution = { atMs: Date.now(), distributedMsat: hosts.reduce((a, h) => a + h.msat, 0), hosts: hosts.length };
+    ordering.append({
+      eventType: "fee_pool_distribution",
+      taskId: rows[0]?.txId ?? randomUUID(),
+      subtaskId: "",
+      actorId: NETWORK_FEE_POOL_ACCOUNT,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({ hosts, totalMsat: hosts.reduce((a, h) => a + h.msat, 0) })
+    });
+  }
+});
+
+/** Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime × services. */
+async function recordInfraHeartbeat(input: { hostId: string; accountId?: string; services: string[]; region?: string; coordinatorUrl?: string; lightningAddress?: string }): Promise<InfrastructureHost> {
+  const now = Date.now();
+  const host: InfrastructureHost = {
+    hostId: input.hostId,
+    accountId: input.accountId ?? `host:${input.hostId}`,
+    coordinatorUrl: input.coordinatorUrl,
+    region: input.region,
+    services: [...new Set(input.services.map((x) => x.trim().toLowerCase()).filter(Boolean))],
+    lightningAddress: input.lightningAddress,
+    firstSeenMs: now,
+    lastSeenMs: now,
+    heartbeatsInWindow: 1
+  };
+  if (pgStore) {
+    await pgStore.upsertInfrastructureHost(host);
+    await pgStore.recordHostHeartbeat(host.hostId, now);
+  } else if (memoryPayoutStore) {
+    const existing = memoryPayoutStore.hosts.get(host.hostId);
+    if (existing) {
+      Object.assign(existing, { accountId: host.accountId, services: host.services, lastSeenMs: now, heartbeatsInWindow: existing.heartbeatsInWindow + 1, region: host.region ?? existing.region, coordinatorUrl: host.coordinatorUrl ?? existing.coordinatorUrl, lightningAddress: host.lightningAddress ?? existing.lightningAddress });
+    } else {
+      memoryPayoutStore.hosts.set(host.hostId, host);
+    }
+    if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
+  }
+  return host;
+}
+const INFRA_HOST_ENABLED = (process.env.INFRA_HOST_ENABLED ?? "1") !== "0";
+const INFRA_HOST_SERVICES: string[] = (process.env.INFRA_HOST_SERVICES ?? "")
+  .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+if (INFRA_HOST_SERVICES.length === 0) {
+  INFRA_HOST_SERVICES.push("coordinator");
+  if (process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind") INFRA_HOST_SERVICES.push("bitcoind");
+  if (["lnd", "cln"].includes((process.env.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
+}
+async function selfInfraHeartbeat(): Promise<void> {
+  if (!INFRA_HOST_ENABLED) return;
+  await recordInfraHeartbeat({
+    hostId: identity.peerId,
+    accountId: process.env.INFRA_HOST_ACCOUNT_ID || undefined,
+    services: INFRA_HOST_SERVICES,
+    region: process.env.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
+    coordinatorUrl: COORDINATOR_PUBLIC_URL,
+    lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined
+  });
+}
+let feePoolDistributing: Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> | null = null;
+async function runFeePoolDistribution(): Promise<{ distributedMsat: number; hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }> }> {
+  // Single-flight: concurrent callers (a flooded endpoint, overlapping timers) share one run so
+  // the pool is not distributed twice for the same window (audit econ#3). NOTE: this guards one
+  // process only; a multi-instance deployment sharing one database still needs a DB advisory lock
+  // inside distributeFeePool — tracked as a follow-up.
+  if (feePoolDistributing) return feePoolDistributing;
+  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
+  feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats).finally(() => { feePoolDistributing = null; });
+  return feePoolDistributing;
+}
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
@@ -583,6 +853,27 @@ function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
 }
 
+/** Routes the portal proxies for logged-in users (market data and standing orders) accept either token. */
+function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  if (hasMeshToken(headers) || hasPortalServiceToken(headers)) return true;
+  reply.code(401).send({ error: "mesh_unauthorized" });
+  return false;
+}
+
+/**
+ * Account-scoped money routes (withdraw, set payout address, read a user's balance) require the
+ * PORTAL service token specifically. The portal binds accountId = acct-<userId> from the session
+ * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents hold
+ * only the shared mesh token and must NOT be able to move another account's funds (audit econ#1).
+ */
+function requirePortalServiceToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  if (hasPortalServiceToken(headers)) return true;
+  reply.code(401).send({ error: "portal_service_unauthorized" });
+  return false;
+}
+
 const robotQueue = ROBOT_QUEUE_ENABLED
   ? new RobotQueue({
       coordinatorFeeBps: ROBOT_COORDINATOR_FEE_BPS,
@@ -601,6 +892,69 @@ if (robotQueue) {
     lightningProvider
   });
 }
+
+// ── Work receipts (architecture step 2): store, routes, epoch close + anchor, peer replication ──
+// Receipts are issued in accrueResultCredits (recordWorkReceipt); everything else lives in src/receipts.
+const receiptStore: ReceiptStore = pgStore ? pgStore.receiptStore() : new MemoryReceiptStore();
+registerReceiptRoutes(app, {
+  store: receiptStore,
+  coordinatorId: identity.peerId,
+  requireMeshToken: (req, reply) => requireMeshToken(req, reply),
+  sign: (payload) => signPayload(payload, coordinatorKeys.privateKeyPem),
+  coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
+  log: app.log
+});
+async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number): Promise<void> {
+  const computeClass = r.meta.subtask.projectMeta.resourceClass;
+  const satsPerCredit = latestPriceEpochByResource.get(computeClass)?.pricePerComputeUnitSats ?? 30;
+  const outcome = issueReceiptForAccrual({
+    claim: (r.meta.report as { receipt?: SignedAgentReceiptClaim }).receipt,
+    result: { taskId: r.meta.taskId, subtaskId: r.subtaskId, agentId: r.agentId, output: r.output },
+    registeredAgentPublicKeyPem: agentCapabilities.get(r.agentId)?.publicKeyPem,
+    coordinator: { coordinatorId: identity.peerId, publicKeyPem: identity.publicKeyPem, privateKeyPem: coordinatorKeys.privateKeyPem },
+    computeClass,
+    credits,
+    msatPerCredit: satsPerCredit * 1000
+  });
+  if (!outcome.receipt) {
+    app.log.debug({ subtaskId: r.subtaskId, agentId: r.agentId, reason: outcome.skipped }, "work_receipt_skipped");
+    return;
+  }
+  await receiptStore.append(outcome.receipt);
+  app.log.info({ receiptId: outcome.receipt.receiptId, subtaskId: r.subtaskId, agentId: r.agentId }, "work_receipt_issued");
+}
+app.addHook("onReady", async () => {
+  const epochTimer = setInterval(() => {
+    void (async () => {
+      const closed = await closeEpoch(receiptStore, { coordinatorId: identity.peerId, coordinatorPrivateKeyPem: coordinatorKeys.privateKeyPem });
+      if (!closed) return;
+      app.log.info({ epochId: closed.epoch.epochId, count: closed.epoch.count, merkleRoot: closed.epoch.merkleRoot }, "receipt_epoch_closed");
+      const deps = anchorDeps();
+      if (!deps) return;
+      const anchored = await anchorEpoch(closed.epoch, deps, receiptStore);
+      app.log.info({ epochId: anchored.epoch.epochId, txRef: anchored.txRef }, "receipt_epoch_anchored");
+    })().catch((error) => app.log.warn({ error }, "receipt_epoch_tick_failed"));
+  }, CC.RECEIPT_EPOCH_MS);
+  epochTimer.unref?.();
+  startReceiptReplication({
+    peers: () =>
+      mesh
+        .listPeers()
+        .filter((p) => isApprovedCoordinator(p.peerId))
+        .map((p) => ({ peerId: p.peerId, coordinatorUrl: p.coordinatorUrl, publicKeyPem: p.publicKeyPem })),
+    store: receiptStore,
+    intervalMs: CC.RECEIPT_REPLICATION_MS,
+    fetch: (url, init) => fetch(url, init),
+    selfId: identity.peerId,
+    meshToken: MESH_AUTH_TOKEN || undefined,
+    coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
+    log: app.log
+  });
+});
+// ── end work receipts ──
+// Architecture step 3: signed self-announcement + Nostr announcer (EDGECODER_NOSTR_ANNOUNCE=1), see docs/discovery.md.
+const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: process.env.EDGECODER_NOSTR_ANNOUNCE === "1", log: (msg, meta) => app.log.info(meta ?? {}, msg) });
+registerDiscoveryRoutes(app, discoveryAnnouncer);
 
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
   const agentId = headers["x-agent-id"];
@@ -803,6 +1157,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
+  if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
   // WARNING: register /admin/* routes ONLY inside the admin plugin below — a route added with
   // app.get("/admin/...") outside it would get no auth at all because of this skip.
@@ -813,7 +1168,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat")
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
   ) {
     return;
   }
@@ -1611,15 +1966,11 @@ async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: 
   if (!pgStore) return { ok: true };
   const stats = await pgStore.creditContributionStats(accountId);
   const balance = await pgStore.creditBalance(accountId);
-  if (balance >= CONTRIBUTION_BURST_CREDITS) return { ok: true };
-  const ratio = stats.spent <= 0 ? Number.POSITIVE_INFINITY : stats.earned / stats.spent;
-  if (ratio < MIN_CONTRIBUTION_RATIO) {
-    return {
-      ok: false,
-      reason: `contribute_first_policy: earned=${stats.earned.toFixed(3)} spent=${stats.spent.toFixed(3)} ratio=${ratio.toFixed(3)}`
-    };
-  }
-  return { ok: true };
+  const decision = contributionPolicyDecision(stats, balance, {
+    burstCredits: CONTRIBUTION_BURST_CREDITS,
+    minRatio: MIN_CONTRIBUTION_RATIO
+  });
+  return decision.ok ? { ok: true } : decision;
 }
 
 async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {
@@ -1677,6 +2028,20 @@ async function recordIntentSettlementSideEffects(settled: PaymentIntent): Promis
     createdAtMs: Date.now()
   };
   await pgStore?.persistCoordinatorFeeEvent(feeEvent);
+  // The coordinator fee on a purchase is network revenue: it goes to the fee pool as sats (no
+  // compute credits attached) and reaches infrastructure hosts at the next distribution.
+  if (settled.coordinatorFeeSats > 0) {
+    const row: CreditTransaction = {
+      txId: `purchase-fee:${settled.intentId}`,
+      accountId: NETWORK_FEE_POOL_ACCOUNT,
+      type: "earn",
+      credits: 0,
+      reason: `purchase_fee:${settled.intentId}`,
+      timestampMs: Date.now(),
+      msat: Math.round(settled.coordinatorFeeSats * 1000)
+    };
+    await payoutStore.recordCreditTransactions([row]);
+  }
   await allocateIntentPayouts(settled);
   return feeEvent;
 }
@@ -1739,6 +2104,23 @@ const defaultPolicy: ExecutionPolicy = {
   allowedHours: { startHourUtc: 22, endHourUtc: 6 }
 };
 
+const hardwareProfileSchema = z.object({
+  cpuCores: z.number().int().min(1).max(4096).optional(),
+  cpuModel: z.string().max(128).optional(),
+  ramGb: z.number().min(0).max(65536).optional(),
+  arch: z.string().max(16).optional(),
+  platform: z.string().max(16).optional(),
+  gpu: z
+    .object({
+      vendor: z.string().max(32).optional(),
+      model: z.string().max(128).optional(),
+      vramGb: z.number().min(0).max(8192).optional(),
+      datacenter: z.boolean().optional()
+    })
+    .optional(),
+  benchmarkScore: z.number().min(0).optional()
+});
+
 const registerSchema = z.object({
   agentId: z.string(),
   deviceId: z.string().min(3).max(128).optional(),
@@ -1766,6 +2148,10 @@ const registerSchema = z.object({
   publicKeyPem: z.string().optional(),
   x25519PublicKey: z.string().optional(),
   sandboxMode: z.enum(["none", "docker", "vm"]).default("none"),
+  /** Hardware the agent runs on; classified into a compute class that prices its seconds. */
+  hardwareProfile: hardwareProfileSchema.optional(),
+  /** Minimum price the agent will work for (msat per credit). Omit to track the class reference. */
+  askMsatPerCredit: z.number().positive().max(1e9).optional(),
   binaryIntegrity: z
     .object({
       distHash: z.string(),
@@ -1797,7 +2183,9 @@ const heartbeatSchema = z.object({
   activeModel: z.string().optional(),
   activeModelParamSize: z.number().optional(),
   modelSwapInProgress: z.boolean().optional(),
-  sandboxMode: z.enum(["none", "docker", "vm"]).optional()
+  sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
+  /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
+  askMsatPerCredit: z.number().min(0).max(1e9).optional()
 });
 const diagnosticsSchema = z.object({
   agentId: z.string(),
@@ -1827,7 +2215,11 @@ const taskSchema = z.object({
   resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
   priority: z.number().min(0).max(100).default(50),
   requestedModel: z.string().optional(),
-  sandboxRequired: z.boolean().default(false)
+  sandboxRequired: z.boolean().default(false),
+  /** Which hardware class should run it; "any" matches by resourceClass only. */
+  computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+  /** Requester's ceiling in msat per credit. Default: class reference × (1 + MARKET_DEFAULT_BID_PREMIUM_BPS). */
+  maxBidMsatPerCredit: z.number().positive().max(1e9).optional()
 });
 
 const pullSchema = z.object({ agentId: z.string() });
@@ -1840,11 +2232,18 @@ const resultSchema = z.object({
   error: z.string().optional(),
   durationMs: z.number(),
   reportNonce: z.string().optional(),
-  reportSignature: z.string().optional()
+  reportSignature: z.string().optional(),
+  receipt: agentReceiptClaimSchema.optional() // work receipt claim signed by the agent (src/receipts)
 });
 
 app.post("/register", async (req, reply) => {
-  const body = registerSchema.parse(req.body);
+  const parsedRegister = registerSchema.safeParse(req.body);
+  if (!parsedRegister.success) {
+    // A malformed registration is the agent's fault, not a server error: 400 with the
+    // issues so the agent logs something actionable instead of retrying a 500 forever.
+    return reply.code(400).send({ error: "invalid_registration", issues: parsedRegister.error.issues });
+  }
+  const body = parsedRegister.data;
   const now = Date.now();
   const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
   const activation = await validatePortalNode({
@@ -1896,6 +2295,8 @@ app.post("/register", async (req, reply) => {
     publicKeyPem: body.publicKeyPem,
     x25519PublicKey: body.x25519PublicKey,
     sandboxMode: body.sandboxMode as SandboxMode,
+    hardwareProfile: body.hardwareProfile,
+    computeClass: classifyHardware(body.hardwareProfile),
     lastSeenMs: now
   });
   // ── Binary integrity verification ──
@@ -1927,9 +2328,23 @@ app.post("/register", async (req, reply) => {
     }
     app.log.info({ agentId: body.agentId, verificationStatus, version: body.binaryIntegrity.releaseVersion }, "binary_integrity_check");
   }
+  // Verified-only policy: a missing attestation, an uncached manifest, or absent release keys all
+  // leave verificationStatus "unverified" — reject those too, not just explicit mismatches, so the
+  // policy actually guarantees a verified binary when enabled (audit mesh#2).
+  if (REQUIRE_VERIFIED_AGENTS && verificationStatus !== "verified") {
+    return reply.code(403).send({ error: "binary_integrity_required", status: verificationStatus });
+  }
 
   behaviorTracker.recordRegistration(body.agentId, now);
   evaluateAndEnforce(body.agentId);
+  // Market: post the agent's ask on its compute class (tracking the oracle reference unless explicit).
+  {
+    const ownerAccount = await rewardAccountForAgent(body.agentId);
+    const standing = marketOrders.get(`${ownerAccount}:sell`);
+    const cls = classifyHardware(body.hardwareProfile);
+    const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
+    orderBook.postAsk(body.agentId, cls, ask, now);
+  }
   const approvalRecord = ordering.append({
     eventType: "node_approval",
     taskId: `agent:${body.agentId}`,
@@ -1970,7 +2385,11 @@ app.post("/heartbeat", async (req, reply) => {
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip);
   if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
 
-  const body = heartbeatSchema.parse(req.body);
+  const parsedHeartbeat = heartbeatSchema.safeParse(req.body);
+  if (!parsedHeartbeat.success) {
+    return reply.code(400).send({ error: "invalid_heartbeat", issues: parsedHeartbeat.error.issues });
+  }
+  const body = parsedHeartbeat.data;
   if (verified && verified.agentId !== body.agentId) {
     return reply.code(401).send({ error: "agent_id_mismatch" });
   }
@@ -2018,6 +2437,10 @@ app.post("/heartbeat", async (req, reply) => {
       existing.activeModelParamSize = body.activeModelParamSize ?? 0;
       existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
     }
+  }
+  if (body.askMsatPerCredit !== undefined) {
+    const existing = agentCapabilities.get(body.agentId);
+    if (existing) orderBook.postAsk(body.agentId, existing.computeClass, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now);
   }
   if (body.sandboxMode !== undefined) {
     const existing = agentCapabilities.get(body.agentId);
@@ -2184,6 +2607,11 @@ app.post("/submit", async (req, reply) => {
   const hasMeshPeers = mesh.listPeers().length > 0;
   const GOSSIP_CLAIM_DELAY_MS = 3_000;
 
+  // Market: register the requester's bid for this task (default = reference × premium).
+  const standingBuy = marketOrders.get(`${body.submitterAccountId}:buy`);
+  const bidCeiling = body.maxBidMsatPerCredit ?? (standingBuy && (standingBuy.computeClass === "any" || standingBuy.computeClass === body.computeClass) ? standingBuy.msatPerCredit : undefined);
+  const marketBid = orderBook.postBid(body.taskId, body.computeClass, bidCeiling, MARKET_DEFAULT_BID_PREMIUM_BPS);
+
   // Assign stable IDs before scheduling so dependsOn references resolve
   const subtasksWithIds = payload.subtasks.map((s) => ({
     ...s,
@@ -2193,7 +2621,9 @@ app.post("/submit", async (req, reply) => {
       projectId: body.projectId,
       tenantId: body.tenantId,
       resourceClass: body.resourceClass as ResourceClass,
-      priority: body.priority
+      priority: body.priority,
+      computeClass: body.computeClass,
+      maxBidMsatPerCredit: marketBid.maxMsatPerCredit
     }
   }));
 
@@ -2304,8 +2734,22 @@ app.post("/pull", async (req, reply) => {
     app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
     return reply.send(sandboxRejection);
   }
-  const task = queue.claim(body.agentId, capability?.activeModel, await rewardAccountForAgent(body.agentId));
+  const task = queue.claim(
+    body.agentId,
+    capability?.activeModel,
+    await rewardAccountForAgent(body.agentId),
+    (subtask) => orderBook.canMatch(body.agentId, subtask.taskId).ok
+  );
   if (task) {
+    // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
+    const match = orderBook.canMatch(body.agentId, task.taskId);
+    if (match.ok) {
+      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass });
+      const trade = { taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() };
+      orderBook.recordTrade(trade);
+      marketHistory.recordTrade(trade);
+      void pgStore?.persistMarketTrade(trade).catch(() => undefined);
+    }
 
     // ── Power policy: small-tasks-only check ──
     if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
@@ -2421,6 +2865,22 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
   // records the credits actually accrued by the pricing formula, so balances reconcile.
   if (!r.ok) return;
+  const cap = agentCapabilities.get(r.agentId);
+  const trade = claimedTradePrice.get(r.subtaskId);
+  claimedTradePrice.delete(r.subtaskId);
+  const computeClass = trade?.computeClass ?? cap?.computeClass ?? "cpu.std";
+  const modelParamSizeB = subtask.requestedModel ? cap?.activeModelParamSize : undefined;
+  const modality = modalityMultiplier(catalogEntryForTag(cap?.activeModel ?? "")?.capabilities);
+  // Sats per credit: the market price agreed at claim (agent's ask), else the oracle's class rate.
+  // The msat value locked on an earn row is withdrawable as real sats, so the trade price must not
+  // be trustable to inflate it. Clamp it to [0.25x, 4x] the oracle class reference, which a
+  // self-dealing ask/bid cannot move (audit econ#2). Falls back to the reference when no trade.
+  const classRef = latestRateEpoch?.classRates?.[computeClass]?.msatPerCredit;
+  let basePerCredit = trade?.msatPerCredit ?? classRef;
+  if (basePerCredit !== undefined && classRef !== undefined && classRef > 0) {
+    basePerCredit = Math.min(Math.max(basePerCredit, classRef * 0.25), classRef * 4);
+  }
+  const valuation = basePerCredit !== undefined ? { msatPerCredit: Math.round(basePerCredit * modality), networkFeeBps: NETWORK_FEE_BPS } : undefined;
   const accrued = await accrueCredits(
     {
       reportId: resultReportId(r.subtaskId),
@@ -2432,15 +2892,18 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
       gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
       success: r.ok,
       qualityScore: r.ok ? 1.0 : 0.6,
-      timestampMs: Date.now()
+      timestampMs: Date.now(),
+      modelParamSizeB
     },
     {
       queuedTasks: queue.status().queued,
       activeAgents: queue.status().agents
-    }
+    },
+    valuation
   );
   // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
   if (accrued) {
+    marketHistory.settleTrade(r.subtaskId, accrued.credits);
     const earningsRecord = ordering.append({
       eventType: "earnings_accrual",
       taskId,
@@ -2451,6 +2914,11 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         sourceAgentId: r.agentId,
         accountId: rewardAccountId,
         credits: accrued.credits,
+        msat: accrued.msat,
+        msatPerCredit: valuation?.msatPerCredit,
+        networkFeeBps: valuation?.networkFeeBps,
+        computeClass,
+        modelParamSizeB,
         durationMs,
         reportedDurationMs,
         ok: r.ok,
@@ -2459,6 +2927,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
     });
     await pgStore?.persistLedgerRecord(earningsRecord);
     await persistStatsLedgerRecord(earningsRecord);
+    // Work receipt (architecture step 2): countersign the agent's claim for what was just credited.
+    await recordWorkReceipt(r, accrued.credits).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
   }
 }
 
@@ -2469,6 +2939,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
  */
 async function publishResult(result: SubtaskResult): Promise<void> {
   queue.complete(result);
+  // Market: a task's bid leaves the book once its last subtask has a result.
+  if (queue.openSubtaskCount(result.taskId) === 0 && depTracker.heldCountForTask(result.taskId) === 0) orderBook.removeBid(result.taskId);
   const completeRecord = ordering.append({
     eventType: "task_complete",
     taskId: result.taskId,
@@ -2625,15 +3097,41 @@ async function finalizeFailedSubtask(result: SubtaskResult, opts: { recordResult
       )
     );
   }
-  const billing = taskBilling.get(result.taskId);
-  if (billing && !billing.refunded) {
-    billing.refunded = true;
-    await grantCredits(billing.accountId, billing.credits, `task_submit_refund:${result.taskId}`);
-  }
+  const refunded = await refundTaskSubmit(result.taskId);
   app.log.warn(
-    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded: Boolean(billing) },
+    { taskId: result.taskId, subtaskIds: failedResults.map((r) => r.subtaskId), refunded },
     "task_failed_max_attempts"
   );
+}
+
+/**
+ * #160: refund what /submit charged, exactly once, even if the credit store fails.
+ * The tx id is derived from the task id, so a retry after a thrown grant dedupes on
+ * the store's primary key instead of paying twice; `refunded` is only set after the
+ * grant succeeded, and the entry is pruned once settled.
+ */
+const REFUND_RETRY_DELAYS_MS = [250, 1_000, 4_000];
+async function refundTaskSubmit(taskId: string): Promise<boolean> {
+  const billing = taskBilling.get(taskId);
+  if (!billing) return false;
+  if (billing.refunded) return true;
+  const txId = refundTxId(taskId);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await grantCreditsIdempotent(billing.accountId, billing.credits, `task_submit_refund:${taskId}`, txId);
+      billing.refunded = true;
+      taskBilling.delete(taskId);
+      return true;
+    } catch (err) {
+      if (attempt >= REFUND_RETRY_DELAYS_MS.length) {
+        // Left in taskBilling with refunded=false so a later failure event or an
+        // operator replay (same deterministic tx id) can complete it.
+        app.log.error({ err, taskId, accountId: billing.accountId, txId }, "task_submit_refund_failed");
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, REFUND_RETRY_DELAYS_MS[attempt]));
+    }
+  }
 }
 
 app.post("/result", async (req, reply) => {
@@ -2658,6 +3156,7 @@ app.post("/result", async (req, reply) => {
         agentId: rawBody.agentId,
         reportNonce: rawBody.reportNonce,
         reportSignature: rawBody.reportSignature,
+        receipt: rawBody.receipt,
       });
       app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
     } catch (decryptErr) {
@@ -2787,6 +3286,31 @@ app.post("/result", async (req, reply) => {
 });
 
 app.get("/status", async () => queue.status());
+
+/**
+ * Requester-side result lookup for a submitted subtask (used by the IDE /run/swarm
+ * route, which polls after POST /submit). Mesh-token protected by the global hook.
+ * 404 while the subtask is still queued/running or when the ids don't match.
+ */
+app.get("/tasks/:taskId/subtasks/:subtaskId/result", async (req, reply) => {
+  const { taskId, subtaskId } = req.params as { taskId: string; subtaskId: string };
+  const result = queue.getResult(subtaskId);
+  if (!result || result.taskId !== taskId) {
+    return reply.code(404).send({ error: "result_not_ready", taskId, subtaskId });
+  }
+  const billing = taskBilling.get(taskId);
+  return reply.send({
+    taskId: result.taskId,
+    subtaskId: result.subtaskId,
+    ok: result.ok,
+    output: result.output,
+    error: result.error,
+    durationMs: result.durationMs,
+    // What /submit charged the submitter (0 once refunded or for anonymous tasks).
+    creditsSpent: billing && !billing.refunded ? billing.credits : 0
+  });
+});
+
 app.get("/health/runtime", async () => {
   const status = queue.status();
   const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
@@ -2912,21 +3436,219 @@ app.get("/economy/price/current", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const cpu = latestPriceEpochByResource.get("cpu");
   const gpu = latestPriceEpochByResource.get("gpu");
-  return { cpu, gpu };
+  return { cpu, gpu, quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") } };
+});
+
+/** Current rate-oracle epoch (market sats per CPU/GPU hour, sources, hashprice signal) and the live credit quote. */
+app.get("/economy/rates/current", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  return {
+    enabled: RATE_ORACLE_ENABLED,
+    recalibrationMs: RATE_RECALIBRATION_MS,
+    epoch: latestRateEpoch,
+    stale: isRateEpochStale(latestRateEpoch, rateOracleConfig),
+    quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") },
+    config: {
+      usdPerCpuHourReference: rateOracleConfig.usdPerCpuHourReference,
+      usdPerGpuHourReference: rateOracleConfig.usdPerGpuHourReference,
+      networkMarkupBps: rateOracleConfig.networkMarkupBps,
+      maxDailyMovePct: rateOracleConfig.maxDailyMovePct,
+      maxSourceSpreadPct: rateOracleConfig.maxSourceSpreadPct,
+      minSources: rateOracleConfig.minSources,
+      btcUsdSources: rateOracleConfig.btcUsdSources.map((s) => s.name),
+      computeSources: rateOracleConfig.computeSources.map((s) => `${s.name}(${s.resourceClass ?? "cpu"})`)
+    }
+  };
+});
+
+app.get("/economy/rates/history", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const query = z.object({ limit: z.coerce.number().int().min(1).max(365).default(30) }).parse(req.query);
+  const epochs = pgStore ? await pgStore.listRateEpochs(query.limit) : latestRateEpoch ? [latestRateEpoch] : [];
+  return { epochs };
+});
+
+/** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
+// ── Payouts, infrastructure hosts and the fee pool ──
+app.get("/economy/payouts/:accountId", async (req, reply) => {
+  if (!requirePortalServiceToken(req as any, reply)) return;
+  const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
+  const [balance, payouts] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100)]);
+  return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED } };
+});
+app.post("/economy/payouts/withdraw", async (req, reply) => {
+  if (!requirePortalServiceToken(req as any, reply)) return;
+  const parsed = z.object({ accountId: z.string().min(1), bolt11: z.string().min(20).max(4096) }).safeParse(req.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
+  const body = parsed.data;
+  const result = await payoutService.withdraw(body.accountId, body.bolt11.trim());
+  if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : 400).send(result);
+  return result;
+});
+app.post("/economy/payouts/address", async (req, reply) => {
+  if (!requirePortalServiceToken(req as any, reply)) return;
+  const parsedAddr = z.object({ accountId: z.string().min(1), lightningAddress: z.string().max(256).nullable() }).safeParse(req.body ?? {});
+  if (!parsedAddr.success) return reply.code(400).send({ error: "invalid_request" });
+  const body = parsedAddr.data;
+  const address = body.lightningAddress?.trim() || null;
+  if (address && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) && !/^https:\/\//i.test(address) && !/^lnurl1/i.test(address)) {
+    return reply.code(400).send({ error: "invalid_lightning_address" });
+  }
+  if (pgStore) await pgStore.setLightningAddress(body.accountId, address, BITCOIN_NETWORK);
+  else if (memoryPayoutStore) {
+    if (address) memoryPayoutStore.autoAccounts.set(body.accountId, address);
+    else memoryPayoutStore.autoAccounts.delete(body.accountId);
+  }
+  return { accountId: body.accountId, lightningAddress: address };
+});
+app.post("/economy/hosts/heartbeat", async (req, reply) => {
+  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  const body = z
+    .object({
+      hostId: z.string().min(3).max(128),
+      accountId: z.string().min(1).max(128).optional(),
+      services: z.array(z.string().min(1).max(32)).min(1).max(8),
+      region: z.string().max(32).optional(),
+      coordinatorUrl: z.string().url().optional(),
+      lightningAddress: z.string().max(256).optional()
+    })
+    .parse(req.body ?? {});
+  const host = await recordInfraHeartbeat(body);
+  return { ok: true, host, heartbeatMs: CC.HOST_HEARTBEAT_MS };
+});
+app.get("/economy/hosts", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const hosts = await payoutStore.listInfrastructureHosts();
+  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
+  return { hosts, expectedHeartbeats, distributionMs: CC.FEE_POOL_DISTRIBUTION_MS };
+});
+app.get("/economy/fee-pool", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req as any, reply)) return;
+  const [earnedMsat, distributedMsat, credits] = await Promise.all([
+    payoutStore.earnedMsat(NETWORK_FEE_POOL_ACCOUNT),
+    payoutStore.distributedMsat(NETWORK_FEE_POOL_ACCOUNT),
+    payoutStore.creditBalance(NETWORK_FEE_POOL_ACCOUNT)
+  ]);
+  return { accountId: NETWORK_FEE_POOL_ACCOUNT, earnedMsat, distributedMsat, availableMsat: Math.max(0, earnedMsat - distributedMsat), credits, networkFeeBps: NETWORK_FEE_BPS, lastDistribution: lastFeePoolDistribution };
+});
+app.post("/economy/fee-pool/distribute", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return; // manual override; the daily timer runs it automatically (audit econ#3)
+  return runFeePoolDistribution();
+});
+
+app.get("/economy/market/book", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).optional() }).parse(req.query);
+  const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
+  return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
+});
+
+/** Candles (OHLC of the mid, trade volume) for one class; `interval` 1m|5m|15m|1h|4h|1d. Portal-token readable. */
+app.get("/economy/market/candles", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z
+    .object({
+      computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"),
+      interval: z.enum(Object.keys(CANDLE_INTERVALS) as [string, ...string[]]).default("5m"),
+      limit: z.coerce.number().int().min(1).max(2000).default(500)
+    })
+    .parse(req.query);
+  return {
+    computeClass: query.computeClass,
+    interval: query.interval,
+    candles: marketHistory.candles(query.computeClass, CANDLE_INTERVALS[query.interval], query.limit),
+    latest: marketHistory.latest(query.computeClass) ?? null
+  };
+});
+
+app.get("/economy/market/trades", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z
+    .object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std"), limit: z.coerce.number().int().min(1).max(500).default(50) })
+    .parse(req.query);
+  return { computeClass: query.computeClass, trades: marketHistory.recentTrades(query.computeClass, query.limit) };
+});
+
+app.get("/economy/market/depth", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const query = z.object({ computeClass: z.enum(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]).default("cpu.std") }).parse(req.query);
+  const snap = orderBook.snapshot(query.computeClass);
+  return { computeClass: query.computeClass, ...MarketHistory.depth(snap.asks, snap.bids), snapshot: snap };
+});
+
+/**
+ * Standing orders from the portal. buy: the account's default max bid for its tasks (msat per
+ * credit). sell: the ask applied to every agent the account owns (0 = track the reference).
+ */
+app.post("/economy/market/orders", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const body = z
+    .object({
+      accountId: z.string().min(1).max(128),
+      side: z.enum(["buy", "sell"]),
+      computeClass: z.enum([...(COMPUTE_CLASS_IDS as [ComputeClassId, ...ComputeClassId[]]), "any"]).default("any"),
+      msatPerCredit: z.number().min(0).max(1e9)
+    })
+    .parse(req.body);
+  const order: MarketOrder = { ...body, updatedAtMs: Date.now() };
+  await applyMarketOrder(order);
+  return { ok: true, order };
+});
+
+app.get("/economy/market/orders/:accountId", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
+  const orders = ["buy", "sell"].map((side) => marketOrders.get(`${params.accountId}:${side}`)).filter(Boolean);
+  const owned = (await pgStore?.listAgentOwnershipByAccount(params.accountId)) ?? [];
+  const agents = [...new Set([...owned.map((o) => o.agentId), params.accountId])]
+    .map((agentId) => ({ agentId, capability: agentCapabilities.get(agentId), ask: orderBook.askFor(agentId) }))
+    .filter((a) => a.capability)
+    .map((a) => ({ agentId: a.agentId, computeClass: a.capability!.computeClass, ask: a.ask?.msatPerCredit ?? null, tracking: a.ask?.tracking ?? true }));
+  return { accountId: params.accountId, orders, agents };
+});
+
+/** Compute class definitions with the current oracle rate and connected agents per class. */
+app.get("/economy/market/classes", async (req, reply) => {
+  if (!requireMeshOrPortalToken(req, reply)) return;
+  const agentsByClass = new Map<string, number>();
+  for (const cap of agentCapabilities.values()) agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
+  return {
+    rateEpochId: latestRateEpoch?.epochId ?? null,
+    classes: COMPUTE_CLASS_IDS.map((id) => ({
+      ...rateOracleConfig.computeClasses[id],
+      rate: latestRateEpoch?.classRates?.[id] ?? null,
+      referenceMsatPerCredit: orderBook.referenceFor(id),
+      agents: agentsByClass.get(id) ?? 0
+    }))
+  };
+});
+
+/** Admin: force a recalibration now (e.g. after changing sources). Daily-move clamp still applies. */
+app.post("/economy/rates/recalibrate", async (req, reply) => {
+  if (!authorizeAdmin(req, reply)) return;
+  try {
+    const epoch = await recalibrateRateEpoch();
+    return { ok: true, epoch };
+  } catch (err) {
+    return reply.code(502).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.get("/economy/credits/:accountId/quote", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const currentCpu = latestPriceEpochByResource.get("cpu");
-  const satsPerCredit = currentCpu?.pricePerComputeUnitSats ?? 30;
+  const quote = quoteSatsPerCredit("cpu");
   const balance = pgStore ? await pgStore.creditBalance(params.accountId) : creditEngine.balance(params.accountId);
   return {
     accountId: params.accountId,
     credits: Number(balance.toFixed(3)),
-    satsPerCredit,
-    estimatedSats: satsForCredits(balance, satsPerCredit),
-    quoteSource: currentCpu ? "price_epoch" : "default_floor",
+    satsPerCredit: quote.satsPerCredit,
+    msatPerCredit: quote.msatPerCredit,
+    estimatedSats: satsForCredits(balance, quote.satsPerCredit),
+    quoteSource: quote.quoteSource,
+    rateEpochId: quote.rateEpochId,
+    loadMultiplier: quote.loadMultiplier,
+    stale: quote.stale,
     quotedAtMs: Date.now()
   };
 });
@@ -3095,8 +3817,9 @@ app.post("/economy/payments/intents", async (req, reply) => {
       amountSats: z.number().int().positive().max(100000000)
     })
     .parse(req.body);
-  const currentCpu = latestPriceEpochByResource.get("cpu");
-  const satsPerCredit = currentCpu?.pricePerComputeUnitSats ?? 30;
+  // Price locked at intent creation from the daily market rate (× current load), never re-quoted.
+  const quote = quoteSatsPerCredit("cpu");
+  const satsPerCredit = quote.satsPerCredit;
   const { feeSats, netSats } = computeIntentFee(body.amountSats, COORDINATOR_FEE_BPS);
   const invoice = await lightningProvider.createInvoice({
     amountSats: body.amountSats,
@@ -3601,6 +4324,7 @@ async function handleMeshIngest(
             connectedPeers: new Set<string>(),
             activeModel: payload.models[0],
             activeModelParamSize: 0,
+            computeClass: "cpu.std" as ComputeClassId,
             sandboxMode: "none" as SandboxMode,
             lastSeenMs: Date.now(),
           });
@@ -5280,6 +6004,11 @@ export async function initCoordinator(): Promise<void> {
       const latestGpu = await storeRef.latestPriceEpoch("gpu");
       if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
       if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
+      latestRateEpoch = await storeRef.latestRateEpoch();
+      syncOrderBookReference(latestRateEpoch);
+      for (const t of await storeRef.listMarketTicks(7 * 24 * 60)) marketHistory.recordTick(t);
+      for (const t of await storeRef.listMarketTrades(5_000)) marketHistory.recordTrade(t);
+      for (const o of await storeRef.listMarketOrders()) marketOrders.set(`${o.accountId}:${o.side}`, o);
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {
@@ -5313,6 +6042,30 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void runIssuanceTick().catch((error) => app.log.warn({ error }, "issuance_tick_failed"));
       }, ISSUANCE_RECALC_MS);
+      // Rate oracle: recalibrate at startup when there is no fresh epoch, then on the daily timer.
+      recordMarketTicks();
+      setInterval(() => recordMarketTicks(), MARKET_TICK_MS);
+      // Payouts: this host's uptime heartbeat, automatic Lightning-address payouts, fee-pool distribution.
+      void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
+      setInterval(() => {
+        void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
+      }, CC.HOST_HEARTBEAT_MS);
+      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) {
+        setInterval(() => {
+          void payoutService.runAutoPayouts().then((r) => { if (r.length) app.log.info({ results: r }, "auto_payouts"); }).catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
+        }, CC.PAYOUT_AUTO_INTERVAL_MS);
+      }
+      setInterval(() => {
+        void runFeePoolDistribution().catch((error) => app.log.warn({ error: String(error) }, "fee_pool_distribution_failed"));
+      }, CC.FEE_POOL_DISTRIBUTION_MS);
+      if (RATE_ORACLE_ENABLED) {
+        if (isRateEpochStale(latestRateEpoch, rateOracleConfig)) {
+          void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));
+        }
+        setInterval(() => {
+          void recalibrateRateEpoch().catch((error) => app.log.warn({ error: String(error) }, "rate_recalibration_failed"));
+        }, RATE_RECALIBRATION_MS);
+      }
       setInterval(() => {
         void maybeAnchorLatestFinalizedEpoch().catch((error) => app.log.warn({ error }, "anchor_tick_failed"));
       }, ANCHOR_INTERVAL_MS);

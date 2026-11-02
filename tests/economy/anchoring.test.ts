@@ -13,6 +13,7 @@ import {
   type AnchorStore
 } from "../../src/economy/anchoring.js";
 import {
+  AnchorBroadcastRejectedError,
   BitcoindRpcProvider,
   anchorFeeRateSatVb,
   decodeOpReturnCheckpoint,
@@ -217,6 +218,49 @@ describe("bitcoind coin selection (#46)", () => {
     expect(calls.some((c) => c.method === "sendrawtransaction")).toBe(false);
   });
 
+  it("#158: a pre-send RPC failure (no UTXOs) is a definite rejection", async () => {
+    agent.get("http://btc.test:38332").intercept({ path: /.*/, method: "POST" }).reply(200, (opts) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.method === "fundrawtransaction") return { result: null, error: { code: -4, message: "Insufficient funds" } };
+      return { result: body.method === "createrawtransaction" ? "rawtx0" : { feerate: 0.00001 }, error: null };
+    }).persist();
+    const p = new BitcoindRpcProvider("http://btc.test:38332", "u", "p", "anchor");
+    const err = await p.broadcastOpReturn("4543" + "01" + CHECKPOINT).catch((e) => e);
+    expect(err).toBeInstanceOf(AnchorBroadcastRejectedError);
+    expect(err.message).toMatch(/Insufficient funds/);
+  });
+
+  it("#158: a node verify-reject on sendrawtransaction is definite; a transport failure is not", async () => {
+    const mk = (sendReply: () => { result: unknown; error: unknown } | never) => {
+      agent.get("http://btc.test:38332").intercept({ path: /.*/, method: "POST" }).reply(200, (opts) => {
+        const body = JSON.parse(String(opts.body));
+        const results: Record<string, unknown> = {
+          createrawtransaction: "rawtx0",
+          estimatesmartfee: { feerate: 0.00001 },
+          fundrawtransaction: { hex: "funded", fee: 0.000004, changepos: 1 },
+          signrawtransactionwithwallet: { hex: "signed", complete: true }
+        };
+        if (body.method === "sendrawtransaction") return sendReply();
+        return { result: results[body.method], error: null };
+      }).persist();
+    };
+    mk(() => ({ result: null, error: { code: -26, message: "min relay fee not met" } }));
+    const rejected = await new BitcoindRpcProvider("http://btc.test:38332", "u", "p", "anchor")
+      .broadcastOpReturn("4543" + "01" + CHECKPOINT).catch((e) => e);
+    expect(rejected).toBeInstanceOf(AnchorBroadcastRejectedError);
+
+    await agent.close();
+    agent = new MockAgent();
+    agent.disableNetConnect();
+    setGlobalDispatcher(agent);
+    // -27 "already in chain" and transport errors are ambiguous: the tx may be out there.
+    mk(() => ({ result: null, error: { code: -27, message: "Transaction already in block chain" } }));
+    const ambiguous = await new BitcoindRpcProvider("http://btc.test:38332", "u", "p", "anchor")
+      .broadcastOpReturn("4543" + "01" + CHECKPOINT).catch((e) => e);
+    expect(ambiguous).toBeInstanceOf(Error);
+    expect(ambiguous).not.toBeInstanceOf(AnchorBroadcastRejectedError);
+  });
+
   it("fee rate = max(estimate, floor)", () => {
     expect(anchorFeeRateSatVb(undefined, {})).toBe(2);
     expect(anchorFeeRateSatVb(0.00025, {})).toBe(25);
@@ -265,14 +309,43 @@ describe("anchoring review fixes (#46)", () => {
     expect(new Set(recs.map((r) => r.anchorId)).size).toBe(1);
   });
 
-  it("a failed broadcast is marked failed and can be retried", async () => {
+  it("a definite pre-send rejection is marked failed and can be retried under a new anchorId (#158)", async () => {
     const store = memStore();
     let n = 0;
-    const provider = { ...scriptedProvider([]).provider, broadcastOpReturn: async () => { if (n++ === 0) throw new Error("insufficient funds"); return { txid: TXID }; } };
-    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/insufficient/);
-    expect([...store.rows.values()][0].status).toBe("failed");
+    const provider = {
+      ...scriptedProvider([]).provider,
+      broadcastOpReturn: async () => {
+        if (n++ === 0) throw new AnchorBroadcastRejectedError("bitcoind_rpc_error: -6 Insufficient funds");
+        return { txid: TXID };
+      }
+    };
+    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/Insufficient/);
+    const failed = [...store.rows.values()][0];
+    expect(failed.status).toBe("failed");
     const rec = await anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT });
     expect(rec).toMatchObject({ status: "pending", txRef: TXID });
+    // The failed row is kept for audit; the retry is a separate row.
+    expect(rec.anchorId).not.toBe(failed.anchorId);
+    expect([...store.rows.values()].map((r) => r.status).sort()).toEqual(["failed", "pending"]);
+  });
+
+  it("an ambiguous broadcast error leaves the row 'broadcasting' and blocks a re-send (#158)", async () => {
+    const store = memStore();
+    const { provider: base, broadcasts } = scriptedProvider([]);
+    let n = 0;
+    const provider = {
+      ...base,
+      broadcastOpReturn: async (hex: string) => {
+        broadcasts.push(hex);
+        if (n++ === 0) throw Object.assign(new Error("fetch failed"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+        return { txid: TXID };
+      }
+    };
+    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/anchor_broadcast_ambiguous/);
+    expect([...store.rows.values()].map((r) => r.status)).toEqual(["broadcasting"]);
+    // A later tick must not spend again: the unreconciled row blocks it.
+    await expect(anchorCheckpoint(deps(provider, store), { epochId: "e", checkpointHash: CHECKPOINT })).rejects.toThrow(/unreconciled/);
+    expect(broadcasts).toHaveLength(1);
   });
 
   it("mainnet needs an explicit opt-in", async () => {

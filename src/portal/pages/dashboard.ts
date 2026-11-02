@@ -3,40 +3,31 @@
 
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
+import { icon } from "./design-system.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerDashboardPages(app: FastifyInstance): void {
 app.get("/portal/dashboard", async (_req, reply) => {
   const content = `
     <style>
-      .welcome-section {
-        padding: 20px 0 12px;
-      }
-      .welcome-section h1 {
-        margin: 0 0 4px; font-size: 22px; font-weight: 700;
-        background: linear-gradient(135deg, var(--text), var(--brand));
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text;
-      }
+      .welcome-section { padding: 4px 0 16px; }
+      .welcome-section h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
       .welcome-section .welcome-sub { color: var(--muted); font-size: 13px; margin: 0; }
       .quick-actions-grid {
         display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px;
       }
       .quick-action-card {
-        display: flex; flex-direction: column; align-items: center; gap: 8px;
-        padding: 18px 12px; text-align: center; text-decoration: none;
+        display: flex; align-items: center; gap: 12px;
+        padding: 14px; text-decoration: none; text-align: left;
         background: var(--card); border: 1px solid var(--card-border);
         border-radius: var(--radius-md); color: var(--text);
-        transition: all var(--transition-fast); cursor: pointer;
+        transition: border-color var(--transition-fast), background var(--transition-fast);
       }
-      .quick-action-card:hover {
-        border-color: var(--brand); transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(0,0,0,0.2);
-      }
+      .quick-action-card:hover { border-color: var(--border-strong); background: var(--bg-surface); color: var(--text); }
       .quick-action-card .qa-icon {
-        font-size: 24px; width: 44px; height: 44px;
+        width: 36px; height: 36px; flex: none;
         display: flex; align-items: center; justify-content: center;
-        border-radius: 10px; background: rgba(193, 120, 80, 0.1);
+        border-radius: var(--radius-sm); border: 1px solid var(--card-border); background: var(--bg-surface); color: var(--brand-2);
       }
       .quick-action-card .qa-label { font-size: 13px; font-weight: 600; }
       .quick-action-card .qa-desc { font-size: 11px; color: var(--muted); line-height: 1.4; }
@@ -47,22 +38,18 @@ app.get("/portal/dashboard", async (_req, reply) => {
         border: 1px solid var(--card-border); border-radius: var(--radius-md);
         transition: border-color var(--transition-fast);
       }
-      .status-dot {
-        width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
-        animation: pulse 2s ease-in-out infinite;
-      }
-      .status-dot.green { background: var(--ok); box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
-      .status-dot.yellow { background: var(--yellow); box-shadow: 0 0 6px rgba(251, 191, 36, 0.4); }
-      .status-dot.red { background: var(--danger); box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
-      .status-dot.gray { background: var(--muted); animation: none; }
-      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+      .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+      .status-dot.green { background: var(--ok); }
+      .status-dot.yellow { background: var(--yellow); }
+      .status-dot.red { background: var(--danger); }
+      .status-dot.gray { background: var(--muted); }
       .status-card .sc-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
       .status-card .sc-value { font-size: 13px; font-weight: 600; }
       .activity-feed { list-style: none; margin: 0; padding: 0; }
       .activity-feed li {
         display: flex; align-items: flex-start; gap: 10px;
         padding: 10px 0; border-bottom: 1px solid var(--card-border);
-        font-size: 12px; animation: fadeSlideIn 0.3s ease both;
+        font-size: 12px;
       }
       .activity-feed li:last-child { border-bottom: none; }
       .activity-feed .af-icon {
@@ -123,8 +110,8 @@ app.get("/portal/dashboard", async (_req, reply) => {
       </table>
     </div>
     </div>
-    <div id="emailVerifyCard" class="card hidden" style="border-color: rgba(245, 158, 11, 0.55); background: rgba(120, 53, 15, 0.22);">
-      <h3 style="margin-top:0;">&#9888; Email verification required</h3>
+    <div id="emailVerifyCard" class="callout warn hidden">
+      <h3>Email verification required</h3>
       <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
       <div class="row" style="margin-top:10px;">
         <button class="primary" id="emailVerifyNowBtn">Send verification email</button>
@@ -133,31 +120,27 @@ app.get("/portal/dashboard", async (_req, reply) => {
     <!-- Quick Actions -->
     <div class="quick-actions-grid">
       <a href="/portal/chat" class="quick-action-card">
-        <div class="qa-icon">&#9993;</div>
-        <div class="qa-label">Open Chat</div>
-        <div class="qa-desc">Talk to your AI assistant</div>
+        <div class="qa-icon">${icon("chat", 16)}</div>
+        <div><div class="qa-label">Open Chat</div><div class="qa-desc">Talk to your AI assistant</div></div>
       </a>
       <a href="/portal/reviews" class="quick-action-card">
-        <div class="qa-icon">&#9998;</div>
-        <div class="qa-label">Code Reviews</div>
-        <div class="qa-desc">Review escalated diffs</div>
+        <div class="qa-icon">${icon("reviews", 16)}</div>
+        <div><div class="qa-label">Code Reviews</div><div class="qa-desc">Review escalated diffs</div></div>
       </a>
       <a href="/portal/wallet" class="quick-action-card">
-        <div class="qa-icon">&#9733;</div>
-        <div class="qa-label">Wallet</div>
-        <div class="qa-desc">Credits, deposits, sends</div>
+        <div class="qa-icon">${icon("wallet", 16)}</div>
+        <div><div class="qa-label">Wallet</div><div class="qa-desc">Credits, deposits, sends</div></div>
       </a>
       <a href="/portal/settings" class="quick-action-card">
-        <div class="qa-icon">&#9881;</div>
-        <div class="qa-label">Settings</div>
-        <div class="qa-desc">Account and preferences</div>
+        <div class="qa-icon">${icon("settings", 16)}</div>
+        <div><div class="qa-label">Settings</div><div class="qa-desc">Account and preferences</div></div>
       </a>
     </div>
     <!-- Recent Activity Feed -->
     <div class="card">
-      <h3 style="margin-top:0;">&#9200; Recent Activity</h3>
+      <h3 style="margin-top:0;">Recent activity</h3>
       <ul class="activity-feed" id="activityFeed">
-        <li><div class="af-icon">&#8987;</div><div class="af-text">Loading recent activity...</div></li>
+        <li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text">Loading recent activity...</div></li>
       </ul>
     </div>
     <!-- Coordinator Operations -->
@@ -544,13 +527,13 @@ app.get("/portal/dashboard", async (_req, reply) => {
       var feed = document.getElementById("activityFeed");
       var items = (history || []).slice(0, 5);
       if (items.length === 0) {
-        feed.innerHTML = '<li><div class="af-icon">&#128203;</div><div class="af-text" style="color:var(--muted);">No recent activity. Start a chat or enroll a node to get going.</div></li>';
+        feed.innerHTML = '<li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text" style="color:var(--muted);">No recent activity. Start a chat or enroll a node to get going.</div></li>';
         return;
       }
       var html = "";
       for (var i = 0; i < items.length; i++) {
         var tx = items[i];
-        var icon = tx.type === "earn" ? "&#9889;" : tx.type === "spend" ? "&#9733;" : "&#9654;";
+        var icon = tx.type === "earn" ? '${icon("zap", 14)}' : tx.type === "spend" ? '${icon("arrowRight", 14)}' : '${icon("bitcoin", 14)}';
         var desc = tx.reason === "compute_contribution" ? "<strong>Compute contribution</strong> earned" :
                    tx.reason === "task_completion" ? "<strong>Task completed</strong>" :
                    tx.reason === "credit_purchase" ? "<strong>Credits purchased</strong>" :

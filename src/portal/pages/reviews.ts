@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
+import { icon } from "./design-system.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 /* ───────────────── Reviews page — Cloud Review Diff UI ───────────────── */
@@ -18,8 +19,8 @@ app.get("/portal/reviews", async (_req, reply) => {
         border:1px solid var(--card-border); background:var(--card);
         transition:all var(--transition-fast);
       }
-      .review-item:hover { border-color:var(--brand); transform:translateX(2px); }
-      .review-item.active { border-color:var(--brand); background:var(--bg-surface); border-left:3px solid var(--brand); }
+      .review-item:hover { border-color:var(--border-strong); }
+      .review-item.active { border-color:var(--brand-border); background:var(--brand-soft); }
       .review-item .ri-task { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
       .review-item .ri-meta { font-size:11px; color:var(--muted); margin-top:4px; display:flex; align-items:center; gap:6px; }
       /* ── Diff view (GitHub-style) ── */
@@ -80,33 +81,17 @@ app.get("/portal/reviews", async (_req, reply) => {
       .diff-stats .removed-count { color:#f85149; }
       /* ── Decision buttons ── */
       .review-actions { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
-      .review-actions button {
-        padding:12px 28px; font-size:14px; font-weight:700;
-        border-radius:var(--radius-md); letter-spacing:0.02em;
-        transition:all var(--transition-fast);
-      }
-      .btn-accept {
-        background:linear-gradient(140deg, #16a34a, #22c55e);
-        border:2px solid rgba(34, 197, 94, 0.7); color:white;
-        box-shadow:0 2px 8px rgba(34, 197, 94, 0.2);
-      }
-      .btn-accept:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(34, 197, 94, 0.35); transform:translateY(-2px); }
-      .btn-reject {
-        background:linear-gradient(140deg, #dc2626, #ef4444);
-        border:2px solid rgba(239, 68, 68, 0.7); color:white;
-        box-shadow:0 2px 8px rgba(239, 68, 68, 0.2);
-      }
-      .btn-reject:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(239, 68, 68, 0.35); transform:translateY(-2px); }
-      .btn-edit {
-        background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border:2px solid rgba(193, 120, 80, 0.7); color:white;
-        box-shadow:0 2px 8px rgba(193, 120, 80, 0.2);
-      }
-      .btn-edit:hover { filter:brightness(1.15); box-shadow:0 4px 16px rgba(193, 120, 80, 0.35); transform:translateY(-2px); }
+      .review-actions button { padding:9px 20px; font-size:13px; font-weight:600; border-radius:var(--radius-sm); }
+      .btn-accept { background:var(--ok); border:1px solid var(--ok); color:#111; }
+      .btn-accept:hover { filter:brightness(1.08); color:#111; }
+      .btn-reject { background:transparent; border:1px solid rgba(240,97,109,0.6); color:var(--danger); }
+      .btn-reject:hover { background:rgba(240,97,109,0.12); color:var(--danger); }
+      .btn-edit { background:var(--brand); border:1px solid var(--brand); color:#111; }
+      .btn-edit:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
       .edit-area {
         width:100%; min-height:300px; margin-top:10px;
         font-family:var(--font-mono); font-size:12px; line-height:1.7;
-        padding:12px; border:2px solid var(--brand);
+        padding:12px; border:1px solid var(--brand-border);
         border-radius:var(--radius-sm); background:#0d1117; color:var(--text);
         resize:vertical;
       }
@@ -120,7 +105,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       .empty-state {
         text-align:center; padding:60px 20px; color:var(--muted);
       }
-      .empty-state .empty-icon { font-size:42px; margin-bottom:12px; opacity:0.5; }
+      .empty-state .empty-icon { width:52px; height:52px; margin:0 auto 12px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); display:flex; align-items:center; justify-content:center; color:var(--muted); }
       .empty-state h3 { color:var(--text-secondary); margin:0 0 8px; font-size:16px; }
       .empty-state p { margin:0; font-size:13px; line-height:1.6; max-width:360px; display:inline-block; }
       .success-banner {
@@ -148,7 +133,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       <div class="reviews-detail">
         <div id="reviewDetail">
           <div class="card empty-state">
-            <div class="empty-icon">&#9998;</div>
+            <div class="empty-icon">${icon("edit", 28)}</div>
             <h3>No review selected</h3>
             <p>Select a review from the list to view the code diff and make a decision.</p>
           </div>
@@ -181,7 +166,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         badge.className = reviews.length > 0 ? "status-badge warn" : "status-badge ok";
       }
       if (reviews.length === 0) {
-        container.innerHTML = '<div class="empty-state" style="padding:32px 12px;"><div class="empty-icon">&#10003;</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
+        container.innerHTML = '<div class="empty-state" style="padding:32px 12px;"><div class="empty-icon">${icon("check", 28)}</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
         return;
       }
       var html = "";
@@ -292,11 +277,11 @@ app.get("/portal/reviews", async (_req, reply) => {
       html += '<div class="card" style="padding:0;overflow:hidden;">';
       html += '<div class="diff-container">';
       html += '<div class="diff-pane diff-pane-left">';
-      html += '<div class="diff-pane-header"><span class="diff-file-icon">&#128196;</span> Original (failed)</div>';
+      html += '<div class="diff-pane-header"><span class="diff-file-icon">${icon("file", 13)}</span> Original (failed)</div>';
       html += diff.leftHtml;
       html += '</div>';
       html += '<div class="diff-pane diff-pane-right">';
-      html += '<div class="diff-pane-header"><span class="diff-file-icon">&#128196;</span> Improved</div>';
+      html += '<div class="diff-pane-header"><span class="diff-file-icon">${icon("file", 13)}</span> Improved</div>';
       html += diff.rightHtml;
       html += '</div>';
       html += '</div>';
@@ -304,18 +289,18 @@ app.get("/portal/reviews", async (_req, reply) => {
       html += '</div>';
 
       if (data.explanation) {
-        html += '<div class="notes-section"><strong>&#128172; Cloud Model Notes:</strong><br>' + escapeHtml(data.explanation) + '</div>';
+        html += '<div class="notes-section"><strong>Cloud model notes:</strong><br>' + escapeHtml(data.explanation) + '</div>';
       }
       if (data.resolvedByModel) {
-        html += '<div class="notes-section"><strong>&#9881; Resolved by:</strong> ' + escapeHtml(data.resolvedByModel) + '</div>';
+        html += '<div class="notes-section"><strong>Resolved by:</strong> ' + escapeHtml(data.resolvedByModel) + '</div>';
       }
 
       html += '<div id="editArea"></div>';
 
       html += '<div class="review-actions" id="reviewActions">';
-      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">&#10003; Accept Changes</button>';
-      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">&#10007; Reject</button>';
-      html += '<button class="btn-edit" onclick="toggleEdit()">&#9998; Edit &amp; Accept</button>';
+      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">${icon("check", 14)} Accept changes</button>';
+      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">${icon("x", 14)} Reject</button>';
+      html += '<button class="btn-edit" onclick="toggleEdit()">${icon("edit", 14)} Edit &amp; accept</button>';
       html += '</div>';
 
       detail.innerHTML = html;

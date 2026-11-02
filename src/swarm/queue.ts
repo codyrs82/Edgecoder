@@ -174,7 +174,13 @@ export class SwarmQueue {
   }
 
   /** `accountId` = the agent's reward account (defaults to agentId), for #50 replica exclusion. */
-  claim(agentId: string, agentActiveModel?: string, accountId: string = agentId): Subtask | undefined {
+  claim(
+    agentId: string,
+    agentActiveModel?: string,
+    accountId: string = agentId,
+    /** Market gate: return false when the agent's ask is above the task's bid or the class doesn't match. */
+    canTake?: (subtask: Subtask) => boolean
+  ): Subtask | undefined {
     const now = Date.now();
     this.expireLeases(now);
     const unclaimed = this.tasks.filter(
@@ -182,7 +188,8 @@ export class SwarmQueue {
         !task.claimedBy &&
         (!task.claimableAfterMs || now >= task.claimableAfterMs) &&
         !task.excludeAgents?.includes(agentId) &&
-        !task.excludeAccounts?.includes(accountId)
+        !task.excludeAccounts?.includes(accountId) &&
+        (!canTake || canTake(task.subtask))
     );
     if (unclaimed.length === 0) return undefined;
 
@@ -218,6 +225,19 @@ export class SwarmQueue {
     this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
     void this.store?.markSubtaskClaimed(item.subtask.id, agentId, item.claimedAt).catch(() => undefined);
     return item.subtask;
+  }
+
+  /** Subtasks of a task still queued or running (0 once every subtask has a result or was removed). */
+  openSubtaskCount(taskId: string): number {
+    return this.tasks.reduce((n, t) => n + (t.subtask.taskId === taskId ? 1 : 0), 0);
+  }
+
+  /** Requester-visible result for a subtask (the latest one recorded), or undefined while it is still queued/running. */
+  getResult(subtaskId: string): SubtaskResult | undefined {
+    for (let i = this.results.length - 1; i >= 0; i--) {
+      if (this.results[i].subtaskId === subtaskId) return this.results[i];
+    }
+    return undefined;
   }
 
   complete(result: SubtaskResult): void {

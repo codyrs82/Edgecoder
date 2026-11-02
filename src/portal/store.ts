@@ -1195,6 +1195,12 @@ export class PortalStore {
     }));
   }
 
+  /** The user_id that owns a conversation, or null if it does not exist. Used for authz checks. */
+  async getConversationOwner(conversationId: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT user_id FROM portal_conversations WHERE conversation_id = $1`, [conversationId]);
+    return r.rows[0]?.user_id ?? null;
+  }
+
   async getConversationMessages(conversationId: string): Promise<PortalMessage[]> {
     const result = await this.pool.query(
       `SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms

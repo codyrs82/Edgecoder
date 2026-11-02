@@ -1,0 +1,40 @@
+# bitcoind (Bitcoin Knots) configuration for the EdgeCoder infrastructure node bundle.
+# scripts/infra-bootstrap.sh substitutes the double-underscore placeholders from deploy/infra/.env and
+# writes deploy/infra/generated/bitcoin.conf (mode 600: it carries the rpcauth line).
+# Edit this template, then re-run the bootstrap; do not edit the generated file.
+
+chain=__BITCOIN_CHAIN__
+server=1
+listen=1
+daemon=0
+# 0 keeps every block (required by electrs); otherwise the prune target in MiB.
+prune=__BITCOIN_PRUNE__
+dbcache=__BITCOIN_DBCACHE__
+txindex=0
+maxconnections=40
+
+# RPC auth: user:salt$hmac derived from BITCOIND_RPC_PASSWORD (same as share/rpcauth/rpcauth.py).
+# The cookie file stays enabled for bitcoin-cli inside the container.
+rpcauth=__BITCOIND_RPCAUTH__
+# Only the compose network (docker-compose.yml fixes it to 172.30.0.0/24) may call RPC.
+rpcallowip=172.30.0.0/24
+rpcthreads=8
+
+# ZMQ feeds lnd (and anything else on the compose network) blocks and transactions.
+zmqpubrawblock=tcp://0.0.0.0:28332
+zmqpubrawtx=tcp://0.0.0.0:28333
+zmqpubhashblock=tcp://0.0.0.0:28334
+
+# bitcoind only honours rpcbind/rpcport inside the section of the active chain, so each chain
+# gets the same values: RPC always answers on 8332 (BITCOIND_RPC_URL=http://bitcoind:8332).
+[main]
+rpcbind=0.0.0.0
+rpcport=8332
+
+[test]
+rpcbind=0.0.0.0
+rpcport=8332
+
+[signet]
+rpcbind=0.0.0.0
+rpcport=8332

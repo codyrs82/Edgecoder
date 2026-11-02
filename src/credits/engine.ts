@@ -29,7 +29,12 @@ export class CreditEngine {
     return [...(this.txByAccount.get(accountId) ?? [])];
   }
 
-  accrue(report: ComputeContributionReport, load: LoadSnapshot): CreditTransaction {
+  /** Sats value (msat) of everything this account earned, as locked at accrual time. */
+  earnedMsat(accountId: string): number {
+    return (this.txByAccount.get(accountId) ?? []).reduce((sum, tx) => sum + (tx.type === "earn" ? Math.floor(tx.msat ?? 0) : 0), 0);
+  }
+
+  accrue(report: ComputeContributionReport, load: LoadSnapshot, valuation?: { msatPerCredit: number }): CreditTransaction {
     if (this.seenReports.has(report.reportId)) {
       throw new Error("duplicate_contribution_report");
     }
@@ -51,7 +56,8 @@ export class CreditEngine {
       type: "earn",
       credits,
       reason: "compute_contribution",
-      relatedTaskId: report.taskId
+      relatedTaskId: report.taskId,
+      ...(valuation ? { msat: Math.round(credits * valuation.msatPerCredit) } : {})
     });
   }
 
@@ -81,6 +87,21 @@ export class CreditEngine {
     return this.addTx(accountId, { type: "spend", credits: debit, reason });
   }
 
+  /** #160: record `tx` unless a transaction with the same txId already exists (returns the existing one). */
+  addIfAbsent(tx: CreditTransaction): CreditTransaction {
+    const existing = (this.txByAccount.get(tx.accountId) ?? []).find((t) => t.txId === tx.txId);
+    if (existing) return existing;
+    const list = this.txByAccount.get(tx.accountId) ?? [];
+    list.push({ ...tx });
+    this.txByAccount.set(tx.accountId, list);
+    return tx;
+  }
+
+  /** Append an arbitrary row (fee-pool credits, distributions); idempotent on txId. */
+  record(tx: CreditTransaction): CreditTransaction {
+    return this.addIfAbsent(tx);
+  }
+
   private addTx(
     accountId: string,
     input: {
@@ -88,6 +109,7 @@ export class CreditEngine {
       credits: number;
       reason: string;
       relatedTaskId?: string;
+      msat?: number;
     }
   ): CreditTransaction {
     const tx: CreditTransaction = {
@@ -97,7 +119,8 @@ export class CreditEngine {
       credits: Math.round(input.credits * MICROS) / MICROS, // #108: 6 decimals, like Postgres
       reason: input.reason,
       relatedTaskId: input.relatedTaskId,
-      timestampMs: Date.now()
+      timestampMs: Date.now(),
+      ...(input.msat !== undefined ? { msat: input.msat } : {})
     };
     const existing = this.txByAccount.get(accountId) ?? [];
     existing.push(tx);

@@ -4,13 +4,19 @@
 import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
-import { totalmem } from "node:os";
+import { cpus, hostname, totalmem } from "node:os";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
+import { execFileSync } from "node:child_process";
 import { isDockerAvailable } from "../executor/docker-sandbox.js";
-import { enforceSandboxPolicy, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
+import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
+import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
+import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
+import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
@@ -28,6 +34,10 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
+// Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
+const coordinatorTrust = new CoordinatorTrustGate({
+  store: PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` })
+});
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
@@ -35,7 +45,8 @@ const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
-const AGENT_ID = process.env.AGENT_ID ?? "worker-1";
+// #96: default to a per-host id so N replicas without AGENT_ID (docker compose --scale) don't all register as "worker-1".
+const AGENT_ID = process.env.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
 const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
 const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
 const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
@@ -51,9 +62,44 @@ const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
 const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
-const SANDBOX_MODE: SandboxMode = (process.env.SANDBOX_MODE ?? (
-  (process.env.AGENT_MODE ?? "swarm-only") === "swarm-only" ? "docker" : "none"
-)) as SandboxMode;
+const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
+const hardwareProbe: Probe = (cmd, args) => {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+};
+/**
+ * Hardware profile reported at registration; the coordinator classifies it into a compute class
+ * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
+ * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
+ * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
+ * override detection (containers and unusual hardware).
+ */
+function buildHardwareProfile(): Record<string, unknown> {
+  const hw = detectHardware({ probe: hardwareProbe });
+  const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
+  const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
+  if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
+    return {
+      ...hardwareProfileFor(hw, undefined),
+      gpu: {
+        vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+        model: gpuModel || undefined,
+        vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
+        datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+      }
+    };
+  }
+  return hardwareProfileFor(hw, selectGpu(hw, process.env));
+}
+const HARDWARE_PROFILE = buildHardwareProfile();
+/** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
+const ASK_MSAT_PER_CREDIT = (() => {
+  const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+})();
 const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
@@ -96,6 +142,13 @@ let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
 // Attempt portal-based coordinator discovery at startup
 (async () => {
+  if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
+    const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined });
+    if (picked) {
+      console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
+      activeCoordinatorUrl = picked.url;
+    }
+  }
   if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
     if (discovered) {
@@ -116,6 +169,11 @@ const BACKOFF_MAX_MS = 30_000;
 const RECONNECT_PROBE_INTERVAL_MS = 15_000;
 const COORDINATOR_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let lastReconnectProbeMs = 0;
+
+// ── Registration state (see registration-policy.ts for why this is not every tick) ──
+const REGISTER_REFRESH_MS = registerRefreshMsFromEnv();
+let registeredWithUrl: string | null = null;
+let lastRegisteredAtMs = 0;
 
 function backoffMs(): number {
   return Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveFailures, 10), BACKOFF_MAX_MS);
@@ -686,34 +744,47 @@ async function loop(): Promise<void> {
           continue;
         }
 
-        const registerBody = {
-          agentId: AGENT_ID,
-          ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-          os: OS,
-          version: "0.1.0",
-          mode: effectiveMode,
-          registrationToken: AGENT_REGISTRATION_TOKEN,
-          localModelProvider: currentProvider,
-          clientType: AGENT_CLIENT_TYPE,
-          maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-          sandboxMode: SANDBOX_MODE,
-          powerTelemetry,
-          publicKeyPem: keys.publicKeyPem,
-          x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
-          ...(binaryIntegrity ? { binaryIntegrity } : {})
-        };
-        const registerResponse = (await post("/register", registerBody, {
-          extraHeaders: signedHeaders("/register", registerBody),
-        })) as {
-          accepted?: boolean;
-          meshToken?: string;
-        };
-        if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
-          if (meshAuthToken !== registerResponse.meshToken) {
-            meshAuthToken = registerResponse.meshToken;
-            console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-            if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
-            if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+        // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).
+        const trust = await coordinatorTrust.check(activeCoordinatorUrl);
+        if (!trust.trusted) {
+          console.error(`[agent:${AGENT_ID}] refusing to work for ${activeCoordinatorUrl}: ${describeTrustFailure(trust)}`);
+          if (trust.decision) process.exit(1); // key mismatch or unlisted: a policy refusal, not a transient error
+          throw new Error("coordinator_identity_unavailable"); // transient: backoff and failover below
+        }
+        if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, activeCoordinatorUrl, Date.now(), REGISTER_REFRESH_MS)) {
+          const registerBody = {
+            agentId: AGENT_ID,
+            ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+            os: OS,
+            version: "0.1.0",
+            mode: effectiveMode,
+            registrationToken: AGENT_REGISTRATION_TOKEN,
+            localModelProvider: currentProvider,
+            clientType: AGENT_CLIENT_TYPE,
+            maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+            sandboxMode: SANDBOX_MODE,
+            powerTelemetry,
+            publicKeyPem: keys.publicKeyPem,
+            x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+            hardwareProfile: HARDWARE_PROFILE,
+            ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
+            ...(binaryIntegrity ? { binaryIntegrity } : {})
+          };
+          const registerResponse = (await post("/register", registerBody, {
+            extraHeaders: signedHeaders("/register", registerBody),
+          })) as {
+            accepted?: boolean;
+            meshToken?: string;
+          };
+          registeredWithUrl = activeCoordinatorUrl;
+          lastRegisteredAtMs = Date.now();
+          if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
+            if (meshAuthToken !== registerResponse.meshToken) {
+              meshAuthToken = registerResponse.meshToken;
+              console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+              if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
+              if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+            }
           }
         }
 
@@ -958,6 +1029,20 @@ async function loop(): Promise<void> {
               console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
             }
           }
+          // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
+          const finishedAtMs = Date.now();
+          resultPayload.receipt = signReceiptAsAgent(
+            {
+              taskId: result.taskId,
+              subtaskId: result.subtaskId,
+              agentId: result.agentId,
+              agentPublicKeyPem: keys.publicKeyPem,
+              startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
+              finishedAtMs,
+              resultHash: hashResultOutput(result.output)
+            },
+            keys.privateKeyPem
+          );
 
           try {
             await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
@@ -1148,6 +1233,9 @@ async function loop(): Promise<void> {
             consecutiveFailures = 0;
             cacheCoordinatorUrl(activeCoordinatorUrl);
             bleMesh?.setOffline(false);
+            // The probe just registered: don't register again on the next online tick.
+            registeredWithUrl = activeCoordinatorUrl;
+            lastRegisteredAtMs = Date.now();
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
             await flushOfflineLedger();
@@ -1248,7 +1336,12 @@ async function loop(): Promise<void> {
     } catch (error) {
       consecutiveFailures++;
       console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
+      if (isAgentNotRegisteredError(error)) {
+        // Coordinator restarted or evicted us: register again on the next tick.
+        registeredWithUrl = null;
+      }
       if (coordinatorOnline && consecutiveFailures >= OFFLINE_THRESHOLD) {
+        registeredWithUrl = null;
         coordinatorOnline = false;
         bleMesh?.setOffline(true);
         try { localStore.deleteConfig("coordinator_url"); } catch {}

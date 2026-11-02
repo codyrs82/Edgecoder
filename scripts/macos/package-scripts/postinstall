@@ -24,6 +24,16 @@ fi
 echo "EdgeCoder installed. Configure runtime with:"
 echo "  sudo $CONFIG_WIZARD"
 
+# The shared installer (same options on macOS, Linux and Windows): detects the hardware and
+# creates the per-instance agent + Ollama daemons. Tokens are added later with
+# `sudo edgecoder-install apply --token <agent-id>=<token>`.
+NODE_BIN="$(command -v node || ls /opt/homebrew/bin/node /usr/local/bin/node 2>/dev/null | head -n1 || true)"
+if [[ -n "$NODE_BIN" ]]; then
+  printf '#!/bin/sh\nexec "%s" /opt/edgecoder/app/dist/install/cli.js "$@"\n' "$NODE_BIN" > /usr/local/bin/edgecoder-install
+  chmod 755 /usr/local/bin/edgecoder-install
+  "$NODE_BIN" /opt/edgecoder/app/dist/install/cli.js apply --from-package --app-dir /opt/edgecoder/app --node-bin "$NODE_BIN" || true
+fi
+
 # Bootstrap Ollama as part of package install (best-effort, non-fatal).
 if [[ -x "$OLLAMA_INSTALLER" ]]; then
   "$OLLAMA_INSTALLER" || true

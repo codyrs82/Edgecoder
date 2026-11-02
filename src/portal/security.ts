@@ -1,9 +1,63 @@
 // #10: portal security headers (helmet), CSRF origin checks and per-route rate limits.
 // Kept separate from server.ts so it can be tested with a small Fastify app.
+import { timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+
+/**
+ * Edge in front of the portal. With "cloudflare" the client IP for rate limiting is taken from
+ * `cf-connecting-ip` (Fly's proxy would otherwise report Cloudflare's edge IP for everyone).
+ * That header is only trusted when the request provably came through Cloudflare, i.e. when an
+ * origin-lock token is configured and present.
+ */
+export type EdgeMode = "none" | "cloudflare";
+export function edgeModeFrom(raw: string | undefined): EdgeMode {
+  return raw === "cloudflare" ? "cloudflare" : "none";
+}
+
+/**
+ * Origin lock: a Cloudflare Transform Rule sets this header to PORTAL_ORIGIN_LOCK_TOKEN on every
+ * request it forwards. When the token is configured the portal refuses requests without it, so the
+ * Fly hostname cannot be used to go around the WAF and rate limits. Exempt: /health (Fly's checks
+ * reach the machine directly) and callers that present the portal service token (coordinators).
+ */
+export const ORIGIN_LOCK_HEADER = "x-edgecoder-origin";
+const ORIGIN_LOCK_EXEMPT_PATHS = new Set(["/health"]);
+
+function headerEquals(value: unknown, expected: string): boolean {
+  if (typeof value !== "string" || !expected) return false;
+  const a = Buffer.from(value);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** True when the request carries the origin-lock header (so it was forwarded by the edge). */
+export function cameThroughEdge(req: Pick<FastifyRequest, "headers">, originLockToken: string | undefined): boolean {
+  return Boolean(originLockToken) && headerEquals(req.headers[ORIGIN_LOCK_HEADER], originLockToken as string);
+}
+
+/** The address rate limits key on: cf-connecting-ip behind a locked Cloudflare edge, else req.ip. */
+export function clientIp(
+  req: Pick<FastifyRequest, "headers" | "ip">,
+  opts: { edge?: EdgeMode; originLockToken?: string } & NodeJS.ProcessEnv = {}
+): string {
+  // Cloudflare: trust cf-connecting-ip only when the origin lock proves the request came through
+  // Cloudflare. Without a configured lock token the header is attacker-spoofable on the Fly origin,
+  // so fall back to req.ip rather than let it forge the rate-limit key (audit auth#4).
+  if (opts.edge === "cloudflare" && opts.originLockToken) {
+    const cf = req.headers["cf-connecting-ip"];
+    if (typeof cf === "string" && cf && cameThroughEdge(req, opts.originLockToken)) return cf;
+  }
+  // Fly: trust fly-client-ip only when PORTAL_TRUST_FLY_CLIENT_IP=true and running on Fly.
+  if (flyClientIpEnabled(opts)) {
+    const raw = req.headers[FLY_CLIENT_IP_HEADER];
+    const v = (Array.isArray(raw) ? raw[0] : raw) as unknown;
+    if (typeof v === "string" && isIP(v.trim())) return v.trim();
+  }
+  return req.ip;
+}
 
 /** Login/signup/verification/passkey/OAuth: 10 requests per minute per client IP. */
 export const AUTH_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
@@ -54,18 +108,6 @@ export function flyClientIpEnabled(env: NodeJS.ProcessEnv = process.env): boolea
   return env.PORTAL_TRUST_FLY_CLIENT_IP === "true" && Boolean((env.FLY_APP_NAME ?? "").trim());
 }
 
-export function clientIp(
-  req: { ip: string; headers: Record<string, unknown> },
-  env: NodeJS.ProcessEnv = process.env
-): string {
-  if (flyClientIpEnabled(env)) {
-    const raw = req.headers[FLY_CLIENT_IP_HEADER];
-    const v = (Array.isArray(raw) ? raw[0] : raw) as unknown;
-    if (typeof v === "string" && isIP(v.trim())) return v.trim();
-  }
-  return req.ip;
-}
-
 export function parseOriginList(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")
@@ -92,6 +134,12 @@ export interface PortalSecurityOptions {
   connectOrigins?: string[];
   /** Enforce the CSP instead of sending it as Report-Only (first release ships report-only). */
   enforceCsp?: boolean;
+  /** PORTAL_EDGE: which proxy sits in front of Fly (affects client-IP resolution). */
+  edge?: EdgeMode;
+  /** PORTAL_ORIGIN_LOCK_TOKEN: when set, requests must carry it in x-edgecoder-origin. */
+  originLockToken?: string;
+  /** PORTAL_SERVICE_TOKEN: callers presenting it bypass the origin lock (coordinators). */
+  serviceToken?: string;
 }
 
 /**
@@ -107,9 +155,22 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
       route.config = { ...(route.config ?? {}), rateLimit: limit } as typeof route.config;
     }
   });
+  if (opts.edge === "cloudflare" && !opts.originLockToken) {
+    app.log.warn("PORTAL_EDGE=cloudflare without PORTAL_ORIGIN_LOCK_TOKEN: cf-connecting-ip is trusted unverified; set the lock token (scripts/cloudflare-bootstrap.sh)");
+  }
+  if (opts.originLockToken) {
+    const lock = opts.originLockToken;
+    app.addHook("onRequest", async (req, reply) => {
+      const path = (req.raw.url ?? "").split("?")[0];
+      if (ORIGIN_LOCK_EXEMPT_PATHS.has(path)) return;
+      if (cameThroughEdge(req, lock)) return;
+      if (opts.serviceToken && headerEquals(req.headers["x-portal-service-token"], opts.serviceToken)) return;
+      return reply.code(403).send({ error: "origin_locked", detail: "This portal is only reachable through its public domain." });
+    });
+  }
   await app.register(rateLimit, {
     global: false,
-    keyGenerator: (req: FastifyRequest) => clientIp(req),
+    keyGenerator: (req: FastifyRequest) => clientIp(req, { edge: opts.edge, originLockToken: opts.originLockToken }),
     errorResponseBuilder: (_req, ctx) => ({ statusCode: 429, error: "rate_limited", retryAfter: ctx.after }),
   });
 
