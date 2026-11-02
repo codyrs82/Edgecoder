@@ -120,9 +120,68 @@ pub fn port_in_use(addr: &str) -> bool {
     }
 }
 
+/// True for the command line of an agent this app spawned: the bundled Node running the bundled
+/// `dist/index.js` (spawn_agent_process runs `<app>/Contents/Resources/agent/node/node dist/index.js`).
+pub fn is_bundled_agent_command(cmd: &str) -> bool {
+    cmd.contains(".app/Contents/Resources/agent/node/node") && cmd.trim_end().ends_with("dist/index.js")
+}
+
+/// An agent left running by an earlier launch of this app (the updater's relaunch and some quits
+/// skip our cleanup) holds the port and never got this launch's tokens. Stop it so this launch can
+/// start its own. Anything else on the port is left alone. Returns true when the port came free.
+#[cfg(target_os = "macos")]
+pub fn reclaim_stale_agent(addr: &str) -> bool {
+    use std::process::Command;
+    let port = addr.rsplit(':').next().unwrap_or("4301");
+    let Ok(out) = Command::new("/usr/sbin/lsof").args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"]).output() else {
+        return false;
+    };
+    let pids: Vec<String> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::to_string).collect();
+    if pids.is_empty() {
+        return false;
+    }
+    for pid in &pids {
+        let Ok(ps) = Command::new("/bin/ps").args(["-o", "command=", "-p", pid]).output() else {
+            return false;
+        };
+        if !is_bundled_agent_command(&String::from_utf8_lossy(&ps.stdout)) {
+            return false;
+        }
+    }
+    for pid in &pids {
+        eprintln!("Stopping agent left by an earlier launch (pid {pid})");
+        let _ = Command::new("/bin/kill").args(["-TERM", pid]).status();
+    }
+    for i in 0..50 {
+        if !port_in_use(addr) {
+            return true;
+        }
+        if i == 30 {
+            for pid in &pids {
+                let _ = Command::new("/bin/kill").args(["-KILL", pid]).status();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !port_in_use(addr)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reclaim_stale_agent(_addr: &str) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognises_only_the_bundled_agent() {
+        assert!(is_bundled_agent_command("/Applications/EdgeCoder.app/Contents/Resources/agent/node/node dist/index.js\n"));
+        assert!(!is_bundled_agent_command("/Applications/EdgeCoder.app/Contents/Resources/agent/node/node /Applications/EdgeCoder.app/Contents/Resources/agent/dist/apps/ide/provider-server.js"));
+        assert!(!is_bundled_agent_command("/opt/homebrew/bin/node dist/index.js"));
+        assert!(!is_bundled_agent_command("/usr/local/bin/ollama serve"));
+    }
     use std::net::TcpListener;
 
     #[test]

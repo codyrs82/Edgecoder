@@ -20,7 +20,15 @@ export const IDE_ROUTES = [
   { method: "GET", path: "/v1/ide/project", auth: true },
   { method: "POST", path: "/v1/ide/project", auth: true },
   { method: "POST", path: "/v1/ide/tool-approval", auth: true },
-  { method: "POST", path: "/v1/ide/chat", auth: true }
+  { method: "POST", path: "/v1/ide/chat", auth: true },
+  { method: "GET", path: "/v1/ide/fs/list", auth: true },
+  { method: "GET", path: "/v1/ide/fs/read", auth: true },
+  { method: "POST", path: "/v1/ide/fs/write", auth: true },
+  { method: "POST", path: "/v1/ide/fs/create", auth: true },
+  { method: "POST", path: "/v1/ide/fs/rename", auth: true },
+  { method: "POST", path: "/v1/ide/fs/delete", auth: true },
+  { method: "POST", path: "/v1/ide/fs/stat", auth: true },
+  { method: "GET", path: "/v1/ide/fs/git-status", auth: true }
 ] as const;
 
 export type IdeRoute = (typeof IDE_ROUTES)[number];

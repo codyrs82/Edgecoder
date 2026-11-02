@@ -17,7 +17,7 @@ use glob::glob;
 mod agent_guard;
 mod network_enrollment;
 mod token;
-use agent_guard::{port_in_use, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
+use agent_guard::{port_in_use, reclaim_stale_agent, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
 use network_enrollment::{NetworkEnrollment, NetworkEnrollmentSummary};
 
@@ -157,7 +157,7 @@ fn retry_local_agent(
     if !alive {
         control.guard.apply(AgentEvent::Exited);
     }
-    if port_in_use(AGENT_ADDR) {
+    if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
         return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
     }
     let child = control.agent_dir.as_ref().and_then(|dir| spawn_agent_process(dir, &control.tokens));
@@ -783,8 +783,9 @@ fn resolve_agent_dir(app: &tauri::App) -> Option<PathBuf> {
 
 fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard) -> (Option<Child>, Option<PathBuf>) {
     let agent_dir = resolve_agent_dir(app);
-    // #72: an existing listener never got this launch's tokens, so don't trust it.
-    if port_in_use(AGENT_ADDR) {
+    // #72: an existing listener never got this launch's tokens, so don't trust it. One left by an
+    // earlier launch of this app is stopped and replaced; anything else is left alone.
+    if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
         eprintln!("Something is already listening on :4301 — not spawning, inference token withheld");
         guard.apply(AgentEvent::PortBusy);
         return (None, agent_dir);
@@ -960,8 +961,22 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error running EdgeCoder desktop app");
+        .build(tauri::generate_context!())
+        .expect("error building EdgeCoder desktop app")
+        .run(|app, event| {
+            // Quit and the updater's relaunch end the app without destroying its window, which
+            // left the agent running and holding the port for the next launch.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AgentProcess>() {
+                    if let Ok(mut guard) = state.0.lock() {
+                        if let Some(ref mut child) = *guard {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

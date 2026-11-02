@@ -3,14 +3,22 @@
     onSend: (message: string) => void;
     placeholder?: string;
     disabled?: boolean;
+    /** A reply is streaming: the send button becomes Stop (typing stays allowed). */
+    streaming?: boolean;
+    onStop?: () => void;
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop }: Props = $props();
 
   let text = $state("");
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
 
   function handleKeydown(e: KeyboardEvent) {
     // isComposing: Enter that confirms an IME composition must not send.
+    if (e.key === "Escape" && streaming && onStop) {
+      e.preventDefault();
+      onStop();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
@@ -19,7 +27,7 @@
 
   function send() {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || disabled || streaming) return;
     onSend(trimmed);
     text = "";
     if (textareaEl) textareaEl.style.height = "auto";
@@ -43,11 +51,17 @@
     onkeydown={handleKeydown}
     oninput={autoResize}
   ></textarea>
-  <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-      <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
-    </svg>
-  </button>
+  {#if streaming && onStop}
+    <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+    </button>
+  {:else}
+    <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
+      </svg>
+    </button>
+  {/if}
 </div>
 
 <style>

@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging.js";
 import { registerMetrics } from "../../common/metrics.js";
 import { registerErrorTracking } from "../../common/error-tracking.js";
@@ -21,6 +21,7 @@ import { buildChatSystemPrompt, buildIdeAgentSystemPrompt, type SystemPromptCont
 import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor } from "./tool-executor.js";
+import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError } from "./project-fs.js";
 import { READ_TOOLS, type ToolName, type IdeStreamEvent } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -314,6 +315,57 @@ app.get("/v1/ide/project", async (_req, reply) => {
   return reply.send({ projectRoot: activeProjectRoot });
 });
 
+// ---------------------------------------------------------------------------
+// Project files for the editor and file tree, confined to the open project (project-fs.ts).
+// Mutations are POST: the desktop's CORS allows GET and POST only.
+// ---------------------------------------------------------------------------
+
+const FS_ERROR_STATUS: Record<ProjectFsError["code"], number> = {
+  escape: 403, not_found: 404, not_a_file: 400, not_a_dir: 400, too_large: 413, binary: 415, exists: 409, conflict: 409, invalid: 400,
+};
+
+async function withProjectFs(reply: FastifyReply, fn: (fs: ProjectFs) => unknown): Promise<unknown> {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  try {
+    return reply.send(await fn(new ProjectFs(activeProjectRoot)));
+  } catch (err) {
+    if (err instanceof ProjectFsError) return reply.status(FS_ERROR_STATUS[err.code]).send({ error: err.code, message: err.message });
+    if (err instanceof z.ZodError) return reply.status(400).send({ error: "invalid", message: err.message });
+    throw err;
+  }
+}
+
+const fsPath = z.string().max(4096);
+
+app.get("/v1/ide/fs/list", (req, reply) =>
+  withProjectFs(reply, (fs) => ({ entries: fs.list(z.object({ path: fsPath.default("") }).parse(req.query).path) })));
+app.get("/v1/ide/fs/read", (req, reply) =>
+  withProjectFs(reply, (fs) => fs.read(z.object({ path: fsPath.min(1) }).parse(req.query).path)));
+app.post("/v1/ide/fs/write", (req, reply) =>
+  withProjectFs(reply, (fs) => {
+    const b = z.object({ path: fsPath.min(1), content: z.string().max(MAX_EDITOR_FILE_BYTES), baseMtimeMs: z.number().optional() }).parse(req.body);
+    return fs.write(b.path, b.content, b.baseMtimeMs);
+  }));
+app.post("/v1/ide/fs/create", (req, reply) =>
+  withProjectFs(reply, (fs) => {
+    const b = z.object({ path: fsPath.min(1), kind: z.enum(["file", "dir"]) }).parse(req.body);
+    return fs.create(b.path, b.kind);
+  }));
+app.post("/v1/ide/fs/rename", (req, reply) =>
+  withProjectFs(reply, (fs) => {
+    const b = z.object({ from: fsPath.min(1), to: fsPath.min(1) }).parse(req.body);
+    return fs.rename(b.from, b.to);
+  }));
+app.post("/v1/ide/fs/delete", (req, reply) =>
+  withProjectFs(reply, (fs) => {
+    fs.remove(z.object({ path: fsPath.min(1) }).parse(req.body).path);
+    return { ok: true };
+  }));
+app.post("/v1/ide/fs/stat", (req, reply) =>
+  withProjectFs(reply, (fs) => ({ mtimes: fs.stat(z.object({ paths: z.array(fsPath).max(200) }).parse(req.body).paths) })));
+app.get("/v1/ide/fs/git-status", (_req, reply) =>
+  withProjectFs(reply, (fs) => fs.gitStatus() ?? { branch: null, files: {} }));
+
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
@@ -352,7 +404,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   const executor = new ToolExecutor(projectRoot, body.githubToken);
   const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
   const chatModel =
-    body.model || process.env.OLLAMA_MODEL || "qwen2.5:7b";
+    body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
 
   // Build system prompt
   let systemContent = "";
@@ -442,6 +494,8 @@ app.post("/v1/ide/chat", async (req, reply) => {
             content: m.content,
           })),
           stream: false,
+          // Each agent step is a model call; a thinking model's reasoning pass made them ~17x slower.
+          think: process.env.OLLAMA_THINK === "1",
         }),
         headersTimeout: 120_000,
         bodyTimeout: 120_000,

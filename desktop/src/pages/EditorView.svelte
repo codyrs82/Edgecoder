@@ -1,21 +1,37 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
-  import FileExplorer from "../components/FileExplorer.svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import FileTree from "../components/FileTree.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
-  import { createFile, type EditorFile } from "../lib/editor-store";
+  import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError } from "../lib/api";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
   import { monacoThemeDataOrBase } from "../lib/monaco-theme";
   import tokens from "@edgecoder/tokens/tokens.json";
 
+  interface Props {
+    projectRoot?: string | null;
+    onOpenProject?: () => void;
+  }
+  let { projectRoot = null, onOpenProject }: Props = $props();
+
+  /** Prefix for buffers that are not (yet) a project file, e.g. code opened from chat. */
+  const UNTITLED = "untitled:";
+  const POLL_MS = 2000;
+
   let editorContainer: HTMLDivElement | undefined = $state(undefined);
   let editor: any = $state(null);
   let monaco: any = $state(null);
+  /** One Monaco model per open file, so each tab keeps its undo history, cursor and scroll. */
+  const models = new Map<string, any>();
+  const viewStates = new Map<string, unknown>();
 
-  let files: EditorFile[] = $state([
-    createFile("main.py", '# Welcome to EdgeCoder\nprint("Hello, world!")'),
-  ]);
-  let activeFilePath: string | null = $state("main.py");
-  let explorerWidth = $state(200);
+  let files: EditorFile[] = $state([]);
+  let activeFilePath: string | null = $state(null);
+  let gitBranch: string | null = $state(null);
+  let gitFiles: Record<string, string> = $state({});
+  let treeRefresh = $state(0);
+  let notice: { kind: "error" | "info"; text: string } | null = $state(null);
+  let explorerWidth = $state(240);
 
   let chatPanelWidth = $state(380);
   let chatPanelVisible = $state(true);
@@ -25,13 +41,22 @@
   let activeFile = $derived(files.find((f) => f.path === activeFilePath) ?? null);
 
   let offTheme: (() => void) | undefined;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  /** Suppresses the dirty flag while the editor itself loads content into a model. */
+  let applyingExternal = false;
+
+  function showNotice(text: string, kind: "error" | "info" = "error") {
+    notice = { kind, text };
+    if (kind === "info") setTimeout(() => { if (notice?.text === text) notice = null; }, 4000);
+  }
 
   onMount(async () => {
-    // Restore chat panel state from localStorage
     const savedVisible = localStorage.getItem("edgecoder-chat-visible");
     if (savedVisible !== null) chatPanelVisible = savedVisible === "true";
     const savedWidth = localStorage.getItem("edgecoder-chat-width");
     if (savedWidth !== null) chatPanelWidth = Math.max(280, Number(savedWidth));
+    const savedExplorer = localStorage.getItem("edgecoder-explorer-width");
+    if (savedExplorer !== null) explorerWidth = Math.max(160, Number(savedExplorer));
 
     // #11: register bundled workers first so Monaco never needs eval/blob loaders.
     await import("../lib/monaco-setup");
@@ -45,8 +70,7 @@
 
     if (editorContainer) {
       editor = mon.editor.create(editorContainer, {
-        value: activeFile?.content ?? "",
-        language: activeFile?.language ?? "plaintext",
+        model: null,
         theme: `edgecoder-${resolvedTheme()}`,
         minimap: { enabled: false },
         fontSize: 14,
@@ -57,47 +81,300 @@
         automaticLayout: true,
         padding: { top: 12 },
       });
-
-      editor.onDidChangeModelContent(() => {
-        if (activeFile) {
-          activeFile.content = editor.getValue();
-          activeFile.dirty = true;
-          files = files;
-        }
-      });
+      editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => void saveActive());
+      editor.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyW, () => { if (activeFilePath) void closeFile(activeFilePath); });
     }
+    pollTimer = setInterval(() => void pollDisk(), POLL_MS);
   });
 
   onDestroy(() => {
     offTheme?.();
+    if (pollTimer) clearInterval(pollTimer);
+    for (const m of models.values()) m.dispose();
+    models.clear();
     editor?.dispose();
   });
 
-  function selectFile(path: string) {
+  // A different project closes everything from the old one.
+  let loadedRoot: string | null = null;
+  $effect(() => {
+    const root = projectRoot;
+    if (root === loadedRoot) return;
+    loadedRoot = root;
+    untrack(() => resetForProject(root));
+  });
+
+  function resetForProject(root: string | null) {
+    for (const m of models.values()) m.dispose();
+    models.clear();
+    viewStates.clear();
+    files = files.filter((f) => f.path.startsWith(UNTITLED));
+    activeFilePath = files[0]?.path ?? null;
+    if (editor) editor.setModel(activeFilePath ? models.get(activeFilePath) ?? null : null);
+    gitFiles = {};
+    gitBranch = null;
+    if (root) void refreshGit();
+  }
+
+  function modelFor(file: EditorFile): any {
+    let model = models.get(file.path);
+    if (!model && monaco) {
+      const uri = monaco.Uri.from({ scheme: file.path.startsWith(UNTITLED) ? "untitled" : "file", path: `/${file.path.replace(UNTITLED, "")}` });
+      model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(file.content, file.language, uri);
+      model.onDidChangeContent(() => {
+        if (applyingExternal) return;
+        const f = files.find((x) => x.path === file.path);
+        if (!f) return;
+        f.content = model.getValue();
+        f.dirty = f.content !== f.savedContent || f.path.startsWith(UNTITLED);
+      });
+      models.set(file.path, model);
+    }
+    return model;
+  }
+
+  function showFile(path: string) {
+    if (editor && activeFilePath && models.has(activeFilePath)) viewStates.set(activeFilePath, editor.saveViewState());
     activeFilePath = path;
     const file = files.find((f) => f.path === path);
-    if (file && editor && monaco) {
-      const model = monaco.editor.createModel(file.content, file.language);
-      editor.setModel(model);
+    if (!file || !editor) return;
+    editor.setModel(modelFor(file));
+    const vs = viewStates.get(path);
+    if (vs) editor.restoreViewState(vs);
+    editor.focus();
+  }
+
+  /** Open a project file from disk (or switch to it if it's already open). */
+  export async function openPath(path: string, line?: number) {
+    if (!files.some((f) => f.path === path)) {
+      try {
+        const disk = await fsRead(path);
+        files = [...files, createFile(path, disk.content, disk.mtimeMs)];
+      } catch (e) {
+        showNotice(e instanceof FsError && e.code === "binary" ? `${path} is a binary file.` : `Couldn't open ${path}: ${(e as Error).message}`);
+        return;
+      }
+    }
+    showFile(path);
+    if (line && editor) {
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
     }
   }
 
-  export function getActiveFileContext(): { path: string; content: string; language: string } | null {
+  async function saveActive() {
+    const file = activeFile;
+    if (!file) return;
+    if (file.path.startsWith(UNTITLED)) return saveUntitled(file);
+    await saveFile(file, false);
+  }
+
+  async function saveFile(file: EditorFile, force: boolean) {
+    try {
+      const res = await fsWrite(file.path, file.content, force ? undefined : file.mtimeMs);
+      file.savedContent = file.content;
+      file.mtimeMs = res.mtimeMs;
+      file.dirty = false;
+      file.diskChanged = false;
+      file.missing = false;
+      void refreshGit();
+    } catch (e) {
+      if (e instanceof FsError && e.code === "conflict") {
+        file.diskChanged = true;
+        const { ask } = await import("@tauri-apps/plugin-dialog");
+        const overwrite = await ask(`${file.path} was changed on disk (by the agent or another program) since you opened it.\n\nOverwrite it with your version?`, {
+          title: "File changed on disk",
+          kind: "warning",
+          okLabel: "Overwrite",
+          cancelLabel: "Keep editing",
+        });
+        if (overwrite) await saveFile(file, true);
+        return;
+      }
+      showNotice(`Couldn't save ${file.path}: ${(e as Error).message}`);
+    }
+  }
+
+  async function saveUntitled(file: EditorFile) {
+    if (!projectRoot) {
+      showNotice("Open a project folder to save this file.");
+      return;
+    }
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const name = file.path.slice(UNTITLED.length);
+    const target = await save({ defaultPath: `${projectRoot}/${name}`, title: "Save in project" });
+    if (!target) return;
+    const root = projectRoot.replace(/\/+$/, "");
+    if (!target.startsWith(`${root}/`)) {
+      showNotice("Save the file inside the open project folder.");
+      return;
+    }
+    const rel = target.slice(root.length + 1);
+    try {
+      const res = await fsWrite(rel, file.content);
+      const content = file.content;
+      await closeFile(file.path, true);
+      files = [...files, createFile(rel, content, res.mtimeMs)];
+      showFile(rel);
+      treeRefresh++;
+      void refreshGit();
+    } catch (e) {
+      showNotice(`Couldn't save ${rel}: ${(e as Error).message}`);
+    }
+  }
+
+  async function closeFile(path: string, force = false) {
+    const file = files.find((f) => f.path === path);
+    if (!file) return;
+    if (file.dirty && !force) {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      const discard = await ask(`${path.replace(UNTITLED, "")} has unsaved changes. Close it and lose them?`, {
+        title: "Unsaved changes",
+        kind: "warning",
+        okLabel: "Discard",
+        cancelLabel: "Cancel",
+      });
+      if (!discard) return;
+    }
+    const idx = files.findIndex((f) => f.path === path);
+    files = files.filter((f) => f.path !== path);
+    models.get(path)?.dispose();
+    models.delete(path);
+    viewStates.delete(path);
+    if (activeFilePath === path) {
+      const next = files[Math.min(idx, files.length - 1)];
+      activeFilePath = null;
+      if (next) showFile(next.path);
+      else editor?.setModel(null);
+    }
+  }
+
+  /** Replace a model's text as one undoable edit, without marking the file dirty. */
+  function setModelText(path: string, text: string) {
+    const model = models.get(path);
+    if (!model || model.getValue() === text) return;
+    applyingExternal = true;
+    try {
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text }], () => null);
+    } finally {
+      applyingExternal = false;
+    }
+  }
+
+  /** Pick up changes made on disk (by the agent, git or another editor) to open files. */
+  async function pollDisk() {
+    if (!projectRoot || document.hidden) return;
+    const open = files.filter((f) => !f.path.startsWith(UNTITLED));
+    if (open.length === 0) return;
+    let mtimes: Record<string, number | null>;
+    try {
+      mtimes = await fsStat(open.map((f) => f.path));
+    } catch {
+      return;
+    }
+    let changed = false;
+    for (const f of open) {
+      const m = mtimes[f.path];
+      if (m === undefined) continue;
+      if (m === null) {
+        if (!f.missing) { f.missing = true; changed = true; }
+        continue;
+      }
+      if (f.mtimeMs !== undefined && Math.abs(m - f.mtimeMs) <= 1) continue;
+      changed = true;
+      if (f.dirty) {
+        f.diskChanged = true;
+        continue;
+      }
+      await reloadFromDisk(f);
+    }
+    if (changed) {
+      treeRefresh++;
+      void refreshGit();
+    }
+  }
+
+  async function reloadFromDisk(f: EditorFile) {
+    try {
+      const disk = await fsRead(f.path);
+      f.content = disk.content;
+      f.savedContent = disk.content;
+      f.mtimeMs = disk.mtimeMs;
+      f.dirty = false;
+      f.diskChanged = false;
+      f.missing = false;
+      setModelText(f.path, disk.content);
+    } catch {
+      f.missing = true;
+    }
+  }
+
+  async function refreshGit() {
+    if (!projectRoot) return;
+    try {
+      const st = await fsGitStatus();
+      gitBranch = st.branch;
+      gitFiles = st.files;
+    } catch {
+      // not fatal: the tree just shows no markers
+    }
+  }
+
+  function handleRenamed(from: string, to: string) {
+    for (const f of files) {
+      if (f.path === from || f.path.startsWith(`${from}/`)) {
+        const newPath = to + f.path.slice(from.length);
+        const model = models.get(f.path);
+        models.delete(f.path);
+        // Monaco models are keyed by URI; reopen under the new name with the same text.
+        const content = model?.getValue() ?? f.content;
+        model?.dispose();
+        f.path = newPath;
+        f.language = detectLanguage(newPath);
+        f.content = content;
+        if (activeFilePath === from || activeFilePath?.startsWith(`${from}/`)) activeFilePath = newPath;
+      }
+    }
+    files = [...files];
+    if (activeFilePath) showFile(activeFilePath);
+    void refreshGit();
+  }
+
+  function handleDeleted(path: string) {
+    for (const f of [...files]) if (f.path === path || f.path.startsWith(`${path}/`)) void closeFile(f.path, true);
+    void refreshGit();
+  }
+
+  /** The open file and selection, for the chat panel. */
+  export function getActiveFileContext(): { path: string; content: string; language: string; selection?: { text: string; startLine: number; endLine: number } } | null {
     if (!activeFile) return null;
-    return { path: activeFile.path, content: activeFile.content, language: activeFile.language };
+    let selection: { text: string; startLine: number; endLine: number } | undefined;
+    const sel = editor?.getSelection();
+    const model = editor?.getModel();
+    if (sel && model && !sel.isEmpty()) {
+      selection = { text: model.getValueInRange(sel), startLine: sel.startLineNumber, endLine: sel.endLineNumber };
+    }
+    return { path: activeFile.path.replace(UNTITLED, ""), content: activeFile.content, language: activeFile.language, ...(selection ? { selection } : {}) };
   }
 
+  /** Open code (e.g. from chat) in a new untitled buffer. */
   export function openFile(path: string, content: string) {
-    const existing = files.find((f) => f.path === path);
-    if (existing) {
-      existing.content = content;
-      files = files;
-      selectFile(path);
-    } else {
-      const newFile = createFile(path, content);
-      files = [...files, newFile];
-      selectFile(path);
+    let name = path.replace(UNTITLED, "");
+    let key = `${UNTITLED}${name}`;
+    for (let n = 2; files.some((f) => f.path === key); n++) {
+      const dot = name.lastIndexOf(".");
+      key = `${UNTITLED}${dot > 0 ? `${name.slice(0, dot)}-${n}${name.slice(dot)}` : `${name}-${n}`}`;
     }
+    const file = createFile(key, content);
+    file.dirty = true;
+    files = [...files, file];
+    showFile(key);
+  }
+
+  /** Called when the agent reports it changed files: reload clean buffers now rather than at the next poll. */
+  export function onAgentChangedFiles() {
+    void pollDisk();
+    treeRefresh++;
   }
 
   export function toggleChatPanel() {
@@ -106,35 +383,31 @@
   }
 
   function handleApplyCode(code: string, language: string) {
-    const extMap: Record<string, string> = {
-      python: "py", javascript: "js", typescript: "ts",
-      rust: "rs", go: "go", html: "html", css: "css", json: "json",
-    };
-    if (activeFile) {
-      activeFile.content = code;
-      activeFile.dirty = true;
-      files = files;
-      if (editor) editor.setValue(code);
+    if (activeFile && models.has(activeFile.path)) {
+      // One undoable edit; the file stays unsaved until the user saves it.
+      const model = models.get(activeFile.path);
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: code }], () => null);
+      editor?.focus();
     } else {
-      const ext = extMap[language] || "txt";
-      openFile(`snippet.${ext}`, code);
+      const ext: Record<string, string> = { python: "py", javascript: "js", typescript: "ts", rust: "rs", go: "go", html: "html", css: "css", json: "json" };
+      openFile(`snippet.${ext[language] || "txt"}`, code);
     }
   }
 
-  function startResize(e: MouseEvent) {
+  function startResize(e: MouseEvent, which: "chat" | "explorer") {
     e.preventDefault();
     isResizing = true;
     const startX = e.clientX;
-    const startWidth = chatPanelWidth;
+    const startWidth = which === "chat" ? chatPanelWidth : explorerWidth;
 
     function onMouseMove(e: MouseEvent) {
-      const delta = startX - e.clientX;
-      chatPanelWidth = Math.max(280, Math.min(startWidth + delta, window.innerWidth * 0.5));
+      if (which === "chat") chatPanelWidth = Math.max(280, Math.min(startWidth + (startX - e.clientX), window.innerWidth * 0.5));
+      else explorerWidth = Math.max(160, Math.min(startWidth + (e.clientX - startX), window.innerWidth * 0.4));
     }
 
     function onMouseUp() {
       isResizing = false;
-      localStorage.setItem("edgecoder-chat-width", String(chatPanelWidth));
+      localStorage.setItem(which === "chat" ? "edgecoder-chat-width" : "edgecoder-explorer-width", String(which === "chat" ? chatPanelWidth : explorerWidth));
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     }
@@ -142,23 +415,47 @@
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }
+
+  function tabName(path: string): string {
+    return path.replace(UNTITLED, "").split("/").pop() ?? path;
+  }
 </script>
 
 <div class="editor-layout" class:resizing={isResizing}>
   <div class="explorer-panel" style="width: {explorerWidth}px">
-    <FileExplorer {files} activeFile={activeFilePath} onSelect={selectFile} />
+    {#if projectRoot}
+      <FileTree
+        {projectRoot}
+        activePath={activeFilePath}
+        {gitFiles}
+        refreshKey={treeRefresh}
+        onOpen={(p) => void openPath(p)}
+        onRenamed={handleRenamed}
+        onDeleted={handleDeleted}
+        onError={(m) => showNotice(m)}
+      />
+    {:else}
+      <div class="no-project">
+        <p>No folder open</p>
+        <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
+      </div>
+    {/if}
   </div>
+  <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "explorer")}></div>
   <div class="editor-panel">
     <div class="tab-bar">
-      {#each files as file}
-        <button
-          class="file-tab {activeFilePath === file.path ? 'active' : ''}"
-          onclick={() => selectFile(file.path)}
-        >
-          {file.path.split("/").pop()}{file.dirty ? " *" : ""}
-        </button>
+      {#each files as file (file.path)}
+        <div class="file-tab" class:active={activeFilePath === file.path} title={file.path.replace(UNTITLED, "")}>
+          <button class="tab-label" onclick={() => showFile(file.path)}>
+            <span class:missing={file.missing}>{tabName(file.path)}</span>
+          </button>
+          <button class="tab-close" aria-label="Close {tabName(file.path)}" onclick={() => void closeFile(file.path)}>
+            {#if file.dirty}<span class="dirty-dot">●</span>{:else}×{/if}
+          </button>
+        </div>
       {/each}
       <div class="tab-bar-spacer"></div>
+      {#if gitBranch}<span class="branch" title="Git branch">⎇ {gitBranch}</span>{/if}
       <button
         class="toggle-chat-btn"
         class:chat-active={chatPanelVisible}
@@ -170,15 +467,45 @@
         </svg>
       </button>
     </div>
-    <div class="monaco-container" bind:this={editorContainer}></div>
+    {#if notice}
+      <div class="notice" class:error={notice.kind === "error"} role="status">
+        <span>{notice.text}</span>
+        <button aria-label="Dismiss" onclick={() => (notice = null)}>×</button>
+      </div>
+    {/if}
+    {#if activeFile?.diskChanged}
+      <div class="notice" role="status">
+        <span>{activeFile.path} changed on disk. Your unsaved edits are kept.</span>
+        <button onclick={() => activeFile && void reloadFromDisk(activeFile)}>Reload from disk</button>
+      </div>
+    {:else if activeFile?.missing}
+      <div class="notice" role="status"><span>{activeFile.path} was deleted or moved on disk. Save to recreate it.</span></div>
+    {/if}
+    <div class="monaco-wrap">
+      <div class="monaco-container" bind:this={editorContainer}></div>
+      {#if files.length === 0}
+        <div class="editor-empty">
+          {#if projectRoot}
+            <p>Open a file from the tree, or ask the agent in the chat panel.</p>
+            <p class="hint">⌘S save · ⌘W close</p>
+          {:else}
+            <p>Open a folder to start.</p>
+            <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
+          {/if}
+        </div>
+      {/if}
+    </div>
   </div>
   {#if chatPanelVisible}
-    <div class="resize-handle" onmousedown={startResize}></div>
+    <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "chat")}></div>
     <div class="chat-panel" style="width: {chatPanelWidth}px">
       <EditorChatPanel
         bind:this={editorChatPanel}
+        {projectRoot}
         onApplyCode={handleApplyCode}
         getFileContext={getActiveFileContext}
+        onFilesChanged={onAgentChangedFiles}
+        onOpenPath={(p) => void openPath(p)}
       />
     </div>
   {/if}
@@ -195,9 +522,30 @@
     user-select: none;
   }
   .explorer-panel {
-    border-right: 0.5px solid var(--border);
     flex-shrink: 0;
     overflow: hidden;
+    background: var(--bg-base);
+  }
+  .no-project {
+    padding: 24px 16px;
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .open-btn {
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    border: 0.5px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .open-btn:hover {
+    border-color: var(--accent);
   }
   .editor-panel {
     flex: 1;
@@ -213,28 +561,62 @@
     border-bottom: 0.5px solid var(--border);
     overflow-x: auto;
     flex-shrink: 0;
+    min-height: 34px;
   }
   .tab-bar-spacer {
     flex: 1;
   }
   .file-tab {
-    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    border-bottom: 2px solid transparent;
+    border-right: 0.5px solid var(--border);
+    white-space: nowrap;
+  }
+  .file-tab.active {
+    border-bottom-color: var(--accent);
+    background: var(--bg-base);
+  }
+  .tab-label {
+    padding: 8px 4px 8px 12px;
     border: none;
     background: none;
     color: var(--text-secondary);
     font-size: 12px;
     cursor: pointer;
-    border-bottom: 2px solid transparent;
+  }
+  .file-tab.active .tab-label,
+  .tab-label:hover {
+    color: var(--text-primary);
+  }
+  .missing {
+    text-decoration: line-through;
+  }
+  .tab-close {
+    width: 20px;
+    height: 20px;
+    margin-right: 6px;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    line-height: 1;
+  }
+  .tab-close:hover {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+  }
+  .dirty-dot {
+    font-size: 10px;
+    color: var(--accent);
+  }
+  .branch {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-right: 10px;
     white-space: nowrap;
-    transition: all 0.1s;
-  }
-  .file-tab.active {
-    color: var(--text-primary);
-    border-bottom-color: var(--accent);
-    background: var(--bg-base);
-  }
-  .file-tab:hover:not(.active) {
-    color: var(--text-primary);
   }
   .toggle-chat-btn {
     width: 28px;
@@ -258,8 +640,51 @@
   .toggle-chat-btn.chat-active {
     color: var(--accent);
   }
+  .notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 12px;
+    font-size: 12px;
+    background: var(--bg-elevated);
+    border-bottom: 0.5px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .notice.error {
+    color: var(--danger, #f85149);
+  }
+  .notice button {
+    border: 0.5px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .monaco-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+  }
   .monaco-container {
     flex: 1;
+  }
+  .editor-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+    background: var(--bg-base);
+  }
+  .hint {
+    font-size: 11px;
   }
   .resize-handle {
     width: 4px;
@@ -267,6 +692,7 @@
     background: transparent;
     flex-shrink: 0;
     transition: background 0.15s;
+    border-left: 0.5px solid var(--border);
   }
   .resize-handle:hover,
   .resize-handle:active {
@@ -274,7 +700,6 @@
   }
   .chat-panel {
     flex-shrink: 0;
-    border-left: 0.5px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow: hidden;

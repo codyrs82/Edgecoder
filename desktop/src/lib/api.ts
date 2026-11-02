@@ -1027,3 +1027,51 @@ export async function streamIdeChat(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Project files (:4304 /v1/ide/fs/*), confined to the open project by the server
+// ---------------------------------------------------------------------------
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size?: number;
+}
+
+export interface FsFile {
+  path: string;
+  content: string;
+  mtimeMs: number;
+  size: number;
+}
+
+/** A failed file operation; `code` is the server's (conflict, exists, not_found, binary, too_large, ...). */
+export class FsError extends Error {
+  constructor(readonly code: string, message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function fsCall<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  const res = await ideFetch(`${ideBase()}${path}`, {
+    method,
+    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+  if (!res.ok) throw new FsError(data.error ?? "error", data.message ?? `${path}: ${res.status}`, res.status);
+  return data as T;
+}
+
+const q = (p: string) => encodeURIComponent(p);
+
+export const fsList = (path = "") => fsCall<{ entries: FsEntry[] }>("GET", `/v1/ide/fs/list?path=${q(path)}`).then((r) => r.entries);
+export const fsRead = (path: string) => fsCall<FsFile>("GET", `/v1/ide/fs/read?path=${q(path)}`);
+export const fsWrite = (path: string, content: string, baseMtimeMs?: number) =>
+  fsCall<{ path: string; mtimeMs: number }>("POST", "/v1/ide/fs/write", { path, content, baseMtimeMs });
+export const fsCreate = (path: string, kind: "file" | "dir") => fsCall<FsEntry>("POST", "/v1/ide/fs/create", { path, kind });
+export const fsRename = (from: string, to: string) => fsCall<{ from: string; to: string }>("POST", "/v1/ide/fs/rename", { from, to });
+export const fsDelete = (path: string) => fsCall<{ ok: true }>("POST", "/v1/ide/fs/delete", { path });
+export const fsStat = (paths: string[]) => fsCall<{ mtimes: Record<string, number | null> }>("POST", "/v1/ide/fs/stat", { paths }).then((r) => r.mtimes);
+export const fsGitStatus = () => fsCall<{ branch: string | null; files: Record<string, string> }>("GET", "/v1/ide/fs/git-status");

@@ -26,7 +26,7 @@
 
   /** IDE agent project state — shared across tabs */
   let projectRoot: string | null = $state(null);
-  let gitBranch: string | null = $state(null);
+  let chatStreaming = $state(false);
 
   $effect(() => {
     // Updates run whether or not anyone is signed in, so a broken sign-in can be fixed by an update.
@@ -51,7 +51,24 @@
   $effect(() => {
     if (user) {
       backendReady.then(() => {
-        ideGetProject().then(p => { if (p) projectRoot = p; });
+        ideGetProject().then(async (p) => {
+          if (p) {
+            projectRoot = p;
+            return;
+          }
+          // The IDE server forgets the folder when the agent restarts; reopen the last one.
+          let saved: string | null = null;
+          try { saved = localStorage.getItem("edgecoder-project-root"); } catch { /* storage unavailable */ }
+          if (saved) {
+            try {
+              await ideSetProject(saved);
+              projectRoot = saved;
+            } catch {
+              // moved or deleted: forget it
+              try { localStorage.removeItem("edgecoder-project-root"); } catch { /* ignore */ }
+            }
+          }
+        });
       });
     }
   });
@@ -139,8 +156,9 @@
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, title: "Open Project" });
       if (selected && typeof selected === "string") {
-        projectRoot = selected;
         await ideSetProject(selected);
+        projectRoot = selected;
+        try { localStorage.setItem("edgecoder-project-root", selected); } catch { /* storage unavailable */ }
       }
     } catch (err) {
       console.warn("Failed to open project dialog:", err);
@@ -206,11 +224,11 @@
           />
         </div>
         <div class="chat-main">
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} />
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} />
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
-        <EditorView bind:this={editorView} {projectRoot} {gitBranch} onOpenProject={openProject} />
+        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} />
       </div>
     </main>
 
@@ -222,7 +240,7 @@
             <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
           </svg>
         </button>
-        <ChatInput onSend={handleSend} />
+        <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} />
       </footer>
     {:else}
       <footer class="bottom-bar minimal">
