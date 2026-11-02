@@ -194,7 +194,6 @@ const COORDINATOR_ADMIN_EMAILS = new Set(
 export type ProviderName = "google" | "microsoft" | "github";
 const IOS_OAUTH_CALLBACK_PREFIX = C.IOS_OAUTH_CALLBACK_PREFIX;
 const MOBILE_OAUTH_TOKEN_TTL_MS = C.MOBILE_OAUTH_TOKEN_TTL_MS;
-const oauthNativeRedirectByState = new Map<string, string>();
 const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number }>();
 
 type OauthProviderConfig = {
@@ -274,21 +273,22 @@ function normalizeNativeOauthRedirect(value: string | undefined): string | null 
   }
 }
 
-function issueMobileOauthSessionToken(userId: string): string {
+async function issueMobileOauthSessionToken(userId: string): Promise<string> { // in Postgres: any instance can redeem it
   const token = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
-  mobileOauthSessionTokens.set(token, {
-    userId,
-    expiresAtMs: Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS
-  });
+  const expiresAtMs = Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS;
+  if (store) await store.issueMobileOauthToken(sha256Hex(token), userId, expiresAtMs);
+  else mobileOauthSessionTokens.set(token, { userId, expiresAtMs });
   return token;
 }
 
-function consumeMobileOauthSessionToken(token: string): { userId: string } | null {
+async function consumeMobileOauthSessionToken(token: string): Promise<{ userId: string } | null> {
+  if (store) {
+    const userId = await store.consumeMobileOauthToken(sha256Hex(token));
+    return userId ? { userId } : null;
+  }
   const record = mobileOauthSessionTokens.get(token);
-  if (!record) return null;
   mobileOauthSessionTokens.delete(token);
-  if (record.expiresAtMs <= Date.now()) return null;
-  return { userId: record.userId };
+  return record && record.expiresAtMs > Date.now() ? { userId: record.userId } : null;
 }
 
 function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -933,7 +933,7 @@ app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
 
-const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword };
+const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 

@@ -228,6 +228,11 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'warm'`);
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
+    // Native-app OAuth hand-off lives in Postgres: Cloudflare spreads one sign-in across portal instances.
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS native_redirect TEXT`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
+    );
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -502,25 +507,45 @@ export class PortalStore {
     provider: "google" | "apple" | "microsoft" | "github";
     redirectUri: string;
     expiresAtMs: number;
+    /** Deep link to hand the session back to a native app (desktop/iOS), if the flow started there. */
+    nativeRedirect?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now()]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri`,
+       RETURNING provider, redirect_uri, native_redirect`,
       [stateId, now]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { provider: row.provider, redirectUri: row.redirect_uri };
+    return { provider: row.provider, redirectUri: row.redirect_uri, ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}) };
+  }
+
+  /** One-time code a native app redeems for a session after OAuth (stored hashed, single use). */
+  async issueMobileOauthToken(tokenHash: string, userId: string, expiresAtMs: number): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_mobile_oauth_tokens WHERE expires_at_ms <= $1`, [Date.now()]);
+    await this.pool.query(
+      `INSERT INTO portal_mobile_oauth_tokens (token_hash, user_id, expires_at_ms) VALUES ($1,$2,$3)`,
+      [tokenHash, userId, expiresAtMs]
+    );
+  }
+
+  /** Redeem a mobile OAuth code; the DELETE ... RETURNING makes it single-use across instances. */
+  async consumeMobileOauthToken(tokenHash: string): Promise<string | null> {
+    const result = await this.pool.query(
+      `DELETE FROM portal_mobile_oauth_tokens WHERE token_hash = $1 AND expires_at_ms > $2 RETURNING user_id`,
+      [tokenHash, Date.now()]
+    );
+    return result.rows[0]?.user_id ?? null;
   }
 
   async upsertNodeEnrollment(input: {
