@@ -1,0 +1,21 @@
+# Regtest Lightning test network (see Dockerfile). Private only: no public services; the
+# coordinators reach the hub at hub.process.edgecoder-lnd-test.internal:8080 over Fly's 6PN.
+app = "edgecoder-lnd-test"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  bitcoind = "bitcoind"
+  hub = "lnd hub"
+  payee = "lnd payee"
+
+[[mounts]]
+  source = "lnddata"
+  destination = "/data"
+  processes = ["bitcoind", "hub", "payee"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

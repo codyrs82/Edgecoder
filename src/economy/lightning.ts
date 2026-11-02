@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { createHash, randomUUID } from "node:crypto";
-import { request } from "undici";
+import { Agent, request, type Dispatcher } from "undici";
 
 export interface CreateInvoiceInput {
   amountSats: number;
@@ -100,14 +100,28 @@ export function lndHashToHex(value: string | undefined): string | undefined {
   return buf.length === 32 ? buf.toString("hex") : undefined;
 }
 
+/**
+ * LND serves REST over a self-signed certificate. Pinning it (LND_TLS_CERT_BASE64: the node's
+ * tls.cert, base64) makes it the only CA trusted for that connection, so the macaroon is never sent
+ * to anything but the node. Without a pin the system CA store applies (e.g. a TLS-terminating proxy).
+ */
+export function lndDispatcher(certBase64: string | undefined): Dispatcher | undefined {
+  const pem = certBase64?.trim() ? Buffer.from(certBase64.trim(), "base64").toString("utf8") : "";
+  if (!pem) return undefined;
+  if (!pem.includes("BEGIN CERTIFICATE")) throw new Error("lnd_tls_cert_invalid");
+  return new Agent({ connect: { ca: pem } });
+}
+
 export class LndRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
-    private readonly macaroonHex: string
+    private readonly macaroonHex: string,
+    private readonly dispatcher?: Dispatcher
   ) {}
 
   async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
     const res = await request(`${this.baseUrl}/v1/invoices`, {
+      dispatcher: this.dispatcher,
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -142,6 +156,7 @@ export class LndRestProvider implements LightningProvider {
     let res;
     try {
       res = await request(`${this.baseUrl}/v1/channels/transactions`, {
+        dispatcher: this.dispatcher,
         method: "POST",
         headers: { "content-type": "application/json", "Grpc-Metadata-macaroon": this.macaroonHex },
         headersTimeout: timeoutMs,
@@ -185,6 +200,7 @@ export class LndRestProvider implements LightningProvider {
     const hashHex = lndHashToHex(paymentHash);
     if (!hashHex) return { settled: false };
     const res = await request(`${this.baseUrl}/v1/invoice/${hashHex}`, {
+      dispatcher: this.dispatcher,
       method: "GET",
       headers: {
         "Grpc-Metadata-macaroon": this.macaroonHex
@@ -402,7 +418,7 @@ export function createLightningProviderFromEnv(): LightningProvider {
     if (!baseUrl || !macaroonHex) {
       throw new Error("lnd_provider_missing_env");
     }
-    return new LndRestProvider(baseUrl, macaroonHex);
+    return new LndRestProvider(baseUrl, macaroonHex, lndDispatcher(process.env.LND_TLS_CERT_BASE64));
   }
   if (provider === "cln") {
     const baseUrl = process.env.CLN_REST_URL;
