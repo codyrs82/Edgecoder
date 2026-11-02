@@ -38,7 +38,11 @@ else if (cmd === "earn") {
   const r = await pool.query(`SELECT agent_id, account_id FROM agent_ownership WHERE agent_id = $1`, [args[0]]);
   await pool.end();
   out({ agentId: args[0], accountId: r.rows[0]?.account_id ?? null });
-} else if (cmd === "balance") out(await call("GET", `/credits/${args[0]}/balance`));
-else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: args[0], bolt11: args[1] }));
+} else if (cmd === "agents") {
+  // Registered agents, trimmed to what a proof-of-concept run needs.
+  const r = await call("GET", "/capacity");
+  out((r.body?.agents ?? []).map((a) => ({ agentId: a.agentId, version: a.version, sandboxMode: a.sandboxMode,
+    activeModel: a.activeModel, blacklisted: a.blacklisted, lastSeenAgoS: Math.round((Date.now() - a.lastSeenMs) / 1000) })));
+} else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: args[0], bolt11: args[1] }));
 else if (cmd === "payouts") out(await call("GET", `/economy/payouts/${args[0]}`));
 else { out({ error: "unknown_command" }); process.exit(2); }
