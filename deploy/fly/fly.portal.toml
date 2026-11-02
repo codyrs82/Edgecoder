@@ -19,6 +19,8 @@ primary_region = "ord"
   # #35: ordered list; the portal uses the first healthy one (cached 60 s). Custom domains with
   # Fly-issued certs (dns-only CNAMEs -> the seed apps); US primary, EU fallback.
   COORDINATOR_DISCOVERY_URLS = "https://coordinator.edgecoder.io,https://coordinator-eu.edgecoder.io"
+  # Portal admins (coordinator ops + admin APIs). Not secret — an authz allowlist of emails.
+  SYSTEM_ADMIN_EMAILS = "cody@rightwaymgmt.com,codyrs82@gmail.com"
 
 [http_service]
   internal_port = 4310
