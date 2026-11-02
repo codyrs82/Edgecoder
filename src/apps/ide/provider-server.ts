@@ -30,7 +30,10 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, computeOverview, contentToText, listNetworkModels, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { ConnectionManager } from "./connections.js";
+import { localBackend, networkBackend } from "../../inference-api/backends.js";
+import { registerCompatRoutes } from "../../inference-api/routes.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
@@ -664,6 +667,111 @@ app.post("/v1/ide/compute/intent", async (req, reply) => {
   const r = await purchaseStatus(networkDeps, intentId);
   return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
 });
+
+// --- Connect to compute: a port per connection, each fixed to one place to run ---
+
+const connections = new ConnectionManager({
+  ollamaHost: process.env.OLLAMA_HOST || "http://127.0.0.1:11434",
+  network: networkDeps ?? undefined,
+  log: (msg, extra) => app.log.warn({ extra }, msg),
+});
+app.addHook("onReady", async () => {
+  connections.load();
+  await connections.startAll();
+});
+app.addHook("onClose", async () => {
+  await connections.stopAll();
+});
+
+const connectionSchema = z.object({
+  name: z.string().min(1).max(80),
+  target: z.enum(["local", "mine", "network", "reserved"]),
+  model: z.string().min(1).max(200),
+  computeClass: z.enum(["any", "cpu", "apple", "gpu", "gpu.dc"]).optional(),
+  reservationId: z.string().max(100).optional(),
+  maxCSatsPerSecond: z.number().positive().max(1_000_000).optional(),
+  budgetCSats: z.number().positive().max(1e9).optional(),
+  port: z.number().int().min(1024).max(65535).optional(),
+  enabled: z.boolean().optional(),
+});
+
+app.get("/v1/ide/connections", async (_req, reply) => {
+  let localModels: string[] = [];
+  try {
+    localModels = (await ollamaTags()).models.map((m) => m.name).filter((n) => !/embed/i.test(n));
+  } catch {
+    // Ollama not running
+  }
+  return reply.send({ connections: connections.list(), localModels, networkConnected: !!networkDeps, nextPort: connections.nextPort() });
+});
+
+app.post("/v1/ide/connections", async (req, reply) => {
+  const body = connectionSchema.parse(req.body);
+  try {
+    return reply.send({ connection: await connections.create(body) });
+  } catch (err) {
+    return reply.status(400).send({ error: (err as Error).message });
+  }
+});
+
+app.patch("/v1/ide/connections/:id", async (req, reply) => {
+  const { id } = z.object({ id: z.string() }).parse(req.params);
+  const body = connectionSchema.partial().extend({ rotateKey: z.boolean().optional(), resetSpent: z.boolean().optional() }).parse(req.body ?? {});
+  try {
+    return reply.send({ connection: await connections.update(id, body) });
+  } catch (err) {
+    return reply.status(400).send({ error: (err as Error).message });
+  }
+});
+
+app.delete("/v1/ide/connections/:id", async (req, reply) => {
+  const { id } = z.object({ id: z.string() }).parse(req.params);
+  await connections.remove(id);
+  return reply.send({ ok: true });
+});
+
+// Reserved capacity (through this machine's agent): your leases, what's free per class, reserve, cancel.
+app.get("/v1/ide/reservations", async (_req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const r = await listReservations(networkDeps);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
+});
+
+app.post("/v1/ide/reservations", async (req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const body = z.object({ computeClass: z.enum(["cpu", "apple", "gpu", "gpu.dc"]), minutes: z.number().int().min(1).max(1440), model: z.string().max(200).optional(), minVramGb: z.number().min(0).max(1024).optional() }).parse(req.body);
+  const r = await createReservation(networkDeps, body);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
+});
+
+app.post("/v1/ide/reservations/cancel", async (req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const { reservationId } = z.object({ reservationId: z.string().min(1).max(100) }).parse(req.body);
+  const r = await cancelReservation(networkDeps, reservationId);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
+});
+
+// Anthropic Messages API on the main endpoint too (Claude Code): the model names where it runs.
+registerCompatRoutes(
+  app,
+  {
+    authenticate: async () => true, // the IDE token hook above already checked the caller
+    models: async () => [],
+    resolve: async (_ctx, model) => {
+      if (!model) return { status: 400, error: "model is required (a local model, network/<model>[@class] or mine/<model>)" };
+      const network = parseNetworkModel(model);
+      if (network || model.startsWith("mine/")) {
+        if (!networkDeps) return { status: 409, error: "This computer's agent isn't connected to the network." };
+        return network
+          ? { backend: networkBackend(networkDeps, network), model }
+          : { backend: networkBackend(networkDeps, { model: model.slice(5), target: "mine" }), model };
+      }
+      return { backend: localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", model), model };
+    },
+  },
+  "",
+  { openai: false }
+);
 
 const toolApprovalSchema = z.object({
   id: z.string().min(1),

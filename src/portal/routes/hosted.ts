@@ -1,0 +1,126 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+/**
+ * Hosted model endpoint: https://edgecoder.io/v1 (OpenAI and Anthropic APIs) for tools that can't
+ * reach a local port (Cursor calls models from its own servers) or machines without the app. An API
+ * key from the portal names the account; requests run on the network through a coordinator (portal
+ * service token) and are billed to that account in cSats, like requests from the app.
+ *
+ * Also: API key management and profile editing for signed-in users.
+ */
+
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import { request } from "undici";
+import { z } from "zod";
+import { listNetworkModels, parseNetworkModel, type NetworkDeps, type Transport } from "../../apps/ide/network-inference.js";
+import { networkBackend } from "../../inference-api/backends.js";
+import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
+import type { PortalStore } from "../store.js";
+
+export const API_KEY_PREFIX = "eck_";
+const MAX_KEYS = 20;
+export const hashApiKey = (key: string) => createHash("sha256").update(key).digest("hex");
+
+export interface HostedRoutesDeps {
+  store: PortalStore | undefined | null;
+  getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null>;
+  PORTAL_SERVICE_TOKEN: string | undefined;
+  EXTERNAL_HTTP_TIMEOUT_MS: number;
+  discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
+}
+
+/** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
+export function hostedTarget(model: string | undefined): { model: string; computeClass?: string; target?: "mine"; reservationId?: string } | null {
+  if (!model) return null;
+  if (model.startsWith("mine/")) return model.length > 5 ? { model: model.slice(5), target: "mine" } : null;
+  const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(model);
+  if (reserved) return { model: reserved[2], reservationId: reserved[1] };
+  return parseNetworkModel(model.startsWith("network/") ? model : `network/${model}`);
+}
+
+export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDeps): void {
+  const { store } = deps;
+
+  const coordinatorTransport =
+    (accountId: string): Transport =>
+    async (method, path, body, signal) => {
+      const [base] = await deps.discoverCoordinatorUrlsForPortal();
+      if (!base) return { status: 503, json: { error: "no_coordinator" } };
+      // Account routes take the account in the body when called with the portal's service token.
+      const payload = body !== undefined && path.startsWith("/account/") ? { ...(body as object), accountId } : body;
+      const res = await request(`${base.replace(/\/$/, "")}${path}`, {
+        method,
+        headers: { ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}), ...(payload !== undefined ? { "content-type": "application/json" } : {}) },
+        body: payload !== undefined ? JSON.stringify(payload) : undefined,
+        headersTimeout: 70_000,
+        bodyTimeout: 70_000,
+        signal,
+      });
+      const text = await res.body.text();
+      try {
+        return { status: res.statusCode, json: JSON.parse(text) };
+      } catch {
+        return { status: res.statusCode, json: { error: text.slice(0, 200) } };
+      }
+    };
+  const networkFor = (accountId: string): NetworkDeps => ({ forwarder: "", token: () => "", agentId: accountId, transport: coordinatorTransport(accountId) });
+
+  // ── The endpoint ──
+  registerCompatRoutes(app, {
+    authenticate: async (req) => {
+      const key = apiKeyOf(req);
+      if (!store || !key.startsWith(API_KEY_PREFIX)) return null;
+      const userId = await store.userForApiKeyHash(hashApiKey(key));
+      return userId ? { accountId: `acct-${userId}` } : null;
+    },
+    models: async (ctx) => (await listNetworkModels(networkFor(ctx.accountId)).catch(() => [])).map((m) => m.id),
+    resolve: async (ctx, model) => {
+      const target = hostedTarget(model);
+      if (!target) return { status: 400, error: "Name a model: network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
+      return { backend: networkBackend(networkFor(ctx.accountId), target), model: model! };
+    },
+  });
+
+  // ── API keys ──
+  app.get("/portal/api/keys", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await deps.getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    return reply.send({ keys: await store.listApiKeys(user.userId) });
+  });
+
+  app.post("/portal/api/keys", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await deps.getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const { name } = z.object({ name: z.string().trim().min(1).max(60) }).parse(req.body ?? {});
+    if ((await store.countApiKeys(user.userId)) >= MAX_KEYS) return reply.code(409).send({ error: "too_many_keys", max: MAX_KEYS });
+    const key = `${API_KEY_PREFIX}${randomBytes(32).toString("base64url")}`;
+    const keyId = randomUUID();
+    await store.createApiKey({ keyId, userId: user.userId, name, keyHash: hashApiKey(key), prefix: key.slice(0, 10) });
+    // The only time the key is shown.
+    return reply.send({ keyId, name, key });
+  });
+
+  app.delete("/portal/api/keys/:keyId", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await deps.getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const { keyId } = z.object({ keyId: z.string().uuid() }).parse(req.params);
+    return (await store.revokeApiKey(user.userId, keyId)) ? reply.send({ ok: true }) : reply.code(404).send({ error: "unknown_key" });
+  });
+
+  // ── Profile ──
+  app.post("/me/profile", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await deps.getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const { displayName } = z.object({ displayName: z.string().trim().max(80) }).parse(req.body ?? {});
+    // Plain text only: no markup or control characters.
+    if (/[<>\u0000-\u001f]/.test(displayName)) return reply.code(400).send({ error: "invalid_display_name" });
+    await store.setDisplayName(user.userId, displayName || null);
+    return reply.send({ ok: true, displayName: displayName || null });
+  });
+}

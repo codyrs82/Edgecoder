@@ -56,6 +56,11 @@ app.get("/portal/settings", async (_req, reply) => {
       <div class="card">
         <h2 style="margin-top:0;">Account</h2>
         <div id="accountLine" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
+        <label for="displayNameInput">Display name</label>
+        <div class="row">
+          <input id="displayNameInput" maxlength="80" placeholder="Your name" style="max-width:260px;" />
+          <button class="primary" id="saveProfileBtn">Save</button>
+        </div>
         <label>Theme</label>
         <select id="themeSelect" style="max-width:220px;">
           <option value="warm">Graphite (default)</option>
@@ -65,6 +70,31 @@ app.get("/portal/settings", async (_req, reply) => {
         <div class="row" style="margin-top:10px;">
           <button class="primary" id="saveThemeBtn">Save theme</button>
         </div>
+      </div>
+      <div class="card" style="grid-column:1 / -1;">
+        <h2 style="margin-top:0;">API keys</h2>
+        <p class="muted" style="margin-bottom:8px;">For tools that use EdgeCoder models from anywhere, including Cursor and Claude Code on machines without the app. Requests run on the network and are paid from your cSats.</p>
+        <div class="row" style="margin-bottom:10px;">
+          <input id="newKeyName" maxlength="60" placeholder="Key name, e.g. Cursor on laptop" style="max-width:300px;" />
+          <button class="primary" id="createKeyBtn">Create key</button>
+        </div>
+        <div id="newKeyBox" class="hidden card" style="margin-bottom:10px;">
+          <strong>Copy this key now. It won't be shown again.</strong>
+          <div class="row" style="margin-top:6px;"><code id="newKeyValue" style="word-break:break-all;"></code><button id="copyKeyBtn">Copy</button></div>
+        </div>
+        <table class="table"><thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody id="keysBody"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table>
+        <details style="margin-top:12px;">
+          <summary>How to connect your tools</summary>
+          <p class="muted">Base URL <code><span class="portal-origin"></span>/v1</code>. Model names: <code>network/&lt;model&gt;</code> (any machine), <code>network/&lt;model&gt;@gpu</code> (one class: cpu, apple, gpu, gpu.dc), <code>mine/&lt;model&gt;</code> (your own machines, free), <code>reserved/&lt;reservation id&gt;/&lt;model&gt;</code> (a machine you reserved). <a href="/portal/market">Prices by class are on the market page.</a></p>
+          <p><strong>Cursor</strong>: Settings → Models → API keys: turn on "OpenAI API key", paste the key, turn on "Override OpenAI Base URL" with <code><span class="portal-origin"></span>/v1</code>, then add a custom model such as <code>network/qwen2.5-coder:32b@gpu</code>.</p>
+          <p><strong>Claude Code</strong>:</p>
+          <pre>export ANTHROPIC_BASE_URL=<span class="portal-origin"></span>
+export ANTHROPIC_AUTH_TOKEN=&lt;your key&gt;
+export ANTHROPIC_MODEL=network/qwen3.5:9b
+export ANTHROPIC_SMALL_FAST_MODEL=network/qwen3.5:9b
+claude</pre>
+          <p><strong>Any OpenAI client</strong>: base URL <code><span class="portal-origin"></span>/v1</code>, the key as the API key.</p>
+        </details>
       </div>
       <div class="card">
         <h2 style="margin-top:0;">Passkey</h2>
@@ -94,10 +124,63 @@ app.get("/portal/settings", async (_req, reply) => {
     async function bootstrapSettings() {
       const me = await requireAuth();
       const user = me.user || {};
-      currentUserTheme = "warm";
+      currentUserTheme = user.uiTheme || "warm";
       document.getElementById("accountLine").textContent = (user.email || "unknown") + " | user ID: " + (user.userId || "n/a");
       document.getElementById("themeSelect").value = currentUserTheme;
+      document.getElementById("displayNameInput").value = user.displayName || "";
+      loadKeys();
+      for (const el of document.querySelectorAll(".portal-origin")) el.textContent = location.origin;
     }
+    function fmtDate(ms) { return ms ? new Date(ms).toLocaleString() : "never"; }
+    async function loadKeys() {
+      const body = document.getElementById("keysBody");
+      try {
+        const res = await api("/portal/api/keys");
+        body.textContent = "";
+        if (!res.keys.length) { body.innerHTML = '<tr><td colspan="5" class="muted">No keys yet.</td></tr>'; return; }
+        for (const k of res.keys) {
+          const tr = document.createElement("tr");
+          for (const v of [k.name, k.prefix + "…", fmtDate(k.createdAtMs), fmtDate(k.lastUsedMs)]) {
+            const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+          }
+          const td = document.createElement("td");
+          const btn = document.createElement("button"); btn.textContent = "Revoke";
+          btn.addEventListener("click", async () => {
+            if (!confirm("Revoke " + k.name + "? Tools using it stop working.")) return;
+            try { await api("/portal/api/keys/" + encodeURIComponent(k.keyId), { method: "DELETE" }); showToast("Key revoked."); loadKeys(); }
+            catch (err) { showToast("Could not revoke: " + String(err.message || err), true); }
+          });
+          td.appendChild(btn); tr.appendChild(td); body.appendChild(tr);
+        }
+      } catch (err) {
+        body.innerHTML = '<tr><td colspan="5" class="muted">Could not load keys.</td></tr>';
+      }
+    }
+    document.getElementById("createKeyBtn").addEventListener("click", async () => {
+      const name = document.getElementById("newKeyName").value.trim();
+      if (!name) { showToast("Name the key first.", true); return; }
+      try {
+        const res = await api("/portal/api/keys", { method: "POST", body: JSON.stringify({ name }) });
+        document.getElementById("newKeyValue").textContent = res.key;
+        document.getElementById("newKeyBox").classList.remove("hidden");
+        document.getElementById("newKeyName").value = "";
+        loadKeys();
+      } catch (err) {
+        showToast("Could not create key: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("copyKeyBtn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(document.getElementById("newKeyValue").textContent); showToast("Copied."); } catch { showToast("Copy failed; select the key and copy it.", true); }
+    });
+    document.getElementById("saveProfileBtn").addEventListener("click", async () => {
+      try {
+        const displayName = document.getElementById("displayNameInput").value.trim();
+        await api("/me/profile", { method: "POST", body: JSON.stringify({ displayName }) });
+        showToast("Profile saved.");
+      } catch (err) {
+        showToast("Could not save: " + String(err.message || err), true);
+      }
+    });
     document.getElementById("saveThemeBtn").addEventListener("click", async () => {
       try {
         await requireAuth();

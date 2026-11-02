@@ -111,6 +111,10 @@ export interface TaskProjectMeta {
   minMemoryGb?: number;
   /** Only an agent whose rolling reliability score (0..1) is at least this may claim. */
   minReliability?: number;
+  /** Run only on an agent owned by this account (your own machines; not billed). */
+  onlyAccountId?: string;
+  /** Run on the agent this reserved-capacity lease holds (src/economy/reservations.ts; the lease pays). */
+  reservationId?: string;
 }
 
 export interface MeshPeerIdentity {

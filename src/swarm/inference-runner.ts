@@ -8,11 +8,13 @@
  * which is what gets billed (measured seconds × the hardware tier's rate).
  */
 
-import { request } from "undici";
 import type { Subtask, SubtaskResult } from "../common/types.js";
+import { ollamaChat } from "../inference-api/ollama.js";
+import type { ChatMessage, ToolCall, ToolSpec } from "../inference-api/types.js";
 
 export interface InferenceInput {
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  messages: ChatMessage[];
+  tools?: ToolSpec[];
   maxTokens?: number;
   temperature?: number;
 }
@@ -46,13 +48,14 @@ export async function runInferenceSubtask(
   let pending = "";
   let lastFlush = Date.now();
   let full = "";
+  const toolCalls: ToolCall[] = [];
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
     const delta = pending;
     pending = "";
     lastFlush = Date.now();
     try {
-      await deps.post("/inference/chunks", { subtaskId: st.id, seq: seq++, delta, done, ...(error ? { error } : {}) });
+      await deps.post("/inference/chunks", { subtaskId: st.id, seq: seq++, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}) });
     } catch {
       // The final result still carries the whole reply.
     }
@@ -61,54 +64,12 @@ export async function runInferenceSubtask(
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), Math.max(5_000, st.timeoutMs));
   try {
-    const res = await request(`${deps.ollamaHost}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages: input.messages,
-        stream: true,
-        think: false,
-        options: {
-          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-          ...(input.maxTokens !== undefined ? { num_predict: input.maxTokens } : {}),
-        },
-      }),
-      signal: abort.signal,
-      headersTimeout: 120_000,
-      bodyTimeout: 120_000,
-    });
-    if (res.statusCode >= 400) {
-      const text = await res.body.text();
-      let msg = text;
-      try {
-        msg = (JSON.parse(text) as { error?: string }).error ?? text;
-      } catch {
-        // plain text
-      }
-      await flush(true, msg);
-      return { ...base, ok: false, output: "", error: `ollama: ${msg}`, durationMs: Date.now() - started };
-    }
-    let buf = "";
-    for await (const part of res.body) {
-      buf += Buffer.from(part as Uint8Array).toString("utf8");
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let chunk: { message?: { content?: string }; error?: string };
-        try {
-          chunk = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (chunk.error) throw new Error(chunk.error);
-        const delta = chunk.message?.content ?? "";
-        if (delta) {
-          full += delta;
-          pending += delta;
-          if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
-        }
+    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal)) {
+      if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
+      else if ("delta" in piece) {
+        full += piece.delta;
+        pending += piece.delta;
+        if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }
     await flush(true);

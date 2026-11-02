@@ -21,6 +21,8 @@ interface Stream {
   done: boolean;
   error?: string;
   doneAtMs?: number;
+  /** Tool calls the model made (Ollama format), sent with the last piece. */
+  toolCalls?: unknown[];
 }
 
 export class InferenceStreams {
@@ -44,7 +46,7 @@ export class InferenceStreams {
    * Apply a piece from the agent. Out-of-order pieces ahead of the next expected one are refused
    * (the agent sends them in order; a gap means a lost request, and the final result has it all).
    */
-  append(subtaskId: string, seq: number, delta: string, done = false, error?: string): "ok" | "duplicate" | "unknown" | "gap" | "too_large" {
+  append(subtaskId: string, seq: number, delta: string, done = false, error?: string, toolCalls?: unknown[]): "ok" | "duplicate" | "unknown" | "gap" | "too_large" {
     const s = this.streams.get(subtaskId);
     if (!s) return "unknown";
     if (seq < s.nextSeq) return "duplicate";
@@ -55,6 +57,7 @@ export class InferenceStreams {
       s.chunks.push(delta);
       s.chars += delta.length;
     }
+    if (toolCalls?.length) s.toolCalls = [...(s.toolCalls ?? []), ...toolCalls];
     if (done) this.finish(subtaskId, error);
     this.events.emit(subtaskId);
     return "ok";
@@ -71,7 +74,7 @@ export class InferenceStreams {
   }
 
   /** Pieces after index `after`; waits up to `waitMs` for something new when there is nothing yet. */
-  async read(subtaskId: string, after: number, waitMs: number): Promise<{ chunks: string[]; next: number; done: boolean; error?: string } | null> {
+  async read(subtaskId: string, after: number, waitMs: number): Promise<{ chunks: string[]; next: number; done: boolean; error?: string; toolCalls?: unknown[] } | null> {
     const s = this.streams.get(subtaskId);
     if (!s) return null;
     if (s.chunks.length <= after && !s.done && waitMs > 0) {
@@ -85,7 +88,7 @@ export class InferenceStreams {
         this.events.on(subtaskId, done);
       });
     }
-    return { chunks: s.chunks.slice(after), next: s.chunks.length, done: s.done, ...(s.error ? { error: s.error } : {}) };
+    return { chunks: s.chunks.slice(after), next: s.chunks.length, done: s.done, ...(s.error ? { error: s.error } : {}), ...(s.done && s.toolCalls ? { toolCalls: s.toolCalls } : {}) };
   }
 
   /** Drop streams that ended long ago. */

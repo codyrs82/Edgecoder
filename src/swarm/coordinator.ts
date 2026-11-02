@@ -108,6 +108,7 @@ import {
   type ComputeClassId,
   type HardwareClassification,
   type HardwareProfile, satsPerCreditForClass } from "../economy/compute-classes.js";
+import { ReservationBook, RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES, reservationPriceMsat, type Reservation, type ReservationEndReason } from "../economy/reservations.js";
 import { ComputeOrderBook, capabilityConstraints, clampToClassReference, meetsCapability, type AskCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
@@ -276,6 +277,8 @@ interface TaskBilling {
   refunded: boolean;
 }
 const taskBilling = new Map<string, TaskBilling>();
+/** Reserved-capacity leases: an account holds one agent for a set time, paid up front. */
+const reservations = new ReservationBook();
 
 /** Longest a subtask may run (the envelope default): the time the worst case is set aside for. */
 const SUBTASK_RESERVE_TIMEOUT_MS = 60_000;
@@ -1520,7 +1523,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
   ) {
     return;
   }
@@ -1580,6 +1583,20 @@ async function discoverBootstrapPeers(): Promise<string[]> {
   return candidates;
 }
 
+/** Whether `url` serves the coordinator identity `peerId` (so its announced URL is safe to use). */
+async function peerAnswersAs(url: string, peerId: string): Promise<boolean> {
+  try {
+    const res = await request(`${url}/identity`, { method: "GET", headersTimeout: 5_000, bodyTimeout: 5_000 });
+    if (res.statusCode !== 200) {
+      await res.body.text().catch(() => undefined);
+      return false;
+    }
+    return ((await res.body.json()) as { peerId?: string }).peerId === peerId;
+  } catch {
+    return false;
+  }
+}
+
 async function bootstrapPeerMesh(): Promise<void> {
   const candidates = await discoverBootstrapPeers();
   app.log.info({ candidateCount: candidates.length, candidates }, "mesh_bootstrap_start");
@@ -1622,8 +1639,10 @@ async function bootstrapPeerMesh(): Promise<void> {
         app.log.warn({ peerUrl, effectiveUrl, localUrl: normalizeUrl(COORDINATOR_PUBLIC_URL) }, "mesh_bootstrap_skip_same_url");
         continue;
       }
-      // Use the actual reachable URL for gossip if the self-reported URL is different
-      const gossipUrl = normalizedPeerUrl ?? effectiveUrl;
+      // Gossip on the peer's own public URL (its domain) when it answers there as the same peer;
+      // otherwise on the URL we reached it at (e.g. a bootstrap fly.dev host).
+      let gossipUrl = normalizedPeerUrl ?? effectiveUrl;
+      if (normalizedRemoteUrl && normalizedRemoteUrl !== normalizedPeerUrl && (await peerAnswersAs(normalizedRemoteUrl, remote.peerId))) gossipUrl = normalizedRemoteUrl;
       const admitted = mesh.addPeer(
         {
           peerId: remote.peerId,
@@ -3264,17 +3283,24 @@ app.post("/pull", async (req, reply) => {
     app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
     return reply.send(sandboxRejection);
   }
+  const pullerAccount = await rewardAccountForAgent(body.agentId);
+  // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
+  const lease = reservations.activeForAgent(body.agentId);
   const task = queue.claim(
     body.agentId,
     capability?.activeModel,
-    await rewardAccountForAgent(body.agentId),
+    pullerAccount,
     // The book enforces the bid's class, price and constraints. The subtask's own constraints are
     // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-    (subtask) =>
-      orderBook.canMatch(body.agentId, subtask.taskId).ok &&
-      meetsCapability(askCapabilityOf(body.agentId, capability), subtask.projectMeta) &&
+    (subtask) => {
       // Inference runs the requested model as is: only an agent that has it may take the job.
-      (subtask.kind !== "inference" || agentHasModel(capability, subtask.requestedModel))
+      const hasModel = subtask.kind !== "inference" || agentHasModel(capability, subtask.requestedModel);
+      const meta = subtask.projectMeta;
+      if (lease) return meta.reservationId === lease.id && hasModel;
+      if (meta.reservationId) return false;
+      if (meta.onlyAccountId) return meta.onlyAccountId === pullerAccount && hasModel;
+      return orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(body.agentId, capability), meta) && hasModel;
+    }
   );
   if (task) {
     // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
@@ -3402,6 +3428,8 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
   // records the credits actually accrued by the pricing formula, so balances reconcile.
   if (!r.ok) return;
+  // A reserved agent is paid by its lease (endReservation); your own machine isn't paid by you.
+  if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return;
   const cap = agentCapabilities.get(r.agentId);
   const eff = effectiveHardware(r.agentId, cap);
   const trade = claimedTradePrice.get(r.subtaskId);
@@ -3886,25 +3914,174 @@ const inferenceSubmitSchema = z.object({
   taskId: z.string().min(1).max(200),
   submitterAccountId: z.string().min(1).max(200),
   model: z.string().min(1).max(200),
-  messages: z.array(z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string().max(400_000) })).min(1).max(500),
+  // Ollama chat format: tool calls on assistant turns, tool results as role "tool".
+  messages: z
+    .array(z.object({ role: z.enum(["system", "user", "assistant", "tool"]), content: z.string().max(400_000), tool_calls: z.array(z.unknown()).max(64).optional(), tool_name: z.string().max(200).optional() }))
+    .min(1)
+    .max(2000),
+  tools: z.array(z.unknown()).max(256).optional(),
   maxTokens: z.number().int().positive().max(32_768).optional(),
   temperature: z.number().min(0).max(2).optional(),
   computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
   maxBidMsatPerCredit: z.number().positive().max(1e9).optional(),
   timeoutMs: z.number().int().min(10_000).max(INFERENCE_MAX_TIMEOUT_MS).default(180_000),
+  /** network: any agent, billed per second; mine: only the requester's own machines, not billed. */
+  target: z.enum(["network", "mine"]).default("network"),
+  /** Run on the agent a reserved-capacity lease holds (the lease pays). */
+  reservationId: z.string().min(1).max(100).optional(),
 });
+
+/**
+ * Whose account an /account/* call is for: the portal (service token) names it; otherwise the
+ * signing agent's owner (or the agent itself when it has no owner yet).
+ */
+async function callerAccount(req: any, routePath: string, requested?: string): Promise<{ accountId: string } | { status: number; error: string }> {
+  const headers = (req.headers ?? {}) as Record<string, unknown>;
+  if (hasPortalServiceToken(headers)) return requested ? { accountId: requested } : { status: 400, error: "account_required" };
+  const verified = await verifyAgentRequest(headers, routePath, req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+  if (!verified || verified === "rejected") return { status: 401, error: "signature_invalid" };
+  return { accountId: (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId };
+}
 
 /** The signing agent's owner account: cSats balance, earnings and recent activity (for the app's Compute page). */
 app.post("/account/summary", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/summary", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const caller = await callerAccount(req, "/account/summary", (req.body as { accountId?: string } | undefined)?.accountId);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const accountId = caller.accountId;
   const balance = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
   const history = pgStore ? await pgStore.creditHistory(accountId) : creditEngine.history(accountId);
   const recent = [...history].sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 25).map((t) => ({
     type: t.type, cSats: Number(t.credits), reason: t.reason, taskId: t.relatedTaskId, atMs: t.timestampMs,
   }));
   return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent });
+});
+
+// ── Reserved capacity (src/economy/reservations.ts) ──
+
+const reserveSchema = z.object({
+  accountId: z.string().max(200).optional(),
+  computeClass: z.enum(["cpu", "apple", "gpu", "gpu.dc"]),
+  minutes: z.number().int().min(RESERVATION_MIN_MINUTES).max(RESERVATION_MAX_MINUTES),
+  /** Only an agent that has this model installed. */
+  model: z.string().min(1).max(200).optional(),
+  minVramGb: z.number().min(0).max(1024).optional(),
+});
+
+/** Agents that could be reserved now for an account: online, of the class, not held, not its own. */
+async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
+  const now = Date.now();
+  const out: Array<{ agentId: string; ownerAccountId: string; tier?: string; creditsPerSecond: number; vramGb?: number; models: string[] }> = [];
+  for (const [id, cap] of agentCapabilities) {
+    if (activeBlacklistRecord(id) || now - cap.lastSeenMs > 60_000 || reservations.isHeld(id, now)) continue;
+    const eff = effectiveHardware(id, cap);
+    if ((eff?.computeClass ?? "cpu") !== cls) continue;
+    if (model && !agentHasModel(cap, model)) continue;
+    if (minVramGb && (eff?.vramGb ?? 0) < minVramGb) continue;
+    const owner = await rewardAccountForAgent(id);
+    if (owner === accountId) continue;
+    out.push({ agentId: id, ownerAccountId: owner, tier: eff?.tier, creditsPerSecond: eff?.creditsPerSecond ?? 1, vramGb: eff?.vramGb, models: [...(cap.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default") });
+  }
+  // Cheapest first (lowest tier weight), then most reliable.
+  return out.sort((a, b) => a.creditsPerSecond - b.creditsPerSecond || (hardwareVerifier.reliability(b.agentId) ?? 0) - (hardwareVerifier.reliability(a.agentId) ?? 0));
+}
+
+function publicReservation(r: Reservation) {
+  const cSats = (msat: number | undefined) => (msat === undefined ? undefined : msatToCSats(msat));
+  return {
+    id: r.id, computeClass: r.computeClass, tier: r.tier, model: r.model, agentId: r.agentId, startMs: r.startMs, endMs: r.endMs,
+    status: r.status, endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
+    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
+  };
+}
+
+/** End a lease: pay the agent's owner for the time held (minus the network fee) and refund the rest. */
+async function endReservation(id: string, reason: ReservationEndReason, atMs = Date.now()): Promise<Reservation | undefined> {
+  const r = reservations.end(id, atMs, reason);
+  if (!r) return undefined;
+  await pgStore?.upsertReservation(r).catch(() => undefined);
+  const used = r.usedMsat ?? 0;
+  const { agentMsat, feeMsat } = splitJobCost(used, NETWORK_FEE_BPS);
+  const heldSeconds = Math.max(0, ((r.endedAtMs ?? atMs) - r.startMs) / 1000);
+  try {
+    await accruePricedJob(
+      {
+        reportId: `reservation:${r.id}`, agentId: r.agentAccountId, sourceAgentId: r.agentId, taskId: `reservation:${r.id}`,
+        resourceClass: r.computeClass === "cpu" ? "cpu" : "gpu", cpuSeconds: r.computeClass === "cpu" ? heldSeconds : 0, gpuSeconds: r.computeClass === "cpu" ? 0 : heldSeconds,
+        success: true, qualityScore: 1, timestampMs: Date.now(), hardwareWeight: r.creditsPerSecond,
+      },
+      { agentMsat, feeMsat }
+    );
+    if ((r.refundMsat ?? 0) > 0) await grantCreditsIdempotent(r.accountId, msatToCSats(r.refundMsat!), `reservation_refund:${r.id}`, `reservation_refund:${r.id}`);
+  } catch (err) {
+    app.log.error({ err, reservationId: r.id }, "reservation_settle_failed");
+  }
+  app.log.info({ reservationId: r.id, reason, usedMsat: used, refundMsat: r.refundMsat }, "reservation_ended");
+  return r;
+}
+
+setInterval(async () => {
+  const now = Date.now();
+  for (const { r, reason } of reservations.due(now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs)) await endReservation(r.id, reason, now);
+  reservations.prune(now);
+}, 30_000).unref?.();
+
+/** Your leases, and what you could reserve now per class (cheapest agent and how many are free). */
+app.post("/account/reservations/list", async (req, reply) => {
+  const caller = await callerAccount(req, "/account/reservations/list", (req.body as { accountId?: string } | undefined)?.accountId);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const options: Record<string, { available: number; cSatsPerSecond?: number; tiers: string[]; models: string[] }> = {};
+  for (const cls of ["cpu", "apple", "gpu", "gpu.dc"] as ComputeClassId[]) {
+    const free = await reservableAgents(caller.accountId, cls);
+    options[cls] = {
+      available: free.length,
+      ...(free[0] ? { cSatsPerSecond: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(cls), free[0].creditsPerSecond)) } : {}),
+      tiers: [...new Set(free.map((a) => a.tier).filter((t): t is string => !!t))],
+      models: [...new Set(free.flatMap((a) => a.models))].sort(),
+    };
+  }
+  return reply.send({ reservations: reservations.listForAccount(caller.accountId).map(publicReservation), options, minMinutes: RESERVATION_MIN_MINUTES, maxMinutes: RESERVATION_MAX_MINUTES });
+});
+
+/** Reserve one agent of a class for some minutes, paid now in cSats (unused time comes back). */
+app.post("/account/reservations", async (req, reply) => {
+  const body = reserveSchema.parse(req.body);
+  const caller = await callerAccount(req, "/account/reservations", body.accountId);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const accountId = caller.accountId;
+  const [agent] = await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb);
+  if (!agent) return reply.code(409).send({ error: "no_agent_available", computeClass: body.computeClass });
+  const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
+  const prepaid = reservationPriceMsat(body.minutes, rate);
+  const id = `res-${randomUUID()}`;
+  try {
+    await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
+    req.log.error({ err }, "reservation_debit_failed");
+    return reply.code(500).send({ error: "credit_debit_failed" });
+  }
+  const now = Date.now();
+  const r: Reservation = {
+    id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
+    creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
+    ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
+  };
+  reservations.add(r);
+  await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
+  app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
+  return reply.send({ reservation: publicReservation(r) });
+});
+
+/** End a lease early; the unused time is refunded. */
+app.post("/account/reservations/cancel", async (req, reply) => {
+  const body = z.object({ reservationId: z.string().min(1).max(100), accountId: z.string().max(200).optional() }).parse(req.body);
+  const caller = await callerAccount(req, "/account/reservations/cancel", body.accountId);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const r = reservations.get(body.reservationId);
+  if (!r || r.accountId !== caller.accountId) return reply.code(404).send({ error: "unknown_reservation" });
+  const ended = r.status === "active" ? await endReservation(r.id, "cancelled") : r;
+  return reply.send({ reservation: publicReservation(ended ?? r) });
 });
 
 /** Models agents on the network can run now, with how many agents and the price per class. */
@@ -3931,49 +4108,73 @@ app.get("/inference/models", async () => {
   };
 });
 
-app.post("/inference/submit", async (req, reply) => {
+app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
   const body = inferenceSubmitSchema.parse(req.body);
   const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId, "/inference/submit");
   if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
   if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
   const accountId = submitter.accountId;
   const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
-  if (holders.length === 0) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+  // Unbilled targets: a lease you already paid for, or your own machines.
+  let onlyAccountId: string | undefined;
+  let reservationId: string | undefined;
+  if (body.reservationId) {
+    const lease = reservations.get(body.reservationId);
+    if (!lease || lease.accountId !== accountId || lease.status !== "active" || Date.now() >= lease.endMs) return reply.code(404).send({ error: "reservation_not_active" });
+    const cap = agentCapabilities.get(lease.agentId);
+    if (!agentHasModel(cap, body.model)) return reply.code(409).send({ error: "reserved_agent_lacks_model", model: body.model, models: cap?.localModelCatalog ?? [] });
+    reservationId = lease.id;
+  } else if (body.target === "mine") {
+    let own = 0;
+    for (const [id] of holders) if ((await rewardAccountForAgent(id)) === accountId) own++;
+    if (own === 0) return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model });
+    onlyAccountId = accountId;
+  } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
+    return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+  }
+  const billed = !reservationId && !onlyAccountId;
   const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
-  const taskClass = (resolved.computeClass ?? "any") as ComputeClassId | "any";
+  const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
   const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
-  const reserve = subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit);
-  try {
-    await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
-    req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
-    return reply.code(500).send({ error: "credit_debit_failed" });
+  const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
+  if (reserve > 0) {
+    try {
+      await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
+      req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
+    }
   }
   taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
-  const marketBid = orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {});
+  const marketBid = billed ? orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {}) : undefined;
   const subtask = queue.enqueueSubtask({
     taskId: body.taskId,
     kind: "inference",
     language: "python",
-    input: JSON.stringify({ messages: body.messages, maxTokens: body.maxTokens, temperature: body.temperature }),
+    input: JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens: body.maxTokens, temperature: body.temperature }),
     timeoutMs: body.timeoutMs,
     snapshotRef: "inference",
     requestedModel: body.model,
-    projectMeta: { projectId: `inference:${accountId}`, resourceClass, priority: 60, computeClass: taskClass, maxBidMsatPerCredit: marketBid.maxMsatPerCredit },
+    projectMeta: {
+      projectId: `inference:${accountId}`, resourceClass, priority: 60, computeClass: taskClass,
+      ...(marketBid ? { maxBidMsatPerCredit: marketBid.maxMsatPerCredit } : {}),
+      ...(onlyAccountId ? { onlyAccountId } : {}),
+      ...(reservationId ? { reservationId } : {}),
+    },
   });
   inferenceStreams.open(subtask.id);
   app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
-  return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve) });
+  return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
 });
 
 app.post("/inference/chunks", async (req, reply) => {
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/inference/chunks", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
   if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-  const body = z.object({ subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional() }).parse(req.body);
+  const body = z.object({ subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(), toolCalls: z.array(z.unknown()).max(64).optional() }).parse(req.body);
   if (queue.getClaim(body.subtaskId)?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
-  const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error);
+  const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
   return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
 });
 
@@ -4655,21 +4856,21 @@ async function createPaymentIntent(accountId: string, amountSats: number, wallet
 
 /** Buy cSats for the signing agent's owner: returns the invoice to pay. */
 app.post("/account/buy", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/buy", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+  const { amountSats, accountId: requested } = z.object({ amountSats: z.number().int().min(100).max(1_000_000), accountId: z.string().max(200).optional() }).parse(req.body);
+  const caller = await callerAccount(req, "/account/buy", requested);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
   if (!ECONOMY_PAYMENTS_ENABLED) return reply.code(503).send({ error: "payments_disabled" });
-  const { amountSats } = z.object({ amountSats: z.number().int().min(100).max(1_000_000) }).parse(req.body);
-  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const accountId = caller.accountId;
   const intent = await createPaymentIntent(accountId, amountSats);
   return reply.send({ intentId: intent.intentId, invoice: intent.invoiceRef, amountSats: intent.amountSats, cSats: intent.quotedCredits, feeSats: intent.coordinatorFeeSats, network: intent.network, expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000) });
 });
 
 /** State of one of the owner's purchases; checks with the Lightning node while it is unpaid. */
 app.post("/account/intent", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/account/intent", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-  const { intentId } = z.object({ intentId: z.string().min(1).max(100) }).parse(req.body);
-  const accountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId;
+  const { intentId, accountId: requested } = z.object({ intentId: z.string().min(1).max(100), accountId: z.string().max(200).optional() }).parse(req.body);
+  const caller = await callerAccount(req, "/account/intent", requested);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const accountId = caller.accountId;
   const intent = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? undefined;
   if (!intent || intent.accountId !== accountId) return reply.code(404).send({ error: "unknown_intent" });
   if (intent.status === "created") await reconcileIntent(intent);
@@ -6931,6 +7132,7 @@ export async function initCoordinator(): Promise<void> {
       for (const t of await storeRef.listMarketTrades(5_000)) marketHistory.recordTrade(t);
       for (const o of await storeRef.listMarketOrders()) marketOrders.set(`${o.accountId}:${o.side}`, o);
       hardwareVerifier.load(await storeRef.listHardwareVerifications());
+      reservations.load(await storeRef.listReservations());
       treasuryPolicy = await storeRef.latestTreasuryPolicy();
       const pendingIntents = await storeRef.listPendingPaymentIntents(500);
       for (const intent of pendingIntents) {

@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
+import type { Reservation } from "../economy/reservations.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
@@ -377,6 +378,13 @@ CREATE TABLE IF NOT EXISTS market_orders (
 -- agent (claimed vs granted tier, last challenge measurement, rolling evidence score), publishable as is.
 CREATE TABLE IF NOT EXISTS hardware_verifications (
   agent_id TEXT PRIMARY KEY,
+  record_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+-- Reserved capacity leases (src/economy/reservations.ts): one JSON record per lease.
+CREATE TABLE IF NOT EXISTS compute_reservations (
+  reservation_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
   record_json JSONB NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
@@ -2672,6 +2680,21 @@ export class PostgresStore {
   async listHardwareVerifications(limit = 100_000): Promise<HardwareVerificationRecord[]> {
     const r = await this.pool.query(`SELECT record_json FROM hardware_verifications ORDER BY updated_at_ms DESC LIMIT $1`, [limit]);
     return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as HardwareVerificationRecord);
+  }
+
+  // ── Reserved capacity ──
+  async upsertReservation(r: Reservation): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO compute_reservations (reservation_id, account_id, record_json, updated_at_ms) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (reservation_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [r.id, r.accountId, JSON.stringify(r), Date.now()]
+    );
+  }
+
+  /** Active leases and those ended in the last week. */
+  async listReservations(): Promise<Reservation[]> {
+    const r = await this.pool.query(`SELECT record_json FROM compute_reservations WHERE updated_at_ms > $1`, [Date.now() - 7 * 24 * 3_600_000]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as Reservation);
   }
 
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {

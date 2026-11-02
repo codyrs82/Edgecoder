@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { request } from "undici";
 import { z } from "zod";
 import type { MarketRoutesDeps } from "../server.js";
+import { registerHostedRoutes } from "./hosted.js";
 
 /**
  * Compute market API for the portal's /portal/market page: proxies the coordinator's
@@ -16,10 +17,10 @@ import type { MarketRoutesDeps } from "../server.js";
  * places standing orders on the user's credit account. Also serves the chart library from
  * node_modules so the page stays within the portal's script-src 'self' CSP.
  */
-export function registerMarketRoutes(
-  app: FastifyInstance,
-  { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser }: MarketRoutesDeps
-): void {
+export function registerMarketRoutes(app: FastifyInstance, deps: MarketRoutesDeps): void {
+  const { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser } = deps;
+  // Buying compute from your tools: the hosted model endpoint and its API keys.
+  registerHostedRoutes(app, deps);
   const require = createRequire(import.meta.url);
   let chartLib: string | null = null;
   const chartLibCandidates = (): string[] => {

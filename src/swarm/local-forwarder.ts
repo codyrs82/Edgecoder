@@ -30,8 +30,11 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/account/summary": "/account/summary",
   "/forward/account/buy": "/account/buy",
   "/forward/account/intent": "/account/intent",
+  "/forward/account/reservations": "/account/reservations",
+  "/forward/account/reservations/list": "/account/reservations/list",
+  "/forward/account/reservations/cancel": "/account/reservations/cancel",
 };
-const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const RESULT_PATH_RE = /^\/forward\/tasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/subtasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/result$/;
 
 export interface LocalForwarderDeps {

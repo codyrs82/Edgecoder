@@ -95,13 +95,20 @@ fn get_system_metrics() -> SystemMetrics {
     let memory_used_mb = sys.used_memory() / 1_048_576;
     let memory_total_mb = sys.total_memory() / 1_048_576;
 
+    // The disk holding the user's files. Summing every mount double-counts: on macOS the system
+    // and data volumes share one APFS container and each reports its full size.
     let disks = Disks::new_with_refreshed_list();
-    let disk_total_bytes: u64 = disks.iter().map(|d| d.total_space()).sum();
-    let disk_available_bytes: u64 = disks.iter().map(|d| d.available_space()).sum();
+    let mounts: Vec<(String, u64, u64)> = disks
+        .iter()
+        .map(|d| (d.mount_point().to_string_lossy().into_owned(), d.total_space(), d.available_space()))
+        .collect();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let (disk_total_bytes, disk_available_bytes) = disk_for_path(&mounts, &home).unwrap_or((0, 0));
     let disk_used_bytes = disk_total_bytes.saturating_sub(disk_available_bytes);
 
-    let disk_total_gb = disk_total_bytes as f64 / 1_073_741_824.0;
-    let disk_used_gb = disk_used_bytes as f64 / 1_073_741_824.0;
+    // Decimal GB, as Finder and About This Mac show it.
+    let disk_total_gb = disk_total_bytes as f64 / 1e9;
+    let disk_used_gb = disk_used_bytes as f64 / 1e9;
 
     SystemMetrics {
         cpu_usage_percent,
@@ -110,6 +117,17 @@ fn get_system_metrics() -> SystemMetrics {
         disk_used_gb,
         disk_total_gb,
     }
+}
+
+/// (total, available) bytes of the mount that holds `path`: the longest mount point it sits under.
+fn disk_for_path(mounts: &[(String, u64, u64)], path: &str) -> Option<(u64, u64)> {
+    mounts
+        .iter()
+        .filter(|(m, total, _)| {
+            *total > 0 && (m == "/" || path == m || path.starts_with(&format!("{}/", m.trim_end_matches('/'))))
+        })
+        .max_by_key(|(m, _, _)| m.len())
+        .map(|(_, t, a)| (*t, *a))
 }
 
 /// #72: the inference token goes to the webview only while :4301 is the agent this app spawned.
@@ -990,6 +1008,18 @@ fn main() {
 
 #[cfg(test)]
 mod node_resolution_tests {
+    #[test]
+    fn disk_is_the_mount_holding_home_not_the_sum_of_volumes() {
+        let mounts = vec![
+            ("/".to_string(), 994_000_000_000, 167_000_000_000),
+            ("/System/Volumes/Data".to_string(), 994_000_000_000, 167_000_000_000),
+            ("/Volumes/USB".to_string(), 64_000_000_000, 10_000_000_000),
+        ];
+        assert_eq!(super::disk_for_path(&mounts, "/Users/me"), Some((994_000_000_000, 167_000_000_000)));
+        assert_eq!(super::disk_for_path(&mounts, "/Volumes/USB/x"), Some((64_000_000_000, 10_000_000_000)));
+        assert_eq!(super::disk_for_path(&mounts, "/Volumes/USBX"), Some((994_000_000_000, 167_000_000_000)));
+    }
+
     use super::parse_node_major;
 
     #[test]

@@ -53,7 +53,16 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/projects/new", auth: true },
   { method: "GET", path: "/v1/ide/compute", auth: true },
   { method: "POST", path: "/v1/ide/compute/buy", auth: true },
-  { method: "POST", path: "/v1/ide/compute/intent", auth: true }
+  { method: "POST", path: "/v1/ide/compute/intent", auth: true },
+  { method: "GET", path: "/v1/ide/connections", auth: true },
+  { method: "POST", path: "/v1/ide/connections", auth: true },
+  { method: "PATCH", path: "/v1/ide/connections/:id", auth: true },
+  { method: "DELETE", path: "/v1/ide/connections/:id", auth: true },
+  { method: "GET", path: "/v1/ide/reservations", auth: true },
+  { method: "POST", path: "/v1/ide/reservations", auth: true },
+  { method: "POST", path: "/v1/ide/reservations/cancel", auth: true },
+  { method: "POST", path: "/v1/messages", auth: true },
+  { method: "POST", path: "/v1/messages/count_tokens", auth: true }
 ] as const;
 
 export type IdeRoute = (typeof IDE_ROUTES)[number];

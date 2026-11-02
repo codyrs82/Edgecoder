@@ -233,6 +233,13 @@ export class PortalStore {
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
     );
+    // API keys for the hosted model endpoint (/v1): only a hash is kept.
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_api_keys (
+         key_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+         created_at_ms BIGINT NOT NULL, last_used_ms BIGINT, revoked_at_ms BIGINT)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_api_keys_user_idx ON portal_api_keys (user_id)`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -354,6 +361,46 @@ export class PortalStore {
 
   async setUserTheme(userId: string, theme: "warm" | "midnight" | "emerald"): Promise<void> {
     await this.pool.query(`UPDATE portal_users SET ui_theme = $2 WHERE user_id = $1`, [userId, theme]);
+  }
+
+  async setDisplayName(userId: string, displayName: string | null): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET display_name = $2 WHERE user_id = $1`, [userId, displayName]);
+  }
+
+  // ── API keys (hosted /v1 endpoint) ──
+  async createApiKey(k: { keyId: string; userId: string; name: string; keyHash: string; prefix: string }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_api_keys (key_id, user_id, name, key_hash, prefix, created_at_ms) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [k.keyId, k.userId, k.name, k.keyHash, k.prefix, Date.now()]
+    );
+  }
+
+  async listApiKeys(userId: string): Promise<Array<{ keyId: string; name: string; prefix: string; createdAtMs: number; lastUsedMs?: number }>> {
+    const r = await this.pool.query(
+      `SELECT key_id, name, prefix, created_at_ms, last_used_ms FROM portal_api_keys WHERE user_id = $1 AND revoked_at_ms IS NULL ORDER BY created_at_ms DESC`,
+      [userId]
+    );
+    return r.rows.map((row) => ({ keyId: row.key_id, name: row.name, prefix: row.prefix, createdAtMs: Number(row.created_at_ms), ...(row.last_used_ms ? { lastUsedMs: Number(row.last_used_ms) } : {}) }));
+  }
+
+  async countApiKeys(userId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT count(*)::int AS n FROM portal_api_keys WHERE user_id = $1 AND revoked_at_ms IS NULL`, [userId]);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
+  async revokeApiKey(userId: string, keyId: string): Promise<boolean> {
+    const r = await this.pool.query(`UPDATE portal_api_keys SET revoked_at_ms = $3 WHERE key_id = $1 AND user_id = $2 AND revoked_at_ms IS NULL`, [keyId, userId, Date.now()]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** The owner of a live key (and marks it used, at most once a minute). */
+  async userForApiKeyHash(keyHash: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT key_id, user_id, last_used_ms FROM portal_api_keys WHERE key_hash = $1 AND revoked_at_ms IS NULL`, [keyHash]);
+    const row = r.rows[0];
+    if (!row) return null;
+    const now = Date.now();
+    if (!row.last_used_ms || now - Number(row.last_used_ms) > 60_000) await this.pool.query(`UPDATE portal_api_keys SET last_used_ms = $2 WHERE key_id = $1`, [row.key_id, now]);
+    return row.user_id as string;
   }
 
   async setUserRole(userId: string, role: "user" | "admin"): Promise<void> {
