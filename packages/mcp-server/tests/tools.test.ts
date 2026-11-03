@@ -122,7 +122,8 @@ describe("MCP identity and config", () => {
     const src = apiKeySource({ http, url: "http://localhost", keyPath, name: "Test agent" });
     const apiKey = await src.current();
     expect(apiKey).toMatch(/^eck_/);
-    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX file modes.
+    if (process.platform !== "win32") expect(statSync(keyPath).mode & 0o777).toBe(0o600);
     const saved = JSON.parse(readFileSync(keyPath, "utf8"));
     expect(saved).toMatchObject({ keyType: "secp256k1", apiKey, url: "http://localhost" });
     expect(loadOrCreateAgentKey(keyPath).publicKey).toBe(saved.publicKey);
