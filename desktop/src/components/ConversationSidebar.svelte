@@ -16,6 +16,8 @@
   import BotAvatar from "./BotAvatar.svelte";
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
+  import { menu } from "../lib/menu";
+  import { tick } from "svelte";
 
   interface Props {
     open: boolean;
@@ -77,6 +79,9 @@
   let renamingId: string | null = $state(null);
   let renameValue = $state("");
   let confirmDeleteId: string | null = $state(null);
+  /** The kebab button that opened the menu; focus goes back to it when the menu closes (#161). */
+  let menuTrigger: HTMLElement | null = $state.raw(null);
+  let listEl: HTMLDivElement | undefined = $state();
 
   let filtered = $derived.by(() => {
     if (!searchQuery.trim()) return conversations;
@@ -144,6 +149,7 @@
     // Second click: actually delete
     confirmDeleteId = null;
     menuOpenId = null;
+    menuTrigger = null;
     const convo = conversations.find((c) => c.id === id);
     // Delete from portal if synced
     if (convo?.portalConversationId) {
@@ -153,13 +159,22 @@
     conversations = conversations.filter((c) => c.id !== id);
   }
 
+  /** Focus the row's "open conversation" button once it is rendered again. */
+  async function focusRow(id: string) {
+    await tick();
+    const rows = listEl?.querySelectorAll<HTMLElement>("[data-convo-id]") ?? [];
+    Array.from(rows).find((el) => el.dataset.convoId === id)?.focus();
+  }
+
   function startRename(convo: Conversation) {
     menuOpenId = null;
+    menuTrigger = null;
     renamingId = convo.id;
     renameValue = convo.title;
   }
 
   async function commitRename() {
+    const id = renamingId;
     if (renamingId && renameValue.trim()) {
       const trimmed = renameValue.trim();
       await renameConversation(renamingId, trimmed);
@@ -178,6 +193,7 @@
     }
     renamingId = null;
     renameValue = "";
+    if (id && listEl?.contains(document.activeElement)) void focusRow(id);
   }
 
   function handleRenameKeydown(e: KeyboardEvent) {
@@ -185,14 +201,17 @@
       e.preventDefault();
       commitRename();
     } else if (e.key === "Escape") {
+      e.preventDefault();
+      const id = renamingId;
       renamingId = null;
       renameValue = "";
+      if (id) void focusRow(id);
     }
   }
 
   function handleBackdropClick() {
     if (menuOpenId) {
-      menuOpenId = null;
+      closeMenu(false);
     } else {
       onClose();
     }
@@ -203,20 +222,12 @@
     if (!inline) onClose();
   }
 
-  // #25: keyboard access. Enter/Space opens a conversation; Escape closes the open menu,
-  // then the drawer.
-  function handleItemKeydown(e: KeyboardEvent, id: string) {
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      handleSelect(id);
-    }
-  }
-
+  // #25: Escape closes the open menu, then the drawer. Each conversation row is a real
+  // <button> (#161), so Enter/Space need no extra handling.
   function handleSidebarKeydown(e: KeyboardEvent) {
     if (e.key !== "Escape" || renamingId) return;
     if (menuOpenId) {
-      menuOpenId = null;
+      closeMenu(true);
       e.stopPropagation();
     } else if (!inline && open) {
       onClose?.();
@@ -224,9 +235,22 @@
   }
 
   function toggleMenu(e: MouseEvent, id: string) {
-    e.stopPropagation();
     confirmDeleteId = null;
-    menuOpenId = menuOpenId === id ? null : id;
+    if (menuOpenId === id) {
+      closeMenu(true);
+      return;
+    }
+    menuTrigger = e.currentTarget as HTMLElement;
+    menuOpenId = id;
+  }
+
+  /** #161: close the row menu; Escape (and the trigger's own toggle) put focus back on the trigger. */
+  function closeMenu(returnFocus: boolean) {
+    const trigger = menuTrigger;
+    menuOpenId = null;
+    confirmDeleteId = null;
+    menuTrigger = null;
+    if (returnFocus && trigger) void tick().then(() => trigger.focus());
   }
 </script>
 
@@ -304,7 +328,7 @@
   </div>
   {/if}
 
-  <div class="conversation-list">
+  <div class="conversation-list" bind:this={listEl}>
     {#if loading}
       <div class="empty-state">Loading...</div>
     {:else if filtered.length === 0}
@@ -319,33 +343,38 @@
       {#each groups as group (group.label)}
       <div class="group-label">{group.label}</div>
       {#each group.items as convo (convo.id)}
-        <div
-          class="conversation-item"
-          class:active={convo.id === activeConversationId}
-          role="button"
-          tabindex="0"
-          aria-current={convo.id === activeConversationId ? "true" : undefined}
-          onclick={() => handleSelect(convo.id)}
-          onkeydown={(e) => handleItemKeydown(e, convo.id)}
-        >
-          <div class="convo-content">
-            {#if renamingId === convo.id}
+        {@const where = parseChoice(convo.selectedModel).where}
+        <!-- #161: the row is a plain container; "open" and "more options" are sibling buttons. -->
+        <div class="conversation-item" class:active={convo.id === activeConversationId}>
+          {#if renamingId === convo.id}
+            <div class="convo-content">
+              <!-- svelte-ignore a11y_autofocus -->
               <input
                 class="rename-input"
                 type="text"
+                aria-label="Rename conversation"
                 bind:value={renameValue}
                 onkeydown={handleRenameKeydown}
                 onblur={commitRename}
-                onclick={(e) => e.stopPropagation()}
                 autofocus
               />
-            {:else}
-              <div class="convo-title" title="{convo.title} · {formatRelativeTime(convo.updatedAt)}">{convo.title}</div>
-            {/if}
-          </div>
-          <span class="ran-on" title={ranOnText(convo)}>
-            {#if parseChoice(convo.selectedModel).where === "mine"}<Server size={13} />{:else if ["network", "reserved", "anywhere"].includes(parseChoice(convo.selectedModel).where)}<Cloud size={13} />{:else}<Laptop size={13} />{/if}
-          </span>
+            </div>
+          {:else}
+            <button
+              class="convo-select"
+              type="button"
+              data-convo-id={convo.id}
+              aria-current={convo.id === activeConversationId ? "true" : undefined}
+              title="{convo.title} · {formatRelativeTime(convo.updatedAt)}"
+              onclick={() => handleSelect(convo.id)}
+            >
+              <span class="convo-title">{convo.title}</span>
+              <span class="ran-on" title={ranOnText(convo)}>
+                {#if where === "mine"}<Server size={13} aria-hidden="true" />{:else if ["network", "reserved", "anywhere"].includes(where)}<Cloud size={13} aria-hidden="true" />{:else}<Laptop size={13} aria-hidden="true" />{/if}
+                <span class="visually-hidden">{ranOnText(convo)}</span>
+              </span>
+            </button>
+          {/if}
           <div class="convo-actions">
             <button
               class="kebab-btn"
@@ -355,23 +384,30 @@
               aria-label="More options for {convo.title}"
               aria-haspopup="menu"
               aria-expanded={menuOpenId === convo.id}
+              aria-controls={menuOpenId === convo.id ? `convo-menu-${convo.id}` : undefined}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
               </svg>
             </button>
             {#if menuOpenId === convo.id}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <div class="context-menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-                <button class="context-menu-item" type="button" role="menuitem" onclick={() => startRename(convo)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <div
+                class="context-menu"
+                id="convo-menu-{convo.id}"
+                role="menu"
+                tabindex="-1"
+                aria-label="Options for {convo.title}"
+                use:menu={{ onClose: closeMenu, trigger: menuTrigger }}
+              >
+                <button class="context-menu-item" type="button" role="menuitem" tabindex="-1" onclick={() => startRename(convo)}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                     <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
                     <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
                   </svg>
                   Rename
                 </button>
-                <button class="context-menu-item delete" type="button" role="menuitem" onclick={() => handleDelete(convo.id)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button class="context-menu-item delete" type="button" role="menuitem" tabindex="-1" onclick={() => handleDelete(convo.id)}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                     <polyline points="3 6 5 6 21 6"/>
                     <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                   </svg>
@@ -501,8 +537,20 @@
     color: var(--text-muted, var(--text-secondary));
     opacity: 0.8;
   }
-  .conversation-item:hover .ran-on {
+  .conversation-item:hover .ran-on,
+  .conversation-item:focus-within .ran-on {
     display: none;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
   .group-label {
     padding: 14px 12px 4px;
@@ -670,6 +718,32 @@
     min-width: 0;
   }
 
+  .convo-select {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .convo-select .convo-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .convo-select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
   .convo-title {
     font-size: 13px;
     font-weight: 400;
@@ -713,7 +787,9 @@
     transition: all 0.15s;
   }
 
-  .conversation-item:hover .kebab-btn {
+  .conversation-item:hover .kebab-btn,
+  .conversation-item:focus-within .kebab-btn,
+  .kebab-btn[aria-expanded="true"] {
     opacity: 1;
   }
 
@@ -771,7 +847,12 @@
     color: var(--red);
   }
 
-  .context-menu-item.delete:hover {
-    background: color-mix(in srgb, var(--red) 10%, transparent);
+  .context-menu-item:focus-visible {
+    background: var(--bg-surface);
+    outline: 2px solid var(--focus-ring, var(--accent));
+    outline-offset: -2px;
   }
+
+  /* #161: no red color-mix() tint behind "Delete": a 10% wash dropped the red text below 4.5:1
+     in both themes. The neutral hover above keeps AA contrast (and needs no WebKitGTK fallback). */
 </style>
