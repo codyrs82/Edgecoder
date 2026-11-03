@@ -84,7 +84,7 @@
     "@types/ws": "^8.18.1",
     "mermaid": "^11.12.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^4.0.18"
