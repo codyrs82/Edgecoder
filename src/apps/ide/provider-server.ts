@@ -34,11 +34,11 @@ import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
-import { BotManager, agentBotRunner, registerBotRoutes, type ApprovalEntry } from "./bots.js";
+import { BotManager, agentBotRunner, botComputeChat, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
-import { AUTO_MODEL_ID, routeInputsFrom, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
-import type { ChatBackend } from "../../inference-api/types.js";
+import { AUTO_MODEL_ID, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
+import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
@@ -140,13 +140,18 @@ async function routeInputsHere(): Promise<RouteInputs> {
         listReservations(networkDeps).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => []),
       ])
     : [null, []];
-  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases, balanceCSats: ov?.account?.cSats });
   routeCache = { at: Date.now(), inputs };
   return inputs;
 }
 
 function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
-  if (r.placement === "local" || !networkDeps) return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
+  if (r.placement === "local") return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
+  if (!networkDeps) {
+    return async function* () {
+      throw new ChatBackendError("This computer isn't connected to the network, so it can't reach your other machines or network models.", 503);
+    };
+  }
   return networkBackend(networkDeps, {
     model: r.model,
     computeClass: r.placement === "network" ? r.computeClass ?? "any" : "any",
@@ -156,7 +161,8 @@ function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
   });
 }
 
-const autoHere = (onRoute?: (r: Route) => void, source?: string) => autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute });
+const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions) =>
+  autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute, policy, plan });
 
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
@@ -770,8 +776,8 @@ const bots = new BotManager({
   approvals: pendingApprovals,
   log: (msg, extra) => app.log.warn({ extra }, msg),
   runner: agentBotRunner({
-    // Bots run on Auto: each step at the cheapest place that fits it.
-    chat: (ctx) => chatFnFor({ target: "auto" }, process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", ctx.sendEvent, ctx.signal, `bot ${ctx.bot.name}`),
+    // Each step on the bot's compute policy (Local first by default), within its budget and your balance.
+    chat: (ctx) => botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
     execute: (bot) => {
       const executor = new ToolExecutor(bot.projectRoot);
       return (tool, args, opts) => executor.execute(tool, args, opts);
@@ -927,15 +933,22 @@ const ideChatSchema = z.object({
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
-    let where = "auto";
+    // When the network isn't affordable, Auto falls back to the biggest free model (planRoutes).
+    let where = "Auto";
     const backend = autoHere((r) => {
-      where = r.reason;
+      where = routeLabel(r);
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
     return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
   }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
-  const where = compute.target === "mine" ? "your machines" : compute.target === "reserved" ? "reserved machine" : `network${compute.computeClass && compute.computeClass !== "any" ? ` (${compute.computeClass})` : ""}`;
+  const where = routeLabel({
+    placement: compute.target,
+    model,
+    cSatsPerSecond: 0,
+    reason: "",
+    ...(compute.target === "network" ? { computeClass: compute.computeClass ?? "any" } : {}),
+  });
   const backend = networkBackend(networkDeps, {
     model,
     computeClass: compute.target === "network" ? compute.computeClass ?? "any" : "any",

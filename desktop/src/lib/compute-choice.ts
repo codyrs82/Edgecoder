@@ -85,5 +85,25 @@ export function freeReplyUsage(id: string | undefined): { cSats: number; where: 
   return { cSats: 0, where: l.model === "Auto" ? l.where : `${l.where} · ${l.model}` };
 }
 
+/**
+ * The reply footer: where it actually ran and what it actually cost. "free" only for places that
+ * are free (this computer, your machines); a reservation is prepaid; anything else shows the cSats,
+ * even 0. Nothing when the reply never ran anywhere (no place, no cost), e.g. a failed run.
+ */
+export function usageText(u: { cSats: number; where?: string }): string | null {
+  const where = u.where?.trim();
+  const spent = Number.isFinite(u.cSats) && u.cSats > 0;
+  if (!where && !spent) return null;
+  const place = where || "Network";
+  const cost = spent
+    ? `${u.cSats.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`
+    : /^(this computer|my machines|your machines|local\b)/i.test(place)
+      ? "free"
+      : /^(reserved|your reserved)/i.test(place)
+        ? "prepaid"
+        : "0 cSats";
+  return `${place} · ${cost}`;
+}
+
 /** Whether replies on this choice cost cSats. */
 export const isBilled = (id: string | undefined) => ["network", "anywhere"].includes(parseChoice(id).where);

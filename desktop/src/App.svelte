@@ -375,7 +375,7 @@
         </div>
         {#if activeBot}
           <div class="chat-main">
-            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} />
+            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} />
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>

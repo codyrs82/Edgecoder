@@ -8,6 +8,7 @@
   import ChangesCard from "./ChangesCard.svelte";
   import NetworkTaskCard from "./NetworkTaskCard.svelte";
   import type { StreamProgress } from "../lib/api";
+  import { usageText } from "../lib/compute-choice";
   import type { ToolEvent } from "../lib/types";
 
   interface Props {
@@ -86,10 +87,8 @@
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
       {/if}
-      {#if usage && !streaming}
-        <div class="reply-usage" title="Where this reply ran and what it cost">
-          {usage.where ?? "Network"} · {usage.cSats > 0 ? `${usage.cSats.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats` : "free"}
-        </div>
+      {#if usage && !streaming && usageText(usage)}
+        <div class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</div>
       {/if}
     </div>
   {/if}
