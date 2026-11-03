@@ -2,17 +2,18 @@
 
 This guide covers how to install your own EdgeCoder agents and how to add additional coordinators to the mesh.
 
-## Current production endpoints
+## Endpoints
 
-- Portal: `https://portal.edgecoder.io/portal`
-- Coordinator operations: `https://portal.edgecoder.io/portal/coordinator-ops`
-- Coordinator bootstrap: `https://coordinator.edgecoder.io`
+Examples below use placeholders:
+
+- `<your-portal>`: the portal you enrol nodes in (the public network's portal is `https://edgecoder.io`)
+- `<your-coordinator>`: the coordinator your nodes connect to. In the default all-in-one runtime
+  the control plane runs in the same process, so control-plane routes live on the same host.
 
 ## Prerequisites
 
 - Node.js 22+
 - Valid portal account with verified email
-- Access to control-plane admin token for approval workflows
 - Mesh token (`MESH_AUTH_TOKEN`) for coordinator/agent runtime auth
 
 ## Enrollment and activation model (required)
@@ -23,9 +24,8 @@ Every agent/coordinator node follows this flow:
 2. Enroll node and get one-time `registrationToken`.
 3. Configure node runtime with registration token.
 4. Start node runtime.
-5. Approve node in control plane:
-   - agent: `POST /agents/:agentId/approval`
-   - coordinator: `POST /coordinators/:coordinatorId/approval`
+5. The coordinator's operator approves the node (control-plane approval routes, see
+   [API.md](API.md); they require `ADMIN_API_TOKEN` and, if set, a source IP in `ALLOWED_ADMIN_IPS`).
 6. Node becomes active only when:
    - owner email is verified
    - coordinator admin approval is complete
@@ -71,7 +71,7 @@ AGENT_ID=mac-worker-001
 AGENT_OS=macos
 AGENT_MODE=swarm-only
 AGENT_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
-COORDINATOR_URL=https://coordinator.edgecoder.io
+COORDINATOR_URL=https://<your-coordinator>
 MESH_AUTH_TOKEN=<mesh-token>
 LOCAL_MODEL_PROVIDER=edgecoder-local
 ```
@@ -98,7 +98,7 @@ AGENT_ID=node-1 \
 AGENT_OS=ubuntu \
 AGENT_MODE=swarm-only \
 AGENT_REGISTRATION_TOKEN=<token-from-portal-node-enrollment> \
-COORDINATOR_URL=https://coordinator.edgecoder.io \
+COORDINATOR_URL=https://<your-coordinator> \
 MESH_AUTH_TOKEN=<mesh-token> \
 npm run dev:worker
 ```
@@ -131,7 +131,7 @@ AGENT_ID=linux-agent-001
 AGENT_OS=linux
 AGENT_MODE=swarm-only
 AGENT_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
-COORDINATOR_URL=https://coordinator.edgecoder.io
+COORDINATOR_URL=https://<your-coordinator>
 MESH_AUTH_TOKEN=<mesh-token>
 ```
 
@@ -157,15 +157,11 @@ Then edit `/etc/edgecoder/agent.env` and restart:
 sudo systemctl restart io.edgecoder.agent.service
 ```
 
-### Approve enrolled agent
+### Approval
 
-```bash
-curl -X POST \
-  -H "Authorization: Bearer <ADMIN_API_TOKEN>" \
-  -H "content-type: application/json" \
-  -d '{"approved":true}' \
-  https://control.edgecoder.io/agents/<AGENT_ID>/approval
-```
+A newly enrolled agent stays inactive until the coordinator's operator approves it. If you run
+your own coordinator, approval uses the control-plane admin API (`ADMIN_API_TOKEN`); see
+[API.md](API.md).
 
 ## Install additional coordinators
 
@@ -186,8 +182,8 @@ Minimum runtime env:
 ```dotenv
 MESH_AUTH_TOKEN=<mesh-token>
 COORDINATOR_PUBLIC_URL=https://<your-coordinator>.fly.dev
-CONTROL_PLANE_URL=https://control.edgecoder.io
-COORDINATOR_BOOTSTRAP_URLS=https://coordinator.edgecoder.io
+CONTROL_PLANE_URL=https://<your-coordinator>
+COORDINATOR_BOOTSTRAP_URLS=https://<your-coordinator>
 COORDINATOR_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
 ```
 
@@ -220,35 +216,30 @@ sudo bash deploy/linux/bootstrap-host.sh coordinator https://github.com/<your-or
 sudo systemctl restart io.edgecoder.coordinator.service
 ```
 
-### 3) Approve enrolled coordinator
+### 3) Approval
 
-```bash
-curl -X POST \
-  -H "Authorization: Bearer <ADMIN_API_TOKEN>" \
-  -H "content-type: application/json" \
-  -d '{"approved":true}' \
-  https://control.edgecoder.io/coordinators/<COORDINATOR_ID>/approval
-```
+The coordinator stays inactive until an operator of the mesh approves it through the control-plane
+admin API, as for agents.
 
 ### 4) Verify mesh joining
 
-Check control-plane discovery feed:
+Check the discovery feed:
 
 ```bash
-curl -s https://control.edgecoder.io/network/coordinators
+curl -s https://<your-coordinator>/network/coordinators
 ```
 
 Check peer view from an existing coordinator (mesh token required):
 
 ```bash
-curl -s -H "x-mesh-token: <MESH_AUTH_TOKEN>" https://coordinator.edgecoder.io/mesh/peers
+curl -s -H "x-mesh-token: <MESH_AUTH_TOKEN>" https://<your-coordinator>/mesh/peers
 ```
 
 ## Troubleshooting
 
 - `node_not_activated` on register:
   - verify email in portal
-  - verify approval API call succeeded
+  - confirm the node was approved
   - verify registration token matches enrolled node ID
 - `mesh_unauthorized`:
   - missing/incorrect `MESH_AUTH_TOKEN`
@@ -272,29 +263,8 @@ Use this for the first production wave without manual drift.
 3. Install runtime on each host (macOS pkg or Linux systemd kit).
 4. Set unique `AGENT_ID` + matching `AGENT_REGISTRATION_TOKEN` per host.
 5. Start/restart service on each host.
-6. Approve in batches from control plane:
-   - approve first 3, verify stable
-   - approve next 7
+6. Have the coordinator operator approve them in batches (first 3, verify stable, then the rest).
 7. Validate all 10:
    - present in `GET /agents/catalog`
    - no `node_not_activated` registration errors
    - expected `ownerEmail`, `sourceIp`, `vpnDetected`, `countryCode` fields visible in UI
-
-Batch approval loop example:
-
-```bash
-for id in agent-001 agent-002 agent-003 agent-004 agent-005 agent-006 agent-007 agent-008 agent-009 agent-010; do
-  curl -sS -X POST \
-    -H "Authorization: Bearer <ADMIN_API_TOKEN>" \
-    -H "content-type: application/json" \
-    -d '{"approved":true}' \
-    "https://control.edgecoder.io/agents/${id}/approval"
-  echo
-done
-```
-
-Quick verification:
-
-```bash
-curl -s -H "Authorization: Bearer <ADMIN_API_TOKEN>" https://control.edgecoder.io/agents/catalog
-```

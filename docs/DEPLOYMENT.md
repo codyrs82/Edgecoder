@@ -73,30 +73,36 @@ fly deploy -c deploy/fly/fly.anchor-proxy.toml --remote-only
 
 Secrets are not stored in the TOML files. With `NODE_ENV=production` every service refuses to
 start without its required secrets (`src/common/env-guard.ts`, `src/*/config.ts`). The bootstrap
-script sets all of these; by hand:
+script sets all of these; by hand (app names default to `<prefix>-seed`, `<prefix>-seed-eu`,
+`<prefix>-portal` and `<prefix>-anchor-proxy`; substitute your own):
 
 ```bash
 # Seeds (coordinator + inference + control plane in one process)
-fly secrets set -a edgecoder-seed \
+fly secrets set -a <seed app> \
   MESH_AUTH_TOKEN="<token>" ADMIN_API_TOKEN="<token>" INFERENCE_AUTH_TOKEN="<32+ chars>" \
-  PORTAL_SERVICE_URL="https://edgecoder.io" PORTAL_SERVICE_TOKEN="<token>" \
+  PORTAL_SERVICE_URL="https://<your-portal-domain>" PORTAL_SERVICE_TOKEN="<token>" \
   PAYMENT_WEBHOOK_SECRET="<token>" COORDINATOR_REGISTRATION_TOKEN="<token>" \
-  COORDINATOR_BOOTSTRAP_URLS="https://edgecoder-seed-eu.fly.dev" \
+  COORDINATOR_BOOTSTRAP_URLS="https://<seed-eu app>.fly.dev" \
   DATABASE_URL="postgresql://..."
-# same for edgecoder-seed-eu (same MESH_AUTH_TOKEN / PORTAL_SERVICE_TOKEN; bootstrap URL = the other seed)
+# same for <seed-eu app> (same MESH_AUTH_TOKEN / PORTAL_SERVICE_TOKEN; bootstrap URL = the other seed)
 
 # Portal
-fly secrets set -a edgecoder-portal \
+fly secrets set -a <portal app> \
   PORTAL_SERVICE_TOKEN="<same as seeds>" CONTROL_PLANE_ADMIN_TOKEN="<ADMIN_API_TOKEN of the seeds>" \
-  WALLET_SECRET_PEPPER="<secret>" RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@edgecoder.io" \
+  WALLET_SECRET_PEPPER="<secret>" RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@<your-portal-domain>" \
   PORTAL_DATABASE_URL="postgresql://..." \
+  SYSTEM_ADMIN_EMAILS="admin@example.com,ops@example.com" \
   OAUTH_GOOGLE_CLIENT_ID="<id>" OAUTH_GOOGLE_CLIENT_SECRET="<secret>" \
   OAUTH_MICROSOFT_CLIENT_ID="<id>" OAUTH_MICROSOFT_CLIENT_SECRET="<secret>"
 
 # Anchor proxy
-fly secrets set -a edgecoder-anchor-proxy \
+fly secrets set -a <anchor app> \
   ANCHOR_PROXY_TOKEN="<token>" BITCOIND_RPC_URL="http://..." BITCOIND_RPC_USER="..." BITCOIND_RPC_PASSWORD="..."
 ```
+
+`SYSTEM_ADMIN_EMAILS` (the portal admin allowlist) is set as a secret rather than in
+`fly.portal.toml`, so operator email addresses stay out of the repository. The bootstrap script
+forwards it when you export it before running.
 
 ### Seed Node Configuration
 
@@ -302,11 +308,11 @@ Coordinator environment (`/etc/edgecoder/coordinator.env`):
 
 ```bash
 MESH_AUTH_TOKEN=<mesh-token>
-COORDINATOR_PUBLIC_URL=https://coordinator.edgecoder.io
-CONTROL_PLANE_URL=https://control.edgecoder.io
-COORDINATOR_BOOTSTRAP_URLS=https://coordinator.edgecoder.io
+COORDINATOR_PUBLIC_URL=https://<your-coordinator>
+CONTROL_PLANE_URL=https://<your-coordinator>        # the control plane runs in the all-in-one process
+COORDINATOR_BOOTSTRAP_URLS=https://<a-peer-coordinator>
 COORDINATOR_REGISTRATION_TOKEN=<token-from-portal-node-enrollment>
-PORTAL_SERVICE_URL=https://portal.edgecoder.io
+PORTAL_SERVICE_URL=https://<your-portal>
 PORTAL_SERVICE_TOKEN=<portal-service-token>
 ```
 
@@ -627,6 +633,6 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SYSTEM_ADMIN_EMAILS` | `admin@example.com` | System admin emails (comma-separated) |
+| `SYSTEM_ADMIN_EMAILS` | | System admin emails (comma-separated). Set as a secret, not in the TOML |
 | `COORDINATOR_OPERATIONS_OWNER_EMAILS` | `admin@example.com` | Coordinator ops owner emails |
 | `COORDINATOR_ADMIN_EMAILS` | | Additional coordinator admin emails |

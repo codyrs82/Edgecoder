@@ -2,20 +2,18 @@
 
 This document explains public-node onboarding and enterprise overlay controls for EdgeCoder mesh deployments.
 
-## Current Live URLs
+## Endpoints
 
-- Portal: `https://portal.edgecoder.io/portal`
-- Coordinator operations dashboard: `https://portal.edgecoder.io/portal/coordinator-ops`
-- Coordinator API base: `https://coordinator.edgecoder.io` (mesh token required)
+Examples use placeholders. Replace them with your deployment's hosts:
+
+- Portal: `https://<your-portal>/portal`
+- Coordinator operations dashboard: `https://<your-portal>/portal/coordinator-ops` (system admins only)
+- Coordinator API base: `https://<your-coordinator>` (mesh token required)
 
 ## First Coordinator Placement
 
 - Coordinator operations home: `portal` at `GET /portal/coordinator-ops`
-- First coordinator runtime: Fly.io app (`edgecoder-coordinator`)
-- Production URLs:
-  - Portal: `https://portal.edgecoder.io/portal`
-  - Coordinator operations: `https://portal.edgecoder.io/portal/coordinator-ops`
-  - Coordinator: `https://coordinator.edgecoder.io`
+- First coordinator runtime: an all-in-one seed app on Fly.io (`<prefix>-seed`, see `scripts/fly-bootstrap-org.sh`)
 - SQL backend for coordinator/control-plane state: Fly Postgres (PostgreSQL 16) via `DATABASE_URL`
 - Deployment defaults endpoint: `GET /deployment/plan`
 - Fly bootstrap guide: `docs/flyio-bootstrap.md`

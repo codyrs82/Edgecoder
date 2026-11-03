@@ -14,7 +14,7 @@ syndicated so one failure does not take the front door down.
 | TLS | Full (strict) to the Fly origin, always-HTTPS, TLS 1.2 minimum, TLS 1.3, HSTS preload, HTTPS rewrites. |
 | WAF | Cloudflare Managed Ruleset + OWASP core (free plan: the free managed ruleset), a managed challenge for risky clients on `/auth/*`, unexpected-method and scanner-path blocks. |
 | Rate limiting | Edge limit on `POST /auth/login`, `/auth/signup`, `/auth/resend-verification`, `/auth/passkey/*` and `/wallet/send/mfa/*` (10 per 10 s per IP by default). The portal keeps its own per-IP limits behind it. |
-| Origin lock | A Transform Rule adds `x-edgecoder-origin: <token>` to every forwarded request. With `PORTAL_ORIGIN_LOCK_TOKEN` set, the portal refuses requests without it, so the `*.fly.dev` hostname cannot bypass the WAF. Fly health checks (`/health`) and coordinators (portal service token) are exempt. |
+| Origin lock | With `PORTAL_ORIGIN_LOCK_TOKEN` set, the portal only serves traffic that arrives through the edge, so the `*.fly.dev` hostname cannot be used to bypass the WAF. |
 | Cache | `/`, `/privacy`, `/terms` and `/portal/vendor/*` are cached at the edge for 5 minutes; Always Online serves them while the origin is down. `/portal`, `/auth`, `/wallet`, `/nodes`, `/me`, `/internal` are never cached. |
 
 ### Run it
@@ -35,7 +35,7 @@ DOMAIN=edgecoder.io APPLY_FLY=1 bash scripts/cloudflare-bootstrap.sh
 Fly's proxy appends the address that connected to it to `x-forwarded-for`. Behind Cloudflare that
 is a Cloudflare edge address, so with the default `trustProxy: 1` every visitor would share one
 rate-limit bucket. With `PORTAL_EDGE=cloudflare` the portal keys on `cf-connecting-ip` instead,
-and only when the request carries the origin-lock header (otherwise the header could be spoofed
+and only for requests it has verified came through the edge (otherwise the header could be spoofed
 by connecting to the Fly hostname directly).
 
 ### What stays off Cloudflare

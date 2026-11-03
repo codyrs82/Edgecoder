@@ -33,6 +33,9 @@
 #   PORTAL_REGIONS           comma-separated Fly regions for the portal (default: ord). More than one
 #                            runs a portal machine per region behind Fly's anycast address, so a
 #                            region outage does not take the front door down (docs/edge-and-redundancy.md).
+#   SYSTEM_ADMIN_EMAILS      comma-separated portal admin emails (coordinator ops + admin APIs);
+#                            forwarded to the portal as a secret when set. Without it nobody is a
+#                            system admin until you run: fly secrets set SYSTEM_ADMIN_EMAILS=... -a <portal app>
 #   PORTAL_EDGE / PORTAL_ORIGIN_LOCK_TOKEN   set when the portal sits behind Cloudflare
 #                            (scripts/cloudflare-bootstrap.sh); forwarded to the portal as secrets.
 #   BITCOIND_RPC_URL / BITCOIND_RPC_USER / BITCOIND_RPC_PASSWORD / BITCOIND_WALLET_NAME
@@ -200,7 +203,7 @@ PORTAL_SECRETS=(
   # Portal -> seed privileged calls (the control plane lives inside the all-in-one seed).
   "CONTROL_PLANE_ADMIN_TOKEN=${ADMIN_API_TOKEN}"
 )
-for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET PORTAL_EDGE PORTAL_ORIGIN_LOCK_TOKEN; do
+for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET SYSTEM_ADMIN_EMAILS PORTAL_EDGE PORTAL_ORIGIN_LOCK_TOKEN; do
   [ -n "${!v:-}" ] && PORTAL_SECRETS+=("$v=${!v}")
 done
 fly secrets set -a "$PORTAL" --stage "${PORTAL_SECRETS[@]}"
@@ -300,6 +303,7 @@ Done. Org: $ORG   prefix: $APP_PREFIX
 $( [ "$WITH_ANCHOR" = 1 ] && echo "  Anchor proxy  $ANCHOR_URL" )
   Secrets       $SECRETS_FILE (keep private; MESH_AUTH_TOKEN is what agents need to join)
 
+$( [ -z "${SYSTEM_ADMIN_EMAILS:-}" ] && echo "No portal admins set yet: fly secrets set SYSTEM_ADMIN_EMAILS=you@example.com -a $PORTAL" )
 Next: enrol a node in the portal (Nodes page), start a worker with the registration token and
 MESH_AUTH_TOKEN, and watch $SEED_URL/capacity. Ollama pulls OLLAMA_MODEL on first use.
 EOF

@@ -28,7 +28,7 @@ Consolidated reference for all environment controls. The primary config file on 
 | `COORDINATOR_URL` | `https://coordinator.edgecoder.io` | URL of the coordinator this agent connects to. |
 | `COORDINATOR_REGISTRATION_TOKEN` | _(from Nodes page)_ | Required for EDGE_RUNTIME_MODE=coordinator. |
 | `COORDINATOR_PUBLIC_URL` | `https://coordinator.edgecoder.io` | Coordinator's publicly-reachable URL (used by coordinator itself). |
-| `COORDINATOR_DISCOVERY_URL` | `https://control.edgecoder.io/network/coordinators` | Control-plane endpoint for coordinator autodiscovery. |
+| `COORDINATOR_DISCOVERY_URL` | `$CONTROL_PLANE_URL/network/coordinators` | Control-plane endpoint for coordinator autodiscovery. |
 | `COORDINATOR_DISCOVERY_URLS` | `https://edgecoder-seed-eu.fly.dev` | Portal: comma-separated coordinator URLs, tried in order. The first healthy one (`/health/runtime`) is cached for 60 s. Takes precedence over `COORDINATOR_DISCOVERY_URL` (#35). |
 | `COORDINATOR_BOOTSTRAP_URLS` | `https://coordinator.edgecoder.io` | Comma-separated fallback list. |
 | `COORDINATOR_HTTP_TIMEOUT_MS` | `15000` | HTTP timeout for coordinator API calls (ms). |

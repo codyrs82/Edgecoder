@@ -1,10 +1,10 @@
 # Economy and compute trust model (#56)
 
-Status: **design draft, for review**. It records the direction from #56 and how the open P1 PRs implement it. The wallet custody model (#49) is deliberately left open until Cody decides.
+Status: **design draft, for review**. It records the direction from #56 and how the open P1 PRs implement it. The wallet custody model (#49) is deliberately left open until the maintainers decide.
 
 "Done in" names the PR that carries each piece; none of them are on `main` yet. `open (#N)` means the issue has no PR yet, so that piece is **not built**.
 
-Pending owner sign-off (Cody): the custody model (#49) and the default daily anchor budget (§5).
+Pending maintainer sign-off: the custody model (#49) and the default daily anchor budget (§5).
 
 ## 1. Principles
 
@@ -20,7 +20,7 @@ Pending owner sign-off (Cody): the custody model (#49) and the default daily anc
 | Balance | Account balance is the sum of `credit_transactions`; debits are atomic and never go negative (row lock or conditional update, `CHECK balance >= 0`). | #91 (#48) |
 | Earn formula | One function, `contributionCredits()`, used by Postgres, the in-memory engine and the `earnings_accrual` ledger payload; failed results earn 0; duration is server-measured, `min(reported, since claim, timeout)`. | #111 (#38); server-measured duration and signed reports open (#44) |
 | Idempotency | Unique keys per source: `reportId(subtaskId)` for earnings, `payment_hash` for purchases, BLE `txId` for offline sync. A replay is a no-op. | purchases: #92; earnings open (#44); BLE open (#41) |
-| Verification mints | Replica executions that win verification are paid from newly minted credits, at most `maxExecutions - 1` per sampled subtask. Only when verification is on (off by default). Minted credits are tagged as their own source (`source_type = 'verification_mint'`), counted separately by `/ledger/verify`, and stay **pending** (not payable) until payouts open. Whether to mint at all before verification is enabled is an open question for Cody. | #95, #114; tagging and pending state open (#115) |
+| Verification mints | Replica executions that win verification are paid from newly minted credits, at most `maxExecutions - 1` per sampled subtask. Only when verification is on (off by default). Minted credits are tagged as their own source (`source_type = 'verification_mint'`), counted separately by `/ledger/verify`, and stay **pending** (not payable) until payouts open. Whether to mint at all before verification is enabled is an open question for the maintainers. | #95, #114; tagging and pending state open (#115) |
 | Reconciliation | Admin-only `/ledger/verify`: recompute balances from ledger records, re-derive accruals, check ordering-chain gaps and duplicate ids. Read-only. | #115 (open) |
 
 ### Ledger schema (minimum)
@@ -44,7 +44,7 @@ The balance is `SUM(credits)` per account. Debits take a row lock on the account
 - Credits are issued only after the node confirms the invoice is settled, looked up by `payment_hash` (LND `lookupinvoice`), never by a client-supplied `txRef` (#42, #47 → #92).
 - The webhook is a hint: an HMAC-SHA256 over the raw body, keyed by `PAYMENT_WEBHOOK_SECRET`, is checked, then the node is queried (#42 → #92). If the secret is missing, production refuses the webhook (fails closed).
 - `mock` Lightning is refused in production (#43).
-- **Custody (#49): open, waiting on Cody.** The options are (a) non-custodial: keys are generated on the client and only the xpub or address is registered; or (b) custodial Lightning accounts (LNbits, LND accounts) with no seed phrase at all. The reviewer recommends (a). Either way, the server must stop generating mnemonics.
+- **Custody (#49): open, waiting on a maintainer decision.** The options are (a) non-custodial: keys are generated on the client and only the xpub or address is registered; or (b) custodial Lightning accounts (LNbits, LND accounts) with no seed phrase at all. The reviewer recommends (a). Either way, the server must stop generating mnemonics.
 
 ## 4. Money out
 
@@ -59,7 +59,7 @@ Postponed. Once verification has run in production and `/ledger/verify` (#115) i
   - The root, the day, and the first and last sequence numbers are stored with the anchor row.
   - A read endpoint returns any record's proof path (its sibling hashes and positions) plus the anchoring txid, so one record can be checked against the chain on its own.
   - Not built yet; open (#56).
-- Spend guards: a daily budget (`BITCOIN_ANCHOR_DAILY_BUDGET_SATS`), a per-tx fee cap, and mainnet opt-in (#94). The default of **200k sats/day is proposed, pending owner sign-off (Cody).**
+- Spend guards: a daily budget (`BITCOIN_ANCHOR_DAILY_BUDGET_SATS`), a per-tx fee cap, and mainnet opt-in (#94). The default of **200k sats/day is proposed, pending maintainer sign-off.**
 - Confirmation depth and reorg tracking; RPC errors are "unknown", never "left the chain" (#94).
 - **Reconciliation** at startup and on a timer: rows left `broadcasting` by a crash are looked up in the wallet; stuck txs are abandoned (`abandontransaction`) before being marked failed; abandoned txs are watched and re-marked anchored if they confirm anyway, with their fee charged to the budget; rows that can't be resolved go to `needs_admin` and are never auto-rebroadcast (#103 → #109, #116).
 - Open: the signed-vsize × feerate check against the fee cap (#103), signet proof run before mainnet.
