@@ -13,13 +13,13 @@ const PAGES: Record<string, string> = {
   "/portal/reset-password": "EdgeCoder Portal | Reset password",
   "/portal/chat": "EdgeCoder Portal | Chat",
   "/portal/dashboard": "EdgeCoder Portal | Dashboard",
-  "/portal/wallet": "EdgeCoder Portal | Wallet",
   "/portal/settings": "EdgeCoder Portal | Settings",
+  "/portal/settings/plan": "EdgeCoder Portal | Settings",
+  "/portal/settings/compute": "EdgeCoder Portal | Settings",
+  "/portal/settings/install": "EdgeCoder Portal | Settings",
   "/portal/settings/nodes": "EdgeCoder Portal | Settings",
   "/portal/settings/admin": "EdgeCoder Portal | Settings",
-  "/portal/download": "EdgeCoder Portal | Get EdgeCoder",
-  "/portal/reviews": "EdgeCoder Portal | Reviews",
-  "/portal/market": "EdgeCoder Portal | Market"
+  "/portal/reviews": "EdgeCoder Portal | Reviews"
 };
 
 describe("portal pages module (#16)", () => {
@@ -35,12 +35,16 @@ describe("portal pages module (#16)", () => {
     await app.close();
   });
 
-  it("redirects the old /portal/nodes and /portal/coordinator-ops paths into Settings", async () => {
+  it("redirects the old top-level pages into Settings", async () => {
     const app = Fastify();
     registerPortalPages(app);
     const expected: Record<string, string> = {
       "/portal/nodes": "/portal/settings/nodes",
-      "/portal/coordinator-ops": "/portal/settings/admin"
+      "/portal/coordinator-ops": "/portal/settings/admin",
+      "/portal/wallet": "/portal/settings/plan",
+      "/portal/market": "/portal/settings/compute",
+      "/portal/download": "/portal/settings/install",
+      "/portal/download?token=abc": "/portal/settings/install?token=abc"
     };
     for (const [url, location] of Object.entries(expected)) {
       const res = await app.inject({ method: "GET", url });
@@ -65,15 +69,32 @@ describe("portal pages module (#16)", () => {
     expect(settings).toContain('id="passkeyEnrollBtn"');
     expect(settings).toContain('href="/portal/settings/nodes"');
     // Admin tab is rendered hidden and only revealed client-side for system admins.
-    expect(settings).toMatch(/class="settings-link hidden" href="\/portal\/settings\/admin" id="settingsAdminTab"/);
+    expect(settings).toMatch(/class="settings-link hidden" href="\/portal\/settings\/admin" id="settingsAdminTab" data-admin-only/);
     // Cursor-like settings: sub-navigation with search, and every section on the page.
     expect(settings).toContain('id="settingsSearch"');
-    for (const sec of ["general", "profile", "usage", "compute", "tools"]) expect(settings, sec).toContain(`id="sec-${sec}"`);
-    for (const id of ["themeSelect", "displayNameInput", "usageBalance", "reserveClass", "reserveBtn", "leasesList", "createKeyBtn", "keysBody"]) {
+    for (const sec of ["general", "profile", "usage", "tools"]) expect(settings, sec).toContain(`id="sec-${sec}"`);
+    for (const id of ["themeSelect", "displayNameInput", "usageBalance", "createKeyBtn", "keysBody"]) {
       expect(settings, id).toContain(`id="${id}"`);
     }
-    expect(settings).toContain('"/portal/api/compute/reservations"');
-    expect(settings).toContain('href="/portal/wallet"');
+    expect(settings).toContain('href="/portal/settings/plan"');
+
+    // Compute: the market and machine reservations on one settings page.
+    const compute = (await app.inject({ url: "/portal/settings/compute" })).body;
+    for (const id of ["pairSelect", "priceChart", "reserveClass", "reserveBtn", "leasesList"]) expect(compute, id).toContain(`id="${id}"`);
+    expect(compute).toContain('"/portal/api/compute/reservations"');
+    expect(compute).toContain('"/portal/api/market/orders"');
+
+    // Plan & usage: the wallet, including where we pay you.
+    const plan = (await app.inject({ url: "/portal/settings/plan" })).body;
+    expect(plan).toContain("Where should we pay you?");
+    for (const id of ["payoutDestInput", "withdrawBtn", "creditHistoryBody"]) expect(plan, id).toContain(`id="${id}"`);
+
+    // Install agent: no inline handlers, and a malformed token falls back to the placeholder.
+    const install = (await app.inject({ url: "/portal/settings/install?token=%3Cb%3E", headers: { "user-agent": "Macintosh" } })).body;
+    expect(install).toContain('data-copy="install-sh"');
+    expect(install).not.toMatch(/ onclick=/);
+    expect(install).toContain("--token YOUR_TOKEN");
+    expect(install).not.toContain("<b>");
 
     const nodes = (await app.inject({ url: "/portal/settings/nodes" })).body;
     expect(nodes).toContain('id="enrollBtn"');

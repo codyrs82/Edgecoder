@@ -245,7 +245,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           <div class="card">
             <h3>Where should we pay you?</h3>
             <p class="muted">Payouts go to a Lightning address from your own wallet. EdgeCoder never creates or stores wallet keys.
-            Set it on the <a href="/portal/wallet">wallet page</a>.</p>
+            Set it on the <a href="/portal/settings/plan">wallet page</a>.</p>
           </div>
           </div>
 

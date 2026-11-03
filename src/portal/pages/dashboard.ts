@@ -364,18 +364,10 @@ app.get("/portal/dashboard", async (_req, reply) => {
   return reply.type("text/html").send(portalAuthedPageHtml({
     title: "EdgeCoder Portal | Dashboard",
     activeTab: "dashboard",
-    heading: "Dashboard",
+    heading: "Overview",
     subtitle: "High-level account and network view.",
     content,
     script
   }));
-});
-
-app.get("/portal/nodes", async (_req, reply) => {
-  return reply.redirect("/portal/settings/nodes");
-});
-
-app.get("/portal/coordinator-ops", async (_req, reply) => {
-  return reply.redirect("/portal/settings/admin");
 });
 }

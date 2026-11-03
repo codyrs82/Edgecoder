@@ -1,27 +1,52 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { icon } from "./design-system.js";
 import { portalAuthedPageHtml } from "./layout.js";
 
 /**
- * The Settings frame (like Cursor's): a left sub-navigation with icons and a "Search settings"
- * box, and a pane of sections made of rounded cards whose rows put a title and description on the
- * left and the control on the right. The account sections live on /portal/settings (one shown at a
- * time, chosen by #hash); Nodes and Admin keep their own URLs. Admin is revealed client-side for
- * system admins only; its APIs enforce authorization server-side.
+ * The Settings frame (like the desktop app's): a left sub-navigation with icons and a "Search
+ * settings" box, and a pane of sections made of rounded cards whose rows put a title and
+ * description on the left and the control on the right. Settings is the home for everything about
+ * the account and the economy. General, Profile, Usage and Connect your tools live on
+ * /portal/settings (one shown at a time, chosen by #hash); Plan & usage (the wallet), Compute (the
+ * market and reservations), Nodes, Install agent and Admin have their own URLs under
+ * /portal/settings/. Admin is revealed client-side for system admins only; its APIs enforce
+ * authorization server-side.
  */
-export type SettingsSection = "general" | "profile" | "usage" | "compute" | "tools" | "nodes" | "admin";
+export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin";
 
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
   { key: "general", label: "General", icon: "layers", href: "/portal/settings#general" },
   { key: "profile", label: "Profile", icon: "user", href: "/portal/settings#profile" },
-  { key: "usage", label: "Plan & usage", icon: "zap", href: "/portal/settings#usage" },
-  { key: "compute", label: "Compute", icon: "cpu", href: "/portal/settings#compute" },
+  { key: "plan", label: "Plan &amp; usage", icon: "wallet", href: "/portal/settings/plan" },
+  { key: "usage", label: "Usage", icon: "zap", href: "/portal/settings#usage" },
+  { key: "compute", label: "Compute", icon: "cpu", href: "/portal/settings/compute" },
   { key: "tools", label: "Connect your tools", icon: "key", href: "/portal/settings#tools" },
   { key: "nodes", label: "Nodes", icon: "server", href: "/portal/settings/nodes" },
+  { key: "install", label: "Install agent", icon: "download", href: "/portal/settings/install" },
   { key: "admin", label: "Admin", icon: "shield", href: "/portal/settings/admin", adminOnly: true }
 ];
+
+/**
+ * Old top-level pages now live in Settings. Each old URL redirects (302) to its section and keeps
+ * the query string (the install page reads ?token=).
+ */
+export const LEGACY_SETTINGS_REDIRECTS: Record<string, string> = {
+  "/portal/wallet": "/portal/settings/plan",
+  "/portal/market": "/portal/settings/compute",
+  "/portal/download": "/portal/settings/install",
+  "/portal/nodes": "/portal/settings/nodes",
+  "/portal/coordinator-ops": "/portal/settings/admin"
+};
+
+export function redirectKeepingQuery(target: string) {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    const q = req.url.indexOf("?");
+    return reply.redirect(target + (q >= 0 ? req.url.slice(q) : ""));
+  };
+}
 
 /** One settings row: title and description on the left, the control on the right. */
 export function settingRow(title: string, desc: string, control: string, opts: { keywords?: string; id?: string; wide?: boolean } = {}): string {
@@ -47,6 +72,8 @@ export const SETTINGS_CSS = `
     .settings-link .icon { flex: none; opacity: 0.85; }
     .settings-link.dim { opacity: 0.35; }
     .settings-pane { min-width: 0; max-width: 780px; }
+    .settings-layout.wide { max-width: none; }
+    .settings-layout.wide .settings-pane { max-width: none; }
     .set-section { margin-bottom: 28px; }
     .set-title { font-size: 20px; font-weight: 600; letter-spacing: -0.015em; margin-bottom: 4px; }
     .set-lead { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
@@ -86,7 +113,7 @@ export const SETTINGS_CSS = `
 function settingsNav(active: SettingsSection): string {
   const links = SETTINGS_NAV.map((t) => {
     const cls = ["settings-link", t.adminOnly && t.key !== active ? "hidden" : ""].filter(Boolean).join(" ");
-    const id = t.adminOnly ? ' id="settingsAdminTab"' : "";
+    const id = t.adminOnly ? ' id="settingsAdminTab" data-admin-only' : "";
     const current = t.key === active ? ' aria-current="page"' : "";
     return `<a class="${cls}" href="${t.href}"${id} data-section="${t.key}"${current}>${icon(t.icon, 16)}<span>${t.label}</span></a>`;
   }).join("");
@@ -118,13 +145,42 @@ const SETTINGS_SHELL_SCRIPT = `
     })();
 `;
 
-export function settingsPage(section: SettingsSection, subtitle: string, content: string, script: string): string {
+/**
+ * Helpers shared by the settings pages' scripts: number and date formatting, DOM building, and a
+ * fetch wrapper that returns status and JSON instead of throwing.
+ */
+export const SETTINGS_HELPERS_SCRIPT = `
+    const CLASS_LABELS = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+    const classLabel = (c) => CLASS_LABELS[c] || c;
+    const fmtNum = (n, d) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 2 : d });
+    const fmtRate = (n) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : Number(n).toPrecision(2));
+    function fmtDate(ms) { return ms ? new Date(ms).toLocaleString() : "never"; }
+    function timeLeft(endMs) {
+      const min = Math.floor((endMs - Date.now()) / 60000);
+      if (min < 1) return "ending";
+      if (min < 60) return min + " min left";
+      return Math.floor(min / 60) + " h" + (min % 60 ? " " + (min % 60) + " min" : "") + " left";
+    }
+    function el(tag, attrs, text) { const e = document.createElement(tag); for (const k in (attrs || {})) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; }
+    async function call(path, options) {
+      const res = await fetch(path, { credentials: "include", headers: { "content-type": "application/json" }, ...(options || {}) });
+      let json = {}; try { json = await res.json(); } catch {}
+      return { ok: res.ok, status: res.status, json };
+    }
+`;
+
+/** One settings section with a title and lead line. */
+export function settingsSection(key: string, title: string, lead: string, body: string): string {
+  return `<section class="set-section" id="sec-${key}" data-section="${key}"><h2 class="set-title">${title}</h2><p class="set-lead">${lead}</p>${body}</section>`;
+}
+
+export function settingsPage(section: SettingsSection, subtitle: string, content: string, script: string, opts: { wide?: boolean } = {}): string {
   return portalAuthedPageHtml({
     title: "EdgeCoder Portal | Settings",
     activeTab: "settings",
     heading: "Settings",
     subtitle,
-    content: `${SETTINGS_CSS}<div class="settings-layout">${settingsNav(section)}<div class="settings-pane">${content}</div></div>`,
+    content: `${SETTINGS_CSS}<div class="settings-layout${opts.wide ? " wide" : ""}">${settingsNav(section)}<div class="settings-pane">${content}</div></div>`,
     script: SETTINGS_SHELL_SCRIPT + script
   });
 }

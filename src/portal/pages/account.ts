@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
 import { displayEnrollmentToken, escapeHtml } from "./escape.js";
+import { settingsPage, settingsSection } from "./settings-shell.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
@@ -17,7 +17,8 @@ export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "io
 }
 
 export function registerAccountPages(app: FastifyInstance): void {
-app.get("/portal/wallet", async (_req, reply) => {
+// Settings > Plan & usage: the wallet (balance, buying cSats, payouts, where we pay you). Was /portal/wallet.
+app.get("/portal/settings/plan", async (_req, reply) => {
   const content = `
     <div class="card" id="payoutDestinationCard">
       <h2 style="margin-top:0;">Where should we pay you?</h2>
@@ -455,17 +456,12 @@ app.get("/portal/wallet", async (_req, reply) => {
     });
     loadWalletView().catch((err) => showToast("Could not load wallet data: " + String(err.message || err), true));
   `;
-  return reply.type("text/html").send(portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Wallet",
-    activeTab: "wallet",
-    heading: "Wallet & Credits",
-    subtitle: "Credits, payouts and where we pay you.",
-    content,
-    script
-  }));
+  const section = settingsSection("plan", "Plan &amp; usage", "Credits, buying cSats, payouts and where we pay you.", content);
+  return reply.type("text/html").send(settingsPage("plan", "Credits, payouts and where we pay you.", section, script + "\n    requireAuth().then(revealSettingsAdminTab).catch(() => undefined);\n", { wide: true }));
 });
 
-app.get("/portal/download", async (req, reply) => {
+// Settings > Install agent. Was /portal/download (which redirects here with its ?token=).
+app.get("/portal/settings/install", async (req, reply) => {
   const GH_RELEASE_BASE = "https://github.com/codyrs82/Edgecoder/releases/latest/download";
   const GH_RELEASES_PAGE = "https://github.com/codyrs82/Edgecoder/releases/latest";
   const userAgent = req.headers["user-agent"] || "";
@@ -641,7 +637,7 @@ app.get("/portal/download", async (req, reply) => {
   `;
 
   const script = `
-    requireAuth().catch(() => {});
+    requireAuth().then(revealSettingsAdminTab).catch(() => {});
 
     function copyCmd(id) {
       var el = document.getElementById(id);
@@ -652,29 +648,21 @@ app.get("/portal/download", async (req, reply) => {
         if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy'; }, 2000); }
       });
     }
+    document.querySelectorAll('.copy-btn[data-copy]').forEach(function(btn) {
+      btn.addEventListener('click', function() { copyCmd(btn.getAttribute('data-copy')); });
+    });
 
-    function toggleOthers() {
+    document.getElementById('toggle-others').addEventListener('click', function() {
       var el = document.getElementById('other-platforms');
       var btn = document.getElementById('toggle-others');
       if (!el || !btn) return;
       el.classList.toggle('show');
       btn.textContent = el.classList.contains('show') ? 'Hide other platforms' : 'Show other platforms';
-    }
-    // No inline handlers (the CSP blocks them): wire the buttons here.
-    document.querySelectorAll('[data-copy]').forEach(function(btn) {
-      btn.addEventListener('click', function() { copyCmd(btn.getAttribute('data-copy')); });
     });
-    document.getElementById('toggle-others').addEventListener('click', toggleOthers);
   `;
 
-  return reply.type("text/html").send(portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Get EdgeCoder",
-    activeTab: "download",
-    heading: "Get EdgeCoder",
-    subtitle: "Install the agent, join the mesh, start contributing.",
-    content,
-    script
-  }));
+  // The token is rendered (escaped) on the server; the script no longer rewrites it.
+  return reply.type("text/html").send(settingsPage("install", "Install the agent, join the mesh, start contributing.", content, script, { wide: true }));
 });
 
 }

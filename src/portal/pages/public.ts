@@ -154,7 +154,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             </p>
             <div class="hero-cta">
               <a class="btn primary" href="/portal#signup">Create an account</a>
-              <a class="btn" href="/portal/download">Run an agent</a>
+              <a class="btn" href="/portal/settings/install">Run an agent</a>
               <a class="btn ghost" href="#how">How it works ${icon("arrowRight", 14)}</a>
             </div>
           </div>
@@ -235,7 +235,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
         <section class="cta">
           <div><h2>Start with an account or an agent.</h2><p>Create an account to buy compute and manage your wallet, or install the agent and start earning sats for idle time.</p></div>
-          <div class="row"><a class="btn primary" href="/portal#signup">Create account</a><a class="btn" href="/portal/download">Install the agent</a></div>
+          <div class="row"><a class="btn primary" href="/portal#signup">Create account</a><a class="btn" href="/portal/settings/install">Install the agent</a></div>
         </section>
       </main>
 

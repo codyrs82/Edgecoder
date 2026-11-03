@@ -171,14 +171,14 @@ describe("portal shell and chat page markup", () => {
   it("puts a profile row with an account menu at the bottom of the sidebar", async () => {
     const app = Fastify();
     registerPortalPages(app);
-    for (const url of ["/portal/dashboard", "/portal/chat", "/portal/settings", "/portal/wallet"]) {
+    for (const url of ["/portal/dashboard", "/portal/chat", "/portal/settings", "/portal/settings/plan"]) {
       const html = (await app.inject({ url })).body;
       expect(html, url).toContain('id="profileBtn"');
       expect(html, url).toContain('aria-haspopup="menu"');
       expect(html, url).toContain('id="accountMenu" role="menu"');
       expect(html, url).toContain('id="profileGear"');
       expect(html, url).not.toContain("balance-chip");
-      for (const label of ["Profile", "Settings", "Compute &amp; usage", "Connect your tools", "Install agent", "Docs", "Log out"]) expect(html, `${url} ${label}`).toContain(`<span>${label}</span>`);
+      for (const label of ["Profile", "Plan &amp; usage", "Usage", "Compute", "Connect your tools", "Install agent", "Settings", "Admin", "Docs", "Log out"]) expect(html, `${url} ${label}`).toContain(`<span>${label}</span>`);
       expect(html, url).toContain('"/portal/api/compute/summary"');
     }
     const chat = (await app.inject({ url: "/portal/chat" })).body;

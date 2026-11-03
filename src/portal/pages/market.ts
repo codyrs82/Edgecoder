@@ -1,20 +1,19 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import type { FastifyInstance } from "fastify";
-import { portalAuthedPageHtml } from "./layout.js";
-
 /**
- * /portal/market: exchange-style view of compute priced in Bitcoin. One "pair" per compute
+ * The compute market, shown under Settings > Compute (/portal/settings/compute; the old
+ * /portal/market redirects there): exchange-style view of compute priced in Bitcoin. One "pair" per compute
  * class (CPU, Apple silicon, GPU, Datacenter GPU / BTC), quoted in msat per credit. The price is
  * flat within a class; one credit is one measured second on the class's base tier and faster
  * tiers mint more credits per second (the weight table under the order book). Candlesticks from the coordinator's minute ticks, a depth chart and order book
  * from live asks/bids, the trade tape, and a panel to place standing buy/sell orders.
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
-export function registerMarketPage(app: FastifyInstance): void {
-  app.get("/portal/market", async (_req, reply) => {
-    const content = `
+export const MARKET_SUBTITLE =
+  "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.";
+
+export const MARKET_CONTENT = `
     <style>
       .mkt-top { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
       .mkt-pair { font-size:20px; font-weight:700; letter-spacing:0.01em; }
@@ -126,7 +125,7 @@ export function registerMarketPage(app: FastifyInstance): void {
       </div>
     </div>`;
 
-    const script = `
+export const MARKET_SCRIPT = `
       (function () {
         var state = { cls: "cpu", interval: "5m", side: "buy", classes: [], rates: null, chart: null, candles: null, volume: null, depth: null, askSeries: null, bidSeries: null, timer: null };
         var $ = function (id) { return document.getElementById(id); };
@@ -288,16 +287,3 @@ export function registerMarketPage(app: FastifyInstance): void {
         }).catch(function (e) { $("chartMeta").textContent = e.message; });
       })();
     `;
-
-    reply.type("text/html").send(
-      portalAuthedPageHtml({
-        title: "EdgeCoder Portal | Market",
-        activeTab: "market",
-        heading: "Compute market",
-        subtitle: "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.",
-        content,
-        script
-      })
-    );
-  });
-}

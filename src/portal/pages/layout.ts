@@ -6,12 +6,41 @@ import { DOCS_SITE_URL } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
 
+/** Account menu entries (the popup above the avatar row), in the desktop app's order. */
+export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
+  { href: "/portal/settings#profile", label: "Profile", icon: "user" },
+  { href: "/portal/settings/plan", label: "Plan &amp; usage", icon: "wallet" },
+  { href: "/portal/settings#usage", label: "Usage", icon: "zap" },
+  { href: "/portal/settings/compute", label: "Compute", icon: "cpu" },
+  { href: "/portal/settings#tools", label: "Connect your tools", icon: "key" },
+  { href: "/portal/settings/install", label: "Install agent", icon: "download" },
+  { href: "/portal/settings", label: "Settings", icon: "settings" },
+  { href: "/portal/settings/admin", label: "Admin", icon: "shield", adminOnly: true },
+  { href: DOCS_SITE_URL, label: "Docs", icon: "docs", external: true, separatorBefore: true }
+];
+
+/** The short primary list under New chat and Search. Everything about the account and the economy lives in Settings. */
+export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string; icon: string; badge?: string }> = [
+  { key: "chat", href: "/portal/chat", label: "Chat", icon: "chat" },
+  { key: "dashboard", href: "/portal/dashboard", label: "Overview", icon: "dashboard" },
+  { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "reviews", badge: "reviewsBadge" }
+];
+
 /**
- * Authenticated app shell: left sidebar (brand, navigation, profile row with account menu), top bar (page
- * title, subtitle, actions), content area. Pages supply `content` (HTML) and `script` (JS) and
- * keep using the shell's helpers: api(), requireAuth(), showToast(), statusBadge(), boolBadge(),
- * applyTheme(). Element ids used by pages are unchanged: toast, topTickerCredits, reviewsBadge,
- * logoutBtn, hamburgerBtn, topbarNav.
+ * Authenticated app shell, laid out like the desktop app: a left sidebar with New chat and Search,
+ * a short primary list (Chat, Overview, Reviews), your recent chats grouped by date, and an avatar
+ * row at the bottom (name and cSats balance, a gear that opens Settings). Clicking the avatar opens
+ * the account menu. Market, Wallet, Install agent and the rest live in Settings. Top bar (page
+ * title, subtitle, actions) and content area on the right; on mobile the sidebar slides in behind
+ * the menu button.
+ *
+ * Pages supply `content` (HTML) and `script` (JS) and keep using the shell's helpers: api(),
+ * requireAuth(), showToast(), statusBadge(), boolBadge(), applyTheme(), sidebarConversationsHtml().
+ * Element ids used by pages: toast, topTickerCredits, reviewsBadge, logoutBtn, hamburgerBtn,
+ * topbarNav, and on the chat page newChatBtn, convSearch and convList (the chat page drives the
+ * recent-chats list itself; other pages show it as links into the chat). Elements marked
+ * data-admin-only are revealed for system admins once /me has loaded; the APIs behind them enforce
+ * authorization server-side. No inline event handlers: everything is wired in the scripts.
  */
 export function portalAuthedPageHtml(input: {
   title: string;
@@ -23,56 +52,22 @@ export function portalAuthedPageHtml(input: {
   /** Optional HTML rendered on the right of the top bar (buttons, filters). */
   actions?: string;
 }): string {
-  const groups: Array<{ label: string; items: Array<{ key: string; href: string; label: string; icon: string; badge?: string; external?: boolean }> }> = [
-    {
-      label: "Workspace",
-      items: [
-        { key: "dashboard", href: "/portal/dashboard", label: "Dashboard", icon: "dashboard" },
-        { key: "chat", href: "/portal/chat", label: "Chat", icon: "chat" },
-        { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "reviews", badge: "reviewsBadge" }
-      ]
-    },
-    {
-      label: "Economy",
-      items: [
-        { key: "market", href: "/portal/market", label: "Market", icon: "market" },
-        { key: "wallet", href: "/portal/wallet", label: "Wallet", icon: "wallet" }
-      ]
-    },
-    {
-      label: "Account",
-      items: [
-        { key: "download", href: "/portal/download", label: "Install agent", icon: "download" },
-        { key: "settings", href: "/portal/settings", label: "Settings", icon: "settings" },
-        { key: "docs", href: DOCS_SITE_URL, label: "Documentation", icon: "docs", external: true }
-      ]
-    }
-  ];
-  // The account menu above the profile row (like Cursor's): where you manage yourself, not the network.
-  const accountMenuItems: Array<{ href: string; label: string; icon: string; external?: boolean }> = [
-    { href: "/portal/settings#profile", label: "Profile", icon: "user" },
-    { href: "/portal/settings", label: "Settings", icon: "settings" },
-    { href: "/portal/settings#compute", label: "Compute &amp; usage", icon: "cpu" },
-    { href: "/portal/settings#tools", label: "Connect your tools", icon: "key" },
-    { href: "/portal/download", label: "Install agent", icon: "download" },
-    { href: DOCS_SITE_URL, label: "Docs", icon: "docs", external: true }
-  ];
-  const navHtml = groups
-    .map(
-      (g) => `
-      <div class="nav-group">
-        <div class="nav-group-label">${g.label}</div>
-        ${g.items
-          .map((item) => {
-            const active = item.key === input.activeTab ? " active" : "";
-            const badge = item.badge ? `<span class="nav-badge" id="${item.badge}" style="display:none;">0</span>` : "";
-            const ext = item.external ? ` target="_blank" rel="noreferrer"` : "";
-            return `<a class="nav-link${active}" href="${item.href}"${ext} title="${item.label}"${active ? ' aria-current="page"' : ""}>${icon(item.icon, 16)}<span class="nav-label">${item.label}</span>${badge}${item.external ? icon("external", 12, "nav-ext") : ""}</a>`;
-          })
-          .join("")}
-      </div>`
-    )
-    .join("");
+  const onChat = input.activeTab === "chat";
+  // On the chat page New chat starts a chat in place; elsewhere it opens the chat page on a new chat.
+  const newChat = onChat
+    ? `<button type="button" class="nav-link nav-action" id="newChatBtn">${icon("edit", 16)}<span class="nav-label">New chat</span></button>`
+    : `<a class="nav-link nav-action" id="newChatBtn" href="/portal/chat?new=1">${icon("edit", 16)}<span class="nav-label">New chat</span></a>`;
+  const primaryHtml = PRIMARY_NAV_ITEMS.map((item) => {
+    const active = item.key === input.activeTab;
+    const badge = item.badge ? `<span class="nav-badge" id="${item.badge}" style="display:none;">0</span>` : "";
+    return `<a class="nav-link${active ? " active" : ""}" href="${item.href}" title="${item.label}"${active ? ' aria-current="page"' : ""}>${icon(item.icon, 16)}<span class="nav-label">${item.label}</span>${badge}</a>`;
+  }).join("");
+  const menuHtml = ACCOUNT_MENU_ITEMS.map((m) => {
+    const sep = m.separatorBefore ? "<hr />" : "";
+    const ext = m.external ? ' target="_blank" rel="noreferrer"' : "";
+    const admin = m.adminOnly ? ' data-admin-only hidden' : "";
+    return `${sep}<a role="menuitem" tabindex="-1" href="${m.href}"${ext}${admin}>${icon(m.icon, 15)}<span>${m.label}</span>${m.external ? icon("external", 12, "nav-ext") : ""}</a>`;
+  }).join("");
 
   return `<!doctype html>
   <html lang="en">
@@ -95,8 +90,31 @@ export function portalAuthedPageHtml(input: {
         .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
         .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
         .sidebar-nav { padding: 10px 10px; flex: 1; overflow-y: auto; }
-        .nav-group { margin-bottom: 14px; }
-        .nav-group-label { font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding: 6px 10px; }
+        .nav-group { margin-bottom: 10px; }
+        .nav-group-label { font-size: 11px; font-weight: 600; color: var(--muted); padding: 10px 10px 4px; }
+        button.nav-link { width: 100%; min-height: 0; padding: 8px 10px; gap: 10px; justify-content: flex-start; background: none; border: none; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+        .profile-btn, .account-menu button[role="menuitem"] { justify-content: flex-start; }
+        .nav-link.nav-action { color: var(--text); }
+        .sidebar-search { padding: 2px 0 6px; }
+        .sidebar-search[hidden] { display: none; }
+        .sidebar-search input { font-size: 12.5px; padding: 6px 10px; min-height: 30px; background: var(--bg-input); }
+        .conv-list { display: flex; flex-direction: column; }
+        .conv-group-label { font-size: 11px; font-weight: 600; color: var(--muted); padding: 10px 10px 4px; }
+        .conv-item {
+          position: relative; display: block; padding: 6px 28px 6px 10px; margin: 1px 0; border-radius: var(--radius-sm);
+          font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+          transition: background var(--transition-fast), color var(--transition-fast);
+        }
+        .conv-item:hover { background: var(--bg-elevated); color: var(--text); }
+        .conv-item.active { background: var(--bg-elevated); color: var(--text); }
+        .conv-delete {
+          position: absolute; right: 4px; top: 50%; transform: translateY(-50%); min-height: 0; padding: 2px 6px;
+          opacity: 0; background: none; border: none; cursor: pointer; color: var(--text-secondary); font-size: 14px;
+          transition: opacity var(--transition-fast), color var(--transition-fast);
+        }
+        .conv-item:hover .conv-delete, .conv-delete:focus-visible { opacity: 0.6; }
+        .conv-delete:hover { opacity: 1 !important; color: var(--danger); background: none; }
+        .conv-empty { padding: 6px 10px; font-size: 12px; color: var(--muted); }
         .nav-link {
           position: relative; display: flex; align-items: center; gap: 10px;
           padding: 8px 10px; margin: 1px 0; border-radius: var(--radius-sm);
@@ -129,13 +147,14 @@ export function portalAuthedPageHtml(input: {
         .profile-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .profile-sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .profile-gear { flex: none; width: 30px; height: 30px; min-height: 0; padding: 0; margin-right: 4px; background: none; border: none; color: var(--muted); border-radius: var(--radius-sm); }
-        .profile-gear:hover { color: var(--text); background: var(--bg-surface); }
+        .profile-gear { display: inline-flex; align-items: center; justify-content: center; }
+        .profile-gear:hover, .profile-gear[aria-current="page"] { color: var(--text); background: var(--bg-surface); }
         .account-menu {
           position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 70;
           background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md);
           box-shadow: var(--shadow-2, 0 12px 32px rgba(0,0,0,0.45)); padding: 5px;
         }
-        .account-menu[hidden] { display: none; }
+        .account-menu[hidden], .account-menu [role="menuitem"][hidden] { display: none; }
         .account-menu .menu-head { padding: 8px 10px 6px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .account-menu a[role="menuitem"], .account-menu button[role="menuitem"] {
           display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; min-height: 0;
@@ -176,13 +195,23 @@ export function portalAuthedPageHtml(input: {
       <div class="app">
         <aside class="sidebar" id="topbarNav">
           <div class="sidebar-brand">
-            <a href="/portal/dashboard">${brandMark(28)}<span><div class="brand-name">EdgeCoder</div><div class="brand-sub">Compute network</div></span></a>
+            <a href="/portal/chat">${brandMark(28)}<span><div class="brand-name">EdgeCoder</div><div class="brand-sub">Compute network</div></span></a>
           </div>
-          <nav class="sidebar-nav" aria-label="Primary">${navHtml}</nav>
+          <nav class="sidebar-nav" aria-label="Primary">
+            <div class="nav-group">
+              ${newChat}
+              <button type="button" class="nav-link" id="sidebarSearchBtn" aria-expanded="false" aria-controls="sidebarSearch">${icon("search", 16)}<span class="nav-label">Search</span></button>
+              <div class="sidebar-search" id="sidebarSearch" hidden><input id="convSearch" type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off" /></div>
+            </div>
+            <div class="nav-group">${primaryHtml}</div>
+            <div class="nav-group" aria-label="Recent chats">
+              <div class="conv-list" id="convList"></div>
+            </div>
+          </nav>
           <div class="sidebar-foot">
             <div class="account-menu" id="accountMenu" role="menu" aria-labelledby="profileBtn" hidden>
               <div class="menu-head" id="accountMenuEmail"></div>
-              ${accountMenuItems.map((m) => `<a role="menuitem" tabindex="-1" href="${m.href}"${m.external ? ' target="_blank" rel="noreferrer"' : ""}>${icon(m.icon, 15)}<span>${m.label}</span>${m.external ? icon("external", 12, "nav-ext") : ""}</a>`).join("")}
+              ${menuHtml}
               <hr />
               <button type="button" role="menuitem" tabindex="-1" id="logoutBtn">${icon("logout", 15)}<span>Log out</span></button>
             </div>
@@ -191,7 +220,7 @@ export function portalAuthedPageHtml(input: {
                 <span class="avatar" id="profileAvatar" aria-hidden="true"></span>
                 <span class="profile-text"><span class="profile-name" id="profileName">&nbsp;</span><span class="profile-sub" id="topTickerCredits" title="cSats balance"><span class="loading-spinner sm"></span></span></span>
               </button>
-              <button type="button" class="profile-gear" id="profileGear" aria-label="Account menu" aria-haspopup="menu" aria-expanded="false" aria-controls="accountMenu">${icon("settings", 16)}</button>
+              <a class="profile-gear" id="profileGear" href="/portal/settings" title="Settings" aria-label="Settings"${input.activeTab === "settings" ? ' aria-current="page"' : ""}>${icon("settings", 16)}</a>
             </div>
           </div>
         </aside>
@@ -255,6 +284,7 @@ export function portalAuthedPageHtml(input: {
           var nav = document.getElementById("topbarNav");
           var scrim = document.getElementById("navScrim");
           function close() { nav.classList.remove("mobile-open"); scrim.classList.remove("show"); }
+          window.closeMobileNav = close;
           if (btn && nav) {
             btn.addEventListener("click", function() { nav.classList.toggle("mobile-open"); scrim.classList.toggle("show", nav.classList.contains("mobile-open")); });
             scrim.addEventListener("click", close);
@@ -283,6 +313,9 @@ export function portalAuthedPageHtml(input: {
             document.getElementById("profileAvatar").textContent = name.charAt(0) || "?";
             document.getElementById("accountMenuEmail").textContent = user.email || "";
             document.getElementById("profileBtn").setAttribute("title", user.email || name);
+            if (user.roles && user.roles.isSystemAdmin) {
+              document.querySelectorAll("[data-admin-only]").forEach(function(e) { e.hidden = false; e.classList.remove("hidden"); });
+            }
           } catch { return; }
           // The balance lives on the coordinator (cSats); the control plane's credits are a fallback.
           try {
@@ -300,9 +333,9 @@ export function portalAuthedPageHtml(input: {
         (function() {
           var menu = document.getElementById("accountMenu");
           var row = document.getElementById("profileRow");
-          var triggers = [document.getElementById("profileBtn"), document.getElementById("profileGear")];
+          var triggers = [document.getElementById("profileBtn")];
           var lastTrigger = triggers[0];
-          function items() { return Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]')); }
+          function items() { return Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]:not([hidden])')); }
           function isOpen() { return !menu.hidden; }
           function setExpanded(v) { triggers.forEach(function(t) { t.setAttribute("aria-expanded", v ? "true" : "false"); }); row.classList.toggle("open", v); }
           function openMenu(trigger, focusLast) {
@@ -335,6 +368,54 @@ export function portalAuthedPageHtml(input: {
           document.addEventListener("keydown", function(e) { if (e.key === "Escape" && isOpen()) closeMenu(true); });
           // Same-page anchors (Settings sections) still navigate; close the menu after.
           menu.addEventListener("click", function(e) { if (e.target.closest && e.target.closest("a[role=menuitem]")) closeMenu(false); });
+        })();
+        /* ── Recent chats, grouped like the desktop: Today, Yesterday, Previous 7 days, Older ── */
+        function sidebarConversationsHtml(list, activeId, opts) {
+          opts = opts || {};
+          if (!list || !list.length) return '<div class="conv-empty">' + escapeHtml(opts.emptyText || "No chats yet") + "</div>";
+          var start = new Date(); start.setHours(0, 0, 0, 0);
+          var t0 = start.getTime(), day = 86400000;
+          var groups = [["Today", []], ["Yesterday", []], ["Previous 7 days", []], ["Older", []]];
+          list.forEach(function(c) {
+            var t = Number(c.updatedAtMs || c.createdAtMs || 0);
+            var g = t >= t0 ? 0 : t >= t0 - day ? 1 : t >= t0 - 7 * day ? 2 : 3;
+            groups[g][1].push(c);
+          });
+          return groups.filter(function(g) { return g[1].length; }).map(function(g) {
+            return '<div class="conv-group-label">' + g[0] + "</div>" + g[1].map(function(c) {
+              var id = escapeHtml(c.conversationId), title = escapeHtml(c.title || "New chat");
+              var cls = "conv-item" + (c.conversationId === activeId ? " active" : "");
+              if (opts.links) return '<a class="' + cls + '" href="/portal/chat?c=' + encodeURIComponent(c.conversationId) + '" title="' + title + '">' + title + "</a>";
+              return '<div class="' + cls + '" data-id="' + id + '" title="' + title + '">' + title + '<button type="button" class="conv-delete" data-delete-id="' + id + '" title="Delete" aria-label="Delete chat">&times;</button></div>';
+            }).join("");
+          }).join("");
+        }
+        (function() {
+          var btn = document.getElementById("sidebarSearchBtn");
+          var wrap = document.getElementById("sidebarSearch");
+          var input = document.getElementById("convSearch");
+          btn.addEventListener("click", function() {
+            wrap.hidden = !wrap.hidden;
+            btn.setAttribute("aria-expanded", wrap.hidden ? "false" : "true");
+            if (!wrap.hidden) input.focus();
+            else if (input.value) { input.value = ""; input.dispatchEvent(new Event("input")); }
+          });
+          input.addEventListener("keydown", function(e) { if (e.key === "Escape") { e.stopPropagation(); btn.click(); btn.focus(); } });
+          document.getElementById("convList").addEventListener("click", function(e) {
+            if (e.target.closest && e.target.closest(".conv-item") && !e.target.closest(".conv-delete") && window.closeMobileNav) window.closeMobileNav();
+          });
+          ${onChat ? "// The chat page renders the list and handles search and New chat itself." : `
+          var all = [];
+          function render() {
+            var q = input.value.trim().toLowerCase();
+            var shown = all.filter(function(c) { return !q || String(c.title || "").toLowerCase().indexOf(q) !== -1; }).slice(0, 30);
+            document.getElementById("convList").innerHTML = sidebarConversationsHtml(shown, null, { links: true, emptyText: q ? "No matching chats" : "No chats yet" });
+          }
+          input.addEventListener("input", render);
+          fetch("/portal/api/conversations", { credentials: "include" })
+            .then(function(r) { return r.ok ? r.json() : { conversations: [] }; })
+            .then(function(res) { all = (res && res.conversations) || []; render(); })
+            .catch(function() {});`}
         })();
         async function loadReviewsBadge() {
           try {

@@ -29,12 +29,12 @@ describe("escapeHtml", () => {
   });
 });
 
-describe("/portal/download token", () => {
+describe("Settings > Install agent token (was /portal/download)", () => {
   const TOKEN = "a".repeat(32) + "0123456789abcdef0123456789abcdef";
 
   it("shows a well-formed enrolment token in the install commands", async () => {
     const app = await pagesApp();
-    const res = await app.inject({ url: `/portal/download?token=${TOKEN}`, headers: { "user-agent": MAC_UA } });
+    const res = await app.inject({ url: `/portal/settings/install?token=${TOKEN}`, headers: { "user-agent": MAC_UA } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain(`--token ${TOKEN}`);
     expect(res.body).toContain(`AGENT_REGISTRATION_TOKEN=${TOKEN}`);
@@ -50,7 +50,7 @@ describe("/portal/download token", () => {
     TOKEN + "<b>",
   ])("falls back to the placeholder for %s", async (bad) => {
     const app = await pagesApp();
-    const res = await app.inject({ url: `/portal/download?token=${encodeURIComponent(bad)}`, headers: { "user-agent": MAC_UA } });
+    const res = await app.inject({ url: `/portal/settings/install?token=${encodeURIComponent(bad)}`, headers: { "user-agent": MAC_UA } });
     expect(res.statusCode).toBe(200);
     expect(res.body).not.toContain(bad);
     expect(res.body).toContain("--token YOUR_TOKEN");
@@ -165,9 +165,9 @@ describe("pages escape node ids and other user or agent data", () => {
     await app.close();
   });
 
-  it("wallet: payouts, send requests and credit history", async () => {
+  it("Settings > Plan & usage (the wallet): payouts, send requests and credit history", async () => {
     const app = await pagesApp();
-    const html = (await app.inject({ url: "/portal/wallet" })).body;
+    const html = (await app.inject({ url: "/portal/settings/plan" })).body;
     const els = await runPage(html, {
       "/me": ADMIN_ME,
       "/wallet/payouts": { balance: {}, policy: {}, payouts: [{ kind: EVIL, status: EVIL, error: EVIL, amountMsat: 1, feeMsat: 1 }] },
@@ -194,6 +194,8 @@ describe("POST /nodes/enroll node id validation", () => {
       store: {
         upsertNodeEnrollment: async (r: any) => { stored.push(r.nodeId); return { ...r, nodeApproved: false, active: false }; },
         setNodeApproval: async () => null,
+        getNodeEnrollment: async () => null,
+        getNodeEnrollmentByDeviceId: async () => null,
       },
       getCurrentUser: async () => user,
       sha256Hex: (s: string) => `h(${s})`,
@@ -222,8 +224,8 @@ describe("POST /nodes/enroll node id validation", () => {
 
 describe("enforced CSP with per-request script nonces", () => {
   const PAGES = [
-    "/portal", "/portal-legacy", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/wallet",
-    "/portal/settings", "/portal/settings/nodes", "/portal/settings/admin", "/portal/download", "/portal/reviews", "/portal/market",
+    "/portal", "/portal-legacy", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/settings/plan",
+    "/portal/settings", "/portal/settings/nodes", "/portal/settings/admin", "/portal/settings/install", "/portal/reviews", "/portal/settings/compute",
     "/", "/privacy", "/terms",
   ];
 
