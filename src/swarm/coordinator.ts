@@ -106,6 +106,7 @@ import { fetchPublicJson } from "../security/public-fetch.js";
 import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
+import type { PostgresStore } from "../db/postgres.js";
 import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
 import { isRateEpochStale, normalizeRateEpoch, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
 import {
@@ -131,6 +132,12 @@ import {
   IssuancePoolConfig,
   smoothLoadIndex
 } from "../economy/issuance.js";
+import {
+  ensureIssuanceEpoch,
+  type IssuanceAllocationDraft,
+  type IssuanceEpochDraft,
+  type IssuanceWindow
+} from "../economy/issuance-epoch.js";
 import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import {
   HOST_HEARTBEAT_MAX_SKEW_MS,
@@ -2307,6 +2314,7 @@ async function appendQuorumRecord(input: {
   return record;
 }
 
+/** Call under the shared issuance lock (pgStore.withIssuanceLock) so the commit is written once. */
 async function maybeFinalizeIssuanceEpoch(epoch: IssuanceEpochRecord): Promise<boolean> {
   const records = (await pgStore?.listQuorumLedgerByEpoch(epoch.issuanceEpochId)) ?? [];
   const approvals = new Set<string>();
@@ -2326,17 +2334,55 @@ async function maybeFinalizeIssuanceEpoch(epoch: IssuanceEpochRecord): Promise<b
       payload: { approvals: [...approvals], threshold: quorumThreshold() }
     });
   }
-  await pgStore?.upsertIssuanceEpoch({ ...epoch, finalized: true });
+  if (!epoch.finalized) await pgStore?.markIssuanceEpochFinalized(epoch.issuanceEpochId);
   return true;
 }
 
-async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocations: IssuanceAllocationRecord[] }> {
-  if (!pgStore) return { allocations: [] };
-  const now = Date.now();
-  const windowEndMs = now;
-  const windowStartMs = now - ISSUANCE_WINDOW_MS;
-  const shares = await pgStore.rollingContributionShares(windowStartMs, windowEndMs);
-  if (shares.length === 0) return { allocations: [] };
+/**
+ * One epoch per issuance window across every seed on this database: the window is aligned to
+ * ISSUANCE_RECALC_MS and the epoch id derives from it, so the first seed to tick computes and writes
+ * the epoch and its allocations; the others (and restarts) read it back. Only the computing seed
+ * proposes and self-approves; other seeds vote through /economy/issuance/quorum/vote as before.
+ */
+async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocations: IssuanceAllocationRecord[]; created: boolean }> {
+  if (!pgStore) return { allocations: [], created: false };
+  const store = pgStore;
+  return ensureIssuanceEpoch({
+    store,
+    nowMs: Date.now(),
+    recalcMs: ISSUANCE_RECALC_MS,
+    windowMs: ISSUANCE_WINDOW_MS,
+    compute: (window) => computeIssuanceEpoch(store, window),
+    afterEpoch: async ({ epoch, created }) => {
+      if (created) {
+        await appendQuorumRecord({
+          recordType: "issuance_proposal",
+          epochId: epoch.issuanceEpochId,
+          payload: {
+            windowStartMs: epoch.windowStartMs,
+            windowEndMs: epoch.windowEndMs,
+            dailyPoolTokens: epoch.dailyPoolTokens,
+            loadIndex: epoch.loadIndex
+          }
+        });
+        await appendQuorumRecord({
+          recordType: "issuance_vote",
+          epochId: epoch.issuanceEpochId,
+          payload: { vote: "approve", voterCoordinatorId: identity.peerId }
+        });
+      }
+      if (epoch.finalized) return epoch;
+      return (await maybeFinalizeIssuanceEpoch(epoch)) ? { ...epoch, finalized: true } : epoch;
+    }
+  });
+}
+
+async function computeIssuanceEpoch(
+  store: PostgresStore,
+  { windowStartMs, windowEndMs }: IssuanceWindow
+): Promise<{ epoch: IssuanceEpochDraft; allocations: IssuanceAllocationDraft[] } | null> {
+  const shares = await store.rollingContributionShares(windowStartMs, windowEndMs);
+  if (shares.length === 0) return null;
   const status = queue.status();
   const cpuCapacity = Math.max(
     1,
@@ -2352,60 +2398,29 @@ async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocat
     cpuCapacity,
     gpuCapacity
   });
-  smoothedLoadIndex = smoothLoadIndex(smoothedLoadIndex, rawLoadIndex, issuancePoolConfig.smoothingAlpha);
+  // Smooth from the network's last epoch (whichever seed wrote it), so the one series stays continuous.
+  const previous = (await store.latestIssuanceEpoch(false, ISSUANCE_RECALC_MS))?.loadIndex ?? smoothedLoadIndex;
+  smoothedLoadIndex = smoothLoadIndex(previous, rawLoadIndex, issuancePoolConfig.smoothingAlpha);
   const dailyPoolTokens = computeDailyPoolTokens(smoothedLoadIndex, issuancePoolConfig);
-  const allocationInputs = computeHourlyIssuanceAllocations(shares, dailyPoolTokens);
   const totalWeightedContribution = shares.reduce((sum, item) => sum + item.weightedContribution, 0);
-  const epoch: IssuanceEpochRecord = {
-    issuanceEpochId: randomUUID(),
-    coordinatorId: identity.peerId,
-    windowStartMs,
-    windowEndMs,
-    loadIndex: smoothedLoadIndex,
-    dailyPoolTokens,
-    hourlyTokens: Number((dailyPoolTokens / 24).toFixed(6)),
-    totalWeightedContribution: Number(totalWeightedContribution.toFixed(6)),
-    contributionCount: shares.length,
-    finalized: false,
-    createdAtMs: now
-  };
-  await pgStore.upsertIssuanceEpoch(epoch);
-  const allocations: IssuanceAllocationRecord[] = allocationInputs.map((item) => ({
-    allocationId: randomUUID(),
-    issuanceEpochId: epoch.issuanceEpochId,
-    accountId: item.accountId,
-    weightedContribution: item.weightedContribution,
-    allocationShare: item.allocationShare,
-    issuedTokens: item.issuedTokens,
-    createdAtMs: now
-  }));
-  await pgStore.replaceIssuanceAllocations(epoch.issuanceEpochId, allocations);
-  await appendQuorumRecord({
-    recordType: "issuance_proposal",
-    epochId: epoch.issuanceEpochId,
-    payload: {
-      windowStartMs,
-      windowEndMs,
-      dailyPoolTokens,
-      loadIndex: smoothedLoadIndex
-    }
-  });
-  await appendQuorumRecord({
-    recordType: "issuance_vote",
-    epochId: epoch.issuanceEpochId,
-    payload: { vote: "approve", voterCoordinatorId: identity.peerId }
-  });
-  const finalized = await maybeFinalizeIssuanceEpoch(epoch);
   return {
-    epoch: finalized ? { ...epoch, finalized: true } : epoch,
-    allocations
+    epoch: {
+      coordinatorId: identity.peerId,
+      loadIndex: smoothedLoadIndex,
+      dailyPoolTokens,
+      hourlyTokens: Number((dailyPoolTokens / 24).toFixed(6)),
+      totalWeightedContribution: Number(totalWeightedContribution.toFixed(6)),
+      contributionCount: shares.length,
+      createdAtMs: Date.now()
+    },
+    allocations: computeHourlyIssuanceAllocations(shares, dailyPoolTokens)
   };
 }
 
 async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | null> {
   const deps = anchorDeps();
   if (!deps || !pgStore) return null;
-  const epoch = await pgStore.latestIssuanceEpoch(true);
+  const epoch = await pgStore.latestIssuanceEpoch(true, ISSUANCE_RECALC_MS);
   if (!epoch) return null;
   const latestAnchor = await pgStore.latestAnchor();
   // #46: a real broadcast (pending or anchored) for this epoch is never re-sent.
@@ -2438,7 +2453,7 @@ async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: 
 async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {
   if (!pgStore) return [];
   const store = pgStore;
-  const epoch = await store.latestIssuanceEpoch(true);
+  const epoch = await store.latestIssuanceEpoch(true, ISSUANCE_RECALC_MS);
   if (!epoch) return [];
   const allocations = await store.listIssuanceAllocations(epoch.issuanceEpochId);
   if (allocations.length === 0) return [];
@@ -5303,7 +5318,7 @@ app.post("/economy/issuance/recalculate", async (req, reply) => {
 
 app.get("/economy/issuance/current", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const epoch = await pgStore?.latestIssuanceEpoch(false);
+  const epoch = await pgStore?.latestIssuanceEpoch(false, ISSUANCE_RECALC_MS);
   if (!epoch || !pgStore) return { epoch: null, allocations: [] };
   const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
   return { epoch, allocations };
@@ -5312,7 +5327,7 @@ app.get("/economy/issuance/current", async (req, reply) => {
 app.get("/economy/issuance/history", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(48) }).parse(req.query);
-  const epochs = (await pgStore?.listIssuanceEpochs(query.limit)) ?? [];
+  const epochs = (await pgStore?.listIssuanceEpochs(query.limit, ISSUANCE_RECALC_MS)) ?? [];
   return { epochs };
 });
 
@@ -5342,9 +5357,10 @@ app.post("/economy/issuance/quorum/vote", async (req, reply) => {
       voterCoordinatorId: identity.peerId
     }
   });
-  const epoch = await pgStore?.getIssuanceEpoch(body.epochId);
-  if (epoch) {
-    await maybeFinalizeIssuanceEpoch(epoch);
+  const store = pgStore;
+  const epoch = await store?.getIssuanceEpoch(body.epochId);
+  if (epoch && store) {
+    await store.withIssuanceLock(() => maybeFinalizeIssuanceEpoch(epoch));
   }
   return { ok: true, record };
 });
