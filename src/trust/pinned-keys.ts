@@ -244,6 +244,10 @@ export interface CoordinatorTrustCheck {
   /** How possession of the key was established. */
   proof?: "challenge" | "identity_only";
   warning?: string;
+  /** The verified key (set when trusted): responses are checked against it (response-signing.ts). */
+  publicKeyPem?: string;
+  /** The coordinator advertises signed responses (`responseSigning` >= 1). */
+  responseSigning?: boolean;
 }
 
 export interface TrustCheckOptions {
@@ -263,6 +267,11 @@ export function challengePolicyFromEnv(env: NodeJS.ProcessEnv, mode: TrustMode):
   if (v === "required" || v === "optional") return v;
   if (v !== "") throw new Error(`EDGECODER_IDENTITY_CHALLENGE must be required or optional, got "${env.EDGECODER_IDENTITY_CHALLENGE}"`);
   return mode === "strict" ? "required" : "optional";
+}
+
+function advertisesResponseSigning(body: unknown): boolean {
+  const v = (body as { responseSigning?: unknown } | null)?.responseSigning;
+  return typeof v === "number" && v >= 1;
 }
 
 function validIdentity(body: { peerId?: unknown; publicKeyPem?: unknown } | null | undefined): body is { peerId: string; publicKeyPem: string } {
@@ -302,7 +311,15 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
       const verified = verifyIdentityChallenge(answer, sent, answer);
       if (!verified.ok) return { trusted: false, coordinatorUrl, peerId: answer.peerId, error: verified.error };
       const decision = store.isTrusted(answer.peerId, answer.publicKeyPem);
-      return { trusted: decision.trusted, coordinatorUrl, peerId: answer.peerId, decision, proof: "challenge" };
+      return {
+        trusted: decision.trusted,
+        coordinatorUrl,
+        peerId: answer.peerId,
+        decision,
+        proof: "challenge",
+        publicKeyPem: answer.publicKeyPem,
+        responseSigning: advertisesResponseSigning(answer)
+      };
     }
     if (!CHALLENGE_UNSUPPORTED_STATUS.has(res.status)) return { trusted: false, coordinatorUrl, error: `identity_challenge_http_${res.status}` };
     if (policy === "required") return { trusted: false, coordinatorUrl, error: "identity_challenge_unsupported" };
@@ -318,6 +335,8 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
       peerId: body.peerId,
       decision,
       proof: "identity_only",
+      publicKeyPem: body.publicKeyPem,
+      responseSigning: advertisesResponseSigning(body),
       warning: `coordinator ${base} does not support ${IDENTITY_CHALLENGE_PATH}; its key was not proven (mode=${store.mode})`
     };
   } catch (error) {
@@ -335,7 +354,7 @@ export const DEFAULT_TRUST_REVERIFY_MS = 10 * 60_000;
  * coordinator when it switches URL, after forget() (reconnect, failure), and when the entry expires.
  */
 export class CoordinatorTrustGate {
-  private readonly verified = new Map<string, number>();
+  private readonly verified = new Map<string, { at: number; result: CoordinatorTrustCheck }>();
   private readonly reverifyMs: number;
   private readonly now: () => number;
   constructor(private readonly opts: TrustCheckOptions & { reverifyMs?: number; now?: () => number } = {}) {
@@ -345,11 +364,14 @@ export class CoordinatorTrustGate {
 
   async check(coordinatorUrl: string): Promise<CoordinatorTrustCheck> {
     const key = normalizeChallengeUrl(coordinatorUrl);
-    const at = this.verified.get(key);
-    if (at !== undefined && this.now() - at < this.reverifyMs) return { trusted: true, coordinatorUrl: key };
+    const hit = this.verified.get(key);
+    if (hit !== undefined && this.now() - hit.at < this.reverifyMs) {
+      const { warning: _warned, ...cached } = hit.result;
+      return { ...cached, coordinatorUrl: key };
+    }
     this.verified.delete(key);
     const result = await checkCoordinatorTrust(key, this.opts);
-    if (result.trusted) this.verified.set(key, this.now());
+    if (result.trusted) this.verified.set(key, { at: this.now(), result });
     return result;
   }
 

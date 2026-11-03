@@ -21,6 +21,8 @@ import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
 import { withNetworkTrustDefaults } from "../trust/seed-keys.js";
 import { CoordinatorTrustGate, PinnedKeyStore, challengePolicyFromEnv, describeTrustFailure, DEFAULT_TRUST_REVERIFY_MS } from "../trust/pinned-keys.js";
 import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
+import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
+import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
 import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
@@ -192,6 +194,28 @@ async function discoverCoordinatorFromPortal(): Promise<string | null> {
 const coordinator = new ActiveCoordinator(COORDINATOR_BOOTSTRAP_URL, coordinatorTrust, (from, to, reason) =>
   console.log(`[worker] coordinator ${from} -> ${to} (${reason}); verifying before use`)
 );
+
+/*
+ * Signed coordinator responses (src/trust/response-signing.ts): every response the worker acts on
+ * is verified against the key the coordinator proved in its identity challenge. Required in strict
+ * mode (EDGECODER_RESPONSE_SIGNING=required); otherwise required from coordinators that advertise
+ * it or were seen signing, and an older coordinator's unsigned responses are accepted with a warning.
+ */
+const responseVerifier = new ResponseVerifier(responseSigningPolicyFromEnv(TRUST_ENV, coordinatorTrustStore.mode), {
+  load: () => {
+    const raw = localStore.getConfig("coordinator_response_signers");
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  },
+  save: (peerIds) => localStore.setConfig("coordinator_response_signers", JSON.stringify(peerIds))
+});
+const coordinatorClient = createCoordinatorClient({
+  coordinator,
+  verifier: responseVerifier,
+  agentId: AGENT_ID,
+  warn: (m) => console.warn(`[agent:${AGENT_ID}] ${m}`),
+  onRejected: (err) =>
+    console.error(`[agent:${AGENT_ID}] refused an unauthenticated coordinator response (${err.reason}) for ${err.method} ${err.path}; failures=${responseVerifier.failures}; re-verifying ${coordinator.url}`)
+});
 
 /*
  * One platform URL, steered (src/discovery/steering.ts): fetch the signed registry from the
@@ -545,12 +569,12 @@ async function post(
       // Signed requests get a fresh nonce per attempt; a retry of a request the coordinator
       // already saw would otherwise be refused as a replay.
       const signature = options?.signed ? signedHeaders(path, payload) : {};
-      // Never send the mesh token or agent credentials to a coordinator that has not proven its key.
-      const res = await request(`${coordinator.requireVerified()}${path}`, {
+      // The coordinator client sends only to the verified URL and verifies the signed response.
+      const res = await coordinatorClient.call({
         method: "POST",
+        path,
         headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
-        headersTimeout: timeoutMs,
-        bodyTimeout: timeoutMs,
+        timeoutMs,
         body: payload
       });
       const parsed = (await parseJsonBodySafe(res)) as unknown;
@@ -568,6 +592,8 @@ async function post(
       // budget and can trigger DOS detection from rapid registration attempts.
       const code = (error as any).statusCode;
       if (code === 401 || code === 403) break;
+      // A refused response is not retried: the coordinator is re-verified first.
+      if (error instanceof CoordinatorResponseRejectedError) break;
       if (attempt >= retries) break;
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     }
@@ -580,14 +606,19 @@ async function post(
  * (agent-mesh tunnels, direct work) take the agent id from the signature, not the mesh token.
  */
 function signedJsonPost(path: string, body: unknown) {
-  // Same rule as post(): no mesh token or signature to a coordinator that has not proven its key.
-  const base = coordinator.requireVerified();
+  // Same path as post(): verified URL only, signed response checked before use.
   const payload = JSON.stringify(body);
-  return request(`${base}${path}`, {
+  return coordinatorClient.call({
     method: "POST",
+    path,
     headers: { "content-type": "application/json", ...meshHeaders(), ...signedHeaders(path, payload) },
     body: payload
   });
+}
+
+/** A GET the worker acts on (agent-mesh peers): same verified, signed-response path. */
+function coordinatorGet(path: string) {
+  return coordinatorClient.call({ method: "GET", path, headers: { ...meshHeaders(), "x-agent-id": AGENT_ID } });
 }
 
 async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: { text: () => Promise<string> } }): Promise<unknown> {
@@ -1158,10 +1189,7 @@ async function loop(): Promise<void> {
           peerTunnels.set(invite.fromAgentId, invite.token);
         }
 
-        const idlePeersResponse = await request(`${coordinator.requireVerified()}/agent-mesh/peers/${AGENT_ID}`, {
-          method: "GET",
-          headers: meshHeaders()
-        });
+        const idlePeersResponse = await coordinatorGet(`/agent-mesh/peers/${AGENT_ID}`);
         if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
           const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
           for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
@@ -1506,10 +1534,7 @@ async function loop(): Promise<void> {
 
         // While idle, offer direct work to nearby peers for spare compute utilization.
         if (canUsePeerDirect) {
-          const peersResponse = await request(`${coordinator.requireVerified()}/agent-mesh/peers/${AGENT_ID}`, {
-            method: "GET",
-            headers: meshHeaders()
-          });
+          const peersResponse = await coordinatorGet(`/agent-mesh/peers/${AGENT_ID}`);
           if (peersResponse.statusCode >= 200 && peersResponse.statusCode < 300) {
             const peersJson = (await parseJsonBodySafe(peersResponse)) as { peers?: string[] };
             const now = Date.now();
