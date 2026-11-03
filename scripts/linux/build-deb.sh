@@ -67,7 +67,7 @@ Package: edgecoder
 Version: ${VERSION}
 Architecture: amd64
 Maintainer: EdgeCoder <ops@edgecoder.io>
-Depends: nodejs (>= 20)
+Depends: nodejs (>= 20), curl, zstd
 Section: utils
 Priority: optional
 Description: EdgeCoder agent/coordinator runtime

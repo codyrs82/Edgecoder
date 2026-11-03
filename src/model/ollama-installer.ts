@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as https from "node:https";
 import * as http from "node:http";
 import * as path from "node:path";
+import { OLLAMA_ASSETS, OLLAMA_VERSION, ollamaAssetUrl, ollamaTargetFor, type OllamaAsset } from "../install/ollama-pins.js";
 
 // ---------------------------------------------------------------------------
 // Public interface (signature-stable; platform field is additive/optional)
@@ -97,20 +100,6 @@ function runCommand(
   });
 }
 
-function runShell(command: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("/bin/sh", ["-c", command], {
-      env: process.env,
-      stdio: "inherit"
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) return resolve();
-      reject(new Error(`Shell command failed (code ${code}): ${command}`));
-    });
-  });
-}
-
 function sanitizeTerminalLine(line: string): string {
   return line
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
@@ -124,38 +113,126 @@ function sanitizeTerminalLine(line: string): string {
 // Phase 2: Binary detection and installation
 // ---------------------------------------------------------------------------
 
-async function isOllamaInstalled(env?: NodeJS.ProcessEnv): Promise<boolean> {
-  try {
-    await runCommand("ollama", ["--version"], env, { silent: true });
-    return true;
-  } catch {
-    return false;
+/** Where the pinned archive is unpacked when EdgeCoder installs Ollama itself (no root needed). */
+export function defaultOllamaInstallDir(platform: NodeJS.Platform = os.platform()): string {
+  if (process.env.EDGECODER_OLLAMA_DIR) return process.env.EDGECODER_OLLAMA_DIR;
+  if (platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "EdgeCoder", "ollama");
   }
+  if (platform === "darwin") return path.join(os.homedir(), "Library", "Application Support", "EdgeCoder", "ollama");
+  return path.join(os.homedir(), ".local", "share", "edgecoder", "ollama");
 }
 
+/** The binary inside an unpacked archive (Linux archives hold bin/ + lib/; macOS and Windows are flat). */
+export function ollamaBinaryIn(dir: string, platform: NodeJS.Platform = os.platform()): string {
+  if (platform === "win32") return path.join(dir, "ollama.exe");
+  if (platform === "darwin") return path.join(dir, "ollama");
+  return path.join(dir, "bin", "ollama");
+}
+
+/** The `ollama` command to run: PATH's, unless EdgeCoder installed its own pinned copy. */
+let ollamaCmd = "ollama";
+function adoptOwnInstallIfPresent(): void {
+  const own = ollamaBinaryIn(defaultOllamaInstallDir());
+  if (existsSync(own)) ollamaCmd = own;
+}
+
+async function isOllamaInstalled(env?: NodeJS.ProcessEnv): Promise<boolean> {
+  for (const adoptOwn of [false, true]) {
+    if (adoptOwn) adoptOwnInstallIfPresent();
+    try {
+      await runCommand(ollamaCmd, ["--version"], env, { silent: true });
+      return true;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return false;
+}
+
+/** Download over https only, following redirects; rejects on a non-2xx response. */
 async function downloadFile(url: string, destPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const file = createWriteStream(destPath);
-
-    const fetchUrl = (targetUrl: string) => {
+    const fetchUrl = (targetUrl: string, redirects: number) => {
+      if (!targetUrl.startsWith("https://")) return reject(new Error(`refusing non-https download: ${targetUrl}`));
+      if (redirects > 10) return reject(new Error("too many redirects"));
       https
         .get(targetUrl, (response) => {
-          if (response.statusCode === 301 || response.statusCode === 302) {
+          const code = response.statusCode ?? 0;
+          if (code >= 300 && code < 400) {
             const location = response.headers.location;
+            response.resume();
             if (!location) return reject(new Error("Redirect with no Location header"));
-            fetchUrl(location);
+            fetchUrl(new URL(location, targetUrl).toString(), redirects + 1);
             return;
           }
+          if (code < 200 || code >= 300) {
+            response.resume();
+            return reject(new Error(`download failed (${code}): ${targetUrl}`));
+          }
+          const file = createWriteStream(destPath);
+          file.on("error", reject);
+          response.on("error", reject);
           response.pipe(file);
           file.on("finish", () => { file.close(); resolve(); });
-          response.on("error", reject);
         })
         .on("error", reject);
     };
-
-    fetchUrl(url);
-    file.on("error", reject);
+    fetchUrl(url, 0);
   });
+}
+
+async function sha256File(file: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+async function extractArchive(archive: string, destDir: string): Promise<void> {
+  if (archive.endsWith(".tar.zst")) return runCommand("tar", ["--zstd", "-xf", archive, "-C", destDir], undefined, { silent: true });
+  if (archive.endsWith(".tgz")) return runCommand("tar", ["-xzf", archive, "-C", destDir], undefined, { silent: true });
+  // Windows 10+ ships bsdtar, which reads zip archives.
+  return runCommand("tar", ["-xf", archive, "-C", destDir], undefined, { silent: true });
+}
+
+export interface PinnedOllamaInstallDeps {
+  platform?: NodeJS.Platform;
+  arch?: string;
+  destDir?: string;
+  download?: (url: string, destPath: string) => Promise<void>;
+  extract?: (archive: string, destDir: string) => Promise<void>;
+  /** Tests only: replaces the pinned asset. */
+  asset?: OllamaAsset;
+}
+
+/**
+ * Install Ollama from the pinned official release archive (src/install/ollama-pins.ts): download,
+ * check the SHA-256, and only then unpack into destDir. A checksum mismatch aborts before anything
+ * is unpacked or any existing install is touched. Returns the path of the installed binary.
+ */
+export async function installPinnedOllama(deps: PinnedOllamaInstallDeps = {}): Promise<string> {
+  const platform = deps.platform ?? os.platform();
+  const arch = deps.arch ?? os.arch();
+  const target = ollamaTargetFor(platform, arch);
+  if (!target) throw new Error(`ollama_install_unsupported: no pinned Ollama build for ${platform}-${arch}`);
+  const asset = deps.asset ?? OLLAMA_ASSETS[target];
+  const url = ollamaAssetUrl(asset);
+  const destDir = deps.destDir ?? defaultOllamaInstallDir(platform);
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "edgecoder-ollama-"));
+  try {
+    const archive = path.join(tmp, asset.name);
+    await (deps.download ?? downloadFile)(url, archive);
+    const got = await sha256File(archive);
+    if (got !== asset.sha256) {
+      throw new Error(`ollama_checksum_mismatch: ${url} expected ${asset.sha256}, got ${got}; not installing it`);
+    }
+    await rm(destDir, { recursive: true, force: true });
+    await mkdir(destDir, { recursive: true });
+    await (deps.extract ?? extractArchive)(archive, destDir);
+    return ollamaBinaryIn(destDir, platform);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
 }
 
 async function installOllamaBinary(
@@ -163,31 +240,12 @@ async function installOllamaBinary(
   role: string,
   onStatus?: OllamaStatusCallback
 ): Promise<void> {
-  log(role, `binary not found on platform=${platform}, installing...`);
-  await onStatus?.("installing_ollama", "Installing Ollama (this may take a minute)…");
-
-  switch (platform) {
-    case "macos":
-    case "debian":
-    case "ubuntu":
-      await runShell("curl -fsSL https://ollama.com/install.sh | sh");
-      break;
-
-    case "windows": {
-      const tmpExe = path.join(os.tmpdir(), "OllamaSetup.exe");
-      log(role, `downloading OllamaSetup.exe to ${tmpExe}...`);
-      await downloadFile("https://ollama.com/download/OllamaSetup.exe", tmpExe);
-      log(role, "running OllamaSetup.exe silently...");
-      await runCommand(tmpExe, ["/S"]);
-      break;
-    }
-
-    case "ios":
-      return; // Managed by native iOS app
-  }
-
+  if (platform === "ios") return; // Managed by native iOS app
+  log(role, `binary not found on platform=${platform}, installing pinned Ollama ${OLLAMA_VERSION}...`);
+  await onStatus?.("installing_ollama", `Installing Ollama ${OLLAMA_VERSION} (this may take a minute)…`);
+  ollamaCmd = await installPinnedOllama();
   await onStatus?.("installing_ollama", "Ollama installed. Verifying…");
-  log(role, "binary install complete");
+  log(role, `binary install complete: ${ollamaCmd}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +268,7 @@ async function isOllamaServing(host?: string): Promise<boolean> {
 
 function startOllamaServeBackground(role: string, env?: NodeJS.ProcessEnv): void {
   log(role, "starting ollama serve in background...");
-  const child = spawn("ollama", ["serve"], {
+  const child = spawn(ollamaCmd, ["serve"], {
     env: { ...process.env, ...(env ?? {}) },
     stdio: "ignore",
     detached: true
@@ -255,7 +313,7 @@ function runPullWithProgress(
   onStatus?: OllamaStatusCallback
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ollama", ["pull", model], {
+    const child = spawn(ollamaCmd, ["pull", model], {
       env: { ...process.env, ...(env ?? {}) },
       stdio: "pipe"
     });
@@ -360,7 +418,7 @@ export async function ensureOllamaModelInstalled(
   if (onStatus) {
     await runPullWithProgress(options.model, serveEnv, onStatus);
   } else {
-    await runCommand("ollama", ["pull", options.model], serveEnv);
+    await runCommand(ollamaCmd, ["pull", options.model], serveEnv);
   }
   log(role, `model ready: ${options.model}`);
 }

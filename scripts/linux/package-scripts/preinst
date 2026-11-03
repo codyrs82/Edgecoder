@@ -5,8 +5,8 @@ set -euo pipefail
 if ! command -v node >/dev/null 2>&1; then
   echo "EdgeCoder requires Node.js 22+ to be installed first."
   echo "Install Node.js and try again:"
-  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -"
-  echo "  sudo apt-get install -y nodejs"
+  echo "  https://nodejs.org/en/download (official release archive or your distribution's package)"
+
   exit 1
 fi
 
