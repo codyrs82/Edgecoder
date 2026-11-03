@@ -120,11 +120,14 @@ jobs:
             cp "$b/macos/EdgeCoder.app.tar.gz"     "out/EdgeCoder_${ver}_aarch64.app.tar.gz"
             cp "$b/macos/EdgeCoder.app.tar.gz.sig" "out/EdgeCoder_${ver}_aarch64.app.tar.gz.sig"
             cp "$b"/dmg/*.dmg                       "out/EdgeCoder_${ver}_aarch64.dmg"
+            # Unversioned copy: the portal links releases/latest/download/EdgeCoder_aarch64.dmg.
+            cp "$b"/dmg/*.dmg                       "out/EdgeCoder_aarch64.dmg"
             echo "EdgeCoder_${ver}_aarch64.app.tar.gz" > out/${{ matrix.platform }}.asset
           else
             exe=$(ls "$b"/nsis/*-setup.exe | head -n1)
             cp "$exe"     "out/EdgeCoder_${ver}_x64-setup.exe"
             cp "$exe.sig" "out/EdgeCoder_${ver}_x64-setup.exe.sig"
+            cp "$exe"     "out/EdgeCoder_x64-setup.exe"
             echo "EdgeCoder_${ver}_x64-setup.exe" > out/${{ matrix.platform }}.asset
           fi
           ls -l out
@@ -180,7 +183,7 @@ jobs:
         run: |
           set -eu
           cd out
-          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --latest \
             --title "EdgeCoder Desktop ${GITHUB_REF_NAME#desktop-v}" \
             --notes "Signed desktop build. Installed apps update automatically." ./*
           # The fixed feed release: apps poll .../releases/download/desktop-updates/latest.json.
