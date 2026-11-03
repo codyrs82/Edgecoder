@@ -82,6 +82,12 @@ import {
   verifyForwardedResult,
   type PeerAllowlist
 } from "../mesh/peer-trust.js";
+import {
+  buildAgentEnvelope,
+  requireAgentSignedForwards,
+  verifyForwardedAgentEnvelope,
+  type AgentResultEnvelope
+} from "../mesh/forwarded-agent-envelope.js";
 import { MeshProtocol } from "../mesh/protocol.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
@@ -369,6 +375,8 @@ const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduct
 const forwardReplayCache = new ReplayCache();
 const OFFERED_SUBTASK_TTL_MS = 24 * 60 * 60 * 1000;
 const offeredToPeers = new Map<string, number>();
+/** #122: forwarded results with an output must carry the agent's own signed request (prod default). */
+const REQUIRE_AGENT_SIGNED_FORWARDS = requireAgentSignedForwards(process.env, isProduction());
 const PORTAL_SERVICE_URL = CC.PORTAL_SERVICE_URL ?? "";
 /** Which forwarded-IP headers to believe (COORDINATOR_TRUST_PROXY, Fly-Client-IP on Fly). Display/geo only. */
 const CLIENT_IP_TRUST = clientIpTrustFromEnv(process.env);
@@ -2239,6 +2247,35 @@ function activeBlacklistRecord(agentId: string): BlacklistRecord | undefined {
   return record;
 }
 
+/** #122: blacklisted here or by any coordinator on the shared database. */
+async function meshBlacklistReason(agentId: string): Promise<string | null> {
+  const local = activeBlacklistRecord(agentId);
+  if (local) return local.reason;
+  const shared = await pgStore?.latestBlacklistEvent(agentId);
+  if (shared && !(shared.expiresAtMs && Date.now() > shared.expiresAtMs)) return shared.reason;
+  return null;
+}
+
+/** #122: agent keys this coordinator trusts: its own registration plus the shared key table. */
+async function trustedAgentSigningKeys(agentId: string): Promise<string[]> {
+  const keys = new Set<string>((await pgStore?.listAgentSigningKeys(agentId)) ?? []);
+  const local = agentCapabilities.get(agentId)?.publicKeyPem;
+  if (local) keys.add(local);
+  return [...keys];
+}
+
+const attestedAgentKeys = new Set<string>();
+function attestAgentSigningKey(agentId: string, publicKeyPem: string): void {
+  if (!pgStore) return;
+  const k = `${agentId}\n${publicKeyPem}`;
+  if (attestedAgentKeys.has(k)) return;
+  attestedAgentKeys.add(k);
+  void pgStore.recordAgentSigningKey(agentId, publicKeyPem, identity.peerId).catch((error) => {
+    attestedAgentKeys.delete(k);
+    app.log.warn({ error, agentId }, "agent_signing_key_record_failed");
+  });
+}
+
 function appendBlacklistRecord(record: BlacklistRecord): void {
   blacklistByAgent.set(record.agentId, record);
   blacklistAuditLog.push(record);
@@ -2883,6 +2920,9 @@ app.post("/register", async (req, reply) => {
     hardwareClass,
     lastSeenMs: now
   });
+  // #122: the shared key record lets other coordinators verify this agent's forwarded results.
+  const registeredKey = agentCapabilities.get(body.agentId)?.publicKeyPem;
+  if (registeredKey) attestAgentSigningKey(body.agentId, registeredKey);
   // ── Binary integrity verification ──
   let verificationStatus: VerificationStatus = "unverified";
   if (body.binaryIntegrity) {
@@ -3544,6 +3584,8 @@ interface ResultMeta {
   durationMs: number;
   reportedDurationMs: number;
   subtask: Subtask;
+  /** #122: the agent's signed request, forwarded to the origin coordinator with the result. */
+  agentEnvelope?: AgentResultEnvelope;
 }
 const verificationConfig = verificationConfigFromEnv();
 const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfig);
@@ -3681,7 +3723,7 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
  * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
  * for verification this runs only at settle time, with the verified output.
  */
-async function publishResult(result: SubtaskResult): Promise<void> {
+async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<void> {
   queue.complete(result);
   // Market: a task's bid leaves the book once its last subtask has a result.
   if (queue.openSubtaskCount(result.taskId) === 0 && depTracker.heldCountForTask(result.taskId) === 0) orderBook.removeBid(result.taskId);
@@ -3697,7 +3739,12 @@ async function publishResult(result: SubtaskResult): Promise<void> {
   const origin = taskOriginMap.get(result.subtaskId);
   if (origin && origin.coordinatorId !== identity.peerId) {
     taskOriginMap.delete(result.subtaskId);
-    const forwardJson = JSON.stringify(result);
+    // #122: the origin verifies the agent's own signature too, not only ours.
+    if (agentEnvelope) {
+      const pem = agentCapabilities.get(agentEnvelope.headers["x-agent-id"])?.publicKeyPem;
+      if (pem) attestAgentSigningKey(agentEnvelope.headers["x-agent-id"], pem);
+    }
+    const forwardJson = JSON.stringify(agentEnvelope ? { ...result, agentEnvelope } : result);
     void request(`${origin.coordinatorUrl}/result`, {
       method: "POST",
       headers: {
@@ -3779,7 +3826,10 @@ async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Pro
   if (outcome.status === "timeout") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_timeout_accepted_unverified");
   }
-  await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output });
+  // #122: forward the signature of the execution whose output is published (verification.ts picks
+  // the original when it won, else the first winner).
+  const ref = outcome.winners.find((w) => w.subtaskId === outcome.originalSubtaskId) ?? outcome.winners[0];
+  await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output }, ref?.meta.agentEnvelope);
   releaseDependents(outcome.originalSubtaskId, outcome.output);
 }
 
@@ -3909,10 +3959,12 @@ app.post("/result", async (req, reply) => {
   // Check if this is an encrypted envelope result
   const cachedKey = typeof rawBody.subtaskId === "string" ? envelopeSharedKeys.get(rawBody.subtaskId) : undefined;
   let body: z.infer<typeof resultSchema>;
+  let envelopeKey: Buffer | undefined;
   if (cachedKey && typeof rawBody.encryptedPayload === "string") {
     try {
       const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, cachedKey.key);
       envelopeSharedKeys.delete(rawBody.subtaskId as string);
+      envelopeKey = cachedKey.key;
       body = resultSchema.parse({
         ...decrypted,
         subtaskId: rawBody.subtaskId,
@@ -3981,7 +4033,25 @@ app.post("/result", async (req, reply) => {
       }
       offeredToPeers.delete(body.subtaskId);
     }
+    // #122: the result itself must be signed by the agent that produced it.
+    const agentCheck = await verifyForwardedAgentEnvelope({
+      result: body,
+      envelope: rawBody.agentEnvelope,
+      required: REQUIRE_AGENT_SIGNED_FORWARDS,
+      agentKeys: trustedAgentSigningKeys,
+      blacklisted: meshBlacklistReason
+    });
+    if (!agentCheck.ok) {
+      app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId, agentId: agentCheck.agentId, error: agentCheck.error }, "forwarded_result_agent_check_failed");
+      return reply.code(agentCheck.code).send({ error: agentCheck.error });
+    }
+    if (agentCheck.mode === "legacy_unenveloped") {
+      app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_without_agent_signature_accepted");
+    }
   }
+  // #122: kept with the result so the origin coordinator can check the agent's own signature.
+  const signedHeaders = verified ? extractSignedHeaders((req as any).headers ?? {}) : null;
+  const agentEnvelope = signedHeaders ? buildAgentEnvelope(signedHeaders, rawBodyOf(req), envelopeKey) : undefined;
   if (!isPeerForward) {
     const claimCheck = checkResultClaim(claim, body.agentId);
     if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
@@ -4023,7 +4093,7 @@ app.post("/result", async (req, reply) => {
       accountId: await rewardAccountForAgent(body.agentId),
       ok: body.ok,
       output: body.output ?? "",
-      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, agentEnvelope }
     };
     if (resultVerifier.isReplica(body.subtaskId)) {
       verificationHold = true;
@@ -4045,7 +4115,7 @@ app.post("/result", async (req, reply) => {
     return reply.send({ ok: true, held: true });
   }
 
-  await publishResult(body);
+  await publishResult(body, agentEnvelope);
   inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
   // ── Dependency tracking: store output and release dependent subtasks ──
   releaseDependents(body.subtaskId, body.output ?? "");

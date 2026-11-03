@@ -199,6 +199,18 @@ CREATE TABLE IF NOT EXISTS agent_registry (
   active_model_param_size DOUBLE PRECISION
 );
 
+-- #122: agent request-signing keys accepted at /register by any coordinator on this database.
+-- The origin of a peer-forwarded result verifies the agent's own signature against these, so the
+-- key never comes from the forwarding coordinator. Every key an agent registered stays listed.
+CREATE TABLE IF NOT EXISTS agent_signing_keys (
+  agent_id TEXT NOT NULL,
+  public_key_pem TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  first_seen_ms BIGINT NOT NULL,
+  last_seen_ms BIGINT NOT NULL,
+  PRIMARY KEY (agent_id, public_key_pem)
+);
+
 CREATE TABLE IF NOT EXISTS blacklist_events (
   event_id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
@@ -1956,34 +1968,35 @@ export class PostgresStore {
   }
 
   async listBlacklistEvents(): Promise<BlacklistRecord[]> {
+    const result = await this.pool.query(`SELECT ${BLACKLIST_COLUMNS} FROM blacklist_events ORDER BY timestamp_ms ASC`);
+    return result.rows.map(blacklistRow);
+  }
+
+  /** #122: newest blacklist event for an agent, written by any coordinator on this database. */
+  async latestBlacklistEvent(agentId: string): Promise<BlacklistRecord | null> {
     const result = await this.pool.query(
-      `SELECT
-        event_id, agent_id, reason_code, reason, evidence_hash_sha256, reporter_id,
-        reporter_public_key_pem, reporter_signature, evidence_signature_verified, evidence_ref,
-        source_coordinator_id, reported_by, timestamp_ms, expires_at_ms, prev_event_hash,
-        event_hash, coordinator_signature
-       FROM blacklist_events
-       ORDER BY timestamp_ms ASC`
+      `SELECT ${BLACKLIST_COLUMNS} FROM blacklist_events WHERE agent_id = $1 ORDER BY timestamp_ms DESC LIMIT 1`,
+      [agentId]
     );
-    return result.rows.map((row) => ({
-      eventId: row.event_id,
-      agentId: row.agent_id,
-      reasonCode: row.reason_code,
-      reason: row.reason,
-      evidenceHashSha256: row.evidence_hash_sha256,
-      reporterId: row.reporter_id,
-      reporterPublicKeyPem: row.reporter_public_key_pem ?? undefined,
-      reporterSignature: row.reporter_signature ?? undefined,
-      evidenceSignatureVerified: Boolean(row.evidence_signature_verified),
-      evidenceRef: row.evidence_ref ?? undefined,
-      sourceCoordinatorId: row.source_coordinator_id,
-      reportedBy: row.reported_by,
-      timestampMs: Number(row.timestamp_ms),
-      expiresAtMs: row.expires_at_ms ? Number(row.expires_at_ms) : undefined,
-      prevEventHash: row.prev_event_hash,
-      eventHash: row.event_hash,
-      coordinatorSignature: row.coordinator_signature
-    }));
+    return result.rows.length ? blacklistRow(result.rows[0]) : null;
+  }
+
+  /** #122: remember an agent signing key accepted at /register (shared by all coordinators). */
+  async recordAgentSigningKey(agentId: string, publicKeyPem: string, coordinatorId: string, nowMs = Date.now()): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO agent_signing_keys (agent_id, public_key_pem, coordinator_id, first_seen_ms, last_seen_ms)
+       VALUES ($1,$2,$3,$4,$4)
+       ON CONFLICT (agent_id, public_key_pem) DO UPDATE SET last_seen_ms = EXCLUDED.last_seen_ms`,
+      [agentId, publicKeyPem, coordinatorId, nowMs]
+    );
+  }
+
+  async listAgentSigningKeys(agentId: string): Promise<string[]> {
+    const result = await this.pool.query(
+      `SELECT public_key_pem FROM agent_signing_keys WHERE agent_id = $1 ORDER BY last_seen_ms DESC`,
+      [agentId]
+    );
+    return result.rows.map((row) => String(row.public_key_pem));
   }
 
   async upsertCreditAccount(account: CreditAccount): Promise<void> {
@@ -3323,5 +3336,32 @@ function mapIssuanceEpochRow(row: any): IssuanceEpochRecord {
     contributionCount: Number(row.contribution_count),
     finalized: Boolean(row.finalized),
     createdAtMs: Number(row.created_at_ms)
+  };
+}
+
+const BLACKLIST_COLUMNS = `event_id, agent_id, reason_code, reason, evidence_hash_sha256, reporter_id,
+  reporter_public_key_pem, reporter_signature, evidence_signature_verified, evidence_ref,
+  source_coordinator_id, reported_by, timestamp_ms, expires_at_ms, prev_event_hash,
+  event_hash, coordinator_signature`;
+
+function blacklistRow(row: Record<string, any>): BlacklistRecord {
+  return {
+    eventId: row.event_id,
+    agentId: row.agent_id,
+    reasonCode: row.reason_code,
+    reason: row.reason,
+    evidenceHashSha256: row.evidence_hash_sha256,
+    reporterId: row.reporter_id,
+    reporterPublicKeyPem: row.reporter_public_key_pem ?? undefined,
+    reporterSignature: row.reporter_signature ?? undefined,
+    evidenceSignatureVerified: Boolean(row.evidence_signature_verified),
+    evidenceRef: row.evidence_ref ?? undefined,
+    sourceCoordinatorId: row.source_coordinator_id,
+    reportedBy: row.reported_by,
+    timestampMs: Number(row.timestamp_ms),
+    expiresAtMs: row.expires_at_ms ? Number(row.expires_at_ms) : undefined,
+    prevEventHash: row.prev_event_hash,
+    eventHash: row.event_hash,
+    coordinatorSignature: row.coordinator_signature
   };
 }
