@@ -274,7 +274,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   if (!opts.dryRun) for (const dir of [p.configDir, p.modelsDir, p.logDir, p.stateDir]) mkdirSync(dir, { recursive: true });
   // Services never run binaries a non-root user can replace (Linux/macOS; Windows runs as the user).
   const staged = secureBinaries(binFs, host.platform, p, { dryRun: opts.dryRun, ollama: !!binFs.stat(p.ollamaBin) });
-  for (const s of staged.plans) if (s.copy) console.log(`${opts.dryRun ? "would copy" : "copied"} ${s.kind} ${s.copy.from} -> ${s.copy.to} (root-owned; ${s.reason})`);
+  for (const s of staged.plans) if (s.copy && !opts.json) console.log(`${opts.dryRun ? "would copy" : "copied"} ${s.kind} ${s.copy.from} -> ${s.copy.to} (root-owned; ${s.reason})`);
   if (staged.problems.length) {
     for (const msg of staged.problems) console.error(`error: ${msg}`);
     console.error("refusing to create services that run code a non-root user can replace");
