@@ -3,7 +3,7 @@
   import { CloudUpload, Download, GitBranch, Github, Link, LoaderCircle } from "@lucide/svelte";
   import {
     gitState, gitHeadContent, gitStage, gitUnstage, gitDiscard, gitCommit, gitCheckout, gitPull, gitPush,
-    gitInit, gitClone, gitAddRemote, gitPublishGitHub, gitGitHubStatus, ideGetProject,
+    gitInit, gitClone, gitAddRemote, gitPublishGitHub, gitGitHubStatus, ideGetProject, connectRepo, getProjectsFolder,
     fsRead, type GitState, type GitFile, type GitHubCliStatus,
   } from "../lib/api";
 
@@ -45,9 +45,14 @@
     }
   }
 
+  /** Where Clone… puts repositories by default (Settings → General → Projects folder). */
+  let projectsFolder = $state<string | null>(null);
+  const tilde = (p: string) => p.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~");
+
   async function openForm(which: "clone" | "publish" | "remote") {
     setupError = null;
     form = which;
+    if (which === "clone" && !projectsFolder) getProjectsFolder().then((f) => (projectsFolder = f.path)).catch(() => {});
     if (which === "publish") {
       if (!repoName) {
         const root = await ideGetProject().catch(() => null);
@@ -80,7 +85,21 @@
       onInfo("Initialized a git repository on main.");
     });
 
+  /** Clone into the projects folder (or update the copy already there) and open it. */
   async function cloneRepo() {
+    const url = cloneUrl.trim();
+    if (!url) return;
+    await setup("Cloning…", async () => {
+      const r = await connectRepo(url, (line) => (progress = line));
+      cloneUrl = "";
+      onInfo(r.action === "cloned" ? `Cloned into ${r.path}` : `${r.path} was already there: ${r.message}`);
+      onProjectOpened?.(r.path);
+      onChanged();
+    });
+  }
+
+  /** Clone somewhere else: pick the parent folder first. */
+  async function cloneElsewhere() {
     const url = cloneUrl.trim();
     if (!url) return;
     setupError = null;
@@ -282,7 +301,8 @@
           <input class="text" bind:value={cloneUrl} placeholder="https://github.com/owner/repo or owner/repo" aria-label="Repository URL" autofocus />
         </label>
         <div class="form-actions">
-          <button type="submit" class="primary" disabled={busy || !cloneUrl.trim()}><Download size={13} /> Choose folder and clone</button>
+          <button type="submit" class="primary" disabled={busy || !cloneUrl.trim()} title={projectsFolder ?? undefined}><Download size={13} /> Clone into {projectsFolder ? tilde(projectsFolder) : "projects folder"}</button>
+          <button type="button" disabled={busy || !cloneUrl.trim()} onclick={() => void cloneElsewhere()}>Choose another location…</button>
           <button type="button" disabled={busy} onclick={() => (form = null)}>Cancel</button>
         </div>
       </form>
@@ -507,6 +527,7 @@
   }
   .form-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
   }
   .form-actions .primary {

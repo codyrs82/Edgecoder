@@ -1,15 +1,16 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-/** New projects started from chat live in ~/EdgeCoder Projects/<name>, a fresh git repository. */
+/** New projects started from chat live in <projects folder>/<name> (default ~/EdgeCoder), a fresh git repository. */
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getProjectsFolder } from "./repo-connect.js";
 
+/** The projects folder (Settings → General), default ~/EdgeCoder. */
 export function projectsHome(): string {
-  return process.env.EDGECODER_PROJECTS_DIR || join(homedir(), "EdgeCoder Projects");
+  return getProjectsFolder().path;
 }
 
 /** A folder name from the user's words: lowercase, dashes, a few words. */
