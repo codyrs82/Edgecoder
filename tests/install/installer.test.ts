@@ -142,17 +142,16 @@ describe("plan", () => {
     expect(systemdOllamaUnit(p, plan.instances[2])).toContain('Environment="OLLAMA_NUM_PARALLEL=1"');
   });
 
-  it("the curl bootstrap installs git and zstd (Ollama's .tar.zst) before anything else", () => {
+  it("the curl bootstrap installs zstd (Ollama's .tar.zst) first and hands every option to edgecoder-install", () => {
     const sh = readFileSync("deploy/install.sh", "utf8");
-    expect(sh).toMatch(/ensure_base\(\) \{[\s\S]*apt-get install[^\n]*\bgit\b[^\n]*\bzstd\b/);
-    expect(sh).toContain("ensure_base; ensure_node; ensure_ollama; ensure_docker; ensure_app");
-    expect(sh).not.toMatch(/ollama\.com\/install\.sh \| sh >\/dev\/null/);
+    expect(sh).toMatch(/ensure_base\(\) \{[\s\S]*pkgs="[^"\n]*\bzstd\b/);
+    expect(sh).toContain("ensure_base; ensure_node; ensure_ollama; ensure_docker");
+    expect(sh).not.toMatch(/ollama\.com\/install\.sh \| sh/);
     // edgecoder-install on PATH is a wrapper: a symlink to scripts/edgecoder-install resolved dist/ under /usr/local.
     expect(sh).not.toMatch(/ln -sf[^\n]*edgecoder-install/);
     expect(sh).toContain('/dist/install/cli.js" "$@"');
-    // A re-run lands on the remote's REPO_REF even after a rewrite, and fails loudly otherwise.
-    expect(sh).not.toContain("pull -q --ff-only || true");
-    expect(sh).toContain('checkout -q -B "$REPO_REF" "refs/remotes/origin/$REPO_REF"');
+    // Signed releases only (tests/install/signed-release.test.ts); git is for --from-source alone.
+    expect(sh).toContain('install_release "$tag"');
   });
 
   it("--single, --instances and no-docker behave", () => {
