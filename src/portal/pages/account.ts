@@ -27,11 +27,11 @@ app.get("/portal/settings/plan", async (_req, reply) => {
         (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.
         On-chain Bitcoin addresses are not supported for payouts yet.
       </p>
-      <div id="payoutDestRetired" class="hidden" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
+      <div id="payoutDestRetired" class="hidden" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;">
         The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
         Nothing was ever paid to it. Your earnings are kept until you set a destination below.
       </div>
-      <div id="payoutCallbackChanged" class="hidden" role="alert" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
+      <div id="payoutCallbackChanged" class="hidden" role="alert" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;">
         <p style="margin:0 0 6px;"><strong id="payoutCallbackText"></strong></p>
         <p class="muted" style="margin:0 0 6px;">Payouts to this address are paused and your earnings are kept. Confirm only if your wallet provider moved its servers; otherwise change your address to a wallet you trust.</p>
         <div class="row"><button class="primary" id="payoutCallbackSendBtn">Email me a code</button></div>
@@ -62,7 +62,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
           <button class="primary" id="payoutDestConfirmBtn">Confirm change</button>
         </div>
       </div>
-      <div id="payoutDestError" role="alert" class="hidden" style="margin-top:8px;color:var(--danger, #dc2626);"></div>
+      <div id="payoutDestError" role="alert" class="hidden" style="margin-top:8px;color:var(--danger);"></div>
       <div id="payoutDestInfo" class="muted hidden" style="margin-top:8px;"></div>
     </div>
     <div class="grid2">
@@ -297,7 +297,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
       const el = document.getElementById("payoutCallbackMsg");
       el.textContent = text || "";
       el.classList.toggle("hidden", !text);
-      el.style.color = isError ? "var(--danger, #dc2626)" : "";
+      el.style.color = isError ? "var(--danger)" : "";
     }
     async function confirmPayoutCallback(withCode) {
       const body = {};
@@ -621,13 +621,13 @@ app.get("/portal/settings/install", async (req, reply) => {
       .wz-icon{width:28px;height:28px;border-radius:var(--radius-sm);border:1px solid var(--card-border);background:var(--bg-surface);display:inline-flex;align-items:center;justify-content:center;color:var(--brand-2);flex:none;}
       .wizard-card{position:relative;background:var(--card);border:1px solid var(--brand-border);border-radius:var(--radius-md);padding:22px 20px;margin-bottom:18px;}
       .wizard-card.secondary{border:1px solid var(--card-border);}
-      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:#111;font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.04em;}
+      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:var(--on-accent);font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.04em;}
       .step{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
       .step:last-child{margin-bottom:0;}
-      .step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--brand);color:#111;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-top:1px;font-family:var(--font-mono);}
+      .step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--brand);color:var(--on-accent);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-top:1px;font-family:var(--font-mono);}
       .step-content{font-size:13px;color:var(--text);line-height:1.55;flex:1;}
       .step-content strong{font-weight:600;}
-      .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:linear-gradient(140deg,var(--brand),var(--brand-2));color:#fff;text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
+      .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:var(--brand);color:var(--on-accent);text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
       .dl-btn:hover{opacity:.88;}
       .code-block{position:relative;background:var(--bg-input);border:1px solid var(--card-border);border-radius:var(--radius-sm);padding:9px 60px 9px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;line-height:1.55;}
       .code-block code{background:none;padding:0;font-size:inherit;color:inherit;}

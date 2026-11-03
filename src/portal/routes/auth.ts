@@ -19,6 +19,7 @@ import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
 import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
 import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { messagePage } from "../assets.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
@@ -115,7 +116,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       return reply
         .code(400)
         .type("text/html")
-        .send(`<!doctype html><html><body><p>Invalid or expired verification token.</p><p><a href="/portal">Return to portal</a></p></body></html>`);
+        .send(messagePage("Verification failed", `<p>Invalid or expired verification token.</p><p><a href="/portal">Return to portal</a></p>`));
     }
     await store.markUserEmailVerified(consumed.userId);
     const user = await store.getUserById(consumed.userId);
@@ -123,7 +124,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     return reply
       .type("text/html")
       .send(
-        `<!doctype html><html><body><p>Email verified. Your account and enrolled nodes can now be activated.</p><p><a href="/portal">Open portal dashboard</a></p></body></html>`
+        messagePage("Email verified", `<p>Email verified. Your account and enrolled nodes can now be activated.</p><p><a href="/portal">Open portal dashboard</a></p>`)
       );
   });
 

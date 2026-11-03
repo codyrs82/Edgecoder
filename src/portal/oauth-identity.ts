@@ -9,6 +9,7 @@
  */
 
 import { claimIsTrue } from "./portal-utils.js";
+import { messagePage } from "./assets.js";
 
 export type OauthProvider = "google" | "microsoft" | "github";
 
@@ -109,5 +110,5 @@ export function oauthErrorMessage(kind: "account_exists" | "account_unclaimed" |
 
 export function oauthErrorPage(message: string): string {
   const safe = message.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in not completed</title></head><body><p>${safe}</p><p><a href="/portal">Return to sign in</a></p></body></html>`;
+  return messagePage("Sign-in not completed", `<p>${safe}</p><p><a href="/portal">Return to sign in</a></p>`);
 }

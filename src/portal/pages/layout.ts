@@ -1,7 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { BASE_CSS, TOKENS_CSS, THEME_SCRIPT, brandMark, icon } from "./design-system.js";
+import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { DOCS_SITE_URL } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
@@ -35,7 +36,8 @@ export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string
  * the menu button.
  *
  * Pages supply `content` (HTML) and `script` (JS) and keep using the shell's helpers: api(),
- * requireAuth(), showToast(), statusBadge(), boolBadge(), applyTheme(), sidebarConversationsHtml().
+ * requireAuth(), showToast(), statusBadge(), boolBadge(), sidebarConversationsHtml(). The theme
+ * toggle is /assets/theme.js (window.edgecoderTheme).
  * Element ids used by pages: toast, topTickerCredits, reviewsBadge, logoutBtn, hamburgerBtn,
  * topbarNav, and on the chat page newChatBtn, convSearch and convList (the chat page drives the
  * recent-chats list itself; other pages show it as links into the chat). Elements marked
@@ -70,11 +72,12 @@ export function portalAuthedPageHtml(input: {
   }).join("");
 
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${input.title}</title>
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}
@@ -127,7 +130,7 @@ export function portalAuthedPageHtml(input: {
         .nav-link .icon { flex: none; opacity: 0.9; }
         .nav-link .nav-ext { margin-left: auto; opacity: 0.5; }
         .nav-badge {
-          margin-left: auto; background: var(--brand); color: #111; font-size: 10px; font-weight: 700;
+          margin-left: auto; background: var(--brand); color: var(--on-accent); font-size: 10px; font-weight: 700;
           min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
         }
         /* ── Profile row + account menu (bottom of the sidebar) ── */
@@ -141,7 +144,7 @@ export function portalAuthedPageHtml(input: {
         .profile-btn:hover { background: none; }
         .avatar {
           flex: none; width: 30px; height: 30px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
-          background: var(--brand); color: #111; font-weight: 700; font-size: 13px; text-transform: uppercase; user-select: none;
+          background: var(--brand); color: var(--on-accent); font-weight: 700; font-size: 13px; text-transform: uppercase; user-select: none;
         }
         .profile-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
         .profile-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -231,7 +234,7 @@ export function portalAuthedPageHtml(input: {
               <button class="hamburger-btn ghost" id="hamburgerBtn" aria-label="Open navigation">${icon("menu", 18)}</button>
               <div class="topbar-title"><h1>${input.heading}</h1><div class="sub">${input.subtitle}</div></div>
             </div>
-            <div class="topbar-actions">${input.actions ?? ""}</div>
+            <div class="topbar-actions">${input.actions ?? ""}${themeToggleButton()}</div>
           </header>
           <div class="shell">
             <div class="content-stack">
@@ -243,7 +246,6 @@ export function portalAuthedPageHtml(input: {
       <div id="toast" class="card hidden" role="status" aria-live="polite"></div>
       <script nonce="${CSP_NONCE}">
         const toast = document.getElementById("toast");
-        ${THEME_SCRIPT}
         ${CLIENT_ESCAPE_JS}
         function showToast(message, isError = false) {
           toast.textContent = message;

@@ -4,37 +4,20 @@
 import type { FastifyInstance } from "fastify";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
+import { htmlOpenTag, themeHeadTags } from "../assets.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerLegacyPage(app: FastifyInstance): void {
 app.get("/portal-legacy", async (_req, reply) => {
   const html = `<!doctype html>
-  <html>
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>EdgeCoder Portal</title>
+      ${themeHeadTags()}
       <style>
-        :root {
-          --bg: #1a1a18;
-          --bg-soft: #2f2f2d;
-          --bg-surface: #3a3a37;
-          --bg-elevated: #454542;
-          --bg-input: #262624;
-          --card: rgba(58, 58, 55, 0.96);
-          --card-border: rgba(214, 204, 194, 0.08);
-          --border-strong: rgba(214, 204, 194, 0.15);
-          --text: #f7f5f0;
-          --text-secondary: #b8b0a4;
-          --muted: #8a8478;
-          --brand: #c17850;
-          --brand-2: #d4895f;
-          --ok: #4ade80;
-          --warn: #fbbf24;
-          --danger: #f87171;
-          --yellow: #fbbf24;
-          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-        }
+        /* #89: colors are the shared tokens from /assets/tokens.css. */
         * { box-sizing: border-box; }
         body {
           font-family: system-ui, -apple-system, sans-serif;
@@ -60,12 +43,13 @@ app.get("/portal-legacy", async (_req, reply) => {
           width: 40px;
           height: 40px;
           border-radius: 12px;
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
+          background: var(--brand);
+          color: var(--on-accent);
           display: inline-flex;
           align-items: center;
           justify-content: center;
           font-size: 18px;
-          box-shadow: 0 0 0 1px rgba(255,255,255,0.1) inset, 0 12px 24px rgba(14, 116, 144, 0.25);
+          box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent) inset;
         }
         .hero-left { display: flex; gap: 12px; align-items: center; }
         .hero h1 { font-size: 26px; margin: 0; }
@@ -123,11 +107,11 @@ app.get("/portal-legacy", async (_req, reply) => {
         }
         button:hover { border-color: var(--border-strong); transform: translateY(-1px); }
         button.primary {
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
-          border-color: rgba(193, 120, 80, 0.7);
-          color: white;
+          background: var(--brand);
+          border-color: var(--brand);
+          color: var(--on-accent);
         }
-        button.primary:hover { background: linear-gradient(140deg, var(--brand-2), var(--brand)); }
+        button.primary:hover { background: var(--brand-2); }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td {
           border-bottom: 1px solid var(--card-border);
@@ -138,17 +122,17 @@ app.get("/portal-legacy", async (_req, reply) => {
         }
         th { color: var(--text-secondary); font-weight: 600; }
         code {
-          background: rgba(193, 120, 80, 0.15);
-          border: 1px solid rgba(193, 120, 80, 0.25);
+          background: color-mix(in srgb, var(--brand) 15%, transparent);
+          border: 1px solid color-mix(in srgb, var(--brand) 25%, transparent);
           padding: 2px 5px;
           border-radius: 6px;
           font-family: var(--font-mono);
         }
         .token-box {
-          border: 1px dashed rgba(193, 120, 80, 0.4);
+          border: 1px dashed color-mix(in srgb, var(--brand) 40%, transparent);
           border-radius: 10px;
           padding: 10px;
-          background: rgba(193, 120, 80, 0.08);
+          background: color-mix(in srgb, var(--brand) 8%, transparent);
           word-break: break-all;
           font-family: var(--font-mono);
           line-height: 1.45;
@@ -226,10 +210,10 @@ app.get("/portal-legacy", async (_req, reply) => {
                 <div id="accountMeta" class="muted"></div>
               </div>
               <div class="row">
-                <select id="themeSelect" style="min-width: 140px;">
-                  <option value="warm">Warm</option>
-                  <option value="midnight">Midnight</option>
-                  <option value="emerald">Emerald</option>
+                <select id="themeSelect" style="min-width: 140px;" aria-label="Theme" data-theme-select>
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
                 </select>
                 <button id="refreshBtn">Refresh</button>
                 <button id="logoutBtn">Log out</button>
@@ -309,46 +293,10 @@ app.get("/portal-legacy", async (_req, reply) => {
         const authView = document.getElementById("authView");
         const dashboardView = document.getElementById("dashboardView");
         const toast = document.getElementById("toast");
-        const themeSelect = document.getElementById("themeSelect");
-        const themePalettes = {
-          warm: {
-            "--bg": "#1a1a18", "--bg-soft": "#2f2f2d", "--bg-surface": "#3a3a37",
-            "--bg-elevated": "#454542", "--bg-input": "#262624",
-            "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.08)",
-            "--border-strong": "rgba(214, 204, 194, 0.15)",
-            "--text": "#f7f5f0", "--text-secondary": "#b8b0a4", "--muted": "#8a8478",
-            "--brand": "#c17850", "--brand-2": "#d4895f"
-          },
-          midnight: {
-            "--bg": "#0f0f1e", "--bg-soft": "#1a1a2e", "--bg-surface": "#252540",
-            "--bg-elevated": "#30304a", "--bg-input": "#141428",
-            "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.12)",
-            "--border-strong": "rgba(99, 102, 241, 0.2)",
-            "--text": "#e8e8f0", "--text-secondary": "#a0a0c0", "--muted": "#8888a0",
-            "--brand": "#6366f1", "--brand-2": "#818cf8"
-          },
-          emerald: {
-            "--bg": "#0f1e0f", "--bg-soft": "#1a2e1a", "--bg-surface": "#253025",
-            "--bg-elevated": "#304030", "--bg-input": "#142814",
-            "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.12)",
-            "--border-strong": "rgba(34, 197, 94, 0.2)",
-            "--text": "#e8f0e8", "--text-secondary": "#a0c0a0", "--muted": "#88a088",
-            "--brand": "#22c55e", "--brand-2": "#4ade80"
-          }
-        };
-
-        function applyTheme(theme) {
-          const palette = themePalettes[theme] || themePalettes.warm;
-          for (const [key, value] of Object.entries(palette)) {
-            document.documentElement.style.setProperty(key, value);
-          }
-          if (themeSelect) themeSelect.value = theme;
-        }
-
         function showToast(message, isError = false) {
           toast.textContent = message;
           toast.classList.remove("hidden");
-          toast.style.borderColor = isError ? "#ef4444" : "#22c55e";
+          toast.style.borderColor = isError ? "var(--danger)" : "var(--ok)";
           setTimeout(() => toast.classList.add("hidden"), 5000);
         }
 
@@ -397,7 +345,6 @@ app.get("/portal-legacy", async (_req, reply) => {
           dashboardView.classList.remove("hidden");
 
           const user = summary.user || {};
-          applyTheme("warm");
           document.getElementById("accountMeta").textContent =
             user.email + " | email verified: " + String(Boolean(user.emailVerified));
           document.getElementById("accountIdLabel").textContent = "acct-" + (user.userId || "unknown");
@@ -579,19 +526,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           loadDashboard().catch((err) => showToast("Refresh failed: " + String(err.message || err), true));
         });
 
-        themeSelect.addEventListener("change", async () => {
-          const theme = themeSelect.value;
-          applyTheme(theme);
-          try {
-            await api("/me/theme", {
-              method: "POST",
-              body: JSON.stringify({ theme })
-            });
-            showToast("Theme updated.");
-          } catch (err) {
-            showToast("Could not save theme: " + String(err.message || err), true);
-          }
-        });
+        // #89: the theme select is wired by /assets/theme.js (data-theme-select).
 
         document.getElementById("enrollBtn").addEventListener("click", async () => {
           try {
@@ -611,7 +546,6 @@ app.get("/portal-legacy", async (_req, reply) => {
           }
         });
 
-        applyTheme("warm");
         bootstrap();
       </script>
     </body>

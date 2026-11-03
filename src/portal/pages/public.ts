@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPricing } from "../public-pricing.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL, supportEmail } from "./urls.js";
 import { escapeHtml } from "./escape.js";
@@ -43,7 +44,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
     ? "Sats per hour are today's rate epoch: the class's USD reference divided by the BTC/USD median of four exchanges, plus the network markup. Agents' asks and requesters' bids trade around it on the Market page."
     : "Reference USD prices per class. The live sats rate is recalibrated daily from four BTC/USD sources and shown on the portal.";
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -52,6 +53,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
         name="description"
         content="EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Contribute idle CPU and GPU time for sats, or buy compute at a daily market rate."
       />
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}
@@ -136,6 +138,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
@@ -256,12 +259,13 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
 export function privacyPolicyHtml(): string {
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>Privacy Policy | EdgeCoder</title>
       <meta name="description" content="EdgeCoder Privacy Policy — how we collect, use, and protect your data." />
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}
@@ -305,6 +309,7 @@ export function privacyPolicyHtml(): string {
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
@@ -397,12 +402,13 @@ export function privacyPolicyHtml(): string {
 
 export function termsOfServiceHtml(): string {
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>Terms of Service | EdgeCoder</title>
       <meta name="description" content="EdgeCoder Terms of Service — the rules governing use of the EdgeCoder platform." />
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}
@@ -446,6 +452,7 @@ export function termsOfServiceHtml(): string {
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
