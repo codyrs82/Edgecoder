@@ -110,8 +110,11 @@ account.
 Question: should `coordinator.edgecoder.io` (or `mesh.edgecoder.io`) be load balancers that send
 users to verified coordinators run by others around the world, chosen by latency?
 
-**Recommendation:** yes to routing by latency and health across a pool that includes community
-coordinators, but by steering, not by proxying.
+**Decided (2026-11-02):** one URL for the whole platform. Agents, the apps, tools, MCP and the hosted
+API all use `coordinator.edgecoder.io` and never need to know which coordinator answered.
+
+Behind that name, requests are routed by latency and health across a pool that includes community
+coordinators. The routing is by steering, not by proxying.
 
 - **Use geo or latency DNS plus a signed registry.**
   - `coordinator.edgecoder.io` resolves to the nearest healthy coordinator from a registry that
