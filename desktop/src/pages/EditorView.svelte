@@ -5,8 +5,9 @@
   import TerminalPanel from "../components/TerminalPanel.svelte";
   import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
+  import ConnectRepo from "../components/ConnectRepo.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, idePreviewUrl, type Diagnostic } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
   import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
@@ -19,8 +20,10 @@
     onOpenProject?: () => void;
     /** The IDE server already opened this folder (a clone): show it. */
     onProjectOpened?: (root: string) => void;
+    /** A repository was connected from the empty state (it is now the open project). */
+    onRepoConnected?: (r: RepoConnection) => void;
   }
-  let { projectRoot = null, onOpenProject, onProjectOpened }: Props = $props();
+  let { projectRoot = null, onOpenProject, onProjectOpened, onRepoConnected }: Props = $props();
 
   /** Prefix for buffers that are not (yet) a project file, e.g. code opened from chat. */
   const UNTITLED = "untitled:";
@@ -777,6 +780,10 @@
           {:else}
             <p>Open a folder to start.</p>
             <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
+            {#if onRepoConnected}
+              <p class="or">or</p>
+              <ConnectRepo onConnected={(r) => onRepoConnected?.(r)} />
+            {/if}
           {/if}
         </div>
       {/if}
@@ -1166,6 +1173,10 @@
   .split-editor {
     flex: 1;
     min-height: 0;
+  }
+  .editor-empty .or {
+    margin: 4px 0;
+    font-size: 12px;
   }
   .editor-empty {
     position: absolute;

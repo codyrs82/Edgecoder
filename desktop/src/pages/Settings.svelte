@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
+  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
@@ -204,6 +204,32 @@
     savedTimeout = setTimeout(() => { showSaved = false; }, 2000);
   }
   let themePref = $state<ThemePreference>(getThemePreference());
+
+  // Projects folder: where new projects and connected repositories go (default ~/EdgeCoder).
+  let projectsFolder = $state<ProjectsFolder | null>(null);
+  let projectsFolderDraft = $state("");
+  let projectsFolderMsg = $state<{ ok: boolean; text: string } | null>(null);
+  backendReady.then(() => getProjectsFolder()).then((f) => { projectsFolder = f; projectsFolderDraft = f.path; }).catch(() => {});
+  async function saveProjectsFolder(path: string) {
+    projectsFolderMsg = null;
+    try {
+      const f = await setProjectsFolder(path);
+      projectsFolder = { ...projectsFolder, ...f };
+      projectsFolderDraft = f.path;
+      projectsFolderMsg = { ok: true, text: "Saved" };
+    } catch (e) {
+      projectsFolderMsg = { ok: false, text: (e as Error).message };
+    }
+  }
+  async function chooseProjectsFolder() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ directory: true, title: "Choose your projects folder", defaultPath: projectsFolder?.path });
+      if (typeof picked === "string") await saveProjectsFolder(picked);
+    } catch (e) {
+      projectsFolderMsg = { ok: false, text: (e as Error).message };
+    }
+  }
 </script>
 
 <div class="settings">
@@ -226,6 +252,27 @@
         </select>
       </div>
     </label>
+  </div>
+
+  <!-- Projects folder -->
+  <div class="section">
+    <h2>Projects</h2>
+    <label>
+      <span class="label-text">Projects folder</span>
+      <div class="input-row">
+        <input type="text" aria-label="Projects folder" bind:value={projectsFolderDraft} placeholder="~/EdgeCoder" disabled={projectsFolder?.source === "env"} onkeydown={(e) => { if (e.key === "Enter") void saveProjectsFolder(projectsFolderDraft); }} />
+        {#if projectsFolderDraft.trim() && projectsFolderDraft !== projectsFolder?.path}
+          <button class="btn-sm" onclick={() => void saveProjectsFolder(projectsFolderDraft)}>Save</button>
+        {/if}
+        <button class="btn-sm" onclick={() => void chooseProjectsFolder()} disabled={projectsFolder?.source === "env"}>Choose…</button>
+        {#if projectsFolderMsg}<span class="badge {projectsFolderMsg.ok ? 'valid' : 'invalid'}">{projectsFolderMsg.ok ? projectsFolderMsg.text : "Not saved"}</span>{/if}
+      </div>
+    </label>
+    <span class="hint">
+      {#if projectsFolderMsg && !projectsFolderMsg.ok}{projectsFolderMsg.text}
+      {:else if projectsFolder?.source === "env"}Set by EDGECODER_PROJECTS_DIR on this machine.
+      {:else}New projects and connected repositories go here, one folder per repository. Created when first used.{/if}
+    </span>
   </div>
 
   <!-- Mesh Configuration -->

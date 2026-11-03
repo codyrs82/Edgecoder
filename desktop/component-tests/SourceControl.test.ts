@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   gitGitHubStatus: vi.fn(),
   gitPush: vi.fn(),
   ideGetProject: vi.fn(),
+  connectRepo: vi.fn(),
+  getProjectsFolder: vi.fn(),
 }));
 const dialog = vi.hoisted(() => ({ open: vi.fn(), ask: vi.fn() }));
 vi.mock("../src/lib/api", () => ({
@@ -41,27 +43,42 @@ describe("SourceControl setup", () => {
     await vi.waitFor(() => expect(screen.getByRole("button", { name: /Publish Branch/ })).toBeTruthy());
   });
 
-  it("clones into the folder the user picks and opens it", async () => {
+  it("clones into the projects folder by default and opens it", async () => {
     api.gitState.mockResolvedValue({ notARepo: true });
+    api.getProjectsFolder.mockResolvedValue({ path: "/Users/me/EdgeCoder", source: "default" });
+    api.connectRepo.mockResolvedValue({ path: "/Users/me/EdgeCoder/widgets", action: "cloned", name: "widgets", message: "Cloned widgets." });
+    const p = props();
+    render(SourceControl, p);
+    await fireEvent.click(await screen.findByRole("button", { name: /Clone Repository/ }));
+    await fireEvent.input(screen.getByLabelText("Repository URL"), { target: { value: "acme/widgets" } });
+    await fireEvent.click(await screen.findByRole("button", { name: "Clone into ~/EdgeCoder" }));
+    await vi.waitFor(() => expect(p.onProjectOpened).toHaveBeenCalledWith("/Users/me/EdgeCoder/widgets"));
+    expect(api.connectRepo).toHaveBeenCalledWith("acme/widgets", expect.any(Function));
+    expect(dialog.open).not.toHaveBeenCalled();
+  });
+
+  it("clones into another folder the user picks", async () => {
+    api.gitState.mockResolvedValue({ notARepo: true });
+    api.getProjectsFolder.mockResolvedValue({ path: "/Users/me/EdgeCoder", source: "default" });
     dialog.open.mockResolvedValue("/Users/me/code");
     api.gitClone.mockResolvedValue("/Users/me/code/widgets");
     const p = props();
     render(SourceControl, p);
     await fireEvent.click(await screen.findByRole("button", { name: /Clone Repository/ }));
     await fireEvent.input(screen.getByLabelText("Repository URL"), { target: { value: "acme/widgets" } });
-    await fireEvent.click(screen.getByRole("button", { name: /clone$/i }));
+    await fireEvent.click(screen.getByRole("button", { name: /Choose another location/ }));
     await vi.waitFor(() => expect(p.onProjectOpened).toHaveBeenCalledWith("/Users/me/code/widgets"));
     expect(api.gitClone).toHaveBeenCalledWith("acme/widgets", "/Users/me/code");
   });
 
   it("shows a clone error inline", async () => {
     api.gitState.mockResolvedValue({ notARepo: true });
-    dialog.open.mockResolvedValue("/Users/me/code");
-    api.gitClone.mockRejectedValue(new Error("file: URLs aren't allowed."));
+    api.getProjectsFolder.mockResolvedValue({ path: "/Users/me/EdgeCoder", source: "default" });
+    api.connectRepo.mockRejectedValue(new Error("file: URLs aren't allowed."));
     render(SourceControl, props());
     await fireEvent.click(await screen.findByRole("button", { name: /Clone Repository/ }));
     await fireEvent.input(screen.getByLabelText("Repository URL"), { target: { value: "file:///x" } });
-    await fireEvent.click(screen.getByRole("button", { name: /clone$/i }));
+    await fireEvent.click(screen.getByRole("button", { name: /^Clone into/ }));
     expect((await screen.findByRole("alert")).textContent).toContain("file: URLs aren't allowed.");
   });
 
