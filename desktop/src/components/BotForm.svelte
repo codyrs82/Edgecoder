@@ -95,7 +95,7 @@
 <div class="bf-dialog" role="dialog" aria-modal="true" aria-label={initial ? `Edit ${initial.name}` : "New bot"} use:focusTrap={{ onEscape: onClose }}>
   <form class="sp" onsubmit={save}>
     <h1>{initial ? `Edit ${initial.name}` : "New bot"}</h1>
-    <p class="sp-lead">A bot owns a job in one project folder. It runs on its schedule, when you press Run now, or when you message it, on the compute you choose below.</p>
+    <p class="sp-lead">A bot owns a job and keeps its own home folder. It runs on its schedule, when you press Run now, or when you message it, on the compute you choose below.</p>
 
     <div class="sp-group">
       <div class="sp-group-title">Who it is</div>
@@ -125,11 +125,16 @@
       <div class="sp-group-title">Where and when</div>
       <div class="sp-card">
         <div class="sp-row">
-          <span class="sp-text"><span class="sp-title">Project folder</span><span class="sp-desc">It reads and edits files only here.</span></span>
+          <span class="sp-text"><span class="sp-title">Home folder</span><span class="sp-desc">Where it keeps its own files and notes. It reads and edits files only here.</span></span>
           <div class="sp-controls">
-            <input type="text" class="bf-path" bind:value={projectRoot} placeholder="/Users/you/project" required aria-label="Project folder" />
+            <input type="text" class="bf-path" bind:value={projectRoot} placeholder="/Users/you/Agents/Harry" required aria-label="Home folder" />
             <button type="button" onclick={chooseFolder}>Choose…</button>
           </div>
+        </div>
+        <!-- Slot for the bot's repository (owner/repo, cloned into ~/EdgeCoder/<repo>): coming in a later change. -->
+        <div class="sp-row bf-soon" aria-disabled="true" data-testid="bot-repository-slot">
+          <span class="sp-text"><span class="sp-title">Repository <span class="sp-pill">Coming soon</span></span><span class="sp-desc">A GitHub repository (owner/repo) it works in, cloned for it automatically.</span></span>
+          <input type="text" class="bf-path" placeholder="owner/repo" disabled aria-label="Repository (coming soon)" />
         </div>
         <div class="sp-row">
           <span class="sp-text"><span class="sp-title">Schedule</span><span class="sp-desc">"every 2 hours", "daily at 18:30" or cron ("0 9 * * 1-5").</span></span>
@@ -249,6 +254,9 @@
   }
   .bf-num {
     width: 120px;
+  }
+  .bf-soon {
+    opacity: 0.55;
   }
   .bf-policies {
     display: grid;
