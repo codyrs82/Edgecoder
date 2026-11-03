@@ -7,6 +7,7 @@
  * launchd and Windows scheduled tasks (services.ts), so every platform installs the same thing.
  */
 import { MODEL_CATALOG, type CatalogModel } from "../model/catalog.js";
+import { parallelInferenceFor } from "../swarm/parallelism.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
 import type { InstallOptions } from "./options.js";
 
@@ -80,16 +81,18 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       OLLAMA_HOST: `http://127.0.0.1:${ollamaPort}`,
       OLLAMA_MODEL: model,
       MAX_CONCURRENT_TASKS: "1",
+      // Parallel model calls sized by this instance's own memory (the GPU's VRAM, not host RAM);
+      // its Ollama gets the same OLLAMA_NUM_PARALLEL (services.ts), as the desktop app does.
+      AGENT_PARALLEL_INFERENCE: String(parallelInferenceFor(memoryGb * 1024 ** 3)),
       EDGECODER_INSTANCE: String(index)
     };
     if (gpu && gpu.vendor !== "apple") {
+      // The agent detects its card itself (nvidia-smi / rocm-smi, picked by EDGECODER_GPU_INDEX).
+      // AGENT_GPU_* are not written: they are the container override, and an overridden profile
+      // is flagged and loses its verified tier on every restart (worker-runner buildHardwareProfile).
       env.CUDA_VISIBLE_DEVICES = String(gpu.index);
       env.HIP_VISIBLE_DEVICES = String(gpu.index);
       env.EDGECODER_GPU_INDEX = String(gpu.index);
-      env.AGENT_GPU_VENDOR = gpu.vendor;
-      env.AGENT_GPU_MODEL = gpu.model;
-      env.AGENT_GPU_VRAM_GB = String(gpu.vramGb);
-      if (gpu.datacenter) env.AGENT_GPU_DATACENTER = "1";
     }
     if (!env.AGENT_REGISTRATION_TOKEN) warnings.push(`${agentId}: no registration token; enrol this node id in the portal and re-run with --token ${agentId}=<token>`);
     return { index, agentId, gpu, ollamaPort, model, memoryGb, env };
