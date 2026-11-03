@@ -80,7 +80,12 @@ workflow checks the result with the installer's own verifier and pinned key befo
 ### Release public key
 
 <!-- release-pubkey -->
-Not set yet: run `scripts/set-release-signing-key.sh`, which writes the key here.
+```
+untrusted comment: minisign public key 3BB9F7E747849FA9
+RWSpn4RH5/e5O8Qd9rasofZ9OVjMNPlvimRunFeWb0LEMylKCiS9kwgI
+```
+
+Key ID: `3BB9F7E747849FA9`
 <!-- /release-pubkey -->
 
 ### Verifying a release by hand

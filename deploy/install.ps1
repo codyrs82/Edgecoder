@@ -41,7 +41,7 @@ $ReleaseApiUrl  = if ($env:EDGECODER_RELEASE_API_URL) { $env:EDGECODER_RELEASE_A
 # ------------------------------------------------------------- trust anchors ----
 # The minisign public key that signs agent releases (scripts/set-release-signing-key.sh writes
 # this line; the same key is in deploy/install.sh and docs/install.md).
-$ReleasePubKey = 'UNSET' # release-pubkey
+$ReleasePubKey = 'RWSpn4RH5/e5O8Qd9rasofZ9OVjMNPlvimRunFeWb0LEMylKCiS9kwgI' # release-pubkey
 # Test-only override (tests/install): it replaces the key above. Never set it.
 if ($env:EDGECODER_INSECURE_TEST_ONLY_RELEASE_PUBKEY) {
     Write-Warning 'EDGECODER_INSECURE_TEST_ONLY_RELEASE_PUBKEY is set: releases are checked against a TEST key, not EdgeCoder''s. Do not use this outside tests.'

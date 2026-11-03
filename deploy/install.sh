@@ -37,7 +37,7 @@ RELEASE_API_URL="${EDGECODER_RELEASE_API_URL:-https://api.github.com/repos/$REPO
 # ------------------------------------------------------------- trust anchors ----
 # The minisign public key that signs agent releases (scripts/set-release-signing-key.sh
 # writes this line; the same key is in deploy/install.ps1 and docs/install.md).
-RELEASE_PUBKEY="UNSET" # release-pubkey
+RELEASE_PUBKEY="RWSpn4RH5/e5O8Qd9rasofZ9OVjMNPlvimRunFeWb0LEMylKCiS9kwgI" # release-pubkey
 # The only override, for the installer's own tests (tests/install, tests/install-dryrun). It
 # replaces the key above, so whoever sets it decides what gets installed as root. Never set it.
 if [ -n "${EDGECODER_INSECURE_TEST_ONLY_RELEASE_PUBKEY:-}" ]; then
