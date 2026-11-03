@@ -31,11 +31,12 @@ case "$(docker info --format '{{.Architecture}}')" in
   *) echo "unsupported docker architecture"; exit 1 ;;
 esac
 WORK="$(mktemp -d)"
-LOG="$WORK/install.log"
+LOG="${TMPDIR:-/tmp}/$NAME.log"   # outside WORK, so it survives the cleanup
 
 cleanup() {
   docker rm -f "$BUILDER" >/dev/null 2>&1 || true
-  if [ "${KEEP:-}" = 1 ]; then echo "kept container $NAME (log $LOG)"; else docker rm -f "$NAME" >/dev/null 2>&1 || true; fi
+  if [ "${KEEP:-}" = 1 ]; then echo "kept container $NAME and $WORK (log $LOG)"
+  else docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 
