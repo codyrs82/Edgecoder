@@ -15,7 +15,7 @@ platform entry point or this page falls behind.
 | macOS | `curl -fsSL https://edgecoder.io/install.sh \| sudo bash -s -- --mesh-token <token>` |
 | Windows (admin PowerShell) | `irm https://edgecoder.io/install.ps1 -OutFile install.ps1; .\install.ps1 -- --mesh-token <token>` |
 
-The bootstrap installs Node 22, Ollama, Docker (Linux; Docker Desktop is required by hand on
+The bootstrap installs Node 22 (on macOS the nodejs.org build in `/opt/edgecoder/node`), Ollama, Docker (Linux; Docker Desktop is required by hand on
 Windows and macOS) and the NVIDIA container toolkit when an NVIDIA GPU is present, builds
 EdgeCoder into `/opt/edgecoder/app` (Windows: `C:\Program Files\EdgeCoder\app`), and runs
 `edgecoder-install apply` with every option you passed. Packages (`.pkg`, `.deb`, `.msi`) run
@@ -42,6 +42,44 @@ The agent reports the GPU it owns (`nvidia-smi`, `rocm-smi`, or Apple silicon's 
 so the coordinator prices it in the right class (an RTX 6000 Ada is `gpu.dc40`, an H100
 `gpu.dc80`). The installer does not write `AGENT_GPU_*`: those override detection inside
 containers, and an overridden profile re-proves its tier every session.
+
+## Service accounts
+
+No service runs as root or SYSTEM.
+
+| | Runs as | Binaries | Writable by the service |
+| --- | --- | --- | --- |
+| Linux | `edgecoder` system user (`useradd --system`, no login shell) | root-owned node, ollama and app dir | its own `/var/lib/edgecoder/agent-n` (systemd `StateDirectory`), the model store, `/var/log/edgecoder` |
+| macOS | `_edgecoder` role account (hidden, uid/gid 300-399, shell `/usr/bin/false`), LaunchDaemons so the agents start at boot without a login | root-owned node, ollama and app dir | `/var/lib/edgecoder/agent-n` (its `HOME`), the model store, `/var/log/edgecoder` |
+| Windows | the user who ran the installer, at that user's logon, with a limited (non-elevated) token | Ollama from that user's profile, as installed | `ProgramData\EdgeCoder\ollama`, `logs`, `state` |
+
+On Linux and macOS, `edgecoder-install apply` checks that node, ollama and the app dir can only be
+changed by root: every path component up to `/` is root-owned and not group- or world-writable,
+and on macOS so is every library the binary links (dylibs and rpaths). A binary that fails (nvm
+under `$HOME`, Homebrew under `/opt/homebrew`, `/Applications`, which admin users can write) is
+copied into `/opt/edgecoder/libexec/<node|ollama>`, owned by root, and the services run the copy.
+If the copy still links libraries a user can replace, apply stops. Homebrew's `node` does (it
+links `/opt/homebrew/opt/*` dylibs), so on macOS `install.sh` installs the self-contained
+nodejs.org build into `/opt/edgecoder/node`. Re-run `apply` after upgrading Ollama to refresh
+the copy. `/etc/edgecoder` and its env files (tokens) stay root's, mode 0600.
+
+The Linux units are sandboxed: `NoNewPrivileges`, `ProtectSystem=strict` (only the paths above
+are writable), `ProtectHome`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`,
+`ProtectControlGroups`, `RestrictSUIDSGID`, `LockPersonality`. GPUs (`/dev/nvidia*`) and the V8
+JIT are left alone.
+
+Windows has no passwordless service identity without `SeImpersonatePrivilege` (Local Service and
+Network Service have it, which leads back to SYSTEM), and Docker Desktop is per user, so the tasks
+run as the installing user. Run the installer from an elevated prompt of the account the agents
+should use; it refuses to run as SYSTEM. The agents start when that user logs on.
+
+**Docker tradeoff.** With `SANDBOX_MODE=docker` the Linux `edgecoder` user joins the `docker`
+group. Access to the Docker socket is equivalent to root on the host, so the sandbox for swarm
+tasks costs this isolation: a compromised agent can become root through Docker. Use
+`--sandbox none` on hosts where that is not acceptable (the agents then take no swarm tasks).
+On macOS, Docker Desktop's socket belongs to the logged-in user and `_edgecoder` cannot use it;
+the plan warns, and the agents register but take no swarm tasks until a Docker daemon the
+account can reach is set up.
 
 ## Enrolment
 

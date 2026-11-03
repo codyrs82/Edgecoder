@@ -149,7 +149,7 @@ if [[ "${1:-}" == "--token" || ( "${1:-}" == "configure" && "${2:-}" == "--token
   write_or_update_env "$ENV_FILE" "COORDINATOR_URL"           "https://coordinator.edgecoder.io"
   write_or_update_env "$ENV_FILE" "AGENT_OS"                  "macos"
 
-  chmod 600 "$ENV_FILE"
+  chown root:_edgecoder "$ENV_FILE" 2>/dev/null && chmod 640 "$ENV_FILE" || chmod 600 "$ENV_FILE"
 
   # 4. Summary
   echo ""
@@ -306,7 +306,8 @@ OLLAMA_HOST=$OLLAMA_HOST
 MAX_CONCURRENT_TASKS=$MAX_CONCURRENT_TASKS
 PEER_OFFER_COOLDOWN_MS=$PEER_OFFER_COOLDOWN_MS
 EOF
-chmod 600 "$ENV_FILE"
+# Readable by the _edgecoder service account the runtime daemon runs as; written only by root.
+chown root:_edgecoder "$ENV_FILE" 2>/dev/null && chmod 640 "$ENV_FILE" || chmod 600 "$ENV_FILE"
 
 echo
 echo "Saved config to: $ENV_FILE"

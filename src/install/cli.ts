@@ -7,12 +7,13 @@
  * (or one per host), writes env files and services, starts them.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
 import { helpText, parseInstallArgs, parseTokensFile, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
+import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
 import { applyPlan, defaultPaths, removeServices, serviceStatus, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -53,6 +54,58 @@ const realHost: Host = {
   },
   exists: (path) => existsSync(path)
 };
+
+const realBinFs: BinFs = {
+  stat(path) {
+    try {
+      const st = statSync(path);
+      return { uid: st.uid, mode: st.mode, isDirectory: st.isDirectory() };
+    } catch {
+      return null;
+    }
+  },
+  realpath: (path) => realpathSync(path),
+  read(path, offset, length) {
+    const fd = openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(length);
+      return buf.subarray(0, readSync(fd, buf, 0, length, offset));
+    } finally {
+      closeSync(fd);
+    }
+  },
+  copy(src, dest) {
+    rmSync(dest, { recursive: true, force: true });
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(src, dest, { recursive: true, dereference: true });
+  },
+  secure(path) {
+    for (const [cmd, args] of [["chown", ["-R", "0:0", path]], ["chmod", ["-R", "go-w", path]]] as const) {
+      const r = spawnSync(cmd, [...args], { encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} failed: ${r.stderr}`);
+    }
+  }
+};
+
+/**
+ * Linux/macOS: make sure the services run root-owned binaries from a root-owned app dir, staging
+ * root-owned copies of node/ollama when needed (binaries.ts). Returns the problems that remain.
+ */
+export function secureBinaries(fs: BinFs, platform: NodeJS.Platform, p: ServicePaths, opts: { dryRun: boolean; ollama: boolean }): { plans: StagePlan[]; problems: string[] } {
+  if (platform !== "linux" && platform !== "darwin") return { plans: [], problems: [] };
+  const plans: StagePlan[] = [];
+  const problems: string[] = [];
+  const kinds = [["node", p.nodeBin], ...(opts.ollama ? [["ollama", p.ollamaBin]] : [])] as Array<["node" | "ollama", string]>;
+  for (const [kind, src] of kinds) {
+    const plan = planBinary(fs, platform, kind, src, p.stageDir);
+    plans.push(plan);
+    if (!opts.dryRun) problems.push(...stageBinary(fs, platform, plan, p.stageDir));
+    if (kind === "node") p.nodeBin = plan.path;
+    else p.ollamaBin = plan.path;
+  }
+  if (!opts.dryRun) problems.push(...appDirProblems(fs, p.appDir));
+  return { plans, problems };
+}
 
 /**
  * The one HTTP call the installer makes: POST a node to the portal's /nodes/enroll. Injected so
@@ -142,7 +195,7 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
   return lines.join("\n");
 }
 
-export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost): Promise<number> {
+export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost, binFs: BinFs = realBinFs): Promise<number> {
   let opts: InstallOptions;
   try {
     opts = parseInstallArgs(argv, env);
@@ -214,13 +267,18 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
       plan = planInstall(hw, opts, dockerPresent);
     }
   }
-  if (!opts.dryRun) {
-    for (const dir of [p.configDir, p.modelsDir, p.logDir]) mkdirSync(dir, { recursive: true });
-    if (host.platform === "linux") {
-      if (host.run("id", ["-u", p.user]).code !== 0) host.run("useradd", ["--system", "--create-home", "--home-dir", "/var/lib/edgecoder", "--shell", "/usr/sbin/nologin", p.user]);
-      host.run("chown", ["-R", `${p.user}:${p.user}`, p.modelsDir, p.logDir, p.configDir]);
-      if (plan.sandboxMode === "docker") host.run("usermod", ["-aG", "docker", p.user]);
-    }
+  if (host.platform === "win32" && (!p.user || /^(SYSTEM|.*\$)$/i.test(p.user.split("\\").pop() ?? ""))) {
+    console.error(`the services run as the installing user, but this is running as "${p.user || "unknown"}"; run edgecoder-install from an elevated prompt of the account the agents should run as`);
+    return 1;
+  }
+  if (!opts.dryRun) for (const dir of [p.configDir, p.modelsDir, p.logDir, p.stateDir]) mkdirSync(dir, { recursive: true });
+  // Services never run binaries a non-root user can replace (Linux/macOS; Windows runs as the user).
+  const staged = secureBinaries(binFs, host.platform, p, { dryRun: opts.dryRun, ollama: !!binFs.stat(p.ollamaBin) });
+  for (const s of staged.plans) if (s.copy) console.log(`${opts.dryRun ? "would copy" : "copied"} ${s.kind} ${s.copy.from} -> ${s.copy.to} (root-owned; ${s.reason})`);
+  if (staged.problems.length) {
+    for (const msg of staged.problems) console.error(`error: ${msg}`);
+    console.error("refusing to create services that run code a non-root user can replace");
+    return 1;
   }
   const result = applyPlan(plan, host, p, opts.dryRun);
   if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
