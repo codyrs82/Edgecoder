@@ -14,7 +14,7 @@ import {
   resolveProjectsFolder,
   setProjectsFolder,
 } from "../../src/apps/ide/repo-connect.js";
-import { GitSetupError } from "../../src/apps/ide/git-setup.js";
+import { GitSetupError, repoNameFromUrl } from "../../src/apps/ide/git-setup.js";
 
 const TOKEN = "repo-connect-test-token";
 process.env.IDE_PROVIDER_TOKEN = TOKEN;
@@ -106,6 +106,13 @@ describe("remote keys", () => {
     expect(remoteKey("ssh://git@github.com/acme/widgets.git/")).toBe(k);
     expect(remoteKey("https://github.com/acme/gadgets.git")).not.toBe(k);
     expect(remoteKey("https://gitlab.com/acme/widgets.git")).not.toBe(k);
+  });
+
+  it("names the folder from URLs and from local paths on any OS", () => {
+    expect(repoNameFromUrl("https://github.com/acme/widgets.git")).toBe("widgets");
+    expect(repoNameFromUrl("git@github.com:acme/widgets")).toBe("widgets");
+    expect(repoNameFromUrl("/tmp/remotes/widgets.git")).toBe("widgets");
+    expect(repoNameFromUrl("C:\\Users\\me\\remotes\\widgets.git")).toBe("widgets");
   });
 });
 
