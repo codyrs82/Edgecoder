@@ -3,6 +3,7 @@
 
 import Fastify, { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { timingSafeEqual } from "node:crypto";
 import { MeshPeer } from "./mesh-peer.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
 
@@ -40,10 +41,20 @@ export class MeshHttpServer {
     this.registerRoutes();
   }
 
+  /** Set (or rotate) the mesh token once the coordinator provisions it. */
+  setMeshToken(token: string | undefined): void {
+    this.config.meshToken = token || undefined;
+  }
+
+  /** Fails closed: until a mesh token is set, only GET /identity answers. */
   private requireMeshToken(req: { headers: Record<string, string | string[] | undefined> }): boolean {
-    if (!this.config.meshToken) return true;
+    const expected = this.config.meshToken;
+    if (!expected) return false;
     const token = req.headers["x-mesh-token"];
-    return typeof token === "string" && token === this.config.meshToken;
+    if (typeof token !== "string") return false;
+    const a = Buffer.from(token);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   private registerRoutes(): void {

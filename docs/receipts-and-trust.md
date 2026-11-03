@@ -113,8 +113,17 @@ Pins written by older builds (sha256 of the PEM text) still match, and are liste
 - `EDGECODER_TRUST_FILE` (default `<config dir>/trusted-coordinators`) holds one entry per line;
   in `tofu` mode first-seen keys are appended with a timestamp comment.
 
-Before registering with a coordinator URL the worker fetches `GET /identity` (`peerId`,
-`publicKeyPem`) and runs it through the store (`CoordinatorTrustGate`, once per URL). A key
+Before registering with a coordinator URL the worker proves the coordinator holds its key: it
+sends a fresh nonce and the URL it is using to `POST /identity/challenge`, and the coordinator
+signs the nonce, that URL, its own public URL and its peerId with its Ed25519 identity key
+(`src/trust/identity-challenge.ts`). The worker checks the signature against the key, then runs
+the key through the store (`CoordinatorTrustGate`); nothing is pinned until the signature checks
+out. A replayed `/identity` therefore no longer passes. The verification lasts
+`EDGECODER_TRUST_REVERIFY_MS` (default 10 min) and is redone on every URL change (steering,
+discovery, failover) and on reconnect; register, heartbeat, pull and mesh calls are refused for a
+URL that is not verified. A coordinator without the route (older builds answer 404 or 401) is
+refused when the challenge is required (`EDGECODER_IDENTITY_CHALLENGE=required`, the default in
+strict mode); otherwise the worker warns and falls back to the public `GET /identity`. A
 mismatch for a known id (possible impersonation) is logged and the agent exits with status 1. A
 coordinator that is merely unlisted in strict mode is refused and the agent backs off and fails
 over to another; a transport failure (identity unreachable) goes through the same path. In strict

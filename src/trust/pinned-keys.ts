@@ -5,6 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fingerprintMatches, publicKeyFingerprint } from "../security/key-fingerprint.js";
+import { IDENTITY_CHALLENGE_PATH, newChallengeNonce, normalizeChallengeUrl, verifyIdentityChallenge } from "./identity-challenge.js";
 
 /*
  * Architecture step 4: pinned-key trust. An agent only works for coordinators whose
@@ -224,8 +225,15 @@ export function isTrusted(peerId: string, publicKeyPem: string, store: PinnedKey
 
 export type IdentityFetch = (
   url: string,
-  init?: { headers?: Record<string, string>; signal?: AbortSignal }
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/**
+ * required: the coordinator must prove possession of its key (POST /identity/challenge).
+ * optional: a coordinator without the challenge route falls back to the public /identity check,
+ *           with a warning. A challenge that is answered but fails verification is always refused.
+ */
+export type ChallengePolicy = "required" | "optional";
 
 export interface CoordinatorTrustCheck {
   trusted: boolean;
@@ -233,27 +241,85 @@ export interface CoordinatorTrustCheck {
   peerId?: string;
   decision?: TrustDecision;
   error?: string;
+  /** How possession of the key was established. */
+  proof?: "challenge" | "identity_only";
+  warning?: string;
 }
 
-/** GET /identity on the coordinator and run its key through the store. Network errors are untrusted. */
-export async function checkCoordinatorTrust(
-  coordinatorUrl: string,
-  opts: { store?: PinnedKeyStore; fetch?: IdentityFetch; timeoutMs?: number } = {}
-): Promise<CoordinatorTrustCheck> {
+export interface TrustCheckOptions {
+  store?: PinnedKeyStore;
+  fetch?: IdentityFetch;
+  timeoutMs?: number;
+  /** Default: required in strict mode, optional otherwise. */
+  challenge?: ChallengePolicy;
+}
+
+/** Status codes an older coordinator returns for the challenge route it does not have. */
+const CHALLENGE_UNSUPPORTED_STATUS = new Set([401, 404, 405, 501]);
+
+/** EDGECODER_IDENTITY_CHALLENGE=required|optional; unset picks by trust mode. */
+export function challengePolicyFromEnv(env: NodeJS.ProcessEnv, mode: TrustMode): ChallengePolicy {
+  const v = (env.EDGECODER_IDENTITY_CHALLENGE ?? "").trim().toLowerCase();
+  if (v === "required" || v === "optional") return v;
+  if (v !== "") throw new Error(`EDGECODER_IDENTITY_CHALLENGE must be required or optional, got "${env.EDGECODER_IDENTITY_CHALLENGE}"`);
+  return mode === "strict" ? "required" : "optional";
+}
+
+function validIdentity(body: { peerId?: unknown; publicKeyPem?: unknown } | null | undefined): body is { peerId: string; publicKeyPem: string } {
+  return typeof body?.peerId === "string" && typeof body?.publicKeyPem === "string" && body.publicKeyPem.includes("BEGIN PUBLIC KEY");
+}
+
+/**
+ * Verify a coordinator before working for it: it signs a fresh nonce (POST /identity/challenge)
+ * and its key goes through the store. Nothing is pinned until the signature checks out. A
+ * coordinator without the challenge route is refused under `challenge: "required"` and falls back
+ * to the public GET /identity (warned) otherwise. Network errors are untrusted.
+ */
+export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustCheckOptions = {}): Promise<CoordinatorTrustCheck> {
   const store = opts.store ?? defaultPinnedKeyStore();
+  const policy = opts.challenge ?? (store.mode === "strict" ? "required" : "optional");
   const doFetch = opts.fetch ?? (globalThis.fetch as IdentityFetch);
-  const base = coordinatorUrl.replace(/\/+$/, "");
+  const base = normalizeChallengeUrl(coordinatorUrl);
   const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000) : undefined;
   try {
-    const res = await doFetch(`${base}/identity`, { headers: { accept: "application/json" }, signal: controller?.signal });
-    if (!res.ok) return { trusted: false, coordinatorUrl, error: `identity_http_${res.status}` };
-    const body = (await res.json()) as { peerId?: unknown; publicKeyPem?: unknown };
-    if (typeof body?.peerId !== "string" || typeof body?.publicKeyPem !== "string" || !body.publicKeyPem.includes("BEGIN PUBLIC KEY")) {
-      return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+    const sent = { nonce: newChallengeNonce(), url: base };
+    // No mesh token here: the coordinator is not trusted yet.
+    const res = await doFetch(`${base}${IDENTITY_CHALLENGE_PATH}`, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify(sent),
+      signal: controller?.signal
+    });
+    if (res.ok) {
+      const answer = (await res.json()) as { peerId?: unknown; publicKeyPem?: unknown };
+      if (!validIdentity(answer)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+      // Refusals (mismatch, unlisted) need no proof and must not pin.
+      if (!store.wouldTrust(answer.peerId, answer.publicKeyPem)) {
+        const decision = store.isTrusted(answer.peerId, answer.publicKeyPem);
+        return { trusted: decision.trusted, coordinatorUrl, peerId: answer.peerId, decision, proof: "challenge" };
+      }
+      const verified = verifyIdentityChallenge(answer, sent, answer);
+      if (!verified.ok) return { trusted: false, coordinatorUrl, peerId: answer.peerId, error: verified.error };
+      const decision = store.isTrusted(answer.peerId, answer.publicKeyPem);
+      return { trusted: decision.trusted, coordinatorUrl, peerId: answer.peerId, decision, proof: "challenge" };
     }
+    if (!CHALLENGE_UNSUPPORTED_STATUS.has(res.status)) return { trusted: false, coordinatorUrl, error: `identity_challenge_http_${res.status}` };
+    if (policy === "required") return { trusted: false, coordinatorUrl, error: "identity_challenge_unsupported" };
+
+    const idRes = await doFetch(`${base}/identity`, { headers: { accept: "application/json" }, signal: controller?.signal });
+    if (!idRes.ok) return { trusted: false, coordinatorUrl, error: `identity_http_${idRes.status}` };
+    const body = (await idRes.json()) as { peerId?: unknown; publicKeyPem?: unknown };
+    if (!validIdentity(body)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
     const decision = store.isTrusted(body.peerId, body.publicKeyPem);
-    return { trusted: decision.trusted, coordinatorUrl, peerId: body.peerId, decision };
+    return {
+      trusted: decision.trusted,
+      coordinatorUrl,
+      peerId: body.peerId,
+      decision,
+      proof: "identity_only",
+      warning: `coordinator ${base} does not support ${IDENTITY_CHALLENGE_PATH}; its key was not proven (mode=${store.mode})`
+    };
   } catch (error) {
     return { trusted: false, coordinatorUrl, error: String(error) };
   } finally {
@@ -261,28 +327,43 @@ export async function checkCoordinatorTrust(
   }
 }
 
+/** Default lifetime of a verification; after it the gate challenges the coordinator again. */
+export const DEFAULT_TRUST_REVERIFY_MS = 10 * 60_000;
+
 /**
- * Remembers which coordinator URLs already passed, so the worker loop re-checks a
- * coordinator only when it switches to a different URL (or after a failure).
+ * Remembers which coordinator URLs passed, for at most `reverifyMs`: the worker loop re-checks a
+ * coordinator when it switches URL, after forget() (reconnect, failure), and when the entry expires.
  */
 export class CoordinatorTrustGate {
-  private readonly verified = new Set<string>();
-  constructor(private readonly opts: { store?: PinnedKeyStore; fetch?: IdentityFetch; timeoutMs?: number } = {}) {}
+  private readonly verified = new Map<string, number>();
+  private readonly reverifyMs: number;
+  private readonly now: () => number;
+  constructor(private readonly opts: TrustCheckOptions & { reverifyMs?: number; now?: () => number } = {}) {
+    this.reverifyMs = Math.max(1_000, opts.reverifyMs ?? DEFAULT_TRUST_REVERIFY_MS);
+    this.now = opts.now ?? Date.now;
+  }
 
   async check(coordinatorUrl: string): Promise<CoordinatorTrustCheck> {
-    const key = coordinatorUrl.replace(/\/+$/, "");
-    if (this.verified.has(key)) return { trusted: true, coordinatorUrl: key };
+    const key = normalizeChallengeUrl(coordinatorUrl);
+    const at = this.verified.get(key);
+    if (at !== undefined && this.now() - at < this.reverifyMs) return { trusted: true, coordinatorUrl: key };
+    this.verified.delete(key);
     const result = await checkCoordinatorTrust(key, this.opts);
-    if (result.trusted) this.verified.add(key);
+    if (result.trusted) this.verified.set(key, this.now());
     return result;
   }
 
-  forget(coordinatorUrl: string): void {
-    this.verified.delete(coordinatorUrl.replace(/\/+$/, ""));
+  forget(coordinatorUrl?: string): void {
+    if (coordinatorUrl === undefined) this.verified.clear();
+    else this.verified.delete(normalizeChallengeUrl(coordinatorUrl));
   }
 }
 
 export function describeTrustFailure(check: CoordinatorTrustCheck): string {
+  if (check.error === "identity_challenge_unsupported") {
+    return "coordinator does not prove possession of its key (no /identity/challenge); refused because the challenge is required (strict mode or EDGECODER_IDENTITY_CHALLENGE=required)";
+  }
+  if (check.error?.startsWith("challenge_")) return `coordinator failed the identity challenge (${check.error}): possible impersonation`;
   if (check.error) return `could not verify coordinator identity (${check.error})`;
   const d = check.decision;
   if (!d) return "untrusted";

@@ -55,6 +55,12 @@ export class MeshPeer {
     if (config.meshToken) this.gossip.setMeshToken(config.meshToken);
   }
 
+  /** Set (or rotate) the mesh token used on outbound mesh requests and gossip. */
+  setMeshToken(token: string | undefined): void {
+    (this.config as { meshToken?: string }).meshToken = token || undefined;
+    if (token) this.gossip.setMeshToken(token);
+  }
+
   /** Update publicUrl after server port is known. */
   setPublicUrl(url: string): void {
     (this.config as { publicUrl: string }).publicUrl = url;

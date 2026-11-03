@@ -14,6 +14,7 @@ import {
   parseTrustMode,
   type IdentityFetch
 } from "../../src/trust/pinned-keys.js";
+import { coordinatorFetch } from "./coordinator-fetch.js";
 
 const coordA = createPeerKeys("coord-a");
 const coordA2 = createPeerKeys("coord-a"); // same id, rotated/forged key
@@ -149,41 +150,27 @@ describe("fromEnv / isTrusted", () => {
 });
 
 describe("checkCoordinatorTrust / CoordinatorTrustGate", () => {
-  const identityFetch = (identity: unknown, status = 200): IdentityFetch & { calls: string[] } => {
-    const calls: string[] = [];
-    const fn = (async (url: string) => {
-      calls.push(url);
-      return { ok: status < 300, status, json: async () => identity };
-    }) as IdentityFetch & { calls: string[] };
-    fn.calls = calls;
-    return fn;
-  };
-
-  it("fetches /identity and applies the store", async () => {
+  it("challenges the coordinator, then applies the store", async () => {
     const store = new PinnedKeyStore({ mode: "strict", entries: new Map([[coordA.peerId, fpA]]), pinFile: null });
-    const ok = identityFetch({ peerId: coordA.peerId, publicKeyPem: coordA.publicKeyPem });
+    const ok = coordinatorFetch(coordA);
     const res = await checkCoordinatorTrust("http://coord.test/", { store, fetch: ok });
-    expect(res).toMatchObject({ trusted: true, peerId: coordA.peerId, decision: { reason: "pinned_match" } });
-    expect(ok.calls).toEqual(["http://coord.test/identity"]);
+    expect(res).toMatchObject({ trusted: true, peerId: coordA.peerId, proof: "challenge", decision: { reason: "pinned_match" } });
+    expect(ok.calls).toEqual(["POST http://coord.test/identity/challenge"]);
 
-    const mismatch = await checkCoordinatorTrust("http://coord.test", {
-      store,
-      fetch: identityFetch({ peerId: coordA.peerId, publicKeyPem: coordA2.publicKeyPem })
-    });
+    // Same peerId, different key (and a valid signature by that key): a mismatch, refused.
+    const mismatch = await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordA2) });
     expect(mismatch.trusted).toBe(false);
     expect(describeTrustFailure(mismatch)).toContain("key mismatch for coord-a");
 
-    const unlisted = await checkCoordinatorTrust("http://coord.test", {
-      store,
-      fetch: identityFetch({ peerId: coordB.peerId, publicKeyPem: coordB.publicKeyPem })
-    });
+    const unlisted = await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordB) });
     expect(describeTrustFailure(unlisted)).toContain("not in TRUSTED_COORDINATOR_KEYS");
   });
 
   it("treats transport errors and malformed identities as untrusted with an error, not a decision", async () => {
     const store = new PinnedKeyStore({ mode: "open", pinFile: null });
-    expect(await checkCoordinatorTrust("http://c", { store, fetch: identityFetch({}, 503) })).toMatchObject({ trusted: false, error: "identity_http_503" });
-    expect(await checkCoordinatorTrust("http://c", { store, fetch: identityFetch({ peerId: "x" }) })).toMatchObject({ trusted: false, error: "identity_malformed" });
+    expect(await checkCoordinatorTrust("http://c", { store, fetch: coordinatorFetch(coordA, { status: 503 }) })).toMatchObject({ trusted: false, error: "identity_challenge_http_503" });
+    expect(await checkCoordinatorTrust("http://c", { store, fetch: coordinatorFetch(coordA, { challengeBody: { peerId: "x" } }) })).toMatchObject({ trusted: false, error: "identity_malformed" });
+    expect(await checkCoordinatorTrust("http://c", { store, fetch: coordinatorFetch(coordA, { challenge: false, identityBody: { peerId: "x" } }) })).toMatchObject({ trusted: false, error: "identity_malformed" });
     const failing: IdentityFetch = async () => {
       throw new Error("ECONNREFUSED");
     };
@@ -193,15 +180,19 @@ describe("checkCoordinatorTrust / CoordinatorTrustGate", () => {
     expect(describeTrustFailure(res)).toContain("ECONNREFUSED");
   });
 
-  it("the gate verifies a URL once and re-checks after forget()", async () => {
+  it("the gate verifies a URL once, re-checks after forget() and after the verification expires", async () => {
     const store = new PinnedKeyStore({ mode: "tofu", pinFile: null });
-    const fetch = identityFetch({ peerId: coordA.peerId, publicKeyPem: coordA.publicKeyPem });
-    const gate = new CoordinatorTrustGate({ store, fetch });
+    const fetch = coordinatorFetch(coordA);
+    let now = 1_000_000;
+    const gate = new CoordinatorTrustGate({ store, fetch, reverifyMs: 60_000, now: () => now });
     expect((await gate.check("http://coord.test/")).trusted).toBe(true);
     expect((await gate.check("http://coord.test")).trusted).toBe(true);
     expect(fetch.calls).toHaveLength(1);
     gate.forget("http://coord.test");
     expect((await gate.check("http://coord.test")).trusted).toBe(true);
     expect(fetch.calls).toHaveLength(2);
+    now += 60_001;
+    expect((await gate.check("http://coord.test")).trusted).toBe(true);
+    expect(fetch.calls).toHaveLength(3);
   });
 });
