@@ -29,6 +29,8 @@ import { backendChat, makeToolRunner, ollamaChat, runAgentLoop } from "./agent-l
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
+import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./git-setup.js";
+import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
@@ -634,6 +636,55 @@ app.post("/v1/ide/git/checkout", (req, reply) =>
   }));
 app.post("/v1/ide/git/pull", (_req, reply) => withGit(reply, async (g) => ({ output: await g.pull() })));
 app.post("/v1/ide/git/push", (_req, reply) => withGit(reply, async (g) => ({ output: await g.push() })));
+
+// Setting up git (git-setup.ts): init, clone, remotes, publishing with the GitHub CLI.
+// GitHub auth stays with git's credential helper and gh's keychain login; no token passes through here.
+const remoteUrl = z.string().min(1).max(2048).transform((u, ctx) => {
+  try {
+    return normalizeRemoteUrl(u);
+  } catch (err) {
+    ctx.addIssue({ code: "custom", message: (err as Error).message });
+    return z.NEVER;
+  }
+});
+function zodMessage(err: z.ZodError): string {
+  return err.issues.map((i) => i.message).join("; ");
+}
+app.post("/v1/ide/git/init", (_req, reply) =>
+  withGit(reply, async (g) => {
+    await g.init();
+    return { ok: true };
+  }));
+app.post("/v1/ide/git/remote", (req, reply) => {
+  const b = z.object({ name: z.string().min(1).max(100).default("origin"), url: remoteUrl }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  return withGit(reply, async (g) => {
+    await g.addRemote(b.data.name, b.data.url);
+    return { ok: true, name: b.data.name, url: b.data.url };
+  });
+});
+app.post("/v1/ide/git/publish", (req, reply) => {
+  const b = z.object({ name: z.string().min(1).max(140), visibility: z.enum(["public", "private"]).default("private") }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  return withGit(reply, (g) => g.publishGitHub(b.data.name, b.data.visibility));
+});
+app.post("/v1/ide/git/clone", async (req, reply) => {
+  const b = z.object({
+    url: remoteUrl,
+    parentDir: z.string().min(1).max(4096).refine((p) => isAbsolute(p), "The clone folder must be an absolute path."),
+    name: z.string().min(1).max(200).optional(),
+  }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  try {
+    const projectRoot = await cloneRepo(b.data.url, b.data.parentDir, b.data.name);
+    activeProjectRoot = projectRoot;
+    return reply.send({ projectRoot });
+  } catch (err) {
+    if (err instanceof GitSetupError) return reply.status(400).send({ error: "git", message: err.message });
+    throw err;
+  }
+});
+app.get("/v1/ide/git/github/status", async (_req, reply) => reply.send(await githubStatus()));
 
 // Background jobs on the network (network-tasks.ts).
 const networkTasks = new NetworkTasks(router);

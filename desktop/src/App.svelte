@@ -265,6 +265,12 @@
     }
   }
 
+  /** A folder the IDE server already made the open project (a clone from Source Control). */
+  function adoptProject(root: string) {
+    projectRoot = root;
+    try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
+  }
+
   async function openProject() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -384,7 +390,7 @@
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
-        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} />
+        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} onProjectOpened={adoptProject} />
       </div>
     </main>
 

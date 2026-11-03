@@ -17,8 +17,10 @@
   interface Props {
     projectRoot?: string | null;
     onOpenProject?: () => void;
+    /** The IDE server already opened this folder (a clone): show it. */
+    onProjectOpened?: (root: string) => void;
   }
-  let { projectRoot = null, onOpenProject }: Props = $props();
+  let { projectRoot = null, onOpenProject, onProjectOpened }: Props = $props();
 
   /** Prefix for buffers that are not (yet) a project file, e.g. code opened from chat. */
   const UNTITLED = "untitled:";
@@ -645,6 +647,7 @@
           onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
           onError={(m) => showNotice(m)}
           onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
+          onProjectOpened={(root) => onProjectOpened?.(root)}
         />
       </div>
     {:else if projectRoot}

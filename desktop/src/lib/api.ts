@@ -1176,8 +1176,11 @@ export interface GitState {
   staged: GitFile[];
   unstaged: GitFile[];
   branches: string[];
+  /** Remote names, origin first. */
+  remotes: string[];
+  hasCommits: boolean;
 }
-export const gitState = () => fsCall<GitState | { notARepo: true }>("GET", "/v1/ide/git/state");
+export const gitState =() => fsCall<GitState | { notARepo: true }>("GET", "/v1/ide/git/state");
 export const gitHeadContent = (path: string) =>
   fsCall<{ content: string | null }>("GET", `/v1/ide/git/head-content?path=${encodeURIComponent(path)}`).then((r) => r.content);
 export const gitStage = (paths: string[]) => fsCall("POST", "/v1/ide/git/stage", { paths });
@@ -1187,6 +1190,20 @@ export const gitCommit = (message: string, all = false) => fsCall<{ commit: stri
 export const gitCheckout = (branch: string, create = false) => fsCall("POST", "/v1/ide/git/checkout", { branch, create });
 export const gitPull = () => fsCall<{ output: string }>("POST", "/v1/ide/git/pull").then((r) => r.output);
 export const gitPush = () => fsCall<{ output: string }>("POST", "/v1/ide/git/push").then((r) => r.output);
+export const gitInit = () => fsCall<{ ok: true }>("POST", "/v1/ide/git/init", {});
+/** Clone into `<parentDir>/<repo name>` and make it the open project; returns the new folder. */
+export const gitClone = (url: string, parentDir: string) =>
+  fsCall<{ projectRoot: string }>("POST", "/v1/ide/git/clone", { url, parentDir }).then((r) => r.projectRoot);
+export const gitAddRemote = (url: string, name = "origin") => fsCall<{ ok: true; name: string; url: string }>("POST", "/v1/ide/git/remote", { name, url });
+/** Create a GitHub repository with the gh CLI and push the current branch to it. */
+export const gitPublishGitHub = (name: string, visibility: "public" | "private") =>
+  fsCall<{ url: string; output: string }>("POST", "/v1/ide/git/publish", { name, visibility });
+export interface GitHubCliStatus {
+  ghInstalled: boolean;
+  loggedIn: boolean;
+  login: string | null;
+}
+export const gitGitHubStatus = () => fsCall<GitHubCliStatus>("GET", "/v1/ide/git/github/status");
 
 // Background jobs on the network (:4304 /v1/ide/network/tasks)
 export interface NetworkTask {
