@@ -7,6 +7,7 @@ import { Language, RunResult } from "../common/types.js";
 import { checkSubset } from "./subset.js";
 import { isDockerAvailable, runInDockerSandbox, type DockerSandboxOptions } from "./docker-sandbox.js";
 import { log } from "../common/logger.js";
+import { PYTHON_NOT_FOUND, resolvePython } from "./python-interpreter.js";
 
 function baseResult(language: Language, durationMs: number): RunResult {
   return {
@@ -65,14 +66,25 @@ export async function runCode(
 }
 
 async function runPython(code: string, timeoutMs: number, start: number): Promise<RunResult> {
+  const python = await resolvePython();
+  if (!python) return { ...baseResult("python", Date.now() - start), stderr: PYTHON_NOT_FOUND };
   return new Promise<RunResult>((resolve) => {
-    const proc = spawn("python3", ["-c", code], {
-      stdio: ["ignore", "pipe", "pipe"]
+    const proc = spawn(python.command, [...python.args, "-c", code], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
     });
 
     let stdout = "";
     let stderr = "";
     let settled = false;
+
+    // A spawn failure is an 'error' event; unhandled, it would kill the process.
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...baseResult("python", Date.now() - start), stderr: `could not run ${python.command}: ${err.message}` });
+    });
 
     const timer = setTimeout(() => {
       if (!settled) {
