@@ -82,7 +82,7 @@
     "@types/pg": "^8.16.0",
     "@types/web-bluetooth": "^0.0.21",
     "@types/ws": "^8.18.1",
-    "mermaid": "^11.12.2",
+    "mermaid": "^12.2.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitepress": "^1.6.4",
