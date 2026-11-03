@@ -48,7 +48,9 @@ export function portalCoordinatorTransport(deps: Pick<ComputeRoutesDeps, "PORTAL
     try {
       return { status: res.statusCode, json: JSON.parse(text) };
     } catch {
-      return { status: res.statusCode, json: { error: text.slice(0, 200) } };
+      // A non-JSON body (a proxy error page, a stack trace) is logged, not passed to the client.
+      console.warn(`[portal] coordinator ${method} ${path} returned non-JSON (${res.statusCode}): ${text.slice(0, 200)}`);
+      return { status: res.statusCode, json: { error: "coordinator_bad_response" } };
     }
   };
 }

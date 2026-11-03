@@ -359,7 +359,7 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft) | none |
 | `GET` | `/auth/oauth/:provider/callback` | OAuth callback (GET) | none |
 | `POST` | `/auth/oauth/:provider/callback` | OAuth callback (POST) | none |
-| `POST` | `/auth/oauth/mobile/complete` | Complete mobile OAuth with session token | none |
+| `POST` | `/auth/oauth/mobile/complete` | Complete native-app OAuth: `{ token, verifier? }`; a token from a start with `appChallenge` (base64url sha256 of `verifier`) needs that verifier | none |
 | `POST` | `/auth/password/forgot` | Request a password reset link by email | none |
 | `POST` | `/auth/password/reset` | Set a new password with a reset token | none |
 
@@ -488,9 +488,9 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/portal/api/reviews` | List pending reviews | session |
-| `GET` | `/portal/api/reviews/:taskId` | Get review details | session |
-| `POST` | `/portal/api/reviews/:taskId/decision` | Submit review decision | session |
+| `GET` | `/portal/api/reviews` | List pending reviews | operator session |
+| `GET` | `/portal/api/reviews/:taskId` | Get review details | operator session |
+| `POST` | `/portal/api/reviews/:taskId/decision` | Submit review decision | operator session |
 
 ### Escalations
 

@@ -65,6 +65,7 @@ import {
 import { edgeModeFrom, parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
+import { nativeRedirectMatches } from "./native-app-auth.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
 // (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
@@ -194,7 +195,7 @@ const COORDINATOR_ADMIN_EMAILS = new Set(
 export type ProviderName = "google" | "microsoft" | "github";
 const IOS_OAUTH_CALLBACK_PREFIX = C.IOS_OAUTH_CALLBACK_PREFIX;
 const MOBILE_OAUTH_TOKEN_TTL_MS = C.MOBILE_OAUTH_TOKEN_TTL_MS;
-const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number }>();
+const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number; appChallenge?: string }>();
 
 type OauthProviderConfig = {
   clientId: string;
@@ -257,33 +258,25 @@ function normalizeNativeOauthRedirect(value: string | undefined): string | null 
   const candidate = value.trim();
   if (!candidate) return null;
   try {
-    const parsed = new URL(candidate);
-    if (!parsed.protocol || parsed.protocol === "http:" || parsed.protocol === "https:") return null;
-    const prefix = IOS_OAUTH_CALLBACK_PREFIX.endsWith("/")
-      ? IOS_OAUTH_CALLBACK_PREFIX.slice(0, -1)
-      : IOS_OAUTH_CALLBACK_PREFIX;
-    return candidate.startsWith(prefix) ? candidate : null;
+    return nativeRedirectMatches(candidate, IOS_OAUTH_CALLBACK_PREFIX) ? candidate : null;
   } catch {
     return null;
   }
 }
 
-async function issueMobileOauthSessionToken(userId: string): Promise<string> { // in Postgres: any instance can redeem it
+async function issueMobileOauthSessionToken(userId: string, appChallenge?: string): Promise<string> { // in Postgres: any instance can redeem it
   const token = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
   const expiresAtMs = Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS;
-  if (store) await store.issueMobileOauthToken(sha256Hex(token), userId, expiresAtMs);
-  else mobileOauthSessionTokens.set(token, { userId, expiresAtMs });
+  if (store) await store.issueMobileOauthToken(sha256Hex(token), userId, expiresAtMs, appChallenge);
+  else mobileOauthSessionTokens.set(token, { userId, expiresAtMs, ...(appChallenge ? { appChallenge } : {}) });
   return token;
 }
 
-async function consumeMobileOauthSessionToken(token: string): Promise<{ userId: string } | null> {
-  if (store) {
-    const userId = await store.consumeMobileOauthToken(sha256Hex(token));
-    return userId ? { userId } : null;
-  }
+async function consumeMobileOauthSessionToken(token: string): Promise<{ userId: string; appChallenge?: string } | null> {
+  if (store) return store.consumeMobileOauthToken(sha256Hex(token));
   const record = mobileOauthSessionTokens.get(token);
   mobileOauthSessionTokens.delete(token);
-  return record && record.expiresAtMs > Date.now() ? { userId: record.userId } : null;
+  return record && record.expiresAtMs > Date.now() ? { userId: record.userId, ...(record.appChallenge ? { appChallenge: record.appChallenge } : {}) } : null;
 }
 
 function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -535,15 +528,15 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
 
   try {
     const [creditRes, historyRes, quoteRes, catalogRes] = await Promise.all([
-      request(`${CONTROL_PLANE_URL}/credits/${agentId}/balance`, {
+      request(`${CONTROL_PLANE_URL}/credits/${encodeURIComponent(agentId)}/balance`, {
         method: "GET",
         headers: controlPlaneHeaders()
       }),
-      request(`${CONTROL_PLANE_URL}/credits/${agentId}/history`, {
+      request(`${CONTROL_PLANE_URL}/credits/${encodeURIComponent(agentId)}/history`, {
         method: "GET",
         headers: controlPlaneHeaders()
       }),
-      request(`${CONTROL_PLANE_URL}/economy/credits/${agentId}/quote`, {
+      request(`${CONTROL_PLANE_URL}/economy/credits/${encodeURIComponent(agentId)}/quote`, {
         method: "GET",
         headers: controlPlaneHeaders()
       }),
@@ -844,7 +837,7 @@ export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 
 // Reviews API — Cloud Review Diff UI for handshake escalations
-const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
+const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, buildAccessContext, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
 

@@ -98,6 +98,8 @@ import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type Payout
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
 import { payoutPolicyFromEnv } from "../economy/payouts.js";
+import { validateLightningAddress } from "../economy/payout-destination.js";
+import { fetchPublicJson } from "../security/public-fetch.js";
 import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
@@ -986,11 +988,8 @@ const payoutService = new PayoutService({
   },
   coordinatorId: identity.peerId,
   feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT,
-  fetcher: async (url: string) => {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) throw new Error(`lnurl_http_${res.status}`);
-    return res.json();
-  },
+  // LNURL hosts are user-chosen: public https only, checked again at connect, no redirects.
+  fetcher: (url: string) => fetchPublicJson(url, { timeoutMs: 10_000 }),
   log: app.log,
   onPaid: async (p) => {
     ordering.append({
@@ -4609,7 +4608,7 @@ app.post("/economy/hosts/heartbeat", async (req, reply) => {
       services: z.array(z.string().min(1).max(32)).min(1).max(8),
       region: z.string().max(32).optional(),
       coordinatorUrl: z.string().url().optional(),
-      lightningAddress: z.string().max(256).optional(),
+      lightningAddress: z.string().max(256).refine((v) => validateLightningAddress(v).ok, "invalid lightningAddress").optional(),
       lightningNodeId: z.string().regex(/^0[23][0-9a-fA-F]{64}$/).optional(),
       ports: z.object({ bitcoind: z.number().int().min(1).max(65535), lightning: z.number().int().min(1).max(65535), electrs: z.number().int().min(1).max(65535) }).partial().optional(),
       issuedAtMs: z.number().int(),

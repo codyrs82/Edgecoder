@@ -72,7 +72,7 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
     }
     const reg = verification.registrationInfo;
     const webauthnUserId = base64UrlFromBuffer(createHash("sha256").update(user.userId).digest().subarray(0, 16));
-    await store.upsertPasskeyCredential({
+    const saved = await store.upsertPasskeyCredential({
       credentialId: reg.credential.id,
       userId: user.userId,
       webauthnUserId,
@@ -82,6 +82,7 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
       backedUp: reg.credentialBackedUp === true,
       transports: reg.credential.transports as string[] | undefined
     });
+    if (!saved) return reply.code(409).send({ error: "passkey_already_registered" });
     return reply.send({ ok: true });
   });
 

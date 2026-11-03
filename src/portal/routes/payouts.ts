@@ -74,7 +74,8 @@ export function registerPayoutRoutes(
       });
       return { status: res.statusCode, text: await res.body.text() };
     } catch (error) {
-      return { error: { status: 502, body: { error: "coordinator_unreachable", detail: error instanceof Error ? error.message : String(error) } } };
+      console.warn(`[portal] payouts: coordinator request failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { error: { status: 502, body: { error: "coordinator_unreachable" } } };
     }
   }
   async function call(method: "GET" | "POST", path: string, reply: any, body?: unknown): Promise<unknown> {

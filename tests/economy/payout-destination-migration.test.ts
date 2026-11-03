@@ -12,12 +12,14 @@ const policy = { ...DEFAULT_PAYOUT_POLICY, network: "signet" as const };
 
 /** Fake LNURL server for alice@getalby.com: returns an invoice for exactly the requested amount. */
 function lnurlFetcher(requested: string[]) {
+  const metadata = JSON.stringify([["text/identifier", "alice@getalby.com"]]);
+  const descriptionHashHex = createHash("sha256").update(metadata).digest("hex");
   return async (url: string) => {
     requested.push(url);
-    if (url === "https://getalby.com/.well-known/lnurlp/alice") return { tag: "payRequest", callback: "https://getalby.com/lnurlp/alice/cb", minSendable: 1000, maxSendable: 1e12 };
+    if (url === "https://getalby.com/.well-known/lnurlp/alice") return { tag: "payRequest", callback: "https://getalby.com/lnurlp/alice/cb", minSendable: 1000, maxSendable: 1e12, metadata };
     const amountMsat = Number(new URL(url).searchParams.get("amount"));
     const hash = createHash("sha256").update(randomBytes(32)).digest("hex");
-    return { pr: encodeTestBolt11({ network: "tbs", amountMsat, paymentHashHex: hash }) };
+    return { pr: encodeTestBolt11({ network: "tbs", amountMsat, paymentHashHex: hash, descriptionHashHex }) };
   };
 }
 

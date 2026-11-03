@@ -88,6 +88,19 @@ export function sanitizeNodeIdForDns(nodeId: string): string {
   return sanitized || "node";
 }
 
+/**
+ * Other node IDs whose DNS label is the same as `nodeId`'s ("My_Coord" and "my-coord" both map to
+ * my-coord). Such a node must not get, update or delete that record.
+ */
+export function dnsLabelConflicts(nodeId: string, nodeIds: Iterable<string>): string[] {
+  const label = sanitizeNodeIdForDns(nodeId);
+  const out: string[] = [];
+  for (const other of nodeIds) {
+    if (other !== nodeId && sanitizeNodeIdForDns(other) === label) out.push(other);
+  }
+  return out;
+}
+
 export function getCoordinatorHostname(nodeId: string): string {
   const label = sanitizeNodeIdForDns(nodeId);
   return `${label}.${DNS_COORDINATOR_PREFIX}.${DNS_BASE_DOMAIN}`;

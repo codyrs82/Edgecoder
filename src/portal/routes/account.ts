@@ -8,6 +8,12 @@ import { z } from "zod";
 import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
 import { NODE_ID_PATTERN } from "../pages/escape.js";
+import { dnsLabelConflicts } from "../dns-manager.js";
+
+/** Credit accounts are named acct-<userId>; a node ID of that form would read that account's ledger. */
+export function isReservedNodeId(nodeId: string): boolean {
+  return /^acct-/i.test(nodeId);
+}
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
@@ -52,6 +58,9 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const params = z.object({ agentId: z.string().min(3) }).parse(req.params);
+    if (!NODE_ID_PATTERN.test(params.agentId) || isReservedNodeId(params.agentId)) {
+      return reply.code(404).send({ error: "agent_not_found" });
+    }
     const node = await store.getNodeEnrollment(params.agentId);
     if (!node || node.nodeKind !== "agent") {
       return reply.code(404).send({ error: "agent_not_found" });
@@ -161,6 +170,9 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     if (typeof raw.nodeId === "string" && !NODE_ID_PATTERN.test(raw.nodeId)) {
       return reply.code(400).send({ error: "invalid_node_id", detail: "Use 3-128 letters, digits, '.', '_' or '-'." });
     }
+    if (typeof raw.nodeId === "string" && isReservedNodeId(raw.nodeId)) {
+      return reply.code(400).send({ error: "reserved_node_id", detail: "Node IDs may not start with 'acct-'." });
+    }
     const body = z
       .object({
         nodeId: z.string().regex(NODE_ID_PATTERN),
@@ -178,6 +190,10 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     ]);
     if ((byNodeId && byNodeId.ownerUserId !== user.userId) || (byDeviceId && byDeviceId.ownerUserId !== user.userId)) {
       return reply.code(409).send({ error: "node_owned_by_another_user" });
+    }
+    // A coordinator's DNS name comes from its node ID; two IDs that map to the same name can't both have one.
+    if (body.nodeKind === "coordinator" && dnsLabelConflicts(body.nodeId, await store.listCoordinatorNodeIds()).length > 0) {
+      return reply.code(409).send({ error: "dns_name_taken", detail: "Another coordinator uses a node ID with the same DNS name. Pick a different node ID." });
     }
     const registrationToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
     let record = await store.upsertNodeEnrollment({
@@ -249,10 +265,16 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       return reply.code(403).send({ error: "node_delete_forbidden" });
     }
     // Clean up DNS record for coordinator nodes
+    // Only when no other coordinator's node ID maps to the same DNS name (an older enrollment may).
     if (existing.nodeKind === "coordinator" && existing.dnsHostname) {
-      deleteDnsRecord(existing.nodeId).catch((err) =>
-        console.error(`[portal] Failed to delete DNS for ${existing.nodeId}:`, err)
-      );
+      const shared = dnsLabelConflicts(existing.nodeId, await store.listCoordinatorNodeIds());
+      if (shared.length === 0) {
+        deleteDnsRecord(existing.nodeId).catch((err) =>
+          console.error(`[portal] Failed to delete DNS for ${existing.nodeId}:`, err)
+        );
+      } else {
+        console.warn(`[portal] DNS record for ${existing.nodeId} kept: shared with ${shared.join(", ")}`);
+      }
     }
 
     const ok = await store.deleteNodeEnrollment(params.nodeId);
@@ -270,7 +292,11 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       return reply.code(401).send({ error: "registration_token_required" });
     }
 
-    // Token is accepted as proof of enrollment — coordinator will re-validate
+    // The token must belong to an enrollment (stored hashed), like /internal/nodes/validate checks.
+    const enrollment = await store.getNodeEnrollmentByRegistrationTokenHash(sha256Hex(token));
+    if (!enrollment) {
+      return reply.code(401).send({ error: "registration_token_invalid" });
+    }
     const coordinators = await store.listActiveCoordinators();
     if (coordinators.length === 0) {
       return reply.send({ coordinatorUrl: null, reason: "no_public_coordinators" });

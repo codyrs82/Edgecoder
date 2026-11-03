@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { InternalRoutesDeps } from "../server.js";
+import { dnsLabelConflicts } from "../dns-manager.js";
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
@@ -53,7 +54,9 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
       refreshed.active &&
       body.sourceIp &&
       isDnsConfigured() &&
-      store
+      store &&
+      // Never point a name another coordinator's node ID also maps to (pre-check enrollments).
+      dnsLabelConflicts(refreshed.nodeId, await store.listCoordinatorNodeIds()).length === 0
     ) {
       syncCoordinatorDns({
         nodeId: refreshed.nodeId,
@@ -117,7 +120,8 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
       updated &&
       updated.nodeKind === "coordinator" &&
       !body.approved &&
-      updated.dnsHostname
+      updated.dnsHostname &&
+      dnsLabelConflicts(updated.nodeId, await store.listCoordinatorNodeIds()).length === 0
     ) {
       deleteDnsRecord(updated.nodeId).catch((err) =>
         console.error(`[portal] DNS delete failed for ${updated.nodeId}:`, err)

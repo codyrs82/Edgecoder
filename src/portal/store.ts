@@ -269,6 +269,9 @@ export class PortalStore {
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
     );
+    // A native app's sign-in can be bound to the app that started it (S256 of an app-held verifier).
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS app_challenge TEXT`);
+    await this.pool.query(`ALTER TABLE portal_mobile_oauth_tokens ADD COLUMN IF NOT EXISTS app_challenge TEXT`);
     // API keys for the hosted model endpoint (/v1): only a hash is kept.
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_api_keys (
@@ -304,6 +307,7 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_status TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_node_enrollments_token_idx ON portal_node_enrollments (registration_token_hash)`);
     await this.migratePayoutDestinations();
   }
 
@@ -837,20 +841,22 @@ export class PortalStore {
     nativeRedirect?: string;
     /** Set when a signed-in user connects this provider from Settings. */
     linkUserId?: string;
+    /** Native flows: base64url sha256 of a verifier the app keeps; the mobile token is bound to it. */
+    appChallenge?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect, link_user_id`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge`,
       [stateId, now]
     );
     const row = result.rows[0];
@@ -859,26 +865,29 @@ export class PortalStore {
       provider: row.provider,
       redirectUri: row.redirect_uri,
       ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
-      ...(row.link_user_id ? { linkUserId: row.link_user_id } : {})
+      ...(row.link_user_id ? { linkUserId: row.link_user_id } : {}),
+      ...(row.app_challenge ? { appChallenge: row.app_challenge } : {})
     };
   }
 
   /** One-time code a native app redeems for a session after OAuth (stored hashed, single use). */
-  async issueMobileOauthToken(tokenHash: string, userId: string, expiresAtMs: number): Promise<void> {
+  async issueMobileOauthToken(tokenHash: string, userId: string, expiresAtMs: number, appChallenge?: string): Promise<void> {
     await this.pool.query(`DELETE FROM portal_mobile_oauth_tokens WHERE expires_at_ms <= $1`, [Date.now()]);
     await this.pool.query(
-      `INSERT INTO portal_mobile_oauth_tokens (token_hash, user_id, expires_at_ms) VALUES ($1,$2,$3)`,
-      [tokenHash, userId, expiresAtMs]
+      `INSERT INTO portal_mobile_oauth_tokens (token_hash, user_id, expires_at_ms, app_challenge) VALUES ($1,$2,$3,$4)`,
+      [tokenHash, userId, expiresAtMs, appChallenge ?? null]
     );
   }
 
   /** Redeem a mobile OAuth code; the DELETE ... RETURNING makes it single-use across instances. */
-  async consumeMobileOauthToken(tokenHash: string): Promise<string | null> {
+  async consumeMobileOauthToken(tokenHash: string): Promise<{ userId: string; appChallenge?: string } | null> {
     const result = await this.pool.query(
-      `DELETE FROM portal_mobile_oauth_tokens WHERE token_hash = $1 AND expires_at_ms > $2 RETURNING user_id`,
+      `DELETE FROM portal_mobile_oauth_tokens WHERE token_hash = $1 AND expires_at_ms > $2 RETURNING user_id, app_challenge`,
       [tokenHash, Date.now()]
     );
-    return result.rows[0]?.user_id ?? null;
+    const row = result.rows[0];
+    if (!row) return null;
+    return { userId: row.user_id, ...(row.app_challenge ? { appChallenge: row.app_challenge } : {}) };
   }
 
   async createWithdrawChallenge(input: { challengeId: string; userId: string; bolt11Hash: string; amountMsat: number; emailCodeHash: string; expiresAtMs: number }): Promise<void> {
@@ -1027,6 +1036,29 @@ export class PortalStore {
     const row = result.rows[0];
     if (!row) return null;
     return this.mapNodeRow(row);
+  }
+
+  /** The enrollment a registration token belongs to (by its hash), or null. */
+  async getNodeEnrollmentByRegistrationTokenHash(tokenHash: string): Promise<NodeEnrollment | null> {
+    const result = await this.pool.query(
+      `SELECT
+        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
+        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
+        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
+        created_at_ms, updated_at_ms
+       FROM portal_node_enrollments
+       WHERE registration_token_hash = $1
+       LIMIT 1`,
+      [tokenHash]
+    );
+    const row = result.rows[0];
+    return row ? this.mapNodeRow(row) : null;
+  }
+
+  /** Node IDs of every coordinator enrollment (DNS label collision checks). */
+  async listCoordinatorNodeIds(): Promise<string[]> {
+    const result = await this.pool.query(`SELECT node_id FROM portal_node_enrollments WHERE node_kind = 'coordinator'`);
+    return result.rows.map((row: any) => String(row.node_id));
   }
 
   async listNodesByOwner(userId: string): Promise<NodeEnrollment[]> {
@@ -1507,8 +1539,9 @@ export class PortalStore {
     deviceType: string;
     backedUp: boolean;
     transports?: string[];
-  }): Promise<void> {
-    await this.pool.query(
+  }): Promise<boolean> {
+    // A credential ID already registered to another user is never re-assigned (returns false).
+    const result = await this.pool.query(
       `INSERT INTO portal_passkey_credentials (
         credential_id, user_id, webauthn_user_id, public_key_b64url, counter, device_type, backed_up,
         transports_json, created_at_ms, last_used_at_ms
@@ -1521,7 +1554,8 @@ export class PortalStore {
         device_type = EXCLUDED.device_type,
         backed_up = EXCLUDED.backed_up,
         transports_json = EXCLUDED.transports_json,
-        last_used_at_ms = EXCLUDED.last_used_at_ms`,
+        last_used_at_ms = EXCLUDED.last_used_at_ms
+      WHERE portal_passkey_credentials.user_id = EXCLUDED.user_id`,
       [
         input.credentialId,
         input.userId,
@@ -1534,6 +1568,7 @@ export class PortalStore {
         Date.now()
       ]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async updatePasskeyCounter(credentialId: string, counter: number): Promise<void> {
