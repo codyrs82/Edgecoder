@@ -21,6 +21,9 @@ import {
   normalizeIpCandidate,
   readHeaderValue,
   extractClientIp,
+  clientIpTrustFromEnv,
+  isLoopbackSocket,
+  socketRemoteAddress,
   normalizeUrl,
   pairKey,
   weightedMedian,
@@ -354,6 +357,17 @@ const forwardReplayCache = new ReplayCache();
 const OFFERED_SUBTASK_TTL_MS = 24 * 60 * 60 * 1000;
 const offeredToPeers = new Map<string, number>();
 const PORTAL_SERVICE_URL = CC.PORTAL_SERVICE_URL ?? "";
+/** Which forwarded-IP headers to believe (COORDINATOR_TRUST_PROXY, Fly-Client-IP on Fly). Display/geo only. */
+const CLIENT_IP_TRUST = clientIpTrustFromEnv(process.env);
+/** The request's network origin: the socket decides loopback; headers only feed the display IP. */
+function requestOrigin(req: unknown): { clientIp?: string; loopback: boolean } {
+  const r = req as { headers?: Record<string, unknown>; socket?: { remoteAddress?: string }; raw?: { socket?: { remoteAddress?: string } } };
+  const socketIp = socketRemoteAddress(r);
+  return {
+    clientIp: extractClientIp(r.headers ?? {}, socketIp, CLIENT_IP_TRUST),
+    loopback: isLoopbackSocket(socketIp, CLIENT_IP_TRUST)
+  };
+}
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
 const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
 const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordinator-fee:default";
@@ -1364,7 +1378,7 @@ async function verifyAgentRequest(
   const agentId = signed["x-agent-id"];
 
   // 1. Skip rate limiting for loopback (embedded worker is trusted)
-  const isLoopback = sourceIp === "127.0.0.1" || sourceIp === "::1" || sourceIp === "::ffff:127.0.0.1";
+  const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST);
 
   // 2. Rate limit (cheapest check first) — skip for loopback
   if (!isLoopback && !agentRateLimiter.check(agentId)) {
@@ -1722,7 +1736,15 @@ async function validatePortalNode(input: {
   nodeKind: "agent" | "coordinator";
   registrationToken?: string;
   deviceId?: string;
+  /** Client IP for the portal's geo/VPN checks and the audit record. Never used for trust. */
   sourceIp?: string;
+  /** The TCP peer is this machine (embedded worker). Decided from the socket, never headers. */
+  loopback?: boolean;
+  /**
+   * The request is signed by the public key this coordinator already holds for the agent, and does
+   * not change that key. Only then may an agent re-register without a portal-validated token.
+   */
+  proofOfKey?: boolean;
 }): Promise<{
   allowed: boolean;
   reason?: string;
@@ -1757,62 +1779,26 @@ async function validatePortalNode(input: {
       // Best-effort audit signal; validation path should not fail due to ledger write.
     }
   };
-  const lookupPersistedApprovedAgent = async (): Promise<{
-    ownerEmail?: string;
-    sourceIp?: string;
-    countryCode?: string;
-    vpnDetected?: boolean;
-  } | null> => {
-    if (!pgStore || input.nodeKind !== "agent") return null;
-    try {
-      const projectionLookupTimeoutMs = 1_500;
-      const nodes = await Promise.race([
-        pgStore.listNodeStatusProjection(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("projection_lookup_timeout")), projectionLookupTimeoutMs)
-        )
-      ]);
-      const matched = (nodes ?? []).find((node) => node.nodeId === input.nodeId && node.nodeApproved === true);
-      if (!matched) return null;
-      return {
-        ownerEmail: matched.ownerEmail,
-        sourceIp: matched.sourceIp,
-        countryCode: matched.countryCode,
-        vpnDetected: matched.vpnDetected
-      };
-    } catch {
-      return null;
-    }
-  };
-  const allowIfKnownAgent = async (reason: string): Promise<{
+  // A known agent may skip the portal only by proving it holds the key already registered for it.
+  // Knowing an agent ID is not enough to re-register it with a new key.
+  const allowIfKnownAgent = (reason: string): {
     allowed: boolean;
     reason?: string;
     ownerEmail?: string;
     sourceIp?: string;
     countryCode?: string;
     vpnDetected?: boolean;
-  } | null> => {
-    if (input.nodeKind !== "agent") return null;
+  } | null => {
+    if (input.nodeKind !== "agent" || input.proofOfKey !== true) return null;
     const existing = agentCapabilities.get(input.nodeId);
-    if (existing) {
-      return {
-        allowed: true,
-        reason,
-        ownerEmail: existing.ownerEmail,
-        sourceIp: existing.sourceIp,
-        countryCode: existing.countryCode,
-        vpnDetected: existing.vpnDetected
-      };
-    }
-    const persisted = await lookupPersistedApprovedAgent();
-    if (!persisted) return null;
+    if (!existing?.publicKeyPem) return null;
     return {
       allowed: true,
       reason,
-      ownerEmail: persisted.ownerEmail,
-      sourceIp: persisted.sourceIp,
-      countryCode: persisted.countryCode,
-      vpnDetected: persisted.vpnDetected
+      ownerEmail: existing.ownerEmail,
+      sourceIp: existing.sourceIp,
+      countryCode: existing.countryCode,
+      vpnDetected: existing.vpnDetected
     };
   };
   if (!PORTAL_SERVICE_URL) {
@@ -1820,14 +1806,15 @@ async function validatePortalNode(input: {
     await appendValidationEvent(outcome);
     return outcome;
   }
-  // Allow loopback registrations — the embedded worker self-registers against its own coordinator
-  if (input.sourceIp === "127.0.0.1" || input.sourceIp === "::1" || input.sourceIp === "::ffff:127.0.0.1") {
+  // Allow loopback registrations: the embedded worker self-registers against its own coordinator.
+  // input.loopback comes from the socket address; a forwarded-IP header cannot set it.
+  if (input.loopback === true) {
     const outcome = { allowed: true, reason: "loopback_self_registration" };
     await appendValidationEvent(outcome);
     return outcome;
   }
   if (!input.registrationToken) {
-    const cached = await allowIfKnownAgent("registration_token_missing_cached_agent");
+    const cached = allowIfKnownAgent("registration_token_missing_proven_key");
     if (cached) {
       await appendValidationEvent(cached);
       return cached;
@@ -1891,9 +1878,9 @@ async function validatePortalNode(input: {
       vpnDetected: payload.node?.vpnDetected
     };
   } catch {
-    // If portal validation is temporarily unavailable, allow agents we already know.
-    // This avoids flapping registrations for long-running approved nodes.
-    const cached = await allowIfKnownAgent("portal_validation_unreachable_cached_agent");
+    // If portal validation is temporarily unavailable, allow agents we already know that prove
+    // their registered key. This avoids flapping registrations for long-running approved nodes.
+    const cached = allowIfKnownAgent("portal_validation_unreachable_proven_key");
     if (cached) {
       await appendValidationEvent(cached);
       return cached;
@@ -2706,6 +2693,26 @@ const resultSchema = z.object({
   receipt: agentReceiptClaimSchema.optional() // work receipt claim signed by the agent (src/receipts)
 });
 
+/**
+ * Proof of key for /register: the request is signed (worker-runner signs /register) by the key
+ * this coordinator already holds for the agent, and keeps that key. A key change never counts as
+ * proof; it needs a portal-validated registration token (or the loopback exemption).
+ */
+async function registerProvesStoredKey(
+  req: unknown,
+  agentId: string,
+  claimedKeyPem: string | undefined,
+  storedKeyPem: string | undefined
+): Promise<boolean> {
+  if (!storedKeyPem) return false;
+  if (claimedKeyPem !== undefined && claimedKeyPem !== storedKeyPem) return false;
+  const r = req as { headers?: Record<string, unknown>; ip?: string };
+  const headers = r.headers ?? {};
+  if (!extractSignedHeaders(headers)) return false;
+  const verified = await verifyAgentRequest(headers, "/register", r.ip, { requireSigned: true, rawBody: rawBodyOf(req as any) });
+  return verified !== null && verified !== "rejected" && verified.agentId === agentId;
+}
+
 app.post("/register", async (req, reply) => {
   const parsedRegister = registerSchema.safeParse(req.body);
   if (!parsedRegister.success) {
@@ -2716,13 +2723,18 @@ app.post("/register", async (req, reply) => {
   const body = parsedRegister.data;
   const now = Date.now();
   const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
-  const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
+  const origin = requestOrigin(req);
+  const sourceIp = origin.clientIp;
+  const previous = agentCapabilities.get(body.agentId);
+  const proofOfKey = await registerProvesStoredKey(req, body.agentId, body.publicKeyPem, previous?.publicKeyPem);
   const activation = await validatePortalNode({
     nodeId: body.agentId,
     nodeKind: "agent",
     registrationToken: body.registrationToken,
     deviceId: body.deviceId,
-    sourceIp
+    sourceIp,
+    loopback: origin.loopback,
+    proofOfKey
   });
   if (!activation.allowed) {
     app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
@@ -2753,7 +2765,7 @@ app.post("/register", async (req, reply) => {
     swarmEnabled: true,
     ideEnabled: body.mode === "ide-enabled",
     maxConcurrentTasks: body.maxConcurrentTasks,
-    connectedPeers: agentCapabilities.get(body.agentId)?.connectedPeers ?? new Set<string>(),
+    connectedPeers: previous?.connectedPeers ?? new Set<string>(),
     ownerEmail: activation.ownerEmail,
     sourceIp: activation.sourceIp ?? sourceIp,
     countryCode: activation.countryCode,
@@ -2765,8 +2777,12 @@ app.post("/register", async (req, reply) => {
           updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
         }
       : undefined,
-    publicKeyPem: body.publicKeyPem,
-    x25519PublicKey: body.x25519PublicKey,
+    // A body without a key keeps the registered one; a body without an envelope key keeps the
+    // stored one only while the signing key is unchanged.
+    publicKeyPem: body.publicKeyPem ?? previous?.publicKeyPem,
+    x25519PublicKey:
+      body.x25519PublicKey ??
+      (previous?.publicKeyPem && (body.publicKeyPem ?? previous.publicKeyPem) === previous.publicKeyPem ? previous.x25519PublicKey : undefined),
     sandboxMode: body.sandboxMode as SandboxMode,
     hardwareProfile: body.hardwareProfile,
     computeClass: hardwareClass.computeClass,
@@ -5272,7 +5288,8 @@ const peerSchema = z.object({
 app.post("/mesh/register-peer", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = peerSchema.parse(req.body);
-  const sourceIp = extractClientIp((req as any).headers, (req as any).ip);
+  const origin = requestOrigin(req);
+  const sourceIp = origin.clientIp;
 
   // Coordinators that authenticate with a valid mesh token are trusted peers —
   // skip portal validation (same pattern as loopback self-registration for agents).
@@ -5295,7 +5312,8 @@ app.post("/mesh/register-peer", async (req, reply) => {
       nodeId: body.peerId,
       nodeKind: "coordinator",
       registrationToken: body.registrationToken,
-      sourceIp
+      sourceIp,
+      loopback: origin.loopback
     });
     if (!activation.allowed) {
       return reply.code(403).send({ error: "coordinator_not_activated", reason: activation.reason });

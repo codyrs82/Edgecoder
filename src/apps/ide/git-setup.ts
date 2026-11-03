@@ -58,7 +58,7 @@ export function normalizeRemoteUrl(input: string): string {
 
 /** The folder name a clone gets: the URL's last path segment without .git. */
 export function repoNameFromUrl(url: string): string {
-  const tail = url.replace(/[/\\]+$/, "").split(/[/:]/).pop() ?? "";
+  const tail = url.replace(/[/\\]+$/, "").split(/[/\\:]/).pop() ?? "";
   const name = tail.replace(/\.git$/, "");
   return validFolderName(name) ? name : "repository";
 }

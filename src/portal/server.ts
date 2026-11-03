@@ -410,8 +410,9 @@ type PortalAccessContext = {
   canManageCoordinatorOps: boolean;
 };
 
-async function buildAccessContext(user: { userId: string; email: string; role?: "user" | "admin" }): Promise<PortalAccessContext> {
-  const normalizedEmail = normalizeEmail(user.email);
+async function buildAccessContext(user: { userId: string; email: string; role?: "user" | "admin"; emailVerified?: boolean }): Promise<PortalAccessContext> {
+  // Email allowlists apply only to a verified address (an unverified one proves nothing).
+  const normalizedEmail = user.emailVerified === true ? normalizeEmail(user.email) : "";
   const dbAdmin = user.role === "admin";
   const isSystemAdmin = dbAdmin || SYSTEM_ADMIN_EMAILS.has(normalizedEmail);
   const isCoordinatorAdmin = isSystemAdmin || COORDINATOR_ADMIN_EMAILS.has(normalizedEmail);
