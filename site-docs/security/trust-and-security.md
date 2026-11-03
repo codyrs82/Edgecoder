@@ -41,6 +41,21 @@ Every outbound API request is signed with an Ed25519 keypair. The coordinator
 and peer nodes verify signatures before processing any payload. Implementation
 lives in `src/security/request-signing.ts`.
 
+Agents send five headers: `x-agent-id`, `x-timestamp-ms`, `x-nonce`,
+`x-body-sha256` (lowercase hex SHA-256 of the exact body bytes) and
+`x-signature` (base64 Ed25519 signature over
+`timestampMs\nnonce\nMETHOD\npath\nbodySha256`). The coordinator looks the
+agent's public key up from the `publicKeyPem` it sent in `/register`, recomputes
+the body hash from the raw request bytes, and rejects a mismatch, a bad
+signature or a reused nonce with `401`.
+
+The iOS app implements the same scheme in Swift (CryptoKit) in
+`ios/EdgeCoderIOS/EdgeCoderIOS/Security/RequestSigner.swift`, with the signing
+key kept in the Keychain (`KeychainEd25519.swift`). Both implementations are
+pinned to the shared vectors in
+`tests/security/fixtures/request-signing-vectors.json`, checked by vitest and by
+the iOS CI job (#64).
+
 ### Nonce-Based Replay Prevention
 
 Each signed request includes a unique nonce. The verifier tracks recently seen

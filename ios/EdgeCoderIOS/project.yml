@@ -63,6 +63,19 @@ targets:
     dependencies:
       - package: SwiftLlama
         product: SwiftLlama
+  # #64: unit tests for the request signer. Compiles the signer source directly (no host app, no
+  # SwiftLlama) so the shared vectors in tests/security/fixtures run in seconds from Xcode:
+  #   xcodegen generate && xcodebuild test -scheme EdgeCoderIOSTests -destination 'platform=iOS Simulator,name=iPhone 15'
+  EdgeCoderIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: EdgeCoderIOSTests
+      - path: EdgeCoderIOS/Security/RequestSigner.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
 packages:
   # #126 review: match the checked-in project (swift-llama-cpp, resolved to 1.2.0 in
   # Package.resolved) and pin it, instead of floating on llama.cpp master.
@@ -78,3 +91,11 @@ schemes:
       config: Debug
     archive:
       config: Release
+  EdgeCoderIOSTests:
+    build:
+      targets:
+        EdgeCoderIOSTests: all
+    test:
+      config: Debug
+      targets:
+        - EdgeCoderIOSTests

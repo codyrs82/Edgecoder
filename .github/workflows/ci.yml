@@ -232,6 +232,21 @@ jobs:
               exit 1
             }
           tail -5 "$RUNNER_TEMP/xcodebuild.log"
+      # #64: prove the Swift request signer matches the TypeScript vectors (key, PEM, body hash and
+      # canonical string byte for byte) and that its signatures verify, in CryptoKit and in Node's
+      # crypto.verify (CryptoKit Ed25519 signatures are randomized, so their bytes differ from Node's).
+      # Plain swiftc on the macOS host (CryptoKit is available there), no Xcode test target needed.
+      - name: Check request-signing vectors against the Swift signer
+        run: |
+          set -eu
+          swiftc -O -o "$RUNNER_TEMP/request-signing-vectors" \
+            EdgeCoderIOS/Security/RequestSigner.swift \
+            EdgeCoderIOSTests/RequestSigningVectorCheck.swift \
+            Scripts/request-signing-vectors/main.swift
+          "$RUNNER_TEMP/request-signing-vectors" ../../tests/security/fixtures/request-signing-vectors.json \
+            "$RUNNER_TEMP/swift-signed-headers.json"
+          node Scripts/request-signing-vectors/verify-with-node.mjs \
+            ../../tests/security/fixtures/request-signing-vectors.json "$RUNNER_TEMP/swift-signed-headers.json"
       - if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
