@@ -4,6 +4,7 @@ import { InteractiveAgent } from "../../src/agent/interactive.js";
 import { SwarmWorkerAgent } from "../../src/agent/worker.js";
 import { EdgeCoderLocalProvider } from "../../src/model/providers.js";
 import type { ModelProvider } from "../../src/model/providers.js";
+import { PYTHON_TEST_TIMEOUT_MS, skipWithoutPython } from "../helpers/python.js";
 
 describe("agent retry types", () => {
   it("IterationRecord has required fields", () => {
@@ -46,7 +47,7 @@ describe("agent retry types", () => {
   });
 });
 
-describe("InteractiveAgent retry loop", () => {
+describe.skipIf(skipWithoutPython)("InteractiveAgent retry loop", { timeout: PYTHON_TEST_TIMEOUT_MS }, () => {
   it("succeeds on first iteration for simple tasks", async () => {
     const provider = new EdgeCoderLocalProvider();
     const agent = new InteractiveAgent(provider);
@@ -74,7 +75,7 @@ describe("InteractiveAgent retry loop", () => {
   });
 });
 
-describe("SwarmWorkerAgent retry loop", () => {
+describe.skipIf(skipWithoutPython)("SwarmWorkerAgent retry loop", { timeout: PYTHON_TEST_TIMEOUT_MS }, () => {
   it("retries subtask on failure (max 2)", async () => {
     const provider = new EdgeCoderLocalProvider();
     // Test-only opt-in: host execution needs origin "local" since #45.
@@ -85,7 +86,8 @@ describe("SwarmWorkerAgent retry loop", () => {
       kind: "single_step",
       language: "python",
       input: "Print hello",
-      timeoutMs: 4000,
+      // A kill timer, not an expectation: Python's cold start on a loaded CI runner can pass 4 s (#112).
+      timeoutMs: 30_000,
       snapshotRef: "test",
       projectMeta: { projectId: "p-1", resourceClass: "cpu", priority: 10 }
     }, "agent-1");
