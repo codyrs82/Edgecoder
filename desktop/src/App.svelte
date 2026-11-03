@@ -10,9 +10,10 @@
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
-  import OllamaSetup from "./components/OllamaSetup.svelte";
+  import LocalComputeSetup from "./components/LocalComputeSetup.svelte";
+  import { getLocalComputeStatus, needsSetupScreen, ollamaBaseFor, startLocalComputeSetup, type ComputeStatus } from "./lib/local-compute";
   import type { AuthUser } from "./lib/api";
-  import { getMe, checkOllamaAvailable, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind, ideNewProject } from "./lib/api";
+  import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind, ideNewProject } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
@@ -25,7 +26,39 @@
 
   let user: AuthUser | null = $state(null);
   let authChecked = $state(false);
-  let showOllamaSetup = $state(false);
+  /** First-run local compute (Ollama + Docker sandbox) set up by the shell. */
+  let computeStatus = $state<ComputeStatus | null>(null);
+  /** State the user hid the screen in; it comes back if setup then fails. */
+  let computeDismissedOn = $state<string | null>(null);
+  /** Don't flash the setup screen when everything is already there (checks take < 1 s). */
+  let computeGraceOver = $state(false);
+  let computePolling = false;
+  const showComputeSetup = $derived(
+    computeDismissedOn !== computeStatus?.state && needsSetupScreen(computeStatus) && (computeGraceOver || computeStatus?.state === "error"),
+  );
+
+  function applyComputeStatus(s: ComputeStatus) {
+    computeStatus = s;
+    setOllamaBase(ollamaBaseFor(s));
+    if (s.state !== "ready") void pollCompute();
+  }
+
+  async function pollCompute() {
+    if (computePolling) return;
+    computePolling = true;
+    try {
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 700));
+        const s = await getLocalComputeStatus();
+        if (!s) return;
+        computeStatus = s;
+        setOllamaBase(ollamaBaseFor(s));
+        if (s.state === "ready" || s.state === "error") return;
+      }
+    } finally {
+      computePolling = false;
+    }
+  }
 
   /** IDE agent project state — shared across tabs */
   let projectRoot: string | null = $state(null);
@@ -76,12 +109,13 @@
     }
   });
 
+  // The shell starts setup at launch; this (re)starts it if needed and follows its progress.
+  // Outside the desktop shell (browser dev) there is nothing to set up.
   $effect(() => {
-    if (user) {
-      checkOllamaAvailable().then((ok) => {
-        if (!ok) showOllamaSetup = true;
-      });
-    }
+    if (!user) return;
+    const t = setTimeout(() => { computeGraceOver = true; }, 800);
+    startLocalComputeSetup().then((s) => { if (s) applyComputeStatus(s); });
+    return () => clearTimeout(t);
   });
 
   // Handle deep-link callback when user is already logged in (e.g. GitHub OAuth)
@@ -289,8 +323,12 @@
       />
     {/if}
 
-    {#if showOllamaSetup}
-      <OllamaSetup onDismiss={() => showOllamaSetup = false} />
+    {#if showComputeSetup && computeStatus}
+      <LocalComputeSetup
+        status={computeStatus}
+        onStatus={applyComputeStatus}
+        onDismiss={() => computeDismissedOn = computeStatus?.state ?? null}
+      />
     {/if}
 
   </div>

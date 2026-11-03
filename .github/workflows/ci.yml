@@ -134,6 +134,12 @@ jobs:
           cp desktop/src-tauri/src/agent_guard.rs /tmp/agent-guard-test/src/lib.rs
           printf '[package]\nname = "agent-guard-test"\nversion = "0.0.0"\nedition = "2021"\n' > /tmp/agent-guard-test/Cargo.toml
           cargo test --manifest-path /tmp/agent-guard-test/Cargo.toml
+      - name: cargo test local_compute module (managed Ollama + Colima setup)
+        run: |
+          mkdir -p /tmp/local-compute-test/src
+          cp desktop/src-tauri/src/local_compute.rs /tmp/local-compute-test/src/lib.rs
+          printf '[package]\nname = "local-compute-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", features = ["derive"] }\nserde_json = "1"\nsha2 = "0.10"\nhex = "0.4"\n' > /tmp/local-compute-test/Cargo.toml
+          cargo test --manifest-path /tmp/local-compute-test/Cargo.toml
 
   # #11: build the desktop web bundle and make sure the production CSP holds:
   # no eval / new Function in the main-thread JS (Monaco workers are bundled separately).

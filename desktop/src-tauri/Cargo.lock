@@ -717,6 +717,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

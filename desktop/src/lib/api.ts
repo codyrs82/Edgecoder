@@ -171,7 +171,14 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
+// The desktop shell may run its own Ollama on another loopback port (see lib/local-compute.ts);
+// dev builds keep the Vite proxy.
+let OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
+
+/** Point model management at the Ollama the shell set up (prod only; validated by the caller). */
+export function setOllamaBase(base: string): void {
+  if (!import.meta.env.DEV) OLLAMA_BASE = base;
+}
 
 // ---------------------------------------------------------------------------
 // Local agent token (for inference/admin auth)

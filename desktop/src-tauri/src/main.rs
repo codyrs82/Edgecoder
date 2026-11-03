@@ -15,6 +15,7 @@ use serde::Serialize;
 use glob::glob;
 
 mod agent_guard;
+mod local_compute;
 mod network_enrollment;
 mod terminal;
 mod token;
@@ -168,6 +169,30 @@ fn retry_local_agent(
         *guard = child;
     }
     control.guard.apply(event).as_str().to_string()
+}
+
+/// Kill the agent so the monitor thread respawns it with the current local-compute env.
+fn restart_agent(agent: &Arc<Mutex<Option<Child>>>) {
+    if let Ok(mut guard) = agent.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// First-run local compute (Ollama + the Colima Docker sandbox): progress for the setup screen.
+#[tauri::command]
+fn get_local_compute_status() -> local_compute::ComputeStatus {
+    local_compute::manager().status()
+}
+
+/// Start (or retry) local compute setup in the background; no-op while it is already running.
+#[tauri::command]
+fn start_local_compute_setup(process: tauri::State<'_, AgentProcess>) -> local_compute::ComputeStatus {
+    let agent = Arc::clone(&process.0);
+    let manager = local_compute::manager();
+    manager.start(move || restart_agent(&agent));
+    manager.status()
 }
 
 /// This machine's network node id: the enrolled one, else a stable proposal for enrolling.
@@ -690,6 +715,8 @@ fn agent_path() -> String {
         return current;
     }
     let home = std::env::var("HOME").unwrap_or_default();
+    // The app's own Docker CLI / Colima (local_compute) come after the user's installs.
+    let managed = local_compute::manager().agent_path_dirs().into_iter().map(|d| d.to_string_lossy().to_string());
     let extra: Vec<String> = [
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".to_string(),
@@ -698,6 +725,7 @@ fn agent_path() -> String {
         format!("{home}/.orbstack/bin"),
     ]
     .into_iter()
+    .chain(managed)
     .filter(|d| PathBuf::from(d).is_dir() && !current.split(':').any(|c| c == d))
     .collect();
     if extra.is_empty() {
@@ -737,6 +765,8 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .env("ECONOMY_PAYMENTS_ENABLED", "0")
         .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
         .env("ADMIN_API_TOKEN", &tokens.admin)
+        // OLLAMA_HOST / DOCKER_HOST of the Ollama and Docker sandbox the app sets up (local_compute).
+        .envs(local_compute::manager().agent_env())
         // Once the signed-in user has enrolled this machine, its worker joins the network
         // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
         .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
@@ -906,6 +936,8 @@ fn main() {
             get_network_node_id,
             get_network_enrollment,
             save_network_enrollment,
+            get_local_compute_status,
+            start_local_compute_setup,
             get_ide_token,
             set_project_root,
             get_project_root,
@@ -924,9 +956,21 @@ fn main() {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
+            // Decide (fast probes) where Ollama and Docker will be before the agent spawns, so it
+            // starts with the right OLLAMA_HOST / DOCKER_HOST; downloads and starts run after.
+            let compute = local_compute::manager();
+            compute.prepare();
+
             let agent_guard = Arc::new(AgentGuard::new());
             let (child, agent_dir) = start_agent(app, &tokens, &agent_guard);
             let agent_mutex = Arc::new(Mutex::new(child));
+
+            let agent_for_compute = Arc::clone(&agent_mutex);
+            compute.start(move || restart_agent(&agent_for_compute));
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(10));
+                compute.watchdog();
+            });
             app.manage(AgentProcess(Arc::clone(&agent_mutex)));
             app.manage(AgentControl {
                 guard: Arc::clone(&agent_guard),
@@ -976,6 +1020,8 @@ fn main() {
                 if let Some(terms) = app.try_state::<terminal::Terminals>() {
                     terminal::kill_all(&terms);
                 }
+                // Our `ollama serve`, and the Colima VM if this launch booted it.
+                local_compute::manager().shutdown();
                 if let Some(state) = app.try_state::<AgentProcess>() {
                     if let Ok(mut guard) = state.0.lock() {
                         if let Some(ref mut child) = *guard {
