@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createPeerKeys } from "../../src/mesh/peer.js";
 import {
   CoordinatorTrustGate,
@@ -87,8 +87,10 @@ describe("tofu mode", () => {
   });
 
   it("static entries win over the file and are enforced in tofu mode", () => {
-    writeFileSync(pinFile.replace("/nested", ""), `coord-a:${fingerprint(coordA2.publicKeyPem)}\n`);
-    const store = new PinnedKeyStore({ mode: "tofu", entries: `coord-a:${fpA}`, pinFile: pinFile.replace("/nested", "") });
+    // A pin file in an existing directory (join, not "/nested" string surgery: Windows paths use \).
+    const flatPinFile = join(dirname(dirname(pinFile)), "trusted-coordinators");
+    writeFileSync(flatPinFile, `coord-a:${fingerprint(coordA2.publicKeyPem)}\n`);
+    const store = new PinnedKeyStore({ mode: "tofu", entries: `coord-a:${fpA}`, pinFile: flatPinFile });
     expect(store.isTrusted(coordA.peerId, coordA.publicKeyPem)).toMatchObject({ trusted: true, reason: "pinned_match" });
     expect(store.isTrusted(coordA.peerId, coordA2.publicKeyPem)).toMatchObject({ trusted: false, reason: "pinned_mismatch" });
     expect(store.list()[0]).toEqual({ peerId: "coord-a", fingerprint: fpA, source: "static" });

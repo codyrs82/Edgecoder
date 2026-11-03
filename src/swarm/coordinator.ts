@@ -3882,7 +3882,8 @@ app.post("/result", async (req, reply) => {
   // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
   if (!isPeerForward && claim?.claimedAt) {
     const nowMs = Date.now();
-    hardwareVerifier.recordTask(body.agentId, { ok: body.ok, outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt }, nowMs);
+    // Model calls carry the model's real token count (reported with the last streamed piece).
+    hardwareVerifier.recordTask(body.agentId, { ok: body.ok, outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt, outputTokens: usagePending.get(body.taskId)?.outputTokens }, nowMs);
     repostAsk(body.agentId, nowMs);
   }
 
@@ -4015,8 +4016,18 @@ app.post("/account/summary", async (req, reply) => {
     .map(({ agentId, cap }) => {
       const eff = effectiveHardware(agentId, cap);
       const lease = reservations.activeForAgent(agentId, now);
+      // Hardware verification: what was claimed, what is paid (granted), and the evidence.
+      const v = hardwareVerifier.get(agentId);
       return {
         agentId,
+        ...(v
+          ? {
+              verification: {
+                status: v.status, claimedTier: v.claimed.tier, grantedTier: v.granted.tier, reason: v.lastFailReason ?? null,
+                lastPassAtMs: v.lastPassAtMs ?? null, score: v.evidence.score ?? null, tokensPerSec: v.evidence.tokensPerSec ?? null,
+              },
+            }
+          : {}),
         online: now - cap!.lastSeenMs < 2 * 60_000,
         lastSeenMs: cap!.lastSeenMs,
         computeClass: eff?.computeClass ?? cap!.computeClass,

@@ -26,7 +26,8 @@ describe("connections", () => {
     const chat = await request("http://127.0.0.1:4391/v1/messages", { method: "POST", headers: { "x-api-key": a.key, "content-type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet", max_tokens: 5, messages: [{ role: "user", content: "hi" }] }) });
     expect(chat.statusCode).toBe(503);
     expect(((await chat.body.json()) as { error: { message: string } }).error.message).toContain("Ollama isn't running");
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows has no Unix permission bits.
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(file, "utf8")).connections).toHaveLength(2);
   });
 

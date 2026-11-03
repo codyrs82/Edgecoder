@@ -510,3 +510,14 @@ describe("reliability admission (minReliability)", () => {
   });
 });
 
+
+describe("real token counts on real work", () => {
+  it("uses the model's count, kept within what the text can hold", async () => {
+    const { workTokens } = await import("../../src/swarm/hardware-verification.js");
+    expect(workTokens(4000)).toBe(1000);
+    expect(workTokens(4000, 900)).toBe(900);
+    // An inflated count can't make the hardware look faster than the text allows.
+    expect(workTokens(4000, 1_000_000)).toBeCloseTo(4000 / 1.5);
+    expect(workTokens(4000, 1)).toBe(500);
+  });
+});

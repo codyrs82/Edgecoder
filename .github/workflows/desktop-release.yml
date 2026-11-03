@@ -59,9 +59,26 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=6144
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple Developer ID signing + notarization (macOS): Tauri signs with the certificate and
+          # notarizes with the Apple ID when these are set, so the app opens without "Open Anyway".
+          # Unset (no secrets yet) = unsigned for Apple, as before. See docs/macos-installer.md.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -eu
           [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set"; exit 1; }
+          # Empty Apple variables would make Tauri try (and fail) to import a certificate: drop them.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ]; then echo "macOS build: Developer ID signing and notarization on"
+            else echo "::notice::macOS build is not notarized (APPLE_* secrets not set); first launch needs Open Anyway"; fi
+          fi
           node scripts/gen-tauri-csp.mjs
           npx tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.csp.json
       - name: Collect bundles

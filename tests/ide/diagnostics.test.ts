@@ -52,7 +52,12 @@ describe("checkProject", () => {
       // Use this repo's tsc for the scratch project.
       const { symlinkSync, mkdirSync } = await import("node:fs");
       mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
-      symlinkSync(join(process.cwd(), "node_modules", ".bin", "tsc"), join(dir, "node_modules", ".bin", "tsc"));
+      if (process.platform === "win32") {
+        // A tsc.cmd shim, as npm installs on Windows, pointing at this repo's TypeScript.
+        writeFileSync(join(dir, "node_modules", ".bin", "tsc.cmd"), `@node "${join(process.cwd(), "node_modules", "typescript", "bin", "tsc")}" %*\r\n`);
+      } else {
+        symlinkSync(join(process.cwd(), "node_modules", ".bin", "tsc"), join(dir, "node_modules", ".bin", "tsc"));
+      }
       const r = await checkProject(dir, ["a.ts"]);
       expect(r.checkers).toEqual(["tsc"]);
       expect(r.byPath["a.ts"]?.[0]).toMatchObject({ line: 1, severity: "error", source: "tsc" });

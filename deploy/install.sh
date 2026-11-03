@@ -26,6 +26,19 @@ OS="$(uname -s)"
 case "$OS" in Linux|Darwin) ;; *) die "unsupported OS $OS (Windows: deploy/install.ps1)";; esac
 need_root
 
+# ------------------------------------------------------------ base tools ----
+# Needed whether or not Node is already present: git for the clone, zstd because Ollama's Linux
+# release is a .tar.zst (its installer exits "requires zstd" without it), gnupg for the apt keys.
+ensure_base() {
+  [ "$OS" = "Linux" ] || return 0
+  export DEBIAN_FRONTEND=noninteractive
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq ca-certificates curl gnupg git zstd >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q ca-certificates curl gnupg2 git zstd
+  fi
+}
+
 # ----------------------------------------------------------------- Node ----
 ensure_node() {
   # Find an existing Node >= NODE_MAJOR even when sudo reset PATH and hid the user's node
@@ -51,7 +64,6 @@ ensure_node() {
   else
     export DEBIAN_FRONTEND=noninteractive
     if command -v apt-get >/dev/null 2>&1; then
-      apt-get update -qq && apt-get install -y -qq ca-certificates curl gnupg git >/dev/null
       install -m 0755 -d /etc/apt/keyrings
       [ -f /etc/apt/keyrings/nodesource.gpg ] || curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
       echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
@@ -72,7 +84,8 @@ ensure_ollama() {
     if command -v brew >/dev/null 2>&1; then sudo -u "${SUDO_USER:-$(whoami)}" brew install ollama >/dev/null
     else curl -fsSL https://ollama.com/download/Ollama-darwin.zip -o /tmp/ollama.zip && ditto -x -k /tmp/ollama.zip /Applications && ln -sf /Applications/Ollama.app/Contents/Resources/ollama /usr/local/bin/ollama; fi
   else
-    curl -fsSL https://ollama.com/install.sh | sh >/dev/null
+    # Quiet on success; on failure show Ollama's own output (it prints its errors on stdout).
+    curl -fsSL https://ollama.com/install.sh | sh >/tmp/edgecoder-ollama-install.log 2>&1 || { cat /tmp/edgecoder-ollama-install.log >&2; die "Ollama install failed"; }
     systemctl disable --now ollama >/dev/null 2>&1 || true   # EdgeCoder runs its own per-GPU instances
   fi
 }
@@ -98,7 +111,15 @@ ensure_docker() {
 ensure_app() {
   log "EdgeCoder source -> $INSTALL_DIR ($REPO_REF)"
   if [ -d "$INSTALL_DIR/.git" ]; then
-    git -C "$INSTALL_DIR" fetch -q --all --tags && git -C "$INSTALL_DIR" checkout -q "$REPO_REF" && git -C "$INSTALL_DIR" pull -q --ff-only || true
+    # Move to exactly what the remote has for REPO_REF (a branch, tag or commit). `pull --ff-only || true`
+    # silently kept the old build whenever the branch had been rewritten.
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+    git -C "$INSTALL_DIR" fetch -q --tags --force origin
+    if git -C "$INSTALL_DIR" rev-parse -q --verify "refs/remotes/origin/$REPO_REF" >/dev/null; then
+      git -C "$INSTALL_DIR" checkout -q -B "$REPO_REF" "refs/remotes/origin/$REPO_REF"
+    else
+      git -C "$INSTALL_DIR" checkout -q --detach "$REPO_REF"
+    fi
   else
     # A non-git directory here (old app, half-done clone) makes git clone fail "already exists".
     [ -e "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
@@ -107,8 +128,12 @@ ensure_app() {
   ( cd "$INSTALL_DIR" && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent )
 }
 
-ensure_node; ensure_ollama; ensure_docker; ensure_app
-ln -sf "$INSTALL_DIR/scripts/edgecoder-install" /usr/local/bin/edgecoder-install 2>/dev/null || true
+ensure_base; ensure_node; ensure_ollama; ensure_docker; ensure_app
+# A wrapper, not a symlink: scripts/edgecoder-install finds dist/ relative to its own path, which a
+# symlink in /usr/local/bin turns into /usr/local/dist (same wrapper as the .deb/.pkg postinstall).
+rm -f /usr/local/bin/edgecoder-install
+printf '#!/bin/sh\nexec "%s" "%s/dist/install/cli.js" "$@"\n' "$(command -v node)" "$INSTALL_DIR" > /usr/local/bin/edgecoder-install
+chmod 755 /usr/local/bin/edgecoder-install
 
 log "Installer"
 exec node "$INSTALL_DIR/dist/install/cli.js" apply --app-dir "$INSTALL_DIR" "$@"

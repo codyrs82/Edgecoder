@@ -71,7 +71,7 @@ export interface EnrollResult {
 }
 
 /**
- * Self-register each instance with the portal using the user's session token and apply the
+ * Self-register each instance with the portal using the user's portal API key (or session token) and apply the
  * returned registration token to opts.tokens, so the normal plan/env wiring (plan.ts sets
  * AGENT_REGISTRATION_TOKEN from opts.tokens) picks it up. A node that already has a token
  * (explicit or via the "*" catch-all) is left alone. Per-node failures warn and continue.
@@ -99,6 +99,30 @@ export async function enrollNodes(opts: InstallOptions, instances: AgentInstance
     }
   }
   return { enrolled, failed };
+}
+
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Pull each distinct model once (the model store is shared by every instance). `ollama pull`
+ * talks to the default 127.0.0.1:11434, which is instance 0's server; it was just (re)started, so
+ * a pull is retried until that server is listening. Returns the models that could not be pulled.
+ */
+export function pullModels(host: Host, ollamaBin: string, instances: AgentInstance[], attempts = 10, sleep: (ms: number) => void = sleepSync): string[] {
+  const failed: string[] = [];
+  for (const model of [...new Set(instances.map((i) => i.model))]) {
+    console.log(`pulling ${model}`);
+    let ok = false;
+    for (let a = 0; a < attempts && !ok; a++) {
+      if (a > 0) sleep(3000);
+      ok = host.run(ollamaBin, ["pull", model]).code === 0;
+    }
+    if (!ok) {
+      console.error(`warning: could not pull ${model}; run \`ollama pull ${model}\` once the services are up`);
+      failed.push(model);
+    }
+  }
+  return failed;
 }
 
 function describeHardware(hw: HostHardware): string {
@@ -183,7 +207,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     if (candidates.length) {
       const { enrolled, failed } = await enrollNodes(opts, candidates, post);
       if (enrolled.length === 0) {
-        console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll token and portal URL`);
+        console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll API key (or EDGECODER_API_KEY) and portal URL`);
         return 1;
       }
       // Re-plan so the env files and warnings reflect the registration tokens just applied.
@@ -199,12 +223,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     }
   }
   const result = applyPlan(plan, host, p, opts.dryRun);
-  if (opts.pullModels && !opts.dryRun) {
-    for (const inst of plan.instances) {
-      console.log(`pulling ${inst.model} on :${inst.ollamaPort}`);
-      host.run(p.ollamaBin, ["pull", inst.model]); // OLLAMA_HOST from env would target one server; the store is shared
-    }
-  }
+  if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
   if (opts.json) {
     console.log(JSON.stringify({ hardware: hw, plan, paths: p, result }, null, 2));
   } else {
