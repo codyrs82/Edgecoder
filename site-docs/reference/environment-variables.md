@@ -400,7 +400,7 @@ OLLAMA_AUTO_INSTALL=true
 ## Operational guidance
 
 **Production fail-fast (#5).** With `NODE_ENV=production`, services refuse to boot when required secrets are empty (an empty token no longer means "auth off"):
-- coordinator: `MESH_AUTH_TOKEN`, `PORTAL_SERVICE_URL`, `PORTAL_SERVICE_TOKEN`, `ADMIN_API_TOKEN`, `PAYMENT_WEBHOOK_SECRET`, and `LIGHTNING_PROVIDER` unless `ECONOMY_PAYMENTS_ENABLED=false`
+- coordinator: `MESH_AUTH_TOKEN`, `PORTAL_SERVICE_URL`, `PORTAL_SERVICE_TOKEN`, `ADMIN_API_TOKEN`, `PAYMENT_WEBHOOK_SECRET`, `DATABASE_URL` (#55: replay/idempotency keys and lease state are durable only in Postgres), and `LIGHTNING_PROVIDER` unless `ECONOMY_PAYMENTS_ENABLED=false`
 - portal: `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY` (plus the existing passkey/URL checks)
 - inference: `INFERENCE_AUTH_TOKEN`
 - control-plane: `ADMIN_API_TOKEN`

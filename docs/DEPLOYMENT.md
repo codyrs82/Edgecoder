@@ -624,7 +624,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | | PostgreSQL connection string |
+| `DATABASE_URL` | | PostgreSQL connection string. Required for a coordinator in production (#55) |
 
 ### UI Links
 
