@@ -1400,7 +1400,13 @@ export function computeErrorText(err: unknown): string {
     not_enrolled: "This computer isn't connected to the network yet. Sign in and let the agent start.",
     unknown_reservation: "That reservation no longer exists.",
   };
-  return known[code] ?? (err as Error)?.message ?? String(err);
+  if (known[code]) return known[code];
+  // The agent can't reach the coordinator (not registered yet, or the coordinator is down).
+  const status = (err as { status?: number })?.status ?? 0;
+  if (["agent_not_registered", "mesh_unauthorized", "coordinator_unreachable"].includes(code) || [502, 503, 504].includes(status)) {
+    return "This computer isn't connected to the network right now. It retries on its own; check Settings → Network.";
+  }
+  return (err as Error)?.message ?? String(err);
 }
 
 // Persistent bots (:4304 /v1/ide/bots): named agents that own a job in a project folder
