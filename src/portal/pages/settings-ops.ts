@@ -48,7 +48,8 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
     function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
-    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
+    // below is user- or agent-supplied and goes through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
       const body = document.getElementById(targetId);
       body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
@@ -59,7 +60,7 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
     function renderNodes(nodes) {
       const body = document.getElementById("nodesBody");
       const rows = (nodes || []).map((n) =>
-        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + boolBadge(Boolean(n.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
+        "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + boolBadge(Boolean(n.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
         boolBadge(Boolean(n.nodeApproved), "APPROVED", "PENDING") + "</td><td>" + (n.active ? statusBadge("ACTIVE", "ok") : statusBadge("DORMANT", "warn")) +
         "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td><button class='deleteNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "'>Delete</button></td></tr>"
       );
@@ -189,7 +190,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
     function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
-    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
+    // below is user- or agent-supplied and goes through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
       const body = document.getElementById(targetId);
       body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
@@ -216,8 +218,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     function renderPending() {
       const body = document.getElementById("opsPendingBody");
       const rows = filterPending(cachedPending, pendingFilter).map((n) =>
-        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
-        String(Boolean(n.emailVerified)) + "</td><td>" + (n.sourceIp || "unknown") + "</td><td>" + (n.countryCode || "unknown") +
+        "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + escapeHtml(n.ownerEmail || "unknown") + "</td><td>" +
+        String(Boolean(n.emailVerified)) + "</td><td>" + escapeHtml(n.sourceIp || "unknown") + "</td><td>" + escapeHtml(n.countryCode || "unknown") +
         "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td>" +
         (canManageApprovals
           ? "<button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='true'>Approve</button> <button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='false'>Reject</button>"
@@ -239,9 +241,9 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     function renderApproved() {
       const body = document.getElementById("opsApprovedBody");
       const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
-        return "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
-          String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + (n.sourceIp || "unknown") +
-          "</td><td>" + (n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
+        return "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + escapeHtml(n.ownerEmail || "unknown") + "</td><td>" +
+          String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + escapeHtml(n.sourceIp || "unknown") +
+          "</td><td>" + escapeHtml(n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
           fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>";
       });
       body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='10'>No approved nodes for this filter.</td></tr>";

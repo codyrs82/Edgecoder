@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 import { siteLabel } from "./urls.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerHomePage(app: FastifyInstance): void {
@@ -118,7 +119,7 @@ app.get("/portal", async (_req, reply) => {
         </section>
       </div>
       <div id="toast" class="card hidden"></div>
-      <script>
+      <script nonce="${CSP_NONCE}">
         const toast = document.getElementById("toast");
         const sessionBanner = document.getElementById("sessionBanner");
         const sessionUserLine = document.getElementById("sessionUserLine");

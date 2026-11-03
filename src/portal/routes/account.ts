@@ -7,6 +7,7 @@ import { request } from "undici";
 import { z } from "zod";
 import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
+import { NODE_ID_PATTERN } from "../pages/escape.js";
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
@@ -155,9 +156,14 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     const user = await enrollingUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
+    // Node ids are shown in admin and owner pages and used in DNS names: a safe charset only.
+    const raw = (req.body ?? {}) as { nodeId?: unknown };
+    if (typeof raw.nodeId === "string" && !NODE_ID_PATTERN.test(raw.nodeId)) {
+      return reply.code(400).send({ error: "invalid_node_id", detail: "Use 3-128 letters, digits, '.', '_' or '-'." });
+    }
     const body = z
       .object({
-        nodeId: z.string().min(3),
+        nodeId: z.string().regex(NODE_ID_PATTERN),
         nodeKind: z.enum(["agent", "coordinator"]),
         deviceId: z.string().min(3).max(128).optional()
       })

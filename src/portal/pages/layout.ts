@@ -3,6 +3,8 @@
 
 import { BASE_CSS, TOKENS_CSS, THEME_SCRIPT, brandMark, icon } from "./design-system.js";
 import { DOCS_SITE_URL } from "./urls.js";
+import { CSP_NONCE } from "../csp-nonce.js";
+import { CLIENT_ESCAPE_JS } from "./escape.js";
 
 /**
  * Authenticated app shell: left sidebar (brand, navigation, profile row with account menu), top bar (page
@@ -210,9 +212,10 @@ export function portalAuthedPageHtml(input: {
         </div>
       </div>
       <div id="toast" class="card hidden" role="status" aria-live="polite"></div>
-      <script>
+      <script nonce="${CSP_NONCE}">
         const toast = document.getElementById("toast");
         ${THEME_SCRIPT}
+        ${CLIENT_ESCAPE_JS}
         function showToast(message, isError = false) {
           toast.textContent = message;
           toast.classList.remove("hidden");
@@ -241,7 +244,7 @@ export function portalAuthedPageHtml(input: {
         }
         function statusBadge(text, tone = "neutral") {
           const toneClass = tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "danger" ? "danger" : tone === "info" ? "info" : "";
-          return "<span class='status-badge " + toneClass + "'>" + String(text) + "</span>";
+          return "<span class='status-badge " + toneClass + "'>" + escapeHtml(text) + "</span>";
         }
         function boolBadge(value, trueLabel = "YES", falseLabel = "NO") {
           return value ? statusBadge(trueLabel, "ok") : statusBadge(falseLabel, "warn");
@@ -355,7 +358,7 @@ export function portalAuthedPageHtml(input: {
         loadTopTicker();
         loadReviewsBadge();
       </script>
-      <script>
+      <script nonce="${CSP_NONCE}">
         ${input.script}
       </script>
     </body>

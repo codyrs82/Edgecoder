@@ -218,21 +218,13 @@ app.get("/portal/chat", async (_req, reply) => {
     var computeOptions = [];
     var COMPUTE_KEY = "edgecoder.chat.compute.";
 
-    function escapeHtml(s) {
-      return String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    }
-
+    // escapeHtml comes from the app shell (pages/escape.ts).
     function renderMarkdown(text) {
       var html = escapeHtml(text);
       // Code blocks (triple backtick) with copy button
       html = html.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, function(m, code) {
         var id = "codeblock-" + Math.random().toString(36).substring(2, 8);
-        return "<pre id=\\"" + id + "\\"><button class=\\"code-copy-btn\\" onclick=\\"copyCodeBlock('" + id + "')\\">Copy</button><code>" + code.trim() + "</code></pre>";
+        return "<pre id=\\"" + id + "\\"><button class=\\"code-copy-btn\\" data-copy-block=\\"" + id + "\\">Copy</button><code>" + code.trim() + "</code></pre>";
       });
       // Inline code
       html = html.replace(/\\\`([^\\\`]+?)\\\`/g, "<code>$1</code>");
@@ -245,6 +237,11 @@ app.get("/portal/chat", async (_req, reply) => {
       return html;
     }
 
+    // Copy buttons inside rendered messages (no inline handlers: the CSP blocks them).
+    document.addEventListener("click", function(e) {
+      var btn = e.target && e.target.closest ? e.target.closest("[data-copy-block]") : null;
+      if (btn) copyCodeBlock(btn.getAttribute("data-copy-block"));
+    });
     function copyCodeBlock(id) {
       var el = document.getElementById(id);
       if (!el) return;

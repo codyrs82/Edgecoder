@@ -77,7 +77,7 @@ await app.register(cors, {
   credentials: true,
 });
 
-// #10: helmet (CSP report-only for the first release), CSRF origin check, rate limits.
+// #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
   publicOrigin: (() => {
@@ -89,7 +89,7 @@ await registerPortalSecurity(app, {
   })(),
   trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
   connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
-  enforceCsp: process.env.PORTAL_CSP_ENFORCE === "1",
+  enforceCsp: !["0", "false"].includes(process.env.PORTAL_CSP_ENFORCE ?? ""),
   // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
   edge: edgeModeFrom(process.env.PORTAL_EDGE),
   originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
