@@ -35,10 +35,13 @@ Env files live in `/etc/edgecoder` (Windows `C:\ProgramData\EdgeCoder`); models 
 `/var/lib/edgecoder/ollama` so each model downloads once. The model per instance is the best
 catalog model that fits the GPU's memory (recommended first, coding before general: 24 to 80 GB →
 `qwen3-coder:30b`, 12 to 16 GB → `qwen3.5:9b`, 8 GB → `qwen3.5:4b`); override with `--model`.
+Parallel model calls are sized by the same memory (4 at 32 GB or more, 2 at 16 GB, else 1): the
+agent gets `AGENT_PARALLEL_INFERENCE` and its Ollama server the matching `OLLAMA_NUM_PARALLEL`.
 
 The agent reports the GPU it owns (`nvidia-smi`, `rocm-smi`, or Apple silicon's unified memory),
 so the coordinator prices it in the right class (an RTX 6000 Ada is `gpu.dc40`, an H100
-`gpu.dc80`). `AGENT_GPU_*` variables still override detection inside containers.
+`gpu.dc80`). The installer does not write `AGENT_GPU_*`: those override detection inside
+containers, and an overridden profile re-proves its tier every session.
 
 ## Enrolment
 

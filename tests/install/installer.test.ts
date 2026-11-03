@@ -1,9 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { detectHardware, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGpu, type Probe } from "../../src/install/hardware.js";
 import { helpText, parseInstallArgs, parseTokensFile, INSTALL_OPTIONS } from "../../src/install/options.js";
 import { pickModel, planInstall, renderEnvFile } from "../../src/install/plan.js";
 import { applyPlan, defaultPaths, launchdAgentPlist, removeServices, systemdAgentUnit, systemdOllamaUnit, windowsAgentCmd, type Host } from "../../src/install/services.js";
-import { enrollNodes, type HttpPost } from "../../src/install/cli.js";
+import { enrollNodes, pullModels, type HttpPost } from "../../src/install/cli.js";
 
 const NVIDIA_8X = Array.from({ length: 8 }, (_, i) => `${i}, NVIDIA RTX 6000 Ada Generation, 49140`).join("\n") + "\n";
 
@@ -88,9 +89,35 @@ describe("plan", () => {
     const i3 = plan.instances[3];
     expect(i3.agentId).toBe("gpu-box-local-gpu3");
     expect(i3.ollamaPort).toBe(11437);
-    expect(i3.env).toMatchObject({ CUDA_VISIBLE_DEVICES: "3", AGENT_GPU_VRAM_GB: "48", AGENT_GPU_DATACENTER: "1", AGENT_REGISTRATION_TOKEN: "tok3", OLLAMA_HOST: "http://127.0.0.1:11437", OLLAMA_MODEL: "qwen3-coder:30b", SANDBOX_MODE: "docker" });
+    expect(i3.env).toMatchObject({ CUDA_VISIBLE_DEVICES: "3", EDGECODER_GPU_INDEX: "3", AGENT_REGISTRATION_TOKEN: "tok3", OLLAMA_HOST: "http://127.0.0.1:11437", OLLAMA_MODEL: "qwen3-coder:30b", SANDBOX_MODE: "docker", AGENT_PARALLEL_INFERENCE: "4" });
+    // Detected hardware is not written as AGENT_GPU_* overrides (that would mark the profile overridden).
+    expect(Object.keys(i3.env).filter((k) => k.startsWith("AGENT_GPU_"))).toEqual([]);
+    expect(new Set(plan.instances.map((i) => i.ollamaPort)).size).toBe(8);
+    expect(plan.instances.map((i) => i.agentId)).toEqual(Array.from({ length: 8 }, (_, n) => `gpu-box-local-gpu${n}`));
     expect(plan.warnings.filter((w) => w.includes("no registration token"))).toHaveLength(7);
     expect(renderEnvFile(i3.env)).toContain("AGENT_ID=gpu-box-local-gpu3\n");
+  });
+
+  it("sizes parallel model calls by each GPU's VRAM, not host RAM", () => {
+    const mixed: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n1, NVIDIA GeForce RTX 4080, 16376\n2, NVIDIA GeForce RTX 3070, 8192\n" : null);
+    const hw = detectHardware({ probe: mixed, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "EPYC", cpuCores: 64, hostname: "mix" });
+    const plan = planInstall(hw, parseInstallArgs(["apply", "--token", "t"]), true);
+    expect(plan.instances.map((i) => i.env.AGENT_PARALLEL_INFERENCE)).toEqual(["4", "2", "1"]);
+    const p = defaultPaths("linux", { nodeBin: "/usr/bin/node" });
+    expect(systemdOllamaUnit(p, plan.instances[2])).toContain('Environment="OLLAMA_NUM_PARALLEL=1"');
+  });
+
+  it("the curl bootstrap installs git and zstd (Ollama's .tar.zst) before anything else", () => {
+    const sh = readFileSync("deploy/install.sh", "utf8");
+    expect(sh).toMatch(/ensure_base\(\) \{[\s\S]*apt-get install[^\n]*\bgit\b[^\n]*\bzstd\b/);
+    expect(sh).toContain("ensure_base; ensure_node; ensure_ollama; ensure_docker; ensure_app");
+    expect(sh).not.toMatch(/ollama\.com\/install\.sh \| sh >\/dev\/null/);
+    // edgecoder-install on PATH is a wrapper: a symlink to scripts/edgecoder-install resolved dist/ under /usr/local.
+    expect(sh).not.toMatch(/ln -sf[^\n]*edgecoder-install/);
+    expect(sh).toContain('/dist/install/cli.js" "$@"');
+    // A re-run lands on the remote's REPO_REF even after a rewrite, and fails loudly otherwise.
+    expect(sh).not.toContain("pull -q --ff-only || true");
+    expect(sh).toContain('checkout -q -B "$REPO_REF" "refs/remotes/origin/$REPO_REF"');
   });
 
   it("--single, --instances and no-docker behave", () => {
@@ -123,7 +150,13 @@ describe("services: the same plan on every platform", () => {
     expect(files.get("/etc/systemd/system/edgecoder-ollama-1.service")).toContain("OLLAMA_HOST=127.0.0.1:11435");
     expect(files.get("/etc/systemd/system/edgecoder-agent-1.service")).toContain("EnvironmentFile=/etc/edgecoder/agent-1.env");
     expect(files.get("/etc/edgecoder/agent-0.env")).toContain("AGENT_REGISTRATION_TOKEN=t");
-    expect(commands.at(-1)).toBe("systemctl enable --now " + r.services.join(" "));
+    // restart, not enable --now: a re-run with new tokens must restart running units.
+    expect(commands.slice(-2)).toEqual(["systemctl enable " + r.services.join(" "), "systemctl restart " + r.services.join(" ")]);
+    expect(files.get("/etc/systemd/system/edgecoder-ollama-1.service")).toContain('Environment="OLLAMA_NUM_PARALLEL=4"');
+    expect(files.get("/etc/edgecoder/agent-1.env")).toContain("AGENT_PARALLEL_INFERENCE=4\n");
+    // Each agent has its own writable HOME (worker.db, pending results), created by systemd.
+    expect(files.get("/etc/systemd/system/edgecoder-agent-1.service")).toContain("StateDirectory=edgecoder/agent-1\n");
+    expect(files.get("/etc/systemd/system/edgecoder-agent-1.service")).toContain('Environment="HOME=/var/lib/edgecoder/agent-1"');
     expect(systemdOllamaUnit(p, plan.instances[0])).toContain("OLLAMA_MODELS=/var/lib/edgecoder/ollama");
     expect(systemdAgentUnit(p, plan.instances[0])).toContain("ExecStart=/usr/bin/node /opt/edgecoder/app/dist/swarm/worker-runner.js");
     expect(removeServices(host, p)).toHaveLength(4);
@@ -154,6 +187,17 @@ describe("services: the same plan on every platform", () => {
     expect(files.get("C:\\ProgramData\\EdgeCoder\\agent-1.cmd")).toContain('set "CUDA_VISIBLE_DEVICES=1"');
     expect(windowsAgentCmd(p, plan.instances[1])).toContain("worker-runner.js");
     expect(commands.some((c) => c.startsWith("schtasks /Create /F /SC ONSTART /RU SYSTEM /RL HIGHEST /TN EdgeCoder\\agent-1"))).toBe(true);
+  });
+
+  it("--pull-models pulls each distinct model once, retrying until Ollama is listening", () => {
+    const plan = planInstall(detectHardware({ probe: () => NVIDIA_8X, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "x", cpuCores: 64, hostname: "box" }), o, true);
+    const calls: string[] = [];
+    let n = 0;
+    const host = { ...fakeHost("linux").host, run: (cmd: string, args: string[]) => { calls.push([cmd, ...args].join(" ")); return { code: ++n < 3 ? 1 : 0, stdout: "", stderr: "" }; } };
+    expect(pullModels(host, "/usr/local/bin/ollama", plan.instances, 10, () => {})).toEqual([]);
+    expect(calls).toEqual(Array(3).fill("/usr/local/bin/ollama pull qwen3-coder:30b"));
+    const down = { ...host, run: () => ({ code: 1, stdout: "", stderr: "" }) };
+    expect(pullModels(down, "ollama", plan.instances, 2, () => {})).toEqual(["qwen3-coder:30b"]);
   });
 
   it("dry run writes nothing", () => {
