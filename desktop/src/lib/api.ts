@@ -987,8 +987,9 @@ export interface IdeStreamEvent {
  * A model id from the compute picker as the IDE chat takes it: "network/m@gpu", "mine/m" and
  * "reserved/<id>/m" run off this computer (billed in cSats on the network), anything else here.
  */
-export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved"; computeClass?: string; reservationId?: string } } {
+export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved" | "auto"; computeClass?: string; reservationId?: string } } {
   if (!id) return {};
+  if (id === "auto") return { compute: { target: "auto" } };
   if (id.startsWith("mine/")) return { model: id.slice(5), compute: { target: "mine" } };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
   if (reserved) return { model: reserved[2], compute: { target: "reserved", reservationId: reserved[1] } };
@@ -1261,7 +1262,7 @@ export interface Machine {
 }
 
 // Connect to compute: one local port per connection (:4304 /v1/ide/connections)
-export type ConnectionTarget = "local" | "mine" | "network" | "reserved";
+export type ConnectionTarget = "local" | "mine" | "network" | "reserved" | "auto";
 export interface Connection {
   id: string;
   name: string;

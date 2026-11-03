@@ -82,7 +82,7 @@ export async function* openAiStream(pieces: AsyncIterable<ChatPiece>, model: str
       yield chunk({ tool_calls: toOpenAiCalls(p.toolCalls, calls) }, null);
       calls += p.toolCalls.length;
     } else if ("done" in p) {
-      yield chunk({}, calls ? "tool_calls" : p.stopReason === "length" ? "length" : "stop", p.cSatsSpent !== undefined ? { edgecoder: { cSatsSpent: p.cSatsSpent } } : {});
+      yield chunk({}, calls ? "tool_calls" : p.stopReason === "length" ? "length" : "stop", p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {});
     }
   }
   yield "data: [DONE]\n\n";
@@ -106,6 +106,6 @@ export async function openAiResponse(pieces: AsyncIterable<ChatPiece>, model: st
     model,
     choices: [{ index: 0, message: { role: "assistant", content: text || (calls.length ? null : ""), ...(calls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: calls.length ? "tool_calls" : done?.stopReason === "length" ? "length" : "stop" }],
     usage: { prompt_tokens: 0, completion_tokens: Math.ceil(text.length / 4), total_tokens: Math.ceil(text.length / 4) },
-    ...(done?.cSatsSpent !== undefined ? { edgecoder: { cSatsSpent: done.cSatsSpent } } : {}),
+    ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
   };
 }

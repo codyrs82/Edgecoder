@@ -32,8 +32,10 @@ import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
-import { localBackend, networkBackend } from "../../inference-api/backends.js";
-import { registerCompatRoutes } from "../../inference-api/routes.js";
+import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
+import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
+import { AUTO_MODEL_ID, routeInputsFrom, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
+import type { ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
@@ -129,10 +131,39 @@ const networkDeps: NetworkDeps | null = process.env.SWARM_VIA_LOCAL_AGENT_URL
   ? { forwarder: process.env.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: process.env.AGENT_ACCOUNT_ID ?? process.env.AGENT_ID ?? "local-agent" }
   : null;
 
+// --- Auto: each request at the cheapest place that fits it (src/inference-api/auto-route.ts) ---
+
+let routeCache: { at: number; inputs: RouteInputs } | null = null;
+async function routeInputsHere(): Promise<RouteInputs> {
+  if (routeCache && Date.now() - routeCache.at < 15_000) return routeCache.inputs;
+  const localModels = await ollamaTags().then((t) => t.models.map((m) => m.name)).catch(() => [] as string[]);
+  const [ov, leases] = networkDeps
+    ? await Promise.all([
+        computeOverview(networkDeps).catch(() => null),
+        listReservations(networkDeps).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => []),
+      ])
+    : [null, []];
+  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+  routeCache = { at: Date.now(), inputs };
+  return inputs;
+}
+
+function runRoute(r: Route): ChatBackend {
+  if (r.placement === "local" || !networkDeps) return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
+  return networkBackend(networkDeps, {
+    model: r.model,
+    computeClass: r.placement === "network" ? r.computeClass ?? "any" : "any",
+    ...(r.placement === "mine" ? { target: "mine" as const } : {}),
+    ...(r.placement === "reserved" ? { reservationId: r.reservationId } : {}),
+  });
+}
+
+const autoHere = (onRoute?: (r: Route) => void) => autoBackend({ inputs: routeInputsHere, run: runRoute, onRoute });
+
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
   // ("network/<model>", optionally "@<class>"): one list for tools that pick a model.
-  const ids = new Set<string>(providers.availableProviders());
+  const ids = new Set<string>([AUTO_MODEL_ID, ...providers.availableProviders()]);
   try {
     for (const m of (await ollamaTags()).models) ids.add(m.name);
   } catch {
@@ -163,6 +194,8 @@ const chatRequestSchema = z.object({
 app.post("/v1/chat/completions", async (req, reply) => {
   const body = chatRequestSchema.parse(req.body);
   const requestId = `chatcmpl-${randomUUID()}`;
+  // "auto": the cheapest place that fits this request (tools and all, so through the shared writer).
+  if (body.model === AUTO_MODEL_ID) return respondWith(req, reply, "openai", autoHere(), AUTO_MODEL_ID);
 
   // "network/<model>[@class]": run on an agent on the network, billed per second by class.
   const network = parseNetworkModel(body.model);
@@ -673,6 +706,7 @@ app.post("/v1/ide/compute/intent", async (req, reply) => {
 const connections = new ConnectionManager({
   ollamaHost: process.env.OLLAMA_HOST || "http://127.0.0.1:11434",
   network: networkDeps ?? undefined,
+  auto: () => autoHere(),
   log: (msg, extra) => app.log.warn({ extra }, msg),
 });
 app.addHook("onReady", async () => {
@@ -685,7 +719,7 @@ app.addHook("onClose", async () => {
 
 const connectionSchema = z.object({
   name: z.string().min(1).max(80),
-  target: z.enum(["local", "mine", "network", "reserved"]),
+  target: z.enum(["local", "mine", "network", "reserved", "auto"]),
   model: z.string().min(1).max(200),
   computeClass: z.enum(["any", "cpu", "apple", "gpu", "gpu.dc"]).optional(),
   reservationId: z.string().max(100).optional(),
@@ -758,7 +792,8 @@ registerCompatRoutes(
     authenticate: async () => true, // the IDE token hook above already checked the caller
     models: async () => [],
     resolve: async (_ctx, model) => {
-      if (!model) return { status: 400, error: "model is required (a local model, network/<model>[@class] or mine/<model>)" };
+      if (!model) return { status: 400, error: "model is required (auto, a local model, network/<model>[@class] or mine/<model>)" };
+      if (model === AUTO_MODEL_ID) return { backend: autoHere(), model };
       const network = parseNetworkModel(model);
       if (network) {
         if (!networkDeps) return { status: 409, error: "This computer's agent isn't connected to the network." };
@@ -799,7 +834,7 @@ const ideChatSchema = z.object({
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
-      target: z.enum(["local", "mine", "network", "reserved"]),
+      target: z.enum(["local", "mine", "network", "reserved", "auto"]),
       computeClass: z.enum(["any", "cpu", "apple", "gpu", "gpu.dc"]).optional(),
       reservationId: z.string().max(100).optional(),
     })
@@ -808,6 +843,15 @@ const ideChatSchema = z.object({
 
 /** The agent's model calls, on the compute the chat picked. */
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal) {
+  if (compute?.target === "auto") {
+    // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
+    let where = "auto";
+    const backend = autoHere((r) => {
+      where = r.reason;
+      sendEvent({ type: "status", message: `Auto: ${r.reason}` });
+    });
+    return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+  }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
   const where = compute.target === "mine" ? "your machines" : compute.target === "reserved" ? "reserved machine" : `network${compute.computeClass && compute.computeClass !== "any" ? ` (${compute.computeClass})` : ""}`;
   const backend = networkBackend(networkDeps, {

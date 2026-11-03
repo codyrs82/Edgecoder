@@ -88,10 +88,16 @@
         <input bind:this={searchEl} bind:value={filter} placeholder="Search models" aria-label="Search models" />
       </div>
       <div class="scroll">
-        <button class="row" class:active={current.where === "auto"} onclick={() => pick(undefined)}>
+        <button class="row" class:active={current.where === "anywhere"} onclick={() => pick("auto")}>
           <Zap size={14} />
           <span class="name">Auto</span>
-          <span class="meta">Best model on this computer · free</span>
+          <span class="meta">Cheapest place that fits each request: yours first, GPUs for heavy work</span>
+          {#if current.where === "anywhere"}<Check size={14} />{/if}
+        </button>
+        <button class="row" class:active={current.where === "auto"} onclick={() => pick(undefined)}>
+          <Laptop size={14} />
+          <span class="name">Auto</span>
+          <span class="meta">This computer only · free</span>
           {#if current.where === "auto"}<Check size={14} />{/if}
         </button>
 

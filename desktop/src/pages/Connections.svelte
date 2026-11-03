@@ -79,8 +79,8 @@
 
   function startNew(target: ConnectionTarget = "local") {
     creating = true;
-    const names: Record<ConnectionTarget, string> = { local: "This computer", mine: "My machines", network: "Network", reserved: "Reserved machine" };
-    form = { name: names[target], target, model: "", computeClass: target === "network" ? "gpu" : "any", reservationId: leases[0]?.id ?? "", maxCSatsPerSecond: "", budgetCSats: "", port: "" };
+    const names: Record<ConnectionTarget, string> = { auto: "Auto", local: "This computer", mine: "My machines", network: "Network", reserved: "Reserved machine" };
+    form = { name: names[target], target, model: target === "auto" ? "auto" : "", computeClass: target === "network" ? "gpu" : "any", reservationId: leases[0]?.id ?? "", maxCSatsPerSecond: "", budgetCSats: "", port: "" };
   }
 
   async function create() {
@@ -121,6 +121,7 @@
   }
 
   function whereText(c: Pick<Connection, "target" | "computeClass" | "reservationId">) {
+    if (c.target === "auto") return "Auto · cheapest place per request";
     if (c.target === "local") return "This computer · free";
     if (c.target === "mine") return "My machines · free";
     if (c.target === "reserved") return "Reserved machine · prepaid";
@@ -194,6 +195,7 @@
         <div class="sp-row">
           <div class="sp-text"><span class="sp-title">No connections yet</span><span class="sp-desc">Start with one of these; you can add more any time.</span></div>
           <div class="sp-controls">
+            <button class="primary" onclick={() => startNew("auto")}>Auto</button>
             <button onclick={() => startNew("local")}>This computer</button>
             <button onclick={() => startNew("mine")} disabled={!networkConnected}>My machines</button>
             <button onclick={() => startNew("network")} disabled={!networkConnected}>Network GPU</button>
@@ -207,7 +209,7 @@
             <span class="sp-title">{c.name} <span class="sp-pill">{shortModel(c.model)}</span></span>
             <span class="sp-desc">
               <span class="sp-dot" class:on={c.listening} class:err={!!c.error}></span>
-              {c.error ? c.error : c.enabled ? (c.listening ? c.url : "Starting…") : "Off"} · {whereText(c)}{#if c.target === "network"} · spent {fmt(c.spentCSats)}{c.budgetCSats ? ` of ${fmt(c.budgetCSats)}` : ""} cSats{/if}
+              {c.error ? c.error : c.enabled ? (c.listening ? c.url : "Starting…") : "Off"} · {whereText(c)}{#if c.target === "network" || c.target === "auto"} · spent {fmt(c.spentCSats)}{c.budgetCSats ? ` of ${fmt(c.budgetCSats)}` : ""} cSats{/if}
             </span>
           </button>
           <div class="sp-controls">
@@ -229,8 +231,8 @@
 
             <span>Runs on</span>
             <div class="sp-seg">
-              {#each [["local", "This computer"], ["mine", "My machines"], ["network", "Network"], ["reserved", "Reserved"]] as [t, label]}
-                <button class:active={form.target === t} disabled={t !== "local" && !networkConnected} onclick={() => { form.target = t as ConnectionTarget; form.model = ""; }}>{label}</button>
+              {#each [["auto", "Auto"], ["local", "This computer"], ["mine", "My machines"], ["network", "Network"], ["reserved", "Reserved"]] as [t, label]}
+                <button class:active={form.target === t} disabled={t !== "local" && t !== "auto" && !networkConnected} onclick={() => { form.target = t as ConnectionTarget; form.model = t === "auto" ? "auto" : ""; }}>{label}</button>
               {/each}
             </div>
 
@@ -256,11 +258,16 @@
               {/if}
             {/if}
 
-            <label for="cn-model">Model</label>
-            <select id="cn-model" bind:value={form.model}>
-              <option value="" disabled>Choose a model</option>
-              {#each formModels as m}<option value={m}>{m}</option>{/each}
-            </select>
+            {#if form.target === "auto"}
+              <span>Model</span>
+              <span class="sp-muted">Chosen per request: the cheapest place and smallest model that fits (your free machines first, network GPUs for heavy work).</span>
+            {:else}
+              <label for="cn-model">Model</label>
+              <select id="cn-model" bind:value={form.model}>
+                <option value="" disabled>Choose a model</option>
+                {#each formModels as m}<option value={m}>{m}</option>{/each}
+              </select>
+            {/if}
 
             {#if form.target !== "local" && form.target !== "mine"}
               <label for="cn-budget">Budget</label>

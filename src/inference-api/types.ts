@@ -36,7 +36,7 @@ export interface ChatRequest {
 export type ChatPiece =
   | { delta: string }
   | { toolCalls: ToolCall[] }
-  | { done: true; cSatsSpent?: number; stopReason?: "stop" | "length" };
+  | { done: true; cSatsSpent?: number; stopReason?: "stop" | "length"; /** Where it ran, when Auto chose. */ where?: string };
 
 export class ChatBackendError extends Error {
   constructor(message: string, readonly status: number) {

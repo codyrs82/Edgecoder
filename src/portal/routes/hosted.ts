@@ -13,8 +13,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { listNetworkModels, parseNetworkModel, type NetworkDeps } from "../../apps/ide/network-inference.js";
-import { networkBackend } from "../../inference-api/backends.js";
+import { computeOverview, listNetworkModels, listReservations, parseNetworkModel, type NetworkDeps } from "../../apps/ide/network-inference.js";
+import { autoBackend, networkBackend } from "../../inference-api/backends.js";
+import { AUTO_MODEL_ID, routeInputsFrom } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { portalNetworkDeps, registerComputeRoutes } from "./compute.js";
@@ -52,10 +53,28 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       const userId = await store.userForApiKeyHash(hashApiKey(key));
       return userId ? { accountId: `acct-${userId}` } : null;
     },
-    models: async (ctx) => (await listNetworkModels(networkFor(ctx.accountId)).catch(() => [])).map((m) => m.id),
+    models: async (ctx) => [AUTO_MODEL_ID, ...(await listNetworkModels(networkFor(ctx.accountId)).catch(() => [])).map((m) => m.id)],
     resolve: async (ctx, model) => {
+      // "auto": the cheapest place that fits each request: a reservation you hold, your own machines (free), then the network.
+      if (model === AUTO_MODEL_ID) {
+        const d = networkFor(ctx.accountId);
+        const backend = autoBackend({
+          inputs: async () => {
+            const [ov, leases] = await Promise.all([computeOverview(d).catch(() => null), listReservations(d).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => [])]);
+            return routeInputsFrom({ localModels: [], machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+          },
+          run: (r) =>
+            networkBackend(d, {
+              model: r.model,
+              computeClass: r.placement === "network" ? r.computeClass ?? "any" : "any",
+              ...(r.placement === "mine" ? { target: "mine" as const } : {}),
+              ...(r.placement === "reserved" ? { reservationId: r.reservationId } : {}),
+            }),
+        });
+        return { backend, model: AUTO_MODEL_ID };
+      }
       const target = hostedTarget(model);
-      if (!target) return { status: 400, error: "Name a model: network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
+      if (!target) return { status: 400, error: "Name a model: auto (cheapest place that fits), network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
       return { backend: networkBackend(networkFor(ctx.accountId), target), model: model! };
     },
   });

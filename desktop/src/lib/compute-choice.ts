@@ -2,7 +2,8 @@
 // where): a model on this computer, on your own machines, on the network (optionally one class),
 // or on a machine you reserved. Stored as one model id, the same ids external tools use:
 //   "qwen3.5:9b"  "mine/qwen3.5:9b"  "network/qwen3.5:9b@gpu"  "reserved/<id>/qwen3.5:9b"
-// Undefined means Auto (the app picks a model on this computer).
+// Undefined means Auto on this computer; "auto" means Auto anywhere: each request goes to the
+// cheapest place that fits it (a reservation, this computer, your machines, then the network).
 
 import { writable } from "svelte/store";
 
@@ -29,7 +30,7 @@ computeChoice.subscribe((v) => {
 export const CLASS_LABELS: Record<string, string> = { any: "Any", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
 
 export interface ParsedChoice {
-  where: "auto" | "local" | "mine" | "network" | "reserved";
+  where: "auto" | "anywhere" | "local" | "mine" | "network" | "reserved";
   model?: string;
   computeClass?: string;
   reservationId?: string;
@@ -37,6 +38,7 @@ export interface ParsedChoice {
 
 export function parseChoice(id: string | undefined): ParsedChoice {
   if (!id) return { where: "auto" };
+  if (id === "auto") return { where: "anywhere" };
   if (id.startsWith("mine/")) return { where: "mine", model: id.slice(5) };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
   if (reserved) return { where: "reserved", reservationId: reserved[1], model: reserved[2] };
@@ -50,6 +52,7 @@ export function parseChoice(id: string | undefined): ParsedChoice {
 }
 
 export function choiceId(c: ParsedChoice): string | undefined {
+  if (c.where === "anywhere") return "auto";
   if (c.where === "auto" || !c.model) return undefined;
   if (c.where === "local") return c.model;
   if (c.where === "mine") return `mine/${c.model}`;
@@ -67,6 +70,7 @@ export function shortModel(model: string): string {
 /** "qwen3.5:9b · This Mac", "qwen3.5:9b · Network GPU", "Auto". */
 export function choiceLabel(id: string | undefined): { model: string; where: string } {
   const c = parseChoice(id);
+  if (c.where === "anywhere") return { model: "Auto", where: "Cheapest anywhere" };
   if (c.where === "auto" || !c.model) return { model: "Auto", where: "This computer" };
   const where =
     c.where === "local" ? "This computer" : c.where === "mine" ? "My machines" : c.where === "reserved" ? "Reserved" : c.computeClass && c.computeClass !== "any" ? `Network ${CLASS_LABELS[c.computeClass]}` : "Network";
@@ -74,4 +78,4 @@ export function choiceLabel(id: string | undefined): { model: string; where: str
 }
 
 /** Whether replies on this choice cost cSats. */
-export const isBilled = (id: string | undefined) => parseChoice(id).where === "network";
+export const isBilled = (id: string | undefined) => ["network", "anywhere"].includes(parseChoice(id).where);

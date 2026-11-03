@@ -52,3 +52,37 @@ describe("auto routing", () => {
     expect(rankRoutes(heavy, { ...base, localModels: ["qwen2.5-coder:1.5b"] })).toEqual([]);
   });
 });
+
+import { autoBackend } from "../../src/inference-api/backends.js";
+import { ChatBackendError, type ChatBackend, type ChatPiece } from "../../src/inference-api/types.js";
+
+describe("auto backend", () => {
+  const inputs = async (): Promise<RouteInputs> => ({ ...base, localModels: ["qwen2.5-coder:1.5b"], networkModels: [{ model: "qwen2.5-coder:1.5b", classes: ["gpu"] }] });
+  const collect = async (b: ChatBackend) => {
+    const out: ChatPiece[] = [];
+    for await (const p of b({ messages: [{ role: "user", content: "hi" }] })) out.push(p);
+    return out;
+  };
+
+  it("falls through to the next place when one can't start, and says where it ran", async () => {
+    const tried: string[] = [];
+    const b = autoBackend({
+      inputs,
+      run: (r) =>
+        async function* () {
+          tried.push(r.placement);
+          if (r.placement === "local") throw new ChatBackendError("Ollama isn't running", 503);
+          yield { delta: "ok" };
+          yield { done: true, cSatsSpent: 0.1 };
+        },
+    });
+    const out = await collect(b);
+    expect(tried).toEqual(["local", "network"]);
+    expect(out[1]).toMatchObject({ done: true, cSatsSpent: 0.1, where: expect.stringContaining("network gpu") });
+  });
+
+  it("explains when no model fits anywhere", async () => {
+    const b = autoBackend({ inputs: async () => base, run: () => async function* () {} });
+    await expect(collect(b)).rejects.toThrow(/no model that fits/);
+  });
+});

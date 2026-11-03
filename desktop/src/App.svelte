@@ -19,7 +19,7 @@
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
-  import { Settings as SettingsIcon } from "@lucide/svelte";
+  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, Bot } from "@lucide/svelte";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -213,6 +213,30 @@
     chatView?.newChat();
   }
 
+  // The header's + : what you can create.
+  let newMenuOpen = $state(false);
+  function newChatHere() {
+    newMenuOpen = false;
+    activeTab = "chat";
+    chatView?.newChat();
+    queueMicrotask(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus());
+  }
+  async function newProjectHere() {
+    newMenuOpen = false;
+    try {
+      const root = await ideNewProject("");
+      projectRoot = root;
+      try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
+      setAutoApplyEdits(root, true);
+      activeTab = "chat";
+      chatView?.newChat();
+      await tick();
+      chatView?.addNote(`New project in \`${root.replace(/^\/Users\/[^/]+/, "~")}\`. Describe what to build; the agent writes the files there.`);
+    } catch (err) {
+      console.warn("Couldn't create a project:", err);
+    }
+  }
+
   async function openProject() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -261,14 +285,21 @@
     {#if activeTab !== "chat"}<UpdateBanner />{/if}
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
-      <button class="header-btn" title="New chat" onclick={() => {
-        activeTab = "chat";
-        chatView?.newChat();
-      }}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 5v14M5 12h14"/>
-        </svg>
-      </button>
+      <div class="new-menu-wrap">
+        <button class="header-btn" title="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
+          <Plus size={18} strokeWidth={2} />
+        </button>
+        {#if newMenuOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+          <div class="new-menu-backdrop" onclick={() => (newMenuOpen = false)}></div>
+          <div class="new-menu" role="menu" tabindex="-1" onkeydown={(e) => e.key === "Escape" && (newMenuOpen = false)}>
+            <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
+            <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
+            <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
+            <button role="menuitem" disabled title="Persistent bots that run jobs on Auto compute are on the Phase 2 roadmap"><Bot size={15} /> New bot <span class="soon">Phase 2</span></button>
+          </div>
+        {/if}
+      </div>
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
@@ -455,5 +486,51 @@
     align-items: center;
     justify-content: center;
     color: var(--text-secondary);
+  }
+  .new-menu-wrap {
+    position: relative;
+  }
+  .new-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+  }
+  .new-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 61;
+    min-width: 200px;
+    padding: 6px;
+    background: var(--bg-elevated, var(--bg-surface));
+    border: 0.5px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+  .new-menu button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .new-menu button:hover:not(:disabled) {
+    background: var(--bg-surface);
+  }
+  .new-menu button:disabled {
+    color: var(--text-secondary);
+    cursor: default;
+  }
+  .new-menu .soon {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-muted, var(--text-secondary));
   }
 </style>

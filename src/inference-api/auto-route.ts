@@ -131,3 +131,23 @@ export function routeModelId(r: Route): string {
 }
 
 export const AUTO_MODEL_ID = "auto";
+
+/** Route inputs from the compute overview, your reservations and this computer's models. */
+export function routeInputsFrom(input: {
+  localModels: string[];
+  selfAgentId?: string;
+  machines?: Array<{ agentId: string; online: boolean; models: string[] }>;
+  networkModels?: Array<{ model: string; classes: string[] }>;
+  classes?: Record<string, { cSatsPerSecondBaseTier: number }>;
+  leases?: Array<{ id: string; computeClass: string; status: string; endMs: number; models: string[] }>;
+  now?: number;
+}): RouteInputs {
+  const now = input.now ?? Date.now();
+  return {
+    localModels: input.localModels,
+    myModels: [...new Set((input.machines ?? []).filter((m) => m.online && m.agentId !== input.selfAgentId).flatMap((m) => m.models))],
+    leases: (input.leases ?? []).filter((l) => l.status === "active" && l.endMs > now).map((l) => ({ id: l.id, computeClass: l.computeClass, models: l.models })),
+    networkModels: input.networkModels ?? [],
+    classPrice: Object.fromEntries(Object.entries(input.classes ?? {}).map(([k, v]) => [k, v.cSatsPerSecondBaseTier])),
+  };
+}
