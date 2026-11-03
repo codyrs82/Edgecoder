@@ -90,6 +90,7 @@ import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/resp
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
+import { reconcileLedger, type ReconcileReport } from "../ledger/reconcile.js";
 import { hashRecordPayload } from "../ledger/record.js";
 import { finalizeStatsCheckpoint, statsCheckpointPeriodMs, statsFinalityState } from "../ledger/stats-checkpoint.js";
 import { DuplicateDebitError, NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
@@ -4769,6 +4770,57 @@ app.get("/economy/fee-pool", async (req, reply) => {
   ]);
   return { accountId: NETWORK_FEE_POOL_ACCOUNT, earnedMsat, distributedMsat, availableMsat: Math.max(0, earnedMsat - distributedMsat), credits, networkFeeBps: NETWORK_FEE_BPS, lastDistribution: lastFeePoolDistribution };
 });
+// ── #115: credits-ledger reconciliation (src/ledger/reconcile.ts). Reads only; never corrects. ──
+/** How often the periodic reconciliation runs (one coordinator per window on a shared database); 0 = off. */
+const LEDGER_VERIFY_INTERVAL_MS = Math.max(0, Number(process.env.LEDGER_VERIFY_INTERVAL_MS ?? 6 * 3_600_000) || 0);
+type LedgerVerifyResult = ReconcileReport & { checkedAtMs: number; durationMs: number; coordinatorId: string };
+
+async function verifyCreditLedger(maxDiscrepancies: number): Promise<LedgerVerifyResult | null> {
+  if (!pgStore) return null;
+  const startedAtMs = Date.now();
+  const input = await pgStore.ledgerReconcileInput(NETWORK_FEE_POOL_ACCOUNT);
+  const report = reconcileLedger(input, { maxDiscrepancies, localCoordinatorIds: [identity.peerId], feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT });
+  return { ...report, checkedAtMs: startedAtMs, durationMs: Date.now() - startedAtMs, coordinatorId: identity.peerId };
+}
+
+function alertLedgerMismatch(result: LedgerVerifyResult, trigger: "admin" | "timer"): void {
+  if (result.ok) return;
+  securityLog.log({
+    level: securityLog.severity("ledger_reconciliation_mismatch"),
+    event: "ledger_reconciliation_mismatch",
+    source: { type: "system", id: identity.peerId },
+    details: { trigger, mismatches: result.mismatches, byKind: result.byKind, discrepancies: result.discrepancies.slice(0, 5) },
+    action: "manual_review_required",
+    coordinatorId: identity.peerId
+  });
+}
+
+/** Periodic run: the first coordinator to claim the window runs it and alerts; the others skip. */
+async function runLedgerVerifyTick(nowMs = Date.now()): Promise<void> {
+  if (!pgStore || LEDGER_VERIFY_INTERVAL_MS <= 0) return;
+  const windowStartMs = Math.floor(nowMs / LEDGER_VERIFY_INTERVAL_MS) * LEDGER_VERIFY_INTERVAL_MS;
+  const r = await pgStore.withLedgerVerifyWindow(windowStartMs, identity.peerId, async () => (await verifyCreditLedger(20))!);
+  if (!r.ran) return;
+  app.log.info({ ok: r.value.ok, mismatches: r.value.mismatches, accountsChecked: r.value.accountsChecked, accrualsChecked: r.value.accrualsChecked, warnings: r.value.warnings, durationMs: r.value.durationMs }, "ledger_verify");
+  alertLedgerMismatch(r.value, "timer");
+}
+
+/**
+ * Mesh token only: this process's in-memory ordering chain (hash and signature check), as before.
+ * With x-admin-token (#115): the full reconciliation of the credits ledger in Postgres.
+ */
+app.get("/ledger/verify", async (req, reply) => {
+  const chain = verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem);
+  if (readHeaderValue((req as any).headers ?? {}, "x-admin-token") === undefined) return { ok: chain.ok, reason: chain.reason };
+  if (!authorizeAdmin(req, reply)) return;
+  const query = z.object({ max: z.coerce.number().int().min(1).max(500).default(20) }).safeParse(req.query ?? {});
+  if (!query.success) return reply.code(400).send({ error: "invalid_query" });
+  if (!pgStore) return reply.code(503).send({ error: "ledger_verify_requires_postgres" });
+  const result = (await verifyCreditLedger(query.data.max))!;
+  alertLedgerMismatch(result, "admin");
+  return { ...result, orderingChain: { ok: chain.ok, reason: chain.reason } };
+});
+
 app.post("/economy/fee-pool/distribute", async (req, reply) => {
   if (!authorizeAdmin(req, reply)) return; // manual override; the daily timer runs it automatically (audit econ#3)
   return runFeePoolDistribution({ manual: true });
@@ -5997,10 +6049,6 @@ app.get("/mesh/capabilities", async (req, reply) => {
 });
 
 app.get("/ledger/snapshot", async () => ({ records: ordering.snapshot(), proof: ordering.latestProof() }));
-app.get("/ledger/verify", async () => {
-  const validation = verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem);
-  return { ok: validation.ok, reason: validation.reason };
-});
 app.get("/stats/ledger/head", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const [head, checkpoint] = await Promise.all([
@@ -7505,6 +7553,12 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void runFeePoolDistribution().catch((error) => app.log.warn({ error: String(error) }, "fee_pool_distribution_failed"));
       }, CC.FEE_POOL_DISTRIBUTION_MS);
+      // #115: periodic ledger reconciliation; ticks often, runs once per window across the database.
+      if (pgStore && LEDGER_VERIFY_INTERVAL_MS > 0) {
+        setInterval(() => {
+          void runLedgerVerifyTick().catch((error) => app.log.warn({ error: String(error) }, "ledger_verify_failed"));
+        }, Math.min(LEDGER_VERIFY_INTERVAL_MS, 15 * 60_000)).unref?.();
+      }
       // Ledger vs Lightning node; a mismatch pauses payouts (payout-reconcile.ts).
       if (ECONOMY_PAYMENTS_ENABLED && payoutReconcileConfig.intervalMs > 0) {
         void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));

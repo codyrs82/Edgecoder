@@ -12,6 +12,7 @@ import type { HardwareVerificationRecord } from "../swarm/hardware-verification.
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
+import type { ReconcileInput } from "../ledger/reconcile.js";
 import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
@@ -89,6 +90,9 @@ export const STATS_CHECKPOINT_LOCK_KEY = 1;
 /** Issuance epochs: coordinators sharing a database compute each window's epoch one at a time. */
 export const ISSUANCE_LOCK_NAMESPACE = 0x45430005;
 export const ISSUANCE_LOCK_KEY = 1;
+/** #115: ledger reconciliation runs one at a time across coordinators sharing this database. */
+export const LEDGER_VERIFY_LOCK_NAMESPACE = 0x45430006;
+export const LEDGER_VERIFY_LOCK_KEY = 1;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
@@ -680,6 +684,17 @@ CREATE TABLE IF NOT EXISTS payout_callback_pins (
   changed_at_ms BIGINT,
   notified_at_ms BIGINT,
   PRIMARY KEY (account_id, destination)
+);
+-- #115: one periodic ledger reconciliation per window across coordinators sharing this database
+-- (the first to claim a window runs it and alerts; the others skip). Read-only audit trail.
+CREATE TABLE IF NOT EXISTS ledger_verifications (
+  window_start_ms BIGINT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  finished_at_ms BIGINT,
+  ok BOOLEAN,
+  mismatches INT,
+  summary_json JSONB
 );
 `;
 
@@ -2637,6 +2652,125 @@ export class PostgresStore {
       return { acquired: true, value: await fn() };
     } finally {
       if (held) await client.query("SELECT pg_advisory_unlock($1, $2)", [FEE_POOL_LOCK_NAMESPACE, FEE_POOL_LOCK_KEY]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  /**
+   * #115: run the periodic ledger reconciliation for one window at most once across every
+   * coordinator on this database: a session try-lock serialises runs, and the window row makes a
+   * second coordinator (or a later timer tick in the same window) skip instead of alerting again.
+   */
+  async withLedgerVerifyWindow<T extends { ok: boolean; mismatches: number }>(
+    windowStartMs: number,
+    coordinatorId: string,
+    fn: () => Promise<T>
+  ): Promise<{ ran: false; reason: "locked" | "already_ran" } | { ran: true; value: T }> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const r = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [LEDGER_VERIFY_LOCK_NAMESPACE, LEDGER_VERIFY_LOCK_KEY]);
+      held = r.rows[0]?.got === true;
+      if (!held) return { ran: false, reason: "locked" };
+      const claimed = await client.query(
+        `INSERT INTO ledger_verifications (window_start_ms, coordinator_id, started_at_ms) VALUES ($1, $2, $3) ON CONFLICT (window_start_ms) DO NOTHING`,
+        [windowStartMs, coordinatorId, Date.now()]
+      );
+      if ((claimed.rowCount ?? 0) === 0) return { ran: false, reason: "already_ran" };
+      const value = await fn();
+      await client.query(
+        `UPDATE ledger_verifications SET finished_at_ms = $2, ok = $3, mismatches = $4, summary_json = $5 WHERE window_start_ms = $1`,
+        [windowStartMs, Date.now(), value.ok, value.mismatches, JSON.stringify(value)]
+      );
+      return { ran: true, value };
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, $2)", [LEDGER_VERIFY_LOCK_NAMESPACE, LEDGER_VERIFY_LOCK_KEY]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  /**
+   * #115: everything the ledger reconciliation (src/ledger/reconcile.ts) reads, in one
+   * REPEATABLE READ READ ONLY snapshot so concurrent accruals can't show up half-written.
+   */
+  async ledgerReconcileInput(feePoolAccountId: string): Promise<ReconcileInput> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const balances = await client.query(
+        `SELECT account_id,
+                COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN 0 ELSE credits END), 0)::text AS earned,
+                COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN credits ELSE 0 END), 0)::text AS spent,
+                COUNT(*)::int AS rows
+           FROM credit_transactions GROUP BY account_id`
+      );
+      const reports = await client.query(`SELECT report_id, account_id, task_id FROM compute_contribution_reports`);
+      const accruals = await client.query(
+        `SELECT id, subtask_id, task_id, actor_id, coordinator_id, payload_json FROM stats_ledger_records WHERE event_type = 'earnings_accrual'`
+      );
+      const earn = await client.query(
+        `SELECT account_id, related_task_id, COUNT(*)::int AS rows, SUM(credits)::text AS credits,
+                SUM(msat)::text AS msat, COUNT(msat)::int AS msat_rows
+           FROM credit_transactions
+          WHERE tx_type = 'earn' AND reason = 'compute_contribution'
+          GROUP BY account_id, related_task_id`
+      );
+      const fees = await client.query(
+        `SELECT substring(reason FROM 13) AS task_id, COUNT(*)::int AS rows, SUM(msat)::text AS msat
+           FROM credit_transactions
+          WHERE account_id = $1 AND tx_type = 'earn' AND reason LIKE 'network\_fee:%'
+          GROUP BY reason`,
+        [feePoolAccountId]
+      );
+      const projections = await client.query(`SELECT account_id, total_credits FROM coordinator_earnings_projection`);
+      const reservations = await client.query(
+        `SELECT reservation_id, record_json FROM compute_reservations WHERE record_json->>'status' = 'ended'`
+      );
+      const chainCount = await client.query(`SELECT COUNT(*)::int AS n FROM ledger_records`);
+      const forks = await client.query(
+        `SELECT prev_hash, COUNT(*)::int AS n FROM ledger_records WHERE prev_hash <> 'GENESIS' GROUP BY prev_hash HAVING COUNT(*) > 1 LIMIT 1000`
+      );
+      const dupHashes = await client.query(`SELECT hash, COUNT(*)::int AS n FROM ledger_records GROUP BY hash HAVING COUNT(*) > 1 LIMIT 1000`);
+      const breaks = await client.query(
+        `SELECT r.id, r.sequence, p.sequence AS prev_sequence
+           FROM ledger_records r JOIN ledger_records p ON p.hash = r.prev_hash
+          WHERE r.sequence <> p.sequence + 1 LIMIT 1000`
+      );
+      const gaps = await client.query(
+        `SELECT COUNT(*)::int AS n FROM ledger_records r
+          WHERE r.prev_hash <> 'GENESIS' AND NOT EXISTS (SELECT 1 FROM ledger_records p WHERE p.hash = r.prev_hash)`
+      );
+      await client.query("COMMIT");
+      return {
+        balances: balances.rows.map((r) => ({ accountId: r.account_id, earned: r.earned, spent: r.spent, rows: r.rows })),
+        reports: reports.rows.map((r) => ({ reportId: r.report_id, accountId: r.account_id, taskId: r.task_id })),
+        accrualRecords: accruals.rows.map((r) => ({
+          id: r.id,
+          subtaskId: r.subtask_id ?? null,
+          taskId: r.task_id,
+          actorId: r.actor_id,
+          coordinatorId: r.coordinator_id ?? null,
+          payload: r.payload_json && typeof r.payload_json === "object" ? (r.payload_json as Record<string, unknown>) : null
+        })),
+        earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
+        feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
+        projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
+        reservations: reservations.rows.flatMap((r) => {
+          const rec = r.record_json as { agentAccountId?: unknown; usedMsat?: unknown };
+          return typeof rec?.agentAccountId === "string" ? [{ id: r.reservation_id, agentAccountId: rec.agentAccountId, usedMsat: Number(rec.usedMsat ?? 0) }] : [];
+        }),
+        chain: {
+          records: chainCount.rows[0]?.n ?? 0,
+          forks: forks.rows.map((r) => ({ prevHash: r.prev_hash, count: r.n })),
+          duplicateHashes: dupHashes.rows.map((r) => ({ hash: r.hash, count: r.n })),
+          sequenceBreaks: breaks.rows.map((r) => ({ id: r.id, sequence: Number(r.sequence), prevSequence: Number(r.prev_sequence) })),
+          gaps: gaps.rows[0]?.n ?? 0
+        }
+      };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
       client.release();
     }
   }
