@@ -24,4 +24,27 @@ describe.skipIf(!PG_URL)("node enrollment ownership against real Postgres", () =
       await pool.end();
     }
   });
+  it("does not redirect another user's node ID through the caller's own device ID", async () => {
+    const pool = new pg.Pool({ connectionString: PG_URL, max: 2 });
+    try {
+      const store = new PortalStore(pool);
+      await store.migrate();
+      const t = Date.now();
+      const victim = `victim-${t}`;
+      const mine = `mine-${t}`;
+      const base = { nodeKind: "agent" as const, emailVerified: true };
+      await store.upsertNodeEnrollment({ ...base, nodeId: victim, deviceId: `vdev-${t}`, ownerUserId: "u-victim", ownerEmail: "v@example.com", registrationTokenHash: "h1" });
+      await store.upsertNodeEnrollment({ ...base, nodeId: mine, deviceId: `adev-${t}`, ownerUserId: "u-attacker", ownerEmail: "a@example.com", registrationTokenHash: "h2" });
+      expect(await store.upsertNodeEnrollment({ ...base, nodeId: victim, deviceId: `adev-${t}`, ownerUserId: "u-attacker", ownerEmail: "a@example.com", registrationTokenHash: "h3" })).toBeNull();
+      expect(await store.upsertNodeEnrollment({ ...base, nodeId: `new-${t}`, deviceId: `vdev-${t}`, ownerUserId: "u-attacker", ownerEmail: "a@example.com", registrationTokenHash: "h4" })).toBeNull();
+      expect((await store.getNodeEnrollment(victim))?.ownerUserId).toBe("u-victim");
+      // The caller's own device still redirects to its canonical node.
+      const own = await store.upsertNodeEnrollment({ ...base, nodeId: `new-${t}`, deviceId: `adev-${t}`, ownerUserId: "u-attacker", ownerEmail: "a@example.com", registrationTokenHash: "h5" });
+      expect(own?.nodeId).toBe(mine);
+      await store.deleteNodeEnrollment(victim);
+      await store.deleteNodeEnrollment(mine);
+    } finally {
+      await pool.end();
+    }
+  });
 });

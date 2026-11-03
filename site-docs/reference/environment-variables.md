@@ -261,6 +261,7 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `PORTAL_SESSION_TTL_MS` | integer ms, 1000 to 31 days | `604800000` |
 | `PORTAL_EMAIL_VERIFY_TTL_MS` | integer ms, 1000 to 31 days | `86400000` |
 | `WALLET_SEND_MFA_TTL_MS` | integer ms, 1000 to 31 days | `600000` |
+| `PORTAL_WITHDRAW_DAILY_CAP_SATS` | integer sats ≥ 0 (0 = no portal cap) | `500000` |
 | `MOBILE_OAUTH_TOKEN_TTL_MS` | integer ms, 1000 to 31 days | `300000` |
 | `OAUTH_MICROSOFT_PROMPT` | string | `select_account` |
 | `PASSKEY_ALLOWED_ORIGINS` | string | unset |

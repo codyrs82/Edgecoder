@@ -288,7 +288,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail } = createPortalMailer(
+const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -841,7 +841,11 @@ registerReviewRoutes(app, reviewsRouteDeps);
 
 const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser };
 export type MarketRoutesDeps = typeof marketRouteDeps;
-registerMarketRoutes(app, marketRouteDeps); registerPayoutRoutes(app, marketRouteDeps);
+registerMarketRoutes(app, marketRouteDeps);
+registerPayoutRoutes(app, marketRouteDeps, {
+  store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, dailyCapSats: C.PORTAL_WITHDRAW_DAILY_CAP_SATS,
+  sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
+});
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

@@ -99,6 +99,14 @@ app.get("/portal/wallet", async (_req, reply) => {
           <button class="primary" id="withdrawBtn">Pay invoice</button>
           <span class="muted" id="payoutPolicyNote"></span>
         </div>
+        <div id="withdrawCodeWrap" class="hidden" style="margin-top:8px;">
+          <label for="withdrawCode">Email code</label>
+          <div class="row">
+            <input id="withdrawCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+            <button class="primary" id="withdrawConfirmBtn">Confirm withdrawal</button>
+          </div>
+          <div class="muted" id="withdrawCodeInfo" style="margin-top:6px;"></div>
+        </div>
         <p class="muted" style="margin:14px 0 0;">Automatic payouts go to the Lightning address under "Where should we pay you?".</p>
         <table style="margin-top:14px;">
           <thead><tr><th>Time</th><th>Kind</th><th>Sats</th><th>Fee</th><th>Status</th></tr></thead>
@@ -198,16 +206,44 @@ app.get("/portal/wallet", async (_req, reply) => {
         document.getElementById("payoutPolicyNote").textContent = "Payout balance unavailable: " + String(err.message || err);
       }
     }
-    document.getElementById("withdrawBtn").addEventListener("click", async () => {
+    // Withdrawing asks for an emailed code bound to this invoice: POST { bolt11 } -> 202 { challengeId },
+    // then POST { bolt11, challengeId, emailCode }.
+    let withdrawChallenge = null;
+    function resetWithdrawCode() {
+      withdrawChallenge = null;
+      document.getElementById("withdrawCodeWrap").classList.add("hidden");
+      document.getElementById("withdrawCode").value = "";
+    }
+    async function submitWithdraw(withCode) {
       const bolt11 = document.getElementById("withdrawInvoice").value.trim();
       if (!bolt11) { showToast("Paste a BOLT11 invoice first.", true); return; }
+      const body = { bolt11 };
+      if (withCode) {
+        const emailCode = document.getElementById("withdrawCode").value.trim();
+        if (!emailCode || !withdrawChallenge || withdrawChallenge.bolt11 !== bolt11) { showToast("Enter the code from the email, or request a new one.", true); return; }
+        body.challengeId = withdrawChallenge.id;
+        body.emailCode = emailCode;
+      }
       try {
-        const r = await api("/wallet/payouts/withdraw", { method: "POST", body: JSON.stringify({ bolt11 }) });
-        if (r.ok) { showToast("Paid " + sats(r.payout.amountMsat) + " sats."); document.getElementById("withdrawInvoice").value = ""; }
-        else showToast("Payout " + (r.code || "failed") + (r.detail ? ": " + r.detail : ""), true);
+        const res = await fetch("/wallet/payouts/withdraw", { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        let r = {};
+        try { r = await res.json(); } catch {}
+        if (res.status === 202 && r.verificationRequired) {
+          withdrawChallenge = { id: r.challengeId, bolt11 };
+          document.getElementById("withdrawCode").value = "";
+          document.getElementById("withdrawCodeInfo").textContent = (r.detail || "We emailed you a code.") + " Amount: " + sats(r.amountMsat) + " sats.";
+          document.getElementById("withdrawCodeWrap").classList.remove("hidden");
+          document.getElementById("withdrawCode").focus();
+          return;
+        }
+        if (withCode) resetWithdrawCode();
+        if (res.ok && r.ok) { showToast("Paid " + sats(r.payout.amountMsat) + " sats."); document.getElementById("withdrawInvoice").value = ""; }
+        else showToast("Payout " + (r.code || r.error || "failed") + (r.detail ? ": " + r.detail : ""), true);
       } catch (err) { showToast("Withdrawal failed: " + String(err.message || err), true); }
       loadPayouts();
-    });
+    }
+    document.getElementById("withdrawBtn").addEventListener("click", () => { resetWithdrawCode(); submitWithdraw(false); });
+    document.getElementById("withdrawConfirmBtn").addEventListener("click", () => submitWithdraw(true));
     let payoutDestChallenge = null;
     function payoutDestMessage(kind, text) {
       const err = document.getElementById("payoutDestError");

@@ -63,7 +63,7 @@ export function clientIp(
 export const AUTH_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 /** Forgot/reset password: 5 requests per 15 minutes per client IP (the forgot route also caps links per email). */
 export const PASSWORD_RESET_RATE_LIMIT = { max: 5, timeWindow: "15 minutes" } as const;
-/** Wallet send + MFA: 5 requests per minute per client IP. */
+/** Wallet send + MFA, payout destination change and withdraw: 5 requests per minute per client IP. */
 export const WALLET_RATE_LIMIT = { max: 5, timeWindow: "1 minute" } as const;
 
 const AUTH_ROUTES: RegExp[] = [
@@ -79,7 +79,8 @@ const AUTH_ROUTES: RegExp[] = [
 // Only the send-code start and confirm steps (POST). GET /wallet/send/requests (the wallet
 // page's list) must not share this bucket.
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/];
+// Withdraw (the code request and the confirm) shares the wallet bucket.
+const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
