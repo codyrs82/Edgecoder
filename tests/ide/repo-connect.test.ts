@@ -26,6 +26,8 @@ const headers = { host: "127.0.0.1:4304", authorization: `Bearer ${TOKEN}` };
 let tmp: string;
 let projects: string;
 const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8" });
+/** A checked-out file's text; Windows runners check out with CRLF (core.autocrlf). */
+const text = (p: string) => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 function identity(dir: string) {
   git(dir, "config", "user.email", "t@t");
   git(dir, "config", "user.name", "t");
@@ -147,7 +149,7 @@ describe("connecting a repository", () => {
     const lines: string[] = [];
     const c = await connectRepoUrl(r.bare, { projectsFolder: projects, onProgress: (l) => lines.push(l) });
     expect(c).toMatchObject({ path: join(projects, "widgets"), name: "widgets", action: "cloned", branch: "main", dirty: false });
-    expect(readFileSync(join(projects, "widgets", "README.md"), "utf8")).toBe("one\n");
+    expect(text(join(projects, "widgets", "README.md"))).toBe("one\n");
     expect(lines[0]).toContain("Cloning into");
   });
 
@@ -157,7 +159,7 @@ describe("connecting a repository", () => {
     r.commit("README.md", "two\n");
     const c = await connectRepoUrl(r.bare, { projectsFolder: projects });
     expect(c).toMatchObject({ action: "updated", branch: "main", dirty: false, fastForwarded: true, behind: 0, ahead: 0 });
-    expect(readFileSync(join(projects, "widgets", "README.md"), "utf8")).toBe("two\n");
+    expect(text(join(projects, "widgets", "README.md"))).toBe("two\n");
   });
 
   it("leaves a dirty copy alone and reports it and how far behind it is", async () => {
