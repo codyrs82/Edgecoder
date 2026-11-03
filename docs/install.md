@@ -11,16 +11,93 @@ platform entry point or this page falls behind.
 
 | Platform | Command |
 | --- | --- |
-| Linux (Debian, Ubuntu, Fedora) | `curl -fsSL https://edgecoder.io/install.sh \| sudo bash -s -- --mesh-token <token>` |
-| macOS | `curl -fsSL https://edgecoder.io/install.sh \| sudo bash -s -- --mesh-token <token>` |
+| Linux (Debian, Ubuntu, Fedora) | `curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --mesh-token <token>` |
+| macOS | `curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --mesh-token <token>` |
 | Windows (admin PowerShell) | `irm https://edgecoder.io/install.ps1 -OutFile install.ps1; .\install.ps1 -- --mesh-token <token>` |
 
-The bootstrap installs Node 22 (on macOS the nodejs.org build in `/opt/edgecoder/node`), Ollama, Docker (Linux; Docker Desktop is required by hand on
-Windows and macOS) and the NVIDIA container toolkit when an NVIDIA GPU is present, builds
-EdgeCoder into `/opt/edgecoder/app` (Windows: `C:\Program Files\EdgeCoder\app`), and runs
-`edgecoder-install apply` with every option you passed. Packages (`.pkg`, `.deb`, `.msi`) run
-`edgecoder-install apply --from-package` in their post-install step and leave the same
-`edgecoder-install` command on the PATH.
+`curl -fsSL https://edgecoder.io/install.sh | sudo bash -s -- --mesh-token <token>` still works,
+but downloading first lets you read the script (and compare it with `deploy/install.sh` in this
+repository) before it runs as root. The script does nothing until its last line, so a
+truncated download runs nothing.
+
+The bootstrap installs the pinned Node.js build into `/opt/edgecoder/node` (Windows:
+`C:\Program Files\EdgeCoder\node`), Ollama, Docker on Linux from the distribution's packages
+(Docker Desktop is installed by hand on Windows and macOS) and the NVIDIA container toolkit
+when an NVIDIA GPU is present. It then installs a **signed, prebuilt agent release** into
+`/opt/edgecoder/app` (Windows: `C:\Program Files\EdgeCoder\app`) and runs
+`edgecoder-install apply` with every option you passed. Nothing is cloned or built on your
+machine. Packages (`.pkg`, `.deb`, `.msi`) run `edgecoder-install apply --from-package` in their
+post-install step and leave the same `edgecoder-install` command on the PATH.
+
+Options of the bootstrap itself (everything else goes to `edgecoder-install`):
+
+| Option | Meaning |
+| --- | --- |
+| `--version X` | Install release `agent-vX` (default: the newest `agent-v*` release on GitHub). |
+| `--from-source [--ref REF]` | **Unverified**, for developers: clone and build `REF` (default `main`) instead of a signed release. On Linux and macOS it builds as the user who ran `sudo`, never as root. |
+
+## How the installer verifies what it installs
+
+Every download is checked before anything from it runs or is unpacked:
+
+| What | From | Checked against |
+| --- | --- | --- |
+| Node.js 22.23.4 | `nodejs.org/dist/v22.23.4/` official tarball / zip | SHA-256 pinned in the script, per OS and arch |
+| EdgeCoder agent | GitHub release `agent-vX`: `edgecoder-agent-agent-vX-<os>-<arch>.tar.gz` | `SHA256SUMS`, whose minisign signature must verify with the release key below **and** name this tag |
+| Ollama 0.40.7 | `github.com/ollama/ollama/releases/download/v0.40.7/` official archive | SHA-256 pinned in the script |
+| Docker (Linux) | the distribution's `docker.io` / `moby-engine` package | the distribution's own apt/dnf package signatures |
+| NVIDIA container toolkit | NVIDIA's apt repository | repo key fingerprint `C95B 321B 61E8 8C18 09C4 F759 DDCA E044 F796 ECB0`, pinned |
+
+If Docker is missing and no distribution package is available, the installer prints how to
+install it instead. Docker's own repository key has fingerprint
+`9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88`; check it if you add that repository.
+
+The release check runs in that pinned Node (`verify-release.js`, embedded in both
+`install.sh` and `install.ps1`), because the obvious tools are not everywhere: macOS ships
+LibreSSL, which cannot verify Ed25519, and minisign is rarely installed. Node's crypto verifies
+Ed25519 and BLAKE2b on every platform, and the Node binary itself is trusted through the
+SHA-256 in the script. Order: download Node and check its hash; download the release tarball,
+`SHA256SUMS` and `SHA256SUMS.minisig`; verify the signature on `SHA256SUMS` with the pinned key
+and check the signed comment says `tag:<this tag>`; check the tarball's SHA-256 against
+`SHA256SUMS`; only then unpack it. Any failure stops the install with nothing changed.
+
+Releases are built in CI by `.github/workflows/agent-release.yml` when an `agent-v*` tag is
+pushed: one tarball per target (`linux-x64`, `linux-arm64`, `darwin-arm64`, `darwin-x64`,
+`win-x64`), `SHA256SUMS`, and a signature made with the `AGENT_RELEASE_SIGNING_KEY` secret. The
+workflow checks the result with the installer's own verifier and pinned key before publishing.
+`scripts/set-release-signing-key.sh` creates the key, stores the private half as that secret
+(it is never written to disk) and pins the public half in the installers and on this page.
+
+### Release public key
+
+<!-- release-pubkey -->
+Not set yet: run `scripts/set-release-signing-key.sh`, which writes the key here.
+<!-- /release-pubkey -->
+
+### Verifying a release by hand
+
+With [minisign](https://jedisct1.github.io/minisign/) (`brew install minisign`,
+`apt install minisign`):
+
+```bash
+TAG=agent-v1.0.0; T=linux-x64     # or linux-arm64, darwin-arm64, darwin-x64, win-x64
+BASE=https://github.com/codyrs82/Edgecoder/releases/download/$TAG
+curl -fsSLO "$BASE/SHA256SUMS" -O "$BASE/SHA256SUMS.minisig" -O "$BASE/edgecoder-agent-$TAG-$T.tar.gz"
+minisign -Vm SHA256SUMS -P <release public key above>   # prints the trusted comment: tag:agent-v1.0.0 ...
+sha256sum -c SHA256SUMS --ignore-missing                  # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+Check that the trusted comment names the tag you downloaded. Without minisign, `node
+scripts/release/minisign.mjs verify SHA256SUMS <public key>` in a checkout does the same check.
+
+### Testing the installer
+
+`EDGECODER_INSECURE_TEST_ONLY_RELEASE_PUBKEY` replaces the pinned key. It exists only for
+`tests/install/signed-release.test.ts` and `tests/install-dryrun/run.sh`, which sign fixture
+releases with a throwaway key; the installer prints a warning when it is set. **Never set it on
+a real host**: whoever chooses that key chooses what the installer runs as root.
+`EDGECODER_RELEASE_BASE_URL` and `EDGECODER_RELEASE_API_URL` change where releases are fetched
+from, which cannot weaken the check.
 
 ## What gets created
 
