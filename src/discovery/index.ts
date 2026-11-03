@@ -8,7 +8,7 @@
 import { resolveDnsSeeds, discoveryDomainsFromEnv, type DnsResolver } from "./dns.js";
 import { fetchNostrAnnouncements, nostrRelaysFromEnv, type WsConnect } from "./nostr.js";
 import { applyStickiness, createCoordinatorSelector, rankCoordinators, type CoordinatorSelector, type FetchLike, type RankedCoordinator, type SelectorOptions } from "./selector.js";
-import { candidateFromAnnouncement, mergeCandidates, normalizeCoordinatorUrl, parseAnnouncement, verifyAnnouncement, type CoordinatorCandidate } from "./types.js";
+import { candidateFromAnnouncement, mergeCandidates, normalizeCoordinatorUrl, parseAnnouncement, pinMatchesKey, verifyAnnouncement, type CoordinatorCandidate } from "./types.js";
 
 export * from "./types.js";
 export * from "./dns.js";
@@ -26,6 +26,13 @@ export interface DiscoverOptions {
   relays?: string[] | false;
   /** Only accept Nostr events from these pubkeys (hex). */
   nostrAuthors?: string[];
+  /**
+   * Nostr announcements are self-signed, so anyone can publish one. Without nostrAuthors, Nostr is
+   * only queried when this filter exists (a candidate must pass it: a pinned or trusted key) or
+   * allowUnpinnedNostr is set (EDGECODER_NOSTR_ALLOW_UNPINNED=1).
+   */
+  acceptNostrCandidate?: (c: CoordinatorCandidate) => boolean;
+  allowUnpinnedNostr?: boolean;
   /** The coordinator currently in use; always included as a candidate. */
   currentUrl?: string;
   /** Ask each discovered coordinator for /discovery/peers (one hop). Default true. */
@@ -91,12 +98,20 @@ export async function discoverCoordinators(opts: DiscoverOptions = {}): Promise<
 
   const dnsPromise: Promise<CoordinatorCandidate[]> =
     opts.domain === false ? Promise.resolve([]) : resolveDnsSeeds({ domain: opts.domain, resolver: opts.resolver, timeoutMs }).catch(() => []);
-  const relays = opts.relays === false ? [] : opts.relays ?? nostrRelaysFromEnv();
+  const authorsSet = (opts.nostrAuthors?.length ?? 0) > 0;
+  const nostrFilter = authorsSet || opts.allowUnpinnedNostr === true ? undefined : opts.acceptNostrCandidate;
+  const nostrEnabled = authorsSet || opts.allowUnpinnedNostr === true || nostrFilter !== undefined;
+  const relays = opts.relays === false || !nostrEnabled ? [] : opts.relays ?? nostrRelaysFromEnv();
   const nostrPromise: Promise<CoordinatorCandidate[]> =
     relays.length === 0
       ? Promise.resolve([])
       : fetchNostrAnnouncements({ relays, timeoutMs, connect: opts.connect, authors: opts.nostrAuthors, verify: { now } })
-          .then((list) => list.map((a) => candidateFromAnnouncement(a, "nostr")).filter((c): c is CoordinatorCandidate => Boolean(c)))
+          .then((list) =>
+            list
+              .map((a) => candidateFromAnnouncement(a, "nostr"))
+              .filter((c): c is CoordinatorCandidate => Boolean(c))
+              .filter((c) => !nostrFilter || nostrFilter(c))
+          )
           .catch(() => []);
   const [fromDns, fromNostr] = await Promise.all([dnsPromise, nostrPromise]);
 
@@ -116,10 +131,23 @@ export type SelectOptions = DiscoverOptions &
     acceptCandidate?: (c: CoordinatorCandidate) => boolean;
   };
 
+/** Nostr candidates are usable without nostrAuthors only when their key is pinned or passes acceptCandidate. */
+function nostrPinFilter(opts: SelectOptions): ((c: CoordinatorCandidate) => boolean) | undefined {
+  // Key pins only: a pinned peerId alone does not authenticate a self-signed announcement.
+  const pins = (opts.pinnedKeys ?? []).map((p) => p.trim()).filter(Boolean);
+  const accept = opts.acceptCandidate;
+  if (pins.length === 0 && !accept) return undefined;
+  return (c) => {
+    if (!c.publicKeyPem) return false;
+    if (pins.some((pin) => pinMatchesKey(pin, c.publicKeyPem as string))) return true;
+    return accept ? accept(c) : false;
+  };
+}
+
 /** Discover, rank and pick one coordinator (stickiness against `currentUrl`). Null when none is healthy. */
 export async function selectCoordinator(opts: SelectOptions = {}): Promise<RankedCoordinator | null> {
   const accept = opts.acceptCandidate;
-  const candidates = (await discoverCoordinators(opts)).filter((c) => !accept || accept(c));
+  const candidates = (await discoverCoordinators({ ...opts, acceptNostrCandidate: opts.acceptNostrCandidate ?? nostrPinFilter(opts) })).filter((c) => !accept || accept(c));
   if (candidates.length === 0) return null;
   const ranked = await rankCoordinators({ ...opts, candidates });
   return applyStickiness(ranked, opts.currentUrl, opts.stickinessMargin);
@@ -166,6 +194,7 @@ export function selectOptionsFromEnv(o: EnvDiscoveryOptions = {}): SelectOptions
     domain: domainRaw === "off" || domainRaw === "0" || domainRaw === "false" ? false : discoveryDomainsFromEnv(env),
     relays: relaysRaw === "off" || relaysRaw === "0" || relaysRaw === "false" ? false : nostrRelaysFromEnv(env),
     nostrAuthors: authors.length > 0 ? authors : undefined,
+    allowUnpinnedNostr: ["1", "true", "yes"].includes((env.EDGECODER_NOSTR_ALLOW_UNPINNED ?? "").trim().toLowerCase()),
     currentUrl: o.currentUrl,
     meshToken: o.meshToken,
     portalToken: o.portalToken,

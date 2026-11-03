@@ -18,6 +18,7 @@ import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } f
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
+import { withNetworkTrustDefaults } from "../trust/seed-keys.js";
 import { CoordinatorTrustGate, PinnedKeyStore, challengePolicyFromEnv, describeTrustFailure, DEFAULT_TRUST_REVERIFY_MS } from "../trust/pinned-keys.js";
 import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
@@ -25,7 +26,7 @@ import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
-import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
+import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
@@ -45,12 +46,14 @@ const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
 // Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
-const coordinatorTrustStore = PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` });
+// On the edgecoder.io network the default is strict with the seeds' keys (src/trust/seed-keys.ts).
+const TRUST_ENV = withNetworkTrustDefaults(process.env);
+const coordinatorTrustStore = PinnedKeyStore.fromEnv(TRUST_ENV, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` });
 // Each coordinator URL must prove possession of its key (POST /identity/challenge); a verification
 // lasts EDGECODER_TRUST_REVERIFY_MS (default 10 min) and is redone on reconnect and URL changes.
 const coordinatorTrust = new CoordinatorTrustGate({
   store: coordinatorTrustStore,
-  challenge: challengePolicyFromEnv(process.env, coordinatorTrustStore.mode),
+  challenge: challengePolicyFromEnv(TRUST_ENV, coordinatorTrustStore.mode),
   reverifyMs: Number(process.env.EDGECODER_TRUST_REVERIFY_MS) > 0 ? Number(process.env.EDGECODER_TRUST_REVERIFY_MS) : DEFAULT_TRUST_REVERIFY_MS
 });
 {
@@ -649,6 +652,31 @@ async function flushOfflineLedger(): Promise<void> {
   }
 }
 
+/**
+ * The mesh only hears peers in its table. When bootstrap did not add the coordinator this WebSocket
+ * is connected to, add it from its /identity, but only with a key the trust store accepts for it.
+ */
+const coordinatorPeerLookups = new Map<string, number>();
+async function learnCoordinatorPeer(peer: MeshPeer, coordinatorUrl: string, fromPeerId: string): Promise<void> {
+  const key = `${coordinatorUrl}|${fromPeerId}`;
+  const last = coordinatorPeerLookups.get(key) ?? 0;
+  if (Date.now() - last < 60_000) return;
+  coordinatorPeerLookups.set(key, Date.now());
+  try {
+    const res = await request(`${coordinatorUrl.replace(/\/+$/, "")}/identity`, { method: "GET", headersTimeout: 8_000, bodyTimeout: 8_000 });
+    if (res.statusCode !== 200) {
+      await res.body.dump();
+      return;
+    }
+    const id = (await res.body.json()) as { peerId?: string; publicKeyPem?: string; networkMode?: string };
+    if (id.peerId !== fromPeerId || typeof id.publicKeyPem !== "string") return;
+    if (!coordinatorTrustStore.wouldTrust(id.peerId, id.publicKeyPem)) return;
+    peer.addPeer({ peerId: id.peerId, publicKeyPem: id.publicKeyPem, coordinatorUrl, networkMode: id.networkMode === "enterprise_overlay" ? "enterprise_overlay" : "public_mesh" }, "coordinator");
+  } catch {
+    // unknown sender stays unknown; its messages are dropped
+  }
+}
+
 function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   let reconnectDelay = 1000;
   const MAX_RECONNECT_DELAY = 30_000;
@@ -687,6 +715,9 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
             registeredPeerId = message.fromPeerId;
             peer.gossip.setWebSocketForPeer(message.fromPeerId, ws as any);
             console.log(`[agent:${AGENT_ID}] registered WS for outbound gossip to ${message.fromPeerId}`);
+          }
+          if (typeof message.fromPeerId === "string" && !peer.getPeer(message.fromPeerId)) {
+            await learnCoordinatorPeer(peer, coordinatorUrl, message.fromPeerId);
           }
           await peer.handleIngest(message);
         }
@@ -1168,13 +1199,17 @@ async function loop(): Promise<void> {
           };
           try {
             await reportStatus("starting", "Preparing to switch model…");
+            const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
+            // A coordinator may only name Ollama library models, and never installs the binary.
+            if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
             await ensureOllamaModelInstalled(
               {
                 enabled: hb.orchestration.provider === "ollama-local",
                 autoInstall: hb.orchestration.autoInstall,
-                model: hb.orchestration.model ?? OLLAMA_MODEL,
+                model: switchModel,
                 role: "agent",
-                host: OLLAMA_HOST
+                host: OLLAMA_HOST,
+                allowBinaryInstall: false
               },
               reportStatus
             );

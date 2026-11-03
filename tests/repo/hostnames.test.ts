@@ -13,6 +13,7 @@ const ALLOWED = [
   /export const DEFAULT_COORDINATOR_URL = /, // --coordinator-url / EDGECODER_COORDINATOR_URL overrides
   /export const DEFAULT_PORTAL_URL = /, // --portal-url / EDGECODER_PORTAL_URL overrides
   /export const DEFAULT_DOWNLOAD_DOMAINS = /, // MODEL_DOWNLOAD_DOMAINS overrides
+  /export const EDGECODER_NETWORK_DOMAIN = /, // scopes the seed keys to their own network; EDGECODER_TRUST_MODE / TRUSTED_COORDINATOR_KEYS override
   /: "support@edgecoder\.io";$/ // SUPPORT_EMAIL overrides (supportEmail fallback)
 ];
 

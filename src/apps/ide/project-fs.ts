@@ -8,10 +8,13 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync, existsSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isWithin, realPathEscape } from "./tool-executor.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
+
+/** O_NOFOLLOW where the platform has it (not on Windows, where reparse points are checked by realpath). */
+const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 
 /** Largest file the editor opens. Bigger files are listed but not loaded. */
 export const MAX_EDITOR_FILE_BYTES = 2 * 1024 * 1024;
@@ -65,6 +68,40 @@ export class ProjectFs {
     return abs;
   }
 
+  /**
+   * Open `abs` (from resolve()) without following a symlink at the final component, then check the
+   * file actually opened is the one inside the project: its realpath is under the root and the
+   * descriptor's dev/ino match it. A leaf symlink that stays inside the project is opened through
+   * its target. This closes the window between resolve()'s check and the open.
+   */
+  private openConfined(abs: string, flags: number): number {
+    let target = abs;
+    try {
+      if (lstatSync(abs).isSymbolicLink()) target = realpathSync(abs);
+    } catch {
+      // missing: opened (or created) at abs
+    }
+    let fd: number;
+    try {
+      fd = openSync(target, flags | O_NOFOLLOW, 0o666);
+    } catch (err) {
+      // ELOOP: the leaf became a symlink after the check.
+      if ((err as NodeJS.ErrnoException).code === "ELOOP") throw new ProjectFsError("escape", "path changed while it was opened");
+      throw err;
+    }
+    try {
+      const real = realpathSync(target);
+      if (!isWithin(this.rootReal, real) && !isWithin(this.root, real)) throw new ProjectFsError("escape", "path left the project while it was opened");
+      const opened = fstatSync(fd);
+      const onDisk = statSync(real);
+      if (opened.dev !== onDisk.dev || opened.ino !== onDisk.ino) throw new ProjectFsError("escape", "path changed while it was opened");
+      return fd;
+    } catch (err) {
+      closeSync(fd);
+      throw err;
+    }
+  }
+
   private rel(abs: string): string {
     return relative(this.root, abs).split(sep).join("/");
   }
@@ -112,7 +149,16 @@ export class ProjectFs {
     const st = statSync(abs);
     if (!st.isFile()) throw new ProjectFsError("not_a_file", `not a file: ${relPath}`);
     if (st.size > MAX_EDITOR_FILE_BYTES) throw new ProjectFsError("too_large", `file is ${st.size} bytes; the editor opens files up to ${MAX_EDITOR_FILE_BYTES}`);
-    const buf = readFileSync(abs);
+    const fd = this.openConfined(abs, fsConstants.O_RDONLY);
+    let buf: Buffer;
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile()) throw new ProjectFsError("not_a_file", `not a file: ${relPath}`);
+      if (opened.size > MAX_EDITOR_FILE_BYTES) throw new ProjectFsError("too_large", `file is ${opened.size} bytes; the editor opens files up to ${MAX_EDITOR_FILE_BYTES}`);
+      buf = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     if (buf.subarray(0, 8000).includes(0)) throw new ProjectFsError("binary", `binary file: ${relPath}`);
     return { path: this.rel(abs), content: buf.toString("utf8"), mtimeMs: st.mtimeMs, size: st.size };
   }
@@ -132,8 +178,17 @@ export class ProjectFs {
     } else {
       mkdirSync(dirname(abs), { recursive: true });
     }
-    writeFileSync(abs, content, "utf8");
-    return { path: this.rel(abs), mtimeMs: statSync(abs).mtimeMs };
+    const fd = this.openConfined(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT);
+    try {
+      if (!fstatSync(fd).isFile()) throw new ProjectFsError("not_a_file", `not a file: ${relPath}`);
+      ftruncateSync(fd, 0);
+      const data = Buffer.from(content, "utf8");
+      let off = 0;
+      while (off < data.length) off += writeSync(fd, data, off, data.length - off, off);
+      return { path: this.rel(abs), mtimeMs: fstatSync(fd).mtimeMs };
+    } finally {
+      closeSync(fd);
+    }
   }
 
   create(relPath: string, kind: "file" | "dir"): FsEntry {

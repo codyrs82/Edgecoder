@@ -69,3 +69,21 @@ export function hardenedGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Pr
 export function gitExecEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return hardenedGitEnv({ ...process.env, ...extra });
 }
+
+/** Env var the GitHub credential helper reads the token from. */
+export const GIT_TOKEN_ENV = "EDGECODER_GIT_TOKEN";
+
+/**
+ * gitExecEnv plus a github.com credential helper that answers with the token from GIT_TOKEN_ENV.
+ * The helper is passed as GIT_CONFIG_KEY/VALUE and expands the variable itself, so the token is in
+ * neither argv nor the config value.
+ */
+export function githubTokenCredentialEnv(token: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = hardenedGitEnv({ ...base, [GIT_TOKEN_ENV]: token });
+  let n = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10) || 0;
+  env[`GIT_CONFIG_KEY_${n}`] = "credential.https://github.com.helper";
+  env[`GIT_CONFIG_VALUE_${n}`] = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$${GIT_TOKEN_ENV}"; }; f`;
+  n++;
+  env.GIT_CONFIG_COUNT = String(n);
+  return env;
+}

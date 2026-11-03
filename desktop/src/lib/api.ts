@@ -628,17 +628,69 @@ function oauthPortalBase(): string {
   return defaultEndpoints().portal;
 }
 
-export function getOAuthStartUrl(provider: "google" | "microsoft" | "github"): string {
-  const redirect = encodeURIComponent("edgecoder://oauth-callback");
-  return `${oauthPortalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}`;
+// Login CSRF guard: each OAuth start gets a random verifier kept in this window's sessionStorage; the
+// portal binds sha256(verifier) (appChallenge) to the one-time token it puts on the deep link, and
+// /auth/oauth/mobile/complete only redeems the token with the matching verifier. A callback the app
+// did not start (no pending verifier) is ignored.
+const OAUTH_PENDING_KEY = "edgecoder.oauthPending";
+const OAUTH_PENDING_TTL_MS = 10 * 60 * 1000;
+
+function base64Url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+export async function oauthChallengeFor(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return base64Url(new Uint8Array(digest));
+}
+
+/** The verifier of the OAuth flow this app started, if one is pending and fresh. */
+export function pendingOAuthVerifier(now: number = Date.now()): string | null {
+  try {
+    const raw = sessionStorage.getItem(OAUTH_PENDING_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as { verifier?: unknown; startedAtMs?: unknown };
+    if (typeof p.verifier !== "string" || typeof p.startedAtMs !== "number") return null;
+    if (now - p.startedAtMs > OAUTH_PENDING_TTL_MS || now < p.startedAtMs) {
+      sessionStorage.removeItem(OAUTH_PENDING_KEY);
+      return null;
+    }
+    return p.verifier;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingOAuth(): void {
+  try {
+    sessionStorage.removeItem(OAUTH_PENDING_KEY);
+  } catch {
+    // storage unavailable
+  }
+}
+
+export async function getOAuthStartUrl(provider: "google" | "microsoft" | "github"): Promise<string> {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const verifier = base64Url(bytes);
+  sessionStorage.setItem(OAUTH_PENDING_KEY, JSON.stringify({ verifier, startedAtMs: Date.now() }));
+  const redirect = encodeURIComponent("edgecoder://oauth-callback");
+  const challenge = encodeURIComponent(await oauthChallengeFor(verifier));
+  return `${oauthPortalBase()}/auth/oauth/${provider}/start?appRedirect=${redirect}&appChallenge=${challenge}`;
+}
+
+/** Redeem the deep link's one-time token with this app's pending verifier (used once). */
 export async function completeOAuthWithToken(mobileToken: string): Promise<AuthUser> {
+  const verifier = pendingOAuthVerifier();
+  if (!verifier) throw new Error("No sign-in was started from this app");
+  clearPendingOAuth();
   const res = await fetch(`${oauthPortalBase()}/auth/oauth/mobile/complete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ token: mobileToken }),
+    body: JSON.stringify({ token: mobileToken, verifier }),
   });
   if (!res.ok) throw new Error("OAuth sign-in failed");
   const data = await res.json();

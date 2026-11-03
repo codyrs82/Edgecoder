@@ -26,6 +26,19 @@ describe("announcement store", () => {
     expect(store.list()[0].announcedAtMs).toBe(NOW);
   });
 
+  it("keeps a peerId bound to its first key until that entry expires", () => {
+    let now = NOW;
+    const store = createAnnouncementStore({ now: () => now, maxAgeMs: 1000 });
+    const imposter = createPeerKeys("coord-imposter");
+    const forged = (at: number) =>
+      signAnnouncement({ peerId: peer.peerId, publicKeyPem: imposter.publicKeyPem, url: "https://evil.example", region: "fra", services: ["swarm"], computeClasses: [], version: "1", announcedAtMs: at }, imposter.privateKeyPem);
+    expect(store.upsert(peerAnnouncement(NOW))).toBe(true);
+    expect(store.upsert(forged(NOW + 10))).toBe(false);
+    expect(store.list()[0].url).toBe("https://peer.example");
+    now = NOW + 1500;
+    expect(store.upsert(forged(now))).toBe(true); // the original expired
+  });
+
   it("prunes stale entries", () => {
     let now = NOW;
     const store = createAnnouncementStore({ now: () => now, maxAgeMs: 1000 });

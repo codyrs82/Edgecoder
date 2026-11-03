@@ -22,6 +22,26 @@ export interface OllamaInstallOptions {
   host?: string;
   /** Caller passes AGENT_OS value. Derived from os.platform() if absent. */
   platform?: OllamaPlatform;
+  /** Install the Ollama binary when it is missing (default true). Coordinator-directed switches pass false. */
+  allowBinaryInstall?: boolean;
+}
+
+/**
+ * Model names a coordinator may ask an agent to pull: Ollama library names only, `name[:tag]` or
+ * `namespace/name[:tag]`. A first segment with '.' or ':' names another registry host and is refused.
+ */
+const OLLAMA_SEGMENT = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+const OLLAMA_TAG = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+export function isOllamaLibraryModelName(model: unknown): model is string {
+  if (typeof model !== "string" || model.length === 0 || model.length > 200) return false;
+  const colon = model.indexOf(":");
+  const name = colon >= 0 ? model.slice(0, colon) : model;
+  const tag = colon >= 0 ? model.slice(colon + 1) : undefined;
+  if (tag !== undefined && !OLLAMA_TAG.test(tag)) return false;
+  const segs = name.split("/");
+  if (segs.length > 2) return false;
+  if (segs.length === 2 && segs[0].includes(".")) return false;
+  return segs.every((s) => OLLAMA_SEGMENT.test(s));
 }
 
 export type OllamaStatusCallback = (phase: string, message: string, progressPct?: number) => void | Promise<void>;
@@ -309,6 +329,9 @@ export async function ensureOllamaModelInstalled(
 
   // Phase 2: Install binary if missing
   const installed = await isOllamaInstalled(serveEnv);
+  if (!installed && options.allowBinaryInstall === false) {
+    throw new Error(`[${role}] ollama_not_installed: install Ollama on this host first`);
+  }
   if (!installed) {
     await installOllamaBinary(platform, role, onStatus);
     const nowInstalled = await isOllamaInstalled(serveEnv);

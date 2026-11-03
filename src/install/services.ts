@@ -359,9 +359,10 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
     run("systemctl", ["restart", ...result.services]);
   } else if (host.platform === "darwin") {
     for (const inst of plan.instances) {
-      for (const [label, content] of [[`io.edgecoder.ollama.${inst.index}`, launchdOllamaPlist(p, inst)], [`io.edgecoder.agent.${inst.index}`, launchdAgentPlist(p, inst)]] as const) {
+      // The agent plist carries MESH_AUTH_TOKEN and AGENT_REGISTRATION_TOKEN: root-only (launchd reads it as root).
+      for (const [label, content, mode] of [[`io.edgecoder.ollama.${inst.index}`, launchdOllamaPlist(p, inst), 0o644], [`io.edgecoder.agent.${inst.index}`, launchdAgentPlist(p, inst), 0o600]] as const) {
         const path = `/Library/LaunchDaemons/${label}.plist`;
-        write(path, content, 0o644);
+        write(path, content, mode);
         result.services.push(label);
         run("launchctl", ["bootout", "system", path]);
         run("launchctl", ["bootstrap", "system", path]);

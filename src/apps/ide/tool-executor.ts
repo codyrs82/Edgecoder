@@ -13,7 +13,7 @@ import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
-import { gitExecEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
+import { gitExecEnv, githubTokenCredentialEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 import { findGh, ghCredentialConfig } from "./git-setup.js";
 
 // ---------------------------------------------------------------------------
@@ -380,6 +380,23 @@ export interface PullRequestPlan {
   commits: number;
   /** Changed files that aren't committed (not part of the PR). */
   uncommitted: number;
+}
+
+/**
+ * Model-supplied git arguments that git would read as options (`--upload-pack=...`, `--output=...`)
+ * are refused; refs, remotes and branch names never start with '-'.
+ */
+export function rejectGitOptionArgs(values: Record<string, string>): ToolResult | null {
+  for (const [name, value] of Object.entries(values)) {
+    if (value && (value.startsWith("-") || value.includes("\0"))) return { error: `invalid ${name}: "${value.slice(0, 80)}" looks like an option` };
+  }
+  return null;
+}
+
+/** git_log count: an integer from 1 to 500 (default 10). */
+export function clampLogCount(raw: unknown): number {
+  const n = typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw) : 10;
+  return Math.min(500, Math.max(1, n));
 }
 
 export class ToolExecutor {
@@ -782,6 +799,8 @@ export class ToolExecutor {
   private gitDiff(args: Record<string, unknown>): ToolResult {
     const ref = typeof args.ref === "string" ? args.ref : "";
     const filePath = typeof args.path === "string" ? args.path : "";
+    const bad = rejectGitOptionArgs({ ref });
+    if (bad) return bad;
 
     const gitArgs = ["diff"];
     if (ref) gitArgs.push(ref);
@@ -807,12 +826,13 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private gitLog(args: Record<string, unknown>): ToolResult {
-    const count =
-      typeof args.count === "number" ? args.count : 10;
+    const count = clampLogCount(args.count);
     const ref = typeof args.ref === "string" ? args.ref : "";
+    const bad = rejectGitOptionArgs({ ref });
+    if (bad) return bad;
 
     const gitArgs = ["log", "--oneline", "-n", `${count}`];
-    if (ref) gitArgs.push(ref);
+    if (ref) gitArgs.push(ref, "--");
 
     try {
       const out = execFileSync("git", hardenedGitArgs(gitArgs), {
@@ -844,7 +864,7 @@ export class ToolExecutor {
     try {
       // Stage files — split on whitespace to pass as separate arguments
       const fileList = files.split(/\s+/).filter(Boolean);
-      execFileSync("git", hardenedGitArgs(["add", ...fileList]), {
+      execFileSync("git", hardenedGitArgs(["add", "--", ...fileList]), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -873,6 +893,8 @@ export class ToolExecutor {
   private gitBranch(args: Record<string, unknown>): ToolResult {
     const name = typeof args.name === "string" ? args.name : "";
     const create = args.create === true;
+    const bad = rejectGitOptionArgs({ name });
+    if (bad) return bad;
 
     try {
       if (!name) {
@@ -888,7 +910,7 @@ export class ToolExecutor {
 
       const gitArgs = create
         ? ["checkout", "-b", name]
-        : ["checkout", name];
+        : ["checkout", name, "--"];
 
       const out = execFileSync("git", hardenedGitArgs(gitArgs), {
         env: gitExecEnv(),
@@ -909,15 +931,10 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private execGitAuth(gitArgs: string[], timeoutMs = 60_000): string {
-    const args: string[] = [];
-    if (this.githubToken) {
-      // Inject a one-shot credential helper that echoes the token as HTTPS password
-      const helper = `!f() { echo "protocol=https"; echo "host=github.com"; echo "username=x-access-token"; echo "password=${this.githubToken}"; }; f`;
-      args.push("-c", `credential.helper=${helper}`);
-    }
-    args.push(...gitArgs);
-    return execFileSync("git", hardenedGitArgs(args), {
-        env: gitExecEnv(),
+    // The token reaches git through the environment (a credential helper that reads it from an env
+    // var), never through argv, where other local users can see it.
+    return execFileSync("git", hardenedGitArgs(gitArgs), {
+      env: this.githubToken ? githubTokenCredentialEnv(this.githubToken) : gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
       timeout: timeoutMs,
@@ -930,8 +947,10 @@ export class ToolExecutor {
 
   private gitFetch(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
+    const bad = rejectGitOptionArgs({ remote });
+    if (bad) return bad;
     try {
-      const out = this.execGitAuth(["fetch", remote]);
+      const out = this.execGitAuth(["fetch", "--end-of-options", remote]);
       return { result: out || `Fetched from ${remote}` };
     } catch (err) {
       return { error: err instanceof Error ? err.message : "git fetch failed" };
@@ -946,10 +965,12 @@ export class ToolExecutor {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
     const setUpstream = args.setUpstream === true;
+    const bad = rejectGitOptionArgs({ remote, branch });
+    if (bad) return bad;
 
     const gitArgs = ["push"];
     if (setUpstream) gitArgs.push("--set-upstream");
-    gitArgs.push(remote);
+    gitArgs.push("--end-of-options", remote);
     if (branch) gitArgs.push(branch);
 
     try {
@@ -967,8 +988,10 @@ export class ToolExecutor {
   private gitPull(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
+    const bad = rejectGitOptionArgs({ remote, branch });
+    if (bad) return bad;
 
-    const gitArgs = ["pull", remote];
+    const gitArgs = ["pull", "--end-of-options", remote];
     if (branch) gitArgs.push(branch);
 
     try {

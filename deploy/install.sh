@@ -94,14 +94,17 @@ ensure_node() {
 ensure_ollama() {
   if command -v ollama >/dev/null 2>&1; then return; fi
   log "Installing Ollama"
+  # A private temp dir (mktemp -d, mode 0700), not fixed /tmp names another user could pre-create.
+  local otmp; otmp="$(mktemp -d)"
   if [ "$OS" = "Darwin" ]; then
     if command -v brew >/dev/null 2>&1; then sudo -u "${SUDO_USER:-$(whoami)}" brew install ollama >/dev/null
-    else curl -fsSL https://ollama.com/download/Ollama-darwin.zip -o /tmp/ollama.zip && ditto -x -k /tmp/ollama.zip /Applications && ln -sf /Applications/Ollama.app/Contents/Resources/ollama /usr/local/bin/ollama; fi
+    else curl -fsSL https://ollama.com/download/Ollama-darwin.zip -o "$otmp/ollama.zip" && ditto -x -k "$otmp/ollama.zip" /Applications && ln -sf /Applications/Ollama.app/Contents/Resources/ollama /usr/local/bin/ollama; fi
   else
     # Quiet on success; on failure show Ollama's own output (it prints its errors on stdout).
-    curl -fsSL https://ollama.com/install.sh | sh >/tmp/edgecoder-ollama-install.log 2>&1 || { cat /tmp/edgecoder-ollama-install.log >&2; die "Ollama install failed"; }
+    curl -fsSL https://ollama.com/install.sh | sh >"$otmp/ollama-install.log" 2>&1 || { cat "$otmp/ollama-install.log" >&2; rm -rf "$otmp"; die "Ollama install failed"; }
     systemctl disable --now ollama >/dev/null 2>&1 || true   # EdgeCoder runs its own per-GPU instances
   fi
+  rm -rf "$otmp"
 }
 
 # --------------------------------------------------------------- Docker ----

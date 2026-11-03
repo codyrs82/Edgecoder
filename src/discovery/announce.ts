@@ -38,6 +38,8 @@ export function createAnnouncementStore(opts: { maxAgeMs?: number; max?: number;
       if (!verifyAnnouncement(a, { maxAgeMs: maxAge, now }).ok) return false;
       const prev = byPeer.get(a.peerId);
       if (prev && prev.announcedAtMs >= a.announcedAtMs) return false;
+      // A peerId stays bound to the key it was first announced with until that entry expires.
+      if (prev && now() - prev.announcedAtMs <= maxAge && prev.publicKeyPem.replace(/\s+/g, "") !== a.publicKeyPem.replace(/\s+/g, "")) return false;
       byPeer.set(a.peerId, a);
       prune();
       return true;
