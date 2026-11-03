@@ -25,7 +25,8 @@ const COMPOSE_FILES = [
   "deploy/infra/docker-compose.yml",
   "docker-compose.yml",
   "tests/e2e/docker-compose.e2e.yml",
-  "tests/e2e/docker-compose.scale.yml"
+  "tests/e2e/docker-compose.scale.yml",
+  "tests/e2e/docker-compose.lnd-regtest.yml"
 ];
 
 const composeImages = COMPOSE_FILES.flatMap((f) =>
