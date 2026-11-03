@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { getProjectsFolder } from "./repo-connect.js";
 
 /** The projects folder (Settings → General), default ~/EdgeCoder. */
@@ -29,7 +30,7 @@ export function createNewProject(name: string): string {
   for (let n = 2; existsSync(dir); n++) dir = join(home, `${base}-${n}`);
   mkdirSync(dir);
   try {
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, stdio: "ignore", timeout: 10_000 });
+    execFileSync("git", hardenedGitArgs(["init", "-q", "-b", "main"]), { env: gitExecEnv(), cwd: dir, stdio: "ignore", timeout: 10_000 });
   } catch {
     // git missing: still a usable folder
   }

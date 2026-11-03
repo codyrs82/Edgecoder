@@ -10,6 +10,7 @@
 
 import { execFile } from "node:child_process";
 import { ProjectFs, ProjectFsError } from "./project-fs.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { GitSetupError, ghCreateRepo, ghCredentialConfig, validGitHubRepoName } from "./git-setup.js";
 
 export interface GitFile {
@@ -57,8 +58,8 @@ export class GitOps {
     return new Promise((resolve, reject) => {
       const child = execFile(
         "git",
-        args,
-        { cwd: this.root, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+        hardenedGitArgs(args),
+        { cwd: this.root, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0" }) },
         (err, stdout, stderr) => {
           if (err) reject(new GitError((stderr || err.message).trim()));
           else resolve(stdout);

@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { GitSetupError, findGh, ghCredentialConfig, normalizeRemoteUrl, repoNameFromUrl, validFolderName } from "./git-setup.js";
 
 // --- The projects folder ----------------------------------------------------------------------
@@ -125,9 +126,9 @@ type Progress = (line: string) => void;
 
 function git(args: string[], opts: { cwd?: string; timeoutMs?: number; onProgress?: Progress } = {}): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("git", ["-c", "protocol.ext.allow=never", ...args], {
+    const child = spawn("git", hardenedGitArgs(args), {
       cwd: opts.cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GIT_ASKPASS: "", SSH_ASKPASS: "" },
+      env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GIT_ASKPASS: "", SSH_ASKPASS: "" }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
@@ -319,7 +320,7 @@ export async function recentGitHubRepos(limit = 20): Promise<string[]> {
   if (!gh) return [];
   const out = await new Promise<string>((res) => {
     const child = spawn(gh, ["repo", "list", "--limit", String(limit), "--json", "nameWithOwner"], {
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
+      env: gitExecEnv({ GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" }),
       stdio: ["ignore", "pipe", "ignore"],
     });
     let s = "";

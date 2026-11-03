@@ -162,6 +162,31 @@ describe("connecting a repository", () => {
     expect(text(join(projects, "widgets", "README.md"))).toBe("two\n");
   });
 
+  it.skipIf(process.platform === "win32")("status and pull ignore a planted core.fsmonitor and hooks", async () => {
+    const r = remote("widgets");
+    await connectRepoUrl(r.bare, { projectsFolder: projects });
+    const local = join(projects, "widgets");
+    const fsmonitorMarker = join(tmp, "fsmonitor-ran");
+    const hookMarker = join(tmp, "hook-ran");
+    git(local, "config", "core.fsmonitor", `touch '${fsmonitorMarker}'; false`);
+    for (const hook of ["post-merge", "post-checkout", "reference-transaction"]) {
+      writeFileSync(join(local, ".git", "hooks", hook), `#!/bin/sh\ntouch '${hookMarker}'\n`, { mode: 0o755 });
+    }
+    r.commit("README.md", "two\n");
+    const c = await connectRepoUrl(r.bare, { projectsFolder: projects });
+    expect(c).toMatchObject({ action: "updated", dirty: false, fastForwarded: true });
+    expect(text(join(local, "README.md"))).toBe("two\n");
+    expect(existsSync(fsmonitorMarker)).toBe(false);
+    expect(existsSync(hookMarker)).toBe(false);
+    // Control: plain git in the same repo does run the planted fsmonitor.
+    try {
+      git(local, "status", "--porcelain");
+    } catch {
+      // the fsmonitor command fails on purpose
+    }
+    expect(existsSync(fsmonitorMarker)).toBe(true);
+  });
+
   it("leaves a dirty copy alone and reports it and how far behind it is", async () => {
     const r = remote("widgets");
     await connectRepoUrl(r.bare, { projectsFolder: projects });
