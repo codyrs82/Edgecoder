@@ -793,6 +793,14 @@ async function loop(): Promise<void> {
   // Initialize BLE mesh transport for local peer discovery
   let bleMesh: BLEMeshManager | null = null;
   let bleTransport: NobleBLETransport | null = null;
+  /** Use the mesh token a coordinator's /register response provisions (heartbeats and pulls need it). */
+  function adoptMeshToken(token: unknown): void {
+    if (typeof token !== "string" || token.length === 0 || token === meshAuthToken) return;
+    meshAuthToken = token;
+    console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+    if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
+    if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+  }
   // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
   if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
   if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
@@ -984,14 +992,7 @@ async function loop(): Promise<void> {
           };
           registeredWithUrl = activeCoordinatorUrl;
           lastRegisteredAtMs = Date.now();
-          if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
-            if (meshAuthToken !== registerResponse.meshToken) {
-              meshAuthToken = registerResponse.meshToken;
-              console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-              if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
-              if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
-            }
-          }
+          adoptMeshToken(registerResponse.meshToken);
         }
 
         const hbStart = Date.now();
@@ -1471,7 +1472,10 @@ async function loop(): Promise<void> {
               powerTelemetry,
               publicKeyPem: keys.publicKeyPem
             };
-            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true });
+            // Keep the mesh token from this register too: an agent that went offline before its first
+            // registration has none, and without it every heartbeat is refused (mesh_unauthorized).
+            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string };
+            adoptMeshToken(probeRegister.meshToken);
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
             await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;
