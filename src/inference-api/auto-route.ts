@@ -7,8 +7,8 @@
  * 1. Size the job: does it need tools or a long context (an agent turn), or is it a short
  *    question? That sets the smallest model that will do it well.
  * 2. Rank where it can run, cheapest first: a machine you already reserved (prepaid), this
- *    computer (free), your other machines (free), then network classes by expected cost:
- *    price per second times how long that hardware takes for the job, not the price alone.
+ *    computer (free), your other machines (free), then the network. Network model calls are
+ *    priced per token (the same on every class), so among classes the fastest comes first.
  * 3. Return the ranked list; the caller tries them in order (a place that can't start falls
  *    through to the next).
  */
@@ -113,9 +113,9 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
     if (price === undefined) continue;
     const model = bestModel(inp.networkModels.filter((m) => m.classes.includes(cls)).map((m) => m.model), w);
     if (!model) continue;
-    // Expected cost for this job: price per second x time, time growing with model size over class speed.
-    const cost = (price * paramsB(model)) / CLASS_SPEED[cls];
-    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (${price} cSats/s, cheapest for this job) · ${model}` });
+    // Same token price on every class: the faster one finishes sooner for the same cSats.
+    const cost = 1 / CLASS_SPEED[cls];
+    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (per-token price, fastest available) · ${model}` });
   }
   net.sort((a, b) => a.cost - b.cost);
   for (const { cost: _c, ...r } of net) out.push(r);

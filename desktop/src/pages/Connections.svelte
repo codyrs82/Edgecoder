@@ -129,6 +129,9 @@
   }
 
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 3 });
+
+  /** A reserved connection whose reservation is no longer active: its requests fail. */
+  const leaseEnded = (c: Connection) => c.target === "reserved" && !loading && !leases.some((l) => l.id === c.reservationId && l.endMs > Date.now());
   const mask = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 
   // Setup steps for the selected connection
@@ -221,6 +224,18 @@
           </div>
         </div>
         {#if shownKeys[c.id]}<div class="sp-row"><code>{c.key}</code></div>{/if}
+        {#if leaseEnded(c)}
+          <div class="sp-row warn-row">
+            <div class="sp-text">
+              <span class="sp-title sp-warn">Its reservation has ended</span>
+              <span class="sp-desc">Tools using "{c.name}" get an error until you point it somewhere else. Auto keeps the same address and key.</span>
+            </div>
+            <div class="sp-controls">
+              <button class="primary small" onclick={() => patch(c, { target: "auto", model: "auto" })}>Switch to Auto</button>
+              <button class="small" onclick={() => onNavigate?.("compute")}>Reserve again</button>
+            </div>
+          </div>
+        {/if}
       {/each}
 
       {#if creating}
@@ -338,6 +353,7 @@
 
 <style>
   .conn.selected { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .warn-row { background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); }
   .conn-main {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;

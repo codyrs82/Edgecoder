@@ -77,5 +77,13 @@ export function choiceLabel(id: string | undefined): { model: string; where: str
   return { model: shortModel(c.model), where };
 }
 
+/** What a reply that ran on this choice says when the server didn't report cost (free places only). */
+export function freeReplyUsage(id: string | undefined): { cSats: number; where: string } | undefined {
+  const c = parseChoice(id);
+  if (c.where !== "auto" && c.where !== "local" && c.where !== "mine") return undefined;
+  const l = choiceLabel(id);
+  return { cSats: 0, where: l.model === "Auto" ? l.where : `${l.where} · ${l.model}` };
+}
+
 /** Whether replies on this choice cost cSats. */
 export const isBilled = (id: string | undefined) => ["network", "anywhere"].includes(parseChoice(id).where);

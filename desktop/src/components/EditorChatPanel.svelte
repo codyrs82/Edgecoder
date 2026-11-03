@@ -3,7 +3,7 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import ComputePicker from "./ComputePicker.svelte";
-  import { computeChoice } from "../lib/compute-choice";
+  import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
   import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
@@ -18,7 +18,7 @@
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
   } from "../lib/chat-store";
-  import type { Conversation, ToolEvent } from "../lib/types";
+  import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
   interface FileContext {
     path: string;
@@ -46,6 +46,7 @@
     autoApply = autoApplyEdits(projectRoot);
   });
   let streamingTurnId: string | undefined = $state(undefined);
+  let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
   let githubToken: string | null = null;
 
@@ -170,18 +171,20 @@
         if (preface) apiMessages[apiMessages.length - 1] = { role: "user", content: `${preface}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
+        streamingUsage = undefined;
         streamingChanged = [];
         await streamIdeChat(
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
             const { turn, filesChanged } = applyAgentEvent(
-              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged },
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
               event,
             );
             if (turn.text !== streamingContent) streamingContent = turn.text;
             if (turn.toolEvents !== streamingToolEvents) streamingToolEvents = turn.toolEvents;
             streamingTurnId = turn.turnId;
+            streamingUsage = turn.usage;
             if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
             if (filesChanged) onFilesChanged?.();
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
@@ -244,6 +247,8 @@
     addMessage(conversation, "assistant", content);
     const last = conversation.messages[conversation.messages.length - 1];
     if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
+    const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
+    if (last && usage) last.usage = usage;
     if (last && streamingTurnId && streamingChanged.length > 0) {
       last.turnId = streamingTurnId;
       last.changedFiles = [...streamingChanged];
@@ -380,6 +385,7 @@
             networkTaskId={msg.networkTaskId}
             turnId={msg.turnId}
             changedFiles={msg.changedFiles}
+            usage={msg.usage}
             onFilesReverted={onFilesChanged}
             {onOpenPath}
             {onPreview}

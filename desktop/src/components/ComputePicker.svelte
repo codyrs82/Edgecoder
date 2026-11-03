@@ -62,7 +62,6 @@
     return [...counts.entries()].map(([model, machines]) => ({ model, machines })).filter((x) => match(x.model));
   });
   let networkModels = $derived((overview?.models ?? []).filter((m) => match(m.model)));
-  let priceOf = (cls: string) => overview?.classes?.[cls]?.cSatsPerSecondBaseTier;
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -140,18 +139,18 @@
         {/if}
 
         {#if networkModels.length}
-          <div class="group"><Globe size={12} /> Network <span class="tag">cSats per second</span></div>
+          <div class="group"><Globe size={12} /> Network <span class="tag">cSats per million tokens</span></div>
           {#each networkModels as m}
             <div class="net-row">
               <div class="net-head">
                 <span class="name">{shortModel(m.model)}</span>
-                <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}</span>
+                <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
               </div>
               <div class="chips">
                 {#each CLASSES.filter((c) => c === "any" || m.classes.includes(c)) as cls}
                   {@const id = choiceId({ where: "network", model: m.model, computeClass: cls })}
-                  <button class="chip" class:active={selected === id} onclick={() => pick(id)} title={cls === "any" ? "Any machine that has it" : `${CLASS_LABELS[cls]}: ${priceOf(cls) ?? "?"} cSats/s on the base tier`}>
-                    {CLASS_LABELS[cls]}{#if cls !== "any" && priceOf(cls) !== undefined}<span class="price">{priceOf(cls)}/s</span>{/if}
+                  <button class="chip" class:active={selected === id} onclick={() => pick(id)} title={cls === "any" ? "Any machine that has it (the fastest free one)" : `Only ${CLASS_LABELS[cls]} machines; same price per token, different speed`}>
+                    {CLASS_LABELS[cls]}
                   </button>
                 {/each}
               </div>
@@ -215,7 +214,6 @@
   }
   .chip:hover { color: var(--text-primary); border-color: var(--text-secondary); }
   .chip.active { background: var(--accent); border-color: var(--accent); color: #111; }
-  .chip .price { opacity: 0.75; font-variant-numeric: tabular-nums; }
   .note { padding: 10px 8px; color: var(--text-secondary); font-size: 12px; }
   .footer { display: flex; gap: 4px; padding: 6px; border-top: 0.5px solid var(--border); }
   .footer button {

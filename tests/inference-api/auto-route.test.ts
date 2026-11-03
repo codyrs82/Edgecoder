@@ -37,15 +37,15 @@ describe("auto routing", () => {
       networkModels: [{ model: "qwen2.5-coder:14b", classes: ["cpu", "apple", "gpu", "gpu.dc"] }],
     });
     expect(routes.map((r) => r.placement)).toEqual(["reserved", "local", "mine", "network", "network", "network"]);
-    // GPU beats Apple and datacenter on cost for the same job, and CPU is skipped for agent work.
-    expect(routes.filter((r) => r.placement === "network").map((r) => r.computeClass)).toEqual(["gpu", "apple", "gpu.dc"]);
+    // Per-token prices are the same on every class, so the fastest comes first; CPU is skipped for agent work.
+    expect(routes.filter((r) => r.placement === "network").map((r) => r.computeClass)).toEqual(["gpu.dc", "gpu", "apple"]);
     expect(routeModelId(routes[0])).toBe("reserved/r1/qwen2.5-coder:14b");
   });
 
-  it("sends a quick task to the cheapest machine, CPU included, when nothing free fits", () => {
+  it("sends a quick task to the network when nothing free fits, CPU allowed after faster classes", () => {
     const routes = rankRoutes(light, { ...base, localModels: ["qwen2.5-coder:0.5b"], networkModels: [{ model: "qwen2.5-coder:1.5b", classes: ["cpu", "gpu"] }] });
-    expect(routes.map((r) => `${r.placement}:${r.computeClass ?? ""}`)).toEqual(["network:cpu", "network:gpu"]);
-    expect(routeModelId(routes[0])).toBe("network/qwen2.5-coder:1.5b@cpu");
+    expect(routes.map((r) => `${r.placement}:${r.computeClass ?? ""}`)).toEqual(["network:gpu", "network:cpu"]);
+    expect(routeModelId(routes[0])).toBe("network/qwen2.5-coder:1.5b@gpu");
   });
 
   it("returns nothing when no model anywhere fits", () => {

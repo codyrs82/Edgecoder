@@ -86,7 +86,8 @@ import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
 import { NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
-import { clampToBand, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
+import { clampToBand, cSatsPerMTokens, inferenceCostMsat, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
+import { paramsB } from "../inference-api/auto-route.js";
 import { InferenceStreams } from "./inference-streams.js";
 import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
@@ -108,6 +109,7 @@ import {
   type ComputeClassId,
   type HardwareClassification,
   type HardwareProfile, satsPerCreditForClass } from "../economy/compute-classes.js";
+import { MemoryUsageStore, summarizeUsage, type UsageRecord } from "../economy/usage.js";
 import { ReservationBook, RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES, reservationPriceMsat, type Reservation, type ReservationEndReason } from "../economy/reservations.js";
 import { ComputeOrderBook, capabilityConstraints, clampToClassReference, meetsCapability, type AskCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
@@ -277,6 +279,22 @@ interface TaskBilling {
   refunded: boolean;
 }
 const taskBilling = new Map<string, TaskBilling>();
+/** Usage records being filled in (keyed by task) until the task settles; then saved. */
+const usagePending = new Map<string, UsageRecord>();
+const memoryUsage = new MemoryUsageStore();
+async function saveUsage(r: UsageRecord): Promise<void> {
+  if (pgStore) await pgStore.insertUsage(r).catch((err) => app.log.warn({ err, id: r.id }, "usage_save_failed"));
+  else memoryUsage.add(r);
+}
+/** A result arrived: which agent and class ran it, for how long (summed over a task's subtasks). */
+function noteUsageRun(taskId: string, agentId: string, ok: boolean, durationMs: number, computeClass?: string): void {
+  const u = usagePending.get(taskId);
+  if (!u) return;
+  u.agentId = agentId;
+  u.ok = ok;
+  u.durationMs += Math.max(0, durationMs);
+  if (computeClass) u.computeClass = computeClass;
+}
 /** Reserved-capacity leases: an account holds one agent for a set time, paid up front. */
 const reservations = new ReservationBook();
 
@@ -2643,6 +2661,8 @@ const minGbParam = z.number().positive().max(4096).optional();
 const taskSchema = z.object({
   taskId: z.string(),
   prompt: z.string().min(1),
+  /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
+  source: z.string().max(80).optional(),
   language: z.enum(["python", "javascript"]).default("python"),
   snapshotRef: z.string().min(1).refine(isValidSnapshotRef, {
     message: "snapshotRef must be a 40-char hex commit hash or an https:// tarball URL"
@@ -3068,6 +3088,7 @@ app.post("/submit", async (req, reply) => {
       const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
       await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId);
       taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
+      usagePending.set(body.taskId, { id: body.taskId, accountId: body.submitterAccountId, atMs: Date.now(), kind: "job", placement: "network", computeClass: early.computeClass ?? undefined, ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.startsWith("insufficient_credits")) {
@@ -3429,6 +3450,7 @@ function enqueueReplica(req: ReplicaRequest): void {
 async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void> {
   const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
+  noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
   // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
   // records the credits actually accrued by the pricing formula, so balances reconcile.
   if (!r.ok) return;
@@ -3462,7 +3484,23 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
   void modality;
   const perCredit = clampToBand(trade?.msatPerCredit, classRefMsatPerCredit(computeClass));
   const rateMsat = ratePerSecondMsat(perCredit, hardwareWeight);
-  const costMsat = jobCostMsat(durationMs, rateMsat);
+  // Model calls are priced per token (tied to the market, with a power floor); code jobs per second.
+  const perSecondCostMsat = jobCostMsat(durationMs, rateMsat);
+  const usageForTask = usagePending.get(taskId);
+  const priced =
+    subtask.kind === "inference"
+      ? inferenceCostMsat({
+          promptTokens: usageForTask?.promptTokens,
+          outputTokens: usageForTask?.outputTokens,
+          paramsB: paramsB(subtask.requestedModel ?? ""),
+          btcUsd: latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
+          durationMs,
+          computeClass,
+          tierWeight: hardwareWeight,
+          perSecondCostMsat,
+        })
+      : { costMsat: perSecondCostMsat, basis: "per_second" as const };
+  const costMsat = priced.costMsat;
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
   const accrued = await accruePricedJob(
@@ -3500,6 +3538,7 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
         msat: accrued.msat,
         costMsat,
         feeMsat,
+        pricingBasis: priced.basis,
         ratePerSecondMsat: rateMsat,
         msatPerCredit: valuation?.msatPerCredit,
         networkFeeBps: valuation?.networkFeeBps,
@@ -3724,6 +3763,12 @@ async function refundTaskSubmit(taskId: string): Promise<boolean> {
       const unusedMsat = Math.max(0, billing.reservedMsat - billing.costMsat);
       if (unusedMsat > 0) await grantCreditsIdempotent(billing.accountId, msatToCSats(unusedMsat), `task_submit_refund:${taskId}`, txId);
       billing.refunded = true;
+      const usage = usagePending.get(taskId);
+      if (usage) {
+        usagePending.delete(taskId);
+        usage.costMsat = billing.costMsat;
+        void saveUsage(usage);
+      }
       taskBilling.delete(taskId);
       return true;
     } catch (err) {
@@ -3933,6 +3978,8 @@ const inferenceSubmitSchema = z.object({
   target: z.enum(["network", "mine"]).default("network"),
   /** Run on the agent a reserved-capacity lease holds (the lease pays). */
   reservationId: z.string().min(1).max(100).optional(),
+  /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
+  source: z.string().max(80).optional(),
 });
 
 /**
@@ -4044,6 +4091,10 @@ async function endReservation(id: string, reason: ReservationEndReason, atMs = D
     app.log.error({ err, reservationId: r.id }, "reservation_settle_failed");
   }
   app.log.info({ reservationId: r.id, reason, usedMsat: used, refundMsat: r.refundMsat }, "reservation_ended");
+  void saveUsage({
+    id: `usage-${r.id}`, accountId: r.accountId, atMs: r.startMs, kind: "reservation", placement: "reserved", computeClass: r.computeClass,
+    agentId: r.agentId, ...(r.model ? { model: r.model } : {}), source: "Reservation", ok: true, durationMs: heldSeconds * 1000, costMsat: used,
+  });
   return r;
 }
 
@@ -4051,7 +4102,20 @@ setInterval(async () => {
   const now = Date.now();
   for (const { r, reason } of reservations.due(now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs)) await endReservation(r.id, reason, now);
   reservations.prune(now);
+  // Usage records whose task never settled (lost, timed out without a result): drop after a day.
+  for (const [id, u] of usagePending) if (now - u.atMs > 86_400_000) usagePending.delete(id);
 }, 30_000).unref?.();
+
+/** Your usage over the last N days: totals, per day, per model / class / source / placement, newest records. */
+app.post("/account/usage", async (req, reply) => {
+  const body = z.object({ accountId: z.string().max(200).optional(), days: z.number().int().min(1).max(90).default(30) }).parse(req.body ?? {});
+  const caller = await callerAccount(req, "/account/usage", body.accountId);
+  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  const now = Date.now();
+  const since = now - body.days * 86_400_000;
+  const records = pgStore ? await pgStore.listUsage(caller.accountId, since) : memoryUsage.forAccount(caller.accountId, since);
+  return reply.send(summarizeUsage(records, since, now));
+});
 
 /** Your leases, and what you could reserve now per class (cheapest agent and how many are free). */
 app.post("/account/reservations/list", async (req, reply) => {
@@ -4131,7 +4195,10 @@ app.get("/inference/models", async () => {
     (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).map((c) => [c, { label: rateOracleConfig.computeClasses[c].label, cSatsPerSecondBaseTier: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(c), 1)) }])
   );
   return {
-    models: [...byModel.entries()].map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes] })).sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
+    // Model calls are priced per token: cSats per million tokens in and out, by model size.
+    models: [...byModel.entries()]
+      .map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
+      .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
     classes,
   };
 });
@@ -4176,6 +4243,10 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
     }
   }
   taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
+  usagePending.set(body.taskId, {
+    id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
+    model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),
+  });
   const marketBid = billed ? orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {}) : undefined;
   const subtask = queue.enqueueSubtask({
     taskId: body.taskId,
@@ -4200,9 +4271,25 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
 app.post("/inference/chunks", async (req, reply) => {
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/inference/chunks", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
   if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-  const body = z.object({ subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(), toolCalls: z.array(z.unknown()).max(64).optional() }).parse(req.body);
+  const body = z
+    .object({
+      subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(),
+      toolCalls: z.array(z.unknown()).max(64).optional(),
+      // Token counts from the model, with the last piece (for the usage page; not billed on).
+      promptTokens: z.number().int().min(0).max(10_000_000).optional(),
+      outputTokens: z.number().int().min(0).max(10_000_000).optional(),
+    })
+    .parse(req.body);
   if (queue.getClaim(body.subtaskId)?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
   const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
+  if (body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+    const claimTask = queue.getClaim(body.subtaskId)?.subtask.taskId;
+    const u = claimTask ? usagePending.get(claimTask) : undefined;
+    if (u) {
+      u.promptTokens = (u.promptTokens ?? 0) + (body.promptTokens ?? 0);
+      u.outputTokens = (u.outputTokens ?? 0) + (body.outputTokens ?? 0);
+    }
+  }
   return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
 });
 

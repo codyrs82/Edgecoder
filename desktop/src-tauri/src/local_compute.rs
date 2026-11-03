@@ -209,6 +209,25 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// Parallel request slots for the Ollama the app starts: 4 with 32 GB or more, 2 with 16 GB, else 1
+/// (matches the agent's parallelInferenceFor).
+pub fn ollama_parallel_for(total_bytes: u64) -> u32 {
+    let gb = total_bytes as f64 / 1_073_741_824.0;
+    if gb >= 31.0 {
+        4
+    } else if gb >= 15.0 {
+        2
+    } else {
+        1
+    }
+}
+
+fn total_memory_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.total_memory()
+}
+
 /// Version of the binary from `ollama --version`. With a server running it prints the *server's*
 /// version first ("ollama version is 0.40.7" + "Warning: client version is 0.40.13"), so the
 /// client line wins when present.
@@ -963,6 +982,11 @@ impl Manager {
         });
         let mut cmd = Command::new(bin);
         cmd.arg("serve").env("OLLAMA_HOST", format!("127.0.0.1:{port}")).stdin(Stdio::null());
+        // Serve several requests at once (the agent runs as many model calls side by side;
+        // src/swarm/parallelism.ts): more tokens per second, cheaper tokens. A user setting wins.
+        if std::env::var_os("OLLAMA_NUM_PARALLEL").is_none() {
+            cmd.env("OLLAMA_NUM_PARALLEL", ollama_parallel_for(total_memory_bytes()).to_string());
+        }
         if let Some(f) = log_file("ollama.log") {
             if let Ok(e) = f.try_clone() {
                 cmd.stdout(f).stderr(e);
@@ -1346,6 +1370,14 @@ fn install_file(src: &Path, dest: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ollama_parallel_slots_follow_memory() {
+        let gb = 1_073_741_824u64;
+        assert_eq!(super::ollama_parallel_for(8 * gb), 1);
+        assert_eq!(super::ollama_parallel_for(16 * gb), 2);
+        assert_eq!(super::ollama_parallel_for(32 * gb), 4);
+    }
+
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {

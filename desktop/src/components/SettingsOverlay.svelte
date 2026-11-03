@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Search, Settings2, UserRound, CreditCard, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
+  import { ArrowLeft, Search, Settings2, UserRound, CreditCard, BarChart3, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
   import "../styles/settings-page.css";
   import Account from "../pages/Account.svelte";
   import Integrations from "../pages/Integrations.svelte";
@@ -9,6 +9,7 @@
   import ModelManager from "../pages/ModelManager.svelte";
   import Credits from "../pages/Credits.svelte";
   import PlanUsage from "../pages/PlanUsage.svelte";
+  import Usage from "../pages/Usage.svelte";
   import ComputeMarket from "../pages/ComputeMarket.svelte";
   import Connections from "../pages/Connections.svelte";
   import TaskQueue from "../pages/TaskQueue.svelte";
@@ -34,6 +35,7 @@
     { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
     { id: "plan", label: "Plan & usage", icon: CreditCard, group: 1, keywords: "csats buy balance lightning invoice billing activity" },
+    { id: "usage", label: "Usage", icon: BarChart3, group: 1, keywords: "spend cost tokens budget requests history csv export chart" },
     { id: "compute", label: "Compute", icon: Cpu, group: 1, keywords: "reserve gpu cpu apple machines prices market" },
     { id: "connect", label: "Connect your tools", icon: Plug, group: 1, keywords: "claude code cursor continue cline aider zed api key port connection openai anthropic" },
     { id: "models", label: "Models", icon: Boxes, group: 2, keywords: "ollama install download" },
@@ -125,6 +127,8 @@
       <Account {user} {onLogout} {onUserChange} />
     {:else if activeSectionId === "plan"}
       <PlanUsage />
+    {:else if activeSectionId === "usage"}
+      <Usage />
     {:else if activeSectionId === "compute"}
       <ComputeMarket onNavigate={go} />
     {:else if activeSectionId === "connect"}

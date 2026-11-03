@@ -75,7 +75,7 @@ export class ConnectionManager {
       ollamaHost: string;
       network?: NetworkDeps;
       /** Auto routing (cheapest place that fits each request), when this machine offers it. */
-      auto?: () => ChatBackend;
+      auto?: (source: string) => ChatBackend;
       file?: string;
       log?: (msg: string, extra?: unknown) => void;
     },
@@ -197,7 +197,7 @@ export class ConnectionManager {
   backendFor(c: Connection): ChatBackend {
     const inner =
       c.target === "auto"
-        ? this.deps.auto!()
+        ? this.deps.auto!(c.name)
         : c.target === "local"
         ? localBackend(this.deps.ollamaHost, c.model)
         : networkBackend(this.deps.network!, {
@@ -206,6 +206,7 @@ export class ConnectionManager {
             ...(c.target === "mine" ? { target: "mine" as const } : {}),
             ...(c.target === "reserved" ? { reservationId: c.reservationId } : {}),
             ...(c.target === "network" && c.maxCSatsPerSecond ? { maxCSatsPerSecond: c.maxCSatsPerSecond } : {}),
+            source: c.name,
           });
     const self = this;
     return async function* (req, signal) {

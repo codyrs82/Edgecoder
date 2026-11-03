@@ -63,3 +63,15 @@ describe("editor-store paths", () => {
     expect(parentDir("a.ts")).toBe("");
   });
 });
+
+describe("reply usage", () => {
+  it("adds up cost across a turn's model calls and keeps where Auto ran", async () => {
+    const { applyAgentEvent } = await import("../src/lib/agent-events");
+    let turn = { text: "", toolEvents: [] } as Parameters<typeof applyAgentEvent>[0];
+    turn = applyAgentEvent(turn, { type: "status", message: "Auto: network gpu (0.043 cSats/s, cheapest for this job) · qwen2.5-coder:14b" }).turn;
+    turn = applyAgentEvent(turn, { type: "usage", cSats: 0.25, where: "network gpu · qwen2.5-coder:14b" }).turn;
+    turn = applyAgentEvent(turn, { type: "usage", cSats: 0.125 }).turn;
+    expect(turn.usage).toEqual({ cSats: 0.375, where: "network gpu · qwen2.5-coder:14b" });
+    expect(applyAgentEvent(turn, { type: "status", message: "Thinking" }).turn.usage).toEqual(turn.usage);
+  });
+});

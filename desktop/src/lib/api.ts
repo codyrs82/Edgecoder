@@ -979,7 +979,7 @@ export async function ideSendToolApproval(id: string, approved: boolean): Promis
 }
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "done";
   [key: string]: unknown;
 }
 
@@ -1239,7 +1239,8 @@ export interface ComputeOverview {
     coordinator?: { peerId: string; url: string };
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
-  models?: Array<{ model: string; agents: number; classes: string[] }>;
+  /** Network models; model calls are priced per token (cSats per million tokens in / out). */
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
 }
 export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
 export const computeBuy = (amountSats: number) =>
@@ -1315,6 +1316,35 @@ export const listReservations = () => fsCall<ReservationOptions>("GET", "/v1/ide
 export const createReservation = (r: { computeClass: string; minutes: number; model?: string }) =>
   fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations", r).then((x) => x.reservation);
 export const cancelReservation = (reservationId: string) => fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations/cancel", { reservationId }).then((x) => x.reservation);
+
+// Usage: what you ran, where, and what it cost (coordinator usage records, via :4304 /v1/ide/usage)
+export interface UsageRecord {
+  id: string;
+  atMs: number;
+  kind: "inference" | "job" | "reservation";
+  placement: "network" | "mine" | "reserved";
+  model?: string;
+  computeClass?: string;
+  agentId?: string;
+  source?: string;
+  ok: boolean;
+  durationMs: number;
+  costMsat: number;
+  promptTokens?: number;
+  outputTokens?: number;
+}
+export interface UsageSlice { key: string; requests: number; cSats: number; seconds: number; promptTokens: number; outputTokens: number }
+export interface UsageSummary {
+  sinceMs: number;
+  totals: { requests: number; cSats: number; seconds: number; failed: number; promptTokens: number; outputTokens: number };
+  byDay: Array<{ day: string; requests: number; cSats: number }>;
+  byModel: UsageSlice[];
+  byClass: UsageSlice[];
+  bySource: UsageSlice[];
+  byPlacement: UsageSlice[];
+  records: UsageRecord[];
+}
+export const getUsage = (days: number) => fsCall<UsageSummary>("GET", `/v1/ide/usage?days=${days}`);
 
 /** A page on the web portal (opens in the browser). */
 export const portalWebUrl = (path = "") => `${portalBase()}${path}`;

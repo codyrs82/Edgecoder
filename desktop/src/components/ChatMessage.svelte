@@ -25,8 +25,10 @@
     onOpenPath?: (path: string) => void;
     networkTaskId?: string;
     onPreview?: (path: string) => void;
+    /** What the reply cost and where it ran. */
+    usage?: { cSats: number; where?: string };
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -84,6 +86,11 @@
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
       {/if}
+      {#if usage && !streaming}
+        <div class="reply-usage" title="Where this reply ran and what it cost">
+          {usage.where ?? "Network"} · {usage.cSats > 0 ? `${usage.cSats.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats` : "free"}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -120,5 +127,10 @@
   }
   .message:hover {
     opacity: 1;
+  }
+  .reply-usage {
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: var(--text-muted, var(--text-secondary));
   }
 </style>

@@ -30,7 +30,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
@@ -148,17 +148,18 @@ async function routeInputsHere(): Promise<RouteInputs> {
   return inputs;
 }
 
-function runRoute(r: Route): ChatBackend {
+function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
   if (r.placement === "local" || !networkDeps) return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
   return networkBackend(networkDeps, {
     model: r.model,
     computeClass: r.placement === "network" ? r.computeClass ?? "any" : "any",
     ...(r.placement === "mine" ? { target: "mine" as const } : {}),
     ...(r.placement === "reserved" ? { reservationId: r.reservationId } : {}),
+    source,
   });
 }
 
-const autoHere = (onRoute?: (r: Route) => void) => autoBackend({ inputs: routeInputsHere, run: runRoute, onRoute });
+const autoHere = (onRoute?: (r: Route) => void, source?: string) => autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute });
 
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
@@ -706,7 +707,7 @@ app.post("/v1/ide/compute/intent", async (req, reply) => {
 const connections = new ConnectionManager({
   ollamaHost: process.env.OLLAMA_HOST || "http://127.0.0.1:11434",
   network: networkDeps ?? undefined,
-  auto: () => autoHere(),
+  auto: (source) => autoHere(undefined, source),
   log: (msg, extra) => app.log.warn({ extra }, msg),
 });
 app.addHook("onReady", async () => {
@@ -778,6 +779,13 @@ app.post("/v1/ide/reservations", async (req, reply) => {
   return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
 });
 
+app.get("/v1/ide/usage", async (req, reply) => {
+  if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
+  const { days } = z.object({ days: z.coerce.number().int().min(1).max(90).default(30) }).parse(req.query ?? {});
+  const r = await usageSummary(networkDeps, days);
+  return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
+});
+
 app.post("/v1/ide/reservations/cancel", async (req, reply) => {
   if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
   const { reservationId } = z.object({ reservationId: z.string().min(1).max(100) }).parse(req.body);
@@ -797,7 +805,7 @@ registerCompatRoutes(
       const network = parseNetworkModel(model);
       if (network) {
         if (!networkDeps) return { status: 409, error: "This computer's agent isn't connected to the network." };
-        return { backend: networkBackend(networkDeps, network), model };
+        return { backend: networkBackend(networkDeps, { ...network, source: "localhost:4304" }), model };
       }
       return { backend: localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", model), model };
     },
@@ -849,7 +857,7 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     const backend = autoHere((r) => {
       where = r.reason;
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
-    });
+    }, "EdgeCoder chat");
     return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
   }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
@@ -859,6 +867,7 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     computeClass: compute.target === "network" ? compute.computeClass ?? "any" : "any",
     ...(compute.target === "mine" ? { target: "mine" as const } : {}),
     ...(compute.target === "reserved" ? { reservationId: compute.reservationId } : {}),
+    source: "EdgeCoder chat",
   });
   return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
 }
