@@ -67,7 +67,6 @@ app.get("/portal/dashboard", async (_req, reply) => {
       </div>
     </div>
     <!-- Account Overview KPIs -->
-    <div id="adminOpsSection" class="hidden">
     <div class="card">
       <h2 style="margin-top:0;">Account overview</h2>
       <div id="accountMeta" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
@@ -78,6 +77,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
         <div class="kpi"><div class="label">Tasks today</div><div class="value" id="tasksToday">--</div></div>
       </div>
     </div>
+    <div id="adminOpsSection" class="hidden">
     </div>
     <div id="emailVerifyCard" class="callout warn hidden">
       <h3>Email verification required</h3>
@@ -190,6 +190,26 @@ app.get("/portal/dashboard", async (_req, reply) => {
       document.getElementById("statusAgentsText").textContent = String(agentCount);
       agDot.className = agentCount > 0 ? "status-dot green" : "status-dot gray";
     }
+
+    /* ── Status cards (every signed-in user; operators also get them from refreshOps) ── */
+    async function refreshStatus() {
+      const s = await api("/dashboard/network-status", { method: "GET", headers: {} });
+      document.getElementById("statusCoordinator").className = "status-dot " + (s.coordinatorOnline ? "green" : "red");
+      document.getElementById("statusCoordinatorText").textContent = s.coordinatorOnline ? "Online" : "Unreachable";
+      const agents = Number(s.agents || 0);
+      document.getElementById("statusInference").className = "status-dot " + (!s.coordinatorOnline ? "gray" : agents > 0 ? "green" : "yellow");
+      document.getElementById("statusInferenceText").textContent = !s.coordinatorOnline ? "Unknown" : agents > 0 ? "Healthy" : "No agents";
+      document.getElementById("statusAgents").className = "status-dot " + (agents > 0 ? "green" : "gray");
+      document.getElementById("statusAgentsText").textContent = String(agents);
+    }
+    function refreshStatusSafe() {
+      refreshStatus().catch(() => {
+        document.getElementById("statusCoordinatorText").textContent = "Unavailable";
+        document.getElementById("statusInferenceText").textContent = "Unavailable";
+      });
+    }
+    refreshStatusSafe();
+    setInterval(refreshStatusSafe, 30000);
 
     /* ── Dashboard main load ── */
     function timeAgo(ms) {

@@ -46,6 +46,7 @@ const API_ROUTES: Array<[string, string]> = [
   ["GET", "/nodes/discover-coordinator"],
   ["GET", "/nodes/me"],
   ["GET", "/dashboard/summary"],
+  ["GET", "/dashboard/network-status"],
   ["GET", "/dashboard/network-insights"],
   ["GET", "/coordinator/ops/summary"],
   ["GET", "/coordinator/ops/agent-diagnostics"],
