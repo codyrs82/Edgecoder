@@ -3,6 +3,8 @@
   import { focusTrap } from "../lib/focus-trap";
   import { createBot, updateBot, getBot, botErrorText } from "../lib/api";
   import ComputePicker from "./ComputePicker.svelte";
+  import BotAvatar from "./BotAvatar.svelte";
+  import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
   import { BOT_TOOL_GROUPS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, SCHEDULE_PRESETS, botCompute, groupsOf, toolsFor, type Bot, type ComputePolicy } from "../lib/bots";
 
   interface Props {
@@ -37,6 +39,11 @@
     else if (id === undefined) policy = "local_only";
     else computeModel = id;
   }
+  // The avatar: follows the name until you pick a color or shape.
+  let pickedColor = $state<string | null>(initial?.color ?? null);
+  let pickedShape = $state<AvatarShape | null>((initial?.avatarShape as AvatarShape | undefined) ?? null);
+  const avatarColor = $derived(pickedColor ?? colorFromName(name || "bot"));
+  const avatarShape = $derived<AvatarShape>(pickedShape ?? shapeFor({ name: name || "bot" }));
   let memory = $state("");
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -77,6 +84,8 @@
       allowedTools: toolsFor(groups),
       autoApproveEdits,
       compute: policy === "model" ? { policy, model: computeModel } : { policy },
+      color: avatarColor,
+      avatarShape,
     };
     saving = true;
     try {
@@ -108,6 +117,23 @@
           <span class="sp-text"><span class="sp-title">Role</span><span class="sp-desc">Shown next to its name.</span></span>
           <input type="text" bind:value={role} placeholder="Engineer" maxlength="80" />
         </label>
+        <div class="sp-row bf-look">
+          <BotAvatar name={name || "Bot"} color={avatarColor} shape={avatarShape} size={56} />
+          <div class="bf-look-controls">
+            <div class="bf-swatches" role="radiogroup" aria-label="Color">
+              {#each AVATAR_COLORS as c (c)}
+                <button type="button" class="bf-swatch" role="radio" aria-checked={avatarColor === c} aria-label="Color {c}" style="background: {c}" onclick={() => (pickedColor = c)}></button>
+              {/each}
+            </div>
+            <div class="bf-shapes" role="radiogroup" aria-label="Shape">
+              {#each AVATAR_SHAPES as s (s)}
+                <button type="button" class="bf-shape" role="radio" aria-checked={avatarShape === s} aria-label={AVATAR_SHAPE_LABELS[s]} title={AVATAR_SHAPE_LABELS[s]} onclick={() => (pickedShape = s)}>
+                  <BotAvatar name={name || "Bot"} color={avatarColor} shape={s} size={30} decorative />
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
         <label class="sp-row stack">
           <span class="sp-text"><span class="sp-title">Instructions</span><span class="sp-desc">Its job, added to the agent's instructions on every run.</span></span>
           <textarea bind:value={instructions} rows="5" maxlength="8000" placeholder="Keep the test suite green. Each run: run the tests, fix what fails, and tell me what you changed."></textarea>
@@ -254,6 +280,47 @@
   }
   .bf-num {
     width: 120px;
+  }
+  .bf-look {
+    gap: 16px;
+  }
+  .bf-look-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .bf-swatches,
+  .bf-shapes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .bf-swatches .bf-swatch {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  }
+  .bf-swatches .bf-swatch[aria-checked="true"] {
+    border-color: var(--text-primary);
+  }
+  .bf-shapes .bf-shape {
+    display: inline-flex;
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-base);
+  }
+  .bf-shapes .bf-shape[aria-checked="true"] {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-base));
+  }
+  .bf-swatch:focus-visible,
+  .bf-shape:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .bf-soon {
     opacity: 0.55;
