@@ -14,7 +14,73 @@ import type { Subtask } from "../common/types.js";
  * - no replica result before timeoutMs (e.g. no other agents online) -> timeout: the original
  *   result is accepted unverified, so single-node meshes aren't starved.
  * Sampling rate rises as an agent's reputation falls: p = min(1, rate * (2 - reputation)).
+ *
+ * #104: only some subtask kinds can be verified this way, each with its own comparator
+ * (see COMPARATORS). LLM generations ("inference") have no sound comparator: two honest runs
+ * produce different text, and fuzzy text similarity would be a target to game. They are
+ * never sampled, whatever the configuration says.
  */
+
+export type SubtaskKind = Subtask["kind"];
+
+/**
+ * #104: equivalence key for one execution. Two executions agree when their keys are equal.
+ * A comparator must only treat as equal results that a cheater can't produce without doing the work.
+ */
+export type ResultComparator = (r: { ok: boolean; output: string }) => string;
+
+/**
+ * #104: execution comparator for code kinds (micro_loop, single_step). Their reported result is
+ * not model text: it is the sandbox run of the generated program, i.e. its exit status (`ok`) and
+ * stdout. The key is the exit status plus stdout normalized for formatting noise that varies
+ * between honest hosts (CRLF, trailing whitespace on each line, leading and trailing blank lines).
+ * Nothing else is relaxed: a different printed value is a mismatch.
+ */
+export function executionResultKey(r: { ok: boolean; output: string }): string {
+  const body = (r.output ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .trim();
+  return createHash("sha256").update(`${r.ok ? 1 : 0}\n${body}`).digest("hex");
+}
+
+/**
+ * #104: comparator per kind. A kind mapped to null is never verified: it can't be put in
+ * RESULT_VERIFICATION_KINDS, and shouldVerify always returns false for it.
+ */
+export const COMPARATORS: Record<SubtaskKind, ResultComparator | null> = {
+  micro_loop: executionResultKey,
+  single_step: executionResultKey,
+  // LLM text generation: non-deterministic, no comparator. Never exact-matched.
+  inference: null
+};
+
+export function isVerifiableKind(kind: string): kind is SubtaskKind {
+  return Object.prototype.hasOwnProperty.call(COMPARATORS, kind) && COMPARATORS[kind as SubtaskKind] !== null;
+}
+
+/** Kinds that have a comparator (the default for RESULT_VERIFICATION_KINDS). */
+export const VERIFIABLE_KINDS: SubtaskKind[] = (Object.keys(COMPARATORS) as SubtaskKind[]).filter(isVerifiableKind);
+
+/**
+ * #104: parse RESULT_VERIFICATION_KINDS (comma-separated). Unset or empty -> every verifiable kind.
+ * "none" -> no kind. Unknown kinds and kinds without a comparator (inference) are dropped and
+ * returned in `rejected` so the coordinator can warn.
+ */
+export function parseVerificationKinds(raw: string | undefined): { kinds: SubtaskKind[]; rejected: string[] } {
+  const v = (raw ?? "").trim();
+  if (v === "") return { kinds: [...VERIFIABLE_KINDS], rejected: [] };
+  if (v.toLowerCase() === "none") return { kinds: [], rejected: [] };
+  const kinds: SubtaskKind[] = [];
+  const rejected: string[] = [];
+  for (const k of v.split(",").map((x) => x.trim()).filter(Boolean)) {
+    if (isVerifiableKind(k)) { if (!kinds.includes(k)) kinds.push(k); }
+    else rejected.push(k);
+  }
+  return { kinds, rejected };
+}
 
 export interface VerificationConfig {
   /** Base fraction of subtasks re-executed (0..1). */
@@ -43,6 +109,11 @@ export interface VerificationConfig {
    * until minting is explicitly decided; the original execution is still paid as usual.
    */
   mintReplicaRewards: boolean;
+  /**
+   * #104: subtask kinds eligible for sampling (RESULT_VERIFICATION_KINDS). Kinds without a
+   * comparator (inference) are ignored even if listed.
+   */
+  kinds: SubtaskKind[];
 }
 
 /**
@@ -54,8 +125,10 @@ export interface VerificationConfig {
  */
 export const MAX_EXECUTIONS_CAP = 3;
 
-// Default rate 0 (opt-in): most swarm work is LLM generation, whose outputs differ between
-// honest runs, so exact-match verification must be enabled only for deterministic workloads.
+// Default rate 0 (opt-in). Even with a rate set, only kinds with a comparator are sampled
+// (#104): code kinds compare exit status + stdout; LLM inference is never verified. Rate stays 0
+// by default because generated programs can still print differently between honest runs, and
+// paying replicas (minting) is an open economic decision (#114).
 export const DEFAULT_VERIFICATION: VerificationConfig = {
   rate: 0,
   maxExecutions: 3,
@@ -66,7 +139,8 @@ export const DEFAULT_VERIFICATION: VerificationConfig = {
   abandonPenalty: 0.25,
   replicaClaimTimeoutMs: 5 * 60_000,
   maxReassignments: 1,
-  mintReplicaRewards: false
+  mintReplicaRewards: false,
+  kinds: [...VERIFIABLE_KINDS]
 };
 
 export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VerificationConfig {
@@ -85,7 +159,8 @@ export function verificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
     replicaClaimTimeoutMs: num("RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS", DEFAULT_VERIFICATION.replicaClaimTimeoutMs, (n) => n >= 10_000),
     maxReassignments: num("RESULT_VERIFICATION_MAX_REASSIGNMENTS", DEFAULT_VERIFICATION.maxReassignments, (n) => Number.isInteger(n) && n >= 0 && n <= 10),
     initialReputation: num("RESULT_VERIFICATION_INITIAL_REPUTATION", DEFAULT_VERIFICATION.initialReputation, (n) => n >= 0 && n <= 1),
-    mintReplicaRewards: /^(1|true|yes)$/i.test((env.RESULT_VERIFICATION_MINT_REPLICA_REWARDS ?? "").trim())
+    mintReplicaRewards: /^(1|true|yes)$/i.test((env.RESULT_VERIFICATION_MINT_REPLICA_REWARDS ?? "").trim()),
+    kinds: parseVerificationKinds(env.RESULT_VERIFICATION_KINDS).kinds
   };
 }
 
@@ -101,11 +176,19 @@ export function payableWinners<T>(
 }
 
 /** #114: startup warning text when verification is on, or null when there's nothing to warn about. */
-export function verificationStartupWarning(cfg: Pick<VerificationConfig, "rate" | "mintReplicaRewards">): string | null {
+export function verificationStartupWarning(cfg: Pick<VerificationConfig, "rate" | "mintReplicaRewards"> & { kinds?: SubtaskKind[] }): string | null {
   if (!(cfg.rate > 0)) return null;
+  const kinds = cfg.kinds ? ` for kinds [${cfg.kinds.join(", ")}] (inference is never verified)` : "";
   return cfg.mintReplicaRewards
-    ? `result verification rate ${cfg.rate} > 0 with RESULT_VERIFICATION_MINT_REPLICA_REWARDS on: winning replicas are paid from newly minted credits`
-    : `result verification rate ${cfg.rate} > 0: winning replicas are NOT paid (RESULT_VERIFICATION_MINT_REPLICA_REWARDS is off)`;
+    ? `result verification rate ${cfg.rate} > 0${kinds} with RESULT_VERIFICATION_MINT_REPLICA_REWARDS on: winning replicas are paid from newly minted credits`
+    : `result verification rate ${cfg.rate} > 0${kinds}: winning replicas are NOT paid (RESULT_VERIFICATION_MINT_REPLICA_REWARDS is off)`;
+}
+
+/** #104: startup warning for RESULT_VERIFICATION_KINDS entries that were dropped, or null. */
+export function verificationKindsWarning(env: NodeJS.ProcessEnv = process.env): string | null {
+  const { rejected } = parseVerificationKinds(env.RESULT_VERIFICATION_KINDS);
+  if (rejected.length === 0) return null;
+  return `RESULT_VERIFICATION_KINDS: ignoring [${rejected.join(", ")}]; only kinds with a comparator can be verified (${VERIFIABLE_KINDS.join(", ")}); LLM inference output is never exact-match compared`;
 }
 
 export interface ExecutionResult<T = unknown> {
@@ -124,10 +207,14 @@ export interface ExecutionResult<T = unknown> {
   meta: T;
 }
 
-/** Comparison key: ok flag + output with line endings and surrounding whitespace normalized. */
-export function resultKey(r: { ok: boolean; output: string }): string {
-  const body = (r.output ?? "").replace(/\r\n/g, "\n").trim();
-  return createHash("sha256").update(`${r.ok ? 1 : 0}\n${body}`).digest("hex");
+/**
+ * Comparison key for a subtask kind. Throws for a kind with no comparator: such a
+ * subtask must never have been sampled.
+ */
+export function resultKey(r: { ok: boolean; output: string }, kind: SubtaskKind = "single_step"): string {
+  const cmp = COMPARATORS[kind];
+  if (!cmp) throw new Error(`no result comparator for subtask kind ${kind}`);
+  return cmp(r);
 }
 
 export interface ReplicaRequest {
@@ -175,6 +262,13 @@ export class ResultVerifier<T = unknown> {
   ) {
     this.cfg = { ...DEFAULT_VERIFICATION, ...cfg };
     this.cfg.maxExecutions = Math.max(2, Math.min(MAX_EXECUTIONS_CAP, Math.floor(this.cfg.maxExecutions)));
+    // #104: a kind without a comparator can't be enabled, whatever the caller passed.
+    this.cfg.kinds = (this.cfg.kinds ?? []).filter(isVerifiableKind);
+  }
+
+  /** #104: whether results of this subtask kind may be sampled. */
+  verifiesKind(kind: SubtaskKind): boolean {
+    return this.cfg.kinds.includes(kind) && COMPARATORS[kind] !== null;
   }
 
   reputation(agentId: string): number {
@@ -191,7 +285,9 @@ export class ResultVerifier<T = unknown> {
     return Math.min(1, this.cfg.rate * (2 - this.reputation(agentId)));
   }
 
-  shouldVerify(agentId: string): boolean {
+  /** #104: never true for a kind that isn't enabled or has no comparator (LLM inference). */
+  shouldVerify(agentId: string, kind: SubtaskKind): boolean {
+    if (!this.verifiesKind(kind)) return false;
     return this.random() < this.sampleRate(agentId);
   }
 
@@ -259,6 +355,7 @@ export class ResultVerifier<T = unknown> {
 
   /** Hold the original result and request the first replica. */
   start(original: Subtask, first: ExecutionResult<T>): ReplicaRequest {
+    if (!this.verifiesKind(original.kind)) throw new Error(`result verification is not enabled for subtask kind ${original.kind}`);
     const p: Pending<T> = { original, results: [first], startedAtMs: this.now(), replicaIds: new Set(), replicaClaimants: new Set(), claims: new Map(), abandoners: new Set(), reassignments: 0 };
     this.pending.set(original.id, p);
     return this.nextReplica(p);
@@ -282,7 +379,7 @@ export class ResultVerifier<T = unknown> {
 
     const groups = new Map<string, ExecutionResult<T>[]>();
     for (const r of p.results) {
-      const k = resultKey(r);
+      const k = resultKey(r, p.original.kind);
       groups.set(k, [...(groups.get(k) ?? []), r]);
     }
     const majority = [...groups.values()].find((g) => g.length >= 2);

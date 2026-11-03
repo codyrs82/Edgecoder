@@ -180,6 +180,7 @@ import {
   ResultVerifier,
   payableWinners,
   verificationConfigFromEnv,
+  verificationKindsWarning,
   verificationStartupWarning,
   type ExecutionResult,
   type ReplicaRequest,
@@ -3550,7 +3551,9 @@ const resultVerifier = new ResultVerifier<ResultMeta>(verificationConfig);
 if (!hardwareVerifier.config.enabled) app.log.warn("HARDWARE_VERIFICATION=0: self-reported hardware tiers are paid unverified");
 {
   const warning = verificationStartupWarning(verificationConfig);
-  if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards }, warning);
+  if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards, kinds: verificationConfig.kinds }, warning);
+  const kindsWarning = verificationKindsWarning();
+  if (kindsWarning) app.log.warn(kindsWarning);
 }
 
 function enqueueReplica(req: ReplicaRequest): void {
@@ -4030,7 +4033,7 @@ app.post("/result", async (req, reply) => {
       const r = resultVerifier.recordReplica(body.subtaskId, execution);
       if (r && r.status === "pending") enqueueReplica(r.next);
       else if (r) verificationOutcome = r;
-    } else if (resultVerifier.shouldVerify(body.agentId)) {
+    } else if (resultVerifier.shouldVerify(body.agentId, subtask.kind)) {
       verificationHold = true;
       enqueueReplica(resultVerifier.start(subtask, execution));
       app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "result_held_for_verification");
