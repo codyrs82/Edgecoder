@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
+import { CSP_NONCE } from "../csp-nonce.js";
+import { CLIENT_ESCAPE_JS } from "./escape.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerLegacyPage(app: FastifyInstance): void {
@@ -303,7 +305,7 @@ app.get("/portal-legacy", async (_req, reply) => {
 
       <div id="toast" class="card hidden"></div>
 
-      <script>
+      <script nonce="${CSP_NONCE}">
         const authView = document.getElementById("authView");
         const dashboardView = document.getElementById("dashboardView");
         const toast = document.getElementById("toast");
@@ -383,6 +385,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           return payload;
         }
 
+        ${CLIENT_ESCAPE_JS}
         function renderRows(targetId, rowsHtml, colspan, emptyText) {
           const el = document.getElementById(targetId);
           el.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : '<tr><td colspan="' + colspan + '">' + emptyText + '</td></tr>';
@@ -400,7 +403,7 @@ app.get("/portal-legacy", async (_req, reply) => {
           document.getElementById("accountIdLabel").textContent = "acct-" + (user.userId || "unknown");
 
           const nodeRows = (summary.nodes || []).map((n) =>
-            "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + String(Boolean(n.emailVerified)) + "</td><td>" +
+            "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + String(Boolean(n.emailVerified)) + "</td><td>" +
             String(Boolean(n.nodeApproved)) + "</td><td>" + String(Boolean(n.active)) + "</td><td>" + fmtTime(n.lastSeenMs) + "</td></tr>"
           );
           renderRows("nodesBody", nodeRows, 6, "No nodes enrolled.");
@@ -416,18 +419,18 @@ app.get("/portal-legacy", async (_req, reply) => {
               : "Estimated sats: n/a";
 
           const creditHistoryRows = (walletSnapshot.creditHistory || []).map((tx) =>
-            "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + tx.type + "</td><td>" + tx.credits + "</td><td>" + tx.reason + "</td></tr>"
+            "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + escapeHtml(tx.type) + "</td><td>" + escapeHtml(tx.credits) + "</td><td>" + escapeHtml(tx.reason) + "</td></tr>"
           );
           renderRows("creditHistoryBody", creditHistoryRows, 4, "No credit transactions yet.");
 
           const walletRows = (walletSnapshot.wallets || []).map((w) =>
-            "<tr><td>" + (w.walletType || "") + "</td><td>" + (w.network || "") + "</td><td>" + (w.payoutAddress || "n/a") +
-            "</td><td>" + (w.lnNodePubkey || w.xpub || "n/a") + "</td></tr>"
+            "<tr><td>" + escapeHtml(w.walletType || "") + "</td><td>" + escapeHtml(w.network || "") + "</td><td>" + escapeHtml(w.payoutAddress || "n/a") +
+            "</td><td>" + escapeHtml(w.lnNodePubkey || w.xpub || "n/a") + "</td></tr>"
           );
           renderRows("walletsBody", walletRows, 4, "No wallets linked.");
 
           const intentRows = (walletSnapshot.paymentIntents || []).map((p) =>
-            "<tr><td>" + p.intentId + "</td><td>" + p.status + "</td><td>" + p.amountSats + "</td><td>" + p.quotedCredits +
+            "<tr><td>" + escapeHtml(p.intentId) + "</td><td>" + escapeHtml(p.status) + "</td><td>" + escapeHtml(p.amountSats) + "</td><td>" + escapeHtml(p.quotedCredits) +
             "</td><td>" + fmtTime(p.createdAtMs) + "</td></tr>"
           );
           renderRows("paymentIntentsBody", intentRows, 5, "No payment intents.");

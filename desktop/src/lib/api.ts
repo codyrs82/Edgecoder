@@ -1202,6 +1202,64 @@ export interface GitHubCliStatus {
 }
 export const gitGitHubStatus = () => fsCall<GitHubCliStatus>("GET", "/v1/ide/git/github/status");
 
+// The projects folder (default ~/EdgeCoder) and connecting repositories into it (:4304 /v1/ide/repos).
+export interface ProjectsFolder {
+  path: string;
+  source: "env" | "setting" | "default";
+  defaultPath?: string;
+}
+export const getProjectsFolder = () => fsCall<ProjectsFolder>("GET", "/v1/ide/settings/projects-folder");
+export const setProjectsFolder = (path: string) => fsCall<ProjectsFolder>("POST", "/v1/ide/settings/projects-folder", { path });
+/** gh's sign-in and, when signed in, the user's 20 most recent repositories (owner/name). */
+export const recentRepos = () => fsCall<GitHubCliStatus & { repos: string[] }>("GET", "/v1/ide/repos/recent");
+export interface RepoConnection {
+  path: string;
+  name: string;
+  url: string;
+  action: "cloned" | "updated";
+  branch: string | null;
+  dirty: boolean;
+  behind: number;
+  ahead: number;
+  fastForwarded: boolean;
+  message: string;
+}
+/**
+ * Put `repo` (owner/repo or a URL) at <projects folder>/<name>: clone it, or fetch and fast-forward
+ * the copy that's there (local changes are left alone). The IDE server opens it as the project.
+ */
+export async function connectRepo(repo: string, onProgress?: (line: string) => void): Promise<RepoConnection> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/repos/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, stream: true }),
+  });
+  if (!res.ok || !res.body) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+    throw new FsError(data.error ?? "error", data.message ?? `Couldn't connect the repository (${res.status}).`, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      const ev = JSON.parse(line.slice(6)) as { type: string; line?: string; result?: RepoConnection; message?: string };
+      if (ev.type === "progress" && ev.line) onProgress?.(ev.line);
+      else if (ev.type === "done" && ev.result) return ev.result;
+      else if (ev.type === "error") throw new FsError("git", ev.message ?? "Couldn't connect the repository.", 400);
+    }
+  }
+  throw new FsError("git", "The connection to EdgeCoder closed before the repository was ready.", 502);
+}
+
 // Background jobs on the network (:4304 /v1/ide/network/tasks)
 export interface NetworkTask {
   id: string;
@@ -1232,7 +1290,7 @@ export interface Diagnostic {
 export const ideDiagnostics = (paths: string[]) =>
   fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[] }>("POST", "/v1/ide/diagnostics", { paths });
 
-/** Create ~/EdgeCoder Projects/<name> (a git repo) and make it the open project. */
+/** Create <projects folder>/<name> (a git repo) and make it the open project. */
 export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
 /** Preview URL of a project file (default index.html) on the IDE server's preview origin. */
 export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/ide/preview?path=${encodeURIComponent(path)}`).then((r) => r.url);

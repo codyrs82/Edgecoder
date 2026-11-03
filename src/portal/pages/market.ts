@@ -132,7 +132,8 @@ export function registerMarketPage(app: FastifyInstance): void {
         var $ = function (id) { return document.getElementById(id); };
         var fmt = function (n, d) { return n === undefined || n === null ? "–" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 0 : d }); };
         var satsHour = function (msatPerCredit, cps) { return msatPerCredit / 1000 * cps * 3600; };
-        var esc = function (s) { return String(s).replace(/[&<>"']/g, function (ch) { return "&#" + ch.charCodeAt(0) + ";"; }); };
+        // The shell's escapeHtml (pages/escape.ts): coordinator- and agent-supplied values go through it.
+        var esc = escapeHtml;
 
         function api(path) { return fetch("/portal/api/market" + path, { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error(path + " " + r.status); return r.json(); }); }
 
@@ -182,7 +183,7 @@ export function registerMarketPage(app: FastifyInstance): void {
           var top = tiers[tiers.length - 1];
           $("tierExplain").textContent = "Same price per credit for every tier. Faster hardware earns more credits per second, so one hour of " + top.label + " costs " + top.creditsPerSecond + " " + spec.label + " credit-hours. Tasks can require minVramGb / minMemoryGb; under-spec agents cannot fill them.";
           $("tiersBody").innerHTML = tiers.map(function (t) {
-            return "<tr><td style='text-align:left;'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + t.creditsPerSecond + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + (t.agents || 0) + "</td></tr>";
+            return "<tr><td style='text-align:left;'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + esc(t.creditsPerSecond) + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + esc(t.agents || 0) + "</td></tr>";
           }).join("");
         }
 
@@ -190,11 +191,11 @@ export function registerMarketPage(app: FastifyInstance): void {
           var asks = book.asks.slice().reverse(); var cum = 0; var rows = [];
           var totalA = 0; for (var i = 0; i < book.asks.length; i++) totalA += book.asks[i].count;
           cum = totalA;
-          for (var a = 0; a < asks.length; a++) { rows.push("<tr><td class='ask'>" + fmt(asks[a].msatPerCredit) + "</td><td>" + asks[a].count + "</td><td>" + cum + "</td></tr>"); cum -= asks[a].count; }
+          for (var a = 0; a < asks.length; a++) { rows.push("<tr><td class='ask'>" + fmt(asks[a].msatPerCredit) + "</td><td>" + esc(asks[a].count) + "</td><td>" + esc(cum) + "</td></tr>"); cum -= asks[a].count; }
           $("asksBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no asks</td></tr>";
           $("bookMid").textContent = fmt(book.midMsatPerCredit) + " msat · clearing " + fmt(book.clearingMsatPerCredit);
           cum = 0; rows = [];
-          for (var b = 0; b < book.bids.length; b++) { cum += book.bids[b].count; rows.push("<tr><td class='bid'>" + fmt(book.bids[b].msatPerCredit) + "</td><td>" + book.bids[b].count + "</td><td>" + cum + "</td></tr>"); }
+          for (var b = 0; b < book.bids.length; b++) { cum += book.bids[b].count; rows.push("<tr><td class='bid'>" + fmt(book.bids[b].msatPerCredit) + "</td><td>" + esc(book.bids[b].count) + "</td><td>" + esc(cum) + "</td></tr>"); }
           $("bidsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no bids (open tasks)</td></tr>";
         }
 
@@ -209,7 +210,7 @@ export function registerMarketPage(app: FastifyInstance): void {
         function renderTape(trades) {
           if (!trades.length) { $("tape").innerHTML = "<div class='hint'>No trades yet on this class. A trade is a task claimed by an agent at its ask.</div>"; return; }
           $("tape").innerHTML = trades.map(function (t) {
-            return "<div><span>" + new Date(t.atMs).toLocaleTimeString() + "</span><span>" + fmt(t.msatPerCredit) + " msat</span><span>" + (t.credits ? fmt(t.credits, 3) + " cr" : "pending") + "</span><span class='hint'>" + t.agentId.slice(0, 14) + "</span></div>";
+            return "<div><span>" + new Date(t.atMs).toLocaleTimeString() + "</span><span>" + fmt(t.msatPerCredit) + " msat</span><span>" + (t.credits ? fmt(t.credits, 3) + " cr" : "pending") + "</span><span class='hint'>" + esc(String(t.agentId || "").slice(0, 14)) + "</span></div>";
           }).join("");
         }
 
@@ -227,12 +228,12 @@ export function registerMarketPage(app: FastifyInstance): void {
         function secondsOf(i) { var n = parseInt(i, 10); return i.endsWith("m") ? n * 60 : i.endsWith("h") ? n * 3600 : n * 86400; }
 
         function renderOrders(data) {
-          var mine = (data.orders || []).map(function (o) { return o.side.toUpperCase() + " " + (o.msatPerCredit ? fmt(o.msatPerCredit) + " msat/credit" : "track reference") + " on " + o.computeClass; });
+          var mine = (data.orders || []).map(function (o) { return esc(String(o.side || "").toUpperCase()) + " " + (o.msatPerCredit ? fmt(o.msatPerCredit) + " msat/credit" : "track reference") + " on " + esc(o.computeClass); });
           $("myOrders").innerHTML = mine.length ? "<strong>Your standing orders:</strong> " + mine.join(" · ") : "No standing orders. Your tasks bid the reference + premium; your agents ask the reference.";
           var ag = data.agents || [];
           // tier = what the agent is paid at (verified grant); claimedTier = what it reported, shown when different.
           function vlabel(a) { var v = a.verification || "unverified"; return v === "base" ? "" : " · " + (v === "verified" ? "verified" : v === "pending" ? "verifying" : v === "demoted" ? "demoted from " + esc(a.claimedTier || "?") : "unverified" + (a.claimedTier && a.claimedTier !== a.tier ? " (claims " + esc(a.claimedTier) + ")" : "")); }
-          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + esc(a.agentId) + " <span class='hint'>" + esc(a.computeClass) + (a.tier ? " · " + esc(a.tier) + " " + (a.creditsPerSecond || 1) + "×" : "") + vlabel(a) + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
+          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + esc(a.agentId) + " <span class='hint'>" + esc(a.computeClass) + (a.tier ? " · " + esc(a.tier) + " " + esc(a.creditsPerSecond || 1) + "×" : "") + vlabel(a) + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
         }
 
         function refresh() {
@@ -278,8 +279,8 @@ export function registerMarketPage(app: FastifyInstance): void {
           return api("/classes");
         }).then(function (data) {
           state.classes = data.classes || [];
-          $("pairSelect").innerHTML = state.classes.map(function (c) { return "<option value='" + c.id + "'>" + c.label + " / BTC" + (c.agents ? " (" + c.agents + " agents)" : "") + "</option>"; }).join("");
-          $("orderClass").innerHTML = "<option value='any'>Any class</option>" + state.classes.map(function (c) { return "<option value='" + c.id + "'>" + c.label + "</option>"; }).join("");
+          $("pairSelect").innerHTML = state.classes.map(function (c) { return "<option value='" + esc(c.id) + "'>" + esc(c.label) + " / BTC" + (c.agents ? " (" + esc(c.agents) + " agents)" : "") + "</option>"; }).join("");
+          $("orderClass").innerHTML = "<option value='any'>Any class</option>" + state.classes.map(function (c) { return "<option value='" + esc(c.id) + "'>" + esc(c.label) + "</option>"; }).join("");
           $("pairSelect").value = state.cls; $("orderClass").value = state.cls;
           setSide("buy");
           refresh();

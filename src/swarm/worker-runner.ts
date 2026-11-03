@@ -8,7 +8,7 @@ import { cpus, hostname, totalmem } from "node:os";
 import { parallelInferenceFor } from "./parallelism.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
-import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
+import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
@@ -18,7 +18,10 @@ import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } f
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
-import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
+import { CoordinatorTrustGate, PinnedKeyStore, challengePolicyFromEnv, describeTrustFailure, DEFAULT_TRUST_REVERIFY_MS } from "../trust/pinned-keys.js";
+import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
+import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
+import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
@@ -31,7 +34,6 @@ import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnv
 import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
-import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
@@ -44,7 +46,13 @@ const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
 // Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
 const coordinatorTrustStore = PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` });
-const coordinatorTrust = new CoordinatorTrustGate({ store: coordinatorTrustStore });
+// Each coordinator URL must prove possession of its key (POST /identity/challenge); a verification
+// lasts EDGECODER_TRUST_REVERIFY_MS (default 10 min) and is redone on reconnect and URL changes.
+const coordinatorTrust = new CoordinatorTrustGate({
+  store: coordinatorTrustStore,
+  challenge: challengePolicyFromEnv(process.env, coordinatorTrustStore.mode),
+  reverifyMs: Number(process.env.EDGECODER_TRUST_REVERIFY_MS) > 0 ? Number(process.env.EDGECODER_TRUST_REVERIFY_MS) : DEFAULT_TRUST_REVERIFY_MS
+});
 {
   // Strict mode with nothing listed would refuse every coordinator: say so once and stop.
   const problem = coordinatorTrustStore.configProblem();
@@ -58,7 +66,7 @@ const coordinatorTrust = new CoordinatorTrustGate({ store: coordinatorTrustStore
 if (process.send) process.on("disconnect", () => process.exit(0));
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
-const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
+const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(process.env.SNAPSHOT_ENFORCEMENT);
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
@@ -177,7 +185,10 @@ async function discoverCoordinatorFromPortal(): Promise<string | null> {
   }
 }
 
-let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
+/** The coordinator this agent works for; every URL change goes through coordinator.set(). */
+const coordinator = new ActiveCoordinator(COORDINATOR_BOOTSTRAP_URL, coordinatorTrust, (from, to, reason) =>
+  console.log(`[worker] coordinator ${from} -> ${to} (${reason}); verifying before use`)
+);
 
 /*
  * One platform URL, steered (src/discovery/steering.ts): fetch the signed registry from the
@@ -217,7 +228,7 @@ async function steerCoordinator(): Promise<SteeringResult | null> {
   // Coordinators the signed registry lists are trusted with exactly the listed key.
   coordinatorTrustStore.setRegistryEntries(coordinatorSteering.trustedEntries());
   if (result.source === "registry") {
-    if (!result.kept || result.url !== activeCoordinatorUrl) {
+    if (!result.kept || result.url !== coordinator.url) {
       console.log(`[worker] steering: ${result.url} (${result.peerId}, region=${result.region}, ${result.latencyMs}ms${result.kept ? ", kept" : ""}; registry from ${result.registry?.from})`);
     }
     return result;
@@ -226,8 +237,10 @@ async function steerCoordinator(): Promise<SteeringResult | null> {
   return null;
 }
 
-// Attempt portal-based coordinator discovery at startup
-(async () => {
+// Coordinator discovery at startup. It starts now, but its pick is applied by the loop (after it
+// is awaited and before anything talks to a coordinator), so it cannot swap the URL mid-iteration.
+const startupDiscovery: Promise<{ url: string; source: string } | null> = (async () => {
+  let pick: { url: string; source: string } | null = null;
   if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
     // Strict trust: never pick an announced coordinator whose key is not listed (key-less
     // candidates are still checked against /identity by the trust gate before registering).
@@ -235,23 +248,39 @@ async function steerCoordinator(): Promise<SteeringResult | null> {
       coordinatorTrustStore.mode === "strict" ? (c: { peerId?: string; publicKeyPem?: string }) => !c.publicKeyPem || coordinatorTrustStore.wouldTrust(c.peerId, c.publicKeyPem) : undefined;
     const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined, acceptCandidate });
     // A signed-registry pick (steering) wins over unsigned discovery.
-    if (picked && !steeredByRegistry()) {
+    if (picked) {
       console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
-      activeCoordinatorUrl = picked.url;
+      pick = { url: picked.url, source: `discovery:${picked.source}` };
     }
   }
   if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
-    if (steeredByRegistry()) {
-      // The signed registry already chose; portal discovery does not override it.
-    } else if (discovered) {
+    if (discovered) {
       console.log(`[worker] Discovered coordinator from portal: ${discovered}`);
-      activeCoordinatorUrl = discovered;
+      pick = { url: discovered, source: "portal" };
     } else {
       console.log(`[worker] Portal discovery returned no coordinator, using ${COORDINATOR_BOOTSTRAP_URL}`);
     }
   }
-})();
+  return pick;
+})().catch((err) => {
+  console.warn(`[worker] startup discovery failed: ${String(err)}`);
+  return null;
+});
+
+/**
+ * Prove the current coordinator holds its pinned key, or throw (the loop then backs off and fails
+ * over). A key mismatch for a pinned id is a possible impersonation: stop the agent.
+ */
+async function verifyCoordinatorOrThrow(opts: { force?: boolean } = {}): Promise<void> {
+  const trust = await coordinator.verify(opts);
+  if (!trust.trusted) {
+    console.error(`[agent:${AGENT_ID}] refusing to work for ${coordinator.url}: ${describeTrustFailure(trust)}`);
+    if (trust.decision?.reason === "pinned_mismatch") process.exit(1);
+    throw new Error(trust.decision ? "coordinator_not_trusted" : "coordinator_identity_unavailable");
+  }
+  if (trust.warning) console.warn(`[agent:${AGENT_ID}] ${trust.warning}`);
+}
 
 // ── Offline resilience state ──────────────────────────────────
 let consecutiveFailures = 0;
@@ -513,7 +542,8 @@ async function post(
       // Signed requests get a fresh nonce per attempt; a retry of a request the coordinator
       // already saw would otherwise be refused as a replay.
       const signature = options?.signed ? signedHeaders(path, payload) : {};
-      const res = await request(`${activeCoordinatorUrl}${path}`, {
+      // Never send the mesh token or agent credentials to a coordinator that has not proven its key.
+      const res = await request(`${coordinator.requireVerified()}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
         headersTimeout: timeoutMs,
@@ -547,8 +577,10 @@ async function post(
  * (agent-mesh tunnels, direct work) take the agent id from the signature, not the mesh token.
  */
 function signedJsonPost(path: string, body: unknown) {
+  // Same rule as post(): no mesh token or signature to a coordinator that has not proven its key.
+  const base = coordinator.requireVerified();
   const payload = JSON.stringify(body);
-  return request(`${activeCoordinatorUrl}${path}`, {
+  return request(`${base}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...meshHeaders(), ...signedHeaders(path, payload) },
     body: payload
@@ -617,31 +649,23 @@ async function flushOfflineLedger(): Promise<void> {
   }
 }
 
-function connectMeshWebSocket(
-  coordinatorUrl: string,
-  getMeshPeer: () => MeshPeer | null
-): void {
-  const wsUrl = coordinatorUrl
-    .replace(/^https:/, "wss:")
-    .replace(/^http:/, "ws:");
-
+function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   let reconnectDelay = 1000;
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
     // Wait for a valid mesh token before connecting — connecting without one
     // triggers rapid 4001 close → reconnect loops that trip DOS detection.
-    if (!meshAuthToken) {
+    // Only to a coordinator that has proven its key (it follows URL changes on reconnect).
+    if (!meshAuthToken || !coordinator.isVerified()) {
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       return;
     }
-    // Build URL on each connect so it picks up the latest meshAuthToken
-    // (token may be provisioned from coordinator after initial registration)
-    // Token in a header (not the URL), and a signed bind so the coordinator ties this connection to
-    // AGENT_ID's registered key (src/mesh/ws-auth.ts). The query token stays for older coordinators.
-    const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken)}&peerId=${encodeURIComponent(AGENT_ID)}`;
-    const ws = new WebSocket(fullUrl, { headers: { "x-mesh-token": meshAuthToken, ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
+    // Token in a header only (never the URL, where proxies log it), and a signed bind so the
+    // coordinator ties this connection to AGENT_ID's registered key (src/mesh/ws-auth.ts).
+    const coordinatorUrl = coordinator.url;
+    const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), { headers: { "x-mesh-token": meshAuthToken, ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
 
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
@@ -697,9 +721,12 @@ async function loop(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] configDir=${PLATFORM_CONFIG_DIR} logDir=${PLATFORM_LOG_DIR}`);
 
   const coordinatorSelection = await resolveCoordinatorUrl();
-  activeCoordinatorUrl = coordinatorSelection.url;
-  cacheCoordinatorUrl(activeCoordinatorUrl);
-  console.log(`[agent:${AGENT_ID}] coordinator selected (${coordinatorSelection.source}): ${activeCoordinatorUrl}`);
+  coordinator.set(coordinatorSelection.url, coordinatorSelection.source);
+  // Startup discovery settles before the loop starts; a signed-registry pick (steering) wins over it.
+  const discoveredAtStartup = await startupDiscovery;
+  if (discoveredAtStartup && !steeredByRegistry()) coordinator.set(discoveredAtStartup.url, discoveredAtStartup.source);
+  cacheCoordinatorUrl(coordinator.url);
+  console.log(`[agent:${AGENT_ID}] coordinator selected (${discoveredAtStartup && !steeredByRegistry() ? discoveredAtStartup.source : coordinatorSelection.source}): ${coordinator.url}`);
 
   await ensureOllamaModelInstalled({
     enabled: PROVIDER === "ollama-local",
@@ -715,6 +742,17 @@ async function loop(): Promise<void> {
   const worker = new SwarmWorkerAgent(providers.current());
   const effectiveMode = OS === "ios" ? "swarm-only" : MODE;
 
+  /** Every subtask runs through the same execution policy, whatever its source. */
+  async function runPolicedSubtask(st: Subtask, opts: { quiet?: boolean } = {}): Promise<SubtaskResult> {
+    const policy = checkSnapshotPolicy(st, SNAPSHOT_ENFORCEMENT);
+    if (!policy.run) {
+      console.error(`[agent:${AGENT_ID}] snapshot enforcement: ${policy.error}`);
+      return { subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: policy.error, durationMs: 0 };
+    }
+    if (policy.warning && !opts.quiet) console.warn(`[agent:${AGENT_ID}] snapshot warning: ${policy.warning}`);
+    return worker.runSubtask(st, AGENT_ID);
+  }
+
   // ── Initialize HTTP mesh peer (BitTorrent-style P2P) ──
   let meshPeer: MeshPeer | null = null;
   let meshServer: MeshHttpServer | null = null;
@@ -728,7 +766,7 @@ async function loop(): Promise<void> {
       publicUrl: `http://${localIp}:0`, // will update after server starts
       networkMode: "public_mesh",
       role: "agent",
-      bootstrapUrls: [activeCoordinatorUrl],
+      bootstrapUrls: [coordinator.url],
       meshToken: meshAuthToken || undefined,
     });
 
@@ -752,6 +790,12 @@ async function loop(): Promise<void> {
       };
       if (!p.subtaskId || !p.taskId || !p.input) return;
       if (meshClaimedTasks.has(p.subtaskId)) return;
+      // Same execution policy as pulled work: don't claim what we would refuse to run.
+      const offerPolicy = checkSnapshotPolicy({ id: p.subtaskId, kind: (p.kind as Subtask["kind"]) ?? "single_step", snapshotRef: p.snapshotRef }, SNAPSHOT_ENFORCEMENT);
+      if (!offerPolicy.run) {
+        console.warn(`[agent:${AGENT_ID}] mesh task_offer ignored: ${offerPolicy.error}`);
+        return;
+      }
       // Don't accept tasks we originated
       if (p.originCoordinatorId === AGENT_ID) return;
       // #45 review: a node without a sandbox never drains this queue, so don't fill it.
@@ -790,13 +834,8 @@ async function loop(): Promise<void> {
       }
     });
 
-    await meshPeer.bootstrap();
-    console.log(`[agent:${AGENT_ID}] mesh peer bootstrapped, ${meshPeer.peerCount()} peers known`);
-
-    // Open persistent WebSocket to coordinator for NAT traversal.
-    // The coordinator pushes gossip messages down this connection,
-    // bypassing the agent's NAT/firewall.
-    connectMeshWebSocket(activeCoordinatorUrl, () => meshPeer);
+    // Bootstrap and the coordinator WebSocket wait for a verified coordinator and a mesh token
+    // (startMeshUplink, after registration).
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] mesh peer init failed (non-fatal): ${String(e)}`);
     meshPeer = null;
@@ -806,14 +845,37 @@ async function loop(): Promise<void> {
   // Initialize BLE mesh transport for local peer discovery
   let bleMesh: BLEMeshManager | null = null;
   let bleTransport: NobleBLETransport | null = null;
+  /**
+   * Bootstrap the mesh peer from the coordinator and open the persistent WebSocket (NAT traversal:
+   * the coordinator pushes gossip down it). Only once the coordinator has proven its key and a
+   * mesh token exists; the WebSocket then follows the verified coordinator on reconnect.
+   */
+  let meshUplinkStarted = false;
+  function startMeshUplink(): void {
+    if (!meshPeer || meshUplinkStarted || !meshAuthToken || !coordinator.isVerified()) return;
+    meshUplinkStarted = true;
+    const peer = meshPeer;
+    peer.config.bootstrapUrls = [coordinator.url];
+    void peer
+      .bootstrap()
+      .then(() => console.log(`[agent:${AGENT_ID}] mesh peer bootstrapped, ${peer.peerCount()} peers known`))
+      .catch((e) => console.warn(`[agent:${AGENT_ID}] mesh bootstrap failed (non-fatal): ${String(e)}`));
+    connectMeshWebSocket(() => meshPeer);
+  }
   /** Use the mesh token a coordinator's /register response provisions (heartbeats and pulls need it). */
   function adoptMeshToken(token: unknown): void {
-    if (typeof token !== "string" || token.length === 0 || token === meshAuthToken) return;
-    meshAuthToken = token;
-    console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-    if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
-    if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+    if (typeof token === "string" && token.length > 0 && token !== meshAuthToken) {
+      meshAuthToken = token;
+      console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+      // The LAN mesh server refuses everything but /identity until it has a token.
+      meshServer?.setMeshToken(token);
+      meshPeer?.setMeshToken(token);
+      if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
+      if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+    }
+    startMeshUplink();
   }
+  const bleGuard = new BleRequestGuard();
   // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
   if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
   if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
@@ -836,22 +898,26 @@ async function loop(): Promise<void> {
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
-        // Authenticate: verify requester shares our mesh token
-        const ownHash = computeMeshTokenHash();
-        if (ownHash) {
-          const peers = bleTransport!.discoveredPeers();
-          const requesterPeer = peers.find(p => p.agentId === req.requesterId);
-          if (!requesterPeer || requesterPeer.meshTokenHash !== ownHash) {
-            console.warn(`[BLE] rejecting task from unauthenticated peer: ${req.requesterId}`);
-            return {
-              requestId: req.requestId,
-              providerId: AGENT_ID,
-              status: "failed" as const,
-              output: "mesh_token_mismatch",
-              cpuSeconds: 0,
-              providerSignature: "",
-            };
-          }
+        // Admission: no mesh token here means no remote BLE work at all; otherwise the requester
+        // must advertise the same token hash, within size and rate limits. BLE adverts carry no
+        // public key, so requesterSignature cannot be verified against an identity.
+        const requesterPeer = bleTransport!.discoveredPeers().find(p => p.agentId === req.requesterId);
+        const admission = bleGuard.admit({
+          ownTokenHash: computeMeshTokenHash(),
+          requesterTokenHash: requesterPeer?.meshTokenHash,
+          requesterId: String(req.requesterId ?? ""),
+          task: req.task
+        });
+        if (!admission.ok) {
+          console.warn(`[BLE] rejecting task from ${req.requesterId}: ${admission.reason}`);
+          return {
+            requestId: req.requestId,
+            providerId: AGENT_ID,
+            status: "failed" as const,
+            output: admission.reason,
+            cpuSeconds: 0,
+            providerSignature: "",
+          };
         }
 
         console.log(`[BLE] processing incoming task: ${req.requestId}`);
@@ -924,11 +990,7 @@ async function loop(): Promise<void> {
         // Re-steer now and then; hysteresis keeps the current coordinator unless another is clearly faster.
         if (coordinatorSteering && Date.now() - lastSteeredAtMs >= STEERING_INTERVAL_MS) {
           const steered = await steerCoordinator();
-          if (steered && steered.url !== activeCoordinatorUrl) {
-            console.log(`[agent:${AGENT_ID}] steering moved from ${activeCoordinatorUrl} to ${steered.url}`);
-            activeCoordinatorUrl = steered.url;
-            cacheCoordinatorUrl(activeCoordinatorUrl);
-          }
+          if (steered && coordinator.set(steered.url, "steering")) cacheCoordinatorUrl(coordinator.url);
         }
         // ── Sandbox policy enforcement ──
         const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
@@ -954,15 +1016,9 @@ async function loop(): Promise<void> {
           console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxProblem}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
         }
 
-        // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).
-        const trust = await coordinatorTrust.check(activeCoordinatorUrl);
-        if (!trust.trusted) {
-          console.error(`[agent:${AGENT_ID}] refusing to work for ${activeCoordinatorUrl}: ${describeTrustFailure(trust)}`);
-          // A key mismatch for a pinned id is a possible impersonation: stop. An unlisted coordinator
-          // (strict mode) is just not ours to work for: back off and fail over to another one.
-          if (trust.decision?.reason === "pinned_mismatch") process.exit(1);
-          throw new Error(trust.decision ? "coordinator_not_trusted" : "coordinator_identity_unavailable");
-        }
+        // Pinned-key trust: the coordinator proves possession of its key before any register,
+        // heartbeat or pull (re-proven on URL change, on reconnect and when the check expires).
+        await verifyCoordinatorOrThrow();
         // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
         if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
           benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
@@ -974,7 +1030,7 @@ async function loop(): Promise<void> {
             console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
           }
         }
-        if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, activeCoordinatorUrl, Date.now(), REGISTER_REFRESH_MS)) {
+        if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
           const installedModels = currentProvider === "ollama-local" ? await listInstalledModels() : [];
           const registerBody = {
             ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
@@ -1003,7 +1059,7 @@ async function loop(): Promise<void> {
             accepted?: boolean;
             meshToken?: string;
           };
-          registeredWithUrl = activeCoordinatorUrl;
+          registeredWithUrl = coordinator.url;
           lastRegisteredAtMs = Date.now();
           adoptMeshToken(registerResponse.meshToken);
         }
@@ -1035,11 +1091,11 @@ async function loop(): Promise<void> {
           hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
         };
         if ("benchmark" in hbBody) benchmarkUnreported = false;
-        try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
+        try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 
         // Heartbeat succeeded — reset failure counter and cache proven URL
         consecutiveFailures = 0;
-        cacheCoordinatorUrl(activeCoordinatorUrl);
+        cacheCoordinatorUrl(coordinator.url);
 
         if (hb.blacklisted) {
           console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
@@ -1071,7 +1127,7 @@ async function loop(): Promise<void> {
           peerTunnels.set(invite.fromAgentId, invite.token);
         }
 
-        const idlePeersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
+        const idlePeersResponse = await request(`${coordinator.requireVerified()}/agent-mesh/peers/${AGENT_ID}`, {
           method: "GET",
           headers: meshHeaders()
         });
@@ -1191,36 +1247,35 @@ async function loop(): Promise<void> {
         if (pulled.subtask) {
           const st = pulled.subtask;
 
-          // ── Frozen snapshot enforcement (Design Decision #8) ──
-          // Inference runs a model, not the project's code: no snapshot involved.
-          if (st.kind !== "inference" && (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef))) {
-            if (SNAPSHOT_ENFORCEMENT === "strict") {
-              console.error(`[agent:${AGENT_ID}] snapshot enforcement STRICT: refusing subtask ${st.id} — invalid snapshotRef: "${st.snapshotRef ?? ""}"`);
-              try {
-                // Sign exactly the body that is posted (the signature covers the body hash).
-                const snapshotRejection = {
-                  subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
-                  ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
-                  durationMs: 0,
-                };
-                await post("/result", snapshotRejection, { signed: true });
-              } catch { /* best effort */ }
-              continue;
-            }
-            console.warn(`[agent:${AGENT_ID}] snapshot warning: subtask ${st.id} has invalid snapshotRef: "${st.snapshotRef ?? ""}" — proceeding (enforcement=${SNAPSHOT_ENFORCEMENT})`);
-          } else if (st.kind !== "inference") {
+          // ── Frozen snapshot enforcement (Design Decision #8; same check for every source) ──
+          const snapshotPolicy = checkSnapshotPolicy(st, SNAPSHOT_ENFORCEMENT);
+          if (!snapshotPolicy.run) {
+            console.error(`[agent:${AGENT_ID}] snapshot enforcement: ${snapshotPolicy.error}`);
+            try {
+              // Sign exactly the body that is posted (the signature covers the body hash).
+              const snapshotRejection = {
+                subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
+                ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
+                durationMs: 0,
+              };
+              await post("/result", snapshotRejection, { signed: true });
+            } catch { /* best effort */ }
+            continue;
+          } else if (snapshotPolicy.warning) {
+            console.warn(`[agent:${AGENT_ID}] snapshot warning: ${snapshotPolicy.warning}`);
+          } else if (snapshotPolicy.verified) {
             console.log(`[agent:${AGENT_ID}] snapshot verified for subtask ${st.id}: ${st.snapshotRef}`);
           }
 
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
           const envelopeForTask = taskEnvelope;
           const runAndReport = async () => {
-            try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+            try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, coordinator.url); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
             const run = st.kind === "inference"
               ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
-              : worker.runSubtask(st, AGENT_ID);
+              : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);
             result.snapshotRef = st.snapshotRef;
@@ -1249,23 +1304,25 @@ async function loop(): Promise<void> {
             // Encrypt result if task was received as an envelope
             let resultPayload: Record<string, unknown> = { ...result };
             if (envelopeForTask) {
-              try {
-                const encrypted = encryptResult(
-                  { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
-                  envelopeForTask,
-                  envelopeKeys.privateKey
-                );
-                resultPayload = {
-                  ...encrypted,
-                  taskId: result.taskId,
-                  agentId: result.agentId,
-                  reportNonce,
-                  reportSignature,
-                };
-                console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
-              } catch (encryptErr) {
-                console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
-              }
+              // Fails closed: if the result cannot be encrypted, report a failure without the output.
+              const sealed = envelopeResultPayload(
+                result,
+                envelopeForTask,
+                (r, env) => encryptResult(r, env, envelopeKeys.privateKey),
+                (ok) => {
+                  const nonce = randomUUID();
+                  return {
+                    reportNonce: nonce,
+                    reportSignature: signPayload(
+                      JSON.stringify({ subtaskId: result.subtaskId, taskId: result.taskId, agentId: result.agentId, ok, durationMs: result.durationMs, reportNonce: nonce }),
+                      keys.privateKeyPem
+                    )
+                  };
+                }
+              );
+              resultPayload = sealed.payload;
+              if (sealed.encrypted) console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
+              else console.error(`[agent:${AGENT_ID}] result encryption failed for ${result.subtaskId}; reporting failure without output: ${sealed.error}`);
             }
             // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
             const finishedAtMs = Date.now();
@@ -1277,7 +1334,8 @@ async function loop(): Promise<void> {
                 agentPublicKeyPem: keys.publicKeyPem,
                 startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
                 finishedAtMs,
-                resultHash: hashResultOutput(result.output)
+                // The output actually reported ("" when encryption failed and it was withheld).
+                resultHash: hashResultOutput(typeof resultPayload.output === "string" ? resultPayload.output : result.output)
               },
               keys.privateKeyPem
             );
@@ -1308,7 +1366,7 @@ async function loop(): Promise<void> {
           const st = meshItem.subtask;
           console.log(`[agent:${AGENT_ID}] executing mesh task: ${st.id} (snapshot: ${st.snapshotRef})`);
           try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch (e) { console.warn(`[db] mesh task start write failed: ${e}`); }
-          const result = await worker.runSubtask(st, AGENT_ID);
+          const result = await runPolicedSubtask(st);
           result.snapshotRef = st.snapshotRef;
           try {
             if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
@@ -1389,7 +1447,7 @@ async function loop(): Promise<void> {
                 }
               };
               const result = SWARM_EXECUTION_ENABLED
-                ? await worker.runSubtask(peerSubtask, AGENT_ID)
+                ? await runPolicedSubtask(peerSubtask)
                 : { ok: false, output: "", error: "sandbox_required_for_remote_task", durationMs: 0 };
               peerResult = {
                 ok: result.ok,
@@ -1413,7 +1471,7 @@ async function loop(): Promise<void> {
 
         // While idle, offer direct work to nearby peers for spare compute utilization.
         if (canUsePeerDirect) {
-          const peersResponse = await request(`${activeCoordinatorUrl}/agent-mesh/peers/${AGENT_ID}`, {
+          const peersResponse = await request(`${coordinator.requireVerified()}/agent-mesh/peers/${AGENT_ID}`, {
             method: "GET",
             headers: meshHeaders()
           });
@@ -1450,9 +1508,11 @@ async function loop(): Promise<void> {
             const probeStart = Date.now();
             // Only register once the coordinator answers at all: an unauthenticated read costs
             // nothing against the registration-storm rule.
-            const reach = await request(`${activeCoordinatorUrl}/identity`, { method: "GET", headersTimeout: 5000, bodyTimeout: 5000 });
+            const reach = await request(`${coordinator.url}/identity`, { method: "GET", headersTimeout: 5000, bodyTimeout: 5000 });
             await reach.body.dump();
             if (reach.statusCode < 200 || reach.statusCode >= 300) throw new Error(`coordinator unreachable (${reach.statusCode})`);
+            // Reconnecting: the coordinator proves its key again before we register.
+            await verifyCoordinatorOrThrow({ force: true });
             // Re-register first (coordinator may have restarted and lost agent state)
             const registerBody = {
               agentId: AGENT_ID,
@@ -1472,14 +1532,14 @@ async function loop(): Promise<void> {
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
             await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;
-            try { localStore.recordHeartbeat(activeCoordinatorUrl, "reconnected", probeLatency); } catch {}
+            try { localStore.recordHeartbeat(coordinator.url, "reconnected", probeLatency); } catch {}
             // Probe succeeded — back online
             coordinatorOnline = true;
             consecutiveFailures = 0;
-            cacheCoordinatorUrl(activeCoordinatorUrl);
+            cacheCoordinatorUrl(coordinator.url);
             bleMesh?.setOffline(false);
             // The probe just registered: don't register again on the next online tick.
-            registeredWithUrl = activeCoordinatorUrl;
+            registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
@@ -1529,7 +1589,7 @@ async function loop(): Promise<void> {
         const st = meshItem.subtask;
         console.log(`[agent:${AGENT_ID}] executing mesh task (offline): ${st.id} (snapshot: ${st.snapshotRef})`);
         try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, "mesh-gossip"); } catch {}
-        const result = await worker.runSubtask(st, AGENT_ID);
+        const result = await runPolicedSubtask(st);
         result.snapshotRef = st.snapshotRef;
         try {
           if (result.ok) localStore.recordTaskComplete(st.id, result.output, result.durationMs);
@@ -1590,14 +1650,15 @@ async function loop(): Promise<void> {
       if (coordinatorOnline && consecutiveFailures >= OFFLINE_THRESHOLD) {
         registeredWithUrl = null;
         coordinatorOnline = false;
+        // Coming back means proving the key again.
+        coordinator.invalidate();
         bleMesh?.setOffline(true);
         try { localStore.deleteConfig("coordinator_url"); } catch {}
         console.warn(`[agent:${AGENT_ID}] entering offline mode after ${consecutiveFailures} consecutive failures — cleared stale coordinator cache`);
       }
       const failover = await resolveCoordinatorUrl();
-      if (failover.url !== activeCoordinatorUrl) {
-        activeCoordinatorUrl = failover.url;
-        console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${activeCoordinatorUrl}`);
+      if (coordinator.set(failover.url, `failover:${failover.source}`)) {
+        console.warn(`[agent:${AGENT_ID}] coordinator failover (${failover.source}): ${coordinator.url}`);
       }
       const delay = backoffMs();
       console.log(`[agent:${AGENT_ID}] backing off ${delay}ms`);

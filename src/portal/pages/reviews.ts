@@ -154,7 +154,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         renderReviewList();
       } catch (err) {
         document.getElementById("reviewsList").innerHTML =
-          '<div class="muted">Could not load reviews: ' + String(err.message || err) + '</div>';
+          '<div class="muted">Could not load reviews: ' + escapeHtml(String(err.message || err)) + '</div>';
       }
     }
 
@@ -174,7 +174,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         var r = reviews[i];
         var active = r.taskId === activeTaskId ? " active" : "";
         var statusTone = r.status === "completed" ? "ok" : r.status === "failed" ? "danger" : "warn";
-        html += '<div class="review-item' + active + '" onclick="selectReview(\\'' + r.taskId + '\\')">';
+        html += '<div class="review-item' + active + '" data-task-id="' + escapeHtml(r.taskId) + '">';
         html += '<div class="ri-task">' + escapeHtml(r.task || r.taskId) + '</div>';
         html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span style="color:var(--muted);">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
         html += '</div>';
@@ -182,14 +182,14 @@ app.get("/portal/reviews", async (_req, reply) => {
       container.innerHTML = html;
     }
 
-    function escapeHtml(str) {
-      var div = document.createElement("div");
-      div.appendChild(document.createTextNode(str));
-      return div.innerHTML;
+    // Element text only (the highlighter's regexes run on the result, so quotes stay literal).
+    // Everything else on this page uses the shell's escapeHtml (pages/escape.ts).
+    function escapeCodeText(str) {
+      return String(str === null || str === undefined ? "" : str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
     function syntaxHighlight(text) {
-      var s = escapeHtml(text);
+      var s = escapeCodeText(text);
       // Comments (single-line: // or #)
       s = s.replace(/(\\/\\/.*$|#.*$)/gm, '<span class="syntax-comment">$1</span>');
       // Strings (double and single quotes)
@@ -254,7 +254,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         var res = await api("/portal/api/reviews/" + encodeURIComponent(taskId));
         renderReviewDetail(res);
       } catch (err) {
-        detail.innerHTML = '<div class="card"><div class="muted">Failed to load review: ' + String(err.message || err) + '</div></div>';
+        detail.innerHTML = '<div class="card"><div class="muted">Failed to load review: ' + escapeHtml(String(err.message || err)) + '</div></div>';
       }
     }
 
@@ -298,9 +298,9 @@ app.get("/portal/reviews", async (_req, reply) => {
       html += '<div id="editArea"></div>';
 
       html += '<div class="review-actions" id="reviewActions">';
-      html += '<button class="btn-accept" onclick="submitDecision(\\'accept\\')">${icon("check", 14)} Accept changes</button>';
-      html += '<button class="btn-reject" onclick="submitDecision(\\'reject\\')">${icon("x", 14)} Reject</button>';
-      html += '<button class="btn-edit" onclick="toggleEdit()">${icon("edit", 14)} Edit &amp; accept</button>';
+      html += '<button class="btn-accept" data-review-action="accept">${icon("check", 14)} Accept changes</button>';
+      html += '<button class="btn-reject" data-review-action="reject">${icon("x", 14)} Reject</button>';
+      html += '<button class="btn-edit" data-review-action="edit">${icon("edit", 14)} Edit &amp; accept</button>';
       html += '</div>';
 
       detail.innerHTML = html;
@@ -344,6 +344,19 @@ app.get("/portal/reviews", async (_req, reply) => {
         showToast("Failed to submit decision: " + String(err.message || err), true);
       }
     }
+
+    // Delegated handlers (the CSP blocks inline onclick attributes).
+    document.getElementById("reviewsList").addEventListener("click", function(e) {
+      var item = e.target && e.target.closest ? e.target.closest("[data-task-id]") : null;
+      if (item) selectReview(item.getAttribute("data-task-id"));
+    });
+    document.getElementById("reviewDetail").addEventListener("click", function(e) {
+      var btn = e.target && e.target.closest ? e.target.closest("[data-review-action]") : null;
+      if (!btn) return;
+      var action = btn.getAttribute("data-review-action");
+      if (action === "edit") toggleEdit();
+      else submitDecision(action);
+    });
 
     requireAuth().then(function() {
       loadReviews();

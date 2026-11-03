@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { request } from "undici";
+import { escapeHtml } from "./pages/escape.js";
 
 /** #16: transactional email via Resend (verification link, wallet send code). Moved from server.ts. */
 export interface PortalMailerConfig {
@@ -9,10 +10,6 @@ export interface PortalMailerConfig {
   resendFromEmail: string;
   portalPublicUrl: string;
   walletSendMfaTtlMs: number;
-}
-
-function escapeHtml(v: string): string {
-  return v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
 export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: string) => void }) {
@@ -63,8 +60,8 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
       <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
       <p>Requested transfer:</p>
       <ul>
-        <li>Amount (sats): ${input.amountSats}</li>
-        <li>Destination: ${input.destination}</li>
+        <li>Amount (sats): ${escapeHtml(input.amountSats)}</li>
+        <li>Destination: ${escapeHtml(input.destination)}</li>
       </ul>
       <p>This code expires in ${Math.floor(cfg.walletSendMfaTtlMs / 60000)} minutes.</p>
       <p>If you did not request this, do not share the code and review account access immediately.</p>
@@ -142,5 +139,18 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(input.email, "Confirm your new EdgeCoder payout destination", html, "payout_destination_email");
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail };
+  /** One-time code to confirm one withdrawal to a Lightning invoice (routes/payouts.ts). */
+  async function sendWithdrawCodeEmail(input: { email: string; code: string; amountSats: number }): Promise<void> {
+    if (!cfg.resendApiKey || !cfg.resendFromEmail) throw new Error("email_mfa_not_configured");
+    const html = `
+      <p>Someone asked to withdraw <strong>${input.amountSats.toLocaleString("en-US")} sats</strong> from your EdgeCoder balance to a Lightning invoice.</p>
+      <p>Your one-time code is:</p>
+      <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
+      <p>The code works once, only for that invoice, and expires in ${Math.floor(cfg.walletSendMfaTtlMs / 60000)} minutes.</p>
+      <p>If you did not ask for this, do not share the code and change your password now.</p>
+    `;
+    await sendResendEmail(input.email, "Confirm your EdgeCoder withdrawal", html, "withdraw_code_email");
+  }
+
+  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail };
 }

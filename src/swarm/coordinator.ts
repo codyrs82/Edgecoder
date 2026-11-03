@@ -85,6 +85,7 @@ import {
 import { MeshProtocol } from "../mesh/protocol.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
+import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
@@ -1582,6 +1583,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
+  // Proof of key possession for agents verifying this coordinator (src/trust/identity-challenge.ts).
+  if (reqPath === IDENTITY_CHALLENGE_PATH && (req as any).method === "POST") return;
   if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
   // Mirror of the signed coordinator registry (clients verify the signature; no auth needed).
   if (reqPath === "/network/registry") return;
@@ -5306,6 +5309,18 @@ app.get("/identity", async () => ({
   trustEntry: `${identity.peerId}:${IDENTITY_FINGERPRINT}`,
   legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem)
 }));
+// Agents send a fresh nonce; the answer is signed with this coordinator's identity key, so a
+// replayed /identity does not pass their pinned-key check.
+app.post(IDENTITY_CHALLENGE_PATH, async (req, reply) => {
+  const answer = answerIdentityChallenge(req.body, {
+    peerId: identity.peerId,
+    publicKeyPem: identity.publicKeyPem,
+    privateKeyPem: coordinatorKeys.privateKeyPem,
+    publicUrl: COORDINATOR_PUBLIC_URL
+  });
+  if (!answer) return reply.code(400).send({ error: "invalid_challenge" });
+  return answer;
+});
 app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
 
 // The portal's signed coordinator registry, mirrored so the one platform URL serves it too

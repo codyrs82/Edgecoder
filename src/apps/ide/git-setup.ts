@@ -11,6 +11,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 
 export class GitSetupError extends Error {}
 
@@ -57,7 +58,7 @@ export function normalizeRemoteUrl(input: string): string {
 
 /** The folder name a clone gets: the URL's last path segment without .git. */
 export function repoNameFromUrl(url: string): string {
-  const tail = url.replace(/[/\\]+$/, "").split(/[/:]/).pop() ?? "";
+  const tail = url.replace(/[/\\]+$/, "").split(/[/\\:]/).pop() ?? "";
   const name = tail.replace(/\.git$/, "");
   return validFolderName(name) ? name : "repository";
 }
@@ -70,8 +71,9 @@ function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
   return new Promise((resolve, reject) => {
     execFile(
       cmd,
-      args,
-      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" } },
+      // gh runs git itself; it gets the same hardening through the environment.
+      cmd === "git" ? hardenedGitArgs(args) : args,
+      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" }) },
       (err, stdout, stderr) => {
         if (err) reject(new GitSetupError((stderr || err.message).trim()));
         else resolve({ stdout, stderr });
@@ -89,7 +91,7 @@ export async function cloneRepo(url: string, parentDir: string, name?: string): 
   const dest = join(parentDir, folder);
   if (existsSync(dest)) throw new GitSetupError(`${dest} already exists. Pick another folder.`);
   // ext:: is refused by the URL check too; this also covers anything a submodule or redirect might name.
-  await run("git", ["-c", "protocol.ext.allow=never", "clone", "--", url, dest], { timeoutMs: 15 * 60_000 });
+  await run("git", ["clone", "--", url, dest], { timeoutMs: 15 * 60_000 });
   return dest;
 }
 

@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { escapeHtml } from "./escape.js";
+
 // #16: shared by server.ts and the page modules (same env + defaults as before).
 export const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL ?? "https://github.com/codyrs82/Edgecoder";
 export const DOCS_SITE_URL = process.env.DOCS_SITE_URL ?? "http://127.0.0.1:5173";
@@ -13,9 +15,6 @@ export function supportEmail(raw: string | undefined = process.env.SUPPORT_EMAIL
 }
 export const SUPPORT_EMAIL = supportEmail();
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-}
 
 /**
  * Label for "Back to …" links: the PORTAL_PUBLIC_URL host, e.g. "edgecoder.io", HTML-escaped

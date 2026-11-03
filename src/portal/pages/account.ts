@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { displayEnrollmentToken, escapeHtml } from "./escape.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
@@ -99,6 +100,14 @@ app.get("/portal/wallet", async (_req, reply) => {
           <button class="primary" id="withdrawBtn">Pay invoice</button>
           <span class="muted" id="payoutPolicyNote"></span>
         </div>
+        <div id="withdrawCodeWrap" class="hidden" style="margin-top:8px;">
+          <label for="withdrawCode">Email code</label>
+          <div class="row">
+            <input id="withdrawCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+            <button class="primary" id="withdrawConfirmBtn">Confirm withdrawal</button>
+          </div>
+          <div class="muted" id="withdrawCodeInfo" style="margin-top:6px;"></div>
+        </div>
         <p class="muted" style="margin:14px 0 0;">Automatic payouts go to the Lightning address under "Where should we pay you?".</p>
         <table style="margin-top:14px;">
           <thead><tr><th>Time</th><th>Kind</th><th>Sats</th><th>Fee</th><th>Status</th></tr></thead>
@@ -191,23 +200,51 @@ app.get("/portal/wallet", async (_req, reply) => {
         document.getElementById("payoutPolicyNote").textContent = pol.lightningEnabled === false
           ? "Lightning payouts are not enabled on this coordinator yet."
           : "Minimum " + (pol.minPayoutSats || 0).toLocaleString() + " sats; routing fee up to " + ((pol.maxFeeBps || 0) / 100) + "% is deducted. Network: " + (pol.network || "");
-        const rows = (p.payouts || []).map((x) => "<tr><td>" + fmtTime(x.createdAtMs) + "</td><td>" + x.kind + "</td><td>" + sats(x.amountMsat) +
-          "</td><td>" + sats(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") + (x.error ? " <span class='muted'>" + x.error + "</span>" : "") + "</td></tr>");
+        const rows = (p.payouts || []).map((x) => "<tr><td>" + fmtTime(x.createdAtMs) + "</td><td>" + escapeHtml(x.kind) + "</td><td>" + sats(x.amountMsat) +
+          "</td><td>" + sats(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") + (x.error ? " <span class='muted'>" + escapeHtml(x.error) + "</span>" : "") + "</td></tr>");
         renderRows("payoutsBody", rows, 5, "No payouts yet.");
       } catch (err) {
         document.getElementById("payoutPolicyNote").textContent = "Payout balance unavailable: " + String(err.message || err);
       }
     }
-    document.getElementById("withdrawBtn").addEventListener("click", async () => {
+    // Withdrawing asks for an emailed code bound to this invoice: POST { bolt11 } -> 202 { challengeId },
+    // then POST { bolt11, challengeId, emailCode }.
+    let withdrawChallenge = null;
+    function resetWithdrawCode() {
+      withdrawChallenge = null;
+      document.getElementById("withdrawCodeWrap").classList.add("hidden");
+      document.getElementById("withdrawCode").value = "";
+    }
+    async function submitWithdraw(withCode) {
       const bolt11 = document.getElementById("withdrawInvoice").value.trim();
       if (!bolt11) { showToast("Paste a BOLT11 invoice first.", true); return; }
+      const body = { bolt11 };
+      if (withCode) {
+        const emailCode = document.getElementById("withdrawCode").value.trim();
+        if (!emailCode || !withdrawChallenge || withdrawChallenge.bolt11 !== bolt11) { showToast("Enter the code from the email, or request a new one.", true); return; }
+        body.challengeId = withdrawChallenge.id;
+        body.emailCode = emailCode;
+      }
       try {
-        const r = await api("/wallet/payouts/withdraw", { method: "POST", body: JSON.stringify({ bolt11 }) });
-        if (r.ok) { showToast("Paid " + sats(r.payout.amountMsat) + " sats."); document.getElementById("withdrawInvoice").value = ""; }
-        else showToast("Payout " + (r.code || "failed") + (r.detail ? ": " + r.detail : ""), true);
+        const res = await fetch("/wallet/payouts/withdraw", { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        let r = {};
+        try { r = await res.json(); } catch {}
+        if (res.status === 202 && r.verificationRequired) {
+          withdrawChallenge = { id: r.challengeId, bolt11 };
+          document.getElementById("withdrawCode").value = "";
+          document.getElementById("withdrawCodeInfo").textContent = (r.detail || "We emailed you a code.") + " Amount: " + sats(r.amountMsat) + " sats.";
+          document.getElementById("withdrawCodeWrap").classList.remove("hidden");
+          document.getElementById("withdrawCode").focus();
+          return;
+        }
+        if (withCode) resetWithdrawCode();
+        if (res.ok && r.ok) { showToast("Paid " + sats(r.payout.amountMsat) + " sats."); document.getElementById("withdrawInvoice").value = ""; }
+        else showToast("Payout " + (r.code || r.error || "failed") + (r.detail ? ": " + r.detail : ""), true);
       } catch (err) { showToast("Withdrawal failed: " + String(err.message || err), true); }
       loadPayouts();
-    });
+    }
+    document.getElementById("withdrawBtn").addEventListener("click", () => { resetWithdrawCode(); submitWithdraw(false); });
+    document.getElementById("withdrawConfirmBtn").addEventListener("click", () => submitWithdraw(true));
     let payoutDestChallenge = null;
     function payoutDestMessage(kind, text) {
       const err = document.getElementById("payoutDestError");
@@ -295,7 +332,7 @@ app.get("/portal/wallet", async (_req, reply) => {
     function renderPaymentIntents(intents) {
       const rows = (intents || []).map((p) => {
         const tone = p.status === "settled" ? "ok" : p.status === "expired" ? "danger" : "warn";
-        return "<tr><td>" + p.intentId + "</td><td>" + statusBadge(p.status, tone) + "</td><td>" + p.amountSats + "</td><td>" + p.quotedCredits +
+        return "<tr><td>" + escapeHtml(p.intentId) + "</td><td>" + statusBadge(p.status, tone) + "</td><td>" + escapeHtml(p.amountSats) + "</td><td>" + escapeHtml(p.quotedCredits) +
           "</td><td>" + fmtTime(p.createdAtMs) + "</td></tr>";
       });
       renderRows("paymentIntentsBody", rows, 5, "No payment intents.");
@@ -310,8 +347,8 @@ app.get("/portal/wallet", async (_req, reply) => {
     function renderSendRequests(requests) {
       const rows = (requests || []).map((req) => {
         const tone = req.status === "sent" ? "ok" : req.status === "rejected" ? "danger" : "warn";
-        return "<tr><td>" + fmtTime(req.createdAtMs) + "</td><td>" + req.destination + "</td><td>" + req.amountSats +
-          "</td><td>" + statusBadge(req.status, tone) + "</td><td>" + req.requestId + "</td></tr>";
+        return "<tr><td>" + fmtTime(req.createdAtMs) + "</td><td>" + escapeHtml(req.destination) + "</td><td>" + escapeHtml(req.amountSats) +
+          "</td><td>" + statusBadge(req.status, tone) + "</td><td>" + escapeHtml(req.requestId) + "</td></tr>";
       });
       renderRows("sendRequestsBody", rows, 5, "No send requests yet.");
     }
@@ -333,13 +370,13 @@ app.get("/portal/wallet", async (_req, reply) => {
       const walletSnapshot = summary.walletSnapshot || {};
       const accountId = (summary.user && summary.user.userId) ? ("acct-" + summary.user.userId) : "n/a";
       const creditHistoryRows = (walletSnapshot.creditHistory || []).map((tx) =>
-        "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + tx.type + "</td><td>" + tx.credits + "</td><td>" + tx.reason + "</td></tr>"
+        "<tr><td>" + fmtTime(tx.timestampMs) + "</td><td>" + escapeHtml(tx.type) + "</td><td>" + escapeHtml(tx.credits) + "</td><td>" + escapeHtml(tx.reason) + "</td></tr>"
       );
       renderRows("creditHistoryBody", creditHistoryRows, 4, "No credit transactions yet.");
       const wallets = walletSnapshot.wallets || [];
       const walletRows = wallets.map((w) =>
-        "<tr><td>" + (w.walletType || "") + "</td><td>" + (w.network || "") + "</td><td>" + (w.payoutAddress || "n/a") +
-        "</td><td>" + (w.lnNodePubkey || w.xpub || "n/a") + "</td></tr>"
+        "<tr><td>" + escapeHtml(w.walletType || "") + "</td><td>" + escapeHtml(w.network || "") + "</td><td>" + escapeHtml(w.payoutAddress || "n/a") +
+        "</td><td>" + escapeHtml(w.lnNodePubkey || w.xpub || "n/a") + "</td></tr>"
       );
       renderRows("walletsBody", walletRows, 4, "No wallets linked.");
       renderDepositDetails(accountId, wallets[0] || null);
@@ -433,9 +470,10 @@ app.get("/portal/download", async (req, reply) => {
   const GH_RELEASES_PAGE = "https://github.com/codyrs82/Edgecoder/releases/latest";
   const userAgent = req.headers["user-agent"] || "";
   const detectedOS = detectOS(userAgent);
-  const queryToken = ((req.query as Record<string, string>)?.token || "").trim();
-  const tokenDisplay = queryToken || "YOUR_TOKEN";
-  const portalBase = (process.env.PORTAL_PUBLIC_URL || "https://edgecoder.io").replace(/\/$/, "");
+  // Only a well-formed enrolment token is shown in the commands; anything else is the placeholder.
+  // Both values are HTML-escaped as well (they land in markup and in copyable shell commands).
+  const tokenDisplay = escapeHtml(displayEnrollmentToken((req.query as Record<string, unknown> | undefined)?.token));
+  const portalBase = escapeHtml((process.env.PORTAL_PUBLIC_URL || "https://edgecoder.io").replace(/\/$/, ""));
 
   const osLabels: Record<string, string> = {
     macos: "macOS", windows: "Windows", linux: "Linux", ios: "iOS", unknown: "your OS"
@@ -481,7 +519,7 @@ app.get("/portal/download", async (req, reply) => {
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.deb">Download .deb package</a>
      <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.AppImage" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download AppImage</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" onclick="copyCmd('linux-install')">Copy</button></div>`,
+    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" data-copy="linux-install">Copy</button></div>`,
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "linux");
 
@@ -489,11 +527,11 @@ app.get("/portal/download", async (req, reply) => {
     `<a class="dl-btn" href="#">Download from App Store</a>
      <span style="font-size:10px;color:var(--muted);margin-left:8px;">TestFlight available now</span>`,
     `Sign in with your <strong>EdgeCoder account</strong>.`,
-    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('ios-token')">Copy</button></div>`
+    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" data-copy="ios-token">Copy</button></div>`
   ], detectedOS === "ios");
 
   const vscodeCard = wizardCard("vscode", icon("code", 15), "VS Code Extension", [
-    `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" onclick="copyCmd('vscode-cmd')">Copy</button></div>
+    `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" data-copy="vscode-cmd">Copy</button></div>
      <span style="font-size:10px;color:var(--muted);">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
     `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
   ], false);
@@ -503,7 +541,7 @@ app.get("/portal/download", async (req, reply) => {
   --name edgecoder \\
   -e EDGE_RUNTIME_MODE=worker \\
   -e AGENT_REGISTRATION_TOKEN=${tokenDisplay} \\
-  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" onclick="copyCmd('docker-cmd')">Copy</button></div>`
+  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" data-copy="docker-cmd">Copy</button></div>`
   ], false);
 
   /* ── pick primary vs secondary cards ─────────────────────────────── */
@@ -515,8 +553,8 @@ app.get("/portal/download", async (req, reply) => {
   // One installer for every platform (docs/install.md): detects GPUs, one agent per GPU.
   const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 style="margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
     <p style="margin:0 0 12px;font-size:13px;color:var(--muted);">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
-    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-sh')">Copy</button></div>
-    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-ps1')">Copy</button></div>
+    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-sh">Copy</button></div>
+    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-ps1">Copy</button></div>
     <div style="font-size:12px;color:var(--muted);margin-top:8px;">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
   const secondaryCards = universalCard + Object.entries(allCards)
     .filter(([k]) => k !== primaryKey)
@@ -594,7 +632,7 @@ app.get("/portal/download", async (req, reply) => {
     ${primaryCard}
 
     <!-- ── Other platforms toggle ─────────────────────────────────────── -->
-    <button class="toggle-link" id="toggle-others" onclick="toggleOthers()">Show other platforms</button>
+    <button class="toggle-link" id="toggle-others">Show other platforms</button>
     <div class="other-platforms" id="other-platforms">
       <div class="other-grid">
         ${secondaryCards}
@@ -622,13 +660,11 @@ app.get("/portal/download", async (req, reply) => {
       el.classList.toggle('show');
       btn.textContent = el.classList.contains('show') ? 'Hide other platforms' : 'Show other platforms';
     }
-    ${queryToken ? `
-    (function() {
-      document.querySelectorAll('.code-block code').forEach(function(el) {
-        el.innerHTML = el.innerHTML.replace(/YOUR_TOKEN/g, '${queryToken}');
-      });
-    })();
-    ` : ""}
+    // No inline handlers (the CSP blocks them): wire the buttons here.
+    document.querySelectorAll('[data-copy]').forEach(function(btn) {
+      btn.addEventListener('click', function() { copyCmd(btn.getAttribute('data-copy')); });
+    });
+    document.getElementById('toggle-others').addEventListener('click', toggleOthers);
   `;
 
   return reply.type("text/html").send(portalAuthedPageHtml({

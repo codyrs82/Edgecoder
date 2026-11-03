@@ -20,9 +20,29 @@ function fakeStore() {
   const users = new Map<string, User>();
   const resets = new Map<string, Reset>();
   const sessions = new Map<string, string>(); // tokenHash -> userId
+  /** Other sign-in methods per user: API keys, passkeys, OAuth links, GitHub token. */
+  const otherCreds = new Map<string, Set<string>>();
+  const drop = (userId: string, kind: string) => otherCreds.get(userId)?.delete(kind);
   const store: PasswordResetStore = {
     async getUserByEmail(email) {
       return [...users.values()].find((u) => u.email === email) ?? null;
+    },
+    async getUserById(userId) {
+      const u = users.get(userId);
+      return u ? { ...u } : null;
+    },
+    async revokeAllApiKeys(userId) {
+      drop(userId, "api_key");
+      return 0;
+    },
+    async deletePasskeysForUser(userId) {
+      drop(userId, "passkey");
+    },
+    async deleteOauthLinksForUser(userId) {
+      drop(userId, "oauth");
+    },
+    async deleteGitHubToken(userId) {
+      drop(userId, "github");
     },
     async createPasswordReset({ tokenHash, userId, expiresAtMs }) {
       const now = Date.now();
@@ -54,7 +74,7 @@ function fakeStore() {
       if (u) u.emailVerified = true;
     }
   };
-  return { store, users, resets, sessions };
+  return { store, users, resets, sessions, otherCreds };
 }
 
 describe("password reset (/auth/password/*)", () => {
@@ -181,6 +201,34 @@ describe("password reset (/auth/password/*)", () => {
     await vi.waitFor(() => expect(ssoNotices).toEqual(["sso@example.test"]));
     expect(sent).toHaveLength(0);
     expect(db.users.get("u2")!.passwordHash).toBeUndefined();
+  });
+
+  it("claiming a never-verified account revokes every other way in the earlier registrant set up", async () => {
+    db.otherCreds.set("u1", new Set(["api_key", "passkey", "oauth", "github"]));
+    db.otherCreds.set("u2", new Set(["api_key", "passkey", "oauth", "github"]));
+    const token = await requestToken();
+    expect((await reset(token)).statusCode).toBe(200);
+    expect([...db.otherCreds.get("u1")!]).toEqual([]);
+    expect([...db.sessions.values()]).toEqual(["u2"]);
+    expect([...db.otherCreds.get("u2")!].sort()).toEqual(["api_key", "github", "oauth", "passkey"]);
+  });
+
+  it("a reset on an already verified account keeps its other sign-in methods", async () => {
+    db.users.get("u1")!.emailVerified = true;
+    db.otherCreds.set("u1", new Set(["api_key", "passkey", "oauth", "github"]));
+    const token = await requestToken();
+    expect((await reset(token)).statusCode).toBe(200);
+    expect(db.otherCreds.get("u1")!.size).toBe(4);
+  });
+
+  it("a never-verified account without a password gets a reset link (the inbox owner can claim it)", async () => {
+    db.users.set("u3", { userId: "u3", email: "placeholder@example.test", emailVerified: false });
+    db.otherCreds.set("u3", new Set(["oauth"]));
+    const token = await requestToken("placeholder@example.test");
+    expect(ssoNotices).toHaveLength(0);
+    expect((await reset(token)).statusCode).toBe(200);
+    expect(db.users.get("u3")!.emailVerified).toBe(true);
+    expect(db.otherCreds.get("u3")!.size).toBe(0);
   });
 
   it("caps reset emails per address, still answering the same", async () => {

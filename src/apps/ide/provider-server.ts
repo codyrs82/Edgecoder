@@ -30,6 +30,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./git-setup.js";
+import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
@@ -44,6 +45,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
@@ -93,7 +95,8 @@ const providers = new ProviderRegistry();
 function projectHeadCommit(): string | undefined {
   if (!activeProjectRoot) return undefined;
   try {
-    const head = execFileSync("git", ["-C", activeProjectRoot, "rev-parse", "HEAD"], {
+    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"]), {
+        env: gitExecEnv(),
       encoding: "utf8",
       timeout: 3_000,
       stdio: ["ignore", "pipe", "ignore"]
@@ -692,6 +695,61 @@ app.post("/v1/ide/git/clone", async (req, reply) => {
 });
 app.get("/v1/ide/git/github/status", async (_req, reply) => reply.send(await githubStatus()));
 
+// The projects folder (default ~/EdgeCoder) and connecting a repository into it (repo-connect.ts).
+app.get("/v1/ide/settings/projects-folder", async (_req, reply) => {
+  const f = getProjectsFolder();
+  return reply.send({ path: f.path, source: f.source, defaultPath: defaultProjectsFolder() });
+});
+app.post("/v1/ide/settings/projects-folder", async (req, reply) => {
+  const b = z.object({ path: z.string().min(1).max(4096) }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  try {
+    return reply.send({ path: setProjectsFolder(b.data.path), source: getProjectsFolder().source });
+  } catch (err) {
+    if (err instanceof GitSetupError) return reply.status(400).send({ error: "invalid", message: err.message });
+    throw err;
+  }
+});
+app.get("/v1/ide/repos/recent", async (_req, reply) => {
+  const st = await githubStatus();
+  return reply.send({ ...st, repos: st.loggedIn ? await recentGitHubRepos(20) : [] });
+});
+app.post("/v1/ide/repos/connect", async (req, reply) => {
+  const b = z.object({ repo: remoteUrl, stream: z.boolean().default(false) }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  if (!b.data.stream) {
+    try {
+      const r = await connectRepoUrl(b.data.repo);
+      activeProjectRoot = r.path;
+      return reply.send(r);
+    } catch (err) {
+      if (err instanceof GitSetupError) return reply.status(400).send({ error: "git", message: err.message });
+      throw err;
+    }
+  }
+  // Streamed: progress lines from git as they come, then the result (or the error).
+  writeSseHead(reply);
+  const send = (ev: Record<string, unknown>) => reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+  let lastAt = 0;
+  try {
+    const r = await connectRepoUrl(b.data.repo, {
+      onProgress: (line) => {
+        const now = Date.now();
+        if (now - lastAt < 120 && !/done\.?$/.test(line)) return;
+        lastAt = now;
+        send({ type: "progress", line: line.slice(0, 300) });
+      },
+    });
+    activeProjectRoot = r.path;
+    send({ type: "done", result: r });
+  } catch (err) {
+    send({ type: "error", message: err instanceof GitSetupError ? err.message : "Couldn't connect the repository." });
+    if (!(err instanceof GitSetupError)) req.log.error({ err }, "repo connect failed");
+  }
+  reply.raw.end();
+  return reply;
+});
+
 // Background jobs on the network (network-tasks.ts).
 const networkTasks = new NetworkTasks(router);
 
@@ -726,7 +784,7 @@ app.get("/v1/ide/preview", async (req, reply) => {
   return reply.send({ url: preview.urlFor(previewPort, path) });
 });
 
-// A new project for something the user asked to build from chat: ~/EdgeCoder Projects/<name>.
+// A new project for something the user asked to build from chat: <projects folder>/<name>.
 app.post("/v1/ide/projects/new", async (req, reply) => {
   const { name } = z.object({ name: z.string().max(200).default("") }).parse(req.body ?? {});
   const projectRoot = createNewProject(name);

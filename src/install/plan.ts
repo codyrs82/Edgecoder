@@ -54,6 +54,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
   const warnings: string[] = [];
   const sandboxMode: "docker" | "none" = opts.sandbox === "none" ? "none" : dockerAvailable ? "docker" : "none";
   if (sandboxMode === "none") warnings.push("Docker is not available: agents will register but not pull swarm tasks until Docker is installed (SANDBOX_MODE=docker).");
+  else if (hw.platform === "darwin") warnings.push("macOS: the agents run as the _edgecoder account, which cannot use a Docker Desktop socket owned by your login user; until it can reach a Docker daemon, agents register but pull no swarm tasks (docs/install.md).");
   const discrete = hw.gpus.filter((g) => g.vendor === "nvidia" || g.vendor === "amd");
   let slots: GpuInfo[][];
   if (opts.instances && opts.instances > 0) {
