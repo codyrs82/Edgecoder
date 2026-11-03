@@ -828,7 +828,7 @@ name = "edgecoder-desktop"
 version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
- "getrandom 0.2.17",
+ "getrandom 0.4.1",
  "glob",
  "hex",
  "portable-pty",
