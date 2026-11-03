@@ -8,13 +8,24 @@ bitcoin"): cSats measure work (1 cSat = 1 sat of compute). They never change han
 and every exchange of value reduces to bitcoin and moves over the bitcoin network (Lightning).
 
 **Recommendation in one paragraph.** Keep one ledger, denominated in msat, where every row points
-at a Lightning payment (or a settlement batch that does). Requesters pay from their own wallets:
-budgeted wallet pull over Nostr Wallet Connect for the app and agents, L402 for the hosted API and
-MCP, and hold invoices for leases and job budgets. Charges are batched into short settlement
-windows because per-token costs are far below one sat. Providers are paid in sats on a short
-window, straight to their Lightning address, BOLT12 offer or node. The network fee is taken in
-sats at settlement. A prepaid balance stays only as an opt-in convenience with caps, labelled as
-custodial. Ecash is a later opt-in.
+at a Lightning payment (or a settlement batch that does). By default, requesters pay from a
+**self-custodial wallet built into the local app**. The user funds it over Lightning or on chain,
+and a **spending contract** signed by the user's key and the coordinator's key lets the network
+pull from it at intervals, within agreed limits, over Nostr Wallet Connect. Hold invoices are the
+fallback for wallets that can't do this. L402 serves the hosted API and MCP. Charges are batched
+into short settlement windows because per-token costs are far below one sat. Providers are paid in
+sats on a short window, straight to their Lightning address, BOLT12 offer or node. The network fee
+is 5 % all-in, taken in sats at settlement. The custodial prepaid balance is leaning toward
+removal. Ecash is a later opt-in.
+
+## Owner decisions (2026-11-02)
+
+| # | Decision | Where |
+|---|---|---|
+| D1 | **Default payment is a self-custodial wallet built into the user's local app**, funded over Lightning or on chain. A spending contract signed by both the user's key and the coordinator's key lets the network pull automatically at intervals, within agreed limits (max per interval, top-up threshold, expiry), and asks the user to top up when the balance runs low. It is built on Nostr Wallet Connect budgeted pulls. Hold invoices stay as the fallback for wallets that can't do it. | [5.7](#57-the-embedded-wallet-and-spending-contract-default) |
+| D2 | **Custodial prepaid balance: no decision yet, leaning toward removal**, because the self-custodial wallet takes its place. | [5.5](#55-prepaid-balance-and-change) |
+| D3 | **Network fee: 5 %.** Whether the 1.5 % purchase fee survives is explained in 5.4. The recommendation is 5 % all-in; the owner still has to confirm. | [5.4](#54-fees) |
+| D4 | **Legal review: a legal AI agent does a first pass, then a digital-assets attorney reviews. Mainnet is gated on the attorney signing off.** | [8](#8-mainnet-gate), [9](#9-regulatory-and-custody-notes) |
 
 ---
 
@@ -239,7 +250,7 @@ splicing, to rebalance. The hot wallet can be smaller than today because liabili
 
 | Surface | Default method | Fallback |
 |---|---|---|
-| Desktop app, portal chat | **NWC wallet pull** with a budget the user sets (e.g. 5,000 sats/day) | Hold-invoice session budget (scan once per session); opt-in prepaid |
+| Desktop app, iOS app, portal chat | **Embedded self-custodial wallet with a signed spending contract** (NWC pulls, 5.7) | An external NWC wallet under the same contract; hold-invoice session budget (scan once per session) |
 | Reservations (leases) | **Hold invoice** when the lease is 60 min or less; longer leases are **NWC pulls every 10 min**, and the lease ends when a pull fails | Prepaid |
 | Large code jobs | **Hold invoice** for the worst-case reserve (`reserveMsat`), settled, then the remainder refunded | NWC |
 | Hosted API (`src/inference-api`) | **L402**: the 402 carries an invoice for a block (e.g. 1,000 sats), and the macaroon is the API credential until the block is used up | NWC bound to the API key; prepaid |
@@ -285,14 +296,28 @@ pattern when they use a hold invoice.
 
 ### 5.4 Fees
 
-- The network fee (`NETWORK_FEE_BPS`) is taken **in sats at settlement**. A settlement's lines
-  split into provider msat and fee msat, as `splitJobCost` does now.
-- The purchase fee (`COORDINATOR_FEE_BPS`) goes away along with purchases. Whether to fold it into
-  the network fee is open question 10.3.
+- **The network fee is 5 %** (`NETWORK_FEE_BPS` = 500, decision D3). It is taken **in sats at
+  settlement**: a settlement's lines split into provider msat and fee msat, as `splitJobCost` does
+  now.
+- **Why the 1.5 % purchase fee goes away.** Today `COORDINATOR_FEE_BPS` (150) is charged when sats
+  are converted into cSats (`createPaymentIntent`). With no cSat purchase step, there is nothing
+  for it to apply to. That leaves two choices:
+  - **drop it:** the payer pays 5 % in total; or
+  - **keep it as a 1.5 % fee on each pull or settlement:** the payer pays 6.5 % in total
+    (5 % network + 1.5 %).
+- **Recommendation: 5 % all-in.** The payer covers routing fees on their own pulls (their wallet
+  pays the route to the coordinator). The network fee covers routing fees on provider payouts, so
+  providers receive their full share. Today providers pay payout routing out of their balance;
+  under this recommendation the fee pool pays it. **Open for the owner to confirm** (10.3).
 - The fee pool stays an msat account. It is distributed to hosts in sats every 24 h through the
   same payout path (hosts already need a Lightning address).
 
-### 5.5 Prepaid balance (opt-in) and change
+### 5.5 Prepaid balance and change
+
+**Decision D2: no decision yet; leaning toward removal.** The self-custodial embedded wallet (5.7)
+gives the convenience of a prepaid balance (fund once, then nothing per request) without the
+coordinator holding the funds. If removed, `/account/buy` is retired after the cut-over and the
+coordinator holds only change (below). If kept:
 
 - Off by default for new accounts (`PREPAID_BALANCE_ENABLED`). When on, the balance is a **sat
   balance held by the coordinator**, shown that way ("held for you by this coordinator"), capped
@@ -309,6 +334,158 @@ Lightning on its settlement window. The coordinator should **not** run a mint it
 would make it a custodian again. Fedimint is similar, with a federation as custodian. Research
 first; no code before Phase 5.
 
+### 5.7 The embedded wallet and spending contract (default)
+
+Decision D1. The local app (desktop on Tauri, with a Rust backend in `desktop/src-tauri`; iOS)
+ships a self-custodial bitcoin wallet. The user holds the keys and funds it over Lightning or on
+chain. A **spending contract**, signed by the user's key and the coordinator's key, authorises the
+network to pull from the wallet automatically within fixed limits. The wallet acts as an NWC
+(NIP-47) wallet service and the coordinator as the NWC client, so the transport is standard
+budgeted NWC. The signed contract is an EdgeCoder layer on top: NIP-47 budgets are wallet-side
+settings, not a two-party agreement.
+
+#### How it flows
+
+1. **Set up.** The app creates the wallet: a seed in the OS keychain (macOS Keychain, Windows
+   Credential Manager, iOS Keychain), with a backup phrase shown once. It derives two keys from the
+   seed: a **contract key** (secp256k1, BIP-340) and an **NWC wallet-service key**.
+2. **Fund.** The user receives over Lightning (an invoice from the wallet) or on chain (an address
+   from the wallet), see "Funding" below.
+3. **Agree.** The user picks limits in the app (presets such as "light", "daily coding", "heavy",
+   or custom). The app asks the coordinator for a contract offer. The coordinator fills its fields
+   and signs; the user reviews and signs. Both keep the contract. The app creates an NWC connection
+   whose client key is the coordinator's and whose NIP-47 budget matches the contract.
+4. **Pull.** Each settlement window (5.2) the coordinator issues a BOLT11 invoice from its node
+   for the window's usage and sends an NWC `pay_invoice` request that names the contract and the
+   settlement. The wallet checks the request against the contract (below) and pays. The preimage
+   goes back over NWC and is recorded on the settlement.
+5. **Top up.** When the balance falls below the top-up threshold, the wallet notifies the user
+   (OS notification and in-app banner, with a suggested amount) and tells the coordinator through
+   an NWC notification, so the coordinator can warn before jobs stop.
+6. **End.** The contract expires, either side revokes it, or a new contract supersedes it.
+
+#### Contract fields
+
+Canonical JSON with sorted keys and no whitespace, the same canonicalisation as work receipts
+(`src/receipts/`).
+
+| Field | Meaning |
+|---|---|
+| `v` | Contract format version (1) |
+| `contractId` | sha256 of the canonical body without signatures |
+| `network` | `bitcoin`, `signet`, `regtest`; must match the coordinator's `BITCOIN_NETWORK` |
+| `accountId` | The EdgeCoder account the usage belongs to |
+| `userPubkey` | User's contract key (x-only, hex) |
+| `coordinatorPubkey` | Coordinator's contract key (x-only, hex). Coordinators sign with Ed25519 today (`COORDINATOR_PRIVATE_KEY_PEM`), so they need a secp256k1 key as well; it is published next to the Ed25519 key so peers can pin it |
+| `coordinatorNwcClientPubkey` | The only NWC client key allowed to send pull requests |
+| `walletServicePubkey`, `relays[]` | Where the wallet listens for NWC requests |
+| `payeeNodeIds[]` | Lightning node ids whose invoices the wallet will pay (the coordinator's node or nodes). An invoice to any other node is refused |
+| `intervalSeconds` | Length of a budget interval (e.g. 3,600) |
+| `maxPerIntervalMsat` | Most the coordinator may pull in one interval (rolling) |
+| `maxPerPullMsat` | Most one pull may take |
+| `minPullMsat` | Smallest pull (e.g. 21 sats), so routing stays economical |
+| `maxTotalMsat` | Most the contract may pull over its lifetime (optional) |
+| `topUpThresholdMsat` | Balance at which the wallet asks for a top-up |
+| `topUpSuggestedMsat` | Amount the prompt suggests |
+| `maxRatePolicy` | Price ceiling the user accepted: network fee bps (500) and max msat per credit per class, so a pull for work priced above it is refused |
+| `notBefore`, `expiresAt` | Validity window (e.g. 90 days, renewable) |
+| `finalSettlementGraceSeconds` | After revocation or expiry, how long one final pull for usage accrued *before* the cut-off is still honoured (e.g. 600) |
+| `supersedes` | `contractId` this contract replaces, if any |
+| `nonce`, `createdAt` | Uniqueness and audit |
+| `sigUser`, `sigCoordinator` | BIP-340 Schnorr signatures over `contractId` |
+
+#### Signatures
+
+- The coordinator signs first (an offer), then the user signs (acceptance). A contract is valid
+  only with both signatures and a correct `contractId`.
+- Each pull request carries `contractId`, `settlementId` and the invoice. The invoice's
+  description hash commits to `{contractId, settlementId, amountMsat}`. The NWC request itself is
+  signed by `coordinatorNwcClientPubkey`, as NIP-47 requires.
+- The wallet keeps a local log of every pull (contract, settlement, amount, payment hash,
+  preimage). The user can check it against the coordinator's signed settlement records and receipts
+  (6.4).
+
+#### Enforcement in the wallet (authoritative)
+
+The wallet holds the money, so its checks are the ones that bind. It pays a pull only if all of
+these hold:
+
+- the contract is signed by both sides, inside `notBefore`/`expiresAt`, not revoked, not
+  superseded, and its `network` matches the invoice;
+- the request comes from `coordinatorNwcClientPubkey` and names this `contractId`;
+- the invoice's payee is in `payeeNodeIds`, it is unexpired, and its description hash matches the
+  committed fields;
+- the amount is between `minPullMsat` and `maxPerPullMsat`, the rolling interval total stays within
+  `maxPerIntervalMsat`, and the lifetime total stays within `maxTotalMsat`;
+- the `settlementId` has not been paid before (no double pulls);
+- the balance covers the amount plus the routing fee cap.
+
+A refused pull returns a NIP-47 error with a reason code (`budget_exceeded`, `expired`, `revoked`,
+`payee_not_allowed`, `insufficient_balance`, ...). A pull that would cross `topUpThresholdMsat`
+still pays, then triggers the top-up prompt.
+
+#### Enforcement at the coordinator
+
+- It pulls only for accrued settlement lines: never ahead of usage, never more than the contract
+  allows.
+- Before accepting a job it checks the payer's remaining headroom (interval budget left, and the
+  balance hint from the last pull or `get_balance` if the user allowed it). Unpaid exposure stays
+  within one settlement window.
+- A failed or refused pull stops new jobs for that account until a pull succeeds, the user tops up
+  or a new contract is signed. Running jobs finish, and their cost goes into the next pull.
+- Every pull is a `settlements` row with `method = nwc_contract`, `contract_id`, payment hash and
+  preimage.
+- Contracts are stored in a `spending_contracts` table (6.1) and verified on load; a contract
+  whose signatures fail is ignored and alerted on.
+
+#### Revocation
+
+- **User:** in the app, "Stop automatic payments". The wallet signs `{contractId, revokedAt}` and
+  stops honouring the contract at once (except one final pull within
+  `finalSettlementGraceSeconds` for usage before `revokedAt`, capped at `maxPerPullMsat`). It also
+  deletes the NWC connection and sends the revocation to the coordinator. Because the wallet
+  enforces it locally, revocation works even if the coordinator is unreachable.
+- **Coordinator:** signs the same structure to end service (e.g. a price change outside
+  `maxRatePolicy`, or abuse). It stops pulling and stops accepting jobs under that contract.
+- **Expiry and supersession:** no action needed. A new contract with `supersedes` replaces the old
+  one once both signatures are in place.
+
+#### Embedded wallet options
+
+| Option | Model | Lightning receive | On-chain receive | Fit and trade-offs |
+|---|---|---|---|---|
+| **Breez SDK (Spark)** | Self-custodial over Spark (a statechain-style layer). The user holds keys; operators must not collude (1-of-n honest assumption); unilateral exit to chain | Yes, no channels to manage | Yes (deposit address, claimed into the wallet) | Rust core with Swift, Kotlin and WASM bindings, so it fits `src-tauri` and iOS. Simplest UX and no liquidity management. Depends on the Spark operator set and a younger protocol |
+| **LDK Node** | A full Lightning node in the app, with an on-chain wallet (BDK) | Yes, through an LSP (LSPS2 just-in-time channels; first receive pays a channel fee) | Yes (built-in wallet; splice or open a channel to use it on Lightning) | Rust, fits `src-tauri`; Swift bindings for iOS. Most sovereign, no third-party trust beyond the LSP for liquidity. Channel and backup management, a larger app, and the app must be online to pay |
+| **Breez SDK (Liquid)** | Swaps through the Liquid sidechain | Yes (swap) | Yes (swap) | Federation trust and swap fees; not preferred now that Spark exists |
+| **Bring your own NWC wallet** (e.g. Alby Hub, other NWC wallets) | The user's own wallet | Theirs | Theirs | Same contract, but EdgeCoder can't verify the wallet enforces it beyond its NIP-47 budget. Supported, labelled "your wallet enforces the budget" |
+
+**Recommendation:** ship Breez SDK (Spark) first for its simpler UX and on-chain receive without
+channels. Offer LDK Node later as an "advanced, fully sovereign" option behind the same wallet
+interface in `src-tauri`, and support bring-your-own NWC from the start. The SDK versions and the
+current trust model of each option need checking at build time; this table reflects the design
+as understood now.
+
+#### Funding
+
+- **Lightning:** the wallet shows an invoice or a reusable Lightning address/BOLT12 offer.
+  Spendable once received (on LDK Node, the first receive may open a JIT channel for a fee).
+- **On chain:** the wallet shows a fresh address (BIP-84, or the SDK's deposit address). Funds
+  become spendable after `ONCHAIN_MIN_CONFIRMATIONS` (proposed 1 below 100k sats, 3 above),
+  then are claimed (Spark) or spliced or opened into a channel (LDK Node). On-chain fees make
+  small deposits uneconomic, so the app suggests a minimum (e.g. 20,000 sats) and shows the
+  expected fee before the user sends.
+- The coordinator never sees funding transactions; it only sees pulls.
+
+#### Limits of this design
+
+- **The wallet must be online to pay.** Desktop and iOS usage happens with the app open, so this
+  usually holds. The hosted API used from another machine while the app is closed cannot be
+  pulled; those requests fall back to L402 or to a hold invoice.
+- **Coordinator exposure** is at most one settlement window per account, the same as any pull
+  model.
+- **Fallback:** a wallet that can't run the contract (no NWC, or not online) uses hold-invoice
+  sessions (5.2).
+
 ---
 
 ## 6. Data model and API changes
@@ -319,9 +496,10 @@ New:
 
 | Table | Purpose | Key fields |
 |---|---|---|
-| `settlements` | One charge to one payer: a session, lease, job budget, L402 block or metered window | `settlement_id`, `payer_account_id`, `kind` (`metered`, `lease`, `job`, `l402_block`, `prepaid`), `method` (`nwc`, `hold_invoice`, `l402`, `prepaid`, `ecash`), `payment_hash`, `bolt11`, `preimage_enc` (hold only), `amount_msat`, `settled_msat`, `cancelled_msat`, `refund_msat`, `refund_payment_hash`, `status` (`open`, `held`, `settled`, `cancelled`, `refunded`, `failed`), `cltv_expiry_height`, `expires_at_ms`, `network`, timestamps |
+| `settlements` | One charge to one payer: a session, lease, job budget, L402 block or metered window | `settlement_id`, `payer_account_id`, `kind` (`metered`, `lease`, `job`, `l402_block`, `prepaid`), `method` (`nwc_contract`, `nwc`, `hold_invoice`, `l402`, `prepaid`, `ecash`), `contract_id`, `payment_hash`, `bolt11`, `preimage_enc` (hold only), `amount_msat`, `settled_msat`, `cancelled_msat`, `refund_msat`, `refund_payment_hash`, `status` (`open`, `held`, `settled`, `cancelled`, `refunded`, `failed`), `cltv_expiry_height`, `expires_at_ms`, `network`, timestamps |
 | `settlement_lines` | What a settlement paid for | `line_id`, `settlement_id`, `task_id`, `subtask_id`, `reservation_id`, `receipt_id`, `provider_account_id`, `cost_msat`, `provider_msat`, `fee_msat`, `pricing_basis` |
 | `payment_methods` | How an account pays and is paid | `account_id`, `kind` (`nwc`, `lightning_address`, `bolt12_offer`, `node_pubkey`), `uri_enc` (NWC secret, encrypted at rest), `budget_msat`, `budget_period`, `role` (`pay`, `receive`, `both`), `verified_at_ms` |
+| `spending_contracts` | Signed contracts (5.7) | `contract_id`, `account_id`, `user_pubkey`, `coordinator_pubkey`, `body_json` (canonical), `sig_user`, `sig_coordinator`, `status` (`active`, `revoked`, `expired`, `superseded`), `revocation_json`, `pulled_total_msat`, `not_before_ms`, `expires_at_ms` |
 | `payout_lines` | Which owed lines a payout covered | `payout_id`, `line_id` |
 | `hold_invoice_watch` | Durable sweeper state | `payment_hash`, `deadline_height`, `action` (`settle`, `cancel`), `attempts` |
 
@@ -367,10 +545,12 @@ raises an alert.
 | Coordinator `/inference/submit` | Debits the reserve, or 402 `insufficient_credits` | Attaches to the payer's open metered settlement; 402 `payment_required` with `{ method, invoice?, settlementId }` when there is no method and no budget |
 | Coordinator `/account/reservations` | Debits cSats | Returns `{ reservation, invoice, settlementId }`; the lease starts when the HTLC is accepted. `/cancel` settles the used part and cancels or refunds the rest |
 | Coordinator `/account/settlements` (new) | – | Lists settlements with lines, payment hashes and refund hashes |
+| Coordinator `/account/contracts` (new) | – | `POST /offer` returns a coordinator-signed contract for the requested limits; `POST /accept` stores the user-signed contract and the NWC connection details; `POST /revoke` takes a signed revocation; `GET` lists contracts with pulled totals |
 | Coordinator `/economy/payouts/*` | Withdraw / address | Same routes; an address is required to earn; auto payout is the default |
 | Coordinator `/credits/ble-sync` | Transfers cSats | Accepts offline receipts; no transfers |
 | Portal (`src/portal/routes/wallet.ts`, `payouts.ts`, `pages/settings.ts`) | "Buy cSats", cSat balance | "Connect wallet" (NWC), payout destination, settlement history in sats with hashes; a balance only if prepaid is on |
-| Desktop (`desktop/src/lib/api.ts`, `/v1/ide/compute/buy`) | Buy flow | Connect wallet; live session spend; a 402 shows an invoice |
+| Desktop (`desktop/src/lib/api.ts`, `desktop/src-tauri`, `/v1/ide/compute/buy`) | Buy flow | Embedded wallet in the Rust backend (create, back up, fund by Lightning or on chain, balance); contract review, signing and revocation screens; top-up prompts; pull log; live session spend; a 402 shows an invoice |
+| iOS (`ios/`) | – | Same wallet and contract flow through the SDK's Swift bindings |
 | Hosted API (`src/inference-api/routes.ts`) | API key; 402 `billing_error` when out of credits | L402: `402` with `WWW-Authenticate: L402 macaroon="…", invoice="…"`, accepting `Authorization: L402 <macaroon>:<preimage>`. Existing API keys can bind an NWC method instead |
 | MCP server (planned, ROADMAP) | – | `quote`, `reserve`, `run` and `usage` use L402 or NWC; `top_up` becomes `connect_wallet` / `pay_invoice` |
 
@@ -405,6 +585,8 @@ until Phase 4.
 | `SETTLEMENT_MODE` | `ledger` | `ledger` (today); `shadow` (today's behaviour, plus settlement rows computed and compared, nothing charged); `sats` (new flows) |
 | `HOLD_INVOICES_ENABLED` | false | Leases and job budgets via hold invoices |
 | `NWC_ENABLED` | false | Wallet pull |
+| `SPENDING_CONTRACTS_ENABLED` | false | Signed contracts and embedded-wallet pulls (5.7) |
+| `ONCHAIN_MIN_CONFIRMATIONS` (app side) | 1 below 100k sats, 3 above | When on-chain deposits become spendable in the embedded wallet |
 | `L402_ENABLED` | false | Hosted API and MCP |
 | `PREPAID_BALANCE_ENABLED` | true now; false for new accounts from Phase 4 | Opt-in prepaid |
 | `BLE_CREDIT_TRANSFER_ENABLED` | false from Phase 0 | Old BLE transfers |
@@ -419,8 +601,8 @@ until Phase 4.
 | **0. Fix and measure** | Spend rows carry msat; payouts write a matching ledger row; one balance function used everywhere; a test for the double count in section 2; BLE transfers off; one definition of cSats (fix "centi-sats"); `settlements` and `settlement_lines` tables; `SETTLEMENT_MODE=shadow` | Over a week of regtest traffic, shadow settlements match today's charges to the msat, and ledger-vs-node reconciliation is clean |
 | **1. Providers paid in sats** | Destination required to earn; hourly auto payout by default; earnings no longer spendable as credits; owed cap | On regtest, every earn row is covered by a payout line within one window; reconciliation clean |
 | **2. Hold invoices** | Provider interface additions, durable sweeper, leases and job budgets via hold invoices, refunds to a return address, tranches when there is none | Regtest e2e: a lease paid, used, cancelled early and refunded; the coordinator restarted mid-lease; an HTLC near expiry handled; the second seed settles a hold the first one created |
-| **3. Wallet pull and L402** | NWC client and budgets; metered settlements; L402 on the hosted API; "connect wallet" in desktop and portal; MCP uses the same paths | Regtest e2e with an NWC wallet (e.g. Alby Hub on regtest, or an NWC service in front of the test LND) and an L402 client; failed pulls stop work within one window |
-| **4. Cut over** | `SETTLEMENT_MODE=sats` on the seeds; prepaid opt-in only; `/account/buy` aliased; old cSat balances migrated (7.3) | A week of regtest traffic with no cSat-to-cSat movement in the ledger, and every row has `msat` plus a payment or settlement reference |
+| **3. Embedded wallet, contracts, L402** | Embedded wallet in desktop and iOS (Breez SDK Spark first); spending contracts (offer, sign, enforce, revoke); NWC client and budgets; metered settlements; on-chain funding; L402 on the hosted API; bring-your-own NWC; MCP uses the same paths | Regtest e2e: wallet funded by Lightning and on chain, contract signed, pulls within limits paid, pulls over limits refused by the wallet, revocation honoured while the coordinator is offline, top-up prompt fires; an L402 client works; failed pulls stop work within one window |
+| **4. Cut over** | `SETTLEMENT_MODE=sats` on the seeds; prepaid removed, or opt-in only if the owner keeps it (D2); `/account/buy` aliased; old cSat balances migrated (7.3) | A week of regtest traffic with no cSat-to-cSat movement in the ledger, and every row has `msat` plus a payment or settlement reference |
 | **5. Ecash (opt-in)** | Cashu acceptance from allowlisted mints | Separate review |
 | **6. Mainnet** | Section 8 | Owner sign-off |
 
@@ -470,14 +652,24 @@ Nothing in this design runs on `BITCOIN_NETWORK=bitcoin` until all of the follow
    reconciliation clean.
 4. Mainnet caps start low (per settlement, per payer per day, total held at any moment), and only
    the owner raises them.
-5. A legal review of the custody and transmission questions in section 9 is done.
+5. **Legal sign-off (decision D4).** A legal AI agent does a first pass over this design and the
+   questions in section 9. A digital-assets attorney then reviews it, starting from that first
+   pass. **Mainnet is gated on the attorney's written sign-off**; the AI pass alone is not enough.
 6. Only the owner funds the node and flips the network; an agent never does.
 
 ---
 
 ## 9. Regulatory and custody notes
 
-These are high-level notes, not legal advice. The owner should take counsel before mainnet.
+These are high-level notes, not legal advice. Review process (decision D4): a legal AI agent
+does a first pass, then a digital-assets attorney reviews, and mainnet waits for the attorney's
+sign-off.
+
+- **Embedded self-custodial wallet with a spending contract** (5.7): the user holds the keys, and
+  the coordinator can only request payments the user pre-authorised. This is the strongest
+  non-custodial position for the default path, but the coordinator still receives and pays on
+  within a window. The attorney should also look at whether shipping wallet software, and the
+  choice of SDK, carries obligations of its own.
 
 - **Holding balances for users** (today's prepaid cSats and accrued earnings) looks like custody of
   customer funds. In many places that brings money-transmission or custodial-wallet rules: in the
@@ -502,13 +694,15 @@ These are high-level notes, not legal advice. The owner should take counsel befo
 
 ## 10. Open questions for the owner
 
-1. **Default payer method.** Is NWC wallet pull acceptable as the default for app users, with
-   hold-invoice sessions as the fallback? Or should hold-invoice sessions be the default, so no
-   standing permission is needed?
-2. **Prepaid balance.** Keep it (opt-in and capped), or remove it entirely? If it stays, what cap?
-3. **Fees.** Today there are two: 1.5 % on purchases and 5 % on work. Once purchases go away,
-   should the network fee be 5 %, 6.5 %, or something else? Should routing fees stay with the payer
-   for pay-in and with the provider for payouts, as now?
+1. ~~**Default payer method.**~~ **Decided (D1):** an embedded self-custodial wallet with a
+   signed spending contract over NWC; hold invoices as the fallback. Follow-ups: are the Breez SDK
+   (Spark) first / LDK Node later choice and the contract presets acceptable? What default limits
+   (per interval, threshold, 90-day expiry)?
+2. **Prepaid balance.** *Leaning toward removal (D2)*, since the embedded wallet replaces it.
+   Confirm removal, or keep it opt-in with a cap?
+3. **Fees.** *5 % network fee decided (D3).* Confirm the recommendation: 5 % all-in with no 1.5 %
+   settlement fee, the payer covering routing on their own pulls, and the network fee covering
+   routing on provider payouts. The alternative is 6.5 % (5 % + 1.5 % on pulls/settlements).
 4. **Providers who also buy.** Can a provider's owed sats be netted against their own usage (in
    sats, inside one settlement), or must every purchase be a separate Lightning payment?
 5. **Windows and minimums.** Is a 1 h provider window with a 100-sat minimum, and a 60 s or 21-sat
@@ -524,5 +718,6 @@ These are high-level notes, not legal advice. The owner should take counsel befo
     feature?
 11. **Coordinator node.** Stay on LND (native hold invoices, BOLT12 via LNDK), move to CLN (native
     BOLT12, hold invoices via a plugin), or run both?
-12. **Legal.** Who reviews section 9 before mainnet? And is atomic pass-through worth building
-    early if counsel prefers it?
+12. ~~**Legal.**~~ **Decided (D4):** a legal AI agent first pass, then a digital-assets attorney;
+    mainnet gated on the attorney's sign-off. Still open: is atomic pass-through worth building
+    early if the attorney prefers it?
