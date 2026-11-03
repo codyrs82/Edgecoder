@@ -80,6 +80,8 @@ await app.register(cors, {
   credentials: true,
 });
 
+const store = PortalStore.fromEnv();
+
 // #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
@@ -98,9 +100,9 @@ await registerPortalSecurity(app, {
   originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
   serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
   coordinatorToken: process.env.PORTAL_COORDINATOR_TOKEN?.trim() || undefined,
+  // Shared Postgres rate-limit counters across portal machines (memory store without a database).
+  rateLimitPool: store?.pool,
 });
-
-const store = PortalStore.fromEnv();
 
 // #15: validated once at import; invalid values exit with every problem listed.
 const C = loadConfigOrExit("portal", portalConfigSchema);
