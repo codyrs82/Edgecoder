@@ -94,7 +94,16 @@ export function componentLine(c: ComponentStatus): string {
 
 /** Whether the setup screen should be up: not ready yet, or failed. */
 export function needsSetupScreen(status: ComputeStatus | null): boolean {
-  return !!status && status.state !== "ready";
+  if (!status || status.state === "ready") return false;
+  if (status.state === "error") return true;
+  // Only first-time setup gets the screen. Every launch re-checks Ollama and restarts the Docker VM
+  // (the shell stops it on quit to free its memory); that routine start runs quietly.
+  return [status.ollama, status.docker].some(isFirstTimeSetup);
+}
+
+/** Downloading or installing something, or creating the Docker VM (not just starting it). */
+export function isFirstTimeSetup(c: ComponentStatus): boolean {
+  return c.state === "downloading" || c.state === "installing" || (c.state === "starting" && c.detail.startsWith("Creating"));
 }
 
 /** The errors to show (only from components that block). */
