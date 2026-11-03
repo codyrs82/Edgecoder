@@ -8,7 +8,10 @@ import { encodeTestBolt11 } from "../economy/helpers/bolt11-encode.js";
 
 const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
 const secureCompare = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-const invoice = (amountMsat: number | undefined, hashByte = "ab") => encodeTestBolt11({ network: "bcrt", amountMsat, paymentHashHex: hashByte.repeat(32), expirySeconds: 3600 });
+// A fixed timestamp, so the same arguments always give the same invoice string (the code is bound to it).
+const INVOICE_TS = Math.floor(Date.now() / 1000);
+const invoice = (amountMsat: number | undefined, hashByte = "ab") =>
+  encodeTestBolt11({ network: "bcrt", amountMsat, paymentHashHex: hashByte.repeat(32), timestamp: INVOICE_TS, expirySeconds: 3600 });
 
 type Row = WithdrawChallenge & { consumed?: boolean; createdAtMs: number; approvedAtMs?: number; released?: boolean };
 function memoryWithdrawStore() {
