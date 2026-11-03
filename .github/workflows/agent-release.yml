@@ -1,0 +1,121 @@
+name: agent-release
+
+# A tagged agent release (agent-v1.2.3) publishes what deploy/install.sh and deploy/install.ps1
+# install: one prebuilt tarball per OS/arch, SHA256SUMS over them, and SHA256SUMS.minisig, a
+# minisign (Ed25519) signature made with the AGENT_RELEASE_SIGNING_KEY secret
+# (scripts/set-release-signing-key.sh). Before publishing, the release is checked with the
+# installer's own verifier and pinned key, so a release the installers would reject never ships.
+# docs/install.md describes how to verify a release by hand.
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing agent-v* tag to (re)build"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # Must equal NODE_VERSION in deploy/install.sh and $NodeVersion in deploy/install.ps1
+  # (tests/install/signed-release.test.ts): the tarballs' native modules are built for it.
+  NODE_VERSION: "22.23.4"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-22.04 }
+          - { target: linux-arm64, os: ubuntu-22.04-arm }
+          - { target: darwin-arm64, os: macos-14 }
+          - { target: darwin-x64, os: macos-15-intel }
+          - { target: win-x64, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the tag
+        run: '[[ "$TAG" =~ ^agent-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "bad tag $TAG"; exit 1; }'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Check Node matches the installers
+        run: '[ "$(node -p process.versions.node)" = "$NODE_VERSION" ]'
+      - name: Build and package
+        run: bash scripts/release/package-agent.sh "$TAG" "${{ matrix.target }}" out
+      - name: Smoke test the packaged installer
+        run: |
+          mkdir smoke && tar -xzf out/*.tar.gz -C smoke
+          node smoke/edgecoder/dist/install/cli.js help >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-${{ matrix.target }}
+          path: out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Sign and publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: agent-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: agent-*
+          path: release
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: release
+        run: |
+          ls -l
+          [ "$(ls edgecoder-agent-*.tar.gz | wc -l)" -eq 5 ] || { echo "expected 5 tarballs"; exit 1; }
+          sha256sum edgecoder-agent-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Sign SHA256SUMS
+        env:
+          AGENT_RELEASE_SIGNING_KEY: ${{ secrets.AGENT_RELEASE_SIGNING_KEY }}
+        run: node scripts/release/minisign.mjs sign release/SHA256SUMS "tag:$TAG file:SHA256SUMS commit:$GITHUB_SHA"
+      - name: Verify with the installer's verifier and pinned key
+        run: node scripts/release/verify-with-installer.mjs release "$TAG"
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prerelease=""; [[ "$TAG" == *-* ]] && prerelease="--prerelease"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            # Not marked "latest": that stays the desktop app; the installers pick agent-v* themselves.
+            gh release create "$TAG" release/* --verify-tag --latest=false $prerelease \
+              --title "EdgeCoder agent ${TAG#agent-v}" \
+              --notes "Prebuilt agent for deploy/install.sh and deploy/install.ps1. Verify by hand: docs/install.md (minisign -Vm SHA256SUMS -P <key>, then sha256sum -c SHA256SUMS --ignore-missing)."
+          fi
