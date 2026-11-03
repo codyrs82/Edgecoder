@@ -82,7 +82,7 @@ describe("plan", () => {
   });
 
   it("one agent and one Ollama per GPU, pinned, with tokens matched by agent id", () => {
-    const o = parseInstallArgs(["apply", "--mesh-token", "m", "--token", "gpu-box-local-gpu3=tok3"]);
+    const o = parseInstallArgs(["apply", "--mesh-token", "m", "--per-gpu", "--token", "gpu-box-local-gpu3=tok3"]);
     const plan = planInstall(gpuBox, o, true);
     expect(plan.instances).toHaveLength(8);
     expect(plan.sandboxMode).toBe("docker");
@@ -96,6 +96,30 @@ describe("plan", () => {
     expect(plan.instances.map((i) => i.agentId)).toEqual(Array.from({ length: 8 }, (_, n) => `gpu-box-local-gpu${n}`));
     expect(plan.warnings.filter((w) => w.includes("no registration token"))).toHaveLength(7);
     expect(renderEnvFile(i3.env)).toContain("AGENT_ID=gpu-box-local-gpu3\n");
+  });
+
+  it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for gpt-oss:120b", () => {
+    const plan = planInstall(gpuBox, parseInstallArgs(["apply", "--token", "t"]), true);
+    expect(plan.instances.map((i) => [i.agentId, i.env.CUDA_VISIBLE_DEVICES, i.model, i.memoryGb])).toEqual([
+      ["gpu-box-local-gpu0", "0", "qwen3-coder:30b", 48],
+      ["gpu-box-local-gpu1", "1", "qwen3-coder:30b", 48],
+      ["gpu-box-local-gpu2", "2", "qwen3-coder:30b", 48],
+      ["gpu-box-local-gpu3", "3", "qwen3-coder:30b", 48],
+      ["gpu-box-local-gpu4-5", "4,5", "gpt-oss:120b", 96],
+      ["gpu-box-local-gpu6-7", "6,7", "gpt-oss:120b", 96],
+    ]);
+    // The pooled instance's Ollama sees both cards.
+    expect(plan.instances[4].gpus.map((g) => g.index)).toEqual([4, 5]);
+  });
+
+  it("pools cards for the biggest models: --layout single, --gpus-per-instance", () => {
+    const single = planInstall(gpuBox, parseInstallArgs(["apply", "--layout", "single", "--token", "t"]), true);
+    expect(single.instances.map((i) => [i.agentId, i.env.CUDA_VISIBLE_DEVICES, i.model])).toEqual([["gpu-box-local-gpu0-7", "0,1,2,3,4,5,6,7", "qwen3-coder:480b"]]);
+    const fours = planInstall(gpuBox, parseInstallArgs(["apply", "--gpus-per-instance", "4", "--token", "t"]), true);
+    expect(fours.instances.map((i) => i.model)).toEqual(["qwen3:235b", "qwen3:235b"]);
+    const chosen = planInstall(gpuBox, parseInstallArgs(["apply", "--gpus-per-instance", "2", "--model", "llama3.3:70b", "--token", "t"]), true);
+    expect(chosen.instances.map((i) => i.model)).toEqual(Array(4).fill("llama3.3:70b"));
+    expect(() => parseInstallArgs(["apply", "--layout", "huge"])).toThrow(/--layout/);
   });
 
   it("sizes parallel model calls by each GPU's VRAM, not host RAM", () => {
@@ -190,7 +214,7 @@ describe("services: the same plan on every platform", () => {
   });
 
   it("--pull-models pulls each distinct model once, retrying until Ollama is listening", () => {
-    const plan = planInstall(detectHardware({ probe: () => NVIDIA_8X, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "x", cpuCores: 64, hostname: "box" }), o, true);
+    const plan = planInstall(detectHardware({ probe: () => NVIDIA_8X, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "x", cpuCores: 64, hostname: "box" }), { ...o, layout: "per-gpu" }, true);
     const calls: string[] = [];
     let n = 0;
     const host = { ...fakeHost("linux").host, run: (cmd: string, args: string[]) => { calls.push([cmd, ...args].join(" ")); return { code: ++n < 3 ? 1 : 0, stdout: "", stderr: "" }; } };
