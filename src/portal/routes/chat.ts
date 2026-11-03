@@ -2,14 +2,64 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { writeSseHead } from "../../common/sse.js";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import type { ChatApiRoutesDeps } from "../server.js";
+import { networkBackend } from "../../inference-api/backends.js";
+import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
+import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
 
 /** #16: Chat API: model list and streaming chat (/portal/api/models, /portal/api/chat). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerChatApiRoutes(app: FastifyInstance, { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store }: ChatApiRoutesDeps): void {
+export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesDeps): void {
+  const { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store } = deps;
+
+  /** A chat on a chosen compute, through networkBackend for the user's account; streams {content} then {done, cSatsSpent}. */
+  async function runOnNetwork(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    userId: string,
+    conversationId: string,
+    compute: ChatCompute,
+    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>
+  ) {
+    const ac = new AbortController();
+    reply.raw.on("close", () => ac.abort());
+    const pieces = networkBackend(portalNetworkDeps(deps, accountIdFor(userId)), networkTargetFor(compute))({ messages }, ac.signal);
+    // Wait for the first piece so a refusal (no machine, not enough cSats, lease ended) is a plain HTTP error.
+    let first: IteratorResult<ChatPiece>;
+    try {
+      first = await pieces.next();
+    } catch (err) {
+      const status = err instanceof ChatBackendError ? err.status : 502;
+      return reply.code(status >= 400 && status < 600 ? status : 502).send({ error: (err as Error).message, compute: computeLabel(compute) });
+    }
+    writeSseHead(reply);
+    const send = (o: unknown) => reply.raw.write(`data: ${JSON.stringify(o)}\n\n`);
+    let fullContent = "";
+    let cSatsSpent: number | undefined;
+    const take = (p: ChatPiece) => {
+      if ("delta" in p && p.delta) {
+        fullContent += p.delta;
+        send({ content: p.delta });
+      } else if ("done" in p) cSatsSpent = p.cSatsSpent;
+    };
+    try {
+      if (!first.done) take(first.value);
+      for (let r = await pieces.next(); !r.done; r = await pieces.next()) take(r.value);
+    } catch (err) {
+      req.log.warn({ err }, "portal_network_chat_failed");
+      send({ error: (err as Error).message || "stream_interrupted" });
+    }
+    if (fullContent.length > 0) {
+      await store!.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content: fullContent, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}) });
+    }
+    send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}) });
+    reply.raw.write("data: [DONE]\n\n");
+    reply.raw.end();
+    return reply;
+  }
   app.get("/portal/api/models", async (req, reply) => {
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
@@ -69,11 +119,15 @@ export function registerChatApiRoutes(app: FastifyInstance, { PORTAL_SERVICE_TOK
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
-    const body = z.object({
+    const parsedBody = z.object({
       conversationId: z.string().min(1),
       message: z.string().min(1),
       model: z.string().optional(),
-    }).parse(req.body);
+      /** Run on the network for this account (billed in cSats), your own machines, or a lease; omitted: the coordinator's default chat. */
+      compute: chatComputeSchema.optional(),
+    }).safeParse(req.body);
+    if (!parsedBody.success) return reply.code(400).send({ error: "invalid_chat_request" });
+    const body = parsedBody.data;
 
     // Only the owner may post into (and thereby read back) a conversation (audit auth#1).
     if ((await store.getConversationOwner(body.conversationId)) !== user.userId) {
@@ -91,6 +145,8 @@ export function registerChatApiRoutes(app: FastifyInstance, { PORTAL_SERVICE_TOK
     // Build message history from conversation
     const history = await store.getConversationMessages(body.conversationId);
     const messages = history.map((m) => ({ role: m.role, content: m.content }));
+
+    if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
 
     // Discover coordinators
     const coordinatorUrls = await discoverCoordinatorUrlsForPortal();

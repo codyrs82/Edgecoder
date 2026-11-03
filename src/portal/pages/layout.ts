@@ -5,7 +5,7 @@ import { BASE_CSS, TOKENS_CSS, THEME_SCRIPT, brandMark, icon } from "./design-sy
 import { DOCS_SITE_URL } from "./urls.js";
 
 /**
- * Authenticated app shell: left sidebar (brand, navigation, balance, sign-out), top bar (page
+ * Authenticated app shell: left sidebar (brand, navigation, profile row with account menu), top bar (page
  * title, subtitle, actions), content area. Pages supply `content` (HTML) and `script` (JS) and
  * keep using the shell's helpers: api(), requireAuth(), showToast(), statusBadge(), boolBadge(),
  * applyTheme(). Element ids used by pages are unchanged: toast, topTickerCredits, reviewsBadge,
@@ -45,6 +45,15 @@ export function portalAuthedPageHtml(input: {
         { key: "docs", href: DOCS_SITE_URL, label: "Documentation", icon: "docs", external: true }
       ]
     }
+  ];
+  // The account menu above the profile row (like Cursor's): where you manage yourself, not the network.
+  const accountMenuItems: Array<{ href: string; label: string; icon: string; external?: boolean }> = [
+    { href: "/portal/settings#profile", label: "Profile", icon: "user" },
+    { href: "/portal/settings", label: "Settings", icon: "settings" },
+    { href: "/portal/settings#compute", label: "Compute &amp; usage", icon: "cpu" },
+    { href: "/portal/settings#tools", label: "Connect your tools", icon: "key" },
+    { href: "/portal/download", label: "Install agent", icon: "download" },
+    { href: DOCS_SITE_URL, label: "Docs", icon: "docs", external: true }
   ];
   const navHtml = groups
     .map(
@@ -101,11 +110,39 @@ export function portalAuthedPageHtml(input: {
           margin-left: auto; background: var(--brand); color: #111; font-size: 10px; font-weight: 700;
           min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
         }
-        .sidebar-foot { border-top: 1px solid var(--card-border); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-        .balance-chip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--bg-surface); }
-        .balance-chip .k { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-        .balance-chip .v { font-family: var(--font-mono); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-        .signout { justify-content: flex-start; width: 100%; }
+        /* ── Profile row + account menu (bottom of the sidebar) ── */
+        .sidebar-foot { position: relative; border-top: 1px solid var(--card-border); padding: 8px; }
+        .profile-row { display: flex; align-items: center; gap: 4px; border-radius: var(--radius-sm); }
+        .profile-row:hover, .profile-row.open { background: var(--bg-elevated); }
+        .profile-btn {
+          flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 7px 8px;
+          background: none; border: none; border-radius: var(--radius-sm); color: var(--text); text-align: left; cursor: pointer; min-height: 0;
+        }
+        .profile-btn:hover { background: none; }
+        .avatar {
+          flex: none; width: 30px; height: 30px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+          background: var(--brand); color: #111; font-weight: 700; font-size: 13px; text-transform: uppercase; user-select: none;
+        }
+        .profile-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+        .profile-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .profile-sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .profile-gear { flex: none; width: 30px; height: 30px; min-height: 0; padding: 0; margin-right: 4px; background: none; border: none; color: var(--muted); border-radius: var(--radius-sm); }
+        .profile-gear:hover { color: var(--text); background: var(--bg-surface); }
+        .account-menu {
+          position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 70;
+          background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+          box-shadow: var(--shadow-2, 0 12px 32px rgba(0,0,0,0.45)); padding: 5px;
+        }
+        .account-menu[hidden] { display: none; }
+        .account-menu .menu-head { padding: 8px 10px 6px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .account-menu a[role="menuitem"], .account-menu button[role="menuitem"] {
+          display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; min-height: 0;
+          background: none; border: none; border-radius: var(--radius-sm); color: var(--text-secondary); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+        }
+        .account-menu [role="menuitem"]:hover, .account-menu [role="menuitem"]:focus-visible { background: var(--bg-elevated); color: var(--text); outline: none; }
+        .account-menu [role="menuitem"] .icon { flex: none; opacity: 0.85; }
+        .account-menu [role="menuitem"] .nav-ext { margin-left: auto; opacity: 0.5; }
+        .account-menu hr { border: none; border-top: 1px solid var(--card-border); margin: 5px 2px; }
         /* ── Top bar + content ── */
         .main { min-width: 0; display: flex; flex-direction: column; }
         .topbar {
@@ -141,8 +178,19 @@ export function portalAuthedPageHtml(input: {
           </div>
           <nav class="sidebar-nav" aria-label="Primary">${navHtml}</nav>
           <div class="sidebar-foot">
-            <div class="balance-chip" title="Credit balance"><span class="k">Credits</span><span class="v" id="topTickerCredits"><span class="loading-spinner sm"></span></span></div>
-            <a class="btn ghost signout" id="logoutBtn" href="#">${icon("logout", 16)}<span>Sign out</span></a>
+            <div class="account-menu" id="accountMenu" role="menu" aria-labelledby="profileBtn" hidden>
+              <div class="menu-head" id="accountMenuEmail"></div>
+              ${accountMenuItems.map((m) => `<a role="menuitem" tabindex="-1" href="${m.href}"${m.external ? ' target="_blank" rel="noreferrer"' : ""}>${icon(m.icon, 15)}<span>${m.label}</span>${m.external ? icon("external", 12, "nav-ext") : ""}</a>`).join("")}
+              <hr />
+              <button type="button" role="menuitem" tabindex="-1" id="logoutBtn">${icon("logout", 15)}<span>Log out</span></button>
+            </div>
+            <div class="profile-row" id="profileRow">
+              <button type="button" class="profile-btn" id="profileBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="accountMenu">
+                <span class="avatar" id="profileAvatar" aria-hidden="true"></span>
+                <span class="profile-text"><span class="profile-name" id="profileName">&nbsp;</span><span class="profile-sub" id="topTickerCredits" title="cSats balance"><span class="loading-spinner sm"></span></span></span>
+              </button>
+              <button type="button" class="profile-gear" id="profileGear" aria-label="Account menu" aria-haspopup="menu" aria-expanded="false" aria-controls="accountMenu">${icon("settings", 16)}</button>
+            </div>
           </div>
         </aside>
         <div class="scrim" id="navScrim"></div>
@@ -210,18 +258,81 @@ export function portalAuthedPageHtml(input: {
             document.addEventListener("keydown", function(e) { if (e.key === "Escape") close(); });
           }
         })();
-        /* ── Balance chip and reviews badge ── */
+        /* ── Profile row: who you are and your cSats balance ── */
+        function formatCSats(n) {
+          var v = Number(n);
+          if (!isFinite(v)) return "";
+          return v.toLocaleString(undefined, { maximumFractionDigits: Math.abs(v) >= 100 ? 0 : 2 }) + " cSats";
+        }
+        function profileDisplayName(user) {
+          var name = String((user && user.displayName) || "").trim();
+          if (name) return name;
+          var email = String((user && user.email) || "");
+          return email ? email.split("@")[0] : "Account";
+        }
         async function loadTopTicker() {
+          var sub = document.getElementById("topTickerCredits");
           try {
-            await requireAuth();
+            var me = await requireAuth();
+            var user = (me && me.user) || {};
+            var name = profileDisplayName(user);
+            document.getElementById("profileName").textContent = name;
+            document.getElementById("profileAvatar").textContent = name.charAt(0) || "?";
+            document.getElementById("accountMenuEmail").textContent = user.email || "";
+            document.getElementById("profileBtn").setAttribute("title", user.email || name);
+          } catch { return; }
+          // The balance lives on the coordinator (cSats); the control plane's credits are a fallback.
+          try {
+            var s = await api("/portal/api/compute/summary", { method: "GET", headers: {} });
+            if (s && s.connected && typeof s.cSats === "number") { sub.textContent = formatCSats(s.cSats); return; }
+          } catch {}
+          try {
             var summary = await api("/dashboard/summary", { method: "GET", headers: {} });
             var credits = (summary.walletSnapshot || {}).credits;
-            var creditVal = credits && typeof credits.balance !== "undefined" ? Number(credits.balance).toLocaleString(undefined, { maximumFractionDigits: 3 }) : "n/a";
-            document.getElementById("topTickerCredits").textContent = creditVal;
-          } catch {
-            document.getElementById("topTickerCredits").textContent = "-";
-          }
+            if (credits && typeof credits.balance !== "undefined") { sub.textContent = formatCSats(credits.balance); return; }
+          } catch {}
+          sub.textContent = "Balance unavailable";
         }
+        /* ── Account menu: opens above the profile row; Esc, outside click or Tab closes ── */
+        (function() {
+          var menu = document.getElementById("accountMenu");
+          var row = document.getElementById("profileRow");
+          var triggers = [document.getElementById("profileBtn"), document.getElementById("profileGear")];
+          var lastTrigger = triggers[0];
+          function items() { return Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]')); }
+          function isOpen() { return !menu.hidden; }
+          function setExpanded(v) { triggers.forEach(function(t) { t.setAttribute("aria-expanded", v ? "true" : "false"); }); row.classList.toggle("open", v); }
+          function openMenu(trigger, focusLast) {
+            lastTrigger = trigger || lastTrigger;
+            menu.hidden = false; setExpanded(true);
+            var list = items(); var target = focusLast ? list[list.length - 1] : list[0];
+            if (target) target.focus();
+          }
+          function closeMenu(restoreFocus) {
+            if (!isOpen()) return;
+            menu.hidden = true; setExpanded(false);
+            if (restoreFocus && lastTrigger) lastTrigger.focus();
+          }
+          triggers.forEach(function(t) {
+            t.addEventListener("click", function(e) { e.stopPropagation(); if (isOpen()) closeMenu(true); else openMenu(t); });
+            t.addEventListener("keydown", function(e) {
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); openMenu(t, e.key === "ArrowUp"); }
+            });
+          });
+          menu.addEventListener("keydown", function(e) {
+            var list = items(); var i = list.indexOf(document.activeElement);
+            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); }
+            else if (e.key === "ArrowDown") { e.preventDefault(); list[(i + 1) % list.length].focus(); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
+            else if (e.key === "Home") { e.preventDefault(); list[0].focus(); }
+            else if (e.key === "End") { e.preventDefault(); list[list.length - 1].focus(); }
+            else if (e.key === "Tab") { closeMenu(false); }
+          });
+          document.addEventListener("click", function(e) { if (isOpen() && !menu.contains(e.target) && !row.contains(e.target)) closeMenu(false); });
+          document.addEventListener("keydown", function(e) { if (e.key === "Escape" && isOpen()) closeMenu(true); });
+          // Same-page anchors (Settings sections) still navigate; close the menu after.
+          menu.addEventListener("click", function(e) { if (e.target.closest && e.target.closest("a[role=menuitem]")) closeMenu(false); });
+        })();
         async function loadReviewsBadge() {
           try {
             var res = await api("/portal/api/reviews");

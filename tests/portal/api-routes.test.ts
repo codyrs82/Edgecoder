@@ -69,6 +69,12 @@ const API_ROUTES: Array<[string, string]> = [
   ["GET", "/portal/api/escalations/pending-count"],
   ["GET", "/portal/api/escalations/:id"],
   ["POST", "/portal/api/escalations/:id/respond"],
+  // Compute for signed-in users (routes/compute.ts, registered via hosted.ts).
+  ["GET", "/portal/api/compute/summary"],
+  ["GET", "/portal/api/compute/reservations"],
+  ["POST", "/portal/api/compute/reservations"],
+  ["POST", "/portal/api/compute/reservations/cancel"],
+  ["GET", "/portal/api/compute/options"],
 ];
 
 describe("portal API routes after the #16 split", () => {

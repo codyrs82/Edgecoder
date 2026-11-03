@@ -64,7 +64,15 @@ describe("portal pages module (#16)", () => {
     expect(settings).toContain('id="passkeyEnrollBtn"');
     expect(settings).toContain('href="/portal/settings/nodes"');
     // Admin tab is rendered hidden and only revealed client-side for system admins.
-    expect(settings).toMatch(/class="btn hidden" href="\/portal\/settings\/admin" id="settingsAdminTab"/);
+    expect(settings).toMatch(/class="settings-link hidden" href="\/portal\/settings\/admin" id="settingsAdminTab"/);
+    // Cursor-like settings: sub-navigation with search, and every section on the page.
+    expect(settings).toContain('id="settingsSearch"');
+    for (const sec of ["general", "profile", "usage", "compute", "tools"]) expect(settings, sec).toContain(`id="sec-${sec}"`);
+    for (const id of ["themeSelect", "displayNameInput", "usageBalance", "reserveClass", "reserveBtn", "leasesList", "createKeyBtn", "keysBody"]) {
+      expect(settings, id).toContain(`id="${id}"`);
+    }
+    expect(settings).toContain('"/portal/api/compute/reservations"');
+    expect(settings).toContain('href="/portal/wallet"');
 
     const nodes = (await app.inject({ url: "/portal/settings/nodes" })).body;
     expect(nodes).toContain('id="enrollBtn"');
