@@ -101,7 +101,7 @@ Core APIs:
 
 - `GET /economy/price/current` - current signed price epochs (CPU/GPU sats per compute unit).
 - `POST /economy/price/propose` - approved coordinators propose demand/supply metrics to negotiate new epochs.
-- `POST /economy/price/consensus` - computes weighted-median price epochs across coordinator peers.
+- `POST /economy/price/consensus` - computes the median price epoch over quotes signed by `MESH_PEER_ALLOWLIST` coordinators (one vote each). Needs a quorum (majority of the allowlist plus self, `PRICE_CONSENSUS_QUORUM` can raise it); the result is clamped to `PRICE_EPOCH_{CPU,GPU}_{MIN,MAX}_SATS` and `PRICE_EPOCH_MAX_CHANGE_BPS` (default 2500 = 25% per epoch).
 - `POST /economy/wallets/register` - attach a wallet identity to a credit account.
 - `POST /economy/payments/intents` - create purchase intent and invoice reference.
 - `POST /economy/payments/intents/:intentId/confirm` - settle intent and mint credits to the account.
