@@ -34,9 +34,16 @@ describe("local forwarder", () => {
       coordinatorUrl: () => registered,
       meshHeaders: () => ({ "x-mesh-token": "mesh" }),
       signedHeaders: (path, raw) => ({ "x-agent-id": "mac-1", "x-signature": `sig:${path}:${raw.length}` }),
-      agentId: "mac-1"
+      agentId: "mac-1",
+      steering: () => ({ url: coordUrl, source: "registry", peerId: "coord-ord", region: "ord", latencyMs: 12, reason: "", decidedAtMs: 1 })
     });
     fwdUrl = await listen(forwarder);
+  });
+
+  it("reports the coordinator steering decision on /forward/health", async () => {
+    const res = await request(`${fwdUrl}/forward/health`, { headers: { authorization: "Bearer secret-token" } });
+    expect(res.statusCode).toBe(200);
+    expect(await res.body.json()).toMatchObject({ registered: true, steering: { source: "registry", region: "ord", latencyMs: 12 } });
   });
 
   afterEach(() => {

@@ -1241,6 +1241,18 @@ export interface ComputeOverview {
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
   /** Network models; model calls are priced per token (cSats per million tokens in / out). */
   models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
+  /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
+  steering?: CoordinatorSteering | null;
+}
+export interface CoordinatorSteering {
+  url: string;
+  source: "registry" | "fallback";
+  peerId?: string;
+  region?: string;
+  latencyMs?: number;
+  /** Why the fallback URL is in use ("" for a registry pick). */
+  reason: string;
+  decidedAtMs: number;
 }
 export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
 export const computeBuy = (amountSats: number) =>
