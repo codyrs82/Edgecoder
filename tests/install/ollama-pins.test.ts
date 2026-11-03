@@ -76,7 +76,7 @@ describe("nothing pipes downloaded content into a shell", () => {
   ]);
 
   it("finds no pipe-to-shell outside --from-source notes", () => {
-    const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+    const files = execFileSync("git", ["-c", "safe.directory=*", "ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
     const offenders: string[] = [];
     for (const f of files) {
       if (f === "tests/install/ollama-pins.test.ts" || FIXTURES.has(f) || isPending(f)) continue;
