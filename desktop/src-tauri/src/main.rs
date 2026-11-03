@@ -15,6 +15,7 @@ use serde::Serialize;
 use glob::glob;
 
 mod agent_guard;
+mod agent_settings;
 mod local_compute;
 mod network_enrollment;
 mod terminal;
@@ -196,6 +197,24 @@ fn restart_agent(agent: &Arc<Mutex<Option<Child>>>) {
             let _ = child.kill();
         }
     }
+}
+
+/// Settings > General choices that the agent reads at start (BLE mesh on or off).
+#[tauri::command]
+fn get_agent_settings() -> agent_settings::AgentSettings {
+    agent_settings::load()
+}
+
+/// Save the BLE mesh choice and restart the agent so it takes effect (the monitor respawns it).
+#[tauri::command]
+fn set_agent_ble(enabled: bool, process: tauri::State<'_, AgentProcess>) -> Result<agent_settings::AgentSettings, String> {
+    let mut s = agent_settings::load();
+    if s.ble_enabled != enabled {
+        s.ble_enabled = enabled;
+        agent_settings::save(&s)?;
+        restart_agent(&process.0);
+    }
+    Ok(s)
 }
 
 /// First-run local compute (Ollama + the Colima Docker sandbox): progress for the setup screen.
@@ -785,6 +804,8 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .env("ADMIN_API_TOKEN", &tokens.admin)
         // OLLAMA_HOST / DOCKER_HOST of the Ollama and Docker sandbox the app sets up (local_compute).
         .envs(local_compute::manager().agent_env())
+        // Settings > General: BLE mesh on or off.
+        .envs(agent_settings::load().agent_env())
         // Once the signed-in user has enrolled this machine, its worker joins the network
         // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
         .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
@@ -955,6 +976,8 @@ fn main() {
             get_network_enrollment,
             save_network_enrollment,
             get_local_compute_status,
+            get_agent_settings,
+            set_agent_ble,
             start_local_compute_setup,
             get_ide_token,
             set_project_root,

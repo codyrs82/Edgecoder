@@ -60,7 +60,33 @@
   let maxConcurrentTasks = $state(1);
   let cpuCapPercent = $state(50);
   let idleOnly = $state(true);
-  let bleEnabled = $state(false);
+  let bleEnabled = $state(true);
+  let bleSaving = $state(false);
+  let bleNote = $state("");
+
+  // BLE peer discovery: the app keeps the choice and restarts its agent with it.
+  $effect(() => {
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<{ bleEnabled: boolean }>("get_agent_settings"))
+      .then((s) => (bleEnabled = s.bleEnabled))
+      .catch(() => (bleNote = "Only available in the desktop app."));
+  });
+
+  async function setBle(on: boolean) {
+    bleSaving = true;
+    bleNote = "";
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s = await invoke<{ bleEnabled: boolean }>("set_agent_ble", { enabled: on });
+      bleEnabled = s.bleEnabled;
+      bleNote = on ? "Saved. The agent is restarting with Bluetooth on (macOS may ask to allow Bluetooth)." : "Saved. The agent is restarting with Bluetooth off.";
+    } catch (e) {
+      bleEnabled = !on;
+      bleNote = `Couldn't save: ${(e as Error).message ?? e}`;
+    } finally {
+      bleSaving = false;
+    }
+  }
 
   // Token test state
 
@@ -257,8 +283,9 @@
     <h2>Local Mesh</h2>
 
     <label class="toggle">
-      <input type="checkbox" bind:checked={bleEnabled} />
+      <input type="checkbox" checked={bleEnabled} disabled={bleSaving} onchange={(e) => setBle((e.currentTarget as HTMLInputElement).checked)} />
       <span>Enable BLE peer discovery (macOS)</span>
+      {#if bleNote}<span class="hint">{bleNote}</span>{/if}
     </label>
   </div>
 

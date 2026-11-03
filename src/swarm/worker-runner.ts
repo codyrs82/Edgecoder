@@ -735,7 +735,9 @@ async function loop(): Promise<void> {
   // Initialize BLE mesh transport for local peer discovery
   let bleMesh: BLEMeshManager | null = null;
   let bleTransport: NobleBLETransport | null = null;
-  if (OS === "macos") {
+  // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
+  if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
+  if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
