@@ -222,10 +222,21 @@ pub fn ollama_parallel_for(total_bytes: u64) -> u32 {
     }
 }
 
+/// Physical memory, without extra crates (this module is also tested on its own in CI):
+/// `sysctl hw.memsize` on macOS, /proc/meminfo on Linux; 8 GB when unknown.
 fn total_memory_bytes() -> u64 {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    sys.total_memory()
+    if cfg!(target_os = "macos") {
+        if let Ok(out) = Command::new("/usr/sbin/sysctl").args(["-n", "hw.memsize"]).output() {
+            if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                return n;
+            }
+        }
+    } else if let Ok(info) = fs::read_to_string("/proc/meminfo") {
+        if let Some(kb) = info.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()) {
+            return kb * 1024;
+        }
+    }
+    8 * 1_073_741_824
 }
 
 /// Version of the binary from `ollama --version`. With a server running it prints the *server's*
