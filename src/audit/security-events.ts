@@ -31,7 +31,8 @@ export type SecurityEventType =
   | "payouts_paused"
   | "payouts_resumed"
   | "payout_reconciliation_mismatch"
-  | "payout_reconciliation_error";
+  | "payout_reconciliation_error"
+  | "ledger_reconciliation_mismatch";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -71,7 +72,8 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   payouts_paused: "CRITICAL",
   payouts_resumed: "HIGH",
   payout_reconciliation_mismatch: "CRITICAL",
-  payout_reconciliation_error: "WARN"
+  payout_reconciliation_error: "WARN",
+  ledger_reconciliation_mismatch: "HIGH"
 };
 
 export class SecurityEventLogger {

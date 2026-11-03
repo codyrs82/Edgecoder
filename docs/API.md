@@ -139,7 +139,7 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/ledger/snapshot` | Full ordering chain snapshot | mesh token |
-| `GET` | `/ledger/verify` | Verify ordering chain integrity | mesh token |
+| `GET` | `/ledger/verify` | Verify ordering chain integrity; with `x-admin-token`, reconcile the credits ledger in Postgres (read-only, #115; `?max=` discrepancies, default 20) | mesh token (+ admin token for reconciliation) |
 | `GET` | `/stats/ledger/head` | Latest stats ledger record | mesh token |
 | `GET` | `/stats/ledger/range` | Stats ledger range query | mesh token |
 | `POST` | `/stats/ledger/ingest` | Ingest stats ledger records from peers | mesh token |
