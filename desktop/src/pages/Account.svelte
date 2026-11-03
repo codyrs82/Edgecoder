@@ -1,15 +1,21 @@
 <script lang="ts">
-  import { logout, getMe } from "../lib/api";
+  import { logout, getMe, updateProfile } from "../lib/api";
   import type { AuthUser } from "../lib/api";
 
   interface Props {
     user: AuthUser;
     onLogout: () => void;
+    /** The saved profile, so the sidebar shows the new name at once. */
+    onUserChange?: (user: AuthUser) => void;
   }
-  let { user, onLogout }: Props = $props();
+  let { user, onLogout, onUserChange }: Props = $props();
 
   let profile: AuthUser | null = $state(null);
   let loading = $state(true);
+  let name = $state("");
+  let saving = $state(false);
+  let saved = $state(false);
+  let error = $state("");
 
   // Fetch fresh profile every time Account mounts
   $effect(() => {
@@ -17,11 +23,33 @@
     getMe()
       .then((fresh) => { profile = fresh; })
       .catch(() => { profile = null; })
-      .finally(() => { loading = false; });
+      .finally(() => {
+        loading = false;
+        name = (profile ?? user).displayName ?? "";
+      });
   });
 
   // Use fetched profile, fall back to prop
   let display = $derived(profile ?? user);
+  let dirty = $derived(name.trim() !== (display.displayName ?? ""));
+  let initial = $derived((name.trim() || display.email).charAt(0).toUpperCase());
+
+  async function save() {
+    saving = true;
+    error = "";
+    try {
+      await updateProfile(name.trim());
+      const next = { ...display, displayName: name.trim() || null };
+      profile = next;
+      onUserChange?.(next);
+      saved = true;
+      setTimeout(() => (saved = false), 2000);
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      saving = false;
+    }
+  }
 
   let loggingOut = $state(false);
 
@@ -36,107 +64,67 @@
   }
 </script>
 
-<div class="account">
-  <h1>Account</h1>
+<div class="sp">
+  <h1>Profile</h1>
 
-  <div class="section">
-    <h2>Profile</h2>
-    {#if loading}
-      <p class="loading-text" role="status">Loading profile...</p>
-    {:else}
-      <dl class="field-grid">
-        <dt class="field-label">Email</dt>
-        <dd class="field-value">{display.email || "\u2014"}</dd>
-
-        <dt class="field-label">Display Name</dt>
-        <dd class="field-value">{display.displayName ?? "\u2014"}</dd>
-
-        <dt class="field-label">Email Verified</dt>
-        <dd class="field-value">
+  {#if loading}
+    <p class="sp-muted" role="status">Loading profile…</p>
+  {:else}
+    <div class="sp-group">
+      <div class="sp-card">
+        <div class="sp-row">
+          <span class="avatar" aria-hidden="true">{initial}</span>
+          <div class="sp-text">
+            <span class="sp-title">{name.trim() || display.email.split("@")[0]}</span>
+            <span class="sp-desc">{display.email}</span>
+          </div>
+        </div>
+        <div class="sp-row">
+          <div class="sp-text">
+            <label class="sp-title" for="display-name">Display name</label>
+            <span class="sp-desc">Shown in the app and on the web portal.</span>
+          </div>
+          <div class="sp-controls">
+            <input id="display-name" type="text" maxlength="80" placeholder="Your name" bind:value={name} onkeydown={(e) => e.key === "Enter" && dirty && save()} />
+            <button class="primary" disabled={!dirty || saving} onclick={save}>{saving ? "Saving…" : saved ? "Saved" : "Save"}</button>
+          </div>
+        </div>
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Email</span><span class="sp-desc">{display.email}</span></div>
           {#if display.emailVerified}
-            <span class="badge verified">Verified</span>
+            <span class="sp-pill" style="color: var(--success, #3fb950)">Verified</span>
           {:else}
-            <span class="badge unverified">Not verified</span>
+            <span class="sp-pill" style="color: var(--warning, #d29922)">Not verified</span>
           {/if}
-        </dd>
-      </dl>
-    {/if}
-  </div>
+        </div>
+      </div>
+      {#if error}<p class="sp-err">{error}</p>{/if}
+    </div>
 
-  <div class="section">
-    <button type="button" class="btn-danger" onclick={handleLogout} disabled={loggingOut}>
-      {loggingOut ? "Signing out..." : "Sign Out"}
-    </button>
-  </div>
+    <div class="sp-group">
+      <div class="sp-card">
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Sign out</span><span class="sp-desc">This computer keeps running its agent; you can sign back in any time.</span></div>
+          <button class="danger" onclick={handleLogout} disabled={loggingOut}>{loggingOut ? "Signing out…" : "Sign out"}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .account {
-    padding: 1.5rem;
-    max-width: 640px;
-  }
-  h1 { margin: 0 0 1.5rem; font-size: 1.4rem; }
-  .section {
-    background: var(--bg-surface);
-    border: 0.5px solid var(--border);
-    padding: 1.2rem 1.4rem;
-    border-radius: var(--radius-md);
-    margin-bottom: 1.2rem;
-  }
-  .section h2 {
-    font-size: 0.92rem;
-    margin: 0 0 1rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 600;
-  }
-  .field-grid {
+  .avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
     display: grid;
-    grid-template-columns: 120px 1fr;
-    gap: 0.5rem 1rem;
-    font-size: 0.85rem;
-  }
-  .loading-text { color: var(--text-muted); font-size: 0.85rem; }
-  .field-label { color: var(--text-muted); }
-  .field-value { color: var(--text-primary); }
-  .badge {
-    font-size: 0.75rem;
+    place-items: center;
     font-weight: 600;
-    padding: 2px 8px;
-    border-radius: var(--radius-sm, 4px);
+    font-size: 16px;
+    background: color-mix(in srgb, var(--accent) 25%, var(--bg-surface));
+    color: var(--text-primary);
   }
-  .badge.verified {
-    color: var(--green);
-    background: rgba(74, 222, 128, 0.12);
+  #display-name {
+    width: 220px;
   }
-  .badge.unverified {
-    color: var(--yellow);
-    background: rgba(251, 191, 36, 0.12);
-  }
-  .btn-danger {
-    padding: 8px 20px;
-    background: rgba(248, 113, 113, 0.1);
-    color: var(--red);
-    border: 1px solid rgba(248, 113, 113, 0.2);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
-    transition: all 0.15s;
-  }
-  .btn-danger:hover:not(:disabled) {
-    background: rgba(248, 113, 113, 0.2);
-  }
-  .btn-danger:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  button:focus-visible {
-    outline: 2px solid var(--accent, #3b82f6);
-    outline-offset: 2px;
-  }
-  .field-grid { margin: 0; }
-  .field-grid dd { margin: 0; }
 </style>

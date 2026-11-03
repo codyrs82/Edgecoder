@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getMeshPeers, getMeshReputation, getIdentity, backendReady, isRemoteMode } from "../lib/api";
+  import { getMeshPeers, getMeshReputation, getIdentity, backendReady, isRemoteMode, computeOverview, type ComputeOverview } from "../lib/api";
   import type { MeshPeer, PeerReputation, NodeIdentity } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import EmptyState from "../components/EmptyState.svelte";
@@ -79,6 +79,17 @@
   // ---------------------------------------------------------------------------
 
   let noLocalAgent = $state(false);
+  /** Your machines and the coordinator they meet through (the network as the coordinator sees it). */
+  let network = $state<ComputeOverview["account"] | null>(null);
+
+  /** Your machines, from the coordinator; never holds up the mesh view. */
+  async function refreshMachines(): Promise<void> {
+    try {
+      network = (await computeOverview()).account ?? null;
+    } catch {
+      network = null;
+    }
+  }
 
   async function refresh(): Promise<void> {
     await backendReady;
@@ -88,6 +99,7 @@
       return;
     }
     noLocalAgent = false;
+    void refreshMachines();
     try {
       const [peersRes, repRes, idRes] = await Promise.all([
         getMeshPeers(),
@@ -134,13 +146,32 @@
 
 <div class="mesh-topology">
   <header class="page-header">
-    <h1>Mesh Topology</h1>
-    <p class="subtitle">{peerCount} {peerCount === 1 ? "peer" : "peers"} discovered</p>
+    <h1>Network</h1>
+    <p class="subtitle">{network ? `${network.networkAgents ?? 0} machines online · ` : ""}{peerCount} coordinator {peerCount === 1 ? "peer" : "peers"}</p>
     <div class="view-toggle" role="group" aria-label="View">
       <button type="button" aria-pressed={view === "graph"} onclick={() => (view = "graph")}>Graph</button>
       <button type="button" aria-pressed={view === "cards"} onclick={() => (view = "cards")}>Cards</button>
     </div>
   </header>
+
+  {#if network}
+    <section class="machines" aria-label="Your machines">
+      <p class="how">Your machines don't need to be on the same network: each one connects to the coordinator{network.coordinator ? ` (${network.coordinator.url.replace(/^https?:\/\//, "")})` : ""}, which matches work between them and the rest of the network by price.</p>
+      <div class="machine-list">
+        {#each network.machines ?? [] as m (m.agentId)}
+          <div class="machine" class:online={m.online}>
+            <span class="dot" aria-hidden="true"></span>
+            <div>
+              <div class="mname">{m.agentId}</div>
+              <div class="mmeta">{m.computeClass}{m.tier ? ` · ${m.tier}` : ""} · {m.online ? "online" : "offline"} · {m.models.length} model{m.models.length === 1 ? "" : "s"}</div>
+            </div>
+          </div>
+        {:else}
+          <p class="how">No machines linked to your account yet.</p>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if noLocalAgent}
     <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to see mesh topology.</div>
@@ -510,4 +541,45 @@
     opacity: 0.6;
   }
   .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .machines {
+    margin-bottom: 16px;
+  }
+  .how {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    margin: 0 0 10px;
+    line-height: 1.5;
+  }
+  .machine-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 8px;
+  }
+  .machine {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 0.5px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-surface);
+  }
+  .machine .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted, #666);
+    flex-shrink: 0;
+  }
+  .machine.online .dot {
+    background: var(--success, #3fb950);
+  }
+  .mname {
+    font-size: 13px;
+    font-family: var(--font-mono, monospace);
+  }
+  .mmeta {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
 </style>

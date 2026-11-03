@@ -32,12 +32,9 @@ export interface HostedRoutesDeps {
 }
 
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
-export function hostedTarget(model: string | undefined): { model: string; computeClass?: string; target?: "mine"; reservationId?: string } | null {
+export function hostedTarget(model: string | undefined) {
   if (!model) return null;
-  if (model.startsWith("mine/")) return model.length > 5 ? { model: model.slice(5), target: "mine" } : null;
-  const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(model);
-  if (reserved) return { model: reserved[2], reservationId: reserved[1] };
-  return parseNetworkModel(model.startsWith("network/") ? model : `network/${model}`);
+  return parseNetworkModel(model.startsWith("network/") || model.startsWith("mine/") || model.startsWith("reserved/") ? model : `network/${model}`);
 }
 
 export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDeps): void {

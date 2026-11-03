@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>shell harness</title>
+<style>html,body{margin:0;height:100%;background:#0d1117;color:#e6edf3;font-family:-apple-system,system-ui,sans-serif}#app{height:100%}</style></head>
+<body>
+<div id="app"></div>
+<script type="module">
+  // The app's shell (sidebar, chat box with the compute picker, settings) against a real IDE server
+  // reached through the dev proxy; the Tauri bridge is stubbed to hand over the IDE token.
+  const params = new URLSearchParams(location.search);
+  document.documentElement.dataset.theme = "dark";
+  window.__TAURI_INTERNALS__ = { invoke: async (cmd) => (cmd === "get_ide_token" ? params.get("token") : null), transformCallback: () => 0 };
+  const { mount } = await import("svelte");
+  const { default: Shell } = await import("./shell-harness.svelte");
+  mount(Shell, { target: document.getElementById("app"), props: { settings: params.get("settings") ?? undefined } });
+  window.ready = true;
+</script>
+</body></html>

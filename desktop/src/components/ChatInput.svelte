@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
 
   interface Props {
     onSend: (message: string) => void;
@@ -10,8 +10,10 @@
     onStop?: () => void;
     /** Project path search; when set, typing @ offers files and folders to mention. */
     mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
+    /** Controls on the bottom-left of the box (the compute picker). */
+    toolbar?: Snippet;
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, toolbar }: Props = $props();
 
   let text = $state("");
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
@@ -137,17 +139,20 @@
     onkeydown={handleKeydown}
     oninput={autoResize}
   ></textarea>
+  <div class="bottom-row">
+  <div class="toolbar">{@render toolbar?.()}</div>
   {#if streaming && onStop}
     <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc)">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
     </button>
   {:else}
     <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-        <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 19V5M5 12l7-7 7 7"/>
       </svg>
     </button>
   {/if}
+  </div>
 </div>
 
 <style>
@@ -199,13 +204,30 @@
   .input-bar {
     position: relative;
     display: flex;
-    align-items: flex-end;
-    gap: 8px;
+    flex-direction: column;
+    gap: 6px;
     background: var(--bg-surface);
     border: 1px solid var(--border-control);
-    border-radius: var(--radius-md);
-    padding: 8px 12px;
+    border-radius: 16px;
+    padding: 10px 10px 8px 14px;
     flex: 1;
+    transition: border-color 0.15s;
+  }
+  .input-bar:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-control));
+  }
+  .bottom-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toolbar {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: -6px;
   }
   textarea {
     flex: 1;
@@ -223,9 +245,9 @@
     color: var(--text-muted);
   }
   .send-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
     border: none;
     background: var(--accent);
     color: var(--on-accent);

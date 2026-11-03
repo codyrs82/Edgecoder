@@ -34,8 +34,15 @@ export interface NetworkModel {
   classes: string[];
 }
 
-/** "network/qwen2.5-coder:32b@gpu" -> { model, computeClass }; null when not a network model. */
-export function parseNetworkModel(id: string): { model: string; computeClass: string } | null {
+/**
+ * Model ids that run off this computer: "network/qwen2.5-coder:32b@gpu" (any agent, optionally one
+ * class), "mine/<model>" (your own machines) and "reserved/<reservation>/<model>" (a machine you
+ * reserved). Null for anything else (a local model).
+ */
+export function parseNetworkModel(id: string): { model: string; computeClass: string; target?: "mine"; reservationId?: string } | null {
+  if (id.startsWith("mine/")) return id.length > 5 ? { model: id.slice(5), computeClass: "any", target: "mine" } : null;
+  const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
+  if (reserved) return { model: reserved[2], computeClass: "any", reservationId: reserved[1] };
   if (!id.startsWith(NETWORK_PREFIX)) return null;
   const rest = id.slice(NETWORK_PREFIX.length);
   const at = rest.lastIndexOf("@");
@@ -167,7 +174,16 @@ export function contentToText(content: unknown): string {
 
 export interface ComputeOverview {
   connected: boolean;
-  account?: { accountId: string; cSats: number; earnedSats: number; recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }> };
+  selfAgentId?: string;
+  account?: {
+    accountId: string;
+    cSats: number;
+    earnedSats: number;
+    recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }>;
+    machines?: Array<{ agentId: string; online: boolean; lastSeenMs: number; computeClass: string; tier: string | null; activeModel: string | null; models: string[]; reservedUntilMs: number | null }>;
+    networkAgents?: number;
+    coordinator?: { peerId: string; url: string };
+  };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
   models?: Array<{ model: string; agents: number; classes: string[] }>;
 }
@@ -181,6 +197,7 @@ export async function computeOverview(d: NetworkDeps): Promise<ComputeOverview> 
   if (acct.status !== 200 && cat.status !== 200) return { connected: false };
   return {
     connected: true,
+    selfAgentId: d.agentId,
     ...(acct.status === 200 ? { account: acct.json as unknown as ComputeOverview["account"] } : {}),
     ...(cat.status === 200 ? { classes: cat.json.classes as ComputeOverview["classes"], models: cat.json.models as ComputeOverview["models"] } : {}),
   };

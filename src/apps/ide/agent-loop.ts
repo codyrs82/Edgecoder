@@ -12,6 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
+import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 
 export interface ChatMessage {
@@ -50,6 +51,32 @@ export function toolSchemas(): ToolSchema[] {
       },
     },
   }));
+}
+
+/**
+ * A model call through any chat backend (the network, your machines, a reserved machine), in the
+ * agent's ChatFn shape. `onSpent` hears what each call cost in cSats.
+ */
+export function backendChat(backend: ChatBackend, onSpent?: (cSats: number) => void, signal?: AbortSignal): ChatFn {
+  return async ({ messages, tools }, onDelta) => {
+    let content = "";
+    const toolCalls: ChatResult["toolCalls"] = [];
+    try {
+      for await (const p of backend({ messages: messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" })), ...(tools ? { tools: tools as ToolSpec[] } : {}), temperature: 0.3 }, signal)) {
+        if ("delta" in p) {
+          content += p.delta;
+          onDelta?.(p.delta);
+        } else if ("toolCalls" in p) {
+          for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
+        } else if (p.cSatsSpent !== undefined) onSpent?.(p.cSatsSpent);
+      }
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      if (/does not support tools/i.test(msg)) throw new ToolsUnsupportedError(msg);
+      throw err;
+    }
+    return { content, toolCalls };
+  };
 }
 
 /** Ollama /api/chat, streamed. Throws ToolsUnsupportedError when the model has no tool support. */

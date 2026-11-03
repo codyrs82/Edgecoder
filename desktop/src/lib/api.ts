@@ -976,6 +976,26 @@ export interface IdeStreamEvent {
   [key: string]: unknown;
 }
 
+/**
+ * A model id from the compute picker as the IDE chat takes it: "network/m@gpu", "mine/m" and
+ * "reserved/<id>/m" run off this computer (billed in cSats on the network), anything else here.
+ */
+export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved"; computeClass?: string; reservationId?: string } } {
+  if (!id) return {};
+  if (id.startsWith("mine/")) return { model: id.slice(5), compute: { target: "mine" } };
+  const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
+  if (reserved) return { model: reserved[2], compute: { target: "reserved", reservationId: reserved[1] } };
+  if (id.startsWith("network/")) {
+    const rest = id.slice(8);
+    const at = rest.lastIndexOf("@");
+    const cls = at > 0 ? rest.slice(at + 1) : "";
+    return ["cpu", "apple", "gpu", "gpu.dc"].includes(cls)
+      ? { model: rest.slice(0, at), compute: { target: "network", computeClass: cls } }
+      : { model: rest, compute: { target: "network", computeClass: "any" } };
+  }
+  return { model: id };
+}
+
 export async function streamIdeChat(
   messages: Array<{ role: string; content: string }>,
   projectRoot: string,
@@ -992,7 +1012,7 @@ export async function streamIdeChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages,
-      model: requestedModel,
+      ...computeFields(requestedModel),
       projectRoot,
       autoApprove,
       ...(githubToken ? { githubToken } : {}),
@@ -1056,7 +1076,7 @@ export class FsError extends Error {
   }
 }
 
-async function fsCall<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function fsCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await ideFetch(`${ideBase()}${path}`, {
     method,
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -1198,8 +1218,18 @@ export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/
 // Compute: cSats balance, prices per class, network models, buying cSats (:4304 /v1/ide/compute*)
 export interface ComputeOverview {
   connected: boolean;
+  /** This computer's agent (so "My machines" can leave it out). */
+  selfAgentId?: string;
   reason?: string;
-  account?: { accountId: string; cSats: number; earnedSats: number; recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }> };
+  account?: {
+    accountId: string;
+    cSats: number;
+    earnedSats: number;
+    recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }>;
+    machines?: Machine[];
+    networkAgents?: number;
+    coordinator?: { peerId: string; url: string };
+  };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
   models?: Array<{ model: string; agents: number; classes: string[] }>;
 }
@@ -1210,3 +1240,96 @@ export const computeIntent = (intentId: string) => fsCall<{ intentId: string; st
 /** The key external tools use for http://localhost:4304/v1 (this computer's IDE token). */
 export const ideApiKey = () => getIdeToken();
 export const IDE_API_BASE = "http://localhost:4304/v1";
+
+/** One of your machines as the coordinator sees it. */
+export interface Machine {
+  agentId: string;
+  online: boolean;
+  lastSeenMs: number;
+  computeClass: string;
+  tier: string | null;
+  activeModel: string | null;
+  models: string[];
+  reservedUntilMs: number | null;
+}
+
+// Connect to compute: one local port per connection (:4304 /v1/ide/connections)
+export type ConnectionTarget = "local" | "mine" | "network" | "reserved";
+export interface Connection {
+  id: string;
+  name: string;
+  port: number;
+  key: string;
+  target: ConnectionTarget;
+  model: string;
+  computeClass?: string;
+  reservationId?: string;
+  maxCSatsPerSecond?: number;
+  budgetCSats?: number;
+  spentCSats: number;
+  enabled: boolean;
+  createdAtMs: number;
+  url: string;
+  listening: boolean;
+  error?: string;
+}
+export type ConnectionInput = Pick<Connection, "name" | "target" | "model"> & Partial<Pick<Connection, "computeClass" | "reservationId" | "maxCSatsPerSecond" | "budgetCSats" | "port" | "enabled">>;
+export const listConnections = () => fsCall<{ connections: Connection[]; localModels: string[]; networkConnected: boolean; nextPort: number }>("GET", "/v1/ide/connections");
+export const createConnection = (c: ConnectionInput) => fsCall<{ connection: Connection }>("POST", "/v1/ide/connections", c).then((r) => r.connection);
+export const updateConnection = (id: string, patch: Partial<ConnectionInput> & { rotateKey?: boolean; resetSpent?: boolean }) =>
+  fsCall<{ connection: Connection }>("PATCH", `/v1/ide/connections/${encodeURIComponent(id)}`, patch).then((r) => r.connection);
+export const deleteConnection = (id: string) => fsCall<{ ok: boolean }>("DELETE", `/v1/ide/connections/${encodeURIComponent(id)}`);
+
+// Reserved capacity: hold a machine of a class for a while, paid up front in cSats
+export interface Reservation {
+  id: string;
+  computeClass: string;
+  tier?: string;
+  model?: string;
+  agentId: string;
+  startMs: number;
+  endMs: number;
+  status: "active" | "ended";
+  endReason?: string;
+  cSatsPerSecond: number;
+  prepaidCSats: number;
+  usedCSats?: number;
+  refundCSats?: number;
+  models: string[];
+}
+export interface ReservationOptions {
+  reservations: Reservation[];
+  options: Record<string, { available: number; cSatsPerSecond?: number; tiers: string[]; models: string[] }>;
+  minMinutes: number;
+  maxMinutes: number;
+}
+export const listReservations = () => fsCall<ReservationOptions>("GET", "/v1/ide/reservations");
+export const createReservation = (r: { computeClass: string; minutes: number; model?: string }) =>
+  fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations", r).then((x) => x.reservation);
+export const cancelReservation = (reservationId: string) => fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations/cancel", { reservationId }).then((x) => x.reservation);
+
+/** A page on the web portal (opens in the browser). */
+export const portalWebUrl = (path = "") => `${portalBase()}${path}`;
+
+/** Save your display name (portal account). */
+export async function updateProfile(displayName: string): Promise<void> {
+  const res = await fetch(`${portalBase()}/me/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    credentials: "include",
+    body: JSON.stringify({ displayName }),
+  });
+  if (!res.ok) throw new Error(res.status === 400 ? "Use plain text for your name." : `Could not save (${res.status})`);
+}
+
+/** Readable text for an error from the compute routes. */
+export function computeErrorText(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? "";
+  const known: Record<string, string> = {
+    insufficient_credits: "Not enough cSats. Buy more on Plan & usage.",
+    no_agent_available: "No machine of that class is free right now. Try another class or later.",
+    not_enrolled: "This computer isn't connected to the network yet. Sign in and let the agent start.",
+    unknown_reservation: "That reservation no longer exists.",
+  };
+  return known[code] ?? (err as Error)?.message ?? String(err);
+}

@@ -2,7 +2,9 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
-  import ModelPicker from "./ModelPicker.svelte";
+  import ComputePicker from "./ComputePicker.svelte";
+  import { computeChoice } from "../lib/compute-choice";
+  import { get } from "svelte/store";
   import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
@@ -205,7 +207,7 @@
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
           abortController.signal,
-          conversation.selectedModel,
+          get(computeChoice),
           githubToken,
           autoApply ? "edits" : "none",
         );
@@ -231,7 +233,7 @@
           (progress) => {
             streamProgress = progress;
           },
-          conversation.selectedModel,
+          get(computeChoice),
         );
       }
       finishTurn(streamingContent);
@@ -339,10 +341,7 @@
         <polyline points="6 9 12 15 18 9"/>
       </svg>
     </button>
-    <ModelPicker
-      selectedModel={conversation.selectedModel}
-      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
-    />
+    <ComputePicker selected={$computeChoice} up={false} onSelect={(id) => computeChoice.set(id)} />
     <button class="new-chat-btn" onclick={newChat} title="New coding chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 5v14M5 12h14"/>

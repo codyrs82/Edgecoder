@@ -2868,6 +2868,10 @@ app.post("/heartbeat", async (req, reply) => {
     });
   }
   queue.heartbeat(body.agentId);
+  // A busy agent is alive: without this a long job (a big prompt on a slow model) made it look
+  // offline, which ended its reservation and hid it from the model list.
+  const seen = agentCapabilities.get(body.agentId);
+  if (seen) seen.lastSeenMs = now;
   if (body.leaseOnly) {
     // #51: mid-task lease renewal. Signature was checked above (unsigned is rejected
     // when REQUIRE_SIGNED_AGENT_REQUESTS is on, the production default); nothing is drained.
@@ -3937,7 +3941,9 @@ const inferenceSubmitSchema = z.object({
  */
 async function callerAccount(req: any, routePath: string, requested?: string): Promise<{ accountId: string } | { status: number; error: string }> {
   const headers = (req.headers ?? {}) as Record<string, unknown>;
-  if (hasPortalServiceToken(headers)) return requested ? { accountId: requested } : { status: 400, error: "account_required" };
+  // The portal path needs the header itself: with no token configured (development) every request
+  // would otherwise count as the portal's.
+  if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) return requested ? { accountId: requested } : { status: 400, error: "account_required" };
   const verified = await verifyAgentRequest(headers, routePath, req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
   if (!verified || verified === "rejected") return { status: 401, error: "signature_invalid" };
   return { accountId: (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId };
@@ -3953,7 +3959,29 @@ app.post("/account/summary", async (req, reply) => {
   const recent = [...history].sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 25).map((t) => ({
     type: t.type, cSats: Number(t.credits), reason: t.reason, taskId: t.relatedTaskId, atMs: t.timestampMs,
   }));
-  return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent });
+  // Your machines as this coordinator sees them (the app's Mesh page and "My machines" in the compute picker).
+  const owned = new Set([...((await pgStore?.listAgentOwnershipByAccount(accountId)) ?? []).map((o) => o.agentId), accountId]);
+  const now = Date.now();
+  const machines = [...owned]
+    .map((agentId) => ({ agentId, cap: agentCapabilities.get(agentId) }))
+    .filter((m) => m.cap)
+    .map(({ agentId, cap }) => {
+      const eff = effectiveHardware(agentId, cap);
+      const lease = reservations.activeForAgent(agentId, now);
+      return {
+        agentId,
+        online: now - cap!.lastSeenMs < 2 * 60_000,
+        lastSeenMs: cap!.lastSeenMs,
+        computeClass: eff?.computeClass ?? cap!.computeClass,
+        tier: eff?.tier ?? null,
+        activeModel: cap!.activeModel ?? null,
+        models: [...(cap!.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
+        reservedUntilMs: lease?.endMs ?? null,
+      };
+    });
+  let networkAgents = 0;
+  for (const cap of agentCapabilities.values()) if (now - cap.lastSeenMs < 2 * 60_000) networkAgents++;
+  return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent, machines, networkAgents, coordinator: { peerId: identity.peerId, url: COORDINATOR_PUBLIC_URL } });
 });
 
 // ── Reserved capacity (src/economy/reservations.ts) ──

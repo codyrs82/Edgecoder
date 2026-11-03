@@ -4,7 +4,8 @@
   import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
-  import ModelPicker from "../components/ModelPicker.svelte";
+  import { computeChoice } from "../lib/compute-choice";
+  import { get } from "svelte/store";
   import {
     streamChat,
     streamPortalChat,
@@ -139,6 +140,8 @@
     if (isStreaming) return;
 
     addMessage(conversation, "user", text);
+    // Where this chat ran last (the sidebar's laptop / server / cloud icon).
+    conversation.selectedModel = get(computeChoice);
     conversation = conversation; // trigger reactivity
 
     isStreaming = true;
@@ -175,7 +178,7 @@
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
           abortController.signal,
-          conversation.selectedModel,
+          get(computeChoice),
           cachedGitHubToken,
           autoApplyEdits(projectRoot) ? "edits" : "none",
         );
@@ -213,7 +216,7 @@
           (progress) => {
             streamProgress = progress;
           },
-          conversation.selectedModel,
+          get(computeChoice),
         );
       }
 
@@ -335,10 +338,6 @@
 
 <div class="chat-view" bind:this={scrollContainer}>
   <div class="chat-header">
-    <ModelPicker
-      selectedModel={conversation.selectedModel}
-      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
-    />
     {#if usePortalChat}
       <span class="portal-badge" title="Chat synced with portal server">
         <span class="portal-dot"></span>

@@ -9,6 +9,10 @@
     portalRenameConversation,
   } from "../lib/api";
   import type { Conversation } from "../lib/types";
+  import type { AuthUser } from "../lib/api";
+  import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud } from "@lucide/svelte";
+  import { parseChoice } from "../lib/compute-choice";
+  import ProfileMenu from "./ProfileMenu.svelte";
 
   interface Props {
     open: boolean;
@@ -18,9 +22,46 @@
     activeConversationId: string | null;
     /** Render as inline panel instead of fixed overlay */
     inline?: boolean;
+    /** Signed-in user: shows the profile row and its menu at the bottom. */
+    user?: AuthUser;
+    onOpenSettings?: (section?: string) => void;
+    onLogout?: () => void;
   }
 
-  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false }: Props = $props();
+  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout }: Props = $props();
+
+  let searchOpen = $state(false);
+  let searchEl: HTMLInputElement | undefined = $state();
+
+  /** Today / Yesterday / Previous 7 days / Older, newest first. */
+  let groups = $derived.by(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const t0 = startOfToday.getTime();
+    const day = 86_400_000;
+    const out: Array<{ label: string; items: Conversation[] }> = [
+      { label: "Today", items: [] },
+      { label: "Yesterday", items: [] },
+      { label: "Previous 7 days", items: [] },
+      { label: "Older", items: [] },
+    ];
+    for (const c of filtered) {
+      const at = new Date(c.updatedAt).getTime();
+      out[at >= t0 ? 0 : at >= t0 - day ? 1 : at >= t0 - 7 * day ? 2 : 3].items.push(c);
+    }
+    return out.filter((g) => g.items.length);
+  });
+
+  function ranOnText(c: Conversation): string {
+    const w = parseChoice(c.selectedModel).where;
+    return w === "mine" ? "Ran on your machines" : w === "network" || w === "reserved" ? "Ran on network compute" : "Ran on this computer";
+  }
+
+  function toggleSearch() {
+    searchOpen = !searchOpen;
+    if (searchOpen) queueMicrotask(() => searchEl?.focus());
+    else searchQuery = "";
+  }
 
   let conversations: Conversation[] = $state([]);
   let searchQuery = $state("");
@@ -80,15 +121,6 @@
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   }
 
-  function getPreview(convo: Conversation): string {
-    const msgCount = convo.messages.length;
-    const firstMsg = convo.messages[0];
-    const prefix = msgCount > 0 ? `${msgCount} msg${msgCount !== 1 ? "s" : ""} · ` : "";
-    if (!firstMsg) return "No messages yet";
-    const text = firstMsg.content;
-    const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
-    return prefix + preview;
-  }
 
   function handleSelect(id: string) {
     if (renamingId) return;
@@ -210,15 +242,16 @@
     </div>
   {/if}
 
-  <div class="sidebar-actions">
-    <button class="new-chat-btn" onclick={handleNewChat}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 5v14M5 12h14"/>
-      </svg>
-      New Chat
-    </button>
-  </div>
+  <nav class="side-nav" aria-label="Chat">
+    <button class="nav-row primary" onclick={handleNewChat}><SquarePen size={16} /> New chat</button>
+    <button class="nav-row" onclick={toggleSearch} aria-expanded={searchOpen}><Search size={16} /> Search</button>
+    {#if onOpenSettings}
+      <button class="nav-row" onclick={() => onOpenSettings?.("compute")}><Cpu size={16} /> Compute</button>
+      <button class="nav-row" onclick={() => onOpenSettings?.("connect")}><Plug size={16} /> Connect your tools</button>
+    {/if}
+  </nav>
 
+  {#if searchOpen || !inline}
   <div class="search-wrapper">
     <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -228,9 +261,12 @@
       type="text"
       placeholder="Search conversations..."
       aria-label="Search conversations"
+      bind:this={searchEl}
       bind:value={searchQuery}
+      onkeydown={(e) => { if (e.key === "Escape") toggleSearch(); }}
     />
   </div>
+  {/if}
 
   <div class="conversation-list">
     {#if loading}
@@ -244,7 +280,9 @@
         {/if}
       </div>
     {:else}
-      {#each filtered as convo (convo.id)}
+      {#each groups as group (group.label)}
+      <div class="group-label">{group.label}</div>
+      {#each group.items as convo (convo.id)}
         <div
           class="conversation-item"
           class:active={convo.id === activeConversationId}
@@ -266,14 +304,12 @@
                 autofocus
               />
             {:else}
-              <div class="convo-title">{convo.title}</div>
+              <div class="convo-title" title="{convo.title} · {formatRelativeTime(convo.updatedAt)}">{convo.title}</div>
             {/if}
-            <div class="convo-meta">
-              <span class="convo-date">{formatRelativeTime(convo.updatedAt)}</span>
-              <span class="convo-separator">&middot;</span>
-              <span class="convo-preview">{getPreview(convo)}</span>
-            </div>
           </div>
+          <span class="ran-on" title={ranOnText(convo)}>
+            {#if parseChoice(convo.selectedModel).where === "mine"}<Server size={13} />{:else if ["network", "reserved"].includes(parseChoice(convo.selectedModel).where)}<Cloud size={13} />{:else}<Laptop size={13} />{/if}
+          </span>
           <div class="convo-actions">
             <button
               class="kebab-btn"
@@ -310,11 +346,56 @@
           </div>
         </div>
       {/each}
+      {/each}
     {/if}
   </div>
+
+  {#if user && onOpenSettings && onLogout}
+    <ProfileMenu {user} {onOpenSettings} {onLogout} />
+  {/if}
 </div>
 
 <style>
+  .side-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 8px 8px 4px;
+  }
+  .nav-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .nav-row:hover,
+  .nav-row[aria-expanded="true"] {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+  .nav-row.primary {
+    color: var(--text-primary);
+  }
+  .ran-on {
+    display: inline-flex;
+    color: var(--text-muted, var(--text-secondary));
+    opacity: 0.8;
+  }
+  .conversation-item:hover .ran-on {
+    display: none;
+  }
+  .group-label {
+    padding: 14px 12px 4px;
+    font-size: 11px;
+    color: var(--text-muted, var(--text-secondary));
+  }
   .backdrop {
     position: fixed;
     inset: 0;
@@ -351,6 +432,7 @@
 
   .sidebar.inline {
     position: static;
+    height: 100%;
     transform: none;
     width: 100%;
     max-width: none;
@@ -394,33 +476,8 @@
     color: var(--text-primary);
   }
 
-  .sidebar-actions {
-    padding: 12px 16px 0;
-    flex-shrink: 0;
-  }
 
-  .new-chat-btn {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 10px 16px;
-    border: 0.5px solid var(--border-strong);
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 500;
-    transition: all 0.15s;
-  }
 
-  .new-chat-btn:hover {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
-  }
 
   .search-wrapper {
     position: relative;
@@ -473,22 +530,26 @@
 
   .conversation-item {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 4px;
-    padding: 12px 16px;
+    margin: 0 8px;
+    padding: 6px 6px 6px 10px;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s;
-    border-left: 3px solid transparent;
     position: relative;
   }
 
   .conversation-item:hover {
-    background: var(--bg-elevated);
+    background: var(--bg-surface);
   }
 
   .conversation-item.active {
-    border-left-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--bg-surface);
+  }
+
+  .conversation-item.active .convo-title {
+    color: var(--text-primary);
   }
 
   .convo-content {
@@ -498,39 +559,14 @@
 
   .convo-title {
     font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
+    font-weight: 400;
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .convo-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 4px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-  }
 
-  .convo-date {
-    flex-shrink: 0;
-    color: var(--text-muted);
-  }
-
-  .convo-separator {
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
-
-  .convo-preview {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--text-secondary);
-  }
 
   .rename-input {
     width: 100%;

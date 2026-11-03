@@ -25,7 +25,7 @@ import { ToolExecutor } from "./tool-executor.js";
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
-import { makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
+import { backendChat, makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
@@ -710,7 +710,7 @@ app.post("/v1/ide/connections", async (req, reply) => {
   try {
     return reply.send({ connection: await connections.create(body) });
   } catch (err) {
-    return reply.status(400).send({ error: (err as Error).message });
+    return reply.status(400).send({ error: "invalid_connection", message: (err as Error).message });
   }
 });
 
@@ -720,7 +720,7 @@ app.patch("/v1/ide/connections/:id", async (req, reply) => {
   try {
     return reply.send({ connection: await connections.update(id, body) });
   } catch (err) {
-    return reply.status(400).send({ error: (err as Error).message });
+    return reply.status(400).send({ error: "invalid_connection", message: (err as Error).message });
   }
 });
 
@@ -760,11 +760,9 @@ registerCompatRoutes(
     resolve: async (_ctx, model) => {
       if (!model) return { status: 400, error: "model is required (a local model, network/<model>[@class] or mine/<model>)" };
       const network = parseNetworkModel(model);
-      if (network || model.startsWith("mine/")) {
+      if (network) {
         if (!networkDeps) return { status: 409, error: "This computer's agent isn't connected to the network." };
-        return network
-          ? { backend: networkBackend(networkDeps, network), model }
-          : { backend: networkBackend(networkDeps, { model: model.slice(5), target: "mine" }), model };
+        return { backend: networkBackend(networkDeps, network), model };
       }
       return { backend: localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", model), model };
     },
@@ -798,7 +796,28 @@ const ideChatSchema = z.object({
   githubToken: z.string().optional(),
   /** "edits": file writes and edits apply without asking (checkpoints keep them undoable); commands still ask. */
   autoApprove: z.enum(["none", "edits"]).default("none"),
+  /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
+  compute: z
+    .object({
+      target: z.enum(["local", "mine", "network", "reserved"]),
+      computeClass: z.enum(["any", "cpu", "apple", "gpu", "gpu.dc"]).optional(),
+      reservationId: z.string().max(100).optional(),
+    })
+    .optional(),
 });
+
+/** The agent's model calls, on the compute the chat picked. */
+function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal) {
+  if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
+  const where = compute.target === "mine" ? "your machines" : compute.target === "reserved" ? "reserved machine" : `network${compute.computeClass && compute.computeClass !== "any" ? ` (${compute.computeClass})` : ""}`;
+  const backend = networkBackend(networkDeps, {
+    model,
+    computeClass: compute.target === "network" ? compute.computeClass ?? "any" : "any",
+    ...(compute.target === "mine" ? { target: "mine" as const } : {}),
+    ...(compute.target === "reserved" ? { reservationId: compute.reservationId } : {}),
+  });
+  return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+}
 
 app.post("/v1/ide/chat", async (req, reply) => {
   const body = ideChatSchema.parse(req.body);
@@ -891,7 +910,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   const abort = new AbortController();
   reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   await runAgentLoop({
-    chat: ollamaChat(ollamaHost, chatModel, abort.signal),
+    chat: chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal),
     systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
     messages: body.messages,
     sendEvent,

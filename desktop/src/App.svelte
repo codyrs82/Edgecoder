@@ -16,9 +16,22 @@
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
+  import ComputePicker from "./components/ComputePicker.svelte";
+  import { computeChoice } from "./lib/compute-choice";
+  import { Settings as SettingsIcon } from "@lucide/svelte";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
+  let settingsSection: string | undefined = $state(undefined);
+  function openSettings(section?: string) {
+    settingsSection = section;
+    settingsOpen = true;
+  }
+  function logout() {
+    clearSessionToken();
+    user = null;
+    settingsOpen = false;
+  }
   let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
   let editorView: EditorView | undefined = $state(undefined);
@@ -211,7 +224,7 @@
   <LoginScreen onLogin={handleLogin} />
 {:else}
   <div class="app-shell">
-    <UpdateBanner />
+    {#if activeTab !== "chat"}<UpdateBanner />{/if}
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
       <button class="header-btn" title="New chat" onclick={() => {
@@ -237,6 +250,9 @@
           <path d="M9 3v18"/>
         </svg>
       </button>
+      <button class="header-btn" title="Settings" aria-label="Settings" onclick={() => openSettings()}>
+        <SettingsIcon size={17} strokeWidth={2} />
+      </button>
     </header>
 
     <!-- Main Content Area — both views stay mounted, hidden via CSS -->
@@ -250,10 +266,20 @@
             onNewChat={handleNewChatFromSidebar}
             activeConversationId={chatView?.getConversationId() ?? null}
             inline={true}
+            user={user!}
+            onOpenSettings={openSettings}
+            onLogout={logout}
           />
         </div>
         <div class="chat-main">
           <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
+          <div class="composer">
+            <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
+              {#snippet toolbar()}
+                <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
+              {/snippet}
+            </ChatInput>
+          </div>
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
@@ -261,31 +287,13 @@
       </div>
     </main>
 
-    <!-- Bottom Bar -->
-    {#if activeTab === "chat"}
-      <footer class="bottom-bar">
-        <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
-          </svg>
-        </button>
-        <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined} />
-      </footer>
-    {:else}
-      <footer class="bottom-bar minimal">
-        <button class="avatar-btn" onclick={() => settingsOpen = !settingsOpen} title="Settings">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a4 4 0 014-4h8a4 4 0 014 4v1"/>
-          </svg>
-        </button>
-      </footer>
-    {/if}
-
     {#if settingsOpen}
       <SettingsOverlay
         onClose={() => settingsOpen = false}
         user={user!}
-        onLogout={() => { clearSessionToken(); user = null; settingsOpen = false; }}
+        initialSection={settingsSection}
+        onUserChange={(u) => (user = u)}
+        onLogout={logout}
       />
     {/if}
 
@@ -391,35 +399,16 @@
     overflow: hidden;
     min-width: 0;
   }
-  /* Bottom Bar */
-  .bottom-bar {
-    display: flex;
-    align-items: flex-end;
-    gap: 12px;
-    padding: 12px 16px;
-    border-top: 0.5px solid var(--border);
+  /* Composer: the chat box under the conversation, centered like the messages */
+  .composer {
     flex-shrink: 0;
-  }
-  .bottom-bar.minimal {
-    padding: 8px 16px;
-  }
-  .avatar-btn {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    border: 0.5px solid var(--border-strong);
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    cursor: pointer;
     display: flex;
-    align-items: center;
     justify-content: center;
-    flex-shrink: 0;
-    transition: all 0.15s;
+    padding: 8px 20px 16px;
   }
-  .avatar-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
+  .composer > :global(*) {
+    width: 100%;
+    max-width: 820px;
   }
 
   .loading-screen {

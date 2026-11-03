@@ -111,6 +111,8 @@ export type IdeStreamEvent =
   | { type: "turn"; id: string }
   /** The turn wrote this project file (its original is kept under the turn's checkpoint). */
   | { type: "file_change"; turnId: string; path: string }
+  /** cSats a model call on the network cost (0 on this computer or your own machines). */
+  | { type: "usage"; cSats: number; where: string }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------
