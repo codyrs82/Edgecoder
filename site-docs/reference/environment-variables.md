@@ -151,6 +151,8 @@ npm run build:ble-proxy
 | `MAX_CONCURRENT_TASKS` | `1` | Parallel task limit per agent. Increase gradually only on machines with headroom. |
 | `PEER_OFFER_COOLDOWN_MS` | `20000` | Cooldown between peer-direct offers while idle (ms). Lower = more aggressive. |
 | `DOCKER_PROBE_TIMEOUT_MS` | `3000` | Timeout for the `docker info` availability probe; a hung daemon counts as unavailable. Result cached 30 s. |
+| `EDGECODER_PYTHON` | (search) | Python 3 interpreter for host-side runs and the Python AST check. Unset: the first of `python3`, `python` that runs Python 3 (Windows: `python`, `py -3`, `python3`, so the Microsoft Store alias is tried last). |
+| `EDGECODER_PYTHON_AST_TIMEOUT_MS` | `10000` | Time limit for the Python AST safety check; on timeout the code is refused (fails closed). |
 
 ## Inference service (port 4302)
 
