@@ -24,6 +24,10 @@ edgecoder-portal            = edgecoder portal
 edgecoder-install           = edgecoder install (the installer, docs/install.md)
 ```
 
+`packages/mcp-server` is a separate npm package (`@edgecoder/mcp-server`, bin `edgecoder-mcp`):
+the MCP server AI agents use to sign up, top up over Lightning and run compute through the hosted
+API (docs/mcp.md). It is not part of the server image.
+
 ## Images
 
 - `deploy/docker/Dockerfile.server`: every non-agent role; pick with `EDGE_RUNTIME_MODE` (build

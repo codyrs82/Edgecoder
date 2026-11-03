@@ -16,6 +16,7 @@ import {
   pkceVerifier
 } from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
+import { isAgentPlaceholderEmail } from "../store.js";
 import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
@@ -51,6 +52,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       })
       .parse(req.body);
     const email = normalizeEmail(body.email);
+    if (isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "email_not_allowed" });
     const existing = await store.getUserByEmail(email);
     if (existing) return reply.code(409).send({ error: "email_already_registered" });
 
@@ -127,7 +129,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ email: z.string().email() }).parse(req.body);
     const user = await store.getUserByEmail(normalizeEmail(body.email));
-    if (!user) return reply.send({ ok: true });
+    // Agent accounts have no deliverable email.
+    if (!user || isAgentPlaceholderEmail(user.email)) return reply.send({ ok: true });
     if (user.emailVerified) return reply.send({ ok: true, alreadyVerified: true });
     const verifyToken = randomUUID();
     await store.createEmailVerification({
@@ -305,7 +308,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     }
 
     if (!subject) return reply.code(400).send({ error: "oauth_subject_missing" });
-    if (!email) return reply.code(400).send({ error: "oauth_email_missing" });
+    if (!email || isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "oauth_email_missing" });
 
     email = normalizeEmail(email);
     const linked = await portalStore.findOauthIdentity(providerName, subject);
