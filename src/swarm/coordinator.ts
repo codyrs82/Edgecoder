@@ -155,6 +155,7 @@ import { createLightningProviderFromEnv, economyPaymentsEnabled, type LightningP
 import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
 import {
   anchorCheckpoint,
+  anchorEpochOnce,
   reconcileAnchors,
   reconcileConfigFromEnv,
   isTxid,
@@ -2096,7 +2097,8 @@ async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord |
 async function refreshAnchorConfirmations(): Promise<void> {
   const deps = anchorDeps();
   if (!deps || !pgStore) return;
-  const recent = await pgStore.listAnchors(5);
+  // #101: the newest rows plus the newest live anchor of each kind (stats rows alone can fill the top 5).
+  const recent = [...(await pgStore.listAnchors(5)), ...(await pgStore.latestLiveAnchorPerKind())];
   const events = await refreshAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, recent);
   for (const e of events) {
     if (e.event === "reorg") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reorg_reverted_to_pending");
@@ -2422,21 +2424,26 @@ async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | 
   if (!deps || !pgStore) return null;
   const epoch = await pgStore.latestIssuanceEpoch(true, ISSUANCE_RECALC_MS);
   if (!epoch) return null;
-  const latestAnchor = await pgStore.latestAnchor();
-  // #46: a real broadcast (pending or anchored) for this epoch is never re-sent.
-  if (latestAnchor?.epochId === epoch.issuanceEpochId && latestAnchor.status !== "failed" && isTxid(latestAnchor.txRef)) {
-    return latestAnchor;
-  }
-  const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
-  const checkpointHash = createHash("sha256")
-    .update(JSON.stringify({ epoch, allocations }))
-    .digest("hex");
-  await appendQuorumRecord({
-    recordType: "issuance_checkpoint",
+  const store = pgStore;
+  let allocationCount = 0;
+  // #46/#101: looked up by epoch id (then checkpoint hash under the lock), never "newest row";
+  // the ledger checkpoint record is appended only when this tick actually broadcast.
+  const { record } = await anchorEpochOnce(deps, {
     epochId: epoch.issuanceEpochId,
-    payload: { checkpointHash, allocationCount: allocations.length }
+    computeCheckpointHash: async () => {
+      const allocations = await store.listIssuanceAllocations(epoch.issuanceEpochId);
+      allocationCount = allocations.length;
+      return createHash("sha256").update(JSON.stringify({ epoch, allocations })).digest("hex");
+    },
+    onBroadcast: async (anchor) => {
+      await appendQuorumRecord({
+        recordType: "issuance_checkpoint",
+        epochId: epoch.issuanceEpochId,
+        payload: { checkpointHash: anchor.checkpointHash, allocationCount, anchorTxRef: anchor.txRef }
+      }).catch((error) => app.log.error({ error, epochId: epoch.issuanceEpochId, txRef: anchor.txRef }, "issuance_checkpoint_ledger_append_failed"));
+    }
   });
-  return anchorCheckpoint(deps, { epochId: epoch.issuanceEpochId, checkpointHash });
+  return record;
 }
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
