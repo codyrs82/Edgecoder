@@ -132,7 +132,8 @@ app.get("/portal/dashboard", async (_req, reply) => {
       const n = Number(v);
       return Number.isFinite(n) ? n.toFixed(digits) : "n/a";
     }
-    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    // escapeHtml comes from the app shell (pages/escape.ts). Agent- and user-supplied values
+    // (agent ids, model names, account ids, reasons) go through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
       const body = document.getElementById(targetId);
       body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
@@ -235,7 +236,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
                    tx.reason === "task_completion" ? "<strong>Task completed</strong>" :
                    tx.reason === "credit_purchase" ? "<strong>Credits purchased</strong>" :
                    "<strong>" + escapeHtml(tx.reason || "Activity") + "</strong>";
-        var amount = tx.credits ? " <strong>" + (tx.type === "earn" ? "+" : "-") + String(tx.credits) + "</strong> credits" : "";
+        var amount = tx.credits ? " <strong>" + (tx.type === "earn" ? "+" : "-") + escapeHtml(tx.credits) + "</strong> credits" : "";
         var time = timeAgo(tx.createdAtMs || tx.timestamp);
         html += '<li><div class="af-icon">' + icon + '</div><div class="af-text">' + desc + amount + '</div><div class="af-time">' + time + '</div></li>';
       }
@@ -288,7 +289,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       document.getElementById("issuanceLoadValue").textContent = epoch ? fmtFixed(epoch.loadIndex, 4) : "n/a";
       document.getElementById("issuanceContribValue").textContent = epoch ? String(epoch.contributionCount || 0) : "0";
       const allocRows = ((issuance.allocations || []).slice(0, 8)).map((row) =>
-        "<tr><td>" + String(row.accountId || "-") + "</td><td>" + fmtFixed((Number(row.allocationShare || 0) * 100), 2) + "%</td><td>" +
+        "<tr><td>" + escapeHtml(row.accountId || "-") + "</td><td>" + fmtFixed((Number(row.allocationShare || 0) * 100), 2) + "%</td><td>" +
         fmtFixed(row.issuedTokens, 6) + "</td><td>" + fmtFixed(row.weightedContribution, 4) + "</td></tr>"
       );
       renderRows("issuanceAllocBody", allocRows, 4, "No issuance allocations available yet.");
@@ -299,8 +300,8 @@ app.get("/portal/dashboard", async (_req, reply) => {
         "Model-serving agents online: " + String(models.length) +
         (modelMesh.generatedAtMs ? " | updated " + new Date(modelMesh.generatedAtMs).toISOString() : "");
       const modelRows = models.slice(0, 12).map((m) =>
-        "<tr><td>" + String(m.agentId || "-") + "</td><td>" + String(m.provider || "-") + "</td><td>" +
-        String((m.modelCatalog || []).join(", ") || "-") + "</td><td>" + String(m.maxConcurrentTasks || 0) + "</td></tr>"
+        "<tr><td>" + escapeHtml(m.agentId || "-") + "</td><td>" + escapeHtml(m.provider || "-") + "</td><td>" +
+        escapeHtml((Array.isArray(m.modelCatalog) ? m.modelCatalog : []).join(", ") || "-") + "</td><td>" + escapeHtml(m.maxConcurrentTasks || 0) + "</td></tr>"
       );
       renderRows("modelMeshBody", modelRows, 4, "No model-serving agents advertising yet.");
 
