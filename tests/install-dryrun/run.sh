@@ -7,7 +7,7 @@
 #   KEEP=1 bash tests/install-dryrun/run.sh          # leave the container running to inspect
 #
 # Installs the real thing inside the container (Node, Ollama, NVIDIA container toolkit, the agent
-# from this checkout's committed HEAD) but points the agents at a dead local coordinator, so nothing
+# from this checkout's current branch, as committed) but points the agents at a dead local coordinator, so nothing
 # joins the network. Checks: 8 agents + 8 Ollama servers active, per-GPU env, `edgecoder-install
 # status`. Not covered: real GPUs/CUDA, a real Docker daemon, x86_64 when run on Apple silicon,
 # model pulls, enrolment against a live portal. Needs Docker (Colima works).
@@ -18,7 +18,9 @@ REPO="$(cd "$HERE/../.." && pwd)"
 BASE="${BASE:-ubuntu:24.04}"
 NAME="ec-install-dryrun-$$"
 IMAGE="ec-install-dryrun:$(echo "$BASE" | tr ':/' '--')"
-REF="$(git -C "$REPO" rev-parse HEAD)"
+# The installer clones a branch (git clone --branch), so test this checkout's current branch.
+REF="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
+[ "$REF" != "HEAD" ] || { echo "Check out a branch first (the installer clones by branch name)."; exit 1; }
 
 docker build -q -t "$IMAGE" --build-arg BASE="$BASE" "$HERE" >/dev/null
 cleanup() { [ "${KEEP:-}" = 1 ] && echo "kept container $NAME" || docker rm -f "$NAME" >/dev/null 2>&1 || true; }

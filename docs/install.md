@@ -90,9 +90,11 @@ curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_
 | `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. Without `AGENT_ID=` it applies to every instance. |
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
 | `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
-| `--model TAG` | Ollama model for every instance (default: largest coding model that fits). |
-| `--per-gpu` | One agent and one Ollama server per discrete GPU (default when GPUs are present). |
-| `--single` | One agent for the whole host. |
+| `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |
+| `--layout per-gpu\|mixed\|single` | How GPUs become instances. `per-gpu`: one model per card (the most parallel work). `mixed`: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB or more). `single`: every card pooled for the biggest model. |
+| `--gpus-per-instance N` | Pool N GPUs per instance (overrides `--layout`): e.g. 2 for `gpt-oss:120b` on 48 GB cards, 4 for `qwen3:235b`, 8 for `qwen3-coder:480b`. |
+| `--per-gpu` | Same as `--layout per-gpu`. |
+| `--single` | Same as `--layout single`: one agent with every GPU pooled. |
 | `--instances N` | Exact number of instances (overrides `--per-gpu` / `--single`). |
 | `--sandbox auto\|docker\|none` | Swarm task sandbox; `auto` uses Docker when present. |
 | `--agent-id-prefix NAME` | Node id prefix (default: hostname). |
@@ -114,9 +116,25 @@ Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 ```bash
 read -rs EDGECODER_API_KEY   # eck_... from Settings → API keys
 curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash -s -- --mesh-token "$MESH" --pull-models
-# detects box-gpu0 … box-gpu7 (48 GB each, qwen3-coder:30b) and enrols all eight with the key
 sudo edgecoder-install status
 ```
+
+By default the eight cards run the **mixed** layout: `box-gpu0` … `box-gpu3` each run
+`qwen3-coder:30b` (fast, four parallel calls per card) and `box-gpu4-5` / `box-gpu6-7` each pool two
+cards for `gpt-oss:120b`. The network gets both quick agent work and a much stronger model. Each
+instance's model is the strongest that fits its VRAM:
+
+| VRAM per instance | Model |
+|---|---|
+| 320 GB+ (7–8 cards) | `qwen3-coder:480b` (290 GB) |
+| 160 GB+ (4 cards) | `qwen3:235b` (142 GB) |
+| 80 GB+ (2 cards) | `gpt-oss:120b` (65 GB) |
+| 24 GB+ (1 card) | `qwen3-coder:30b` (19 GB) |
+
+Other layouts: `--layout per-gpu` (eight instances, the most throughput), `--layout single`
+(one instance with all eight cards: `qwen3-coder:480b`), `--gpus-per-instance 4` (two instances of
+`qwen3:235b`). `--model TAG` picks the model yourself, e.g. `--gpus-per-instance 1 --model
+llama3.3:70b`. Run `sudo edgecoder-install plan` first to see the ids, cards and models.
 
 The host must not be rented out on a GPU marketplace at the same time: the marketplace's host
 daemon and EdgeCoder's Ollama instances would compete for the same cards, and a marketplace

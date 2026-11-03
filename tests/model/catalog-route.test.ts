@@ -19,7 +19,7 @@ describe("GET /model/catalog", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.version).toBe(MODEL_CATALOG_VERSION);
-    expect(body.categories).toEqual({ coding: "Coding", general: "General Purpose", small: "Small & Fast" });
+    expect(body.categories).toEqual({ coding: "Coding", general: "General Purpose", small: "Small & Fast", large: "Large (GPU servers)" });
     expect(body.models).toHaveLength(MODEL_CATALOG.length);
     expect(body.models.map((m: { modelId: string }) => m.modelId)).toContain("qwen3.5:9b");
     await app.close();

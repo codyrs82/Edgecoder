@@ -20,6 +20,10 @@ export interface InstallOptions {
   enrollToken?: string;
   model?: string;
   perGpu: boolean;
+  /** GPU layout: per-gpu (one model per card), mixed (half per card, half in pairs), single (all cards pooled). Default: mixed on 4+ cards of 40 GB+, else per-gpu. */
+  layout?: "per-gpu" | "mixed" | "single";
+  /** Pool this many GPUs per instance (overrides layout), for models bigger than one card. */
+  gpusPerInstance?: number;
   instances?: number;
   sandbox: "auto" | "docker" | "none";
   agentIdPrefix?: string;
@@ -58,9 +62,11 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--token", arg: "[AGENT_ID=]TOKEN", description: "Registration token from the portal Nodes page; repeatable. Without AGENT_ID= it applies to every instance." },
   { flag: "--tokens-file", arg: "PATH", description: "File of AGENT_ID=TOKEN lines (one per instance)." },
   { flag: "--enroll", arg: "API_KEY", description: "Portal API key (eck_..., Settings → API keys; or a portal session token; or set EDGECODER_API_KEY): self-enrol each un-tokened instance with the portal and apply the registration token it returns." },
-  { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: largest coding model that fits each GPU)." },
-  { flag: "--per-gpu", description: "One agent and one Ollama server per discrete GPU (default when GPUs are present)." },
-  { flag: "--single", description: "One agent for the whole host, even with several GPUs." },
+  { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: the strongest that fits each instance's VRAM: 30B coder per 48 GB card, gpt-oss:120b on 80 GB+, qwen3:235b on 160 GB+, qwen3-coder:480b on 320 GB+)." },
+  { flag: "--layout", arg: "per-gpu|mixed|single", description: "How GPUs are used. per-gpu: one model per card (most parallel work). mixed: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB+). single: every card pooled for the biggest model." },
+  { flag: "--gpus-per-instance", arg: "N", description: "Pool N GPUs per instance (overrides --layout), e.g. 2 for gpt-oss:120b on 48 GB cards, 8 for qwen3-coder:480b." },
+  { flag: "--per-gpu", description: "Same as --layout per-gpu." },
+  { flag: "--single", description: "Same as --layout single: one agent with every GPU pooled." },
   { flag: "--instances", arg: "N", description: "Exact number of agent instances to run (overrides --per-gpu/--single)." },
   { flag: "--sandbox", arg: "auto|docker|none", description: "Swarm task sandbox. auto uses Docker when present (default)." },
   { flag: "--agent-id-prefix", arg: "NAME", description: "Node id prefix (default: this hostname); ids are <prefix>-gpu<N> or <prefix>-cpu." },
@@ -127,8 +133,16 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--tokens-file": o.tokensFile = val(); break;
       case "--enroll": o.enrollToken = val(); break;
       case "--model": o.model = val(); break;
-      case "--per-gpu": o.perGpu = true; break;
-      case "--single": o.perGpu = false; break;
+      case "--per-gpu": o.perGpu = true; o.layout = "per-gpu"; break;
+      case "--single": o.perGpu = false; o.layout = "single"; break;
+      case "--layout": {
+        const v = val();
+        if (v !== "per-gpu" && v !== "mixed" && v !== "single") throw new Error("--layout must be per-gpu, mixed or single");
+        o.layout = v;
+        o.perGpu = v !== "single";
+        break;
+      }
+      case "--gpus-per-instance": o.gpusPerInstance = Number(val()); if (!Number.isInteger(o.gpusPerInstance) || o.gpusPerInstance < 1) throw new Error("--gpus-per-instance must be a positive integer"); break;
       case "--instances": o.instances = Number(val()); if (!Number.isInteger(o.instances) || o.instances < 1) throw new Error("--instances must be a positive integer"); break;
       case "--sandbox": { const s = val(); if (s !== "auto" && s !== "docker" && s !== "none") throw new Error("--sandbox must be auto, docker or none"); o.sandbox = s; break; }
       case "--agent-id-prefix": o.agentIdPrefix = val(); break;

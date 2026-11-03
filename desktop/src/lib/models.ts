@@ -7,7 +7,7 @@
 
 export const MODEL_CATALOG_VERSION = "2026-11-01.1";
 
-export type CatalogCategory = "coding" | "general" | "small";
+export type CatalogCategory = "coding" | "general" | "small" | "large";
 
 export interface CatalogModel {
   /** Official Ollama library tag, e.g. "qwen3.5:9b". */
@@ -199,11 +199,98 @@ export const MODEL_CATALOG: CatalogModel[] = [
     contextTokens: 262_144,
     license: "Apache-2.0",
     capabilities: ["tools", "thinking"]
+  },
+  // ---- Large: datacenter GPUs, one card or several pooled (sizes from the Ollama registry, 2026-11-03) ----
+  {
+    modelId: "qwen2.5-coder:32b",
+    name: "Qwen2.5-Coder 32B",
+    paramSize: "32B",
+    diskSize: "20 GB",
+    description: "Dense 32B coder: strong code generation and repair; a steady choice for one 24-48 GB GPU.",
+    category: "large",
+    minMemoryGb: 24,
+    contextTokens: 32_768,
+    license: "Apache-2.0",
+    capabilities: ["tools"]
+  },
+  {
+    modelId: "llama3.3:70b",
+    name: "Llama 3.3 70B",
+    paramSize: "70B",
+    diskSize: "43 GB",
+    description: "General 70B model with tool calling; fills one 48 GB card.",
+    category: "large",
+    minMemoryGb: 48,
+    contextTokens: 131_072,
+    license: "Llama 3.3 Community",
+    capabilities: ["tools"]
+  },
+  {
+    modelId: "deepseek-r1:70b",
+    name: "DeepSeek-R1 70B (distill)",
+    paramSize: "70B",
+    diskSize: "43 GB",
+    description: "Reasoning model distilled from DeepSeek-R1 onto Llama 3.3 70B; slow and thorough. One 48 GB card.",
+    category: "large",
+    minMemoryGb: 48,
+    contextTokens: 131_072,
+    license: "Llama 3.3 Community",
+    capabilities: ["thinking"]
+  },
+  {
+    modelId: "gpt-oss:120b",
+    name: "gpt-oss 120B MoE",
+    paramSize: "117B (5.1B active)",
+    diskSize: "65 GB",
+    description: "OpenAI's open-weight 120B: strong reasoning and tool use at MoE speed. Two 48 GB cards or one 80 GB.",
+    category: "large",
+    minMemoryGb: 80,
+    contextTokens: 131_072,
+    license: "Apache-2.0",
+    capabilities: ["tools", "thinking"]
+  },
+  {
+    modelId: "deepseek-coder-v2:236b",
+    name: "DeepSeek-Coder-V2 236B MoE",
+    paramSize: "236B (21B active)",
+    diskSize: "133 GB",
+    description: "Large MoE coder. Four 48 GB cards.",
+    category: "large",
+    minMemoryGb: 160,
+    contextTokens: 163_840,
+    license: "DeepSeek",
+    capabilities: []
+  },
+  {
+    modelId: "qwen3:235b",
+    name: "Qwen3 235B MoE",
+    paramSize: "235B (22B active)",
+    diskSize: "142 GB",
+    description: "Frontier-class open MoE for hard reasoning and agent work. Four 48 GB cards.",
+    category: "large",
+    minMemoryGb: 160,
+    contextTokens: 40_960,
+    license: "Apache-2.0",
+    capabilities: ["tools", "thinking"]
+  },
+  {
+    modelId: "qwen3-coder:480b",
+    name: "Qwen3-Coder 480B MoE",
+    paramSize: "480B (35B active)",
+    diskSize: "290 GB",
+    description: "The largest open agentic coder: 256K context, tool calling. Seven or eight 48 GB cards pooled.",
+    category: "large",
+    recommended: true,
+    minMemoryGb: 320,
+    contextTokens: 262_144,
+    license: "Apache-2.0",
+    capabilities: ["tools"]
   }
 ];
 
 export const CATEGORY_LABELS: Record<CatalogCategory, string> = {
   coding: "Coding",
   general: "General Purpose",
-  small: "Small & Fast"
+  small: "Small & Fast",
+  large: "Large (GPU servers)"
 };

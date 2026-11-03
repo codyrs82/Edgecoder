@@ -74,8 +74,10 @@ function ollamaEnv(p: ServicePaths, inst: AgentInstance): Record<string, string>
   // Same slot count the agent sends at once (plan.ts AGENT_PARALLEL_INFERENCE).
   if (inst.env?.AGENT_PARALLEL_INFERENCE) env.OLLAMA_NUM_PARALLEL = inst.env.AGENT_PARALLEL_INFERENCE;
   if (inst.gpu && inst.gpu.vendor !== "apple") {
-    env.CUDA_VISIBLE_DEVICES = String(inst.gpu.index);
-    env.HIP_VISIBLE_DEVICES = String(inst.gpu.index);
+    // Every card of the instance: Ollama spreads a model too big for one across them.
+    const visible = (inst.gpus?.length ? inst.gpus : [inst.gpu]).map((g) => g.index).join(",");
+    env.CUDA_VISIBLE_DEVICES = visible;
+    env.HIP_VISIBLE_DEVICES = visible;
   }
   return env;
 }

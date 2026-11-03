@@ -6,7 +6,7 @@
  * each with its own Ollama server, model and env file. The same plan is realised by systemd,
  * launchd and Windows scheduled tasks (services.ts), so every platform installs the same thing.
  */
-import { MODEL_CATALOG, type CatalogModel } from "../model/catalog.js";
+import { gpuModelForVram, MODEL_CATALOG, type CatalogModel } from "../model/catalog.js";
 import { parallelInferenceFor } from "../swarm/parallelism.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
 import type { InstallOptions } from "./options.js";
@@ -16,7 +16,10 @@ export const OLLAMA_BASE_PORT = 11434;
 export interface AgentInstance {
   index: number;
   agentId: string;
+  /** The instance's first GPU (its agent reports this card's hardware). */
   gpu?: GpuInfo;
+  /** Every GPU the instance's Ollama uses (one card, or several pooled for a bigger model). */
+  gpus: GpuInfo[];
   ollamaPort: number;
   model: string;
   /** Memory the model choice was based on (GPU VRAM, or RAM / unified memory). */
@@ -52,19 +55,23 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
   const sandboxMode: "docker" | "none" = opts.sandbox === "none" ? "none" : dockerAvailable ? "docker" : "none";
   if (sandboxMode === "none") warnings.push("Docker is not available: agents will register but not pull swarm tasks until Docker is installed (SANDBOX_MODE=docker).");
   const discrete = hw.gpus.filter((g) => g.vendor === "nvidia" || g.vendor === "amd");
-  let slots: Array<GpuInfo | undefined>;
+  let slots: GpuInfo[][];
   if (opts.instances && opts.instances > 0) {
-    slots = Array.from({ length: opts.instances }, (_, i) => discrete[i]);
-  } else if (opts.perGpu && discrete.length > 0) {
-    slots = discrete;
+    slots = Array.from({ length: opts.instances }, (_, i) => (discrete[i] ? [discrete[i]] : []));
+  } else if (discrete.length > 0) {
+    slots = gpuGroups(discrete, opts);
   } else {
-    slots = [hw.gpus[0]];
+    slots = [hw.gpus[0] ? [hw.gpus[0]] : []];
   }
   const base = (opts.agentIdPrefix ?? hw.hostname).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
-  const instances: AgentInstance[] = slots.map((gpu, index) => {
-    const memoryGb = gpu && gpu.vendor !== "apple" ? gpu.vramGb : hw.ramGb;
-    const model = opts.model ?? pickModel(memoryGb);
-    const agentId = slots.length === 1 ? `${base}-${gpu ? "gpu" : "cpu"}` : `${base}-gpu${gpu?.index ?? index}`;
+  const instances: AgentInstance[] = slots.map((group, index) => {
+    const gpu = group[0];
+    const discreteGpu = !!gpu && gpu.vendor !== "apple";
+    // A pooled instance's model can use every card's VRAM.
+    const memoryGb = discreteGpu ? group.reduce((n, g) => n + g.vramGb, 0) : hw.ramGb;
+    const model = opts.model ?? (discreteGpu ? gpuModelForVram(memoryGb) : pickModel(memoryGb));
+    const gpuTag = group.length > 1 ? `gpu${group[0].index}-${group[group.length - 1].index}` : `gpu${gpu?.index ?? index}`;
+    const agentId = slots.length === 1 ? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}` : `${base}-${gpuTag}`;
     const ollamaPort = OLLAMA_BASE_PORT + index;
     const env: Record<string, string> = {
       EDGE_RUNTIME_MODE: "worker",
@@ -90,14 +97,33 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       // The agent detects its card itself (nvidia-smi / rocm-smi, picked by EDGECODER_GPU_INDEX).
       // AGENT_GPU_* are not written: they are the container override, and an overridden profile
       // is flagged and loses its verified tier on every restart (worker-runner buildHardwareProfile).
-      env.CUDA_VISIBLE_DEVICES = String(gpu.index);
-      env.HIP_VISIBLE_DEVICES = String(gpu.index);
+      const visible = group.map((g) => g.index).join(",");
+      env.CUDA_VISIBLE_DEVICES = visible;
+      env.HIP_VISIBLE_DEVICES = visible;
       env.EDGECODER_GPU_INDEX = String(gpu.index);
     }
     if (!env.AGENT_REGISTRATION_TOKEN) warnings.push(`${agentId}: no registration token; enrol this node id in the portal and re-run with --token ${agentId}=<token>`);
-    return { index, agentId, gpu, ollamaPort, model, memoryGb, env };
+    return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env };
   });
   return { hostname: hw.hostname, platform: hw.platform, sandboxMode, instances, warnings };
+}
+
+/**
+ * How a host's GPUs become instances. --gpus-per-instance pools N cards each. Otherwise the layout:
+ * per-gpu (one model per card: the most parallel work), single (every card pooled: the biggest
+ * model), or mixed (half the cards one per card, the rest in pairs: fast work and a bigger model
+ * side by side). Default: mixed on 4+ cards of 40 GB or more, else per-gpu.
+ */
+export function gpuGroups(gpus: GpuInfo[], opts: Pick<InstallOptions, "layout" | "gpusPerInstance" | "perGpu">): GpuInfo[][] {
+  const chunk = (n: number, from: GpuInfo[]) => Array.from({ length: Math.ceil(from.length / n) }, (_, i) => from.slice(i * n, i * n + n));
+  if (opts.gpusPerInstance && opts.gpusPerInstance > 0) return chunk(opts.gpusPerInstance, gpus);
+  const layout = opts.layout ?? (!opts.perGpu ? "single" : gpus.length >= 4 && gpus.every((g) => g.vramGb >= 40) ? "mixed" : "per-gpu");
+  if (layout === "single") return [gpus];
+  if (layout === "mixed") {
+    const singles = Math.ceil(gpus.length / 2);
+    return [...chunk(1, gpus.slice(0, singles)), ...chunk(2, gpus.slice(singles))];
+  }
+  return chunk(1, gpus);
 }
 
 export function renderEnvFile(env: Record<string, string>): string {
