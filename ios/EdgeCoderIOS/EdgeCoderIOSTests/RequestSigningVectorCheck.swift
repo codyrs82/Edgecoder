@@ -2,7 +2,9 @@ import CryptoKit
 import Foundation
 
 /// Loads tests/security/fixtures/request-signing-vectors.json (shared with the vitest suite) and
-/// checks that RequestSigner reproduces every vector byte for byte. No XCTest dependency so the same
+/// checks that RequestSigner reproduces every vector: public key, PEM, body hash and canonical string
+/// byte for byte, plus a signature that verifies under the vector's registered key (CryptoKit Ed25519
+/// signatures are randomized, so their bytes cannot match Node's deterministic ones). No XCTest dependency so the same
 /// check runs from RequestSigningVectorsTests (Xcode) and from Scripts/request-signing-vectors (CI,
 /// plain swiftc on macOS).
 struct RequestSigningVector: Decodable {
@@ -129,9 +131,11 @@ enum RequestSigningVectorCheck {
         } catch {
             return failures + ["signing threw: \(error)"]
         }
-        if headers.signature != vector.expected.signatureBase64 {
-            failures.append("signature: got \(headers.signature), expected \(vector.expected.signatureBase64)")
-        }
+        // CryptoKit's Curve25519.Signing adds randomness to Ed25519 signatures (hedged signing), while
+        // Node's are deterministic RFC 8032, so the signature bytes cannot equal the fixture. What the
+        // coordinator checks is still enforced exactly: canonical padded base64 of 64 bytes that verifies,
+        // under the vector's registered public key, over the exact expected canonical string and no other.
+        failures += signatureFailures(headers.signature, vector: vector)
         if headers.bodySha256 != vector.expected.bodySha256 || headers.agentId != vector.agentId
             || headers.timestampMs != vector.timestampMs || headers.nonce != vector.nonce {
             failures.append("header values do not echo the inputs")
@@ -151,6 +155,32 @@ enum RequestSigningVectorCheck {
             failures.append("tampered body produced the same hash")
         }
 
+        return failures
+    }
+
+    /// Checks a Swift-produced signature the way the coordinator verifies it.
+    static func signatureFailures(_ signatureBase64: String, vector: RequestSigningVector) -> [String] {
+        guard let signature = Data(base64Encoded: signatureBase64) else {
+            return ["signature is not valid base64: \(signatureBase64)"]
+        }
+        var failures: [String] = []
+        if signature.count != 64 {
+            failures.append("signature is \(signature.count) bytes, expected 64")
+        }
+        if signature.base64EncodedString() != signatureBase64 || signatureBase64.count != 88 {
+            failures.append("signature is not canonical padded base64: \(signatureBase64)")
+        }
+        guard let publicRaw = hexData(vector.publicKeyHex),
+              let registeredKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicRaw) else {
+            return failures + ["publicKeyHex is not a valid Ed25519 public key"]
+        }
+        let canonical = Data(vector.expected.canonicalString.utf8)
+        if !registeredKey.isValidSignature(signature, for: canonical) {
+            failures.append("signature does not verify over the expected canonical string with the registered public key")
+        }
+        if registeredKey.isValidSignature(signature, for: Data((vector.expected.canonicalString + "x").utf8)) {
+            failures.append("signature also verifies over a tampered canonical string")
+        }
         return failures
     }
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // Command-line runner for the shared request-signing vectors (#64). Built in CI (ios-build job)
@@ -36,6 +37,35 @@ for vector in fixture.vectors {
     } else {
         failed = true
         print("FAIL \(vector.name): \(failures.joined(separator: "; "))")
+    }
+}
+
+// Optional second argument: write the headers the Swift signer produces for each vector, so CI can
+// verify them with Node's crypto.verify (the coordinator's verifier) via verify-with-node.mjs.
+if arguments.count > 2 {
+    var emitted: [[String: String]] = []
+    for vector in fixture.vectors {
+        guard let seed = RequestSigningVectorCheck.hexData(vector.privateKeySeedHex),
+              let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed),
+              let headers = try? RequestSigner.sign(
+                  method: vector.method, path: vector.path, body: Data(vector.body.utf8),
+                  agentId: vector.agentId, privateKey: key,
+                  timestampMs: vector.timestampMs, nonce: vector.nonce) else {
+            failed = true
+            print("FAIL \(vector.name): could not sign for emit")
+            continue
+        }
+        var entry = headers.headerFields
+        entry["name"] = vector.name
+        emitted.append(entry)
+    }
+    do {
+        let data = try JSONSerialization.data(withJSONObject: emitted, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: arguments[2]))
+        print("wrote \(emitted.count) Swift-signed header sets to \(arguments[2])")
+    } catch {
+        failed = true
+        print("FAIL: could not write \(arguments[2]): \(error)")
     }
 }
 exit(failed ? 1 : 0)

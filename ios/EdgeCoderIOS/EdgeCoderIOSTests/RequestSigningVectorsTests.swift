@@ -1,6 +1,7 @@
 import XCTest
 
-/// #64: the Swift signer must reproduce the TypeScript vectors byte for byte. The fixture lives at
+/// #64: the Swift signer must reproduce the TypeScript vectors (key, PEM, body hash and canonical string
+/// byte for byte; signatures must verify, since CryptoKit's Ed25519 is randomized). The fixture lives at
 /// tests/security/fixtures/request-signing-vectors.json and is also enforced by vitest
 /// (tests/security/request-signing-vectors.test.ts); CI additionally runs this check with plain
 /// swiftc via Scripts/request-signing-vectors.
