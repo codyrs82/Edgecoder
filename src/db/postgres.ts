@@ -86,6 +86,11 @@ export const PAYOUT_GLOBAL_LOCK_KEY = 0;
 /** Stats-ledger checkpoint signing: coordinators sharing a database sign and commit one at a time. */
 export const STATS_CHECKPOINT_LOCK_NAMESPACE = 0x45430004;
 export const STATS_CHECKPOINT_LOCK_KEY = 1;
+/** Issuance epochs: coordinators sharing a database compute each window's epoch one at a time. */
+export const ISSUANCE_LOCK_NAMESPACE = 0x45430005;
+export const ISSUANCE_LOCK_KEY = 1;
+/** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
+export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
 export const STATS_CHECKPOINT_EVENT_TYPES = ["stats_checkpoint_signature", "stats_checkpoint_commit"] as const;
 /** What a payout row has or may still move: pending rows count at their fee cap. */
@@ -465,6 +470,10 @@ CREATE TABLE IF NOT EXISTS issuance_epochs (
   finalized BOOLEAN NOT NULL,
   created_at_ms BIGINT NOT NULL
 );
+
+-- One epoch per window across seeds: the id is derived from window_end_ms; this index serves the
+-- read-side dedupe of rows written before that (two seeds, two random-id series).
+CREATE INDEX IF NOT EXISTS idx_issuance_epochs_window_end ON issuance_epochs (window_end_ms);
 
 CREATE TABLE IF NOT EXISTS issuance_allocations (
   allocation_id TEXT PRIMARY KEY,
@@ -1473,31 +1482,95 @@ export class PostgresStore {
     }
   }
 
-  async latestIssuanceEpoch(finalizedOnly = false): Promise<IssuanceEpochRecord | null> {
+  /**
+   * The newest issuance window's epoch. Legacy duplicates (two seeds writing the same window with
+   * random ids) are collapsed by bucketing window_end_ms on the recalc interval and keeping the
+   * earliest row per bucket, so every seed reports the same "current" epoch.
+   */
+  async latestIssuanceEpoch(finalizedOnly = false, bucketMs = DEFAULT_ISSUANCE_BUCKET_MS): Promise<IssuanceEpochRecord | null> {
     const where = finalizedOnly ? "WHERE finalized = TRUE" : "";
     const result = await this.pool.query(
       `SELECT issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
               hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
        FROM issuance_epochs
        ${where}
-       ORDER BY created_at_ms DESC
-       LIMIT 1`
+       ORDER BY window_end_ms / $1::bigint DESC, created_at_ms ASC, issuance_epoch_id ASC
+       LIMIT 1`,
+      [Math.max(1, Math.floor(bucketMs))]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      issuanceEpochId: row.issuance_epoch_id,
-      coordinatorId: row.coordinator_id,
-      windowStartMs: Number(row.window_start_ms),
-      windowEndMs: Number(row.window_end_ms),
-      loadIndex: Number(row.load_index),
-      dailyPoolTokens: Number(row.daily_pool_tokens),
-      hourlyTokens: Number(row.hourly_tokens),
-      totalWeightedContribution: Number(row.total_weighted_contribution),
-      contributionCount: Number(row.contribution_count),
-      finalized: Boolean(row.finalized),
-      createdAtMs: Number(row.created_at_ms)
-    };
+    return mapIssuanceEpochRow(row);
+  }
+
+  /** Session advisory lock: seeds sharing this database create (and finalize) epochs one at a time. */
+  async withIssuanceLock<T>(fn: () => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock($1, $2)", [ISSUANCE_LOCK_NAMESPACE, ISSUANCE_LOCK_KEY]);
+      try {
+        return await fn();
+      } finally {
+        await client.query("SELECT pg_advisory_unlock($1, $2)", [ISSUANCE_LOCK_NAMESPACE, ISSUANCE_LOCK_KEY]).catch(() => undefined);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Writes an epoch and its allocations in one transaction, only if no epoch with this id exists.
+   * Returns false (and writes nothing) when another seed, or an earlier run, already created it.
+   */
+  async createIssuanceEpoch(record: IssuanceEpochRecord, allocations: IssuanceAllocationRecord[]): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query(
+        `INSERT INTO issuance_epochs (
+          issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+          hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (issuance_epoch_id) DO NOTHING`,
+        [
+          record.issuanceEpochId,
+          record.coordinatorId,
+          record.windowStartMs,
+          record.windowEndMs,
+          record.loadIndex,
+          record.dailyPoolTokens,
+          record.hourlyTokens,
+          record.totalWeightedContribution,
+          record.contributionCount,
+          record.finalized,
+          record.createdAtMs
+        ]
+      );
+      if ((inserted.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      for (const row of allocations) {
+        await client.query(
+          `INSERT INTO issuance_allocations (
+            allocation_id, issuance_epoch_id, account_id, weighted_contribution, allocation_share, issued_tokens, created_at_ms
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+          ON CONFLICT (allocation_id) DO NOTHING`,
+          [row.allocationId, row.issuanceEpochId, row.accountId, row.weightedContribution, row.allocationShare, row.issuedTokens, row.createdAtMs]
+        );
+      }
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markIssuanceEpochFinalized(issuanceEpochId: string): Promise<void> {
+    await this.pool.query(`UPDATE issuance_epochs SET finalized = TRUE WHERE issuance_epoch_id = $1`, [issuanceEpochId]);
   }
 
   async getIssuanceEpoch(issuanceEpochId: string): Promise<IssuanceEpochRecord | null> {
@@ -1511,43 +1584,24 @@ export class PostgresStore {
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      issuanceEpochId: row.issuance_epoch_id,
-      coordinatorId: row.coordinator_id,
-      windowStartMs: Number(row.window_start_ms),
-      windowEndMs: Number(row.window_end_ms),
-      loadIndex: Number(row.load_index),
-      dailyPoolTokens: Number(row.daily_pool_tokens),
-      hourlyTokens: Number(row.hourly_tokens),
-      totalWeightedContribution: Number(row.total_weighted_contribution),
-      contributionCount: Number(row.contribution_count),
-      finalized: Boolean(row.finalized),
-      createdAtMs: Number(row.created_at_ms)
-    };
+    return mapIssuanceEpochRow(row);
   }
 
-  async listIssuanceEpochs(limit = 50): Promise<IssuanceEpochRecord[]> {
+  /** Issuance history, one row per window (legacy duplicates collapse to the earliest per bucket). */
+  async listIssuanceEpochs(limit = 50, bucketMs = DEFAULT_ISSUANCE_BUCKET_MS): Promise<IssuanceEpochRecord[]> {
     const result = await this.pool.query(
-      `SELECT issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
-              hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
-       FROM issuance_epochs
+      `SELECT * FROM (
+         SELECT DISTINCT ON (window_end_ms / $2::bigint)
+                issuance_epoch_id, coordinator_id, window_start_ms, window_end_ms, load_index, daily_pool_tokens,
+                hourly_tokens, total_weighted_contribution, contribution_count, finalized, created_at_ms
+         FROM issuance_epochs
+         ORDER BY window_end_ms / $2::bigint, created_at_ms ASC, issuance_epoch_id ASC
+       ) deduped
        ORDER BY created_at_ms DESC
        LIMIT $1`,
-      [limit]
+      [limit, Math.max(1, Math.floor(bucketMs))]
     );
-    return result.rows.map((row) => ({
-      issuanceEpochId: row.issuance_epoch_id,
-      coordinatorId: row.coordinator_id,
-      windowStartMs: Number(row.window_start_ms),
-      windowEndMs: Number(row.window_end_ms),
-      loadIndex: Number(row.load_index),
-      dailyPoolTokens: Number(row.daily_pool_tokens),
-      hourlyTokens: Number(row.hourly_tokens),
-      totalWeightedContribution: Number(row.total_weighted_contribution),
-      contributionCount: Number(row.contribution_count),
-      finalized: Boolean(row.finalized),
-      createdAtMs: Number(row.created_at_ms)
-    }));
+    return result.rows.map(mapIssuanceEpochRow);
   }
 
   async listIssuanceAllocations(epochId: string): Promise<IssuanceAllocationRecord[]> {
@@ -3253,4 +3307,21 @@ export class PostgresCallbackPinStore implements CallbackPinStore {
       [accountId, keepDestination]
     );
   }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapIssuanceEpochRow(row: any): IssuanceEpochRecord {
+  return {
+    issuanceEpochId: row.issuance_epoch_id,
+    coordinatorId: row.coordinator_id,
+    windowStartMs: Number(row.window_start_ms),
+    windowEndMs: Number(row.window_end_ms),
+    loadIndex: Number(row.load_index),
+    dailyPoolTokens: Number(row.daily_pool_tokens),
+    hourlyTokens: Number(row.hourly_tokens),
+    totalWeightedContribution: Number(row.total_weighted_contribution),
+    contributionCount: Number(row.contribution_count),
+    finalized: Boolean(row.finalized),
+    createdAtMs: Number(row.created_at_ms)
+  };
 }
