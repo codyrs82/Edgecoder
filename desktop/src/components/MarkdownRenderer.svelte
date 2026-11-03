@@ -127,7 +127,7 @@
   .markdown :global(.plan-list) {
     margin: 8px 0;
     padding: 10px 12px;
-    border: 1px solid var(--border-color, rgba(255,255,255,0.08));
+    border: 1px solid var(--border);
     border-radius: 8px;
   }
   .markdown :global(.plan-title) { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 6px; }
