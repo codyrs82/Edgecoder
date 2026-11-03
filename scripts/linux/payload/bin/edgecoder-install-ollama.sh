@@ -7,6 +7,37 @@ OLLAMA_SERVICE="edgecoder-ollama"
 OLLAMA_SERVICE_FILE="/etc/systemd/system/${OLLAMA_SERVICE}.service"
 OLLAMA_SERVICE_SRC="/usr/lib/edgecoder/edgecoder-ollama.service"
 
+# Ollama comes only from its official release archive, pinned to this version and SHA-256
+# (source of truth: src/install/ollama-pins.ts; tests/install/ollama-pins.test.ts keeps these in
+# sync). Nothing downloaded is piped into a shell.
+OLLAMA_VERSION=0.40.7
+ollama_asset() {
+  case "$(uname -m)" in
+    x86_64|amd64)  echo "ollama-linux-amd64.tar.zst 7f082e625b4c334df84ed1558fe282d6d8091fe3545790aef30b3a9c50d44d41" ;;
+    aarch64|arm64) echo "ollama-linux-arm64.tar.zst c74249e87795b1437ce0f484adfd05b4628d7497472c475b13ec6db69ecc69cf" ;;
+    *) return 1 ;;
+  esac
+}
+
+install_pinned_ollama() {
+  local spec name sum tmp got
+  spec="$(ollama_asset)" || { echo "No pinned Ollama build for $(uname -m)."; return 1; }
+  name="${spec%% *}"; sum="${spec##* }"
+  command -v zstd >/dev/null 2>&1 || { echo "zstd is required to unpack Ollama's release archive."; return 1; }
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL --proto '=https' -o "$tmp/$name" "https://github.com/ollama/ollama/releases/download/v$OLLAMA_VERSION/$name"; then
+    rm -rf "$tmp"; echo "Download of $name failed."; return 1
+  fi
+  got="$(sha256sum "$tmp/$name" | awk '{print $1}')"
+  if [[ "$got" != "$sum" ]]; then
+    rm -rf "$tmp"; echo "Checksum mismatch for $name (expected $sum, got $got); not installing it."; return 1
+  fi
+  # The layout Ollama's own installer uses: /usr/local/bin/ollama and /usr/local/lib/ollama.
+  rm -rf /usr/local/lib/ollama
+  zstd -q -dc "$tmp/$name" | tar -xf - -C /usr/local --no-same-owner
+  rm -rf "$tmp"
+}
+
 ollama_bin() {
   local candidate
   if candidate="$(command -v ollama 2>/dev/null)"; then
@@ -30,8 +61,8 @@ else
     echo "curl is required to install Ollama automatically."
     exit 0
   fi
-  echo "Installing Ollama (best-effort)..."
-  if curl -fsSL https://ollama.com/install.sh | sh; then
+  echo "Installing Ollama $OLLAMA_VERSION from the pinned release archive..."
+  if install_pinned_ollama; then
     ollama_path="$(ollama_bin)" || true
     if [[ -n "${ollama_path:-}" ]]; then
       echo "Ollama installed at: $ollama_path"
@@ -39,7 +70,7 @@ else
   fi
   if [[ -z "${ollama_path:-}" ]]; then
     echo "Warning: automatic Ollama install did not complete."
-    echo "Install manually from https://ollama.com/download if needed."
+    echo "Install Ollama manually (https://github.com/ollama/ollama/releases) if needed."
     exit 0
   fi
 fi
@@ -53,8 +84,7 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
   fi
 
-  # Create ollama user/group if not present (the official install.sh usually
-  # does this, but handle the case where it was skipped).
+  # Create the ollama user/group if not present.
   if ! id -u ollama >/dev/null 2>&1; then
     useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
   fi
