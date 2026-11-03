@@ -22,7 +22,10 @@ services:
       dockerfile: deploy/docker/Dockerfile.agent
     command: ["node", "dist/portal/server.js"]
     environment:
-      - NODE_ENV=production
+      # The portal is the account service the seed calls, not the system under test. Production
+      # mode would need a real email provider, https public URL and docs site; the seed and
+      # workers stay NODE_ENV=production, so their registration rules are the production ones.
+      - NODE_ENV=test
       - HOST=0.0.0.0
       - SKIP_OLLAMA=true
       - PORTAL_DATABASE_URL=postgresql://${POSTGRES_USER:-edgecoder}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edgecoder}

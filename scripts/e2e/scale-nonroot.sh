@@ -89,15 +89,16 @@ fi
 echo "[6/6] Checking every worker registered and none got blacklisted (#96)..."
 # A regression that re-registers every tick trips the coordinator's BHV008
 # registration-storm rule within seconds and shows up here as blacklistedAgents > 0.
-# Workers register with portal-validated tokens (step 2), so agentsConnected >= WORKERS is
-# asserted by default. EXPECT_REGISTERED=0 skips it (debugging only).
+# Workers register with portal-validated tokens (step 2). The seed's own embedded agent
+# (loopback self-registration) is also listed, so count only the portal-enrolled workers:
+# distinct worker-* ids whose enrollmentReason is "ok". EXPECT_REGISTERED=0 skips this (debugging only).
 capacity=$(curl -sf -H "x-mesh-token: ${MESH_TOKEN}" "$SEED_URL/capacity" || fail "GET /capacity failed")
-connected=$(printf '%s' "$capacity" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);console.log(j.totals.agentsConnected)})')
-blacklisted=$(printf '%s' "$capacity" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);console.log(j.totals.blacklistedAgents)})')
-echo "  agentsConnected=$connected blacklistedAgents=$blacklisted (expected $WORKERS / 0)"
+counts=$(printf '%s' "$capacity" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);const w=new Set((j.agents||[]).filter(a=>/^worker-/.test(a.agentId)&&a.enrollmentReason==="ok"&&!a.blacklisted).map(a=>a.agentId));console.log(j.totals.agentsConnected, j.totals.blacklistedAgents, w.size)})')
+read -r connected blacklisted enrolled <<<"$counts"
+echo "  agentsConnected=$connected blacklistedAgents=$blacklisted portalEnrolledWorkers=$enrolled (expected $WORKERS enrolled / 0 blacklisted)"
 [ "$blacklisted" = "0" ] || fail "$blacklisted agent(s) were blacklisted during the settle window"
 if [ "${EXPECT_REGISTERED:-1}" = "1" ]; then
-  [ "$connected" -ge "$WORKERS" ] || fail "expected $WORKERS registered workers, coordinator sees $connected (see the seed log for registration_token_required / node_* reasons)"
+  [ "$enrolled" -ge "$WORKERS" ] || fail "expected $WORKERS portal-enrolled workers, coordinator sees $enrolled (see the seed log for registration_token_required / node_* reasons)"
 fi
 echo "  status: $(status | head -c 500)"
 echo "=== Non-root scale test passed ==="
