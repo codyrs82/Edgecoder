@@ -12,12 +12,12 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
 import { z } from "zod";
-import { listNetworkModels, parseNetworkModel, type NetworkDeps, type Transport } from "../../apps/ide/network-inference.js";
+import { listNetworkModels, parseNetworkModel, type NetworkDeps } from "../../apps/ide/network-inference.js";
 import { networkBackend } from "../../inference-api/backends.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
+import { portalNetworkDeps, registerComputeRoutes } from "./compute.js";
 
 export const API_KEY_PREFIX = "eck_";
 const MAX_KEYS = 20;
@@ -43,29 +43,9 @@ export function hostedTarget(model: string | undefined): { model: string; comput
 export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDeps): void {
   const { store } = deps;
 
-  const coordinatorTransport =
-    (accountId: string): Transport =>
-    async (method, path, body, signal) => {
-      const [base] = await deps.discoverCoordinatorUrlsForPortal();
-      if (!base) return { status: 503, json: { error: "no_coordinator" } };
-      // Account routes take the account in the body when called with the portal's service token.
-      const payload = body !== undefined && path.startsWith("/account/") ? { ...(body as object), accountId } : body;
-      const res = await request(`${base.replace(/\/$/, "")}${path}`, {
-        method,
-        headers: { ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}), ...(payload !== undefined ? { "content-type": "application/json" } : {}) },
-        body: payload !== undefined ? JSON.stringify(payload) : undefined,
-        headersTimeout: 70_000,
-        bodyTimeout: 70_000,
-        signal,
-      });
-      const text = await res.body.text();
-      try {
-        return { status: res.statusCode, json: JSON.parse(text) };
-      } catch {
-        return { status: res.statusCode, json: { error: text.slice(0, 200) } };
-      }
-    };
-  const networkFor = (accountId: string): NetworkDeps => ({ forwarder: "", token: () => "", agentId: accountId, transport: coordinatorTransport(accountId) });
+  const networkFor = (accountId: string): NetworkDeps => portalNetworkDeps(deps, accountId);
+  // Balance, reservations and the chat compute picker for signed-in users.
+  registerComputeRoutes(app, deps);
 
   // ── The endpoint ──
   registerCompatRoutes(app, {

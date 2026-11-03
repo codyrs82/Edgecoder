@@ -2,110 +2,116 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { portalAuthedPageHtml } from "./layout.js";
+import { registerSettingsOpsPages } from "./settings-ops.js";
+import { settingRow, settingsPage } from "./settings-shell.js";
 
 /**
- * Settings area: Account (/portal/settings), Nodes (/portal/settings/nodes) and Admin
- * (/portal/settings/admin). The Admin sub-tab is revealed client-side only for system admins;
- * the admin APIs it calls (/portal/api/admin/*, /coordinator/ops/*) enforce authorization
- * server-side.
+ * Settings (/portal/settings): General, Profile, Plan & usage, Compute and Connect your tools, one
+ * section at a time by #hash, all searchable from the sub-navigation's search box. Nodes and Admin
+ * are their own pages (settings-ops.ts) in the same frame (settings-shell.ts).
  */
-type SettingsSection = "account" | "nodes" | "admin";
+const section = (key: string, title: string, lead: string, body: string) =>
+  `<section class="set-section" id="sec-${key}" data-section="${key}"><h2 class="set-title">${title}</h2><p class="set-lead">${lead}</p>${body}</section>`;
+const card = (rows: string) => `<div class="set-card">${rows}</div>`;
+const group = (label: string) => `<div class="set-group">${label}</div>`;
 
-function settingsTabs(active: SettingsSection): string {
-  const tabs: Array<{ key: SettingsSection; href: string; label: string; adminOnly?: boolean }> = [
-    { key: "account", href: "/portal/settings", label: "Account" },
-    { key: "nodes", href: "/portal/settings/nodes", label: "Nodes" },
-    { key: "admin", href: "/portal/settings/admin", label: "Admin", adminOnly: true }
-  ];
-  const links = tabs
-    .map((t) => {
-      const cls = ["btn", t.key === active ? "primary" : "", t.adminOnly && t.key !== active ? "hidden" : ""].filter(Boolean).join(" ");
-      const id = t.adminOnly ? ' id="settingsAdminTab"' : "";
-      const current = t.key === active ? ' aria-current="page"' : "";
-      return `<a class="${cls}" href="${t.href}"${id}${current}>${t.label}</a>`;
-    })
-    .join("");
-  return `<nav class="row settings-tabs" aria-label="Settings sections" style="margin-bottom:12px;">${links}</nav>`;
-}
+const GENERAL = section(
+  "general",
+  "General",
+  "How the portal looks on this account.",
+  card(
+    settingRow(
+      "Theme",
+      "Applies to every page of the portal, on every device you sign in from.",
+      `<select id="themeSelect" aria-label="Theme"><option value="warm">Graphite (default)</option><option value="midnight">Midnight</option><option value="emerald">Evergreen</option></select>`,
+      { keywords: "theme appearance colour color dark" }
+    )
+  )
+);
 
-/** Reveals the Admin sub-tab for system admins (cosmetic only; the APIs enforce authz). */
-const SETTINGS_TABS_SCRIPT = `
-    function revealSettingsAdminTab(me) {
-      const user = (me && me.user) || {};
-      const tab = document.getElementById("settingsAdminTab");
-      if (tab && user.roles && user.roles.isSystemAdmin) tab.classList.remove("hidden");
-    }
-`;
+const PROFILE = section(
+  "profile",
+  "Profile",
+  "How you appear in the portal, and how you sign in.",
+  card(
+    settingRow("Avatar", "Your initial, from your display name or email.", `<span class="set-avatar" id="profileAvatarLarge" aria-hidden="true"></span>`, { keywords: "avatar picture photo initial" }) +
+      settingRow(
+        "Display name",
+        "Shown at the bottom of the sidebar. Leave empty to use your email name.",
+        `<input id="displayNameInput" maxlength="80" placeholder="Your name" aria-label="Display name" /><button class="primary" id="saveProfileBtn">Save</button>`,
+        { keywords: "name display profile" }
+      ) +
+      settingRow("Email", "The address you sign in with.", `<span class="set-value" id="profileEmail"></span><span id="profileEmailBadge"></span>`, { keywords: "email address verified" }) +
+      settingRow("User ID", "Your account is <code id=\"profileAccountId\"></code> on the network.", `<span class="set-value" id="profileUserId"></span>`, { keywords: "user id account" })
+  ) +
+    group("Sign-in") +
+    card(settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }))
+);
 
-function settingsPage(section: SettingsSection, subtitle: string, content: string, script: string): string {
-  return portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Settings",
-    activeTab: "settings",
-    heading: "Settings",
-    subtitle,
-    content: settingsTabs(section) + content,
-    script: SETTINGS_TABS_SCRIPT + script
-  });
-}
+const USAGE = section(
+  "usage",
+  "Plan & usage",
+  "You pay for compute in cSats (centi-sats). Chats, tools and reservations spend them; your machines earn sats.",
+  card(
+    settingRow("cSats balance", "What you can spend on network compute.", `<span class="set-big" id="usageBalance">—</span><a class="btn primary" href="/portal/wallet">Buy cSats</a>`, { keywords: "balance credits csats plan buy wallet" }) +
+      settingRow("Earned", "Sats your machines have earned running jobs for others.", `<span class="set-value" id="usageEarned">—</span>`, { keywords: "earned earnings sats payout" }) +
+      settingRow("Prices", "Per second of compute on the base tier of each class.", `<span class="set-value" id="usagePrices">—</span>`, { keywords: "price rate cost per second class" })
+  ) +
+    group("Recent activity") +
+    card(
+      `<div class="set-row wide" data-keywords="recent activity history usage spend transactions"><table><thead><tr><th>When</th><th>What</th><th class="num">cSats</th></tr></thead><tbody id="usageRecent"><tr><td colspan="3" class="muted">Loading…</td></tr></tbody></table></div>`
+    )
+);
 
-export function registerSettingsPages(app: FastifyInstance): void {
-app.get("/portal/settings", async (_req, reply) => {
-  const content = `
-    <div class="grid2">
-      <div class="card">
-        <h2 style="margin-top:0;">Account</h2>
-        <div id="accountLine" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
-        <label for="displayNameInput">Display name</label>
-        <div class="row">
-          <input id="displayNameInput" maxlength="80" placeholder="Your name" style="max-width:260px;" />
-          <button class="primary" id="saveProfileBtn">Save</button>
-        </div>
-        <label>Theme</label>
-        <select id="themeSelect" style="max-width:220px;">
-          <option value="warm">Graphite (default)</option>
-          <option value="midnight">Midnight</option>
-          <option value="emerald">Evergreen</option>
-        </select>
-        <div class="row" style="margin-top:10px;">
-          <button class="primary" id="saveThemeBtn">Save theme</button>
-        </div>
-      </div>
-      <div class="card" style="grid-column:1 / -1;">
-        <h2 style="margin-top:0;">API keys</h2>
-        <p class="muted" style="margin-bottom:8px;">For tools that use EdgeCoder models from anywhere, including Cursor and Claude Code on machines without the app. Requests run on the network and are paid from your cSats.</p>
-        <div class="row" style="margin-bottom:10px;">
-          <input id="newKeyName" maxlength="60" placeholder="Key name, e.g. Cursor on laptop" style="max-width:300px;" />
-          <button class="primary" id="createKeyBtn">Create key</button>
-        </div>
-        <div id="newKeyBox" class="hidden card" style="margin-bottom:10px;">
-          <strong>Copy this key now. It won't be shown again.</strong>
-          <div class="row" style="margin-top:6px;"><code id="newKeyValue" style="word-break:break-all;"></code><button id="copyKeyBtn">Copy</button></div>
-        </div>
-        <table class="table"><thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody id="keysBody"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table>
-        <details style="margin-top:12px;">
-          <summary>How to connect your tools</summary>
-          <p class="muted">Base URL <code><span class="portal-origin"></span>/v1</code>. Model names: <code>network/&lt;model&gt;</code> (any machine), <code>network/&lt;model&gt;@gpu</code> (one class: cpu, apple, gpu, gpu.dc), <code>mine/&lt;model&gt;</code> (your own machines, free), <code>reserved/&lt;reservation id&gt;/&lt;model&gt;</code> (a machine you reserved). <a href="/portal/market">Prices by class are on the market page.</a></p>
-          <p><strong>Cursor</strong>: Settings → Models → API keys: turn on "OpenAI API key", paste the key, turn on "Override OpenAI Base URL" with <code><span class="portal-origin"></span>/v1</code>, then add a custom model such as <code>network/qwen2.5-coder:32b@gpu</code>.</p>
-          <p><strong>Claude Code</strong>:</p>
-          <pre>export ANTHROPIC_BASE_URL=<span class="portal-origin"></span>
+const COMPUTE = section(
+  "compute",
+  "Compute",
+  "Reserve a machine: it takes only your jobs for the time you pick, paid now in cSats. Unused time comes back when you cancel.",
+  group("Reserve a machine") +
+    card(
+      settingRow("Class", "What kind of machine. Shows how many are free and the price.", `<select id="reserveClass" aria-label="Machine class"><option value="">Loading…</option></select>`, { keywords: "reserve class gpu cpu apple machine lease" }) +
+        settingRow("Minutes", "How long to hold it.", `<input id="reserveMinutes" type="number" min="5" max="1440" step="5" value="30" aria-label="Minutes" />`, { keywords: "reserve minutes duration time" }) +
+        settingRow("Model", "Optional: only a machine that has this model installed.", `<select id="reserveModel" aria-label="Model"><option value="">Any model</option></select>`, { keywords: "reserve model" }) +
+        settingRow("Cost", "Charged now; the unused part is refunded.", `<span class="set-value" id="reserveCost">—</span><button class="primary" id="reserveBtn">Reserve</button>`, { keywords: "reserve cost price" })
+    ) +
+    group("Your reservations") +
+    card(`<div id="leasesList" data-keywords="reservations leases active cancel"><div class="set-row"><div class="set-empty">Loading…</div></div></div>`)
+);
+
+const TOOLS = section(
+  "tools",
+  "Connect your tools",
+  "Use EdgeCoder models from Cursor, Claude Code or any OpenAI client, from anywhere. Requests run on the network and are paid from your cSats.",
+  group("API keys") +
+    card(
+      settingRow("Create a key", "Name it after the tool or machine that will use it.", `<input id="newKeyName" maxlength="60" placeholder="e.g. Cursor on laptop" aria-label="Key name" /><button class="primary" id="createKeyBtn">Create key</button>`, { keywords: "api key create token" }) +
+        `<div id="newKeyBox" class="hidden set-row wide"><strong>Copy this key now. It won't be shown again.</strong><div class="row"><code id="newKeyValue" style="word-break:break-all;"></code><button id="copyKeyBtn">Copy</button></div></div>` +
+        `<div class="set-row wide" data-keywords="api keys revoke list"><table class="table"><thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody id="keysBody"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table></div>`
+    ) +
+    group("Instructions") +
+    card(
+      settingRow(
+        "Base URL and models",
+        `Base URL <code><span class="portal-origin"></span>/v1</code>. Models: <code>network/&lt;model&gt;</code> (any machine), <code>network/&lt;model&gt;@gpu</code> (one class: cpu, apple, gpu, gpu.dc), <code>mine/&lt;model&gt;</code> (your own machines, free), <code>reserved/&lt;reservation id&gt;/&lt;model&gt;</code> (a machine you reserved). <a href="/portal/market">Prices by class are on the market page.</a>`,
+        "",
+        { keywords: "base url models openai endpoint" }
+      ) +
+        settingRow(
+          "Cursor",
+          `Settings → Models → API keys: turn on "OpenAI API key", paste the key, turn on "Override OpenAI Base URL" with <code><span class="portal-origin"></span>/v1</code>, then add a custom model such as <code>network/qwen2.5-coder:32b@gpu</code>.`,
+          "",
+          { keywords: "cursor ide" }
+        ) +
+        `<div class="set-row wide" data-keywords="claude code anthropic"><div class="set-text"><div class="set-label">Claude Code</div><div class="set-desc">Point it at the portal with your key:</div><pre>export ANTHROPIC_BASE_URL=<span class="portal-origin"></span>
 export ANTHROPIC_AUTH_TOKEN=&lt;your key&gt;
 export ANTHROPIC_MODEL=network/qwen3.5:9b
 export ANTHROPIC_SMALL_FAST_MODEL=network/qwen3.5:9b
-claude</pre>
-          <p><strong>Any OpenAI client</strong>: base URL <code><span class="portal-origin"></span>/v1</code>, the key as the API key.</p>
-        </details>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0;">Passkey</h2>
-        <p class="muted" style="margin-bottom:12px;">Enroll a passkey while logged in for passwordless sign-in on future visits.</p>
-        <div class="row">
-          <button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>
-        </div>
-      </div>
-    </div>
-  `;
-  const script = `
+claude</pre></div></div>` +
+        settingRow("Any OpenAI client", `Base URL <code><span class="portal-origin"></span>/v1</code>, the key as the API key.`, "", { keywords: "openai client sdk" })
+    )
+);
+
+const SCRIPT = `
     function b64urlToArrayBuffer(base64url) {
       const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
       const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
@@ -120,18 +126,246 @@ claude</pre>
       for (const b of bytes) binary += String.fromCharCode(b);
       return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
     }
-    let currentUserTheme = "warm";
-    async function bootstrapSettings() {
-      const me = await requireAuth();
-      const user = me.user || {};
-      currentUserTheme = user.uiTheme || "warm";
-      document.getElementById("accountLine").textContent = (user.email || "unknown") + " | user ID: " + (user.userId || "n/a");
-      document.getElementById("themeSelect").value = currentUserTheme;
-      document.getElementById("displayNameInput").value = user.displayName || "";
-      loadKeys();
-      for (const el of document.querySelectorAll(".portal-origin")) el.textContent = location.origin;
-    }
+    const CLASS_LABELS = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+    const classLabel = (c) => CLASS_LABELS[c] || c;
+    const fmtNum = (n, d) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 2 : d });
+    const fmtRate = (n) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : Number(n).toPrecision(2));
     function fmtDate(ms) { return ms ? new Date(ms).toLocaleString() : "never"; }
+    function timeLeft(endMs) {
+      const min = Math.floor((endMs - Date.now()) / 60000);
+      if (min < 1) return "ending";
+      if (min < 60) return min + " min left";
+      return Math.floor(min / 60) + " h" + (min % 60 ? " " + (min % 60) + " min" : "") + " left";
+    }
+    function el(tag, attrs, text) { const e = document.createElement(tag); for (const k in (attrs || {})) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; }
+    async function call(path, options) {
+      const res = await fetch(path, { credentials: "include", headers: { "content-type": "application/json" }, ...(options || {}) });
+      let json = {}; try { json = await res.json(); } catch {}
+      return { ok: res.ok, status: res.status, json };
+    }
+
+    /* ── Sections by #hash, and search ── */
+    const SECTIONS = ["general", "profile", "usage", "compute", "tools"];
+    let currentSection = "general";
+    function sectionFromHash() { const h = location.hash.replace(/^#/, ""); return SECTIONS.includes(h) ? h : "general"; }
+    function showSection(key) {
+      currentSection = key;
+      for (const s of document.querySelectorAll(".set-section")) s.classList.toggle("hidden", s.dataset.section !== key);
+      for (const a of document.querySelectorAll(".settings-link")) {
+        a.classList.remove("dim");
+        if (a.dataset.section === key) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+      }
+      document.getElementById("settingsNoMatch").classList.add("hidden");
+      for (const r of document.querySelectorAll(".set-row, .set-card, .set-group")) r.classList.remove("search-hidden");
+    }
+    window.onSettingsSearch = function(raw) {
+      const q = String(raw || "").trim().toLowerCase();
+      if (!q) { showSection(currentSection); return; }
+      let any = false;
+      for (const s of document.querySelectorAll(".set-section")) {
+        let hits = 0;
+        for (const r of s.querySelectorAll(".set-row, [data-keywords]:not(.set-row)")) {
+          const text = ((r.querySelector(".set-text") || r).textContent + " " + (r.dataset.keywords || "")).toLowerCase();
+          const hit = text.includes(q) || s.querySelector(".set-title").textContent.toLowerCase().includes(q);
+          r.classList.toggle("search-hidden", !hit);
+          if (hit) hits++;
+        }
+        for (const c of s.querySelectorAll(".set-card")) c.classList.toggle("search-hidden", !c.querySelector(".set-row:not(.search-hidden):not(.hidden), [data-keywords]:not(.search-hidden)"));
+        for (const g of s.querySelectorAll(".set-group")) g.classList.add("search-hidden");
+        s.classList.toggle("hidden", hits === 0);
+        const link = document.querySelector('.settings-link[data-section="' + s.dataset.section + '"]');
+        if (link) { link.classList.toggle("dim", hits === 0); link.removeAttribute("aria-current"); }
+        if (hits) any = true;
+      }
+      document.getElementById("settingsNoMatch").classList.toggle("hidden", any);
+    };
+    window.addEventListener("hashchange", () => {
+      const input = document.getElementById("settingsSearch");
+      if (input.value) input.value = "";
+      showSection(sectionFromHash());
+      window.scrollTo(0, 0);
+    });
+
+    /* ── Profile and general ── */
+    let me = null;
+    async function bootstrapSettings() {
+      me = await requireAuth();
+      revealSettingsAdminTab(me);
+      const user = me.user || {};
+      document.getElementById("themeSelect").value = user.uiTheme || "warm";
+      document.getElementById("displayNameInput").value = user.displayName || "";
+      document.getElementById("profileEmail").textContent = user.email || "";
+      document.getElementById("profileEmailBadge").innerHTML = user.emailVerified ? statusBadge("Verified", "ok") : statusBadge("Unverified", "warn");
+      document.getElementById("profileUserId").textContent = user.userId || "";
+      document.getElementById("profileAccountId").textContent = "acct-" + (user.userId || "");
+      renderAvatar();
+      for (const e of document.querySelectorAll(".portal-origin")) e.textContent = location.origin;
+      loadKeys();
+      loadUsage();
+      loadCompute();
+    }
+    function renderAvatar() {
+      const user = (me && me.user) || {};
+      const name = document.getElementById("displayNameInput").value.trim() || String(user.email || "").split("@")[0];
+      document.getElementById("profileAvatarLarge").textContent = (name || "?").charAt(0);
+    }
+    document.getElementById("displayNameInput").addEventListener("input", renderAvatar);
+    document.getElementById("saveProfileBtn").addEventListener("click", async () => {
+      try {
+        const displayName = document.getElementById("displayNameInput").value.trim();
+        await api("/me/profile", { method: "POST", body: JSON.stringify({ displayName }) });
+        showToast("Profile saved.");
+        loadTopTicker();
+      } catch (err) {
+        showToast("Could not save: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("themeSelect").addEventListener("change", async (e) => {
+      const theme = e.target.value;
+      applyTheme(theme);
+      try { await api("/me/theme", { method: "POST", body: JSON.stringify({ theme }) }); showToast("Theme updated."); }
+      catch (err) { showToast("Could not save theme: " + String(err.message || err), true); }
+    });
+
+    /* ── Plan & usage ── */
+    function reasonLabel(reason) {
+      const r = String(reason || "").split(":")[0].replace(/_/g, " ");
+      return r ? r.charAt(0).toUpperCase() + r.slice(1) : "Activity";
+    }
+    async function loadUsage() {
+      const body = document.getElementById("usageRecent");
+      const r = await call("/portal/api/compute/summary");
+      if (!r.ok || !r.json.connected) {
+        document.getElementById("usageBalance").textContent = "Unavailable";
+        body.innerHTML = '<tr><td colspan="3" class="muted">The network is unreachable right now.</td></tr>';
+        return;
+      }
+      const s = r.json;
+      document.getElementById("usageBalance").textContent = fmtNum(s.cSats, Math.abs(s.cSats) >= 100 ? 0 : 2) + " cSats";
+      document.getElementById("usageEarned").textContent = fmtNum(s.earnedSats || 0, 0) + " sats";
+      const prices = Object.entries(s.classes || {}).map(([c, v]) => classLabel(c) + " " + fmtRate(v.cSatsPerSecondBaseTier) + "/s");
+      document.getElementById("usagePrices").textContent = prices.length ? prices.join(" · ") : "—";
+      body.textContent = "";
+      if (!(s.recent || []).length) { body.innerHTML = '<tr><td colspan="3" class="muted">No activity yet.</td></tr>'; return; }
+      for (const t of s.recent) {
+        const tr = el("tr");
+        tr.appendChild(el("td", {}, fmtDate(t.atMs)));
+        tr.appendChild(el("td", {}, reasonLabel(t.reason)));
+        const spend = t.type === "spend";
+        tr.appendChild(el("td", { class: "num " + (spend ? "neg" : "pos") }, (spend ? "−" : "+") + fmtNum(Math.abs(t.cSats), 3)));
+        body.appendChild(tr);
+      }
+    }
+
+    /* ── Compute: reserve a machine, your leases ── */
+    let computeData = { options: {}, reservations: [] };
+    function renderReserveForm() {
+      const sel = document.getElementById("reserveClass");
+      const prev = sel.value;
+      sel.textContent = "";
+      for (const cls of ["cpu", "apple", "gpu", "gpu.dc"]) {
+        const o = (computeData.options || {})[cls] || { available: 0 };
+        const label = classLabel(cls) + " · " + (o.available ? o.available + " free" : "none free") + (o.cSatsPerSecond !== undefined ? " · " + fmtRate(o.cSatsPerSecond) + " cSats/s" : "");
+        const opt = el("option", { value: cls }, label);
+        if (!o.available) opt.disabled = true;
+        sel.appendChild(opt);
+      }
+      const firstFree = ["gpu", "apple", "cpu", "gpu.dc"].find((c) => ((computeData.options || {})[c] || {}).available);
+      sel.value = prev && ((computeData.options || {})[prev] || {}).available ? prev : firstFree || "gpu";
+      const m = document.getElementById("reserveMinutes");
+      if (computeData.minMinutes) m.min = computeData.minMinutes;
+      if (computeData.maxMinutes) m.max = computeData.maxMinutes;
+      renderReserveModels();
+    }
+    function renderReserveModels() {
+      const cls = document.getElementById("reserveClass").value;
+      const sel = document.getElementById("reserveModel");
+      const prev = sel.value;
+      sel.textContent = "";
+      sel.appendChild(el("option", { value: "" }, "Any model"));
+      for (const m of (((computeData.options || {})[cls] || {}).models || [])) sel.appendChild(el("option", { value: m }, m));
+      sel.value = [...sel.options].some((o) => o.value === prev) ? prev : "";
+      renderReserveCost();
+    }
+    function renderReserveCost() {
+      const cls = document.getElementById("reserveClass").value;
+      const o = (computeData.options || {})[cls] || {};
+      const minutes = Number(document.getElementById("reserveMinutes").value) || 0;
+      const cost = document.getElementById("reserveCost");
+      const btn = document.getElementById("reserveBtn");
+      if (!o.available) { cost.textContent = "No " + classLabel(cls) + " machine free"; btn.disabled = true; return; }
+      btn.disabled = false;
+      cost.textContent = o.cSatsPerSecond !== undefined ? "≈ " + fmtNum(o.cSatsPerSecond * minutes * 60, 1) + " cSats" : "—";
+    }
+    function renderLeases() {
+      const list = document.getElementById("leasesList");
+      list.textContent = "";
+      const rs = [...(computeData.reservations || [])].sort((a, b) => (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) || b.startMs - a.startMs).slice(0, 10);
+      if (!rs.length) { const row = el("div", { class: "set-row" }); row.appendChild(el("div", { class: "set-empty" }, "No reservations yet. Reserve a machine above; it shows up in the chat's compute picker.")); list.appendChild(row); return; }
+      for (const r of rs) {
+        const active = r.status === "active" && r.endMs > Date.now();
+        const row = el("div", { class: "set-row lease" });
+        const text = el("div", { class: "set-text" });
+        const label = el("div", { class: "set-label" }, classLabel(r.computeClass) + " · " + (r.model || "any model"));
+        label.insertAdjacentHTML("beforeend", active ? statusBadge("Active", "ok") : statusBadge(r.endReason || r.status || "ended"));
+        text.appendChild(label);
+        const parts = active
+          ? [timeLeft(r.endMs), r.cSatsPerSecond !== undefined ? fmtRate(r.cSatsPerSecond) + " cSats/s" : "", r.prepaidCSats !== undefined ? fmtNum(r.prepaidCSats, 1) + " cSats prepaid" : ""]
+          : ["Ended " + fmtDate(r.endMs), r.usedCSats !== undefined ? fmtNum(r.usedCSats, 1) + " cSats used" : "", r.refundCSats ? fmtNum(r.refundCSats, 1) + " refunded" : ""];
+        text.appendChild(el("div", { class: "set-desc" }, parts.filter(Boolean).join(" · ")));
+        row.appendChild(text);
+        const ctl = el("div", { class: "set-control" });
+        if (active) {
+          const btn = el("button", { class: "danger sm" }, "Cancel");
+          btn.addEventListener("click", () => cancelLease(r));
+          ctl.appendChild(btn);
+        }
+        row.appendChild(ctl);
+        list.appendChild(row);
+      }
+    }
+    async function loadCompute() {
+      const r = await call("/portal/api/compute/reservations");
+      if (!r.ok) {
+        document.getElementById("reserveClass").innerHTML = '<option value="">Network unreachable</option>';
+        document.getElementById("reserveBtn").disabled = true;
+        document.getElementById("leasesList").innerHTML = '<div class="set-row"><div class="set-empty">Could not load reservations.</div></div>';
+        return;
+      }
+      computeData = r.json;
+      renderReserveForm();
+      renderLeases();
+    }
+    async function cancelLease(r) {
+      if (!confirm("End this reservation now? The unused time is refunded.")) return;
+      const res = await call("/portal/api/compute/reservations/cancel", { method: "POST", body: JSON.stringify({ reservationId: r.id }) });
+      if (!res.ok) { showToast("Could not cancel: " + (res.json.error || res.status), true); return; }
+      showToast("Reservation ended." + (res.json.reservation && res.json.reservation.refundCSats ? " Refunded " + fmtNum(res.json.reservation.refundCSats, 1) + " cSats." : ""));
+      loadCompute(); loadUsage(); loadTopTicker();
+    }
+    document.getElementById("reserveClass").addEventListener("change", renderReserveModels);
+    document.getElementById("reserveMinutes").addEventListener("input", renderReserveCost);
+    document.getElementById("reserveBtn").addEventListener("click", async () => {
+      const computeClass = document.getElementById("reserveClass").value;
+      const minutes = Math.round(Number(document.getElementById("reserveMinutes").value));
+      const model = document.getElementById("reserveModel").value;
+      const btn = document.getElementById("reserveBtn");
+      btn.disabled = true;
+      const res = await call("/portal/api/compute/reservations", { method: "POST", body: JSON.stringify({ computeClass, minutes, ...(model ? { model } : {}) }) });
+      btn.disabled = false;
+      if (!res.ok) {
+        const e = res.json.error;
+        showToast(e === "insufficient_credits" ? "Not enough cSats: this needs " + fmtNum(res.json.neededCSats, 1) + " cSats. Buy more on the Wallet page."
+          : e === "no_agent_available" ? "No " + classLabel(computeClass) + " machine is free right now." : "Could not reserve: " + (e || res.status), true);
+        loadCompute();
+        return;
+      }
+      showToast("Reserved a " + classLabel(computeClass) + " machine for " + minutes + " min. Pick it in the chat's compute picker.");
+      loadCompute(); loadUsage(); loadTopTicker();
+    });
+    setInterval(() => { if (currentSection === "compute") renderLeases(); }, 30000);
+
+    /* ── Connect your tools: API keys ── */
     async function loadKeys() {
       const body = document.getElementById("keysBody");
       try {
@@ -144,7 +378,7 @@ claude</pre>
             const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
           }
           const td = document.createElement("td");
-          const btn = document.createElement("button"); btn.textContent = "Revoke";
+          const btn = document.createElement("button"); btn.textContent = "Revoke"; btn.className = "sm";
           btn.addEventListener("click", async () => {
             if (!confirm("Revoke " + k.name + "? Tools using it stop working.")) return;
             try { await api("/portal/api/keys/" + encodeURIComponent(k.keyId), { method: "DELETE" }); showToast("Key revoked."); loadKeys(); }
@@ -172,26 +406,8 @@ claude</pre>
     document.getElementById("copyKeyBtn").addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(document.getElementById("newKeyValue").textContent); showToast("Copied."); } catch { showToast("Copy failed; select the key and copy it.", true); }
     });
-    document.getElementById("saveProfileBtn").addEventListener("click", async () => {
-      try {
-        const displayName = document.getElementById("displayNameInput").value.trim();
-        await api("/me/profile", { method: "POST", body: JSON.stringify({ displayName }) });
-        showToast("Profile saved.");
-      } catch (err) {
-        showToast("Could not save: " + String(err.message || err), true);
-      }
-    });
-    document.getElementById("saveThemeBtn").addEventListener("click", async () => {
-      try {
-        await requireAuth();
-        const theme = document.getElementById("themeSelect").value;
-        await api("/me/theme", { method: "POST", body: JSON.stringify({ theme }) });
-        applyTheme(theme);
-        showToast("Theme updated.");
-      } catch (err) {
-        showToast("Could not save theme: " + String(err.message || err), true);
-      }
-    });
+
+    /* ── Passkey ── */
     document.getElementById("passkeyEnrollBtn").addEventListener("click", async () => {
       if (!window.PublicKeyCredential) {
         showToast("Passkeys are not supported in this browser.", true);
@@ -228,368 +444,19 @@ claude</pre>
         showToast("Passkey enrollment failed: " + String(err.message || err), true);
       }
     });
-    requireAuth().then(revealSettingsAdminTab).catch(() => {});
+
+    showSection(sectionFromHash());
+    (function() {
+      const q = new URLSearchParams(location.search).get("q");
+      if (q) { const input = document.getElementById("settingsSearch"); input.value = q; window.onSettingsSearch(q); }
+    })();
     bootstrapSettings().catch((err) => showToast("Could not load settings: " + String(err.message || err), true));
-  `;
-  return reply.type("text/html").send(settingsPage("account", "Account preferences and authentication options.", content, script));
-});
+`;
 
-app.get("/portal/settings/nodes", async (_req, reply) => {
-  const content = `
-    <div id="emailVerifyNote" class="callout warn hidden">
-      <h3>Email verification required</h3>
-      <div class="muted">Your account email is not verified yet. Verify it on the dashboard to fully activate enrolled nodes.</div>
-    </div>
-    <div class="grid2">
-      <div class="card">
-        <h2 style="margin-top:0;">Enroll node</h2>
-        <label>Node ID</label><input id="nodeId" type="text" placeholder="mac-worker-001" />
-        <label>Node type</label>
-        <select id="nodeKind">
-          <option value="agent">Agent</option>
-          <option value="coordinator">Coordinator</option>
-        </select>
-        <div class="row">
-          <button class="primary" id="enrollBtn">Generate node token</button>
-        </div>
-        <p class="muted">Save this token now. It is shown only once.</p>
-        <div id="newTokenWrap" class="hidden">
-          <div id="newToken" class="token-box"></div>
-        </div>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0;">Node activation states</h2>
-        <p class="muted">Nodes become active after email verification and coordinator approval.</p>
-        <div class="table-controls">
-          <input id="nodesFilterInput" type="text" placeholder="Filter by node id or type" />
-          <select id="nodesStatusFilter">
-            <option value="all">All states</option>
-            <option value="active">Active only</option>
-            <option value="pending">Pending activation</option>
-          </select>
-          <select id="nodesSortOrder">
-            <option value="asc">Node A-Z</option>
-            <option value="desc">Node Z-A</option>
-          </select>
-        </div>
-        <table>
-          <thead><tr><th>Node</th><th>Type</th><th>Email verified</th><th>Approved</th><th>Active</th><th>Last seen</th><th>Actions</th></tr></thead>
-          <tbody id="nodesBody"></tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  const script = `
-    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
-    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
-    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-    function renderRows(targetId, rowsHtml, colspan, emptyText) {
-      const body = document.getElementById(targetId);
-      body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
-    }
-
-    /* ── Nodes ── */
-    let allNodes = [];
-    function renderNodes(nodes) {
-      const body = document.getElementById("nodesBody");
-      const rows = (nodes || []).map((n) =>
-        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + boolBadge(Boolean(n.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
-        boolBadge(Boolean(n.nodeApproved), "APPROVED", "PENDING") + "</td><td>" + (n.active ? statusBadge("ACTIVE", "ok") : statusBadge("DORMANT", "warn")) +
-        "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td><button class='deleteNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "'>Delete</button></td></tr>"
-      );
-      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='7'>No nodes enrolled.</td></tr>";
-    }
-    function applyNodeTableView() {
-      const text = (document.getElementById("nodesFilterInput").value || "").trim().toLowerCase();
-      const statusFilter = document.getElementById("nodesStatusFilter").value;
-      const sortOrder = document.getElementById("nodesSortOrder").value;
-      const filtered = (allNodes || []).filter((n) => {
-        const matchesText = !text || String(n.nodeId).toLowerCase().includes(text) || String(n.nodeKind).toLowerCase().includes(text);
-        const active = Boolean(n.active);
-        const matchesStatus = statusFilter === "all" || (statusFilter === "active" ? active : !active);
-        return matchesText && matchesStatus;
-      });
-      filtered.sort((a, b) => {
-        const aa = String(a.nodeId || "").toLowerCase();
-        const bb = String(b.nodeId || "").toLowerCase();
-        if (sortOrder === "desc") return bb.localeCompare(aa);
-        return aa.localeCompare(bb);
-      });
-      renderNodes(filtered);
-    }
-    async function loadNodes() {
-      await requireAuth();
-      const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
-      allNodes = summary.nodes || [];
-      applyNodeTableView();
-    }
-    document.getElementById("nodesFilterInput").addEventListener("input", applyNodeTableView);
-    document.getElementById("nodesStatusFilter").addEventListener("change", applyNodeTableView);
-    document.getElementById("nodesSortOrder").addEventListener("change", applyNodeTableView);
-    document.getElementById("nodesBody").addEventListener("click", async (event) => {
-      const target = event.target;
-      if (!target || !target.classList || !target.classList.contains("deleteNodeBtn")) return;
-      const nodeIdRaw = target.getAttribute("data-node-id");
-      if (!nodeIdRaw) return;
-      const nodeId = decodeURIComponent(nodeIdRaw);
-      if (!window.confirm("Delete node '" + nodeId + "'? This removes enrollment from your portal account.")) return;
-      try {
-        await api("/nodes/" + encodeURIComponent(nodeId), { method: "DELETE", headers: {} });
-        showToast("Deleted node " + nodeId);
-        await loadNodes();
-      } catch (err) {
-        showToast("Delete failed: " + String(err.message || err), true);
-      }
-    });
-    document.getElementById("enrollBtn").addEventListener("click", async () => {
-      try {
-        await requireAuth();
-        const payload = await api("/nodes/enroll", {
-          method: "POST",
-          body: JSON.stringify({
-            nodeId: document.getElementById("nodeId").value,
-            nodeKind: document.getElementById("nodeKind").value
-          })
-        });
-        document.getElementById("newTokenWrap").classList.remove("hidden");
-        document.getElementById("newToken").textContent = payload.registrationToken;
-        await loadNodes();
-        showToast("Node enrollment token generated.");
-      } catch (err) {
-        showToast("Enroll failed: " + String(err.message || err), true);
-      }
-    });
-
-    (async () => {
-      const me = await requireAuth();
-      revealSettingsAdminTab(me);
-      const user = me.user || {};
-      if (!user.emailVerified) document.getElementById("emailVerifyNote").classList.remove("hidden");
-      await loadNodes();
-    })().catch((err) => {
-      showToast("Could not load nodes: " + String(err.message || err), true);
-    });
-  `;
-  return reply.type("text/html").send(settingsPage("nodes", "Enroll nodes and track their activation.", content, script));
-});
-
-app.get("/portal/settings/admin", async (_req, reply) => {
-  const content = `
-    <div id="adminDeniedNote" class="callout warn hidden">
-      <h3>Admin access required</h3>
-      <div class="muted">This section is only available to system administrators.</div>
-    </div>
-    <div id="userMgmtSection" class="hidden">
-    <div class="card">
-      <h2 style="margin-top:0;">User Management</h2>
-      <table>
-        <thead><tr><th>Email</th><th>Role</th><th>Email verified</th><th>Created</th><th>Actions</th></tr></thead>
-        <tbody id="userMgmtBody"></tbody>
-      </table>
-    </div>
-    </div>
-    <div id="adminNodeApprovalSection" class="hidden">
-    <div class="card">
-      <h3 style="margin-top:0;">Coordinator enrollment requests</h3>
-      <div class="row">
-        <button class="primary" id="filterAllBtn">All pending</button>
-        <button id="filterCoordinatorBtn">Coordinator enrollment requests</button>
-        <button id="filterAgentBtn">Agent enrollment requests</button>
-      </div>
-      <table>
-        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Actions</th></tr></thead>
-        <tbody id="opsPendingBody"></tbody>
-      </table>
-      <div id="opsPendingNote" class="muted"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0;">Approved nodes</h3>
-      <div class="row">
-        <button class="primary" id="approvedFilterAllBtn">All approved</button>
-        <button id="approvedFilterCoordinatorBtn">Coordinators</button>
-        <button id="approvedFilterAgentBtn">Agents</button>
-        <button id="approvedFilterActiveBtn">Active only</button>
-      </div>
-      <table>
-        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th></tr></thead>
-        <tbody id="opsApprovedBody"></tbody>
-      </table>
-      <div id="opsApprovedNote" class="muted"></div>
-    </div>
-    </div>
-  `;
-  const script = `
-    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
-    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
-    function escapeHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-    function renderRows(targetId, rowsHtml, colspan, emptyText) {
-      const body = document.getElementById(targetId);
-      body.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
-    }
-
-    /* ── Coordinator Ops ── */
-    function filterPending(nodes, mode) {
-      if (mode === "all") return nodes;
-      return (nodes || []).filter((n) => String(n.nodeKind) === mode);
-    }
-    function filterApproved(nodes, mode, activeOnly) {
-      let values = nodes || [];
-      if (mode !== "all") values = values.filter((n) => String(n.nodeKind) === mode);
-      if (activeOnly) values = values.filter((n) => n.active === true);
-      return values;
-    }
-    let pendingFilter = "all";
-    let approvedFilter = "all";
-    let approvedActiveOnly = false;
-    let cachedPending = [];
-    let cachedApproved = [];
-    let canManageApprovals = false;
-
-    function renderPending() {
-      const body = document.getElementById("opsPendingBody");
-      const rows = filterPending(cachedPending, pendingFilter).map((n) =>
-        "<tr><td>" + n.nodeId + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
-        String(Boolean(n.emailVerified)) + "</td><td>" + (n.sourceIp || "unknown") + "</td><td>" + (n.countryCode || "unknown") +
-        "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td>" +
-        (canManageApprovals
-          ? "<button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='true'>Approve</button> <button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='false'>Reject</button>"
-          : "<span class='muted'>Read-only</span>") +
-        "</td></tr>"
-      );
-      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='9'>No pending nodes for this filter.</td></tr>";
-      const counts = {
-        all: cachedPending.length,
-        coordinator: cachedPending.filter((n) => n.nodeKind === "coordinator").length,
-        agent: cachedPending.filter((n) => n.nodeKind === "agent").length
-      };
-      document.getElementById("opsPendingNote").textContent = "Filter: " + pendingFilter + " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent;
-      document.getElementById("filterAllBtn").className = pendingFilter === "all" ? "primary" : "";
-      document.getElementById("filterCoordinatorBtn").className = pendingFilter === "coordinator" ? "primary" : "";
-      document.getElementById("filterAgentBtn").className = pendingFilter === "agent" ? "primary" : "";
-    }
-
-    function renderApproved() {
-      const body = document.getElementById("opsApprovedBody");
-      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
-        return "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + n.nodeKind + "</td><td>" + (n.ownerEmail || "unknown") + "</td><td>" +
-          String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + (n.sourceIp || "unknown") +
-          "</td><td>" + (n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
-          fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>";
-      });
-      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='10'>No approved nodes for this filter.</td></tr>";
-      const counts = {
-        all: cachedApproved.length,
-        coordinator: cachedApproved.filter((n) => n.nodeKind === "coordinator").length,
-        agent: cachedApproved.filter((n) => n.nodeKind === "agent").length,
-        active: cachedApproved.filter((n) => n.active === true).length
-      };
-      document.getElementById("opsApprovedNote").textContent =
-        "Filter: " + approvedFilter + (approvedActiveOnly ? " + active-only" : "") +
-        " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent + " active=" + counts.active;
-      document.getElementById("approvedFilterAllBtn").className = approvedFilter === "all" ? "primary" : "";
-      document.getElementById("approvedFilterCoordinatorBtn").className = approvedFilter === "coordinator" ? "primary" : "";
-      document.getElementById("approvedFilterAgentBtn").className = approvedFilter === "agent" ? "primary" : "";
-      document.getElementById("approvedFilterActiveBtn").className = approvedActiveOnly ? "primary" : "";
-    }
-
-    async function refreshOps() {
-      const data = await api("/coordinator/ops/summary", { method: "GET", headers: {} });
-      cachedPending = data.pendingNodes || [];
-      cachedApproved = data.approvedNodes || [];
-      canManageApprovals = Boolean(data.access && data.access.canManageApprovals);
-      renderPending();
-      renderApproved();
-    }
-    async function refreshApprovalsSafe() {
-      try {
-        await refreshOps();
-      } catch (err) {
-        document.getElementById("opsPendingNote").textContent = "Could not load enrollment requests: " + String(err.message || err) + " (auto-retrying)";
-      }
-    }
-
-    document.getElementById("filterAllBtn").addEventListener("click", () => { pendingFilter = "all"; renderPending(); });
-    document.getElementById("filterCoordinatorBtn").addEventListener("click", () => { pendingFilter = "coordinator"; renderPending(); });
-    document.getElementById("filterAgentBtn").addEventListener("click", () => { pendingFilter = "agent"; renderPending(); });
-    document.getElementById("approvedFilterAllBtn").addEventListener("click", () => { approvedFilter = "all"; renderApproved(); });
-    document.getElementById("approvedFilterCoordinatorBtn").addEventListener("click", () => { approvedFilter = "coordinator"; renderApproved(); });
-    document.getElementById("approvedFilterAgentBtn").addEventListener("click", () => { approvedFilter = "agent"; renderApproved(); });
-    document.getElementById("approvedFilterActiveBtn").addEventListener("click", () => { approvedActiveOnly = !approvedActiveOnly; renderApproved(); });
-
-    document.getElementById("opsPendingBody").addEventListener("click", async (event) => {
-      const target = event.target;
-      if (!target || !target.classList || !target.classList.contains("approveBtn")) return;
-      const coordinatorIdRaw = target.getAttribute("data-node-id");
-      const nodeKindRaw = target.getAttribute("data-node-kind");
-      if (!coordinatorIdRaw || !nodeKindRaw) return;
-      const nodeId = decodeURIComponent(coordinatorIdRaw);
-      const nodeKind = decodeURIComponent(nodeKindRaw);
-      const approved = target.getAttribute("data-approved") === "true";
-      try {
-        await api("/coordinator/ops/node-approval", {
-          method: "POST",
-          body: JSON.stringify({ nodeId, nodeKind, approved })
-        });
-        showToast("Updated " + nodeKind + " " + nodeId + " to " + (approved ? "approved" : "rejected"));
-        await refreshOps();
-      } catch (err) {
-        showToast("Approval failed: " + String(err.message || err), true);
-      }
-    });
-
-    /* ── User management (admin only) ── */
-    async function loadUserManagement() {
-      try {
-        const data = await api("/portal/api/admin/users", { method: "GET", headers: {} });
-        const body = document.getElementById("userMgmtBody");
-        const rows = (data.users || []).map(function(u) {
-          const roleBtn = u.role === "admin"
-            ? "<button class='userRoleBtn' data-uid='" + encodeAttr(u.userId) + "' data-role='user'>Remove Admin</button>"
-            : "<button class='userRoleBtn primary' data-uid='" + encodeAttr(u.userId) + "' data-role='admin'>Make Admin</button>";
-          return "<tr><td>" + escapeHtml(u.email) + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
-            boolBadge(Boolean(u.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
-            fmtTime(u.createdAtMs) + "</td><td>" + roleBtn + "</td></tr>";
-        });
-        body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='5'>No users found.</td></tr>";
-      } catch (err) {
-        document.getElementById("userMgmtBody").innerHTML = "<tr><td colspan='5'>Failed to load users.</td></tr>";
-      }
-    }
-    document.getElementById("userMgmtBody").addEventListener("click", async function(event) {
-      var target = event.target;
-      if (!target || !target.classList || !target.classList.contains("userRoleBtn")) return;
-      var uid = target.getAttribute("data-uid");
-      var role = target.getAttribute("data-role");
-      if (!uid || !role) return;
-      try {
-        await api("/portal/api/admin/users/" + encodeURIComponent(uid) + "/role", {
-          method: "POST",
-          body: JSON.stringify({ role: role })
-        });
-        showToast("User role updated to " + role);
-        await loadUserManagement();
-      } catch (err) {
-        showToast("Role update failed: " + String(err.message || err), true);
-      }
-    });
-
-    (async () => {
-      const me = await requireAuth();
-      revealSettingsAdminTab(me);
-      const user = me.user || {};
-      if (!(user.roles && user.roles.isSystemAdmin)) {
-        document.getElementById("adminDeniedNote").classList.remove("hidden");
-        return;
-      }
-      document.getElementById("userMgmtSection").classList.remove("hidden");
-      document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
-      loadUserManagement();
-      await refreshApprovalsSafe();
-      setInterval(refreshApprovalsSafe, 15000);
-    })().catch((err) => {
-      showToast("Could not load admin settings: " + String(err.message || err), true);
-    });
-  `;
-  return reply.type("text/html").send(settingsPage("admin", "User management and node enrollment approvals.", content, script));
-});
+export function registerSettingsPages(app: FastifyInstance): void {
+  app.get("/portal/settings", async (_req, reply) => {
+    const content = `<style>.search-hidden { display: none !important; }</style>${GENERAL}${PROFILE}${USAGE}${COMPUTE}${TOOLS}<div id="settingsNoMatch" class="hidden">No settings match your search.</div>`;
+    return reply.type("text/html").send(settingsPage("general", "Your account, compute and connected tools.", content, SCRIPT));
+  });
+  registerSettingsOpsPages(app);
 }
