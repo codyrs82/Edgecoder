@@ -507,3 +507,12 @@ describe("dashboard node status scenarios", () => {
     expect(body.user.uiTheme).toBe("midnight");
   });
 });
+
+describe("dashboard for non-admins", () => {
+  it("shows the account overview outside the admin-only section and fills status cards for everyone", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../src/portal/pages/dashboard.ts", import.meta.url), "utf8");
+    expect(src.indexOf("Account overview")).toBeLessThan(src.indexOf('id="adminOpsSection"'));
+    expect(src).toContain('api("/dashboard/network-status"');
+  });
+});
