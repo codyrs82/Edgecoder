@@ -109,10 +109,15 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: "Postgres-backed credit tests"
+      - name: "Postgres-backed tests"
         env:
           TEST_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/credits
-        run: npx vitest run tests/credits/atomic-debit.test.ts tests/portal/rate-limit-store.test.ts
+        # Every test that uses the real database (TEST_DATABASE_URL or the two-coordinator helper),
+        # one file at a time so they don't share tables concurrently. New ones are picked up here.
+        run: |
+          grep -rlE "TEST_DATABASE_URL|helpers/shared-pg" tests --include='*.test.ts' | sort > pg-tests.txt
+          cat pg-tests.txt
+          xargs npx vitest run --no-file-parallelism < pg-tests.txt
 
   desktop-token-test:
     # #6/#72: unit-test desktop/src-tauri/src/token.rs and agent_guard.rs standalone (the full Tauri
