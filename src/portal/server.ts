@@ -32,7 +32,9 @@ import cors from "@fastify/cors";
 import { randomUUID, createHash } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
-import { checkInternalServiceToken, LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
+import { LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
+import { createInternalAuth } from "./internal-auth.js";
+import { coordinatorUrlAllowed, coordinatorUrlPolicyFromEnv, filterCoordinatorUrls } from "./coordinator-url-policy.js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -94,6 +96,7 @@ await registerPortalSecurity(app, {
   edge: edgeModeFrom(process.env.PORTAL_EDGE),
   originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
   serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
+  coordinatorToken: process.env.PORTAL_COORDINATOR_TOKEN?.trim() || undefined,
 });
 
 const store = PortalStore.fromEnv();
@@ -317,20 +320,15 @@ async function getCurrentUser(req: { headers: Record<string, unknown> }) {
 
 const PORTAL_ALLOW_OPEN_INTERNAL = portalAllowOpenInternal();
 
-function requireInternalToken(req: { headers: Record<string, unknown> }, reply: any): boolean {
-  // #40: empty token -> 503 (open only with PORTAL_ALLOW_OPEN_INTERNAL=1 outside production);
-  // constant-time compare.
-  const result = checkInternalServiceToken(PORTAL_SERVICE_TOKEN, req.headers["x-portal-service-token"], {
-    allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL
-  });
-  if (result === "ok") return true;
-  if (result === "not_configured") {
-    reply.code(503).send({ error: "internal_auth_not_configured" });
-    return false;
-  }
-  reply.code(401).send({ error: "portal_service_token_required" });
-  return false;
-}
+// #40: empty token -> 503 (open only with PORTAL_ALLOW_OPEN_INTERNAL=1 outside production);
+// constant-time compare. Reads accept the service or coordinator token; approval mutations also
+// need the control-plane admin credential (src/portal/internal-auth.ts).
+const { requireInternalToken, requireControlPlaneAdmin } = createInternalAuth({
+  serviceToken: PORTAL_SERVICE_TOKEN,
+  coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
+  adminToken: CONTROL_PLANE_ADMIN_TOKEN,
+  allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL
+});
 
 async function resolveIpIntelligence(sourceIp?: string): Promise<{ countryCode?: string; vpnDetected?: boolean }> {
   const ip = sourceIp?.trim();
@@ -618,7 +616,15 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
   }
 }
 
+// Every caller attaches the portal service token to these URLs, so only allowlisted https
+// coordinators are returned (src/portal/coordinator-url-policy.ts).
+const COORDINATOR_URL_POLICY = coordinatorUrlPolicyFromEnv(process.env, COORDINATOR_DISCOVERY_URLS);
+
 async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
+  return filterCoordinatorUrls(await discoverCoordinatorUrlsUnfiltered(), COORDINATOR_URL_POLICY);
+}
+
+async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
   // Try control plane API first
   if (CONTROL_PLANE_URL) {
     try {
@@ -635,7 +641,9 @@ async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
         const urls = (payload.coordinators ?? [])
           .map((item) => String(item.coordinatorUrl ?? "").trim())
           .filter(Boolean)
-          .filter((value, index, arr) => arr.indexOf(value) === index);
+          .filter((value, index, arr) => arr.indexOf(value) === index)
+          .filter((value) => coordinatorUrlAllowed(value, COORDINATOR_URL_POLICY));
+        // None allowlisted: fall back to the configured discovery list below.
         if (urls.length > 0) return urls;
       }
     } catch {
@@ -852,7 +860,7 @@ registerPayoutRoutes(app, marketRouteDeps, {
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
-const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
+const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);

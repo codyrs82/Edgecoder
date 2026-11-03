@@ -370,6 +370,10 @@ function requestOrigin(req: unknown): { clientIp?: string; loopback: boolean } {
   };
 }
 const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
+// What this coordinator presents to the portal's read/validate /internal routes. Defaults to
+// PORTAL_SERVICE_TOKEN; once PORTAL_COORDINATOR_TOKEN is set here and on the portal, coordinators
+// no longer need the portal's own service token for those calls.
+const PORTAL_OUTBOUND_TOKEN = (process.env.PORTAL_COORDINATOR_TOKEN ?? "").trim() || PORTAL_SERVICE_TOKEN;
 const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
 const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordinator-fee:default";
 const BITCOIN_NETWORK = CC.BITCOIN_NETWORK;
@@ -1213,6 +1217,39 @@ function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
   return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
 }
 
+/*
+ * Mesh token scope (docs/security-baseline.md, "Coordinator route authority"). Every enrolled agent
+ * holds MESH_AUTH_TOKEN, so it is a transport gate only (the global onRequest hook). Routes that act
+ * for one agent take the agent from its request signature (requireAgentSelf); operator routes need
+ * authorizeAdmin; coordinator-to-coordinator routes verify an allowlisted peer signature.
+ */
+
+/**
+ * Agent-self routes: the request must be signed by a registered agent key, and when the route
+ * names an agent (`claimedAgentId`, from the body or path) it must be the signer. Sends 401/403
+ * and returns null otherwise.
+ */
+async function requireAgentSelf(
+  req: { headers?: unknown; url?: string; ip?: string },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown } },
+  claimedAgentId?: string
+): Promise<string | null> {
+  const routePath = String(req.url ?? "").split("?")[0];
+  const verified = await verifyAgentRequest((req.headers ?? {}) as Record<string, unknown>, routePath, req.ip, {
+    requireSigned: true,
+    rawBody: rawBodyOf(req as any)
+  });
+  if (!verified || verified === "rejected") {
+    reply.code(401).send({ error: "agent_signature_required" });
+    return null;
+  }
+  if (claimedAgentId !== undefined && claimedAgentId !== verified.agentId) {
+    reply.code(403).send({ error: "agent_identity_mismatch" });
+    return null;
+  }
+  return verified.agentId;
+}
+
 /** Routes the portal proxies for logged-in users (market data and standing orders) accept either token. */
 function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
   const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
@@ -1827,7 +1864,7 @@ async function validatePortalNode(input: {
     return outcome;
   }
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
   try {
     const portalValidationTimeoutMs = 5_000;
     const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/validate`, {
@@ -4686,7 +4723,15 @@ app.get("/economy/market/depth", async (req, reply) => {
  * credit). sell: the ask applied to every agent the account owns (0 = track the reference).
  */
 app.post("/economy/market/orders", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
+  // The portal names the account (it binds acct-<userId> from the session); an agent may set
+  // orders only for its own linked account. The mesh token alone is not enough.
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  const requestedAccount = (req.body as { accountId?: unknown } | undefined)?.accountId;
+  if (!(headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers))) {
+    const caller = await callerAccount(req, "/economy/market/orders", typeof requestedAccount === "string" ? requestedAccount : undefined);
+    if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+    if (caller.accountId !== requestedAccount) return reply.code(403).send({ error: "account_mismatch" });
+  }
   const body = z
     .object({
       accountId: z.string().min(1).max(128),
@@ -4838,7 +4883,7 @@ app.get("/economy/price/quote", async (req, reply) => {
 });
 
 app.post("/economy/price/propose", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator: sets this coordinator's price epoch
   const body = z
     .object({
       coordinatorId: z.string(),
@@ -4886,7 +4931,7 @@ app.post("/economy/price/propose", async (req, reply) => {
 });
 
 app.post("/economy/price/consensus", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator: sets this coordinator's price epoch
   const body = z
     .object({
       cpuCapacity: z.number().nonnegative(),
@@ -4961,7 +5006,8 @@ app.post("/economy/price/consensus", async (req, reply) => {
 });
 
 app.post("/economy/payments/intents", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  // Operator: an invoice for any named account. Owners buy through /account/buy (callerAccount).
+  if (!authorizeAdmin(req, reply)) return;
   const body = z
     .object({
       accountId: z.string(),
@@ -5089,7 +5135,7 @@ app.register(async (scope) => {
 });
 
 app.post("/economy/payments/reconcile", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator
   const pending = pgStore ? await pgStore.listPendingPaymentIntents(500) : [...paymentIntents.values()];
   let settledCount = 0;
   let expiredCount = 0;
@@ -5103,7 +5149,7 @@ app.post("/economy/payments/reconcile", async (req, reply) => {
 });
 
 app.post("/economy/treasury/policies", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator: approvedCoordinatorIds drives the issuance quorum
   const body = z
     .object({
       treasuryAccountId: z.string().min(3),
@@ -5134,7 +5180,7 @@ app.post("/economy/treasury/policies", async (req, reply) => {
 });
 
 app.post("/economy/treasury/policies/:policyId/activate", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator
   const params = z.object({ policyId: z.string() }).parse(req.params);
   const body = z.object({ requestedBy: z.string().default(identity.peerId) }).parse(req.body);
   if (!treasuryPolicy || treasuryPolicy.policyId !== params.policyId) {
@@ -5169,7 +5215,7 @@ app.get("/economy/treasury", async (req, reply) => {
 });
 
 app.post("/economy/issuance/recalculate", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator; the issuance timer runs it automatically
   const result = await runIssuanceTick();
   return { ok: true, epoch: result.epoch ?? null, allocations: result.allocations.length };
 });
@@ -5200,7 +5246,7 @@ app.get("/economy/issuance/rolling/:accountId", async (req, reply) => {
 });
 
 app.post("/economy/issuance/quorum/vote", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator: the vote is cast with this coordinator's identity
   const body = z
     .object({
       epochId: z.string(),
@@ -6048,7 +6094,7 @@ app.get("/stats/network/summary", async (req, reply) => {
   if (PORTAL_SERVICE_URL) {
     try {
       const headers: Record<string, string> = { "content-type": "application/json" };
-      if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
       const res = await request(`${PORTAL_SERVICE_URL}/internal/stats/counts`, {
         method: "GET",
         headers,
@@ -6253,8 +6299,8 @@ app.get("/agent-mesh/models/available", async (req, reply) => {
 });
 
 app.post("/agent-mesh/connect", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ fromAgentId: z.string(), toAgentId: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
   if (activeBlacklistRecord(body.fromAgentId) || activeBlacklistRecord(body.toAgentId)) {
     return reply.code(403).send({ error: "agent_blacklisted" });
   }
@@ -6289,8 +6335,8 @@ app.post("/agent-mesh/connect", async (req, reply) => {
 });
 
 app.post("/agent-mesh/accept", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ agentId: z.string(), token: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.agentId))) return;
   if (activeBlacklistRecord(body.agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
   const tunnel = activeTunnels.get(body.token);
   if (!tunnel) return reply.code(404).send({ error: "tunnel_not_found" });
@@ -6301,8 +6347,8 @@ app.post("/agent-mesh/accept", async (req, reply) => {
 });
 
 app.post("/agent-mesh/relay", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ token: z.string(), fromAgentId: z.string(), payload: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
   if (activeBlacklistRecord(body.fromAgentId)) return reply.code(403).send({ error: "agent_blacklisted" });
   const tunnel = activeTunnels.get(body.token);
   if (!tunnel) return reply.code(404).send({ error: "tunnel_not_found" });
@@ -6339,8 +6385,8 @@ app.post("/agent-mesh/relay", async (req, reply) => {
 });
 
 app.post("/agent-mesh/close", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ fromAgentId: z.string(), token: z.string(), reason: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
   const tunnel = activeTunnels.get(body.token);
   if (!tunnel) return reply.code(404).send({ error: "tunnel_not_found" });
   if (tunnel.fromAgentId !== body.fromAgentId && tunnel.toAgentId !== body.fromAgentId) {
@@ -6358,15 +6404,14 @@ app.post("/agent-mesh/close", async (req, reply) => {
 });
 
 app.post("/agent-mesh/close-ack", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ agentId: z.string(), token: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.agentId))) return;
   const notices = (pendingTunnelCloseNotices.get(body.agentId) ?? []).filter((n) => n.token !== body.token);
   pendingTunnelCloseNotices.set(body.agentId, notices);
   return { ok: true };
 });
 
 app.post("/agent-mesh/direct-work/offer", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z
     .object({
       fromAgentId: z.string(),
@@ -6376,6 +6421,7 @@ app.post("/agent-mesh/direct-work/offer", async (req, reply) => {
       input: z.string().min(1)
     })
     .parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
   if (activeBlacklistRecord(body.fromAgentId) || activeBlacklistRecord(body.toAgentId)) {
     return reply.code(403).send({ error: "agent_blacklisted" });
   }
@@ -6411,7 +6457,6 @@ app.post("/agent-mesh/direct-work/offer", async (req, reply) => {
 });
 
 app.post("/agent-mesh/models/request", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z
     .object({
       fromAgentId: z.string(),
@@ -6419,6 +6464,7 @@ app.post("/agent-mesh/models/request", async (req, reply) => {
       prompt: z.string().min(1).max(16_384)
     })
     .parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
   if (activeBlacklistRecord(body.fromAgentId) || activeBlacklistRecord(body.toAgentId)) {
     return reply.code(403).send({ error: "agent_blacklisted" });
   }
@@ -6476,8 +6522,8 @@ app.get("/agent-mesh/models/request/:offerId", async (req, reply) => {
 });
 
 app.post("/agent-mesh/direct-work/accept", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z.object({ offerId: z.string(), byAgentId: z.string() }).parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.byAgentId))) return;
   if (activeBlacklistRecord(body.byAgentId)) return reply.code(403).send({ error: "agent_blacklisted" });
   const offer = directWorkById.get(body.offerId);
   if (!offer) return reply.code(404).send({ error: "offer_not_found" });
@@ -6493,7 +6539,6 @@ app.post("/agent-mesh/direct-work/accept", async (req, reply) => {
 });
 
 app.post("/agent-mesh/direct-work/result", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const body = z
     .object({
       offerId: z.string(),
@@ -6504,6 +6549,7 @@ app.post("/agent-mesh/direct-work/result", async (req, reply) => {
       durationMs: z.number()
     })
     .parse(req.body);
+  if (!(await requireAgentSelf(req, reply, body.byAgentId))) return;
   if (activeBlacklistRecord(body.byAgentId)) return reply.code(403).send({ error: "agent_blacklisted" });
   const offer = directWorkById.get(body.offerId);
   if (!offer) return reply.code(404).send({ error: "offer_not_found" });
@@ -6522,7 +6568,7 @@ app.post("/agent-mesh/direct-work/result", async (req, reply) => {
 });
 
 app.post("/orchestration/coordinator/ollama-install", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  if (!authorizeAdmin(req, reply)) return; // operator: pulls a model onto this coordinator's volume
   const body = z
     .object({
       provider: z.enum(["edgecoder-local", "ollama-local"]).default("ollama-local"),
@@ -6635,7 +6681,8 @@ function resolveRecentOrchestrationAgentId(
 }
 
 app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+  // Operator: a forced model rollout makes the target agent pull (and maybe install Ollama).
+  if (!authorizeAdmin(req, reply)) return;
   const params = z.object({ agentId: z.string() }).parse(req.params);
   const body = z
     .object({
@@ -6691,8 +6738,8 @@ app.post("/orchestration/agents/:agentId/ollama-install", async (req, reply) => 
 });
 
 app.post("/orchestration/agents/:agentId/status", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ agentId: z.string() }).parse(req.params);
+  if (!(await requireAgentSelf(req, reply, params.agentId))) return;
   const body = z
     .object({
       phase: z.string().max(64),
@@ -6730,8 +6777,8 @@ app.post("/orchestration/agents/:agentId/status", async (req, reply) => {
 });
 
 app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const params = z.object({ agentId: z.string() }).parse(req.params);
+  if (!(await requireAgentSelf(req, reply, params.agentId))) return;
   const body = z.object({ ok: z.boolean(), error: z.string().optional() }).parse(req.body);
   const current = agentOrchestration.get(params.agentId);
   if (!current) return reply.code(404).send({ error: "orchestration_not_found" });

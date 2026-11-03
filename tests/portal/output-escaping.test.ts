@@ -192,6 +192,8 @@ describe("POST /nodes/enroll node id validation", () => {
     const app = Fastify();
     registerAccountApiRoutes(app, {
       store: {
+        getNodeEnrollment: async () => null,
+        getNodeEnrollmentByDeviceId: async () => null,
         upsertNodeEnrollment: async (r: any) => { stored.push(r.nodeId); return { ...r, nodeApproved: false, active: false }; },
         setNodeApproval: async () => null,
         getNodeEnrollment: async () => null,

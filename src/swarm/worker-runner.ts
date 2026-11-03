@@ -572,6 +572,21 @@ async function post(
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "unknown_post_error"));
 }
 
+/**
+ * One signed POST, no retries; the caller reads the status. Routes that act for this agent
+ * (agent-mesh tunnels, direct work) take the agent id from the signature, not the mesh token.
+ */
+function signedJsonPost(path: string, body: unknown) {
+  // Same rule as post(): no mesh token or signature to a coordinator that has not proven its key.
+  const base = coordinator.requireVerified();
+  const payload = JSON.stringify(body);
+  return request(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...meshHeaders(), ...signedHeaders(path, payload) },
+    body: payload
+  });
+}
+
 async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: { text: () => Promise<string> } }): Promise<unknown> {
   const contentType = String(res.headers["content-type"] ?? "");
   const raw = await res.body.text();
@@ -1104,11 +1119,11 @@ async function loop(): Promise<void> {
         const blacklistSet = new Set(hb.blacklist?.agents ?? []);
         for (const notice of hb.tunnelCloseNotices ?? []) {
           peerTunnels.delete(notice.peerAgentId);
-          await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token });
+          await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token }, { signed: true });
         }
         for (const invite of hb.tunnelInvites ?? []) {
           if (blacklistSet.has(invite.fromAgentId)) continue;
-          await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token });
+          await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token }, { signed: true });
           peerTunnels.set(invite.fromAgentId, invite.token);
         }
 
@@ -1122,11 +1137,7 @@ async function loop(): Promise<void> {
             if (blacklistSet.has(peerId)) continue;
             if (peerId === AGENT_ID) continue;
             if (peerTunnels.has(peerId)) continue;
-            const connect = await request(`${coordinator.requireVerified()}/agent-mesh/connect`, {
-              method: "POST",
-              headers: { "content-type": "application/json", ...meshHeaders() },
-              body: JSON.stringify({ fromAgentId: AGENT_ID, toAgentId: peerId })
-            });
+            const connect = await signedJsonPost("/agent-mesh/connect", { fromAgentId: AGENT_ID, toAgentId: peerId });
             if (connect.statusCode >= 200 && connect.statusCode < 300) {
               const body = (await parseJsonBodySafe(connect)) as { token?: string };
               if (body.token) peerTunnels.set(peerId, body.token);
@@ -1135,14 +1146,10 @@ async function loop(): Promise<void> {
         }
 
         for (const token of peerTunnels.values()) {
-          const relayRes = await request(`${coordinator.requireVerified()}/agent-mesh/relay`, {
-            method: "POST",
-            headers: { "content-type": "application/json", ...meshHeaders() },
-            body: JSON.stringify({
-              token,
-              fromAgentId: AGENT_ID,
-              payload: `ping:${Date.now()}`
-            })
+          const relayRes = await signedJsonPost("/agent-mesh/relay", {
+            token,
+            fromAgentId: AGENT_ID,
+            payload: `ping:${Date.now()}`
           });
           if (relayRes.statusCode === 404 || relayRes.statusCode === 403) {
             for (const [peerId, peerToken] of peerTunnels.entries()) {
@@ -1154,7 +1161,7 @@ async function loop(): Promise<void> {
         if (hb.orchestration?.pending) {
           const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
             try {
-              await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct });
+              await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct }, { signed: true });
             } catch {
               // best-effort; coordinator may be unreachable
             }
@@ -1178,7 +1185,7 @@ async function loop(): Promise<void> {
               await post(
                 `/orchestration/agents/${AGENT_ID}/ack`,
                 { ok: true },
-                { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+                { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS), signed: true }
               );
             } catch (ackError) {
               console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
@@ -1192,7 +1199,7 @@ async function loop(): Promise<void> {
                 ok: false,
                 error: String(error)
               },
-              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS) }
+              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS), signed: true }
             ).catch(() => {});
           }
         }
@@ -1401,13 +1408,9 @@ async function loop(): Promise<void> {
             await new Promise((r) => setTimeout(r, 500));
             continue;
           }
-          const accepted = await request(`${coordinator.requireVerified()}/agent-mesh/direct-work/accept`, {
-            method: "POST",
-            headers: { "content-type": "application/json", ...meshHeaders() },
-            body: JSON.stringify({
-              offerId: offer.offerId,
-              byAgentId: AGENT_ID
-            })
+          const accepted = await signedJsonPost("/agent-mesh/direct-work/accept", {
+            offerId: offer.offerId,
+            byAgentId: AGENT_ID
           });
           if (accepted.statusCode >= 200 && accepted.statusCode < 300) {
             let peerResult: { ok: boolean; output: string; error?: string; durationMs: number };
@@ -1453,17 +1456,13 @@ async function loop(): Promise<void> {
                 durationMs: result.durationMs
               };
             }
-            await request(`${coordinator.requireVerified()}/agent-mesh/direct-work/result`, {
-              method: "POST",
-              headers: { "content-type": "application/json", ...meshHeaders() },
-              body: JSON.stringify({
-                offerId: offer.offerId,
-                byAgentId: AGENT_ID,
-                ok: peerResult.ok,
-                output: peerResult.output,
-                error: peerResult.error,
-                durationMs: peerResult.durationMs
-              })
+            await signedJsonPost("/agent-mesh/direct-work/result", {
+              offerId: offer.offerId,
+              byAgentId: AGENT_ID,
+              ok: peerResult.ok,
+              output: peerResult.output,
+              error: peerResult.error,
+              durationMs: peerResult.durationMs
             });
             await new Promise((r) => setTimeout(r, 300));
             continue;
@@ -1487,16 +1486,12 @@ async function loop(): Promise<void> {
               const workInput = PEER_DIRECT_WORK_ITEMS[peerWorkCursor % PEER_DIRECT_WORK_ITEMS.length].trim();
               peerWorkCursor += 1;
               if (!workInput) continue;
-              const offerRes = await request(`${coordinator.requireVerified()}/agent-mesh/direct-work/offer`, {
-                method: "POST",
-                headers: { "content-type": "application/json", ...meshHeaders() },
-                body: JSON.stringify({
-                  fromAgentId: AGENT_ID,
-                  toAgentId: peerId,
-                  workType: "code_task",
-                  language: "python",
-                  input: workInput
-                })
+              const offerRes = await signedJsonPost("/agent-mesh/direct-work/offer", {
+                fromAgentId: AGENT_ID,
+                toAgentId: peerId,
+                workType: "code_task",
+                language: "python",
+                input: workInput
               });
               if (offerRes.statusCode >= 200 && offerRes.statusCode < 300) {
                 lastOfferAtByPeer.set(peerId, now);

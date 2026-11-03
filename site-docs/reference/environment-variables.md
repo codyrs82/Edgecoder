@@ -80,8 +80,10 @@ Consolidated reference for all environment controls. The primary config file on 
 | `MESH_PEER_ALLOWLIST` | #52: comma-separated `peerId:fingerprint@https://peer-url` entries for the peer coordinators this coordinator trusts. `@url` pins the peer's endpoint, and gossip never changes it. **In production every entry must have `@url`, or the coordinator refuses to start.** `fingerprint` is the SHA-256 (hex) of the peer's SPKI public key. With the mesh token, a peer must also be on this list and sign its registration with that key. Results it forwards must be signed too. **Required in production**: without it, token-only peer registration and forwarded results are rejected. In dev an empty list keeps the old token-only behaviour. |
 | `COORDINATOR_PRIVATE_KEY_PEM` | Ed25519 private key (PKCS#8 PEM) for this coordinator's mesh identity. Set it on every coordinator that peers, since a generated key changes on each restart and would drop off its peers' allowlists. Fingerprint for `MESH_PEER_ALLOWLIST`: `node -e 'const c=require("crypto");const k=c.createPublicKey(process.env.COORDINATOR_PRIVATE_KEY_PEM);console.log(c.createHash("sha256").update(k.export({type:"spki",format:"der"})).digest("hex"))'` |
 | `INFERENCE_AUTH_TOKEN` | Auth token for the inference service API. |
-| `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. |
-| `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
+| `ADMIN_API_TOKEN` | Admin token for control-plane operator APIs. On a coordinator it is also the only credential for operator routes: treasury policies, issuance votes and recalculation, price propose/consensus, payment intents for a named account, payment reconcile and forced model rollouts (`/orchestration/*/ollama-install`). The mesh token alone is refused there (sent as `x-admin-token`). |
+| `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. On the control plane it stands in for the admin token on reads (GET) only. |
+| `PORTAL_COORDINATOR_TOKEN` | Optional, unset by default. Set the same value on the portal and the coordinators: coordinators then present it (instead of `PORTAL_SERVICE_TOKEN`) to the portal's read/validate `/internal/*` routes. It never authorizes node approval. Unset keeps today's behaviour (coordinators send `PORTAL_SERVICE_TOKEN`). |
+| `PORTAL_COORDINATOR_HOSTS` | Portal, optional. Comma list of coordinator hostnames (or URLs) the portal may send its service token to. Default: the hosts of `COORDINATOR_DISCOVERY_URLS`. In production, and whenever this is set, coordinator URLs must be https, without userinfo, not private/loopback/link-local, and on this list; others are dropped before any request. |
 | `ENABLE_DEBUG_ROUTES` | Set `1` to register coordinator `/debug/*` routes (dev/e2e only; never registered in production). |
 | `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
 | `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-timestamp-ms`, `x-nonce`, `x-body-sha256`, `x-signature`). The TS worker and the iOS app (#64, `RequestSigner.swift`, Keychain-held key registered via `publicKeyPem` in `/register`) both sign this way; shared vectors live in `tests/security/fixtures/request-signing-vectors.json`. Set `false` only for local dev with legacy unsigned agents. A signed request's `x-body-sha256` must be the sha256 of the exact body bytes received. `/benchmark/response` is signed-only whatever this is set to. Nonces are kept in Postgres (`request_nonces`) when `DATABASE_URL` is set, so replays are refused across restarts and seeds. |
@@ -258,7 +260,9 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `NODE_ENV` | string | `development` |
 | `PORTAL_EXTERNAL_HTTP_TIMEOUT_MS` | integer ≥ 100 | `7000` |
 | `RESEND_FROM_EMAIL` | string | unset |
-| `CONTROL_PLANE_ADMIN_TOKEN` | string | unset |
+| `CONTROL_PLANE_ADMIN_TOKEN` | string (also the credential `/internal/nodes/:nodeId/approval` requires, as `x-admin-token` or Bearer) | unset |
+| `PORTAL_COORDINATOR_TOKEN` | string | unset |
+| `PORTAL_COORDINATOR_HOSTS` | comma list | hosts of `COORDINATOR_DISCOVERY_URLS` |
 | `PORTAL_SESSION_TTL_MS` | integer ms, 1000 to 31 days | `604800000` |
 | `PORTAL_EMAIL_VERIFY_TTL_MS` | integer ms, 1000 to 31 days | `86400000` |
 | `WALLET_SEND_MFA_TTL_MS` | integer ms, 1000 to 31 days | `600000` |

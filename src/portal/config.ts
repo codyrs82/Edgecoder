@@ -21,6 +21,10 @@ export const portalConfigSchema = z.object({
   NODE_ENV: z.string().default("development"),
   PORTAL_PUBLIC_URL: envUrl("http://127.0.0.1:4310"),
   PORTAL_SERVICE_TOKEN: optStr,
+  /** Read/validate-only token coordinators present to /internal/* (src/portal/internal-auth.ts). */
+  PORTAL_COORDINATOR_TOKEN: optStr,
+  /** Hosts the portal may send credentials to (src/portal/coordinator-url-policy.ts); default: COORDINATOR_DISCOVERY_URLS hosts. */
+  PORTAL_COORDINATOR_HOSTS: optStr,
   PORTAL_EXTERNAL_HTTP_TIMEOUT_MS: envInt(7000, { min: 100, max: 120_000 }),
   RESEND_API_KEY: optStr,
   RESEND_FROM_EMAIL: optStr,
