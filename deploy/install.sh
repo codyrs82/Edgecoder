@@ -40,10 +40,36 @@ ensure_base() {
 }
 
 # ----------------------------------------------------------------- Node ----
+# macOS: the agent daemons run as _edgecoder from root-owned binaries. Homebrew's node lives in a
+# user-owned prefix and links Homebrew dylibs, so it cannot be used (edgecoder-install refuses it);
+# install the self-contained nodejs.org build into a root-owned dir instead, checksum-verified.
+MAC_NODE_DIR=/opt/edgecoder/node
+ensure_mac_node() {
+  if [ -x "$MAC_NODE_DIR/bin/node" ] && [ "$("$MAC_NODE_DIR/bin/node" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ]; then
+    export PATH="$MAC_NODE_DIR/bin:$PATH"; return
+  fi
+  log "Installing Node.js $NODE_MAJOR (nodejs.org build) into $MAC_NODE_DIR"
+  local arch base tmp tarball
+  arch="$(uname -m)"; [ "$arch" = "arm64" ] || arch="x64"
+  base="https://nodejs.org/dist/latest-v${NODE_MAJOR}.x"
+  tmp="$(mktemp -d)"
+  curl -fsSL "$base/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt"
+  tarball="$(awk '{print $2}' "$tmp/SHASUMS256.txt" | grep -E "^node-v[0-9.]+-darwin-${arch}\.tar\.gz$" | head -n1)"
+  [ -n "$tarball" ] || die "no Node.js $NODE_MAJOR darwin-$arch build at $base"
+  curl -fsSL "$base/$tarball" -o "$tmp/$tarball"
+  ( cd "$tmp" && grep " $tarball\$" SHASUMS256.txt | shasum -a 256 -c - >/dev/null ) || die "Node.js download failed its checksum"
+  rm -rf "$MAC_NODE_DIR" && mkdir -p "$MAC_NODE_DIR"
+  tar -xzf "$tmp/$tarball" -C "$MAC_NODE_DIR" --strip-components 1
+  chown -R root:wheel "$MAC_NODE_DIR" && chmod -R go-w "$MAC_NODE_DIR"
+  rm -rf "$tmp"
+  export PATH="$MAC_NODE_DIR/bin:$PATH"
+}
+
 ensure_node() {
-  # Find an existing Node >= NODE_MAJOR even when sudo reset PATH and hid the user's node
-  # (Homebrew on /opt/homebrew/bin, nvm, etc.). Put its dir on PATH so npm/node work below too.
-  for c in "$(command -v node 2>/dev/null)" /opt/homebrew/opt/node@$NODE_MAJOR/bin/node /usr/local/opt/node@$NODE_MAJOR/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+  if [ "$OS" = "Darwin" ]; then ensure_mac_node; return; fi
+  # Find an existing Node >= NODE_MAJOR. Put its dir on PATH so npm/node work below too. A node a
+  # user can replace is copied to a root-owned dir by edgecoder-install before the services use it.
+  for c in "$(command -v node 2>/dev/null)" /usr/local/bin/node /usr/bin/node; do
     [ -n "$c" ] && [ -x "$c" ] || continue
     if [ "$("$c" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ]; then
       case ":$PATH:" in *":$(dirname "$c"):"*) :;; *) export PATH="$(dirname "$c"):$PATH";; esac
@@ -51,28 +77,16 @@ ensure_node() {
     fi
   done
   log "Installing Node.js $NODE_MAJOR"
-  if [ "$OS" = "Darwin" ]; then
-    if command -v brew >/dev/null 2>&1; then
-      sudo -u "${SUDO_USER:-$(whoami)}" brew install node@$NODE_MAJOR >/dev/null 2>&1 || true
-      # node@NN is keg-only; put its bin on PATH (brew link needs --force) so npm/node below use v22, not a linked v20.
-      nbin="$(sudo -u "${SUDO_USER:-$(whoami)}" brew --prefix node@$NODE_MAJOR 2>/dev/null)/bin"; [ -x "$nbin/node" ] && export PATH="$nbin:$PATH"
-    else
-      pkg="/tmp/node-$NODE_MAJOR.pkg"; arch="$(uname -m)"; [ "$arch" = "arm64" ] || arch="x64"
-      ver="$(curl -fsSL https://nodejs.org/dist/index.json | python3 -c 'import json,sys; print(next(v["version"] for v in json.load(sys.stdin) if v["version"].startswith("v'$NODE_MAJOR'.")))')"
-      curl -fsSL "https://nodejs.org/dist/$ver/node-$ver.pkg" -o "$pkg" && installer -pkg "$pkg" -target / >/dev/null
-    fi
+  export DEBIAN_FRONTEND=noninteractive
+  if command -v apt-get >/dev/null 2>&1; then
+    install -m 0755 -d /etc/apt/keyrings
+    [ -f /etc/apt/keyrings/nodesource.gpg ] || curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+    apt-get update -qq && apt-get install -y -qq nodejs >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null && dnf install -y -q nodejs
   else
-    export DEBIAN_FRONTEND=noninteractive
-    if command -v apt-get >/dev/null 2>&1; then
-      install -m 0755 -d /etc/apt/keyrings
-      [ -f /etc/apt/keyrings/nodesource.gpg ] || curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-      echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
-      apt-get update -qq && apt-get install -y -qq nodejs >/dev/null
-    elif command -v dnf >/dev/null 2>&1; then
-      curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null && dnf install -y -q nodejs
-    else
-      die "install Node.js $NODE_MAJOR+ and re-run"
-    fi
+    die "install Node.js $NODE_MAJOR+ and re-run"
   fi
 }
 

@@ -35,6 +35,7 @@ resolve_node_bin() {
   fi
 
   for candidate in \
+    "/opt/edgecoder/node/bin/node" \
     "/opt/homebrew/bin/node" \
     "/usr/local/bin/node" \
     "/opt/local/bin/node"; do

@@ -204,13 +204,13 @@ describe("services: the same plan on every platform", () => {
   it("windows: scheduled tasks and cmd wrappers", () => {
     const hw = detectHardware({ probe, platform: "win32", arch: "x64", ramGb: 128, cpuModel: "x", cpuCores: 16, hostname: "WINBOX" });
     const plan = planInstall(hw, o, true);
-    const p = defaultPaths("win32", { configDir: "C:\\ProgramData\\EdgeCoder", appDir: "C:\\Program Files\\EdgeCoder\\app", nodeBin: "C:\\Program Files\\nodejs\\node.exe", ollamaBin: "C:\\ollama.exe", modelsDir: "C:\\ProgramData\\EdgeCoder\\ollama", logDir: "C:\\ProgramData\\EdgeCoder\\logs" });
+    const p = defaultPaths("win32", { configDir: "C:\\ProgramData\\EdgeCoder", appDir: "C:\\Program Files\\EdgeCoder\\app", nodeBin: "C:\\Program Files\\nodejs\\node.exe", ollamaBin: "C:\\ollama.exe", modelsDir: "C:\\ProgramData\\EdgeCoder\\ollama", logDir: "C:\\ProgramData\\EdgeCoder\\logs", user: "BOX\\me" });
     const { host, files, commands } = fakeHost("win32");
     const r = applyPlan(plan, host, p, false);
     expect(r.services).toEqual(["EdgeCoder\\ollama-0", "EdgeCoder\\agent-0", "EdgeCoder\\ollama-1", "EdgeCoder\\agent-1"]);
     expect(files.get("C:\\ProgramData\\EdgeCoder\\agent-1.cmd")).toContain('set "CUDA_VISIBLE_DEVICES=1"');
     expect(windowsAgentCmd(p, plan.instances[1])).toContain("worker-runner.js");
-    expect(commands.some((c) => c.startsWith("schtasks /Create /F /SC ONSTART /RU SYSTEM /RL HIGHEST /TN EdgeCoder\\agent-1"))).toBe(true);
+    expect(commands.some((c) => c.startsWith("schtasks /Create /F /SC ONLOGON /RU \"BOX\\me\" /IT /RL LIMITED /TN EdgeCoder\\agent-1"))).toBe(true);
   });
 
   it("--pull-models pulls each distinct model once, retrying until Ollama is listening", () => {
