@@ -31,6 +31,8 @@ import { registryPublicKeysFromEnv } from "../discovery/registry.js";
 import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
+import { BleCosignProvider } from "../mesh/ble/ble-cosign.js";
+import { ledgerRowToTransaction, settledBleTxIds } from "../mesh/ble/offline-ledger.js";
 import { localStore } from "../db/local-store.js";
 import { hashRequestBody, signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
@@ -661,23 +663,15 @@ async function flushOfflineLedger(): Promise<void> {
   if (unsynced.length === 0) return;
   console.log(`[agent:${AGENT_ID}] flushing ${unsynced.length} BLE credit transaction(s)`);
   try {
-    const transactions = unsynced.map(row => ({
-      txId: row.txId,
-      requesterId: row.requesterId,
-      providerId: row.providerId,
-      requesterAccountId: row.requesterId,
-      providerAccountId: row.providerId,
-      credits: row.credits,
-      cpuSeconds: row.cpuSeconds,
-      taskHash: row.taskHash,
-      timestamp: row.createdAt * 1000,
-      requesterSignature: row.requesterSig,
-      providerSignature: row.providerSig,
-    }));
+    const transactions = unsynced.map(ledgerRowToTransaction);
     const bleSyncBody = { transactions };
-    await post("/credits/ble-sync", bleSyncBody, { signed: true });
-    localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
-    console.log(`[agent:${AGENT_ID}] BLE credits synced`);
+    const result = await post("/credits/ble-sync", bleSyncBody, { signed: true });
+    // #63: only stop retrying what settled (or can never settle); the rest stays in the ledger.
+    const settled = settledBleTxIds(result);
+    localStore.markBLECreditsSynced(settled);
+    const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+    if (skipped.length) console.warn(`[agent:${AGENT_ID}] BLE credit sync skipped ${skipped.length}: ${JSON.stringify(skipped.slice(0, 5))}`);
+    console.log(`[agent:${AGENT_ID}] BLE credits synced (${Array.isArray(result?.applied) ? result.applied.length : 0} applied)`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] BLE credit flush failed (will retry): ${String(e)}`);
   }
@@ -937,6 +931,14 @@ async function loop(): Promise<void> {
     }
     startMeshUplink();
   }
+  /** #63: the reward account the coordinator resolves for this agent (both BLE tx sides sign it). */
+  let rewardAccountId = AGENT_ID;
+  function adoptRewardAccount(accountId: unknown): void {
+    if (typeof accountId === "string" && accountId.length > 0 && !accountId.includes("\n")) {
+      rewardAccountId = accountId;
+      bleMesh?.setAccountId(accountId);
+    }
+  }
   const bleGuard = new BleRequestGuard();
   // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
   if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
@@ -944,7 +946,16 @@ async function loop(): Promise<void> {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
-      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore);
+      bleMesh = new BLEMeshManager(AGENT_ID, rewardAccountId, bleTransport, localStore, { privateKeyPem: keys.privateKeyPem });
+      // #63: provider side of the co-sign step for tasks this agent serves over BLE.
+      const transportForCosign = bleTransport;
+      const bleCosigner = new BleCosignProvider({
+        agentId: AGENT_ID,
+        accountId: () => rewardAccountId,
+        privateKeyPem: keys.privateKeyPem,
+        modelParamSize: () => transportForCosign.currentAdvertisement()?.modelParamSize ?? 0,
+      });
+      bleTransport.onCosignRequest((req) => bleCosigner.handle(req));
       bleMesh.setOwnTokenHash(computeMeshTokenHash());
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
@@ -991,13 +1002,16 @@ async function loop(): Promise<void> {
           const durationMs = Date.now() - started;
           try { localStore.recordTaskComplete(subtaskId, response.text, durationMs); } catch (e) { console.warn(`[db] BLE task complete write failed: ${e}`); }
           const taskHash = computeTaskHash(req.task);
+          // #63: credits are settled by the co-sign step that follows; remember what we served.
+          bleCosigner.recordServed(req.requestId, String(req.requesterId ?? ""), taskHash, durationMs);
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
+            providerAccountId: rewardAccountId,
             status: "completed" as const,
             output: response.text,
             cpuSeconds: durationMs / 1000,
-            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "completed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
+            providerSignature: "",
           };
         } catch (e) {
           const durationMs = Date.now() - started;
@@ -1009,7 +1023,7 @@ async function loop(): Promise<void> {
             status: "failed" as const,
             output: String(e),
             cpuSeconds: durationMs / 1000,
-            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "failed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
+            providerSignature: "",
           };
         }
       });
@@ -1120,10 +1134,12 @@ async function loop(): Promise<void> {
           })) as {
             accepted?: boolean;
             meshToken?: string;
+            rewardAccountId?: string;
           };
           registeredWithUrl = coordinator.url;
           lastRegisteredAtMs = Date.now();
           adoptMeshToken(registerResponse.meshToken);
+          adoptRewardAccount(registerResponse.rewardAccountId);
         }
 
         const hbStart = Date.now();
@@ -1587,8 +1603,9 @@ async function loop(): Promise<void> {
             };
             // Keep the mesh token from this register too: an agent that went offline before its first
             // registration has none, and without it every heartbeat is refused (mesh_unauthorized).
-            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string };
+            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string; rewardAccountId?: string };
             adoptMeshToken(probeRegister.meshToken);
+            adoptRewardAccount(probeRegister.rewardAccountId);
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
             await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;

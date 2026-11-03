@@ -200,6 +200,8 @@ final class SwarmRuntimeController: ObservableObject {
         appendEvent(statusText)
         await discoverCoordinators()
         bleMeshManager.start()
+        // #63: the agent key signs this device's side of BLE credit transactions.
+        bleMeshManager.signingKey = resolveSigningKey()
         bleMeshManager.startAdvertising(
             agentId: agentId,
             model: modelManager.selectedModel,
@@ -387,6 +389,11 @@ final class SwarmRuntimeController: ObservableObject {
                 persistRuntimeSettings()
                 appendEvent("Mesh token issued by coordinator.")
             }
+            // #63: BLE credit transactions sign the reward account the coordinator resolves for us.
+            if let rewardAccountId = response["rewardAccountId"] as? String, !rewardAccountId.isEmpty,
+               !rewardAccountId.utf8.contains(0x0A) {
+                bleMeshManager.currentAccountId = rewardAccountId
+            }
             appendEvent("Register succeeded.")
             return true
         } catch is CancellationError {
@@ -545,9 +552,11 @@ final class SwarmRuntimeController: ObservableObject {
         let payload: [String: Any] = ["transactions": txDicts]
         do {
             let response = try await postCoordinator(path: "/credits/ble-sync", payload: payload)
-            let syncedIds = (response["syncedTxIds"] as? [String]) ?? pending.map(\.txId)
+            // #63: drop only what settled (or can never settle); the rest is retried later.
+            let syncedIds = OfflineLedger.settledTxIds(fromSyncResponse: response)
             ledger.markSynced(syncedIds)
-            appendEvent("Offline ledger sync complete — \(syncedIds.count) transaction(s) confirmed.")
+            let applied = (response["applied"] as? [String])?.count ?? 0
+            appendEvent("Offline ledger sync complete — \(applied) applied, \(syncedIds.count) settled, \(pending.count - syncedIds.count) still pending.")
         } catch {
             appendEvent("Offline ledger sync failed: \(error.localizedDescription)")
         }

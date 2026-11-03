@@ -8,7 +8,9 @@ import {
   isBleSyncAuthorized,
   type BleSyncTx
 } from "../../src/credits/ble-sync.js";
-import { signBleTransactionV2 } from "../../src/mesh/ble/offline-ledger.js";
+import { signBleTransaction } from "../../src/mesh/ble/offline-ledger.js";
+import { bleTxSignedPayloadV2 } from "../../src/credits/ble-sync.js";
+import { signPayload } from "../../src/mesh/peer.js";
 import { createPeerKeys } from "../../src/mesh/peer.js";
 
 const requesterKeys = createPeerKeys();
@@ -35,8 +37,8 @@ function makeTx(overrides: Partial<BleSyncTx> = {}, sign: { req?: boolean; prov?
   };
   return {
     ...base,
-    requesterSignature: sign.req ? signBleTransactionV2(base, requesterKeys.privateKeyPem) : "",
-    providerSignature: sign.prov ? signBleTransactionV2(base, providerKeys.privateKeyPem) : ""
+    requesterSignature: sign.req ? signBleTransaction(base, requesterKeys.privateKeyPem) : "",
+    providerSignature: sign.prov ? signBleTransaction(base, providerKeys.privateKeyPem) : ""
   };
 }
 
@@ -60,7 +62,7 @@ describe("/credits/ble-sync auth (#41)", () => {
     expect(isBleSyncAuthorized({ agentId: "a" }, false, false)).toBe(true);
   });
 
-  test("both valid v2 signatures -> applied, balances moved", async () => {
+  test("both valid v3 signatures -> applied, balances moved", async () => {
     const { engine, deps } = setup(100);
     const out = await applyBleSyncBatch([makeTx()], deps);
     expect(out.applied).toEqual(["tx-1"]);
@@ -123,6 +125,66 @@ describe("/credits/ble-sync auth (#41)", () => {
     expect(schema.safeParse({ transactions: [{ ...tx, credits: 0 }] }).success).toBe(false);
     expect(schema.safeParse({ transactions: [{ ...tx, credits: -5 }] }).success).toBe(false);
     expect(schema.safeParse({ transactions: [{ ...tx, credits: 101 }] }).success).toBe(false);
+  });
+
+  test("tampering any signed field, credits by one milli included -> invalid_signature (#63)", async () => {
+    const tampered: Array<Partial<BleSyncTx>> = [
+      { credits: 5.001 },
+      { credits: 4.999 },
+      { cpuSeconds: 5.001 },
+      { txId: "tx-other" },
+      { taskHash: "hash-abd" },
+      { requesterId: "agent-prov" },
+      { providerId: "agent-req" }
+    ];
+    for (const change of tampered) {
+      const { engine, deps } = setup(100);
+      const out = await applyBleSyncBatch([{ ...makeTx(), ...change }], deps);
+      expect(out.skipped.map((s) => s.reason), JSON.stringify(change)).toEqual(["invalid_signature"]);
+      expect(engine.balance("agent-prov")).toBe(0);
+    }
+  });
+
+  test("tampered account ids are caught by the signature before the account check (#63)", async () => {
+    const { deps } = setup(100);
+    for (const change of [{ requesterAccountId: "agent-req2" }, { providerAccountId: "agent-prov2" }]) {
+      const out = await applyBleSyncBatch([{ ...makeTx(), ...change }], deps);
+      expect(out.skipped[0].reason).toBe("invalid_signature");
+    }
+  });
+
+  test("providerAccountId must match the provider's reward account (#63)", async () => {
+    const { deps } = setup(100);
+    const out = await applyBleSyncBatch([makeTx({ providerAccountId: "someone-else" })], deps);
+    expect(out.skipped[0].reason).toBe("account_mismatch");
+  });
+
+  test("newline in a field or sub-milli amounts -> invalid_field (#63)", async () => {
+    const { deps } = setup(100);
+    const withNewline = { ...makeTx(), txId: "tx\n1" };
+    const subMilli = { ...makeTx(), credits: 5.0004 };
+    const out = await applyBleSyncBatch([withNewline, subMilli], deps);
+    expect(out.skipped.map((s) => s.reason)).toEqual(["invalid_field", "invalid_field"]);
+  });
+
+  test("settles the exact signed milli amount", async () => {
+    const { engine, deps } = setup(100);
+    const out = await applyBleSyncBatch([makeTx({ credits: 0.003, cpuSeconds: 0.01 })], deps);
+    expect(out.applied).toEqual(["tx-1"]);
+    expect(engine.balance("agent-prov")).toBeCloseTo(0.003, 9);
+  });
+
+  test("legacy v2 JSON signatures are refused unless the compat flag allows them", async () => {
+    const base = makeTx({}, { req: false, prov: false });
+    const v2 = {
+      ...base,
+      requesterSignature: signPayload(bleTxSignedPayloadV2(base), requesterKeys.privateKeyPem),
+      providerSignature: signPayload(bleTxSignedPayloadV2(base), providerKeys.privateKeyPem)
+    };
+    const strict = setup(100);
+    expect((await applyBleSyncBatch([v2], strict.deps)).skipped[0].reason).toBe("invalid_signature");
+    const compat = setup(100);
+    expect((await applyBleSyncBatch([v2], { ...compat.deps, allowV1: true })).applied).toEqual(["tx-1"]);
   });
 
   test("v1 payloads only allowed with BLE_SYNC_ALLOW_V1=1 outside production", () => {

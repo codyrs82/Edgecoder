@@ -2971,7 +2971,9 @@ app.post("/register", async (req, reply) => {
     policy: defaultPolicy,
     mode: body.mode,
     meshToken: MESH_AUTH_TOKEN || undefined,
-    hardwareVerification: verificationSummary(hardwareRecord)
+    hardwareVerification: verificationSummary(hardwareRecord),
+    // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
+    rewardAccountId: await rewardAccountForAgent(body.agentId)
   });
 });
 

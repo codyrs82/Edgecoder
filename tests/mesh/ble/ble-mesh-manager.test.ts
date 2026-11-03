@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
+import { serveWithCosign, requesterOptions, keysFor } from "./helpers/cosign.js";
+import { bleTxV3FieldsFromWire, verifyBleTxV3 } from "../../../src/credits/ble-tx-v3.js";
 
 let store: SQLiteStore;
 
@@ -75,7 +77,7 @@ describe("BLEMeshManager", () => {
     const transportA = new MockBLETransport("agent-a", network);
     const transportB = new MockBLETransport("agent-b", network);
     transportB.startAdvertising({ agentId: "agent-b", model: "big", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
-    transportB.onTaskRequest(async (req) => ({
+    serveWithCosign(transportB, "agent-b", async (req) => ({
       requestId: req.requestId,
       providerId: "agent-b",
       status: "completed" as const,
@@ -85,7 +87,7 @@ describe("BLEMeshManager", () => {
       providerSignature: "sig-b"
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -108,7 +110,7 @@ describe("BLEMeshManager", () => {
     const transportA = new MockBLETransport("agent-a", network);
     const transportSmall = new MockBLETransport("agent-small", network);
     transportSmall.startAdvertising({ agentId: "agent-small", model: "tiny", modelParamSize: 0.5, memoryMB: 2048, batteryPct: 100, currentLoad: 0, deviceType: "phone" });
-    transportSmall.onTaskRequest(async (req) => ({
+    serveWithCosign(transportSmall, "agent-small", async (req) => ({
       requestId: req.requestId,
       providerId: "agent-small",
       status: "completed" as const,
@@ -118,7 +120,7 @@ describe("BLEMeshManager", () => {
       providerSignature: "sig-s"
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -290,12 +292,12 @@ describe("BLEMeshManager mesh token auth", () => {
     expect(result!.output).toBe("authenticated");
   });
 
-  it("propagates request and response signatures into credit transaction", async () => {
+  it("records only a co-signed transaction: both v3 signatures verify over the canonical bytes (#63)", async () => {
     const network = new Map<string, MockBLETransport>();
     const transportA = new MockBLETransport("agent-a", network);
     const transportB = new MockBLETransport("agent-b", network);
     transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
-    transportB.onTaskRequest(async (req) => ({
+    serveWithCosign(transportB, "agent-b", async (req) => ({
       requestId: req.requestId,
       providerId: "agent-b",
       status: "completed" as const,
@@ -304,7 +306,7 @@ describe("BLEMeshManager mesh token auth", () => {
       providerSignature: "provider-sig-abc",
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
     manager.setOffline(true);
     manager.refreshPeers();
     await manager.routeTask({
@@ -317,8 +319,12 @@ describe("BLEMeshManager mesh token auth", () => {
 
     const pending = manager.pendingTransactions();
     expect(pending).toHaveLength(1);
-    expect(pending[0].requesterSignature).toBe("requester-sig-xyz");
-    expect(pending[0].providerSignature).toBe("provider-sig-abc");
+    const fields = bleTxV3FieldsFromWire(pending[0]);
+    expect(fields).not.toBeNull();
+    expect(verifyBleTxV3(fields!, pending[0].requesterSignature, keysFor("agent-a").publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields!, pending[0].providerSignature, keysFor("agent-b").publicKeyPem)).toBe(true);
+    // The response's own signature is not what gets recorded.
+    expect(pending[0].providerSignature).not.toBe("provider-sig-abc");
   });
 });
 
@@ -418,7 +424,7 @@ describe("BLEMeshManager retry/failover", () => {
       cpuSeconds: 0,
       providerSignature: "",
     }));
-    transportOk.onTaskRequest(async (req) => ({
+    serveWithCosign(transportOk, "peer-ok", async (req) => ({
       requestId: req.requestId,
       providerId: "peer-ok",
       status: "completed" as const,
@@ -427,7 +433,7 @@ describe("BLEMeshManager retry/failover", () => {
       providerSignature: "sig",
     }));
 
-    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
     manager.setOffline(true);
 
     await manager.routeTask({
@@ -443,6 +449,62 @@ describe("BLEMeshManager retry/failover", () => {
     expect(pending[0].providerId).toBe("peer-ok");
     // 3B model → 0.7 multiplier → 5 * 1.0 * 0.7 = 3.5
     expect(pending[0].credits).toBe(3.5);
+  });
+});
+
+describe("BLEMeshManager co-sign step (#63)", () => {
+  function setupPair(cosign: boolean) {
+    const network = new Map<string, MockBLETransport>();
+    const transportA = new MockBLETransport("agent-a", network);
+    const transportB = new MockBLETransport("agent-b", network);
+    transportB.startAdvertising({ agentId: "agent-b", model: "qwen", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "laptop" });
+    const handler = async (req: { requestId: string }) => ({
+      requestId: req.requestId,
+      providerId: "agent-b",
+      status: "completed" as const,
+      output: "ok",
+      cpuSeconds: 1.5,
+      providerSignature: "",
+    });
+    if (cosign) serveWithCosign(transportB, "agent-b", handler);
+    else transportB.onTaskRequest(handler);
+    return { transportA, transportB };
+  }
+  const req = { requestId: "cs-1", requesterId: "agent-a", task: "t", language: "python" as const, requesterSignature: "" };
+
+  it("provider without a co-sign handler: task result returned, nothing recorded", async () => {
+    const { transportA } = setupPair(false);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
+    manager.setOffline(true);
+    const res = await manager.routeTask(req, 7);
+    expect(res?.status).toBe("completed");
+    expect(manager.pendingTransactions()).toHaveLength(0);
+  });
+
+  it("requester without a signing key records nothing", async () => {
+    const { transportA } = setupPair(true);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store);
+    manager.setOffline(true);
+    await manager.routeTask(req, 7);
+    expect(manager.pendingTransactions()).toHaveLength(0);
+  });
+
+  it("provider refuses inflated credits, a second txId, and unknown requests", async () => {
+    const { transportA, transportB } = setupPair(true);
+    const manager = new BLEMeshManager("agent-a", "account-a", transportA, store, requesterOptions("agent-a"));
+    manager.setOffline(true);
+    await manager.routeTask(req, 7);
+    const [tx] = manager.pendingTransactions();
+    expect(tx.credits).toBe(1.5);
+    const fields = bleTxV3FieldsFromWire(tx)!;
+    const ask = (over: object) => transportA.sendCosignRequest("agent-b", { type: "cosign", requestId: "cs-1", tx: { ...fields, ...over } });
+    expect((await ask({})).status).toBe("signed"); // idempotent for the same tx
+    expect((await ask({ creditMillis: fields.creditMillis + 100 })).reason).toBe("credits_out_of_tolerance");
+    expect((await ask({ txId: "another" })).reason).toBe("already_cosigned");
+    expect((await ask({ cpuMillis: fields.cpuMillis + 1 })).reason).toBe("cpu_mismatch");
+    expect((await ask({ providerAccountId: "elsewhere" })).reason).toBe("provider_account_mismatch");
+    expect((await transportA.sendCosignRequest("agent-b", { type: "cosign", requestId: "nope", tx: fields })).reason).toBe("unknown_request");
+    void transportB;
   });
 });
 

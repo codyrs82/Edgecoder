@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { BLETaskRequest, BLETaskResponse, BLEPeerEntry } from "../../common/types.js";
+import { BLETaskRequest, BLETaskResponse, BLEPeerEntry, BLECosignRequest, BLECosignResponse } from "../../common/types.js";
 
 export interface BLEAdvertisement {
   agentId: string;
@@ -15,6 +15,19 @@ export interface BLEAdvertisement {
 }
 
 export type TaskRequestHandler = (req: BLETaskRequest) => Promise<BLETaskResponse>;
+export type CosignRequestHandler = (req: BLECosignRequest) => Promise<BLECosignResponse> | BLECosignResponse;
+
+/** A co-sign answer for when the peer cannot be reached or has no co-sign handler. */
+export function cosignUnavailable(req: BLECosignRequest, reason = "unavailable"): BLECosignResponse {
+  return {
+    type: "cosign_result",
+    requestId: req.requestId,
+    txId: req.tx?.txId ?? "",
+    status: "rejected",
+    providerSignature: "",
+    reason
+  };
+}
 
 export interface BLETransport {
   startAdvertising(advertisement: BLEAdvertisement): void;
@@ -24,6 +37,9 @@ export interface BLETransport {
   discoveredPeers(): BLEPeerEntry[];
   sendTaskRequest(peerId: string, request: BLETaskRequest): Promise<BLETaskResponse>;
   onTaskRequest(handler: TaskRequestHandler): void;
+  /** #63: send the final transaction to the provider for its signature. */
+  sendCosignRequest(peerId: string, request: BLECosignRequest): Promise<BLECosignResponse>;
+  onCosignRequest(handler: CosignRequestHandler): void;
   updateAdvertisement(update: Partial<BLEAdvertisement>): void;
   currentAdvertisement(): BLEAdvertisement | null;
 }
@@ -32,6 +48,7 @@ export class MockBLETransport implements BLETransport {
   private advertisement: BLEAdvertisement | null = null;
   private scanning = false;
   private handler: TaskRequestHandler | null = null;
+  private cosignHandler: CosignRequestHandler | null = null;
 
   constructor(
     private readonly localId: string,
@@ -94,6 +111,17 @@ export class MockBLETransport implements BLETransport {
       };
     }
     return peer.handler(request);
+  }
+
+  onCosignRequest(handler: CosignRequestHandler): void {
+    this.cosignHandler = handler;
+  }
+
+  async sendCosignRequest(peerId: string, request: BLECosignRequest): Promise<BLECosignResponse> {
+    const peer = this.network.get(peerId);
+    if (!peer || !peer.cosignHandler) return cosignUnavailable(request);
+    // Round-trip through JSON like the real transport, so nothing but the wire format crosses.
+    return JSON.parse(JSON.stringify(await peer.cosignHandler(JSON.parse(JSON.stringify(request)))));
   }
 
   updateAdvertisement(update: Partial<BLEAdvertisement>): void {
