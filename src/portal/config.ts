@@ -30,6 +30,8 @@ export const portalConfigSchema = z.object({
   PORTAL_EMAIL_VERIFY_TTL_MS: ttl(1000 * 60 * 60 * 24),
   PASSKEY_CHALLENGE_TTL_MS: ttl(300_000),
   WALLET_SEND_MFA_TTL_MS: ttl(600_000),
+  /** Most sats one account can withdraw to invoices per rolling 24 h through the portal; 0 = no portal cap. */
+  PORTAL_WITHDRAW_DAILY_CAP_SATS: envInt(500_000, { min: 0, max: 2_100_000_000_000_000 }),
   MOBILE_OAUTH_TOKEN_TTL_MS: ttl(300_000),
   OAUTH_MICROSOFT_PROMPT: z.string().default("select_account"),
   PASSKEY_RP_ID: optStr,

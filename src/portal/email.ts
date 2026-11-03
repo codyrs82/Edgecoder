@@ -142,5 +142,18 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(input.email, "Confirm your new EdgeCoder payout destination", html, "payout_destination_email");
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail };
+  /** One-time code to confirm one withdrawal to a Lightning invoice (routes/payouts.ts). */
+  async function sendWithdrawCodeEmail(input: { email: string; code: string; amountSats: number }): Promise<void> {
+    if (!cfg.resendApiKey || !cfg.resendFromEmail) throw new Error("email_mfa_not_configured");
+    const html = `
+      <p>Someone asked to withdraw <strong>${input.amountSats.toLocaleString("en-US")} sats</strong> from your EdgeCoder balance to a Lightning invoice.</p>
+      <p>Your one-time code is:</p>
+      <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
+      <p>The code works once, only for that invoice, and expires in ${Math.floor(cfg.walletSendMfaTtlMs / 60000)} minutes.</p>
+      <p>If you did not ask for this, do not share the code and change your password now.</p>
+    `;
+    await sendResendEmail(input.email, "Confirm your EdgeCoder withdrawal", html, "withdraw_code_email");
+  }
+
+  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail };
 }

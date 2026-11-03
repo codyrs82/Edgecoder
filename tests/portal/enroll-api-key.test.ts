@@ -14,6 +14,8 @@ describe("POST /nodes/enroll accepts a portal API key", () => {
     const store = {
       userForApiKeyHash: async (h: string) => keys.get(h) ?? null,
       getUserById: async (id: string) => users[id] ?? null,
+      getNodeEnrollment: async (id: string) => nodes.get(id) ?? null,
+      getNodeEnrollmentByDeviceId: async () => null,
       upsertNodeEnrollment: async (r: any) => {
         const prev = nodes.get(r.nodeId);
         if (prev && prev.ownerUserId !== r.ownerUserId) return null;
