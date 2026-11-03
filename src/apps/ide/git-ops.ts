@@ -10,6 +10,7 @@
 
 import { execFile } from "node:child_process";
 import { ProjectFs, ProjectFsError } from "./project-fs.js";
+import { GitSetupError, ghCreateRepo, ghCredentialConfig, validGitHubRepoName } from "./git-setup.js";
 
 export interface GitFile {
   path: string;
@@ -27,6 +28,10 @@ export interface GitState {
   staged: GitFile[];
   unstaged: GitFile[];
   branches: string[];
+  /** Remote names (origin first when present). */
+  remotes: string[];
+  /** False before the first commit. */
+  hasCommits: boolean;
 }
 
 export class GitError extends Error {}
@@ -76,12 +81,13 @@ export class GitOps {
     } catch {
       return null;
     }
-    const st: GitState = { branch: null, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: [] };
+    const st: GitState = { branch: null, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: [], remotes: [], hasCommits: false };
     const recs = raw.split("\0");
     for (let i = 0; i < recs.length; i++) {
       const r = recs[i];
       if (!r) continue;
-      if (r.startsWith("# branch.head ")) st.branch = r.slice(14) === "(detached)" ? null : r.slice(14);
+      if (r.startsWith("# branch.oid ")) st.hasCommits = r.slice(13) !== "(initial)";
+      else if (r.startsWith("# branch.head ")) st.branch = r.slice(14) === "(detached)" ? null : r.slice(14);
       else if (r.startsWith("# branch.upstream ")) st.upstream = r.slice(18);
       else if (r.startsWith("# branch.ab ")) {
         const m = /\+(\d+) -(\d+)/.exec(r);
@@ -107,7 +113,56 @@ export class GitOps {
     } catch {
       // no commits yet
     }
+    st.remotes = await this.remotes();
     return st;
+  }
+
+  private async remotes(): Promise<string[]> {
+    try {
+      const names = (await this.git(["remote"])).split("\n").map((r) => r.trim()).filter(Boolean);
+      return names.includes("origin") ? ["origin", ...names.filter((n) => n !== "origin")] : names;
+    } catch {
+      return [];
+    }
+  }
+
+  /** `git init` here, on a branch named main (git's default may still be master). */
+  async init(): Promise<void> {
+    if (await this.state()) throw new GitError("This folder is already a git repository.");
+    await this.git(["init"]);
+    const head = (await this.git(["symbolic-ref", "--short", "HEAD"])).trim();
+    if (head === "master") await this.git(["symbolic-ref", "HEAD", "refs/heads/main"]);
+  }
+
+  /** Add a remote. The URL is validated by the caller (normalizeRemoteUrl). */
+  async addRemote(name: string, url: string): Promise<void> {
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(name) || name.startsWith("-")) throw new GitError(`"${name}" isn't a valid remote name.`);
+    if ((await this.remotes()).includes(name)) throw new GitError(`A remote named ${name} already exists.`);
+    await this.git(["remote", "add", "--", name, url]);
+  }
+
+  /**
+   * Publish to a new GitHub repository with gh: init if needed, make a first commit of every
+   * non-ignored file if there are no commits yet, create the repository as origin, push with -u.
+   */
+  async publishGitHub(name: string, visibility: "public" | "private"): Promise<{ url: string; output: string }> {
+    if (!validGitHubRepoName(name)) throw new GitError(`"${name}" isn't a valid GitHub repository name.`);
+    if (!(await this.state())) await this.init();
+    const st = (await this.state())!;
+    if (st.remotes.includes("origin")) throw new GitError("This repository already has an origin remote. Use Publish Branch to push to it.");
+    if (!st.branch) throw new GitError("Check out a branch before publishing.");
+    if (!st.hasCommits) {
+      await this.git(["add", "-A"]);
+      await this.git(["commit", "--allow-empty", "-m", "Initial commit"]);
+    }
+    let url: string;
+    try {
+      url = await ghCreateRepo(this.root, name, visibility);
+    } catch (err) {
+      if (err instanceof GitSetupError) throw new GitError(err.message);
+      throw err;
+    }
+    return { url, output: await this.push() };
   }
 
   /** A file's content at HEAD (the diff's "before"); null when it is not in HEAD. */
@@ -164,10 +219,19 @@ export class GitOps {
     return (await this.git(["pull", "--ff-only"], { timeoutMs: 120_000 })).trim();
   }
 
+  /** Push; a branch with no upstream is published with `-u <origin, else the first remote> <branch>`. */
   async push(): Promise<string> {
     const st = await this.state();
-    const args = st?.upstream ? ["push"] : ["push", "-u", "origin", st?.branch ?? "HEAD"];
-    // git push reports progress on stderr; success has nothing on stdout.
-    return (await this.git(args, { timeoutMs: 120_000 })).trim() || "Pushed.";
+    let args: string[];
+    if (st?.upstream) args = ["push"];
+    else {
+      const remote = st?.remotes[0];
+      if (!remote) throw new GitError("This repository has no remote yet. Publish it to GitHub or add a remote first.");
+      if (!st?.branch) throw new GitError("Check out a branch before publishing.");
+      args = ["push", "-u", "--", remote, st.branch];
+    }
+    // gh's login as a fallback credential for github.com; git push reports progress on stderr.
+    const out = (await this.git([...ghCredentialConfig(), ...args], { timeoutMs: 120_000 })).trim();
+    return out || (st?.upstream ? "Pushed." : `Published ${st!.branch}.`);
   }
 }
