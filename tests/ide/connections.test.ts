@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request } from "undici";
@@ -38,7 +38,20 @@ describe("connections", () => {
     await expect(mgr.create({ name: "B", target: "local", model: "m", port: 4393 })).rejects.toThrow(/used by another connection/);
     await expect(mgr.create({ name: "C", target: "local", model: "m", port: 4304 })).rejects.toThrow(/doesn't already use/);
     await expect(mgr.create({ name: "D", target: "network", model: "m" })).rejects.toThrow(/isn't connected/);
-    expect(mgr.nextPort()).toBe(4310);
+    expect(mgr.nextPort()).toBe(4311);
+  });
+
+  it("keeps the portal's port 4310 free for new connections but lets a saved one keep it", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "conn-")), "connections.json");
+    const saved = { id: "old43100", name: "Old", port: 4310, key: "ec-old", target: "local", model: "m", spentCSats: 0, enabled: false, createdAtMs: 1 };
+    writeFileSync(file, JSON.stringify({ connections: [saved] }));
+    mgr = new ConnectionManager({ ollamaHost: "http://127.0.0.1:9", file });
+    mgr.load();
+    expect(mgr.nextPort()).toBe(4311);
+    await expect(mgr.create({ name: "New", target: "local", model: "m", port: 4310, enabled: false })).rejects.toThrow(/doesn't already use/);
+    const renamed = await mgr.update("old43100", { name: "Renamed" });
+    expect(renamed.port).toBe(4310);
+    expect(renamed.name).toBe("Renamed");
   });
 
   it("stops at its budget", async () => {

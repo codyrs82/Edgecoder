@@ -136,7 +136,7 @@
 
   // Setup steps for the selected connection
   let sel = $derived(conns.find((c) => c.id === selectedId) ?? conns[0]);
-  let base = $derived(sel ? `http://127.0.0.1:${sel.port}` : "http://127.0.0.1:4310");
+  let base = $derived(sel ? `http://127.0.0.1:${sel.port}` : "http://127.0.0.1:4311");
   let key = $derived(sel?.key ?? "<key>");
   let modelName = $derived(sel?.model ?? "qwen3.5:9b");
   let hostedBase = $derived(portalWebUrl(""));

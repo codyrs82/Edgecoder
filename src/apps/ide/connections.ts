@@ -47,8 +47,13 @@ export interface ConnectionStatus extends Connection {
   error?: string;
 }
 
-export const FIRST_CONNECTION_PORT = 4310;
-const RESERVED_PORTS = new Set([4301, 4302, 4303, 4304, 4305, 4306]);
+/**
+ * Ports EdgeCoder's own services use locally: coordinator, inference, control plane and the other
+ * dev services on 4301-4306, and the portal on 4310 (src/portal/server.ts). New connections start
+ * just above them.
+ */
+export const RESERVED_PORTS: ReadonlySet<number> = new Set([4301, 4302, 4303, 4304, 4305, 4306, 4310]);
+export const FIRST_CONNECTION_PORT = 4311;
 
 export function connectionsFile(): string {
   return process.env.EDGECODER_CONNECTIONS_FILE ?? join(homedir(), ".edgecoder", "connections.json");
@@ -121,7 +126,7 @@ export class ConnectionManager {
     return this.conns.find((c) => c.id === id);
   }
 
-  /** The next free port from 4310 that no connection uses. */
+  /** The next free port from FIRST_CONNECTION_PORT that no connection or EdgeCoder service uses. */
   nextPort(): number {
     const used = new Set(this.conns.map((c) => c.port));
     let p = FIRST_CONNECTION_PORT;
@@ -135,7 +140,10 @@ export class ConnectionManager {
     if (c.target !== "auto" && !c.model?.trim()) return "Pick a model.";
     if (c.target === "auto" && !this.deps.auto) return "Auto isn't available on this computer.";
     if (c.target === "reserved" && !c.reservationId) return "Pick a reservation.";
-    if (c.port !== undefined && (!Number.isInteger(c.port) || c.port < 1024 || c.port > 65535 || RESERVED_PORTS.has(c.port))) return "Use a port from 1024 to 65535 that EdgeCoder doesn't already use (4301–4306).";
+    // A connection saved on a port that has since been reserved (4310 before the portal clash was
+    // fixed) keeps it, so editing it doesn't fail; new or changed ports must avoid the reserved set.
+    const keepsSavedPort = c.id !== undefined && this.conns.some((o) => o.id === c.id && o.port === c.port);
+    if (c.port !== undefined && (!Number.isInteger(c.port) || c.port < 1024 || c.port > 65535 || (RESERVED_PORTS.has(c.port) && !keepsSavedPort))) return "Use a port from 1024 to 65535 that EdgeCoder doesn't already use (4301–4306, 4310).";
     if (c.port !== undefined && this.conns.some((o) => o.port === c.port && o.id !== c.id)) return `Port ${c.port} is used by another connection.`;
     if (c.target !== "local" && c.target !== "auto" && !this.deps.network) return "This computer's agent isn't connected to the network.";
     return null;
