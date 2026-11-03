@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { BitcoinNetwork } from "../../common/types.js";
 import { PAYABLE_DESTINATION_KINDS, validatePayoutDestination } from "../../economy/payout-destination.js";
 import type { PayoutDestinationChallenge, PayoutDestinationRecord } from "../store.js";
+import type { CallbackChange } from "./payout-callback.js";
 
 /**
  * "Where should we pay you?" (/wallet/payout-destination). The user gives a Lightning address
@@ -45,6 +46,8 @@ export interface PayoutDestinationRouteDeps {
   generateSixDigitCode: () => string;
   sha256Hex: (v: string) => string;
   secureCompare: (a: string, b: string) => boolean;
+  /** The destination's pending payment-server change (routes/payout-callback.ts); omitted = not shown. */
+  callbackChange?: (accountId: string, destination: string) => Promise<CallbackChange | null | undefined>;
 }
 
 /** Registers the destination with the control plane and the coordinator. Best effort: failures are reported, not thrown. */
@@ -96,6 +99,7 @@ export function registerPayoutDestinationRoutes(app: FastifyInstance, d: PayoutD
   const view = async (userId: string) => {
     const store = d.store!;
     const [current, legacy] = await Promise.all([store.getPayoutDestination(userId), store.getWalletOnboardingByUserId(userId)]);
+    const change = current && current.kind === "lightning_address" && d.callbackChange ? await d.callbackChange(`acct-${userId}`, current.destination).catch(() => undefined) : null;
     return {
       accountId: `acct-${userId}`,
       network: d.network,
@@ -105,7 +109,9 @@ export function registerPayoutDestinationRoutes(app: FastifyInstance, d: PayoutD
       legacyAddressRetired: Boolean(legacy),
       supportedKinds: [...PAYABLE_DESTINATION_KINDS],
       onchainSupported: PAYABLE_DESTINATION_KINDS.has("onchain"),
-      changeRequiresEmailCode: true
+      changeRequiresEmailCode: true,
+      /** The wallet's payment server (LNURL callback host) changed; payouts are held until confirmed with an email code. */
+      callbackChange: change ? { previousOrigin: change.previousOrigin, newOrigin: change.newOrigin, changedAtMs: change.changedAtMs ?? null } : null
     };
   };
 

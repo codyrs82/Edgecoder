@@ -6,12 +6,14 @@ import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../com
 import type { LightningProvider } from "./lightning.js";
 import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
 import type { ReconcileLedger } from "./payout-reconcile.js";
+import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck } from "./lnurl-callback-pin.js";
 import {
   distributeFeePool,
   payableMsat,
   payoutCapacityMsat,
   preimageMatches,
   requestLnurlInvoice,
+  resolveLnurlCallback,
   validatePayoutRequest,
   type JsonFetcher,
   type PayoutPolicy
@@ -189,9 +191,18 @@ export interface PayoutServiceDeps {
   limits?: PayoutLimits;
   /** Kill switch; when paused nothing leaves the node and the fee pool is not distributed. */
   pause?: PayoutPauseControl;
-  /** Security events (cap hits, payments refused while paused). */
-  onSecurityEvent?: (event: "payout_limit_exceeded" | "payout_blocked_paused", details: Record<string, unknown>) => void;
+  /** Security events (cap hits, payments refused while paused, a changed LNURL callback host). */
+  onSecurityEvent?: (event: "payout_limit_exceeded" | "payout_blocked_paused" | "payout_callback_changed", details: Record<string, unknown>) => void;
+  /** LNURL callback pins (lnurl-callback-pin.ts); omitted = no pinning. */
+  pins?: CallbackPinStore;
+  /**
+   * Tell the owner a destination's callback host changed. Called once per change (the claim is
+   * atomic across seeds); return false (or throw) when delivery failed so the next cycle retries.
+   */
+  onCallbackChanged?: (info: { accountId: string; destination: string; previousOrigin: string; newOrigin: string }) => Promise<boolean>;
 }
+
+export type CallbackChangedResult = { ok: false; code: "callback_changed"; detail: string; previousOrigin: string; newOrigin: string };
 
 export type FeePoolDistribution = {
   distributedMsat: number;
@@ -313,14 +324,63 @@ export class PayoutService {
       // Leave room for the routing fee cap inside the payable balance.
       const amount = Math.floor((bal.payableMsat * 10_000) / (10_000 + this.d.policy.maxFeeBps)) - this.d.policy.minFeeFloorSats * 1000;
       if (amount < min) continue;
+      let refused: PinCheck | null = null;
       try {
-        const { bolt11 } = await requestLnurlInvoice(lightningAddress, amount, fetcher, this.d.policy.network);
+        const { bolt11 } = await requestLnurlInvoice(lightningAddress, amount, fetcher, this.d.policy.network, {
+          beforeCallback: async (callbackUrl) => {
+            const check = await this.checkPin(accountId, lightningAddress, callbackUrl);
+            if (check && !check.ok) {
+              refused = check;
+              throw new Error("callback_changed");
+            }
+          }
+        });
         out.push({ accountId, result: await this.withdraw(accountId, bolt11, "auto", lightningAddress) });
       } catch (err) {
-        out.push({ accountId, result: { ok: false, code: "lnurl_failed", detail: err instanceof Error ? err.message : String(err) } });
+        const r = refused as PinCheck | null;
+        if (r && !r.ok) out.push({ accountId, result: await this.callbackChanged(accountId, lightningAddress, r) });
+        else out.push({ accountId, result: { ok: false, code: "lnurl_failed", detail: err instanceof Error ? err.message : String(err) } });
       }
     }
     return out;
+  }
+
+  private async checkPin(accountId: string, destination: string, callbackUrl: string): Promise<PinCheck | null> {
+    if (!this.d.pins) return null;
+    return checkCallbackPin(this.d.pins, accountId, destination, callbackOrigin(callbackUrl), (this.d.now ?? Date.now)());
+  }
+
+  /** Payout held: nothing is reserved, so the earnings stay payable. Notifies the owner once per change. */
+  private async callbackChanged(accountId: string, destination: string, r: Extract<PinCheck, { ok: false }>): Promise<CallbackChangedResult> {
+    const { previousOrigin, newOrigin } = r;
+    this.d.onSecurityEvent?.("payout_callback_changed", { accountId, destination, previousOrigin, newOrigin });
+    this.d.log?.warn({ accountId, destination, previousOrigin, newOrigin }, "payout_callback_changed");
+    const pins = this.d.pins;
+    if (pins && this.d.onCallbackChanged) {
+      const claimed = await pins.claimCallbackNotification(accountId, destination, (this.d.now ?? Date.now)());
+      if (claimed) {
+        const delivered = await this.d.onCallbackChanged({ accountId, destination, previousOrigin: claimed.origin, newOrigin: claimed.changedOrigin ?? newOrigin }).catch(() => false);
+        if (!delivered) await pins.releaseCallbackNotification(accountId, destination);
+      }
+    }
+    return { ok: false, code: "callback_changed", detail: `payment server changed from ${previousOrigin} to ${newOrigin}; held until the owner confirms`, previousOrigin, newOrigin };
+  }
+
+  /**
+   * Resolve a destination's callback now and pin it (save time). Best effort: a destination that
+   * does not resolve is pinned at its first payout instead. A mismatch is recorded and notified.
+   */
+  async pinDestination(accountId: string, destination: string): Promise<{ ok: true; origin: string; pinned: "new" | "match" } | CallbackChangedResult | { ok: false; code: "not_pinned"; detail: string }> {
+    if (!this.d.pins || !this.d.fetcher) return { ok: false, code: "not_pinned", detail: "pinning not configured" };
+    let callbackUrl: string;
+    try {
+      callbackUrl = await resolveLnurlCallback(destination, this.d.fetcher);
+    } catch (err) {
+      return { ok: false, code: "not_pinned", detail: err instanceof Error ? err.message : String(err) };
+    }
+    const check = (await this.checkPin(accountId, destination, callbackUrl))!;
+    if (!check.ok) return this.callbackChanged(accountId, destination, check);
+    return { ok: true, origin: check.pin.origin, pinned: check.pinned };
   }
 
   /**

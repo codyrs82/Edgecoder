@@ -1,6 +1,8 @@
 <script lang="ts">
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import { open as openUrl } from "@tauri-apps/plugin-shell";
   import {
+    portalWebUrl,
     getPayoutDestination,
     savePayoutDestination,
     getWalletSendRequests,
@@ -9,6 +11,13 @@
   } from "../lib/api";
 
   let payout = $state<PayoutDestinationView | null>(null);
+  const originHost = (o: string) => {
+    try {
+      return new URL(o).host;
+    } catch {
+      return o;
+    }
+  };
   let sendRequests = $state<WalletSendRequest[]>([]);
   let loading = $state(true);
   let error = $state("");
@@ -100,6 +109,13 @@
         (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.
         On-chain Bitcoin addresses are not supported for payouts yet.
       </p>
+      {#if payout?.callbackChange}
+        <p class="notice" role="alert">
+          Your wallet's payment server changed from {originHost(payout.callbackChange.previousOrigin)} to {originHost(payout.callbackChange.newOrigin)}.
+          Confirm to keep receiving payouts. Payouts are paused until then and your earnings are kept.
+          <button class="btn-primary" onclick={() => openUrl(portalWebUrl("/portal/settings/plan"))}>Confirm in the portal ↗</button>
+        </p>
+      {/if}
       {#if payout?.legacyAddressRetired && !payout?.destination}
         <p class="notice">
           The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.

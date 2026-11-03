@@ -743,6 +743,8 @@ export interface PayoutDestinationView {
   supportedKinds: string[];
   onchainSupported: boolean;
   registration?: { controlPlane: string; coordinator: string };
+  /** The wallet's payment server changed; payouts are held until confirmed in the portal with an email code. */
+  callbackChange?: { previousOrigin: string; newOrigin: string; changedAtMs: number | null } | null;
 }
 
 export type PayoutDestinationSaveResult =
