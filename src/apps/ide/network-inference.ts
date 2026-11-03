@@ -189,18 +189,50 @@ export interface ComputeOverview {
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
   models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
+  /** How this machine's agent chose its coordinator (signed registry + latency), from /forward/health. */
+  steering?: CoordinatorSteeringView | null;
+}
+
+/** The agent's last steering decision as the app shows it (src/discovery/steering.ts SteeringResult). */
+export interface CoordinatorSteeringView {
+  url: string;
+  source: "registry" | "fallback";
+  peerId?: string;
+  region?: string;
+  latencyMs?: number;
+  reason: string;
+  decidedAtMs: number;
+}
+
+function steeringView(raw: unknown): CoordinatorSteeringView | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.url !== "string" || (r.source !== "registry" && r.source !== "fallback")) return null;
+  return {
+    url: r.url,
+    source: r.source,
+    ...(typeof r.peerId === "string" ? { peerId: r.peerId } : {}),
+    ...(typeof r.region === "string" ? { region: r.region } : {}),
+    ...(typeof r.latencyMs === "number" ? { latencyMs: r.latencyMs } : {}),
+    reason: typeof r.reason === "string" ? r.reason : "",
+    decidedAtMs: typeof r.decidedAtMs === "number" ? r.decidedAtMs : 0,
+  };
 }
 
 /** Balance, prices per class and the network's models, for the app's Compute page. */
 export async function computeOverview(d: NetworkDeps): Promise<ComputeOverview> {
-  const [acct, cat] = await Promise.all([
+  const [acct, cat, health] = await Promise.all([
     call(d, "POST", "/account/summary", {}).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
     call(d, "GET", "/inference/models").catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+    // The local forwarder's own state (which coordinator steering picked); not a coordinator route.
+    d.transport ? Promise.resolve(null) : call(d, "GET", "/health").catch(() => null),
   ]);
   if (acct.status !== 200 && cat.status !== 200) return { connected: false };
+  const steering = health?.status === 200 ? steeringView(health.json.steering) : null;
   return {
     connected: true,
     selfAgentId: d.agentId,
+    ...(steering ? { steering } : {}),
     ...(acct.status === 200 ? { account: acct.json as unknown as ComputeOverview["account"] } : {}),
     ...(cat.status === 200 ? { classes: cat.json.classes as ComputeOverview["classes"], models: cat.json.models as ComputeOverview["models"] } : {}),
   };

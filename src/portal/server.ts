@@ -63,7 +63,7 @@ import {
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
 import { edgeModeFrom, parseOriginList, registerPortalSecurity } from "./security.js";
-import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
+import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
@@ -976,7 +976,7 @@ await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
 }); // end /internal plugin (#40)
 
-registerEscalationRoutes(app, { getCurrentUser, buildAccessContext });
+registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
 
 // DNS staleness sweep (src/portal/dns-sweep.ts).
 startDnsStaleSweep(store);

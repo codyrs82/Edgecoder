@@ -154,3 +154,9 @@ coordinators. The routing is by steering, not by proxying.
   community pool is empty.
 - **Routing cost:** latency first, then the coordinator's load and the market's depth for the
   class you asked for.
+
+**Code side built (2026-11-02):** the signed registry (`GET /network/registry` on the portal,
+mirrored by every coordinator), portal health checks, admission rules as data, and client
+steering by latency with hysteresis in the agent and the desktop app. It stays off until the
+registry key is generated and its public half is pinned; see docs/discovery.md, "Signed registry
+and steering". Latency DNS for `coordinator.edgecoder.io` is a later ops step (same section).

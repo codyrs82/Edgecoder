@@ -146,13 +146,27 @@
     });
   });
 
-  // Which coordinator this computer is connected through (from the account summary).
-  let meshStatus = $state<"loading" | { url: string; machines: number; agents: number } | null>("loading");
+  // Which coordinator this computer is connected through: the agent's steering pick (signed registry,
+  // lowest latency) when there is one, else the coordinator the account summary came from.
+  type MeshStatus = { url: string; machines: number; agents: number; region: string | null; latencyMs: number | null; steered: boolean; fallbackReason: string | null };
+  let meshStatus = $state<"loading" | MeshStatus | null>("loading");
   $effect(() => {
     computeOverview()
       .then((ov) => {
         const a = ov.account;
-        meshStatus = a?.coordinator ? { url: a.coordinator.url, machines: (a.machines ?? []).filter((m) => m.online).length, agents: a.networkAgents ?? 0 } : null;
+        const s = ov.steering ?? null;
+        const url = s?.source === "registry" ? s.url : a?.coordinator?.url;
+        meshStatus = url && a
+          ? {
+              url,
+              machines: (a.machines ?? []).filter((m) => m.online).length,
+              agents: a.networkAgents ?? 0,
+              region: s?.source === "registry" ? s.region ?? null : null,
+              latencyMs: s?.source === "registry" ? s.latencyMs ?? null : null,
+              steered: s?.source === "registry",
+              fallbackReason: s?.source === "fallback" ? s.reason : null,
+            }
+          : null;
       })
       .catch(() => (meshStatus = null));
   });
@@ -225,9 +239,18 @@
       {:else if meshStatus}
         <div class="input-row">
           <code>{meshStatus.url}</code>
+          {#if meshStatus.region}<span class="badge" title="Coordinator region">{meshStatus.region}</span>{/if}
+          {#if meshStatus.latencyMs !== null}<span class="badge" title="Median /identity round trip">{meshStatus.latencyMs} ms</span>{/if}
           <span class="badge valid">Joined</span>
         </div>
-        <span class="hint">This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.</span>
+        <span class="hint">
+          {#if meshStatus.steered}
+            Chosen as the fastest healthy coordinator in EdgeCoder's signed registry; its identity key matched the registry.
+          {:else if meshStatus.fallbackReason}
+            Using the default coordinator (the coordinator registry was not usable: {meshStatus.fallbackReason.split(":")[0].replaceAll("_", " ")}).
+          {/if}
+          This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.
+        </span>
       {:else}
         <span class="hint">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
       {/if}

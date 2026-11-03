@@ -44,6 +44,12 @@ Coordinators (`edgecoder-seed*.fly.dev`) are reached directly by agents and by t
 are authenticated with the mesh token and are not behind the proxy. Agents never need the
 portal's Fly hostname; the desktop and iOS apps use `PORTAL_PUBLIC_URL`.
 
+`coordinator.edgecoder.io` stays a plain DNS name, not a proxied one. Clients choose a
+coordinator from the signed registry (docs/discovery.md, "Signed registry and steering"). Making
+the name itself answer with the nearest healthy coordinator needs a latency-aware DNS service:
+Cloudflare Load Balancing in DNS-only mode, or Route 53 latency records with health checks. That
+is a later ops step, and the same section of docs/discovery.md describes what it needs.
+
 ## 2. Syndicating the UI
 
 Three layers, cheapest first. All of them are set up by the scripts in this repo.

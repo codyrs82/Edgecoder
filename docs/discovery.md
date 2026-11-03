@@ -154,6 +154,159 @@ default. `PORTAL_DISCOVERY=selector` switches it to the scored selector over the
 **Coordinators** (`src/swarm/coordinator.ts`): always serve `/discovery/*`; announce on Nostr only
 with `EDGECODER_NOSTR_ANNOUNCE=1`.
 
+## Signed registry and steering
+
+The decision in docs/ROADMAP.md ("Global coordinator entry points") is one URL for the whole
+platform, `coordinator.edgecoder.io`. Behind it is a pool of EdgeCoder seeds and admitted community
+coordinators. Clients pick from that pool by latency and health. This is steering, not proxying:
+the client talks to the chosen coordinator directly, and nothing in the middle sees its traffic.
+
+Code: `src/discovery/registry.ts` (format, signing, verification, pinned keys),
+`src/discovery/steering.ts` (client), `src/discovery/registry-mirror.ts` (coordinator mirror),
+`src/portal/coordinator-registry.ts` (pool, admission, health checks, routes).
+Tests: `tests/discovery/registry.test.ts`, `tests/discovery/steering.test.ts`,
+`tests/portal/coordinator-registry.test.ts`.
+
+### The registry document
+
+The portal serves `GET /network/registry`:
+
+```json
+{
+  "format": "edgecoder-registry/1",
+  "keyId": "<sha256 hex of the registry key's SPKI DER>",
+  "payload": "{\"v\":1,\"network\":\"edgecoder\",\"issuedAtMs\":...,\"expiresAtMs\":...,\"coordinators\":[...],\"fallbackUrls\":[...]}",
+  "signature": "<base64 Ed25519 over the payload bytes>"
+}
+```
+
+The signature covers the exact `payload` string, so no canonical JSON is needed. Each entry in
+`coordinators` carries:
+
+- `peerId` and `publicKeyFingerprint` (the `fingerprint` that `GET /identity` reports)
+- `urls` and `region`
+- `operator` (`id`, `name`, `kind`: `edgecoder` or `community`)
+- `admission` (`verifiedOperator`, `publishedKey`, `stakeSats`)
+- `admittedAtMs`
+- `health` (`status`: `healthy`, `unhealthy` or `unknown`, plus `checkedAtMs`, `latencyMs`,
+  `reason`, `consecutiveFailures`)
+
+A document is valid for 15 minutes (`REGISTRY_TTL_MS`). The portal signs it again after each
+health round, or when a third of that lifetime has passed.
+
+Every coordinator also serves `GET /network/registry`. It relays the portal's document, caches it
+for 30 s, and keeps serving the last good copy while the portal is down. The upstream is
+`REGISTRY_UPSTREAM_URL`, else `PORTAL_SERVICE_URL`, else `PORTAL_PUBLIC_URL`, each with
+`/network/registry` appended. The mirror is untrusted by design, because clients check the
+signature themselves. This is why the single platform URL hands the registry out too.
+
+### Pool, admission and health (portal)
+
+- **Seeds:** `REGISTRY_SEEDS` lists EdgeCoder's own coordinators as a comma list of
+  `peerId:fingerprint@url[=region]`. Use the `trustEntry` from each seed's `/identity`, then its
+  URL. Repeat an entry to give a seed a second URL.
+- **Community coordinators:** a system admin adds them with
+  `POST /admin/network/registry/admissions`. This is a stub workflow, and the records are kept in
+  `REGISTRY_POOL_FILE` as JSON. `POST /admin/network/registry/suspend` takes `{ peerId, suspended }`.
+  `GET /admin/network/registry` lists every member with its admission problems and health.
+- **Admission rules** (`admissionProblems`):
+  - Every member needs a published key and valid URLs.
+  - A community member also needs `verifiedOperator` and https URLs.
+  - `stakeSats` is recorded but not enforced yet. The same goes for uptime history and the
+    reliability score.
+  - Members that fail a rule, or are suspended, are not published.
+- **Health:** every `REGISTRY_HEALTH_INTERVAL_MS` (default 60 s), each URL of each published member
+  is checked in two steps:
+  1. `GET /identity`: the peerId must match, and the key must match the fingerprint.
+  2. `GET /health/runtime`: it must return 2xx and not `ok: false`.
+- **Marking:**
+  - A wrong identity marks the member `unhealthy` at once.
+  - Network or health failures mark it `unhealthy` after 2 consecutive rounds.
+  - A healthy member is published with only the URLs that passed.
+  - Unhealthy members stay in the document, marked, and clients exclude them.
+
+### Clients (agent and desktop app)
+
+`createCoordinatorSteering` runs in the agent (`src/swarm/worker-runner.ts`). The desktop app's
+bundled agent is the same worker, so the app gets the same choice. Each round:
+
+1. **Fetch the registry.** It tries `<configured coordinator URL>/network/registry`, then
+   `<PORTAL_URL>/network/registry` (override both with `EDGECODER_REGISTRY_URLS`), then the cached
+   copy in the agent's local store.
+2. **Verify it.** The signature must check out against a pinned registry key, and the document
+   must not have expired (5 min of clock skew is allowed). An unsigned, badly signed, expired or
+   replayed document is never used. A replayed document is one older than the newest already
+   seen.
+3. **Measure latency.** For every `healthy` entry, the client sends 3 sequential `GET /identity`
+   round trips and takes the median. Every answer must carry the registry's peerId and a key
+   that matches the registry's fingerprint, or the coordinator is skipped.
+4. **Pick one.** The lowest median wins. Hysteresis keeps the current coordinator unless the best
+   is more than 25% faster and more than 25 ms faster.
+5. **Fall back** to the configured URL (`coordinator.edgecoder.io`, the seeds) when there is no
+   pinned key, no valid registry, or no verified healthy coordinator.
+
+The keys listed in the verified registry go into the pinned-key store
+(`PinnedKeyStore.setRegistryEntries`). The trust gate then accepts a registry-listed coordinator,
+even in strict mode, with exactly the listed key. A static `TRUSTED_COORDINATOR_KEYS` entry for
+the same peerId still wins.
+
+A signed registry pick also takes precedence over unsigned discovery (DNS, Nostr and the portal's
+`/nodes/discover-coordinator`). The agent steers again every `EDGECODER_STEERING_INTERVAL_MS`
+(default 10 min) and on every failover. Steering is off when:
+
+- the coordinator is a loopback URL,
+- `EDGECODER_STEERING=off` is set, or
+- no registry key is pinned.
+
+The agent's local forwarder reports the last decision on `/forward/health`. The IDE provider adds
+it to `/v1/ide/compute` as `steering`. The app shows it in Settings, under "Connected
+through", as the coordinator, its region and its latency.
+
+### Turning steering on (operator)
+
+1. **Generate the registry key, offline.** Keep the private half in a secret manager, never in
+   the repo:
+
+   ```bash
+   openssl genpkey -algorithm ed25519 -out registry-signing.pem
+   openssl pkey -in registry-signing.pem -pubout -out registry-public.pem
+   ```
+
+2. **Configure the portal.**
+
+   ```bash
+   fly secrets set -a edgecoder-portal \
+     REGISTRY_SIGNING_KEY_PEM="$(cat registry-signing.pem)" \
+     REGISTRY_SEEDS="$(curl -s https://edgecoder-seed.fly.dev/identity | jq -r .trustEntry)@https://edgecoder-seed.fly.dev=ord,$(curl -s https://edgecoder-seed-eu.fly.dev/identity | jq -r .trustEntry)@https://edgecoder-seed-eu.fly.dev=ams"
+   ```
+
+   Then check that `curl https://edgecoder.io/network/registry/public-key` shows the key, and that
+   `curl https://edgecoder.io/network/registry` lists both seeds as `healthy` after a minute.
+
+3. **Publish the public key.** Put the PEM from `registry-public.pem` (or its 64-hex raw key) in
+   `DEFAULT_REGISTRY_PUBLIC_KEYS` in `src/discovery/registry.ts`, then release the agent and the
+   desktop app. Until that release ships, set `EDGECODER_REGISTRY_PUBLIC_KEYS` on agents to turn
+   steering on. Also publish the key where operators can compare it, for example the docs site.
+4. **Rotate the key** by pinning the new key next to the old one (the list takes several keys),
+   releasing, switching `REGISTRY_SIGNING_KEY_PEM`, and dropping the old key in a later release.
+
+### Latency DNS (later ops step)
+
+`coordinator.edgecoder.io` is a plain GoDaddy record today, so a client's first contact always
+lands on the seeds, and steering happens after that. That is enough for correctness. To also make
+the first contact the nearest healthy coordinator, the name needs a DNS provider that steers by
+latency or geography with health checks:
+
+- **Cloudflare Load Balancing:** pools per region, health monitors on `/health/runtime`, and
+  dynamic (latency) or geo steering. Keep the record DNS-only (grey cloud) so TLS is not
+  terminated in the middle. Moving the zone to Cloudflare is covered in
+  docs/edge-and-redundancy.md.
+- **Route 53:** latency-based or geolocation records with health checks.
+
+Either one can be fed from the same registry, with healthy entries becoming pool members. Every
+coordinator in that pool needs a certificate for `coordinator.edgecoder.io`. Clients still
+verify the key over `/identity`, so DNS stays a hint and never becomes a trust anchor.
+
 ## Environment variables
 
 | Variable | Used by | Default | Meaning |
@@ -172,6 +325,16 @@ with `EDGECODER_NOSTR_ANNOUNCE=1`.
 | `EDGECODER_DISCOVERY_MARGIN` | agent | `0.2` | Stickiness margin |
 | `PORTAL_DISCOVERY` | portal | `ordered` | `selector` enables the scored picker |
 | `PORTAL_DISCOVERY_SOURCES` | portal | `static` | Comma list of `static`, `dns`, `nostr` |
+| `REGISTRY_SIGNING_KEY_PEM` | portal | unset | Ed25519 PKCS#8 PEM that signs `/network/registry`; unset means the registry is not served |
+| `REGISTRY_SEEDS` | portal | unset | EdgeCoder seeds, `peerId:fingerprint@url[=region]`, comma list |
+| `REGISTRY_POOL_FILE` | portal | unset | JSON file of admitted community coordinators |
+| `REGISTRY_TTL_MS` / `REGISTRY_HEALTH_INTERVAL_MS` | portal | `900000` / `60000` | Registry lifetime / health-check interval |
+| `REGISTRY_FALLBACK_URLS` | portal | `https://coordinator.edgecoder.io` | `fallbackUrls` in the registry |
+| `REGISTRY_UPSTREAM_URL` | coordinator | portal's `/network/registry` | Source of the coordinator's registry mirror |
+| `EDGECODER_REGISTRY_PUBLIC_KEYS` | agent | built-in list (empty for now) | Extra pinned registry keys (PEM or 64-hex), `;` or `,` separated |
+| `EDGECODER_REGISTRY_URLS` | agent | `<COORDINATOR_URL>/network/registry`, `<PORTAL_URL>/network/registry` | Where the registry is fetched |
+| `EDGECODER_STEERING` | agent | on | `off` disables registry steering |
+| `EDGECODER_STEERING_INTERVAL_MS` | agent | `600000` | How often the agent steers again (minimum 60 s) |
 
 ## Operational notes
 

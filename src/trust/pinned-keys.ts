@@ -25,6 +25,7 @@ export type TrustMode = "tofu" | "strict" | "open";
 
 export type TrustReason =
   | "pinned_match"
+  | "registry_match"
   | "pinned_mismatch"
   | "tofu_pinned"
   | "strict_unlisted"
@@ -90,6 +91,7 @@ export class PinnedKeyStore {
   readonly pinFile: string | null;
   private readonly staticEntries: Map<string, string>;
   private readonly pinned = new Map<string, string>();
+  private registryEntries = new Map<string, string>();
   private readonly now: () => number;
 
   constructor(opts: PinnedKeyStoreOptions = {}) {
@@ -121,8 +123,24 @@ export class PinnedKeyStore {
     return out;
   }
 
+  /**
+   * Keys from the signed coordinator registry (src/discovery/steering.ts), replaced on every
+   * verified registry. They count as listed (strict mode trusts them); a static entry for the same
+   * peerId still wins, and they are never written to the trust file.
+   */
+  setRegistryEntries(entries: Map<string, string>): void {
+    this.registryEntries = new Map([...entries].map(([peerId, fp]) => [peerId, fp.toLowerCase()]));
+  }
+
   knownFingerprint(peerId: string): string | undefined {
-    return this.staticEntries.get(peerId) ?? this.pinned.get(peerId);
+    return this.staticEntries.get(peerId) ?? this.registryEntries.get(peerId) ?? this.pinned.get(peerId);
+  }
+
+  private knownSource(peerId: string): "static" | "registry" | "pinned" | undefined {
+    if (this.staticEntries.has(peerId)) return "static";
+    if (this.registryEntries.has(peerId)) return "registry";
+    if (this.pinned.has(peerId)) return "pinned";
+    return undefined;
   }
 
   /** Number of keys this store can match (static entries plus file pins). */
@@ -157,7 +175,9 @@ export class PinnedKeyStore {
     const base = { mode: this.mode, peerId, fingerprint: fp };
     const known = this.knownFingerprint(peerId);
     if (known !== undefined) {
-      if (known === fp || fingerprintMatches(known, publicKeyPem)) return { ...base, trusted: true, reason: "pinned_match" };
+      if (known === fp || fingerprintMatches(known, publicKeyPem)) {
+        return { ...base, trusted: true, reason: this.knownSource(peerId) === "registry" ? "registry_match" : "pinned_match" };
+      }
       if (this.mode === "open") return { ...base, trusted: true, reason: "open_mismatch", pinnedFingerprint: known };
       return { ...base, trusted: false, reason: "pinned_mismatch", pinnedFingerprint: known };
     }

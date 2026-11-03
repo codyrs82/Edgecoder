@@ -8,6 +8,9 @@ import { nostrRelaysFromEnv } from "../discovery/nostr.js";
 
 export const DEFAULT_DISCOVERY_URL = "https://coordinator.edgecoder.io";
 
+// The signed coordinator registry (GET /network/registry) the portal serves for steering.
+export { registerPortalRegistry } from "./coordinator-registry.js";
+
 export function parseDiscoveryUrls(env: NodeJS.ProcessEnv = process.env): string[] {
   const raw = env.COORDINATOR_DISCOVERY_URLS ?? env.COORDINATOR_DISCOVERY_URL ?? DEFAULT_DISCOVERY_URL;
   const urls = raw
