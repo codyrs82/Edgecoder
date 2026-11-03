@@ -138,7 +138,7 @@ import {
   type IssuanceEpochDraft,
   type IssuanceWindow
 } from "../economy/issuance-epoch.js";
-import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
+import { checkSharedToken, coordinatorRequiredProdEnv, debugRoutesEnabled, isProduction, LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import {
   HOST_HEARTBEAT_MAX_SKEW_MS,
   HostServiceAttestor,
@@ -418,14 +418,8 @@ const ANCHOR_INTERVAL_MS = CC.ANCHOR_INTERVAL_MS;
 const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET ?? "";
 // #5: fail fast in production instead of silently running with auth disabled.
 // LIGHTNING_PROVIDER is only required while payments are enabled (see #43 ECONOMY_PAYMENTS_ENABLED).
-requireProdEnv("coordinator", [
-  "MESH_AUTH_TOKEN",
-  "PORTAL_SERVICE_URL",
-  "PORTAL_SERVICE_TOKEN",
-  "ADMIN_API_TOKEN",
-  "PAYMENT_WEBHOOK_SECRET",
-  ...(economyPaymentsEnabled() ? ["LIGHTNING_PROVIDER"] : [])
-]);
+// #55: DATABASE_URL too, so replay/idempotency keys are never held only in memory in production.
+requireProdEnv("coordinator", coordinatorRequiredProdEnv(economyPaymentsEnabled()));
 const IS_PROD = isProduction();
 // #42: production must verify webhook HMACs.
 assertPaymentWebhookSecret();
@@ -1230,7 +1224,7 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
 
 // ── Subtask dependency tracking ─────────────────────────────────────────────
 import { SubtaskDepTracker } from "./subtask-deps.js";
-import { lateResultRejection } from "./lease-gate.js";
+import { lateResultRejectionDurable } from "./lease-gate.js";
 const depTracker = new SubtaskDepTracker();
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
@@ -3939,7 +3933,7 @@ app.post("/result", async (req, reply) => {
     return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
   }
   // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
-  const late = lateResultRejection(queue, body.subtaskId, body.agentId);
+  const late = await lateResultRejectionDurable(queue, body.subtaskId, body.agentId);
   if (late) return reply.code(late.statusCode).send(late.body);
   // ── #44: claim ownership, before anything is recorded ──
   const claim = queue.getClaim(body.subtaskId);

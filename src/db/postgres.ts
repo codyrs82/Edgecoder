@@ -620,6 +620,16 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
+-- #99: claim attempts survive a coordinator restart (the retry cap is not reset), and agents whose
+-- lease on a subtask expired stay recorded so their late results are rejected on any coordinator
+-- sharing this database. Rows for a subtask are removed once its result is recorded.
+ALTER TABLE queue_tasks ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS queue_expired_holders (
+  subtask_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  expired_at_ms BIGINT NOT NULL,
+  PRIMARY KEY (subtask_id, agent_id)
+);
 -- Signed work receipts (architecture step 2): replicated between coordinators, batched into
 -- Merkle epochs whose roots are anchored on Bitcoin. receipt_json keeps the full signed
 -- receipt (PEM keys and both signatures); the columns are for indexing.
@@ -759,16 +769,64 @@ export class PostgresStore {
     );
   }
 
-  async markSubtaskClaimed(subtaskId: string, agentId: string, claimedAtMs: number): Promise<void> {
+  /**
+   * #99: record a claim with its attempt number. GREATEST keeps a concurrent write from moving the
+   * count backwards. A re-claim by an agent whose earlier lease expired clears its expired mark.
+   */
+  async markSubtaskClaimed(subtaskId: string, agentId: string, claimedAtMs: number, attempts?: number): Promise<void> {
     await this.pool.query(
-      `UPDATE queue_tasks SET claimed_by = $2, claimed_at_ms = $3 WHERE subtask_id = $1`,
-      [subtaskId, agentId, claimedAtMs]
+      `WITH upd AS (
+         UPDATE queue_tasks
+            SET claimed_by = $2, claimed_at_ms = $3, attempts = GREATEST(attempts, COALESCE($4::int, attempts + 1))
+          WHERE subtask_id = $1
+          RETURNING subtask_id
+       )
+       DELETE FROM queue_expired_holders WHERE subtask_id = $1 AND agent_id = $2`,
+      [subtaskId, agentId, claimedAtMs, attempts ?? null]
     );
+  }
+
+  /**
+   * #99: a claim ended without a result. With `expiredHolder` the lease expired and that agent is
+   * recorded (late results from it are rejected); without it the coordinator handed the claim back
+   * and `attempts` is the decremented count.
+   */
+  async markSubtaskReleased(subtaskId: string, attempts: number, expiredHolder?: { agentId: string; atMs: number }): Promise<void> {
+    await this.pool.query(
+      `WITH upd AS (
+         UPDATE queue_tasks SET claimed_by = NULL, claimed_at_ms = NULL, attempts = $2 WHERE subtask_id = $1
+         RETURNING subtask_id
+       )
+       INSERT INTO queue_expired_holders (subtask_id, agent_id, expired_at_ms)
+       SELECT $1, $3::text, $4::bigint WHERE $3::text IS NOT NULL
+       ON CONFLICT (subtask_id, agent_id) DO UPDATE SET expired_at_ms = EXCLUDED.expired_at_ms`,
+      [subtaskId, attempts, expiredHolder?.agentId ?? null, expiredHolder?.atMs ?? null]
+    );
+  }
+
+  /** #99: persisted attempts and expired holders for a subtask (zero/empty when unknown). */
+  async getSubtaskLeaseState(subtaskId: string): Promise<{ attempts: number; expiredHolders: string[] }> {
+    const r = await this.pool.query(
+      `SELECT COALESCE((SELECT attempts FROM queue_tasks WHERE subtask_id = $1), 0) AS attempts,
+              COALESCE((SELECT array_agg(agent_id) FROM queue_expired_holders WHERE subtask_id = $1), '{}') AS holders`,
+      [subtaskId]
+    );
+    return { attempts: Number(r.rows[0]?.attempts ?? 0), expiredHolders: r.rows[0]?.holders ?? [] };
+  }
+
+  /** #99: true when `agentId`'s lease on `subtaskId` expired (recorded by any coordinator on this database). */
+  async isExpiredLeaseHolder(subtaskId: string, agentId: string): Promise<boolean> {
+    const r = await this.pool.query(
+      `SELECT 1 FROM queue_expired_holders WHERE subtask_id = $1 AND agent_id = $2`,
+      [subtaskId, agentId]
+    );
+    return (r.rowCount ?? 0) > 0;
   }
 
   async persistResult(result: SubtaskResult): Promise<void> {
     await this.pool.query(
-      `INSERT INTO queue_results (
+      `WITH cleared AS (DELETE FROM queue_expired_holders WHERE subtask_id = $1)
+       INSERT INTO queue_results (
          subtask_id, task_id, agent_id, ok, output, error, duration_ms, report_nonce, report_signature, created_at_ms
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (subtask_id) DO UPDATE SET
