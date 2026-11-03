@@ -26,7 +26,8 @@ export type ToolName =
   | "git_fetch"
   | "github_create_pr"
   | "github_list_prs"
-  | "github_list_issues";
+  | "github_list_issues"
+  | "open_pull_request";
 
 /** Tools that only observe the workspace (no approval needed). */
 export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -52,6 +53,7 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "git_push",
   "git_pull",
   "github_create_pr",
+  "open_pull_request",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -428,6 +430,30 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       labels: {
         type: "string",
         description: "Comma-separated list of label names to filter by.",
+      },
+    },
+  },
+  {
+    name: "open_pull_request",
+    description:
+      "Open a pull request for the work you committed: pushes the current branch (creating a new branch if you're on the default branch) and opens the PR with the GitHub CLI. It commits nothing: commit first with git_commit. Always asks the user, who sees the title, body, branch and diffstat. Never pushes to the default branch.",
+    parameters: {
+      title: {
+        type: "string",
+        description: "Pull request title.",
+        required: true,
+      },
+      body: {
+        type: "string",
+        description: "Pull request description: what changed and why, and how it was tested.",
+      },
+      base: {
+        type: "string",
+        description: "The branch to merge into. Defaults to the repository's default branch.",
+      },
+      branch: {
+        type: "string",
+        description: "The branch to push. Defaults to the current branch, or a new bot/<name>/<slug> branch when on the default branch.",
       },
     },
   },

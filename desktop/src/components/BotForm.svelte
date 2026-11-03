@@ -5,7 +5,10 @@
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
   import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
-  import { BOT_TOOL_GROUPS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, SCHEDULE_PRESETS, botCompute, groupsOf, toolsFor, type Bot, type ComputePolicy } from "../lib/bots";
+  import {
+    BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, groupsOf, toolsFor,
+    type Bot, type BotTriggerConfig, type ComputePolicy, type TriggerKind,
+  } from "../lib/bots";
 
   interface Props {
     /** Edit this bot; omitted: create a new one. */
@@ -24,6 +27,18 @@
   let instructions = $state(initial?.instructions ?? "");
   // svelte-ignore state_referenced_locally
   let projectRoot = $state(initial?.projectRoot ?? defaultProject ?? "");
+  let repository = $state(initial?.repository ?? "");
+  let triggers = $state<BotTriggerConfig[]>(initial?.triggers?.map((t) => ({ ...t })) ?? []);
+  let maxRunsText = $state(String(initial?.maxTriggerRunsPerHour ?? 6));
+  function addTrigger(kind: TriggerKind) {
+    triggers = [...triggers, kind === "pr" ? { kind, enabled: true, onlyOthers: true } : kind === "ci_failed" ? { kind, enabled: true, scope: "any" } : { kind, enabled: true, label: "" }];
+  }
+  function setTrigger(i: number, patch: Partial<BotTriggerConfig>) {
+    triggers = triggers.map((t, j) => (j === i ? { ...t, ...patch } : t));
+  }
+  function removeTrigger(i: number) {
+    triggers = triggers.filter((_, j) => j !== i);
+  }
   let schedule = $state(initial?.schedule ?? "");
   let customSchedule = $state(!!initial?.schedule && !SCHEDULE_PRESETS.some((p) => p.value === initial.schedule));
   let budgetText = $state(initial ? (initial.budgetCSatsPerDay == null ? "" : String(initial.budgetCSatsPerDay)) : "100");
@@ -74,11 +89,27 @@
       error = "Pick the model this bot runs on, or choose another compute option.";
       return;
     }
+    const maxRuns = Number(maxRunsText);
+    if (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 60) {
+      error = "Trigger runs an hour must be a whole number from 1 to 60.";
+      return;
+    }
+    if (triggers.some((t) => t.kind === "issue_labeled" && !t.label?.trim())) {
+      error = "Type the label the issue trigger watches for.";
+      return;
+    }
+    if (triggers.length > 0 && !repository.trim()) {
+      error = "GitHub triggers need a repository (owner/repo).";
+      return;
+    }
     const input = {
       name: name.trim(),
       role: role.trim(),
       instructions,
       projectRoot: projectRoot.trim(),
+      repository: repository.trim(),
+      triggers: triggers.map((t) => ({ ...t, label: t.label?.trim() || undefined })),
+      maxTriggerRunsPerHour: maxRuns,
       schedule: schedule.trim(),
       budgetCSatsPerDay: budget,
       allowedTools: toolsFor(groups),
@@ -151,17 +182,16 @@
       <div class="sp-group-title">Where and when</div>
       <div class="sp-card">
         <div class="sp-row">
-          <span class="sp-text"><span class="sp-title">Home folder</span><span class="sp-desc">Where it keeps its own files and notes. It reads and edits files only here.</span></span>
+          <span class="sp-text"><span class="sp-title">Home folder</span><span class="sp-desc">Where it keeps its own notes and memory. Without a repository, it also works here.</span></span>
           <div class="sp-controls">
             <input type="text" class="bf-path" bind:value={projectRoot} placeholder="/Users/you/Agents/Harry" required aria-label="Home folder" />
             <button type="button" onclick={chooseFolder}>Choose…</button>
           </div>
         </div>
-        <!-- Slot for the bot's repository (owner/repo, cloned into ~/EdgeCoder/<repo>): coming in a later change. -->
-        <div class="sp-row bf-soon" aria-disabled="true" data-testid="bot-repository-slot">
-          <span class="sp-text"><span class="sp-title">Repository <span class="sp-pill">Coming soon</span></span><span class="sp-desc">A GitHub repository (owner/repo) it works in, cloned for it automatically.</span></span>
-          <input type="text" class="bf-path" placeholder="owner/repo" disabled aria-label="Repository (coming soon)" />
-        </div>
+        <label class="sp-row" data-testid="bot-repository-slot">
+          <span class="sp-text"><span class="sp-title">Repository</span><span class="sp-desc">A GitHub repository (owner/repo) it works in. Cloned into your projects folder when you save, and updated before each run.</span></span>
+          <input type="text" class="bf-path" bind:value={repository} placeholder="owner/repo" maxlength="500" spellcheck="false" autocomplete="off" aria-label="Repository" />
+        </label>
         <div class="sp-row">
           <span class="sp-text"><span class="sp-title">Schedule</span><span class="sp-desc">"every 2 hours", "daily at 18:30" or cron ("0 9 * * 1-5").</span></span>
           <div class="sp-controls">
@@ -175,6 +205,51 @@
             <button type="button" class="ghost small" onclick={() => (customSchedule = !customSchedule)}>{customSchedule ? "Presets" : "Custom"}</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="sp-group" data-testid="bot-triggers">
+      <div class="sp-group-title">Triggers</div>
+      <div class="sp-card">
+        <div class="sp-row stack">
+          <span class="sp-text"><span class="sp-title">GitHub events</span><span class="sp-desc">Each one starts a run. Checked every 2 minutes while EdgeCoder is open, through your GitHub CLI login. Pausing the bot pauses them.</span></span>
+        </div>
+        {#each triggers as t, i (i)}
+          <div class="sp-row bf-trigger">
+            <div class="bf-trigger-fields">
+              <select value={t.kind} aria-label="Trigger {i + 1}" onchange={(e) => {
+                const kind = (e.currentTarget as HTMLSelectElement).value as TriggerKind;
+                setTrigger(i, kind === "pr" ? { kind, onlyOthers: t.onlyOthers ?? true, scope: undefined } : kind === "ci_failed" ? { kind, scope: t.scope ?? "any", onlyOthers: undefined } : { kind, onlyOthers: undefined, scope: undefined });
+              }}>
+                {#each TRIGGER_KIND_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+              </select>
+              {#if t.kind === "pr"}
+                <label class="bf-check"><input type="checkbox" checked={t.onlyOthers !== false} onchange={(e) => setTrigger(i, { onlyOthers: (e.currentTarget as HTMLInputElement).checked })} /> Only PRs by others</label>
+                <input type="text" class="bf-label" value={t.label ?? ""} placeholder="Any label" maxlength="100" aria-label="Only PRs with this label" oninput={(e) => setTrigger(i, { label: (e.currentTarget as HTMLInputElement).value })} />
+              {:else if t.kind === "ci_failed"}
+                <select value={t.scope ?? "any"} aria-label="Where CI failed" onchange={(e) => setTrigger(i, { scope: (e.currentTarget as HTMLSelectElement).value as BotTriggerConfig["scope"] })}>
+                  {#each CI_SCOPE_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+                </select>
+              {:else}
+                <input type="text" class="bf-label" value={t.label ?? ""} placeholder="Label, e.g. bug" maxlength="100" required aria-label="Issue label" oninput={(e) => setTrigger(i, { label: (e.currentTarget as HTMLInputElement).value })} />
+              {/if}
+            </div>
+            <button type="button" class="sp-switch" role="switch" aria-checked={t.enabled} aria-label="Trigger {i + 1} on" onclick={() => setTrigger(i, { enabled: !t.enabled })}></button>
+            <button type="button" class="ghost small" onclick={() => removeTrigger(i)} aria-label="Remove trigger {i + 1}">Remove</button>
+          </div>
+        {/each}
+        <div class="sp-row">
+          <span class="sp-text"><span class="sp-desc">{repository.trim() ? "Add a trigger:" : "Set a repository above to add triggers."}</span></span>
+          <div class="sp-controls">
+            {#each TRIGGER_KIND_OPTIONS as o (o.value)}
+              <button type="button" class="small" disabled={!repository.trim() || triggers.length >= 10} onclick={() => addTrigger(o.value)}>+ {o.label}</button>
+            {/each}
+          </div>
+        </div>
+        <label class="sp-row">
+          <span class="sp-text"><span class="sp-title">Trigger runs an hour</span><span class="sp-desc">At most this many runs from triggers each hour; more events are skipped and noted in the conversation.</span></span>
+          <input type="number" min="1" max="60" step="1" bind:value={maxRunsText} class="bf-num" />
+        </label>
       </div>
     </div>
 
@@ -322,8 +397,26 @@
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-  .bf-soon {
-    opacity: 0.55;
+  .bf-trigger {
+    gap: 10px;
+  }
+  .bf-trigger-fields {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .bf-label {
+    width: 150px;
+  }
+  .bf-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
   }
   .bf-policies {
     display: grid;

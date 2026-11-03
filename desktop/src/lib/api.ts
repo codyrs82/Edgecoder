@@ -1477,6 +1477,8 @@ export const cancelBotRun = (id: string) => fsCall<{ cancelled: boolean }>("POST
 export const botMessages = (id: string) => fsCall<{ messages: BotMessage[] }>("GET", botPath(id, "/messages")).then((r) => r.messages);
 export const sendBotMessage = (id: string, content: string) => fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content });
 export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
-export const approveBotCall = (id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
+/** Clone or update the bot's repository now (it also happens on save and before each run). */
+export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
+export const approveBotCall =(id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
 /** The server's message for a failed bot call (its `error` field). */
 export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));

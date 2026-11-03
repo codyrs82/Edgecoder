@@ -21,11 +21,11 @@ import {
 import { buildChatSystemPrompt, buildIdeAgentSystemPrompt, type SystemPromptContext } from "../../model/system-prompt.js";
 import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
-import { ToolExecutor } from "./tool-executor.js";
+import { ToolExecutor, hasGitHubOrigin, preparePullRequestArgs } from "./tool-executor.js";
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
-import { backendChat, makeToolRunner, ollamaChat, runAgentLoop } from "./agent-loop.js";
+import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
@@ -35,7 +35,7 @@ import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
-import { BotManager, agentBotRunner, botComputeChat, registerBotRoutes, type ApprovalEntry } from "./bots.js";
+import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
 import { AUTO_MODEL_ID, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
@@ -836,14 +836,20 @@ const bots = new BotManager({
   runner: agentBotRunner({
     // Each step on the bot's compute policy (Local first by default), within its budget and your balance.
     chat: (ctx) => botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
+    // Runs work in the bot's repository checkout when it has one, else in its home folder.
     execute: (bot) => {
-      const executor = new ToolExecutor(bot.projectRoot);
+      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name) });
       return (tool, args, opts) => executor.execute(tool, args, opts);
+    },
+    prepare: (bot) => {
+      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name) });
+      return (tool, args) => preparePullRequestArgs(executor, tool, args);
     },
     systemPrompt: async (bot) => {
       const ctx = await agentPromptContext(process.env.OLLAMA_MODEL || "qwen3.5:9b");
-      const rules = readProjectRules(bot.projectRoot);
-      return (format) => buildIdeAgentSystemPrompt(ctx, bot.projectRoot, rules, format);
+      const root = botWorkRoot(bot);
+      const rules = readProjectRules(root);
+      return (format) => buildIdeAgentSystemPrompt(ctx, root, rules, format);
     },
     checkpoints,
   }),
@@ -1089,13 +1095,17 @@ app.post("/v1/ide/chat", async (req, reply) => {
 
   const abort = new AbortController();
   reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
+  // open_pull_request is offered only when the project is a GitHub repository.
+  const tools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
   await runAgentLoop({
     chat: chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal),
     systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
     messages: body.messages,
     sendEvent,
     isCancelled: () => clientDisconnected,
+    tools,
     runTool: makeToolRunner({
+      prepare: (tool, args) => preparePullRequestArgs(executor, tool, args),
       execute: (tool, args, opts) => executor.execute(tool, args, opts),
       sendEvent,
       waitForApproval: (callId, tool, args) =>
