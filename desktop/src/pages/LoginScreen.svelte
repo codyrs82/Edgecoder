@@ -2,7 +2,7 @@
   import { login, getOAuthStartUrl, completeOAuthWithToken } from "../lib/api";
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
-  import { portalSignupUrl } from "../lib/endpoints";
+  import { portalResetPasswordUrl, portalSignupUrl } from "../lib/endpoints";
 
   interface Props {
     onLogin: (user: AuthUser) => void;
@@ -51,6 +51,16 @@
       await open(portalSignupUrl());
     } catch {
       error = "Could not open browser for sign-up";
+    }
+  }
+
+  // Password reset also happens on the portal, in the system browser.
+  async function handleForgotPassword() {
+    error = "";
+    try {
+      await open(portalResetPasswordUrl());
+    } catch {
+      error = "Could not open browser for password reset";
     }
   }
 
@@ -116,6 +126,7 @@
       <button type="submit" class="btn-primary" disabled={submitting}>
         {submitting ? "Signing in..." : "Sign In"}
       </button>
+      <button type="button" class="link-btn forgot-link" onclick={handleForgotPassword}>Forgot password? <span class="sr-only">(opens in your browser)</span></button>
     </form>
 
     <div class="divider" aria-hidden="true">
@@ -267,6 +278,10 @@
     cursor: pointer;
     font-size: 13px;
     padding: 0;
+  }
+  .forgot-link {
+    align-self: flex-end;
+    font-size: 12px;
   }
   .link-btn:hover {
     text-decoration: underline;
