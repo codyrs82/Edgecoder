@@ -2,12 +2,20 @@
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
-  import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen } from "@lucide/svelte";
-  import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, updateBot, botErrorText } from "../lib/api";
+  import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
+  import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botCompute, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, relativeTime, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botCompute, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, relativeTime, runSourceText, scheduleText, statusChip,
+    triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
+  import { open as openShell } from "@tauri-apps/plugin-shell";
+
+  /** A GitHub link in the browser (only https links the app itself parsed from gh's output). */
+  function openLink(url: string) {
+    if (!/^https:\/\//.test(url)) return;
+    openShell(url).catch(() => window.open(url, "_blank", "noopener"));
+  }
   import type { ToolEvent } from "../lib/types";
   import { choiceLabel } from "../lib/compute-choice";
   import { refreshBots } from "../lib/bots-store";
@@ -194,6 +202,9 @@
     closeMenu();
     return act(() => updateBot(bot.id, { enabled: !bot.enabled }));
   };
+  const toggleTrigger = (id: string | undefined) =>
+    act(() => updateBot(bot.id, { triggers: (bot.triggers ?? []).map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)) }));
+  const retryRepo = () => act(() => syncBotRepository(bot.id));
   const send = (text: string) => act(() => sendBotMessage(bot.id, text));
   const approve = (callId: string, approved: boolean) => act(() => approveBotCall(bot.id, callId, approved));
   async function remove() {
@@ -259,7 +270,11 @@
         <span class="sep" aria-hidden="true">·</span>
         <span class="m" title="Compute: where its model calls run (change it in Edit)"><Cpu size={12} />{computeLabel}</span>
         <span class="sep" aria-hidden="true">·</span>
-        <span class="m folder" title={bot.projectRoot}><Folder size={12} /><span class="folder-name">{folderName(bot.projectRoot)}</span></span>
+        {#if bot.repository}
+          <span class="m folder" title={bot.repoPath ?? bot.repository}><GitBranch size={12} /><span class="folder-name">{bot.repository}</span></span>
+        {:else}
+          <span class="m folder" title={bot.projectRoot}><Folder size={12} /><span class="folder-name">{folderName(bot.projectRoot)}</span></span>
+        {/if}
       </div>
       {/if}
     </div>
@@ -334,6 +349,15 @@
               {#each cards as c (c.id)}
                 <div class="ask-card" class:waiting={!c.answer} data-testid="ask-card">
                   <div class="ask-q">{c.question}</div>
+                  {#if c.pr}
+                    <div class="pr-ask" data-testid="pr-ask">
+                      <div class="pr-ask-title">{c.pr.title}</div>
+                      <div class="pr-ask-branch"><GitBranch size={12} /> <code>{c.pr.branch}</code> → <code>{c.pr.base}</code>{#if c.pr.commits} · {c.pr.commits} commit{c.pr.commits === 1 ? "" : "s"}{/if}</div>
+                      {#if c.pr.body}<div class="pr-ask-body">{c.pr.body}</div>{/if}
+                      {#if c.pr.diffstat}<code class="ask-detail">{c.pr.diffstat}</code>{/if}
+                      {#if c.pr.uncommitted}<div class="pr-ask-note">{c.pr.uncommitted} uncommitted file{c.pr.uncommitted === 1 ? "" : "s"} won't be in the pull request.</div>{/if}
+                    </div>
+                  {/if}
                   {#if c.detail}<code class="ask-detail">{c.detail}</code>{/if}
                   {#if c.answer}
                     <div class="ask-answer" class:denied={c.answer === "Denied"}>You: {c.answer}</div>
@@ -343,6 +367,16 @@
                       <button onclick={() => approve(c.id, false)}>Deny</button>
                     </div>
                   {/if}
+                </div>
+              {/each}
+              {#each prCards(turn.toolEvents) as p (p.id)}
+                <div class="pr-card" data-testid="pr-card">
+                  <GitPullRequest size={18} />
+                  <div class="pr-card-text">
+                    <div class="pr-card-title">Pull request #{p.number}{p.title ? `: ${p.title}` : ""}</div>
+                    <div class="pr-card-sub">{p.branch}{p.base ? ` → ${p.base}` : ""}</div>
+                  </div>
+                  <button onclick={() => openLink(p.url)} title={p.url}>Open on GitHub</button>
                 </div>
               {/each}
             </div>
@@ -361,9 +395,14 @@
             {#each runs as r (r.id)}
               <tr>
                 <td>{when(r.startedAtMs)}</td>
-                <td>{r.trigger === "schedule" ? "Schedule" : r.trigger === "message" ? "Message" : "Run now"}</td>
+                <td class="src" title={runSourceText(r)}>{runSourceText(r)}</td>
                 <td class="st {r.status}">{RUN_STATUS_TEXT[r.status]}</td>
-                <td class="sum" title={r.summary}>{r.summary}</td>
+                <td class="sum" title={r.summary}>
+                  {r.summary}
+                  {#each r.pullRequests ?? [] as p (p.url)}
+                    <button class="link pr-link" onclick={() => openLink(p.url)} title={p.url}><GitPullRequest size={12} /> PR #{p.number}</button>
+                  {/each}
+                </td>
                 <td class="num">{formatCSats(r.cSats)}</td>
                 <td>{r.where ?? (r.status === "failed" ? "Didn't run" : "—")}{#if r.note}<div class="run-note">{r.note}</div>{/if}</td>
                 <td class="num">{duration(r)}</td>
@@ -416,6 +455,36 @@
             </div>
           {/if}
         </div>
+        <div class="d-section" data-testid="bot-triggers-panel">
+          <div class="d-label">Triggers</div>
+          {#if (bot.triggers ?? []).length}
+            {#each bot.triggers ?? [] as t (t.id)}
+              <div class="routine">
+                <Zap size={15} />
+                <div class="routine-text">
+                  <div class="routine-title">{triggerText(t)}</div>
+                  <div class="routine-sub">{!bot.enabled && t.enabled ? "Paused with the bot" : triggerStatusText(t.id ? bot.triggerStatus?.[t.id] : undefined, t.enabled)}</div>
+                </div>
+                <button class="switch" role="switch" aria-checked={t.enabled} aria-label="Trigger: {triggerText(t)}" onclick={() => toggleTrigger(t.id)}></button>
+              </div>
+            {/each}
+            {#if bot.queuedEvents}<div class="d-sub muted">{bot.queuedEvents} event{bot.queuedEvents === 1 ? "" : "s"} waiting for the current run</div>{/if}
+          {:else}
+            <div class="routine empty-routine">
+              <div class="routine-text"><div class="routine-sub">{bot.repository ? "No triggers: add one to run on PRs, CI failures or labeled issues." : "Set a repository to run on GitHub events."}</div></div>
+              <button class="link" onclick={() => onEdit(bot)}>Add one</button>
+            </div>
+          {/if}
+        </div>
+        {#if bot.repository}
+          <div class="d-section">
+            <div class="d-label">Repository</div>
+            <div class="d-row"><GitBranch size={14} /><span class="d-val" title={bot.repository}>{bot.repository}</span>
+              {#if bot.repo?.state !== "cloning"}<button class="link" onclick={retryRepo} title="Clone or update it now"><RefreshCw size={12} /> {bot.repo?.state === "error" ? "Retry" : "Update"}</button>{/if}
+            </div>
+            {#if bot.repo}<div class="d-sub" class:muted={bot.repo.state !== "error"} class:repo-err={bot.repo.state === "error"}>{bot.repo.message}</div>{/if}
+          </div>
+        {/if}
         <div class="d-section">
           <div class="d-label">Compute</div>
           <div class="d-row"><Cpu size={14} /><span class="d-val">{computeLabel}</span><button class="link" onclick={() => onEdit(bot)}>Change</button></div>
@@ -449,9 +518,19 @@
           <button class="link" onclick={() => onEdit(bot)}>Edit memory</button>
         </div>
       {:else}
+        {#if bot.repository && bot.repoPath}
+          <div class="d-section">
+            <div class="d-label">Repository checkout</div>
+            <code class="path">{bot.repoPath}</code>
+            <div class="d-actions">
+              {#if onOpenFolder}<button onclick={() => onOpenFolder?.(bot.repoPath!)}><FolderOpen size={14} /> Open in editor</button>{/if}
+            </div>
+          </div>
+        {/if}
         <div class="d-section">
           <div class="d-label">Home folder</div>
           <code class="path">{bot.projectRoot}</code>
+          {#if bot.repository}<div class="d-sub muted">Its notes and memory (memory.md) live here.</div>{/if}
           <div class="d-actions">
             {#if onOpenFolder}<button onclick={() => onOpenFolder?.(bot.projectRoot)}><FolderOpen size={14} /> Open in editor</button>{/if}
             <button onclick={copyPath}><Copy size={14} /> {copied ? "Copied" : "Copy path"}</button>
@@ -567,6 +646,97 @@
   }
   .ask-answer.denied {
     background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+    color: var(--danger, #e5484d);
+  }
+  .pr-ask {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pr-ask-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .pr-ask-branch,
+  .pr-ask-note {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .pr-ask-body {
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 6px 9px;
+    border-radius: 8px;
+    border: 0.5px solid var(--border);
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-primary);
+  }
+  .pr-card {
+    max-width: 520px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border: 0.5px solid color-mix(in srgb, var(--success, #3fb950) 50%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--success, #3fb950) 8%, var(--bg-surface));
+    color: var(--success, #3fb950);
+    margin-bottom: 8px;
+  }
+  .pr-card-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .pr-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pr-card-sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pr-card button {
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 0.5px solid var(--border-strong, var(--border));
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .pr-card button:focus-visible,
+  .pr-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .pr-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 6px;
+  }
+  td.src {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .repo-err {
     color: var(--danger, #e5484d);
   }
   /* --- details panel --- */

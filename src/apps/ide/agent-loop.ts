@@ -354,12 +354,31 @@ export interface ToolRunnerDeps {
   autoApproveEdits?: boolean;
   /** Honour IDE_SHELL_AUTO_APPROVE=1 (default true; bots pass false so their commands always ask). */
   allowShellAutoApprove?: boolean;
+  /**
+   * Resolve a call's arguments before asking (open_pull_request: the branch, base and diffstat the
+   * approval card shows). What the user approves is exactly what runs. A throw refuses the call.
+   */
+  prepare?: (tool: ToolName, args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
 }
+
+/** Tools that ask every time, whatever auto-approve settings say. */
+export const ALWAYS_ASK_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["open_pull_request", "git_push", "git_commit"]);
 
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
 export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
-  return async (tool, args) => {
+  return async (tool, rawArgs) => {
     const callId = `tc_${randomUUID().slice(0, 8)}`;
+    let args = rawArgs;
+    if (d.prepare) {
+      try {
+        args = await d.prepare(tool, rawArgs);
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        d.sendEvent({ type: "tool_call", id: callId, tool, args: rawArgs, requires_approval: false });
+        d.sendEvent({ type: "tool_result", id: callId, error: msg });
+        return `[Error]: ${msg}`;
+      }
+    }
     // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
     // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
     const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
@@ -367,7 +386,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     // auto-approved; the executor refuses .git outright and the rest without an explicit approval.
     const editAutoApprove =
       d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
-    const requiresApproval = !READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove;
+    const requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove);
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
       const msg = `Tool call ${tool} was rejected by the user.`;

@@ -14,6 +14,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
 import { gitExecEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
+import { findGh, ghCredentialConfig } from "./git-setup.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -350,9 +351,42 @@ export function scrubShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/** A branch-name piece: lower case, letters, digits and dashes, at most `max` characters. */
+export function branchSlug(text: string, max = 40): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max)
+    .replace(/-+$/g, "");
+}
+
+/** `bot/<bot-name>/<short-slug>` (or `<prefix>/<short-slug>`) for a pull request's title. */
+export function pullRequestBranch(prefix: string, title: string): string {
+  return `${prefix}/${branchSlug(title) || "changes"}`;
+}
+
+/** What open_pull_request will do, as the approval card shows it. */
+export interface PullRequestPlan {
+  title: string;
+  body: string;
+  base: string;
+  branch: string;
+  /** Create `branch` at HEAD (the agent is on the default branch, or asked for a new name). */
+  createBranch: boolean;
+  diffstat: string;
+  commits: number;
+  /** Changed files that aren't committed (not part of the PR). */
+  uncommitted: number;
+}
+
 export class ToolExecutor {
   private readonly root: string;
   private readonly githubToken: string | null;
+  /** Prefix for generated PR branches: "bot/<name>" for bots, "edgecoder" for chat. */
+  private readonly branchPrefix: string;
 
   /** #17: symlink-resolved root (e.g. /tmp -> /private/tmp on macOS), for real-path checks. */
   private readonly rootReal: string;
@@ -360,8 +394,9 @@ export class ToolExecutor {
   /** Search by meaning (the project's codebase index), when available. */
   private readonly codebaseSearch: ((query: string) => Promise<string>) | null;
 
-  constructor(projectRoot: string, githubToken?: string | null, codebaseSearch?: (query: string) => Promise<string>) {
+  constructor(projectRoot: string, githubToken?: string | null, codebaseSearch?: (query: string) => Promise<string>, opts: { branchPrefix?: string } = {}) {
     this.codebaseSearch = codebaseSearch ?? null;
+    this.branchPrefix = opts.branchPrefix ?? "edgecoder";
     this.root = resolve(projectRoot);
     let rootReal = this.root;
     try {
@@ -458,6 +493,8 @@ export class ToolExecutor {
           return await this.githubListPrs(args);
         case "github_list_issues":
           return await this.githubListIssues(args);
+        case "open_pull_request":
+          return await this.openPullRequest(args, opts.approved === true);
         default: {
           const _exhaustive: never = tool;
           return { error: `Unknown tool: ${_exhaustive}` };
@@ -1071,5 +1108,153 @@ export class ToolExecutor {
     } catch (err) {
       return { error: err instanceof Error ? err.message : "github_list_issues failed" };
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // open_pull_request: push the current branch and open a PR with gh's login
+  // -----------------------------------------------------------------------
+
+  private git(args: string[], timeoutMs = 15_000): string {
+    return execFileSync("git", hardenedGitArgs(args), {
+      env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0" }),
+      cwd: this.root,
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trimEnd();
+  }
+
+  private gitOk(args: string[]): string | null {
+    try {
+      return this.git(args);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The repository's default branch: origin/HEAD, then gh, then main. */
+  private defaultBranch(): string {
+    const head = this.gitOk(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+    if (head && head.startsWith("origin/")) return head.slice("origin/".length);
+    const gh = findGh();
+    if (gh) {
+      try {
+        const out = execFileSync(gh, ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], {
+          cwd: this.root,
+          encoding: "utf-8",
+          timeout: 15_000,
+          stdio: ["ignore", "pipe", "ignore"],
+          env: gitExecEnv({ GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" }),
+        }).trim();
+        if (/^[A-Za-z0-9._/-]{1,200}$/.test(out)) return out;
+      } catch {
+        // fall through
+      }
+    }
+    return "main";
+  }
+
+  private validBranch(name: string): boolean {
+    if (!name || name.startsWith("-") || name.length > 200) return false;
+    return this.gitOk(["check-ref-format", "--branch", name]) !== null;
+  }
+
+  /**
+   * Work out the pull request before asking: base (the default branch unless given), branch (the
+   * current one, or bot/<name>/<slug> when on the default branch), commits and diffstat. Throws
+   * when it can't be opened, including any attempt to push the default branch.
+   */
+  preparePullRequest(args: Record<string, unknown>): PullRequestPlan {
+    const title = String(args.title ?? "").replace(/\s+/g, " ").trim().slice(0, 256);
+    if (!title) throw new Error("A pull request needs a title.");
+    const body = typeof args.body === "string" ? args.body.slice(0, 60_000) : "";
+    if (this.gitOk(["rev-parse", "--is-inside-work-tree"]) !== "true") throw new Error("This project isn't a git repository.");
+    if (!this.gitOk(["remote", "get-url", "origin"])) throw new Error("This repository has no origin remote to push to.");
+    const defaultBranch = this.defaultBranch();
+    const base = typeof args.base === "string" && args.base.trim() ? args.base.trim() : defaultBranch;
+    if (!this.validBranch(base)) throw new Error(`"${base}" isn't a branch name.`);
+    const headRaw = this.gitOk(["rev-parse", "--abbrev-ref", "HEAD"]);
+    const current = headRaw && headRaw !== "HEAD" ? headRaw : null;
+    let branch = typeof args.branch === "string" ? args.branch.trim() : "";
+    if (!branch) branch = current && current !== defaultBranch && current !== base ? current : pullRequestBranch(this.branchPrefix, title);
+    if (!this.validBranch(branch)) throw new Error(`"${branch}" isn't a branch name.`);
+    if (branch === defaultBranch || branch === base) {
+      throw new Error(`Refusing to push to ${branch}, the ${branch === defaultBranch ? "default" : "base"} branch: a pull request goes on its own branch.`);
+    }
+    let createBranch = false;
+    if (branch !== current) {
+      if (this.gitOk(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]) !== null) {
+        throw new Error(`Branch ${branch} already exists and isn't checked out. Switch to it first, or leave branch empty.`);
+      }
+      createBranch = true;
+    }
+    const baseRef = this.gitOk(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${base}`]) !== null ? `origin/${base}` : base;
+    const commits = Number(this.gitOk(["rev-list", "--count", `${baseRef}..HEAD`]) ?? "0") || 0;
+    if (commits === 0) throw new Error(`There are no commits on top of ${base} to open a pull request with. Commit your changes first (git_commit).`);
+    const diffstat = this.gitOk(["diff", "--stat", "--no-color", `${baseRef}...HEAD`]) ?? "";
+    const uncommitted = (this.gitOk(["status", "--porcelain"]) ?? "").split("\n").filter(Boolean).length;
+    return { title, body, base, branch, createBranch, diffstat: diffstat.length > 4_000 ? `${diffstat.slice(0, 4_000)}\n…` : diffstat, commits, uncommitted };
+  }
+
+  private async openPullRequest(args: Record<string, unknown>, approved: boolean): Promise<ToolResult> {
+    // Never without an explicit approval of this very call.
+    if (!approved) return { error: "open_pull_request needs the user's approval." };
+    const gh = findGh();
+    if (!gh) return { error: "Install the GitHub CLI (brew install gh) and run `gh auth login` to open pull requests." };
+    const plan = this.preparePullRequest(args);
+    if (plan.createBranch) this.git(["switch", "-c", plan.branch]);
+    const origin = this.gitOk(["remote", "get-url", "origin"]) ?? "";
+    // gh's stored login as git's credential for github.com; no token passes through EdgeCoder.
+    const cred = /^https:\/\/github\.com\//i.test(origin) ? ghCredentialConfig() : [];
+    try {
+      // An explicit refspec: only this branch, which was checked not to be the default one.
+      this.git([...cred, "push", "--set-upstream", "origin", `refs/heads/${plan.branch}:refs/heads/${plan.branch}`], 120_000);
+    } catch (err) {
+      const e = err as { stderr?: unknown; message?: string };
+      return { error: `git push failed: ${String(e.stderr || e.message || "").trim().split("\n").slice(-3).join(" ")}` };
+    }
+    const out = await new Promise<{ code: number; stdout: string; stderr: string }>((done) => {
+      const child = spawn(gh, ["pr", "create", "--title", plan.title, "--body", plan.body, "--base", plan.base, "--head", plan.branch], {
+        cwd: this.root,
+        env: gitExecEnv({ GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GIT_TERMINAL_PROMPT: "0" }),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      const timer = setTimeout(() => child.kill("SIGTERM"), 60_000);
+      child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+      child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+      child.on("error", (e) => {
+        clearTimeout(timer);
+        done({ code: 1, stdout, stderr: e.message });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        done({ code: code ?? 1, stdout, stderr });
+      });
+    });
+    const url = /https:\/\/\S+\/pull\/\d+/.exec(`${out.stdout}\n${out.stderr}`)?.[0];
+    if (out.code !== 0 || !url) return { error: `gh pr create failed: ${(out.stderr || out.stdout).trim().slice(0, 500) || `exit ${out.code}`}` };
+    return { result: `Opened pull request ${url}\nBranch ${plan.branch} → ${plan.base} (${plan.commits} commit${plan.commits === 1 ? "" : "s"}).` };
+  }
+}
+
+/**
+ * The arguments the approval card shows and the call then runs with: open_pull_request gets its
+ * base and branch filled in, plus the diffstat and commit count (shown, not used). Other tools pass.
+ */
+export function preparePullRequestArgs(executor: ToolExecutor, tool: ToolName, args: Record<string, unknown>): Record<string, unknown> {
+  if (tool !== "open_pull_request") return args;
+  const plan = executor.preparePullRequest(args);
+  return { title: plan.title, body: plan.body, base: plan.base, branch: plan.branch, diffstat: plan.diffstat, commits: plan.commits, uncommitted: plan.uncommitted };
+}
+
+/** True when the project's origin is on github.com (open_pull_request is offered to chat then). */
+export function hasGitHubOrigin(root: string): boolean {
+  try {
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/i.test(url);
+  } catch {
+    return false;
   }
 }
