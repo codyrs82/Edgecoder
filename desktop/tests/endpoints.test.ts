@@ -9,6 +9,7 @@ import {
   PORTAL_KEY,
   coordinatorUrl,
   defaultEndpoints,
+  portalResetPasswordUrl,
   portalSignupUrl,
   portalUrl,
   resetEndpoints,
@@ -96,5 +97,11 @@ describe("portalSignupUrl (#26 sign-up button)", () => {
   it("uses the portal override or the default, without a double slash", () => {
     expect(portalSignupUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal");
     expect(portalSignupUrl(mem())).toMatch(/^https:\/\/[^/]+(\/[^/]+)*\/portal$/);
+  });
+});
+
+describe("portalResetPasswordUrl (Forgot password? link)", () => {
+  it("points at /portal/reset-password on the configured portal", () => {
+    expect(portalResetPasswordUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal/reset-password");
   });
 });

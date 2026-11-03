@@ -90,7 +90,7 @@ app.get("/portal", async (_req, reply) => {
                 <button class="primary" id="loginBtn" style="flex:1;">Sign in</button>
                 <button id="passkeyLoginBtn">${icon("key", 14)} Passkey</button>
               </div>
-              <div class="row" style="margin-top:10px;"><button class="link-btn" id="resendBtn">Resend verification email</button></div>
+              <div class="row" style="margin-top:10px; justify-content:space-between;"><a class="link-btn" id="forgotLink" href="/portal/reset-password">Forgot password?</a><button class="link-btn" id="resendBtn">Resend verification email</button></div>
               ${ssoBlock}
             </div>
 
@@ -206,7 +206,8 @@ app.get("/portal", async (_req, reply) => {
             });
             window.location.href = "/portal/dashboard";
           } catch (err) {
-            showToast("Login failed: " + String(err.message || err), true);
+            const code = String(err.message || err);
+            showToast(code === "invalid_credentials" ? 'Wrong email or password. To reset it, use \u201cForgot password?\u201d below.' : "Login failed: " + code, true);
           }
         });
         document.getElementById("resendBtn").addEventListener("click", async () => {

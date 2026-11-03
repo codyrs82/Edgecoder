@@ -13,6 +13,8 @@ const API_ROUTES: Array<[string, string]> = [
   ["POST", "/auth/logout"],
   ["GET", "/auth/verify-email"],
   ["POST", "/auth/resend-verification"],
+  ["POST", "/auth/password/forgot"],
+  ["POST", "/auth/password/reset"],
   ["GET", "/auth/oauth/apple/start"],
   ["GET", "/auth/oauth/apple/callback"],
   ["POST", "/auth/oauth/apple/callback"],

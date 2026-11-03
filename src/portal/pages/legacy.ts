@@ -202,6 +202,7 @@ app.get("/portal-legacy", async (_req, reply) => {
             <div class="row" style="margin-top:10px;">
               <button class="primary" id="loginBtn">Log in</button>
               <button id="resendBtn">Resend verification</button>
+              <a href="/portal/reset-password">Forgot password?</a>
             </div>
             <div class="row" style="margin-top:10px;">
               <button id="passkeyLoginBtn">Log in with passkey</button>

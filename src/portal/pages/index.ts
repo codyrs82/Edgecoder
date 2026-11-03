@@ -9,6 +9,7 @@ import { registerHomePage } from "./home.js";
 import { registerLegacyPage } from "./legacy.js";
 import { registerMarketPage } from "./market.js";
 import { registerPublicPages, type PublicPagesDeps } from "./public.js";
+import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
 import { registerSettingsPages } from "./settings.js";
 
@@ -17,6 +18,7 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   registerPublicPages(app, deps);
   registerLegacyPage(app);
   registerHomePage(app);
+  registerResetPasswordPage(app);
   registerChatPage(app);
   registerDashboardPages(app);
   registerAccountPages(app);

@@ -89,6 +89,11 @@ export function portalSignupUrl(s: KV | null = storage(), env: EndpointEnv = bui
   return `${portalUrl(s, env).replace(/\/+$/, "")}/portal`;
 }
 
+/** The portal's password reset page ("Forgot password?"). Opened in the system browser. */
+export function portalResetPasswordUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
+  return `${portalUrl(s, env).replace(/\/+$/, "")}/portal/reset-password`;
+}
+
 /** Save an override; throws on an invalid URL. Empty string clears it. */
 export function setEndpoint(kind: EndpointKind, raw: string, s: KV | null = storage()): void {
   const key = kind === "coordinator" ? COORDINATOR_KEY : PORTAL_KEY;
