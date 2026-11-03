@@ -71,7 +71,7 @@ export interface EnrollResult {
 }
 
 /**
- * Self-register each instance with the portal using the user's session token and apply the
+ * Self-register each instance with the portal using the user's portal API key (or session token) and apply the
  * returned registration token to opts.tokens, so the normal plan/env wiring (plan.ts sets
  * AGENT_REGISTRATION_TOKEN from opts.tokens) picks it up. A node that already has a token
  * (explicit or via the "*" catch-all) is left alone. Per-node failures warn and continue.
@@ -183,7 +183,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     if (candidates.length) {
       const { enrolled, failed } = await enrollNodes(opts, candidates, post);
       if (enrolled.length === 0) {
-        console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll token and portal URL`);
+        console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll API key (or EDGECODER_API_KEY) and portal URL`);
         return 1;
       }
       // Re-plan so the env files and warnings reflect the registration tokens just applied.
