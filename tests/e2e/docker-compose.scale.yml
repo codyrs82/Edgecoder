@@ -7,6 +7,39 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-edgecoder}
     volumes:
       - scale-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-edgecoder}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # #96: the seed validates every non-loopback registration against this portal, as in production.
+  # scripts/e2e/scale-nonroot.sh creates a verified test user and a portal API key here; each
+  # worker enrols itself with that key (scripts/e2e/scale-worker-enroll.sh).
+  portal:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    command: ["node", "dist/portal/server.js"]
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - SKIP_OLLAMA=true
+      - PORTAL_DATABASE_URL=postgresql://${POSTGRES_USER:-edgecoder}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edgecoder}
+      # PLACEHOLDERS for local scale tests only; must match the seed's PORTAL_SERVICE_TOKEN.
+      - PORTAL_SERVICE_TOKEN=${PORTAL_SERVICE_TOKEN:-scale-test-placeholder-portal-token}
+      - WALLET_SECRET_PEPPER=${WALLET_SECRET_PEPPER:-scale-test-placeholder-pepper}
+      - RESEND_API_KEY=
+    ports:
+      - "127.0.0.1:${SCALE_PORTAL_PORT:-4310}:4310"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   seed-node:
     build:
@@ -25,7 +58,7 @@ services:
       - HOST=0.0.0.0
       - MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}
       - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-scale-test-placeholder-admin-token}
-      - PORTAL_SERVICE_URL=${PORTAL_SERVICE_URL:-http://portal.invalid:4310}
+      - PORTAL_SERVICE_URL=${PORTAL_SERVICE_URL:-http://portal:4310}
       - PORTAL_SERVICE_TOKEN=${PORTAL_SERVICE_TOKEN:-scale-test-placeholder-portal-token}
       - PAYMENT_WEBHOOK_SECRET=${PAYMENT_WEBHOOK_SECRET:-scale-test-placeholder-webhook-secret}
       - INFERENCE_AUTH_TOKEN=${INFERENCE_AUTH_TOKEN:-scale-test-placeholder-inference-token}
@@ -33,7 +66,10 @@ services:
     ports:
       - "4301:4301"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      portal:
+        condition: service_healthy
     healthcheck:
       # /status requires the mesh token since #40.
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/status',{headers:{'x-mesh-token':process.env.MESH_AUTH_TOKEN}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -45,8 +81,13 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.agent
-    command: ["node", "dist/swarm/worker-runner.js"]
+    # Enrols with the portal (unique AGENT_ID per replica: worker-<hostname>), then execs the worker.
+    command: ["sh", "/scale/worker-enroll.sh"]
+    volumes:
+      - ../../scripts/e2e/scale-worker-enroll.sh:/scale/worker-enroll.sh:ro
     environment:
+      - SCALE_PORTAL_URL=http://portal:4310
+      - SCALE_ENROLL_KEY=${SCALE_ENROLL_KEY:-}
       - COORDINATOR_URL=http://seed-node:4301
       - MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}
       - AGENT_MODE=swarm-only
