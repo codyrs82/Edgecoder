@@ -26,7 +26,6 @@ import {
   socketRemoteAddress,
   normalizeUrl,
   pairKey,
-  weightedMedian,
   parseRecordPayload,
   computeIntentFee,
   contributionPolicyDecision,
@@ -72,6 +71,7 @@ import {
   allowlistEnforced,
   checkPeerRegistration,
   isAllowlistedKey,
+  PEER_SIGNATURE_MAX_SKEW_MS,
   parsePeerAllowlist,
   parsePeerUrlPins,
   assertUrlPinsForProduction,
@@ -107,7 +107,8 @@ import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import type { PostgresStore } from "../db/postgres.js";
-import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, satsForCredits } from "../economy/pricing.js";
+import { computeDynamicPricePerComputeUnitSats, creditsForSats, dynamicLoadMultiplier, LEGACY_BASE_SATS_PER_UNIT, satsForCredits } from "../economy/pricing.js";
+import { checkPriceEpoch, priceConsensusQuorum, priceEpochBoundsFromEnv, resolvePriceConsensus, signPriceQuote, verifyPriceQuote } from "../economy/price-epoch-guard.js";
 import { isRateEpochStale, normalizeRateEpoch, rateOracleConfigFromEnv, recalibrateRates, type RateEpoch } from "../economy/rate-oracle.js";
 import {
   ACCEPTED_COMPUTE_CLASS_IDS,
@@ -703,6 +704,12 @@ const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>(
 const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
 const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
+/** #53: band and max step for the legacy price epoch, and how many signed coordinators a consensus round needs. */
+const PRICE_EPOCH_BOUNDS = { cpu: priceEpochBoundsFromEnv("cpu"), gpu: priceEpochBoundsFromEnv("gpu") } as const;
+const PRICE_CONSENSUS_QUORUM_OVERRIDE = process.env.PRICE_CONSENSUS_QUORUM ? Number(process.env.PRICE_CONSENSUS_QUORUM) : undefined;
+function previousPriceEpochSats(resourceClass: ResourceClass): number {
+  return latestPriceEpochByResource.get(resourceClass)?.pricePerComputeUnitSats ?? LEGACY_BASE_SATS_PER_UNIT[resourceClass];
+}
 
 // ── Rate oracle: sats per CPU-hour from market data, recalibrated daily ──
 const RATE_RECALIBRATION_MS = CC.RATE_RECALIBRATION_MS;
@@ -4957,24 +4964,23 @@ app.get("/economy/price/quote", async (req, reply) => {
       activeAgents: z.coerce.number().nonnegative().default(queue.status().agents)
     })
     .parse(req.query);
-  const computed = computeDynamicPricePerComputeUnitSats(query.resourceClass, {
+  const inputs = {
     cpuCapacity: query.cpuCapacity,
     gpuCapacity: query.gpuCapacity,
     queuedTasks: query.queuedTasks,
     activeAgents: query.activeAgents
-  });
-  const payload = JSON.stringify({
-    resourceClass: query.resourceClass,
-    computed,
-    coordinatorId: identity.peerId,
-    createdAtMs: Date.now()
-  });
+  };
+  const computed = computeDynamicPricePerComputeUnitSats(query.resourceClass, inputs);
+  // #53: signed over the inputs and time so the asking coordinator can count it toward a quorum.
+  const issuedAtMs = Date.now();
+  const fields = { coordinatorId: identity.peerId, resourceClass: query.resourceClass, pricePerComputeUnitSats: computed, inputs, issuedAtMs };
   return {
     coordinatorId: identity.peerId,
     resourceClass: query.resourceClass,
     pricePerComputeUnitSats: computed,
+    issuedAtMs,
     reputationWeight: peerScore.get(identity.peerId) ?? 120,
-    signature: signPayload(payload, coordinatorKeys.privateKeyPem)
+    signature: signPriceQuote(fields, coordinatorKeys.privateKeyPem)
   };
 });
 
@@ -4994,14 +5000,19 @@ app.post("/economy/price/propose", async (req, reply) => {
   }
   const now = Date.now();
   const resources: ResourceClass[] = ["cpu", "gpu"];
+  const proposed = new Map<ResourceClass, number>();
+  // #53: an epoch outside the configured band, or moving more than the max step, is rejected whole.
+  for (const resourceClass of resources) {
+    const price = computeDynamicPricePerComputeUnitSats(resourceClass, body);
+    const check = checkPriceEpoch(price, previousPriceEpochSats(resourceClass), PRICE_EPOCH_BOUNDS[resourceClass]);
+    if (!check.ok) {
+      return reply.code(422).send({ error: "price_out_of_bounds", resourceClass, reason: check.reason, proposed: price, previous: previousPriceEpochSats(resourceClass), bounds: PRICE_EPOCH_BOUNDS[resourceClass] });
+    }
+    proposed.set(resourceClass, price);
+  }
   const created: PriceEpochRecord[] = [];
   for (const resourceClass of resources) {
-    const pricePerComputeUnitSats = computeDynamicPricePerComputeUnitSats(resourceClass, {
-      cpuCapacity: body.cpuCapacity,
-      gpuCapacity: body.gpuCapacity,
-      queuedTasks: body.queuedTasks,
-      activeAgents: body.activeAgents
-    });
+    const pricePerComputeUnitSats = proposed.get(resourceClass)!;
     const payload = JSON.stringify({
       resourceClass,
       pricePerComputeUnitSats,
@@ -5036,45 +5047,83 @@ app.post("/economy/price/consensus", async (req, reply) => {
       activeAgents: z.number().nonnegative()
     })
     .parse(req.body);
-  const peers = mesh.listPeers().filter((p) => isApprovedCoordinator(p.peerId));
-  const localWeight = Math.max(1, peerScore.get(identity.peerId) ?? 120);
+  // #53: only coordinators on MESH_PEER_ALLOWLIST, presenting the allowlisted key, can sign a
+  // quote that counts; a round needs a quorum of them and the result is bounded.
+  const peers = mesh
+    .listPeers()
+    .filter((p) => isApprovedCoordinator(p.peerId) && isAllowlistedKey(MESH_PEER_ALLOWLIST, p.peerId, p.publicKeyPem));
+  const quorum = priceConsensusQuorum(MESH_PEER_ALLOWLIST.keys(), identity.peerId, PRICE_CONSENSUS_QUORUM_OVERRIDE);
+  const inputs = {
+    cpuCapacity: body.cpuCapacity,
+    gpuCapacity: body.gpuCapacity,
+    queuedTasks: body.queuedTasks,
+    activeAgents: body.activeAgents
+  };
 
   const negotiate = async (resourceClass: ResourceClass) => {
-    const localPrice = computeDynamicPricePerComputeUnitSats(resourceClass, body);
-    const quotes: Array<{ coordinatorId: string; value: number; weight: number }> = [
-      { coordinatorId: identity.peerId, value: localPrice, weight: localWeight }
-    ];
+    const localPrice = computeDynamicPricePerComputeUnitSats(resourceClass, inputs);
+    const quotes: Array<{ coordinatorId: string; value: number }> = [{ coordinatorId: identity.peerId, value: localPrice }];
+    const rejected: Array<{ coordinatorId: string; reason: string }> = [];
     await Promise.all(
       peers.map(async (peer) => {
         try {
           const url = new URL(`${peer.coordinatorUrl}/economy/price/quote`);
           url.searchParams.set("resourceClass", resourceClass);
-          url.searchParams.set("cpuCapacity", String(body.cpuCapacity));
-          url.searchParams.set("gpuCapacity", String(body.gpuCapacity));
-          url.searchParams.set("queuedTasks", String(body.queuedTasks));
-          url.searchParams.set("activeAgents", String(body.activeAgents));
+          url.searchParams.set("cpuCapacity", String(inputs.cpuCapacity));
+          url.searchParams.set("gpuCapacity", String(inputs.gpuCapacity));
+          url.searchParams.set("queuedTasks", String(inputs.queuedTasks));
+          url.searchParams.set("activeAgents", String(inputs.activeAgents));
           const res = await request(url.toString(), {
             method: "GET",
             headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
           });
           if (res.statusCode < 200 || res.statusCode >= 300) return;
           const quote = (await res.body.json()) as {
-            coordinatorId: string;
-            pricePerComputeUnitSats: number;
-            reputationWeight?: number;
+            coordinatorId?: string;
+            resourceClass?: ResourceClass;
+            pricePerComputeUnitSats?: number;
+            issuedAtMs?: number;
+            signature?: string;
           };
-          quotes.push({
-            coordinatorId: quote.coordinatorId,
-            value: quote.pricePerComputeUnitSats,
-            weight: Math.max(1, Math.min(500, quote.reputationWeight ?? (peerScore.get(peer.peerId) ?? 100)))
+          const verdict = verifyPriceQuote({
+            quote,
+            expectedCoordinatorId: peer.peerId,
+            resourceClass,
+            inputs,
+            publicKeyPem: peer.publicKeyPem,
+            nowMs: Date.now(),
+            maxSkewMs: PEER_SIGNATURE_MAX_SKEW_MS
           });
+          if (!verdict.ok) {
+            rejected.push({ coordinatorId: peer.peerId, reason: verdict.reason });
+            return;
+          }
+          quotes.push({ coordinatorId: peer.peerId, value: quote.pricePerComputeUnitSats! });
         } catch {
           return;
         }
       })
     );
-    const finalPrice = weightedMedian(quotes.map((q) => ({ value: q.value, weight: q.weight })));
-    const now = Date.now();
+    const outcome = resolvePriceConsensus({
+      quotes,
+      quorum,
+      previous: previousPriceEpochSats(resourceClass),
+      bounds: PRICE_EPOCH_BOUNDS[resourceClass]
+    });
+    return { resourceClass, outcome, quotes, rejected };
+  };
+
+  const rounds = await Promise.all([negotiate("cpu"), negotiate("gpu")]);
+  const failed = rounds.find((r) => !r.outcome.ok);
+  if (failed) {
+    return reply.code(409).send({ error: "price_quorum_not_met", resourceClass: failed.resourceClass, outcome: failed.outcome, rejected: failed.rejected });
+  }
+  const now = Date.now();
+  const result: Record<string, unknown> = {};
+  for (const round of rounds) {
+    if (!round.outcome.ok) continue;
+    const { resourceClass } = round;
+    const finalPrice = round.outcome.price;
     const payload = JSON.stringify({
       resourceClass,
       pricePerComputeUnitSats: finalPrice,
@@ -5086,19 +5135,17 @@ app.post("/economy/price/consensus", async (req, reply) => {
       coordinatorId: identity.peerId,
       resourceClass,
       pricePerComputeUnitSats: finalPrice,
-      supplyIndex: resourceClass === "gpu" ? body.gpuCapacity : body.cpuCapacity,
-      demandIndex: body.queuedTasks + body.activeAgents,
-      negotiatedWith: [...new Set(quotes.map((q) => q.coordinatorId))],
+      supplyIndex: resourceClass === "gpu" ? inputs.gpuCapacity : inputs.cpuCapacity,
+      demandIndex: inputs.queuedTasks + inputs.activeAgents,
+      negotiatedWith: round.outcome.signers,
       signature: signPayload(payload, coordinatorKeys.privateKeyPem),
       createdAtMs: now
     };
     latestPriceEpochByResource.set(resourceClass, epoch);
     await pgStore?.upsertPriceEpoch(epoch);
-    return { epoch, quotes };
-  };
-
-  const [cpu, gpu] = await Promise.all([negotiate("cpu"), negotiate("gpu")]);
-  return { ok: true, cpu, gpu };
+    result[resourceClass] = { epoch, quotes: round.quotes, rejected: round.rejected, medianPrice: round.outcome.medianPrice, clamped: round.outcome.clamped };
+  }
+  return { ok: true, quorum, ...result };
 });
 
 app.post("/economy/payments/intents", async (req, reply) => {
@@ -7442,8 +7489,9 @@ export async function initCoordinator(): Promise<void> {
       blacklistVersion = blacklistAuditLog.length;
       const latestCpu = await storeRef.latestPriceEpoch("cpu");
       const latestGpu = await storeRef.latestPriceEpoch("gpu");
-      if (latestCpu) latestPriceEpochByResource.set("cpu", latestCpu);
-      if (latestGpu) latestPriceEpochByResource.set("gpu", latestGpu);
+      // #53: a stored epoch outside the configured band (older code had none) is not reloaded.
+      if (latestCpu && checkPriceEpoch(latestCpu.pricePerComputeUnitSats, undefined, PRICE_EPOCH_BOUNDS.cpu).ok) latestPriceEpochByResource.set("cpu", latestCpu);
+      if (latestGpu && checkPriceEpoch(latestGpu.pricePerComputeUnitSats, undefined, PRICE_EPOCH_BOUNDS.gpu).ok) latestPriceEpochByResource.set("gpu", latestGpu);
       const storedEpoch = await storeRef.latestRateEpoch();
       latestRateEpoch = storedEpoch ? normalizeRateEpoch(storedEpoch, rateOracleConfig.computeClasses) : null;
       syncOrderBookReference(latestRateEpoch);
