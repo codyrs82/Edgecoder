@@ -92,15 +92,18 @@ Consolidated reference for all environment controls. The primary config file on 
 | `TRUSTED_COORDINATOR_KEYS` | Agent: comma-separated `peerId:fingerprint` (sha256 of the SPKI DER; `GET /identity` → `trustEntry`). Older PEM-text fingerprints are still accepted. |
 | `EDGECODER_TRUST_FILE` | Agent: trust file path (default `<config dir>/trusted-coordinators`); one `peerId:fingerprint` per line; tofu appends first-seen keys. |
 
-## Result verification (#50, #106)
+## Result verification (#50, #105, #106, #117, #162)
+
+Reputation, abandonment and replica exclusion are keyed on the agent's reward account (its agent id only when it has none), so a new agent id doesn't reset them. With Postgres, per-account reputation (`verification_reputation`) and held results (`pending_verifications`) are stored: a restart holds them again with their original deadline and re-issues the replica, and both seeds share one reputation per account. A result outvoted by an agreeing majority is a strike for the automatic blacklister (3 within an hour blacklist the agent id).
 
 | Variable | Default | Description |
 |---|---|---|
 | `RESULT_VERIFICATION_RATE` | `0` | Base fraction of subtasks re-executed for verification. `0` = verification off (the default). |
 | `RESULT_VERIFICATION_ABANDON_PENALTY` | `0.25` | Reputation lost for claiming a verification replica and never reporting it. |
-| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` | A claimed replica with no report after this long is reassigned to an agent other than the abandoner(s). |
-| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | `1` | How many times one sampled subtask's stalled replica is reassigned (0–10). After that the subtask waits for the overall timeout. |
-| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation (0–1) of an agent id the coordinator has never seen. Below 1 so a caught agent can't regain full trust by re-registering; lower reputation means its results are re-executed more often. |
+| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` | A claimed replica with no report after this long is penalized and reassigned to an agent on a reward account that hasn't run or abandoned it. This repeats for each new stall while more than this long remains before the overall timeout (`RESULT_VERIFICATION_TIMEOUT_MS`, counted from the original result; reassignment doesn't extend it). When no eligible agent is left the replica stays unclaimed and the subtask settles at the timeout. |
+| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | unlimited | Optional hard cap (0–1000) on reassignments per sampled subtask. Unset: bounded by the overall timeout as above. |
+| `RESULT_VERIFICATION_REPUTATION_CACHE_MAX` | `50000` | Most reputations kept in memory. Entries at or above the initial reputation are dropped first, so eviction never raises a penalized account's trust. With Postgres the stored value is reloaded on the account's next result. |
+| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation (0–1) of a reward account the coordinator has never seen. Below 1 so a caught agent can't regain full trust by re-registering; lower reputation means its results are re-executed more often. |
 | `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Max executions of a sampled subtask (original + replicas), 2–3. Values above 3 are capped. At most this minus one replicas run per sampled subtask; whether winning replicas are paid is set by `RESULT_VERIFICATION_MINT_REPLICA_REWARDS`. |
 | `RESULT_VERIFICATION_MINT_REPLICA_REWARDS` | `false` | Pay winning verification replicas from newly minted compute credits (`true`/`1`/`yes` to enable). Off by default: only the original execution is paid, so verification doesn't add to the credit supply. **Enabling minting requires Cody's approval.** The coordinator logs a startup warning whenever `RESULT_VERIFICATION_RATE` is above 0, saying whether replicas are paid. |
 

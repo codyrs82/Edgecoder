@@ -681,6 +681,24 @@ CREATE TABLE IF NOT EXISTS payout_callback_pins (
   notified_at_ms BIGINT,
   PRIMARY KEY (account_id, destination)
 );
+
+-- Result verification (#105, #162; src/swarm/verification.ts). Reputation is per reward account
+-- and shared by every coordinator on this database: updates are atomic deltas, clamped to [0, 1].
+CREATE TABLE IF NOT EXISTS verification_reputation (
+  account_id TEXT PRIMARY KEY,
+  reputation DOUBLE PRECISION NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+-- Results held for verification. Each row belongs to the coordinator that holds it (its queue has
+-- the replicas); only that coordinator writes it or restores it after a restart.
+CREATE TABLE IF NOT EXISTS pending_verifications (
+  original_subtask_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  state_json JSONB NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_verifications_coordinator ON pending_verifications (coordinator_id, started_at_ms);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -2851,6 +2869,54 @@ export class PostgresStore {
   async listHardwareVerifications(limit = 100_000): Promise<HardwareVerificationRecord[]> {
     const r = await this.pool.query(`SELECT record_json FROM hardware_verifications ORDER BY updated_at_ms DESC LIMIT $1`, [limit]);
     return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as HardwareVerificationRecord);
+  }
+
+  // ── Result verification (#105, #162) ──
+  /** Reputation of a reward account, or undefined when it has none stored yet. */
+  async getVerificationReputation(accountId: string): Promise<number | undefined> {
+    const r = await this.pool.query(`SELECT reputation FROM verification_reputation WHERE account_id = $1`, [accountId]);
+    return r.rows[0] ? Number(r.rows[0].reputation) : undefined;
+  }
+
+  /**
+   * Move a reward account's reputation by `delta` in one statement (a new account starts at
+   * `initial`), clamped to [0, 1]; returns the stored value. Two coordinators adjusting the same
+   * account at once both apply: the row lock serializes the read-modify-write.
+   */
+  async adjustVerificationReputation(accountId: string, delta: number, initial: number): Promise<number> {
+    const r = await this.pool.query(
+      `INSERT INTO verification_reputation (account_id, reputation, updated_at_ms)
+       VALUES ($1, GREATEST(0, LEAST(1, $3::double precision + $2::double precision)), $4)
+       ON CONFLICT (account_id) DO UPDATE
+         SET reputation = GREATEST(0, LEAST(1, verification_reputation.reputation + $2::double precision)),
+             updated_at_ms = EXCLUDED.updated_at_ms
+       RETURNING reputation`,
+      [accountId, delta, initial, Date.now()]
+    );
+    return Number(r.rows[0].reputation);
+  }
+
+  /** Save a held verification; a row held by another coordinator is left alone (returns false). */
+  async upsertPendingVerification(coordinatorId: string, originalSubtaskId: string, state: unknown, startedAtMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO pending_verifications (original_subtask_id, coordinator_id, state_json, started_at_ms, updated_at_ms)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (original_subtask_id) DO UPDATE SET state_json = EXCLUDED.state_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE pending_verifications.coordinator_id = EXCLUDED.coordinator_id`,
+      [originalSubtaskId, coordinatorId, JSON.stringify(state), startedAtMs, Date.now()]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async deletePendingVerification(coordinatorId: string, originalSubtaskId: string): Promise<boolean> {
+    const r = await this.pool.query(`DELETE FROM pending_verifications WHERE original_subtask_id = $1 AND coordinator_id = $2`, [originalSubtaskId, coordinatorId]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** The verifications this coordinator held before a restart, oldest first. */
+  async listPendingVerifications<S = unknown>(coordinatorId: string): Promise<S[]> {
+    const r = await this.pool.query(`SELECT state_json FROM pending_verifications WHERE coordinator_id = $1 ORDER BY started_at_ms ASC`, [coordinatorId]);
+    return r.rows.map((row) => (typeof row.state_json === "string" ? JSON.parse(row.state_json) : row.state_json) as S);
   }
 
   // ── Reserved capacity ──

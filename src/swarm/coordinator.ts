@@ -178,10 +178,12 @@ import {
 } from "./result-integrity.js";
 import {
   ResultVerifier,
+  executorKey,
   payableWinners,
   verificationConfigFromEnv,
   verificationStartupWarning,
   type ExecutionResult,
+  type PendingVerificationSnapshot,
   type ReplicaRequest,
   type VerificationOutcome
 } from "./verification.js";
@@ -3463,7 +3465,8 @@ app.post("/pull", async (req, reply) => {
     lastTaskAssignedByAgent.set(body.agentId, Date.now());
     behaviorTracker.recordTaskClaim(body.agentId);
     // #106: remember who took a verification replica, so abandoning it can't force an unverified payout.
-    if (resultVerifier.isReplica(task.id)) resultVerifier.markReplicaClaimed(task.id, body.agentId);
+    // #162: keyed on the reward account, so a new agent id on the same account is still the abandoner.
+    if (resultVerifier.isReplica(task.id)) resultVerifier.markReplicaClaimed(task.id, body.agentId, pullerAccount);
     const claimRecord = ordering.append({
       eventType: "task_claim",
       taskId: task.taskId,
@@ -3551,6 +3554,96 @@ if (!hardwareVerifier.config.enabled) app.log.warn("HARDWARE_VERIFICATION=0: sel
 {
   const warning = verificationStartupWarning(verificationConfig);
   if (warning) app.log.warn({ rate: verificationConfig.rate, mintReplicaRewards: verificationConfig.mintReplicaRewards }, warning);
+}
+
+/*
+ * #105: held verifications and per-account reputation are mirrored to Postgres. Writes run in
+ * order on one chain (a held row is never re-saved after its delete); /result and the expiry
+ * tick wait for it, so what they acknowledged survives a restart. Reputation is shared by both
+ * seeds: deltas are applied atomically in the database and the stored value refreshes the cache.
+ */
+let verificationWrites: Promise<void> = Promise.resolve();
+function queueVerificationWrite(write: () => Promise<unknown>): void {
+  verificationWrites = verificationWrites
+    .then(write)
+    .then(
+      () => undefined,
+      (error) => app.log.warn({ error: String(error) }, "result_verification_persist_failed")
+    );
+}
+resultVerifier.onChange((change) => {
+  const store = pgStore;
+  if (!store) return;
+  if (change.kind === "reputation") {
+    queueVerificationWrite(async () =>
+      resultVerifier.primeReputation(change.key, await store.adjustVerificationReputation(change.key, change.delta, verificationConfig.initialReputation))
+    );
+  } else if (change.kind === "pending") {
+    queueVerificationWrite(() => store.upsertPendingVerification(identity.peerId, change.originalSubtaskId, change.snapshot, change.snapshot.startedAtMs));
+  } else {
+    queueVerificationWrite(() => store.deletePendingVerification(identity.peerId, change.originalSubtaskId));
+  }
+});
+
+/** #162: the key reputation and sampling use (the reward account), with its stored reputation loaded. */
+async function verificationAccountFor(agentId: string): Promise<string> {
+  const accountId = await rewardAccountForAgent(agentId);
+  const stored = await pgStore?.getVerificationReputation(accountId).catch(() => undefined);
+  if (stored !== undefined) resultVerifier.primeReputation(accountId, stored);
+  return accountId;
+}
+
+/** #105: hold again the verifications this coordinator held before a restart, re-issuing their replicas. */
+async function restorePendingVerifications(store: PostgresStore): Promise<number> {
+  const snapshots = await store.listPendingVerifications<PendingVerificationSnapshot<ResultMeta>>(identity.peerId);
+  let restored = 0;
+  for (const snap of snapshots) {
+    const next = resultVerifier.restore(snap);
+    if (!next) continue;
+    restored += 1;
+    enqueueReplica(next);
+  }
+  await verificationWrites;
+  if (restored > 0) app.log.info({ restored }, "result_verifications_restored");
+  return restored;
+}
+
+/**
+ * #50/#106/#117: one pass of the verification clock: penalize and reassign stalled replica
+ * claims, then settle verifications past their deadline. Runs every minute (initCoordinator).
+ */
+export async function runResultVerificationTick(): Promise<void> {
+  const stalled = resultVerifier.reassignStalled();
+  for (const a of stalled.abandoned) {
+    securityLog.log({
+      level: securityLog.severity("result_verification_replica_abandoned"),
+      event: "result_verification_replica_abandoned",
+      source: { type: "agent", id: a.agentId },
+      details: { originalSubtaskId: a.originalSubtaskId, accountId: a.accountId, reputation: resultVerifier.reputation(a.accountId) },
+      action: "replica_reassigned",
+      coordinatorId: identity.peerId,
+    });
+  }
+  for (const r of stalled.replacements) {
+    queue.removeHeld(r.replaces); // the abandoner's late report then fails the claim check
+    enqueueReplica(r.request);
+  }
+  for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
+  await verificationWrites;
+}
+
+/** #105: a result outvoted by a verification majority is a strike towards an automatic blacklist. */
+function recordVerificationMismatchStrike(loser: ExecutionResult<ResultMeta>, originalSubtaskId: string): void {
+  autoBlacklister.processAnomalies(loser.agentId, [
+    {
+      ruleId: "VRF001",
+      ruleName: "result_verification_mismatch",
+      severity: "HIGH",
+      blacklistReason: "forged_results",
+      description: "result disagreed with a verified majority of independent executions",
+      stats: { originalSubtaskId, executedSubtaskId: loser.subtaskId, accountId: executorKey(loser) }
+    }
+  ]);
 }
 
 function enqueueReplica(req: ReplicaRequest): void {
@@ -3745,11 +3838,15 @@ async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Pro
         originalSubtaskId: outcome.originalSubtaskId,
         executedSubtaskId: l.subtaskId,
         status: outcome.status,
-        reputation: resultVerifier.reputation(l.agentId)
+        accountId: executorKey(l),
+        reputation: resultVerifier.reputation(executorKey(l))
       },
       action: "credits_withheld",
       coordinatorId: identity.peerId,
     });
+    // Only a loser outvoted by an agreeing majority: "unresolved" means no two executions agreed,
+    // which honest agents on non-deterministic work hit too.
+    if (outcome.status === "verified") recordVerificationMismatchStrike(l, outcome.originalSubtaskId);
   }
   const original = [...outcome.winners, ...outcome.losers].find((r) => r.subtaskId === outcome.originalSubtaskId);
   if (!original) {
@@ -4020,7 +4117,7 @@ app.post("/result", async (req, reply) => {
     const execution: ExecutionResult<ResultMeta> = {
       subtaskId: body.subtaskId,
       agentId: body.agentId,
-      accountId: await rewardAccountForAgent(body.agentId),
+      accountId: await verificationAccountFor(body.agentId),
       ok: body.ok,
       output: body.output ?? "",
       meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
@@ -4030,7 +4127,7 @@ app.post("/result", async (req, reply) => {
       const r = resultVerifier.recordReplica(body.subtaskId, execution);
       if (r && r.status === "pending") enqueueReplica(r.next);
       else if (r) verificationOutcome = r;
-    } else if (resultVerifier.shouldVerify(body.agentId)) {
+    } else if (resultVerifier.shouldVerify(executorKey(execution))) {
       verificationHold = true;
       enqueueReplica(resultVerifier.start(subtask, execution));
       app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "result_held_for_verification");
@@ -4042,6 +4139,7 @@ app.post("/result", async (req, reply) => {
     // coordinator, and nothing is paid, until the verdict (settleVerification).
     queue.removeHeld(body.subtaskId);
     if (verificationOutcome) await settleVerification(verificationOutcome);
+    await verificationWrites; // #105: the held state is stored before the agent is told
     return reply.send({ ok: true, held: true });
   }
 
@@ -7457,6 +7555,8 @@ export async function initCoordinator(): Promise<void> {
       for (const intent of pendingIntents) {
         paymentIntents.set(intent.intentId, intent);
       }
+      // #105: results held for verification before a restart are held again, not dropped.
+      await restorePendingVerifications(storeRef).catch((error) => app.log.warn({ error: String(error) }, "result_verification_restore_failed"));
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([
@@ -7587,27 +7687,9 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void maybeAnchorLatestStatsCheckpoint().catch((error) => app.log.warn({ error }, "stats_anchor_tick_failed"));
       }, STATS_ANCHOR_INTERVAL_MS);
-      // #50: release verifications whose replicas never reported.
+      // #50: reassign stalled replicas and release verifications whose replicas never reported.
       setInterval(() => {
-        void (async () => {
-          // #106: penalize and (once) reassign replicas that were claimed but never reported.
-          const stalled = resultVerifier.reassignStalled();
-          for (const a of stalled.abandoned) {
-            securityLog.log({
-              level: securityLog.severity("result_verification_replica_abandoned"),
-              event: "result_verification_replica_abandoned",
-              source: { type: "agent", id: a.agentId },
-              details: { originalSubtaskId: a.originalSubtaskId, reputation: resultVerifier.reputation(a.agentId) },
-              action: "replica_reassigned",
-              coordinatorId: identity.peerId,
-            });
-          }
-          for (const r of stalled.replacements) {
-            queue.removeHeld(r.replaces); // the abandoner's late report then fails the claim check
-            enqueueReplica(r.request);
-          }
-          for (const outcome of resultVerifier.expire()) await settleVerification(outcome);
-        })().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
+        void runResultVerificationTick().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
       }, 60_000);
       setInterval(() => {
         void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
