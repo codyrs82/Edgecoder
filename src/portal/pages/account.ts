@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { escapeHtml, settingsPage, settingsSection } from "./settings-shell.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
@@ -16,7 +16,8 @@ export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "io
 }
 
 export function registerAccountPages(app: FastifyInstance): void {
-app.get("/portal/wallet", async (_req, reply) => {
+// Settings > Plan & usage: the wallet (balance, buying cSats, payouts, where we pay you). Was /portal/wallet.
+app.get("/portal/settings/plan", async (_req, reply) => {
   const content = `
     <div class="card" id="payoutDestinationCard">
       <h2 style="margin-top:0;">Where should we pay you?</h2>
@@ -418,23 +419,18 @@ app.get("/portal/wallet", async (_req, reply) => {
     });
     loadWalletView().catch((err) => showToast("Could not load wallet data: " + String(err.message || err), true));
   `;
-  return reply.type("text/html").send(portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Wallet",
-    activeTab: "wallet",
-    heading: "Wallet & Credits",
-    subtitle: "Credits, payouts and where we pay you.",
-    content,
-    script
-  }));
+  const section = settingsSection("plan", "Plan &amp; usage", "Credits, buying cSats, payouts and where we pay you.", content);
+  return reply.type("text/html").send(settingsPage("plan", "Credits, payouts and where we pay you.", section, script + "\n    requireAuth().then(revealSettingsAdminTab).catch(() => undefined);\n", { wide: true }));
 });
 
-app.get("/portal/download", async (req, reply) => {
+// Settings > Install agent. Was /portal/download (which redirects here with its ?token=).
+app.get("/portal/settings/install", async (req, reply) => {
   const GH_RELEASE_BASE = "https://github.com/codyrs82/Edgecoder/releases/latest/download";
   const GH_RELEASES_PAGE = "https://github.com/codyrs82/Edgecoder/releases/latest";
   const userAgent = req.headers["user-agent"] || "";
   const detectedOS = detectOS(userAgent);
   const queryToken = ((req.query as Record<string, string>)?.token || "").trim();
-  const tokenDisplay = queryToken || "YOUR_TOKEN";
+  const tokenDisplay = escapeHtml(queryToken || "YOUR_TOKEN");
   const portalBase = (process.env.PORTAL_PUBLIC_URL || "https://edgecoder.io").replace(/\/$/, "");
 
   const osLabels: Record<string, string> = {
@@ -481,7 +477,7 @@ app.get("/portal/download", async (req, reply) => {
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.deb">Download .deb package</a>
      <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.AppImage" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download AppImage</a>
      <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" onclick="copyCmd('linux-install')">Copy</button></div>`,
+    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" data-copy="linux-install">Copy</button></div>`,
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "linux");
 
@@ -489,11 +485,11 @@ app.get("/portal/download", async (req, reply) => {
     `<a class="dl-btn" href="#">Download from App Store</a>
      <span style="font-size:10px;color:var(--muted);margin-left:8px;">TestFlight available now</span>`,
     `Sign in with your <strong>EdgeCoder account</strong>.`,
-    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('ios-token')">Copy</button></div>`
+    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" data-copy="ios-token">Copy</button></div>`
   ], detectedOS === "ios");
 
   const vscodeCard = wizardCard("vscode", icon("code", 15), "VS Code Extension", [
-    `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" onclick="copyCmd('vscode-cmd')">Copy</button></div>
+    `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" data-copy="vscode-cmd">Copy</button></div>
      <span style="font-size:10px;color:var(--muted);">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
     `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
   ], false);
@@ -503,7 +499,7 @@ app.get("/portal/download", async (req, reply) => {
   --name edgecoder \\
   -e EDGE_RUNTIME_MODE=worker \\
   -e AGENT_REGISTRATION_TOKEN=${tokenDisplay} \\
-  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" onclick="copyCmd('docker-cmd')">Copy</button></div>`
+  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" data-copy="docker-cmd">Copy</button></div>`
   ], false);
 
   /* ── pick primary vs secondary cards ─────────────────────────────── */
@@ -515,8 +511,8 @@ app.get("/portal/download", async (req, reply) => {
   // One installer for every platform (docs/install.md): detects GPUs, one agent per GPU.
   const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 style="margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
     <p style="margin:0 0 12px;font-size:13px;color:var(--muted);">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
-    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-sh')">Copy</button></div>
-    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" onclick="copyCmd('install-ps1')">Copy</button></div>
+    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-sh">Copy</button></div>
+    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-ps1">Copy</button></div>
     <div style="font-size:12px;color:var(--muted);margin-top:8px;">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
   const secondaryCards = universalCard + Object.entries(allCards)
     .filter(([k]) => k !== primaryKey)
@@ -594,7 +590,7 @@ app.get("/portal/download", async (req, reply) => {
     ${primaryCard}
 
     <!-- ── Other platforms toggle ─────────────────────────────────────── -->
-    <button class="toggle-link" id="toggle-others" onclick="toggleOthers()">Show other platforms</button>
+    <button class="toggle-link" id="toggle-others">Show other platforms</button>
     <div class="other-platforms" id="other-platforms">
       <div class="other-grid">
         ${secondaryCards}
@@ -603,7 +599,7 @@ app.get("/portal/download", async (req, reply) => {
   `;
 
   const script = `
-    requireAuth().catch(() => {});
+    requireAuth().then(revealSettingsAdminTab).catch(() => {});
 
     function copyCmd(id) {
       var el = document.getElementById(id);
@@ -614,31 +610,21 @@ app.get("/portal/download", async (req, reply) => {
         if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy'; }, 2000); }
       });
     }
+    document.querySelectorAll('.copy-btn[data-copy]').forEach(function(btn) {
+      btn.addEventListener('click', function() { copyCmd(btn.getAttribute('data-copy')); });
+    });
 
-    function toggleOthers() {
+    document.getElementById('toggle-others').addEventListener('click', function() {
       var el = document.getElementById('other-platforms');
       var btn = document.getElementById('toggle-others');
       if (!el || !btn) return;
       el.classList.toggle('show');
       btn.textContent = el.classList.contains('show') ? 'Hide other platforms' : 'Show other platforms';
-    }
-    ${queryToken ? `
-    (function() {
-      document.querySelectorAll('.code-block code').forEach(function(el) {
-        el.innerHTML = el.innerHTML.replace(/YOUR_TOKEN/g, '${queryToken}');
-      });
-    })();
-    ` : ""}
+    });
   `;
 
-  return reply.type("text/html").send(portalAuthedPageHtml({
-    title: "EdgeCoder Portal | Get EdgeCoder",
-    activeTab: "download",
-    heading: "Get EdgeCoder",
-    subtitle: "Install the agent, join the mesh, start contributing.",
-    content,
-    script
-  }));
+  // The token is rendered (escaped) on the server; the script no longer rewrites it.
+  return reply.type("text/html").send(settingsPage("install", "Install the agent, join the mesh, start contributing.", content, script, { wide: true }));
 });
 
 }

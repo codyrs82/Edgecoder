@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
+import { registerSettingsComputePage } from "./settings-compute.js";
 import { registerSettingsOpsPages } from "./settings-ops.js";
-import { settingRow, settingsPage } from "./settings-shell.js";
+import { LEGACY_SETTINGS_REDIRECTS, SETTINGS_HELPERS_SCRIPT, redirectKeepingQuery, settingRow, settingsPage } from "./settings-shell.js";
 
 /**
- * Settings (/portal/settings): General, Profile, Plan & usage, Compute and Connect your tools, one
- * section at a time by #hash, all searchable from the sub-navigation's search box. Nodes and Admin
- * are their own pages (settings-ops.ts) in the same frame (settings-shell.ts).
+ * Settings (/portal/settings): General, Profile, Usage and Connect your tools, one section at a
+ * time by #hash, all searchable from the sub-navigation's search box. Plan & usage and Install
+ * agent (account.ts), Compute (settings-compute.ts), Nodes and Admin (settings-ops.ts) are their
+ * own pages in the same frame (settings-shell.ts).
  */
 const section = (key: string, title: string, lead: string, body: string) =>
   `<section class="set-section" id="sec-${key}" data-section="${key}"><h2 class="set-title">${title}</h2><p class="set-lead">${lead}</p>${body}</section>`;
@@ -50,10 +52,10 @@ const PROFILE = section(
 
 const USAGE = section(
   "usage",
-  "Plan & usage",
+  "Usage",
   "You pay for compute in cSats (1 cSat = 1 sat). Chats, tools and reservations spend them; your machines earn sats.",
   card(
-    settingRow("cSats balance", "What you can spend on network compute.", `<span class="set-big" id="usageBalance">—</span><a class="btn primary" href="/portal/wallet">Buy cSats</a>`, { keywords: "balance credits csats plan buy wallet" }) +
+    settingRow("cSats balance", "What you can spend on network compute.", `<span class="set-big" id="usageBalance">—</span><a class="btn primary" href="/portal/settings/plan">Buy cSats</a>`, { keywords: "balance credits csats plan buy wallet" }) +
       settingRow("Earned", "Sats your machines have earned running jobs for others.", `<span class="set-value" id="usageEarned">—</span>`, { keywords: "earned earnings sats payout" }) +
       settingRow("Prices", "Per second of compute on the base tier of each class.", `<span class="set-value" id="usagePrices">—</span>`, { keywords: "price rate cost per second class" })
   ) +
@@ -61,21 +63,6 @@ const USAGE = section(
     card(
       `<div class="set-row wide" data-keywords="recent activity history usage spend transactions"><table><thead><tr><th>When</th><th>What</th><th class="num">cSats</th></tr></thead><tbody id="usageRecent"><tr><td colspan="3" class="muted">Loading…</td></tr></tbody></table></div>`
     )
-);
-
-const COMPUTE = section(
-  "compute",
-  "Compute",
-  "Reserve a machine: it takes only your jobs for the time you pick, paid now in cSats. Unused time comes back when you cancel.",
-  group("Reserve a machine") +
-    card(
-      settingRow("Class", "What kind of machine. Shows how many are free and the price.", `<select id="reserveClass" aria-label="Machine class"><option value="">Loading…</option></select>`, { keywords: "reserve class gpu cpu apple machine lease" }) +
-        settingRow("Minutes", "How long to hold it.", `<input id="reserveMinutes" type="number" min="5" max="1440" step="5" value="30" aria-label="Minutes" />`, { keywords: "reserve minutes duration time" }) +
-        settingRow("Model", "Optional: only a machine that has this model installed.", `<select id="reserveModel" aria-label="Model"><option value="">Any model</option></select>`, { keywords: "reserve model" }) +
-        settingRow("Cost", "Charged now; the unused part is refunded.", `<span class="set-value" id="reserveCost">—</span><button class="primary" id="reserveBtn">Reserve</button>`, { keywords: "reserve cost price" })
-    ) +
-    group("Your reservations") +
-    card(`<div id="leasesList" data-keywords="reservations leases active cancel"><div class="set-row"><div class="set-empty">Loading…</div></div></div>`)
 );
 
 const TOOLS = section(
@@ -92,7 +79,7 @@ const TOOLS = section(
     card(
       settingRow(
         "Base URL and models",
-        `Base URL <code><span class="portal-origin"></span>/v1</code>. Models: <code>network/&lt;model&gt;</code> (any machine), <code>network/&lt;model&gt;@gpu</code> (one class: cpu, apple, gpu, gpu.dc), <code>mine/&lt;model&gt;</code> (your own machines, free), <code>reserved/&lt;reservation id&gt;/&lt;model&gt;</code> (a machine you reserved). <a href="/portal/market">Prices by class are on the market page.</a>`,
+        `Base URL <code><span class="portal-origin"></span>/v1</code>. Models: <code>network/&lt;model&gt;</code> (any machine), <code>network/&lt;model&gt;@gpu</code> (one class: cpu, apple, gpu, gpu.dc), <code>mine/&lt;model&gt;</code> (your own machines, free), <code>reserved/&lt;reservation id&gt;/&lt;model&gt;</code> (a machine you reserved). <a href="/portal/settings/compute">Prices by class are under Compute.</a>`,
         "",
         { keywords: "base url models openai endpoint" }
       ) +
@@ -111,7 +98,7 @@ claude</pre></div></div>` +
     )
 );
 
-const SCRIPT = `
+const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
     function b64urlToArrayBuffer(base64url) {
       const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
       const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
@@ -126,28 +113,14 @@ const SCRIPT = `
       for (const b of bytes) binary += String.fromCharCode(b);
       return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
     }
-    const CLASS_LABELS = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
-    const classLabel = (c) => CLASS_LABELS[c] || c;
-    const fmtNum = (n, d) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 2 : d });
-    const fmtRate = (n) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : Number(n).toPrecision(2));
-    function fmtDate(ms) { return ms ? new Date(ms).toLocaleString() : "never"; }
-    function timeLeft(endMs) {
-      const min = Math.floor((endMs - Date.now()) / 60000);
-      if (min < 1) return "ending";
-      if (min < 60) return min + " min left";
-      return Math.floor(min / 60) + " h" + (min % 60 ? " " + (min % 60) + " min" : "") + " left";
-    }
-    function el(tag, attrs, text) { const e = document.createElement(tag); for (const k in (attrs || {})) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; }
-    async function call(path, options) {
-      const res = await fetch(path, { credentials: "include", headers: { "content-type": "application/json" }, ...(options || {}) });
-      let json = {}; try { json = await res.json(); } catch {}
-      return { ok: res.ok, status: res.status, json };
-    }
 
     /* ── Sections by #hash, and search ── */
-    const SECTIONS = ["general", "profile", "usage", "compute", "tools"];
+    const SECTIONS = ["general", "profile", "usage", "tools"];
+    // Sections that moved to their own page under /portal/settings/ (old #hash links still land there).
+    const MOVED = { plan: "/portal/settings/plan", compute: "/portal/settings/compute", install: "/portal/settings/install", nodes: "/portal/settings/nodes", admin: "/portal/settings/admin" };
     let currentSection = "general";
     function sectionFromHash() { const h = location.hash.replace(/^#/, ""); return SECTIONS.includes(h) ? h : "general"; }
+    (function() { const h = location.hash.replace(/^#/, ""); if (MOVED[h]) location.replace(MOVED[h]); })();
     function showSection(key) {
       currentSection = key;
       for (const s of document.querySelectorAll(".set-section")) s.classList.toggle("hidden", s.dataset.section !== key);
@@ -180,6 +153,8 @@ const SCRIPT = `
       document.getElementById("settingsNoMatch").classList.toggle("hidden", any);
     };
     window.addEventListener("hashchange", () => {
+      const moved = MOVED[location.hash.replace(/^#/, "")];
+      if (moved) { location.href = moved; return; }
       const input = document.getElementById("settingsSearch");
       if (input.value) input.value = "";
       showSection(sectionFromHash());
@@ -202,7 +177,6 @@ const SCRIPT = `
       for (const e of document.querySelectorAll(".portal-origin")) e.textContent = location.origin;
       loadKeys();
       loadUsage();
-      loadCompute();
     }
     function renderAvatar() {
       const user = (me && me.user) || {};
@@ -256,114 +230,6 @@ const SCRIPT = `
         body.appendChild(tr);
       }
     }
-
-    /* ── Compute: reserve a machine, your leases ── */
-    let computeData = { options: {}, reservations: [] };
-    function renderReserveForm() {
-      const sel = document.getElementById("reserveClass");
-      const prev = sel.value;
-      sel.textContent = "";
-      for (const cls of ["cpu", "apple", "gpu", "gpu.dc"]) {
-        const o = (computeData.options || {})[cls] || { available: 0 };
-        const label = classLabel(cls) + " · " + (o.available ? o.available + " free" : "none free") + (o.cSatsPerSecond !== undefined ? " · " + fmtRate(o.cSatsPerSecond) + " cSats/s" : "");
-        const opt = el("option", { value: cls }, label);
-        if (!o.available) opt.disabled = true;
-        sel.appendChild(opt);
-      }
-      const firstFree = ["gpu", "apple", "cpu", "gpu.dc"].find((c) => ((computeData.options || {})[c] || {}).available);
-      sel.value = prev && ((computeData.options || {})[prev] || {}).available ? prev : firstFree || "gpu";
-      const m = document.getElementById("reserveMinutes");
-      if (computeData.minMinutes) m.min = computeData.minMinutes;
-      if (computeData.maxMinutes) m.max = computeData.maxMinutes;
-      renderReserveModels();
-    }
-    function renderReserveModels() {
-      const cls = document.getElementById("reserveClass").value;
-      const sel = document.getElementById("reserveModel");
-      const prev = sel.value;
-      sel.textContent = "";
-      sel.appendChild(el("option", { value: "" }, "Any model"));
-      for (const m of (((computeData.options || {})[cls] || {}).models || [])) sel.appendChild(el("option", { value: m }, m));
-      sel.value = [...sel.options].some((o) => o.value === prev) ? prev : "";
-      renderReserveCost();
-    }
-    function renderReserveCost() {
-      const cls = document.getElementById("reserveClass").value;
-      const o = (computeData.options || {})[cls] || {};
-      const minutes = Number(document.getElementById("reserveMinutes").value) || 0;
-      const cost = document.getElementById("reserveCost");
-      const btn = document.getElementById("reserveBtn");
-      if (!o.available) { cost.textContent = "No " + classLabel(cls) + " machine free"; btn.disabled = true; return; }
-      btn.disabled = false;
-      cost.textContent = o.cSatsPerSecond !== undefined ? "≈ " + fmtNum(o.cSatsPerSecond * minutes * 60, 1) + " cSats" : "—";
-    }
-    function renderLeases() {
-      const list = document.getElementById("leasesList");
-      list.textContent = "";
-      const rs = [...(computeData.reservations || [])].sort((a, b) => (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) || b.startMs - a.startMs).slice(0, 10);
-      if (!rs.length) { const row = el("div", { class: "set-row" }); row.appendChild(el("div", { class: "set-empty" }, "No reservations yet. Reserve a machine above; it shows up in the chat's compute picker.")); list.appendChild(row); return; }
-      for (const r of rs) {
-        const active = r.status === "active" && r.endMs > Date.now();
-        const row = el("div", { class: "set-row lease" });
-        const text = el("div", { class: "set-text" });
-        const label = el("div", { class: "set-label" }, classLabel(r.computeClass) + " · " + (r.model || "any model"));
-        label.insertAdjacentHTML("beforeend", active ? statusBadge("Active", "ok") : statusBadge(r.endReason || r.status || "ended"));
-        text.appendChild(label);
-        const parts = active
-          ? [timeLeft(r.endMs), r.cSatsPerSecond !== undefined ? fmtRate(r.cSatsPerSecond) + " cSats/s" : "", r.prepaidCSats !== undefined ? fmtNum(r.prepaidCSats, 1) + " cSats prepaid" : ""]
-          : ["Ended " + fmtDate(r.endMs), r.usedCSats !== undefined ? fmtNum(r.usedCSats, 1) + " cSats used" : "", r.refundCSats ? fmtNum(r.refundCSats, 1) + " refunded" : ""];
-        text.appendChild(el("div", { class: "set-desc" }, parts.filter(Boolean).join(" · ")));
-        row.appendChild(text);
-        const ctl = el("div", { class: "set-control" });
-        if (active) {
-          const btn = el("button", { class: "danger sm" }, "Cancel");
-          btn.addEventListener("click", () => cancelLease(r));
-          ctl.appendChild(btn);
-        }
-        row.appendChild(ctl);
-        list.appendChild(row);
-      }
-    }
-    async function loadCompute() {
-      const r = await call("/portal/api/compute/reservations");
-      if (!r.ok) {
-        document.getElementById("reserveClass").innerHTML = '<option value="">Network unreachable</option>';
-        document.getElementById("reserveBtn").disabled = true;
-        document.getElementById("leasesList").innerHTML = '<div class="set-row"><div class="set-empty">Could not load reservations.</div></div>';
-        return;
-      }
-      computeData = r.json;
-      renderReserveForm();
-      renderLeases();
-    }
-    async function cancelLease(r) {
-      if (!confirm("End this reservation now? The unused time is refunded.")) return;
-      const res = await call("/portal/api/compute/reservations/cancel", { method: "POST", body: JSON.stringify({ reservationId: r.id }) });
-      if (!res.ok) { showToast("Could not cancel: " + (res.json.error || res.status), true); return; }
-      showToast("Reservation ended." + (res.json.reservation && res.json.reservation.refundCSats ? " Refunded " + fmtNum(res.json.reservation.refundCSats, 1) + " cSats." : ""));
-      loadCompute(); loadUsage(); loadTopTicker();
-    }
-    document.getElementById("reserveClass").addEventListener("change", renderReserveModels);
-    document.getElementById("reserveMinutes").addEventListener("input", renderReserveCost);
-    document.getElementById("reserveBtn").addEventListener("click", async () => {
-      const computeClass = document.getElementById("reserveClass").value;
-      const minutes = Math.round(Number(document.getElementById("reserveMinutes").value));
-      const model = document.getElementById("reserveModel").value;
-      const btn = document.getElementById("reserveBtn");
-      btn.disabled = true;
-      const res = await call("/portal/api/compute/reservations", { method: "POST", body: JSON.stringify({ computeClass, minutes, ...(model ? { model } : {}) }) });
-      btn.disabled = false;
-      if (!res.ok) {
-        const e = res.json.error;
-        showToast(e === "insufficient_credits" ? "Not enough cSats: this needs " + fmtNum(res.json.neededCSats, 1) + " cSats. Buy more on the Wallet page."
-          : e === "no_agent_available" ? "No " + classLabel(computeClass) + " machine is free right now." : "Could not reserve: " + (e || res.status), true);
-        loadCompute();
-        return;
-      }
-      showToast("Reserved a " + classLabel(computeClass) + " machine for " + minutes + " min. Pick it in the chat's compute picker.");
-      loadCompute(); loadUsage(); loadTopTicker();
-    });
-    setInterval(() => { if (currentSection === "compute") renderLeases(); }, 30000);
 
     /* ── Connect your tools: API keys ── */
     async function loadKeys() {
@@ -455,8 +321,11 @@ const SCRIPT = `
 
 export function registerSettingsPages(app: FastifyInstance): void {
   app.get("/portal/settings", async (_req, reply) => {
-    const content = `<style>.search-hidden { display: none !important; }</style>${GENERAL}${PROFILE}${USAGE}${COMPUTE}${TOOLS}<div id="settingsNoMatch" class="hidden">No settings match your search.</div>`;
-    return reply.type("text/html").send(settingsPage("general", "Your account, compute and connected tools.", content, SCRIPT));
+    const content = `<style>.search-hidden { display: none !important; }</style>${GENERAL}${PROFILE}${USAGE}${TOOLS}<div id="settingsNoMatch" class="hidden">No settings match your search.</div>`;
+    return reply.type("text/html").send(settingsPage("general", "Your account, plan, compute and connected tools.", content, SCRIPT));
   });
+  registerSettingsComputePage(app);
   registerSettingsOpsPages(app);
+  // The old top-level pages (Wallet, Market, Install agent, Nodes, Coordinator ops) live in Settings now.
+  for (const [from, to] of Object.entries(LEGACY_SETTINGS_REDIRECTS)) app.get(from, redirectKeepingQuery(to));
 }

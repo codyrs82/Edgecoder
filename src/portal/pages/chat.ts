@@ -13,34 +13,6 @@ app.get("/portal/chat", async (_req, reply) => {
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
       .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
-      .conv-sidebar {
-        width:280px; min-width:260px; border-right:1px solid var(--card-border);
-        background:var(--bg-soft); display:flex; flex-direction:column; padding:14px;
-      }
-      .conv-sidebar h3 { margin:0 0 8px 0; font-size:14px; }
-      .new-chat-btn {
-        display:flex; align-items:center; justify-content:center; gap:6px;
-        width:100%; padding:9px 14px; margin-bottom:12px;
-        border-radius:var(--radius-sm); font-size:13px; font-weight:600;
-        background:var(--brand); border:1px solid var(--brand); color:#111; cursor:pointer;
-      }
-      .new-chat-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
-      .conv-item {
-        position:relative; padding:10px 30px 10px 12px; border-radius:var(--radius-sm); cursor:pointer;
-        margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden;
-        text-overflow:ellipsis; color:var(--text-secondary);
-        transition:all var(--transition-fast); border:1px solid transparent;
-      }
-      .conv-delete {
-        position:absolute; right:8px; top:50%; transform:translateY(-50%);
-        opacity:0; background:none; border:none; cursor:pointer;
-        color:var(--text-secondary); font-size:14px; padding:2px 4px;
-        transition:opacity var(--transition-fast), color var(--transition-fast);
-      }
-      .conv-item:hover .conv-delete { opacity:0.6; }
-      .conv-delete:hover { opacity:1 !important; color:#e74c3c; }
-      .conv-item:hover { background:var(--bg-surface); color:var(--text); }
-      .conv-item.active { background:var(--brand-soft); color:var(--brand-2); border-color:var(--brand-border); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
       .chat-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
       .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
@@ -154,19 +126,9 @@ app.get("/portal/chat", async (_req, reply) => {
       .msg-error { color:var(--danger); }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
-      @media (max-width:680px) {
-        .conv-sidebar { display:none; }
-        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:var(--topbar-h); bottom:0; width:85vw; box-shadow:var(--shadow-2); }
-      }
     </style>
     <div class="chat-layout">
-      <!-- Left: Conversation sidebar -->
-      <div class="conv-sidebar" id="convSidebar">
-        <button class="new-chat-btn" id="newChatBtn">${icon("plus", 14)} New conversation</button>
-        <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:10px; font-size:12px;" />
-        <div id="convList" style="flex:1; overflow-y:auto;"></div>
-      </div>
-      <!-- Right: Chat area -->
+      <!-- Conversations (New chat, Search, recent chats) live in the shell's sidebar. -->
       <div class="chat-main">
         <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
@@ -271,16 +233,8 @@ app.get("/portal/chat", async (_req, reply) => {
       var filtered = conversations.filter(function(c) {
         return !search || (c.title || "").toLowerCase().indexOf(search) !== -1;
       });
-      var html = "";
-      for (var i = 0; i < filtered.length; i++) {
-        var c = filtered[i];
-        var cls = "conv-item" + (c.conversationId === activeConvId ? " active" : "");
-        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&times;</button></div>";
-      }
-      if (filtered.length === 0) {
-        html = "<div class=\\"muted\\" style=\\"padding:8px; font-size:12px;\\">No conversations yet</div>";
-      }
-      list.innerHTML = html;
+      // The shell's sidebar holds the list, grouped by date like the desktop app.
+      list.innerHTML = sidebarConversationsHtml(filtered, activeConvId, { emptyText: search ? "No matching chats" : "No chats yet" });
     }
 
     function renderMessages(messages) {
@@ -701,7 +655,15 @@ app.get("/portal/chat", async (_req, reply) => {
       restoreCompute("last");
       refreshModels();
       await loadConversations();
-      if (conversations.length > 0) {
+      // Links from the sidebar on other pages: ?c=<id> opens that chat, ?new=1 starts one.
+      var params = new URLSearchParams(location.search);
+      var wanted = params.get("c");
+      if (params.has("c") || params.has("new")) history.replaceState(null, "", location.pathname);
+      if (params.has("new")) {
+        await createNewChat();
+      } else if (wanted && conversations.some(function(c) { return c.conversationId === wanted; })) {
+        await selectConversation(wanted);
+      } else if (conversations.length > 0) {
         await selectConversation(conversations[0].conversationId);
       } else {
         renderMessages([]);
