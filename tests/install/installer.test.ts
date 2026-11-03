@@ -212,4 +212,17 @@ describe("enrolment: --enroll self-registers nodes with the portal", () => {
     expect(failed).toEqual(["box-gpu1"]);
     expect(opts.tokens["box-gpu0"]).toBe("keep");
   });
+
+  it("takes a portal API key from --enroll or EDGECODER_API_KEY, and never puts it in the plan", () => {
+    expect(parseInstallArgs(["apply", "--enroll", "eck_flag"]).enrollToken).toBe("eck_flag");
+    expect(parseInstallArgs(["apply", "--enroll=eck_inline"]).enrollToken).toBe("eck_inline");
+    expect(parseInstallArgs(["apply"], { EDGECODER_API_KEY: "eck_env" }).enrollToken).toBe("eck_env");
+    expect(parseInstallArgs(["apply"], { EDGECODER_API_KEY: "eck_env", EDGECODER_ENROLL_TOKEN: "sess" }).enrollToken).toBe("eck_env");
+    expect(parseInstallArgs(["apply"], { EDGECODER_ENROLL_TOKEN: "sess" }).enrollToken).toBe("sess");
+    expect(parseInstallArgs(["apply", "--enroll", "eck_flag"], { EDGECODER_API_KEY: "eck_env" }).enrollToken).toBe("eck_flag");
+    expect(() => parseInstallArgs(["apply", "--enroll"])).toThrow(/needs a value/);
+    expect(helpText()).toContain("EDGECODER_API_KEY");
+    const plan = planInstall(twoGpu, parseInstallArgs(["apply"], { EDGECODER_API_KEY: "eck_secret" }), true);
+    expect(JSON.stringify(plan)).not.toContain("eck_secret");
+  });
 });

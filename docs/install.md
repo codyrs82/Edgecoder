@@ -47,12 +47,24 @@ the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repe
 `--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
 rewrites the env files and restarts the services; nothing else changes.
 
-To do it in one run, pass `--enroll <portal-token>` instead of fetching tokens by hand: the
-installer self-registers every instance that has no `--token` with the portal
-(`POST /nodes/enroll`, authenticated as `Authorization: Bearer <portal-token>` where the token is
-your portal session token) and applies each returned registration token automatically. A node
-that already has a `--token` is left alone, and a node whose enrolment fails is skipped with a
-warning so the rest still install.
+To do it in one run, create a portal API key (edgecoder.io → Settings → API keys, it starts
+with `eck_`) and pass it as `--enroll <api-key>`, or better, in the `EDGECODER_API_KEY`
+environment variable so it stays out of shell history and process listings. The installer
+self-registers every instance that has no `--token` with the portal (`POST /nodes/enroll`,
+authenticated as `Authorization: Bearer <api-key>`) and applies each returned registration token
+automatically. The nodes are owned by the key's account; its email must be verified for agents
+to be approved. A portal session token still works in place of the key. The key is only sent to
+the portal and is never printed or written to the service env files. A node that already has a
+`--token` is left alone, and a node whose enrolment fails is skipped with a warning so the rest
+still install.
+
+`sudo` drops most environment variables, so put the variable after `sudo`:
+
+```bash
+read -rs EDGECODER_API_KEY   # paste the key; nothing is echoed or saved in history
+curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash -s -- --mesh-token "$MESH" --pull-models
+# later runs: sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" edgecoder-install apply
+```
 
 ## Commands
 
@@ -74,7 +86,7 @@ warning so the rest still install.
 | `--mesh-token TOKEN` | Mesh auth token for the coordinator. |
 | `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. Without `AGENT_ID=` it applies to every instance. |
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
-| `--enroll PORTAL_TOKEN` | Portal session token: self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
+| `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: largest coding model that fits). |
 | `--per-gpu` | One agent and one Ollama server per discrete GPU (default when GPUs are present). |
 | `--single` | One agent for the whole host. |
@@ -91,15 +103,15 @@ warning so the rest still install.
 | `--ollama-bin PATH` | Ollama binary. |
 
 Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
-`EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`.
+`EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`,
+`EDGECODER_API_KEY` (same as `--enroll`; takes precedence over `EDGECODER_ENROLL_TOKEN`).
 
 ## Example: an 8× RTX 6000 Ada host
 
 ```bash
-curl -fsSL https://edgecoder.io/install.sh | sudo bash -s -- --mesh-token "$MESH" --pull-models
-sudo edgecoder-install plan            # prints box-gpu0 … box-gpu7, 48 GB each, qwen3-coder:30b
-# enrol the eight node ids in the portal, then:
-sudo edgecoder-install apply --tokens-file ~/tokens.txt
+read -rs EDGECODER_API_KEY   # eck_... from Settings → API keys
+curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash -s -- --mesh-token "$MESH" --pull-models
+# detects box-gpu0 … box-gpu7 (48 GB each, qwen3-coder:30b) and enrols all eight with the key
 sudo edgecoder-install status
 ```
 
