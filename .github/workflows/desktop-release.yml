@@ -52,6 +52,34 @@ jobs:
       - run: npm ci
       - run: npm ci
         working-directory: desktop
+      - name: Import Developer ID certificate (macOS, for signing the bundled agent)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          # Without the secrets the build is unsigned for Apple, as before.
+          [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ] || { echo "No Apple signing secrets: skipping"; exit 0; }
+          KEYCHAIN="$RUNNER_TEMP/edgecoder-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # codesign may use the key without a prompt.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Apple's Developer ID G2 intermediate, so the identity validates on the runner.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" >/dev/null || true
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application" || { echo "::error::Developer ID identity not usable after import"; exit 1; }
+          # The bundling step (Tauri's beforeBuildCommand) signs the agent's binaries with this identity.
+          echo "EDGECODER_CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
       - name: tauri build (signed updater artifacts)
         working-directory: desktop
         shell: bash

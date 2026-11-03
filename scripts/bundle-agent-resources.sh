@@ -58,5 +58,30 @@ case "$NODE_BIN" in
 esac
 echo "Bundled Node $(node -v) from $NODE_BIN"
 
+# macOS notarization: every binary in the bundle must be signed with the Developer ID, the hardened
+# runtime and a secure timestamp. Tauri signs the app, not these resources, so sign the bundled Node
+# and every native module (.node, .dylib) here when a signing identity is available (the release
+# workflow imports the certificate and sets EDGECODER_CODESIGN_IDENTITY).
+if [ "$(uname)" = "Darwin" ] && [ -n "${EDGECODER_CODESIGN_IDENTITY:-}" ]; then
+  ENTITLEMENTS="$ROOT_DIR/desktop/src-tauri/agent-node.entitlements"
+  signed=0
+  while IFS= read -r -d '' f; do
+    if file -b "$f" | grep -q "Mach-O"; then
+      if [ "$f" = "$RESOURCE_DIR/node/node" ]; then
+        codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$EDGECODER_CODESIGN_IDENTITY" "$f"
+      else
+        codesign --force --options runtime --timestamp --sign "$EDGECODER_CODESIGN_IDENTITY" "$f"
+      fi
+      signed=$((signed + 1))
+    fi
+  done < <(find "$RESOURCE_DIR" -type f \( -name "*.node" -o -name "*.dylib" -o -name "*.so" -o -perm -u+x \) -print0)
+  echo "Signed $signed binaries in the agent bundle for notarization"
+  # Every Mach-O must now verify, or notarization rejects the app.
+  while IFS= read -r -d '' f; do
+    file -b "$f" | grep -q "Mach-O" || continue
+    codesign --verify --strict "$f" || { echo "ERROR: $f did not verify after signing"; exit 1; }
+  done < <(find "$RESOURCE_DIR" -type f \( -name "*.node" -o -name "*.dylib" -o -name "*.so" -o -perm -u+x \) -print0)
+fi
+
 echo "Agent bundled to: $RESOURCE_DIR"
 du -sh "$RESOURCE_DIR"
