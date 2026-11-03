@@ -1,9 +1,13 @@
 <script lang="ts">
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
-  import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare } from "@lucide/svelte";
+  import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, runBot, sendBotMessage, updateBot, botErrorText } from "../lib/api";
-  import { RUN_STATUS_TEXT, botInitial, botStatusLine, budgetText, foldBotReply, formatCSats, relativeTime, scheduleText, type Bot, type BotMessage, type BotRun } from "../lib/bots";
+  import {
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, botCompute, botInitial, computeText, failureNotice, foldBotReply, folderName, formatCSats, relativeTime, scheduleText, statusChip,
+    type Bot, type BotMessage, type BotRun, type NoticeAction,
+  } from "../lib/bots";
+  import { choiceLabel } from "../lib/compute-choice";
   import { refreshBots } from "../lib/bots-store";
 
   interface Props {
@@ -12,8 +16,66 @@
     onDeleted: () => void;
     onOpenPath?: (path: string) => void;
     onPreview?: (path: string) => void;
+    /** Open a settings section ("plan" to buy cSats). */
+    onOpenSettings?: (section: string) => void;
   }
-  let { bot, onEdit, onDeleted, onOpenPath, onPreview }: Props = $props();
+  let { bot, onEdit, onDeleted, onOpenPath, onPreview, onOpenSettings }: Props = $props();
+
+  let menuOpen = $state(false);
+  let menuEl: HTMLDivElement | undefined = $state();
+  const DISMISSED_KEY = "edgecoder-bot-dismissed-failures";
+  function loadDismissed(): string[] {
+    try {
+      return JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  }
+  let dismissed = $state<string[]>(loadDismissed());
+  function dismiss(runId: string) {
+    dismissed = [...dismissed, runId].slice(-50);
+    try {
+      localStorage.setItem(DISMISSED_KEY, JSON.stringify(dismissed));
+    } catch {
+      // private mode: dismissed for this session
+    }
+  }
+
+  const chip = $derived(statusChip(bot));
+  const compute = $derived(botCompute(bot));
+  const computeLabel = $derived(computeText(compute, choiceLabel));
+  const notice = $derived.by(() => {
+    const n = failureNotice(bot);
+    return n && !dismissed.includes(n.runId) ? n : null;
+  });
+  const budgetPct = $derived(bot.budgetCSatsPerDay ? Math.min(100, (bot.spentTodayCSats / bot.budgetCSatsPerDay) * 100) : 0);
+
+  function noticeAction(a: NoticeAction) {
+    if (a === "buy") onOpenSettings?.("plan");
+    else if (a === "edit") onEdit(bot);
+    else void act(() => updateBot(bot.id, { compute: { policy: "local_only" } }));
+  }
+
+  function toggleMenu() {
+    menuOpen = !menuOpen;
+    if (menuOpen) queueMicrotask(() => menuEl?.querySelector<HTMLButtonElement>("button")?.focus());
+    else confirmDelete = false;
+  }
+  function closeMenu() {
+    menuOpen = false;
+    confirmDelete = false;
+  }
+  function menuKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closeMenu();
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const items = [...(menuEl?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+      const i = items.indexOf(document.activeElement as HTMLButtonElement);
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+    }
+  }
 
   let messages = $state<BotMessage[]>([]);
   let runs = $state<BotRun[]>([]);
@@ -57,6 +119,7 @@
   $effect(() => {
     void bot.id;
     confirmDelete = false;
+    menuOpen = false;
     error = null;
     lastCount = 0;
   });
@@ -74,7 +137,10 @@
 
   const runNow = () => act(() => runBot(bot.id));
   const stop = () => act(() => cancelBotRun(bot.id));
-  const togglePause = () => act(() => updateBot(bot.id, { enabled: !bot.enabled }));
+  const togglePause = () => {
+    closeMenu();
+    return act(() => updateBot(bot.id, { enabled: !bot.enabled }));
+  };
   const send = (text: string) => act(() => sendBotMessage(bot.id, text));
   const approve = (callId: string, approved: boolean) => act(() => approveBotCall(bot.id, callId, approved));
   async function remove() {
@@ -82,6 +148,7 @@
       confirmDelete = true;
       return;
     }
+    closeMenu();
     await act(() => deleteBot(bot.id));
     onDeleted();
   }
@@ -98,14 +165,27 @@
 
 <div class="bot-view">
   <header class="bot-head">
-    <span class="avatar big" style="background: {bot.color}">{botInitial(bot.name)}</span>
+    <span class="avatar big" style="background: {bot.color}" aria-hidden="true">{botInitial(bot.name)}</span>
     <div class="who">
-      <div class="name">{bot.name}{#if bot.role}<span class="role"> · {bot.role}</span>{/if}</div>
-      <div class="sub" class:warn={bot.status === "needs_approval" || bot.status === "over_budget"} class:err={bot.status === "error"}>{botStatusLine(bot)}</div>
-      <div class="meta">
-        <span title="Schedule">{scheduleText(bot.schedule)}{#if bot.enabled && bot.nextRunAtMs} · next {relativeTime(bot.nextRunAtMs)}{:else if !bot.enabled && bot.schedule} · paused{/if}</span>
-        <span title="Spent today against the daily budget">{budgetText(bot)}</span>
-        <span class="path" title={bot.projectRoot}>{bot.projectRoot.replace(/^\/Users\/[^/]+/, "~")}</span>
+      <div class="line1">
+        <h2 class="name">{bot.name}{#if bot.role}<span class="role"> · {bot.role}</span>{/if}</h2>
+        <span class="chip {chip.tone}" data-testid="bot-status-chip" title={bot.activity ?? chip.text}>{chip.text}</span>
+      </div>
+      <div class="meta" data-testid="bot-meta">
+        <span class="m" title="Schedule"><CalendarClock size={12} />{scheduleText(bot.schedule)}{bot.enabled && bot.nextRunAtMs ? ` · next ${relativeTime(bot.nextRunAtMs)}` : !bot.enabled && bot.schedule ? " · paused" : ""}</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="m budget" title="cSats spent today against the daily budget">
+          {#if bot.budgetCSatsPerDay != null}
+            <span class="meter" role="meter" aria-label="Daily budget used" aria-valuemin="0" aria-valuemax={bot.budgetCSatsPerDay} aria-valuenow={bot.spentTodayCSats}><span style="width: {budgetPct}%"></span></span>
+            {formatCSats(bot.spentTodayCSats)} / {formatCSats(bot.budgetCSatsPerDay)} cSats today
+          {:else}
+            {formatCSats(bot.spentTodayCSats)} cSats today · no limit
+          {/if}
+        </span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="m" title="Compute: where its model calls run (change it in Edit)"><Cpu size={12} />{computeLabel}</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="m folder" title={bot.projectRoot}><Folder size={12} /><span class="folder-name">{folderName(bot.projectRoot)}</span></span>
       </div>
     </div>
     <div class="actions">
@@ -114,11 +194,20 @@
       {:else}
         <button class="primary" onclick={runNow} disabled={bot.status === "over_budget"} title={bot.status === "over_budget" ? "Today's budget is spent" : "Start a run now"}><Play size={14} /> Run now</button>
       {/if}
-      <button onclick={togglePause} title={bot.enabled ? "Pause the schedule (messages and Run now still work)" : "Resume the schedule"}>
-        {#if bot.enabled}<Pause size={14} /> Pause{:else}<Play size={14} /> Resume{/if}
-      </button>
-      <button onclick={() => onEdit(bot)} title="Edit"><Pencil size={14} /> Edit</button>
-      <button class="icon danger" onclick={remove} title={confirmDelete ? "Click again to delete" : "Delete bot"}><Trash2 size={14} />{#if confirmDelete} Delete?{/if}</button>
+      <div class="more">
+        <button class="icon" onclick={toggleMenu} aria-haspopup="menu" aria-expanded={menuOpen} aria-label="More actions" title="More actions"><Ellipsis size={16} /></button>
+        {#if menuOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+          <div class="menu-backdrop" onclick={closeMenu}></div>
+          <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} onkeydown={menuKey}>
+            <button role="menuitem" onclick={togglePause}>
+              {#if bot.enabled}<Pause size={14} /> Pause schedule{:else}<Play size={14} /> Resume schedule{/if}
+            </button>
+            <button role="menuitem" onclick={() => { closeMenu(); onEdit(bot); }}><Pencil size={14} /> Edit</button>
+            <button role="menuitem" class="danger" onclick={remove}><Trash2 size={14} /> {confirmDelete ? "Click again to delete" : "Delete"}</button>
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -128,6 +217,24 @@
   </div>
 
   {#if error}<div class="error" role="alert">{error}</div>{/if}
+
+  {#if view === "chat" && notice}
+    <div class="notice" role="status" data-testid="bot-failure-notice">
+      <CircleAlert size={15} />
+      <div class="notice-text">
+        <div class="notice-title">{notice.title}</div>
+        <div class="notice-detail">{notice.detail}</div>
+      </div>
+      <div class="notice-actions">
+        {#each notice.actions as a (a)}
+          {#if a !== "buy" || onOpenSettings}
+            <button onclick={() => noticeAction(a)}>{NOTICE_ACTION_TEXT[a]}</button>
+          {/if}
+        {/each}
+      </div>
+      <button class="notice-close" onclick={() => dismiss(notice.runId)} aria-label="Dismiss" title="Dismiss"><X size={14} /></button>
+    </div>
+  {/if}
 
   {#if view === "chat"}
     <div class="messages" bind:this={scrollEl}>
@@ -175,7 +282,7 @@
                 <td class="st {r.status}">{RUN_STATUS_TEXT[r.status]}</td>
                 <td class="sum" title={r.summary}>{r.summary}</td>
                 <td class="num">{formatCSats(r.cSats)}</td>
-                <td>{r.where ?? "—"}</td>
+                <td>{r.where ?? (r.status === "failed" ? "Didn't run" : "—")}{#if r.note}<div class="run-note">{r.note}</div>{/if}</td>
                 <td class="num">{duration(r)}</td>
               </tr>
             {/each}
@@ -199,10 +306,11 @@
   }
   .bot-head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 12px;
-    padding: 14px 20px 10px;
+    padding: 12px 20px;
     border-bottom: 0.5px solid var(--border);
+    min-width: 0;
   }
   .avatar {
     flex-shrink: 0;
@@ -214,9 +322,9 @@
     font-weight: 600;
   }
   .avatar.big {
-    width: 40px;
-    height: 40px;
-    font-size: 17px;
+    width: 34px;
+    height: 34px;
+    font-size: 15px;
   }
   .avatar.huge {
     width: 56px;
@@ -228,44 +336,97 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
+  }
+  .line1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
   .name {
-    font-size: 15px;
+    margin: 0;
+    font-size: 14.5px;
     font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .role {
     font-weight: 400;
     color: var(--text-secondary);
   }
-  .sub {
-    font-size: 12.5px;
+  .chip {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 0.5px solid var(--border);
     color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
-  .sub.warn {
-    color: var(--yellow);
+  .chip.accent {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
-  .sub.err {
-    color: var(--danger);
+  .chip.warn {
+    color: var(--warning, #d29922);
+    border-color: color-mix(in srgb, var(--warning, #d29922) 45%, transparent);
+    background: color-mix(in srgb, var(--warning, #d29922) 10%, transparent);
+  }
+  .chip.err {
+    color: var(--danger, #e5484d);
+    border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, transparent);
+    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
   }
   .meta {
     display: flex;
-    flex-wrap: wrap;
-    gap: 4px 14px;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
     font-size: 11.5px;
     color: var(--text-muted, var(--text-secondary));
+    white-space: nowrap;
+    overflow: hidden;
   }
-  .meta .path {
-    font-family: var(--font-mono, ui-monospace, monospace);
+  .meta .m {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .meta .folder {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta .sep {
+    flex-shrink: 0;
+    opacity: 0.6;
+  }
+  .meter {
+    display: inline-block;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .meter > span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
   }
   .actions {
+    flex-shrink: 0;
     display: flex;
+    align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
   }
   .actions button {
     display: inline-flex;
@@ -293,8 +454,107 @@
     color: var(--on-accent);
     font-weight: 600;
   }
-  .actions button.danger {
+  .actions button.icon {
+    padding: 6px 7px;
+  }
+  .more {
+    position: relative;
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 41;
+    min-width: 180px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: var(--bg-elevated, var(--bg-surface));
+    border: 0.5px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+  .menu button {
+    border: none;
+    background: none;
+    justify-content: flex-start;
+    width: 100%;
+    padding: 7px 9px;
+  }
+  .menu button:hover,
+  .menu button:focus-visible {
+    background: var(--bg-surface);
+    outline: none;
+  }
+  .menu button.danger {
     color: var(--danger);
+  }
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 10px 20px 0;
+    padding: 10px 12px;
+    border: 0.5px solid color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--danger, #e5484d) 7%, var(--bg-surface));
+    color: var(--danger, #e5484d);
+    font-size: 12.5px;
+  }
+  .notice-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .notice-title {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .notice-detail {
+    color: var(--text-secondary);
+    line-height: 1.45;
+  }
+  .notice-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .notice-actions button {
+    padding: 4px 10px;
+    border: 0.5px solid var(--border-strong, var(--border));
+    border-radius: 7px;
+    background: var(--bg-base, var(--bg-surface));
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .notice-actions button:hover {
+    border-color: var(--text-secondary);
+  }
+  .notice-close {
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 6px;
+  }
+  .notice-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-base);
+  }
+  .run-note {
+    font-size: 11px;
+    color: var(--text-muted, var(--text-secondary));
   }
   .tabs {
     display: flex;

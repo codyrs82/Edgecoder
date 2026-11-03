@@ -2,7 +2,8 @@
   import "../styles/settings-page.css";
   import { focusTrap } from "../lib/focus-trap";
   import { createBot, updateBot, getBot, botErrorText } from "../lib/api";
-  import { BOT_TOOL_GROUPS, SCHEDULE_PRESETS, groupsOf, toolsFor, type Bot } from "../lib/bots";
+  import ComputePicker from "./ComputePicker.svelte";
+  import { BOT_TOOL_GROUPS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, SCHEDULE_PRESETS, botCompute, groupsOf, toolsFor, type Bot, type ComputePolicy } from "../lib/bots";
 
   interface Props {
     /** Edit this bot; omitted: create a new one. */
@@ -26,6 +27,16 @@
   let budgetText = $state(initial ? (initial.budgetCSatsPerDay == null ? "" : String(initial.budgetCSatsPerDay)) : "100");
   let groups = $state<Record<string, boolean>>(initial ? groupsOf(initial.allowedTools) : { edit: true, shell: true, git: true });
   let autoApproveEdits = $state(initial?.autoApproveEdits ?? true);
+  const initialCompute = initial ? botCompute(initial) : DEFAULT_COMPUTE;
+  let policy = $state<ComputePolicy>(initialCompute.policy);
+  let computeModel = $state<string | undefined>(initialCompute.model);
+
+  // The picker's own Auto rows map onto the matching policies.
+  function pickModel(id: string | undefined) {
+    if (id === "auto") policy = "auto";
+    else if (id === undefined) policy = "local_only";
+    else computeModel = id;
+  }
   let memory = $state("");
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -52,6 +63,10 @@
       error = "The budget must be a number above 0, or empty for no limit.";
       return;
     }
+    if (policy === "model" && !computeModel) {
+      error = "Pick the model this bot runs on, or choose another compute option.";
+      return;
+    }
     const input = {
       name: name.trim(),
       role: role.trim(),
@@ -61,6 +76,7 @@
       budgetCSatsPerDay: budget,
       allowedTools: toolsFor(groups),
       autoApproveEdits,
+      compute: policy === "model" ? { policy, model: computeModel } : { policy },
     };
     saving = true;
     try {
@@ -79,7 +95,7 @@
 <div class="bf-dialog" role="dialog" aria-modal="true" aria-label={initial ? `Edit ${initial.name}` : "New bot"} use:focusTrap={{ onEscape: onClose }}>
   <form class="sp" onsubmit={save}>
     <h1>{initial ? `Edit ${initial.name}` : "New bot"}</h1>
-    <p class="sp-lead">A bot owns a job in one project folder. It runs on its schedule, when you press Run now, or when you message it, on Auto compute (the cheapest place that fits each step).</p>
+    <p class="sp-lead">A bot owns a job and keeps its own home folder. It runs on its schedule, when you press Run now, or when you message it, on the compute you choose below.</p>
 
     <div class="sp-group">
       <div class="sp-group-title">Who it is</div>
@@ -109,11 +125,16 @@
       <div class="sp-group-title">Where and when</div>
       <div class="sp-card">
         <div class="sp-row">
-          <span class="sp-text"><span class="sp-title">Project folder</span><span class="sp-desc">It reads and edits files only here.</span></span>
+          <span class="sp-text"><span class="sp-title">Home folder</span><span class="sp-desc">Where it keeps its own files and notes. It reads and edits files only here.</span></span>
           <div class="sp-controls">
-            <input type="text" class="bf-path" bind:value={projectRoot} placeholder="/Users/you/project" required aria-label="Project folder" />
+            <input type="text" class="bf-path" bind:value={projectRoot} placeholder="/Users/you/Agents/Harry" required aria-label="Home folder" />
             <button type="button" onclick={chooseFolder}>Choose…</button>
           </div>
+        </div>
+        <!-- Slot for the bot's repository (owner/repo, cloned into ~/EdgeCoder/<repo>): coming in a later change. -->
+        <div class="sp-row bf-soon" aria-disabled="true" data-testid="bot-repository-slot">
+          <span class="sp-text"><span class="sp-title">Repository <span class="sp-pill">Coming soon</span></span><span class="sp-desc">A GitHub repository (owner/repo) it works in, cloned for it automatically.</span></span>
+          <input type="text" class="bf-path" placeholder="owner/repo" disabled aria-label="Repository (coming soon)" />
         </div>
         <div class="sp-row">
           <span class="sp-text"><span class="sp-title">Schedule</span><span class="sp-desc">"every 2 hours", "daily at 18:30" or cron ("0 9 * * 1-5").</span></span>
@@ -128,8 +149,34 @@
             <button type="button" class="ghost small" onclick={() => (customSchedule = !customSchedule)}>{customSchedule ? "Presets" : "Custom"}</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="sp-group">
+      <div class="sp-group-title">Model and compute</div>
+      <div class="sp-card">
+        <div class="sp-row stack">
+          <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">When the network can't be paid for, it uses the best model on this computer or your machines instead.</span></span>
+          <div class="bf-policies" role="radiogroup" aria-label="Where it runs">
+            {#each COMPUTE_POLICY_OPTIONS as o (o.value)}
+              <label class="bf-policy" class:active={policy === o.value}>
+                <input type="radio" name="bot-compute" value={o.value} bind:group={policy} />
+                <span class="bf-policy-title">{o.title}</span>
+                <span class="bf-policy-desc">{o.desc}</span>
+              </label>
+            {/each}
+          </div>
+        </div>
+        {#if policy === "model"}
+          <div class="sp-row">
+            <span class="sp-text"><span class="sp-title">Model</span><span class="sp-desc">Every step runs on this model, wherever it is.</span></span>
+            <div class="bf-picker">
+              <ComputePicker selected={computeModel} onSelect={pickModel} up={false} />
+            </div>
+          </div>
+        {/if}
         <label class="sp-row">
-          <span class="sp-text"><span class="sp-title">Daily budget</span><span class="sp-desc">cSats a day. A run stops when it's spent. Empty: no limit. Runs on this computer are free.</span></span>
+          <span class="sp-text"><span class="sp-title">Daily budget</span><span class="sp-desc">cSats a day for the network. A run stops when it's spent, and the network is never asked for more than what's left. Empty: no limit (your balance still caps it). This computer and your machines are free.</span></span>
           <input type="number" min="0" step="any" bind:value={budgetText} placeholder="No limit" class="bf-num" />
         </label>
       </div>
@@ -207,6 +254,56 @@
   }
   .bf-num {
     width: 120px;
+  }
+  .bf-soon {
+    opacity: 0.55;
+  }
+  .bf-policies {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 8px;
+  }
+  .bf-policy {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 12px;
+    border: 0.5px solid var(--border-strong, var(--border));
+    border-radius: 10px;
+    background: var(--bg-base);
+    cursor: pointer;
+  }
+  .bf-policy:hover {
+    border-color: var(--text-secondary);
+  }
+  .bf-policy.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-base));
+  }
+  .bf-policy:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .bf-policy input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .bf-policy-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .bf-policy-desc {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+  }
+  .bf-picker {
+    border: 0.5px solid var(--border-strong, var(--border));
+    border-radius: 8px;
+    background: var(--bg-base);
   }
   .bf-actions {
     display: flex;
