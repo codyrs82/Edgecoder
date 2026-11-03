@@ -10,7 +10,7 @@
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
   import { autoApplyEdits, setAutoApplyEdits } from "../lib/project-mode";
-  import { fsFind, networkSubmit } from "../lib/api";
+  import { fsFind } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -40,7 +40,6 @@
 
   let streamingToolEvents: ToolEvent[] = $state([]);
   /** Where a message goes: the local agent, or a background job on the network. */
-  let runOn = $state<"local" | "network">("local");
   /** Apply the agent's file edits without asking, in this project (commands still ask). */
   let autoApply = $state(false);
   $effect(() => {
@@ -135,27 +134,8 @@
     return portalId;
   }
 
-  /** Send the message to the network as a background job; its card in the reply tracks it. */
-  async function sendToNetwork(text: string) {
-    addMessage(conversation, "user", text);
-    conversation = conversation;
-    try {
-      const attached = await expandMentions(text);
-      const task = await networkSubmit(attached ? `${attached}\n\n${text}` : text);
-      addMessage(conversation, "assistant", "Sent to the network as a background job.");
-      const last = conversation.messages[conversation.messages.length - 1];
-      if (last) last.networkTaskId = task.id;
-    } catch (err) {
-      addMessage(conversation, "assistant", `Couldn't send to the network: ${(err as Error).message}`);
-    }
-    conversation = conversation;
-    await saveConversation(conversation);
-    scrollToBottom();
-  }
-
   export async function sendMessage(text: string) {
     if (isStreaming) return;
-    if (runOn === "network" && projectRoot && !usePortalChat) return sendToNetwork(text);
 
     addMessage(conversation, "user", text);
     conversation = conversation;
@@ -423,10 +403,8 @@
 
   <div class="panel-input">
     {#if projectRoot && !usePortalChat}
-      <div class="run-on" role="radiogroup" aria-label="Run on">
-        <span>Run on</span>
-        <button role="radio" aria-checked={runOn === "local"} class:on={runOn === "local"} onclick={() => (runOn = "local")} title="The agent on this computer, with your project files">This computer</button>
-        <button role="radio" aria-checked={runOn === "network"} class:on={runOn === "network"} onclick={() => (runOn = "network")} title="A background job on the EdgeCoder network (1 credit): another machine writes and runs code for it in a sandbox and returns the output">Network</button>
+      <!-- Where the model runs (this computer, your machines, the network) is the compute picker above. -->
+      <div class="run-on">
         <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
           <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
           Auto-apply edits
@@ -435,7 +413,7 @@
     {/if}
     <ChatInput
       onSend={handleSend}
-      placeholder={!projectRoot ? "Ask about your code…" : runOn === "network" ? "Describe a job for the network (1 credit)…" : "Ask the agent… (@ to mention a file)"}
+      placeholder={!projectRoot ? "Ask about your code…" : "Ask the agent… (@ to mention a file)"}
       streaming={isStreaming}
       onStop={stop}
       mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}
@@ -600,25 +578,12 @@
     font-size: 11px;
     color: var(--text-muted);
   }
-  .run-on button {
-    border: 0.5px solid var(--border);
-    background: none;
-    color: var(--text-muted);
-    border-radius: var(--radius-sm);
-    padding: 2px 8px;
-    cursor: pointer;
-    font-size: 11px;
-  }
   .auto-apply {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: 4px;
     cursor: pointer;
-  }
-  .run-on button.on {
-    color: var(--accent);
-    border-color: var(--accent);
   }
   .panel-input {
     border-top: 0.5px solid var(--border);
