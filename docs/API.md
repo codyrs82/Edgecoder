@@ -61,26 +61,26 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `GET` | `/economy/price/current` | Current dynamic price epoch | mesh token |
 | `GET` | `/economy/price/quote` | Get a sats quote for a given resource class | mesh token |
 | `GET` | `/economy/credits/:accountId/quote` | Credit-to-sats conversion quote | mesh token |
-| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only) | mesh token |
-| `POST` | `/economy/price/consensus` | Run weighted-median price consensus across peers | mesh token |
-| `POST` | `/economy/payments/intents` | Create a BTC/Lightning payment intent | mesh token |
+| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only) | mesh token + admin token |
+| `POST` | `/economy/price/consensus` | Run weighted-median price consensus across peers | mesh token + admin token |
+| `POST` | `/economy/payments/intents` | Create a BTC/Lightning payment intent | mesh token + admin token |
 | `GET` | `/economy/payments/intents/:intentId` | Get payment intent status | mesh token |
-| `POST` | `/economy/payments/intents/:intentId/confirm` | Confirm payment settlement and mint credits | mesh token |
+| `POST` | `/economy/payments/intents/:intentId/confirm` | Confirm payment settlement and mint credits | mesh token + admin token |
 | `POST` | `/economy/payments/webhook` | Webhook for external payment notifications | webhook secret |
-| `POST` | `/economy/payments/reconcile` | Poll pending intents for settlement/expiry | mesh token |
+| `POST` | `/economy/payments/reconcile` | Poll pending intents for settlement/expiry | mesh token + admin token |
 
 ### Treasury and Issuance
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/economy/treasury/policies` | Create a treasury custody policy | mesh token |
-| `POST` | `/economy/treasury/policies/:policyId/activate` | Activate a treasury policy | mesh token |
+| `POST` | `/economy/treasury/policies` | Create a treasury custody policy | mesh token + admin token |
+| `POST` | `/economy/treasury/policies/:policyId/activate` | Activate a treasury policy | mesh token + admin token |
 | `GET` | `/economy/treasury` | Get current treasury state | mesh token |
-| `POST` | `/economy/issuance/recalculate` | Trigger issuance recalculation | mesh token |
+| `POST` | `/economy/issuance/recalculate` | Trigger issuance recalculation | mesh token + admin token |
 | `GET` | `/economy/issuance/current` | Current issuance epoch | mesh token |
 | `GET` | `/economy/issuance/history` | Issuance epoch history | mesh token |
 | `GET` | `/economy/issuance/rolling/:accountId` | Rolling issuance totals for an account | mesh token |
-| `POST` | `/economy/issuance/quorum/vote` | Submit quorum vote for an issuance epoch | mesh token |
+| `POST` | `/economy/issuance/quorum/vote` | Submit quorum vote for an issuance epoch | mesh token + admin token |
 | `GET` | `/economy/issuance/quorum/:epochId` | Get quorum votes for an epoch | mesh token |
 | `POST` | `/economy/issuance/anchor` | Anchor current issuance epoch to Bitcoin (spends sats) | admin token |
 | `GET` | `/economy/issuance/anchors` | List Bitcoin anchor records | mesh token |
@@ -91,7 +91,7 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/mesh/peers` | List known mesh peers | mesh token |
-| `POST` | `/mesh/register-peer` | Register a peer coordinator | mesh token |
+| `POST` | `/mesh/register-peer` | Register a peer coordinator | mesh token + allowlisted peer signature |
 | `POST` | `/mesh/ingest` | Ingest a gossip message | mesh token |
 | `GET` | `/mesh/ws` | WebSocket endpoint for persistent mesh connections | mesh token |
 | `GET` | `/mesh/capabilities` | Aggregated capability summary across agents | mesh token |
@@ -103,27 +103,27 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 |--------|------|-------------|------|
 | `GET` | `/agent-mesh/peers/:agentId` | Get peer info for an agent | mesh token |
 | `GET` | `/agent-mesh/models/available` | List models available in the agent mesh | mesh token |
-| `POST` | `/agent-mesh/connect` | Initiate a peer tunnel connection | mesh token |
-| `POST` | `/agent-mesh/accept` | Accept a peer tunnel invitation | mesh token |
-| `POST` | `/agent-mesh/relay` | Relay a message through a peer tunnel | mesh token |
-| `POST` | `/agent-mesh/close` | Close a peer tunnel | mesh token |
-| `POST` | `/agent-mesh/close-ack` | Acknowledge tunnel close | mesh token |
-| `POST` | `/agent-mesh/direct-work/offer` | Offer direct work to a peer | mesh token |
-| `POST` | `/agent-mesh/direct-work/accept` | Accept a direct work offer | mesh token |
-| `POST` | `/agent-mesh/direct-work/result` | Submit result for direct work | mesh token |
+| `POST` | `/agent-mesh/connect` | Initiate a peer tunnel connection | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/accept` | Accept a peer tunnel invitation | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/relay` | Relay a message through a peer tunnel | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/close` | Close a peer tunnel | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/close-ack` | Acknowledge tunnel close | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/direct-work/offer` | Offer direct work to a peer | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/direct-work/accept` | Accept a direct work offer | mesh token + agent signature (the named agent) |
+| `POST` | `/agent-mesh/direct-work/result` | Submit result for direct work | mesh token + agent signature (the named agent) |
 | `GET` | `/agent-mesh/direct-work/audit` | Audit log of direct work exchanges | mesh token |
-| `POST` | `/agent-mesh/models/request` | Request model transfer from a peer | mesh token |
+| `POST` | `/agent-mesh/models/request` | Request model transfer from a peer | mesh token + agent signature (the named agent) |
 | `GET` | `/agent-mesh/models/request/:offerId` | Get model transfer request status | mesh token |
 
 ### Orchestration
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/orchestration/coordinator/ollama-install` | Install/update Ollama model on coordinator | mesh token |
+| `POST` | `/orchestration/coordinator/ollama-install` | Install/update Ollama model on coordinator | mesh token + admin token |
 | `GET` | `/orchestration/coordinator/status` | Coordinator orchestration status | mesh token |
-| `POST` | `/orchestration/agents/:agentId/ollama-install` | Install Ollama model on a specific agent | mesh token |
-| `POST` | `/orchestration/agents/:agentId/status` | Update agent orchestration status | mesh token |
-| `POST` | `/orchestration/agents/:agentId/ack` | Acknowledge orchestration command | mesh token |
+| `POST` | `/orchestration/agents/:agentId/ollama-install` | Install Ollama model on a specific agent | mesh token + admin token |
+| `POST` | `/orchestration/agents/:agentId/status` | Update agent orchestration status | mesh token + agent signature (the named agent) |
+| `POST` | `/orchestration/agents/:agentId/ack` | Acknowledge orchestration command | mesh token + agent signature (the named agent) |
 | `GET` | `/orchestration/rollouts` | List rollout state across agents | mesh token |
 
 ### Security and Audit

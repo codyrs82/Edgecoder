@@ -75,11 +75,15 @@ function extractAdminToken(headers: Record<string, unknown>): string | undefined
 function isPortalInternalRequest(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return false;
   const token = headers["x-portal-service-token"];
-  return typeof token === "string" && token === PORTAL_SERVICE_TOKEN;
+  return typeof token === "string" && safeTokenEqual(token, PORTAL_SERVICE_TOKEN);
 }
 
-function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string }, reply: any): boolean {
-  if (isPortalInternalRequest(req.headers)) {
+function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string; method?: string }, reply: any): boolean {
+  // The portal service token is shared more widely than the admin token (coordinators and the
+  // portal hold it), so it only stands in for the admin token on reads. Every write here (node
+  // approval, rollouts, treasury, prices) needs the admin token itself.
+  const method = String(req.method ?? "GET").toUpperCase();
+  if ((method === "GET" || method === "HEAD") && isPortalInternalRequest(req.headers)) {
     return true;
   }
   const allowedIps = parseAllowedIps(process.env.ALLOWED_ADMIN_IPS);
@@ -115,6 +119,11 @@ function coordinatorMeshHeaders(contentType = false): Record<string, string> {
   if (contentType) headers["content-type"] = "application/json";
   if (COORDINATOR_MESH_TOKEN) headers["x-mesh-token"] = COORDINATOR_MESH_TOKEN;
   return headers;
+}
+
+/** Coordinator operator routes (rollouts, treasury, prices, issuance) need the admin token, not just the mesh token. */
+function coordinatorAdminHeaders(contentType = false): Record<string, string> {
+  return { ...coordinatorMeshHeaders(contentType), "x-admin-token": ADMIN_API_TOKEN };
 }
 
 // Unauthenticated health check for Fly health probes
@@ -683,7 +692,7 @@ app.post("/orchestration/install-model", async (req, reply) => {
     try {
       const res = await request(`${coordinatorUrl}/orchestration/coordinator/ollama-install`, {
         method: "POST",
-        headers: coordinatorMeshHeaders(true),
+        headers: coordinatorAdminHeaders(true),
         body: JSON.stringify({
           provider: body.provider,
           model: body.model,
@@ -701,7 +710,7 @@ app.post("/orchestration/install-model", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/orchestration/agents/${body.agentId}/ollama-install`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify({
         provider: body.provider,
         model: body.model,
@@ -1020,7 +1029,7 @@ app.post("/economy/price/propose", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/economy/price/propose`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1042,7 +1051,7 @@ app.post("/economy/price/consensus", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/economy/price/consensus`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1102,7 +1111,7 @@ app.post("/economy/payments/intents", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/economy/payments/intents`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1147,7 +1156,7 @@ app.post("/economy/payments/reconcile", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/economy/payments/reconcile`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify({})
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1172,7 +1181,7 @@ app.post("/economy/treasury/policies", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/economy/treasury/policies`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1188,7 +1197,7 @@ app.post("/economy/treasury/policies/:policyId/activate", async (req, reply) => 
   try {
     const res = await request(`${coordinatorUrl}/economy/treasury/policies/${params.policyId}/activate`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
     });
     return reply.code(res.statusCode).send(await res.body.json());
@@ -1369,7 +1378,7 @@ app.post("/ops/coordinator-ollama", async (req, reply) => {
   try {
     const res = await request(`${coordinatorUrl}/orchestration/coordinator/ollama-install`, {
       method: "POST",
-      headers: coordinatorMeshHeaders(true),
+      headers: coordinatorAdminHeaders(true),
       body: JSON.stringify({
         provider: body.provider,
         model: body.model,
@@ -1490,7 +1499,7 @@ app.post("/agents/:agentId/approval", async (req, reply) => {
   try {
     const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${params.agentId}/approval`, {
       method: "POST",
-      headers: portalHeaders(true),
+      headers: { ...portalHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify({ approved: body.approved })
     });
     const payload = await res.body.json();
@@ -1508,7 +1517,7 @@ app.post("/coordinators/:coordinatorId/approval", async (req, reply) => {
   try {
     const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${params.coordinatorId}/approval`, {
       method: "POST",
-      headers: portalHeaders(true),
+      headers: { ...portalHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify({ approved: body.approved })
     });
     return reply.code(res.statusCode).send(await res.body.json());

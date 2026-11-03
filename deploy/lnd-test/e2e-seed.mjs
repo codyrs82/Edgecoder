@@ -8,7 +8,8 @@ const base = "http://127.0.0.1:4301";
 const headers = {
   "content-type": "application/json",
   "x-mesh-token": process.env.MESH_AUTH_TOKEN ?? "",
-  "x-portal-service-token": process.env.PORTAL_SERVICE_TOKEN ?? ""
+  "x-portal-service-token": process.env.PORTAL_SERVICE_TOKEN ?? "",
+  "x-admin-token": process.env.ADMIN_API_TOKEN ?? ""
 };
 const call = async (method, path, body) => {
   const r = await fetch(base + path, { method, headers, body: body ? JSON.stringify(body) : undefined });

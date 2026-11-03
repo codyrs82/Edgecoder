@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { InternalRoutesDeps } from "../server.js";
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
+export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
   internal.addHook("onRequest", async (req, reply) => {
     if (!requireInternalToken(req as any, reply)) return reply;
   });
@@ -105,6 +105,8 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
   internal.post("/internal/nodes/:nodeId/approval", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     if (!requireInternalToken(req as any, reply)) return;
+    // A mutation: the service or coordinator token is not enough (coordinators hold one of them).
+    if (!requireControlPlaneAdmin(req as any, reply)) return;
     const params = z.object({ nodeId: z.string() }).parse(req.params);
     const body = z.object({ approved: z.boolean() }).parse(req.body);
     const updated = await store.setNodeApproval(params.nodeId, body.approved);

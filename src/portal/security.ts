@@ -151,6 +151,8 @@ export interface PortalSecurityOptions {
   originLockToken?: string;
   /** PORTAL_SERVICE_TOKEN: callers presenting it bypass the origin lock (coordinators). */
   serviceToken?: string;
+  /** PORTAL_COORDINATOR_TOKEN: coordinators calling /internal/* directly also pass the origin lock. */
+  coordinatorToken?: string;
 }
 
 /**
@@ -176,6 +178,7 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
       if (ORIGIN_LOCK_EXEMPT_PATHS.has(path)) return;
       if (cameThroughEdge(req, lock)) return;
       if (opts.serviceToken && headerEquals(req.headers["x-portal-service-token"], opts.serviceToken)) return;
+      if (opts.coordinatorToken && headerEquals(req.headers["x-portal-service-token"], opts.coordinatorToken)) return;
       return reply.code(403).send({ error: "origin_locked", detail: "This portal is only reachable through its public domain." });
     });
   }

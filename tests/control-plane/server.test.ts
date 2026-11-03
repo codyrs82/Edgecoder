@@ -757,6 +757,18 @@ describe("Admin API authentication -- portal service token", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  test("portal service token does not stand in for the admin token on writes", async () => {
+    for (const url of ["/agents/agent-1/approval", "/coordinators/coord-1/approval", "/orchestration/install-model", "/economy/treasury/policies"]) {
+      const res = await app.inject({
+        method: "POST",
+        url,
+        headers: { "x-portal-service-token": PORTAL_TOKEN, "content-type": "application/json" },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(401);
+    }
+  });
+
   test("wrong portal service token does not bypass auth", async () => {
     const res = await app.inject({
       method: "GET",
