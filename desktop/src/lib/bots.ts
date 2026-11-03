@@ -40,6 +40,8 @@ export interface Bot {
   /** Where its model calls run (older servers don't send it: Auto). */
   compute?: BotCompute;
   color: string;
+  /** "robot" | "orb" | "hex" | "block"; unset: picked from the name (lib/bot-avatar). */
+  avatarShape?: string;
   createdAtMs: number;
   updatedAtMs: number;
   nextRunAtMs?: number;
@@ -72,6 +74,37 @@ export interface BotInput {
   autoApproveEdits?: boolean;
   compute?: BotCompute;
   color?: string;
+  avatarShape?: string;
+}
+
+/** A tool call the bot asked you about, as a card in the conversation. */
+export interface AskCard {
+  id: string;
+  question: string;
+  detail?: string;
+  /** null while it waits for you. */
+  answer: "Allowed" | "Denied" | null;
+}
+
+/** The approvals in a run's tool events, as cards: waiting ones have no answer yet. */
+export function askCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string }>, botName: string): AskCard[] {
+  return events
+    .filter((e) => e.type === "tool_call" && e.requires_approval && e.id)
+    .map((e) => {
+      const args = e.args ?? {};
+      const cmd = typeof args.command === "string" ? args.command : undefined;
+      const path = typeof args.path === "string" ? args.path : undefined;
+      const tool = e.tool ?? "a tool";
+      const question =
+        tool === "run_shell" ? `${botName} wants to run a command` :
+        tool === "git_commit" ? `${botName} wants to commit` :
+        tool === "git_push" ? `${botName} wants to push` :
+        tool === "write_file" || tool === "edit_file" ? `${botName} wants to ${tool === "write_file" ? "write" : "edit"} a file` :
+        `${botName} wants to use ${tool.replace(/_/g, " ")}`;
+      const detail = cmd ?? path ?? (typeof args.message === "string" ? args.message : undefined);
+      const answer = e.approval_status === "approved" ? "Allowed" : e.approval_status === "rejected" ? "Denied" : null;
+      return { id: e.id!, question, ...(detail ? { detail } : {}), answer };
+    });
 }
 
 export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model";

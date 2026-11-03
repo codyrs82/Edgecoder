@@ -4,6 +4,10 @@ import {
   normalizeIpCandidate,
   readHeaderValue,
   extractClientIp,
+  clientIpTrustFromEnv,
+  isLoopbackAddress,
+  isLoopbackSocket,
+  socketRemoteAddress,
   normalizeUrl,
   pairKey,
   weightedMedian,
@@ -78,36 +82,68 @@ describe("readHeaderValue", () => {
 });
 
 describe("extractClientIp", () => {
-  test("fly-client-ip has highest precedence", () => {
-    const headers = {
-      "fly-client-ip": "10.0.0.1",
-      "cf-connecting-ip": "10.0.0.2",
-      "x-forwarded-for": "10.0.0.3",
-    };
-    expect(extractClientIp(headers)).toBe("10.0.0.1");
+  const spoofed = {
+    "fly-client-ip": "10.0.0.1",
+    "cf-connecting-ip": "10.0.0.2",
+    "x-real-ip": "10.0.0.4",
+    "x-forwarded-for": "10.0.0.3",
+  };
+
+  test("by default ignores every forwarded header and uses the socket address", () => {
+    expect(extractClientIp(spoofed, "198.51.100.7")).toBe("198.51.100.7");
+    expect(extractClientIp({ "x-real-ip": "127.0.0.1" }, "::ffff:198.51.100.7")).toBe("198.51.100.7");
   });
 
-  test("falls back to cf-connecting-ip when no fly-client-ip", () => {
-    const headers = {
-      "cf-connecting-ip": "10.0.0.2",
-      "x-forwarded-for": "10.0.0.3",
-    };
-    expect(extractClientIp(headers)).toBe("10.0.0.2");
+  test("on Fly only Fly-Client-IP is read", () => {
+    const trust = { trustedProxies: [], onFly: true };
+    expect(extractClientIp(spoofed, "172.19.0.1", trust)).toBe("10.0.0.1");
+    const { "fly-client-ip": _fly, ...rest } = spoofed;
+    expect(extractClientIp(rest, "172.19.0.1", trust)).toBe("172.19.0.1");
   });
 
-  test("x-forwarded-for multi-value picks first valid IP", () => {
-    const headers = {
-      "x-forwarded-for": "203.0.113.50, 70.41.3.18, 150.172.238.178",
-    };
-    expect(extractClientIp(headers)).toBe("203.0.113.50");
+  test("forwarded headers are read only when the socket is a configured proxy", () => {
+    const trust = { trustedProxies: ["10.1.1.1"], onFly: false };
+    expect(extractClientIp({ "x-real-ip": "203.0.113.5" }, "10.1.1.1", trust)).toBe("203.0.113.5");
+    expect(extractClientIp({ "x-real-ip": "203.0.113.5" }, "10.9.9.9", trust)).toBe("10.9.9.9");
+    expect(extractClientIp({ "fly-client-ip": "203.0.113.5" }, "10.1.1.1", trust)).toBe("10.1.1.1");
   });
 
-  test("falls back to fallbackIp when no headers match", () => {
-    expect(extractClientIp({}, "9.8.7.6")).toBe("9.8.7.6");
+  test("x-forwarded-for from a trusted proxy is read right to left", () => {
+    const trust = { trustedProxies: ["10.1.1.1", "10.1.1.2"], onFly: false };
+    expect(extractClientIp({ "x-forwarded-for": "127.0.0.1, 203.0.113.50, 10.1.1.2" }, "10.1.1.1", trust)).toBe("203.0.113.50");
   });
 
   test("returns undefined when nothing provided", () => {
     expect(extractClientIp({})).toBeUndefined();
+  });
+});
+
+describe("loopback detection", () => {
+  test("isLoopbackAddress", () => {
+    expect(isLoopbackAddress("127.0.0.1")).toBe(true);
+    expect(isLoopbackAddress("::1")).toBe(true);
+    expect(isLoopbackAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isLoopbackAddress("203.0.113.9")).toBe(false);
+    expect(isLoopbackAddress(undefined)).toBe(false);
+  });
+
+  test("isLoopbackSocket is false for a configured proxy on this host", () => {
+    expect(isLoopbackSocket("127.0.0.1")).toBe(true);
+    expect(isLoopbackSocket("127.0.0.1", { trustedProxies: ["127.0.0.1"], onFly: false })).toBe(false);
+  });
+
+  test("socketRemoteAddress reads the socket, never headers", () => {
+    expect(socketRemoteAddress({ socket: { remoteAddress: "::ffff:203.0.113.9" } })).toBe("203.0.113.9");
+    expect(socketRemoteAddress({ raw: { socket: { remoteAddress: "127.0.0.1" } } })).toBe("127.0.0.1");
+    expect(socketRemoteAddress({ headers: { "x-real-ip": "127.0.0.1" } } as any)).toBeUndefined();
+  });
+
+  test("clientIpTrustFromEnv", () => {
+    expect(clientIpTrustFromEnv({})).toEqual({ trustedProxies: [], onFly: false });
+    expect(clientIpTrustFromEnv({ COORDINATOR_TRUST_PROXY: " 10.0.0.1, ::ffff:10.0.0.2 ,", FLY_APP_NAME: "seed" })).toEqual({
+      trustedProxies: ["10.0.0.1", "10.0.0.2"],
+      onFly: true,
+    });
   });
 });
 

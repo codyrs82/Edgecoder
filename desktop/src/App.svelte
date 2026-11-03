@@ -271,6 +271,17 @@
     try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
   }
 
+  /** Open a folder (a bot's home folder) as the editor's project. */
+  async function openFolderInEditor(root: string) {
+    try {
+      await ideSetProject(root);
+      adoptProject(root);
+      activeTab = "editor";
+    } catch (err) {
+      console.warn("Failed to open folder:", err);
+    }
+  }
+
   async function openProject() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -375,7 +386,7 @@
         </div>
         {#if activeBot}
           <div class="chat-main">
-            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} />
+            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} onOpenFolder={openFolderInEditor} />
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>

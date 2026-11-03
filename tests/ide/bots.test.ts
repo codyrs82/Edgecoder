@@ -326,6 +326,19 @@ describe("bot compute policy", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).bots[0].compute).toEqual({ policy: "auto" });
   });
 
+  it("keeps the avatar shape the user picked", async () => {
+    const m = manager(gatedRunner().runner);
+    const b = m.create({ name: "Harry", projectRoot: dir(), avatarShape: "hex", color: "#46a758" });
+    expect(b).toMatchObject({ avatarShape: "hex", color: "#46a758" });
+    expect(m.update(b.id, { avatarShape: "orb" }).avatarShape).toBe("orb");
+    expect(m.create({ name: "Plain", projectRoot: dir() }).avatarShape).toBeUndefined();
+    const app = Fastify();
+    registerBotRoutes(app, m);
+    const bad = await app.inject({ method: "PATCH", url: `/v1/ide/bots/${b.id}`, payload: { avatarShape: "blob" } });
+    expect(bad.statusCode).toBe(400);
+    await app.close();
+  });
+
   it("rejects a specific-model policy without a model, and unknown policies", () => {
     const m = manager(gatedRunner().runner);
     expect(() => m.create({ name: "X", projectRoot: dir(), compute: { policy: "model" } })).toThrow(/Pick the model/);

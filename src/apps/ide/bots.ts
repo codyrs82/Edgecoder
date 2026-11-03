@@ -186,6 +186,8 @@ export interface BotConfig {
   /** Where its model calls run. New bots: Local first; bots saved before this existed: Auto. */
   compute: BotCompute;
   color: string;
+  /** The avatar character's shape (the app picks one from the name when unset). */
+  avatarShape?: BotAvatarShape;
   createdAtMs: number;
   updatedAtMs: number;
   nextRunAtMs?: number;
@@ -196,6 +198,8 @@ export interface BotCompute {
   policy: ComputePolicy;
   model?: string;
 }
+export const BOT_AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
+export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
 export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "local_first" };
 /** What bots saved before compute policies existed keep doing. */
 export const LEGACY_BOT_COMPUTE: BotCompute = { policy: "auto" };
@@ -343,6 +347,7 @@ export interface BotInput {
   autoApproveEdits?: boolean;
   compute?: BotCompute;
   color?: string;
+  avatarShape?: BotAvatarShape;
 }
 
 export type BotPatch = Partial<BotInput> & { memory?: string };
@@ -578,6 +583,7 @@ export class BotManager {
       autoApproveEdits: input.autoApproveEdits ?? true,
       compute: input.compute ? BotManager.compute(input.compute) : { ...DEFAULT_BOT_COMPUTE },
       color: input.color ?? COLORS[this.bots.length % COLORS.length],
+      ...(input.avatarShape ? { avatarShape: input.avatarShape } : {}),
       createdAtMs: now,
       updatedAtMs: now,
     };
@@ -985,6 +991,7 @@ const botFields = {
   autoApproveEdits: z.boolean(),
   compute: z.object({ policy: z.enum(COMPUTE_POLICIES as [ComputePolicy, ...ComputePolicy[]]), model: z.string().trim().min(1).max(300).optional() }),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  avatarShape: z.enum(BOT_AVATAR_SHAPES),
 };
 const createSchema = z.object(botFields).partial().required({ name: true, projectRoot: true });
 const patchSchema = z.object({ ...botFields, memory: z.string().max(MAX_MEMORY_BYTES) }).partial();
