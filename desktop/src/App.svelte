@@ -11,6 +11,7 @@
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
   import LoginScreen from "./pages/LoginScreen.svelte";
   import LocalComputeSetup from "./components/LocalComputeSetup.svelte";
+  import StarterModel from "./components/StarterModel.svelte";
   import { getLocalComputeStatus, needsSetupScreen, ollamaBaseFor, startLocalComputeSetup, type ComputeStatus } from "./lib/local-compute";
   import type { AuthUser } from "./lib/api";
   import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind, ideNewProject } from "./lib/api";
@@ -361,6 +362,9 @@
         onLogout={logout}
       />
     {/if}
+
+    <!-- First run: one small model downloads by itself once Ollama answers (skippable). -->
+    <StarterModel ollamaBase={import.meta.env.DEV ? "/ollama" : ollamaBaseFor(computeStatus)} onOpenModels={() => openSettings("models")} />
 
     {#if showComputeSetup && computeStatus}
       <LocalComputeSetup
