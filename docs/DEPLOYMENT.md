@@ -582,6 +582,30 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `ISSUANCE_RESERVE_SHARE` | `0.05` | Reserve share of issuance (5%) |
 | `ANCHOR_INTERVAL_MS` | `7200000` (2h) | Bitcoin anchoring interval |
 
+### Result Verification
+
+Sampled redundant execution of worker results (`src/swarm/verification.ts`, #50). A sampled result is re-run by an agent on a different reward account, and credits wait until two executions agree. Off by default.
+
+Only subtask kinds with a comparator can be verified (#104):
+
+- `micro_loop` and `single_step` (code tasks) compare the **execution result**: the exit status (`ok`) plus stdout, with CRLF, trailing whitespace on each line, and leading or trailing blank lines ignored. Any other difference is a mismatch.
+- `inference` (LLM text generation) is **never verified**. Two honest generations differ, and fuzzy text similarity could be gamed. Inference results are paid unverified. Listing `inference` in `RESULT_VERIFICATION_KINDS` is ignored with a startup warning.
+
+Even for code tasks, generated programs can print differently between honest runs, so turn the rate on gradually and watch the `result_verification_mismatch` security events.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESULT_VERIFICATION_RATE` | `0` (off) | Base fraction of eligible results re-executed (0..1). Effective rate is `min(1, rate * (2 - reputation))` |
+| `RESULT_VERIFICATION_KINDS` | `micro_loop,single_step` | Comma-separated subtask kinds eligible for sampling; `none` disables every kind. `inference` and unknown kinds are ignored |
+| `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Total executions, including the original, before a subtask is unresolved (2..3) |
+| `RESULT_VERIFICATION_MISMATCH_PENALTY` | `0.25` | Reputation lost on a mismatch (0..1) |
+| `RESULT_VERIFICATION_TIMEOUT_MS` | `900000` (15 min) | Hold time before a result no replica picked up is released unverified |
+| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation of an agent never seen before (0..1) |
+| `RESULT_VERIFICATION_ABANDON_PENALTY` | `0.25` | Reputation lost for claiming a replica and never reporting it (0..1) |
+| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` (5 min) | A claimed replica with no report after this long is reassigned |
+| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | `1` | How many times one sampled subtask's stalled replicas are reassigned (0..10) |
+| `RESULT_VERIFICATION_MINT_REPLICA_REWARDS` | `false` | Pay winning replicas from newly minted credits. The original execution is always paid |
+
 ### Stats and Audit
 
 | Variable | Default | Description |
