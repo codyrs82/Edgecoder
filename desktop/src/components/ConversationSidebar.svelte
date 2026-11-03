@@ -12,7 +12,8 @@
   import type { AuthUser } from "../lib/api";
   import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud, Plus } from "@lucide/svelte";
   import { bots } from "../lib/bots-store";
-  import { botInitial, botStatusLine } from "../lib/bots";
+  import { botStatusLine } from "../lib/bots";
+  import BotAvatar from "./BotAvatar.svelte";
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
 
@@ -275,9 +276,7 @@
             onclick={() => { onSelectBot?.(bot.id); if (!inline) onClose(); }}
             title="{bot.name}{bot.role ? ` · ${bot.role}` : ''}: {botStatusLine(bot)}"
           >
-            <span class="bot-avatar" style="background: {bot.color}">{botInitial(bot.name)}
-              {#if bot.status === "running" || bot.status === "needs_approval"}<span class="bot-dot" class:warn={bot.status === "needs_approval"}></span>{/if}
-            </span>
+            <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={30} decorative />
             <span class="bot-text">
               <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
               <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget"} class:err={bot.status === "error"}>{botStatusLine(bot)}</span>
@@ -441,32 +440,6 @@
   .bot-row.empty-bot {
     font-size: 12.5px;
     color: var(--text-secondary);
-  }
-  .bot-avatar {
-    position: relative;
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .bot-dot {
-    position: absolute;
-    right: -1px;
-    bottom: -1px;
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--green);
-    border: 2px solid var(--bg-deep);
-  }
-  .bot-dot.warn {
-    background: var(--yellow);
   }
   .bot-text {
     display: flex;
