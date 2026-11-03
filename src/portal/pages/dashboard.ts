@@ -93,8 +93,8 @@ app.get("/portal/dashboard", async (_req, reply) => {
         <li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text">Loading recent activity...</div></li>
       </ul>
     </div>
-    <!-- Coordinator Operations -->
-    <div class="card">
+    <!-- Coordinator Operations (coordinator operators and system admins only) -->
+    <div class="card hidden" id="coordOpsCard">
       <h2 style="margin-top:0;">Coordinator Operations</h2>
       <div id="opsAccountLine" class="muted"><span class="loading-spinner sm"></span> Loading operator session...</div>
       <div id="opsFinalityLine" class="muted">Loading finality state...</div>
@@ -311,10 +311,17 @@ app.get("/portal/dashboard", async (_req, reply) => {
     });
 
     /* ── Coordinator Ops load + refresh ── */
+    let opsTimer = null;
     async function refreshOpsSafe() {
       try {
         await refreshOps();
       } catch (err) {
+        // Not an operator after all: hide the card quietly and stop asking.
+        if (/forbidden|403/.test(String(err.message || err))) {
+          document.getElementById("coordOpsCard").classList.add("hidden");
+          if (opsTimer) clearInterval(opsTimer);
+          return;
+        }
         const message = "Could not load coordinator operations: " + String(err.message || err);
         document.getElementById("opsAccountLine").textContent = message + " (auto-retrying)";
         document.getElementById("opsFinalityLine").textContent = "Stats ledger finality: unavailable";
@@ -324,8 +331,14 @@ app.get("/portal/dashboard", async (_req, reply) => {
         showToast(message, true);
       }
     }
-    refreshOpsSafe();
-    setInterval(refreshOpsSafe, 15000);
+    (async () => {
+      const me = await requireAuth();
+      const roles = (me.user || {}).roles || {};
+      if (!roles.isSystemAdmin && !roles.isCoordinatorAdmin) return;
+      document.getElementById("coordOpsCard").classList.remove("hidden");
+      refreshOpsSafe();
+      opsTimer = setInterval(refreshOpsSafe, 15000);
+    })().catch(() => undefined);
   `;
   return reply.type("text/html").send(portalAuthedPageHtml({
     title: "EdgeCoder Portal | Dashboard",
