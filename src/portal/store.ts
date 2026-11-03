@@ -37,6 +37,25 @@ export type NodeEnrollment = {
   updatedAtMs: number;
 };
 
+export type PayoutDestinationRecord = {
+  userId: string;
+  accountId: string;
+  kind: string;
+  destination: string;
+  network: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type PayoutDestinationChallenge = {
+  challengeId: string;
+  userId: string;
+  kind: string;
+  destination: string;
+  emailCodeHash: string;
+  expiresAtMs: number;
+};
+
 export type PortalConversation = {
   conversationId: string;
   userId: string;
@@ -272,6 +291,92 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_status TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
+    await this.migratePayoutDestinations();
+  }
+
+  /**
+   * Payout destinations the user supplies from their own wallet (routes/payout-destination.ts), and
+   * the retirement of the old server-generated seed wallets: those addresses were derived from a
+   * seed the portal generated and no longer returns, so nobody can spend from them. Every
+   * portal_wallet_onboarding row came from that flow; each is marked invalid (kept for audit) and
+   * the user is asked for a destination. Returns how many rows were newly invalidated.
+   */
+  async migratePayoutDestinations(): Promise<number> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_payout_destinations (
+         user_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, kind TEXT NOT NULL, destination TEXT NOT NULL,
+         network TEXT NOT NULL, created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_payout_destination_challenges (
+         challenge_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, destination TEXT NOT NULL,
+         email_code_hash TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, consumed_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(`ALTER TABLE portal_wallet_onboarding ADD COLUMN IF NOT EXISTS invalidated_at_ms BIGINT`);
+    const res = await this.pool.query(
+      `UPDATE portal_wallet_onboarding SET invalidated_at_ms = $1
+       WHERE invalidated_at_ms IS NULL AND (seed_phrase_hash IS NOT NULL OR encrypted_private_key_ref LIKE 'seed-sha256:%')`,
+      [Date.now()]
+    );
+    return Number(res.rowCount ?? 0);
+  }
+
+  async getPayoutDestination(userId: string): Promise<PayoutDestinationRecord | null> {
+    const r = await this.pool.query(
+      `SELECT user_id, account_id, kind, destination, network, created_at_ms, updated_at_ms FROM portal_payout_destinations WHERE user_id = $1`,
+      [userId]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      userId: row.user_id,
+      accountId: row.account_id,
+      kind: row.kind,
+      destination: row.destination,
+      network: row.network,
+      createdAtMs: Number(row.created_at_ms),
+      updatedAtMs: Number(row.updated_at_ms)
+    };
+  }
+
+  async upsertPayoutDestination(input: { userId: string; accountId: string; kind: string; destination: string; network: string }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(
+      `INSERT INTO portal_payout_destinations (user_id, account_id, kind, destination, network, created_at_ms, updated_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$6)
+       ON CONFLICT (user_id) DO UPDATE SET account_id = EXCLUDED.account_id, kind = EXCLUDED.kind,
+         destination = EXCLUDED.destination, network = EXCLUDED.network, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [input.userId, input.accountId, input.kind, input.destination, input.network, now]
+    );
+  }
+
+  async createPayoutDestinationChallenge(input: { challengeId: string; userId: string; kind: string; destination: string; emailCodeHash: string; expiresAtMs: number }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_payout_destination_challenges (challenge_id, user_id, kind, destination, email_code_hash, expires_at_ms, created_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [input.challengeId, input.userId, input.kind, input.destination, input.emailCodeHash, input.expiresAtMs, Date.now()]
+    );
+  }
+
+  /** Single use: marks the challenge consumed and returns it, or null when unknown, used or expired. */
+  async consumePayoutDestinationChallenge(challengeId: string): Promise<PayoutDestinationChallenge | null> {
+    const now = Date.now();
+    const r = await this.pool.query(
+      `UPDATE portal_payout_destination_challenges SET consumed_at_ms = $2
+       WHERE challenge_id = $1 AND consumed_at_ms IS NULL AND expires_at_ms > $2
+       RETURNING challenge_id, user_id, kind, destination, email_code_hash, expires_at_ms`,
+      [challengeId, now]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      challengeId: row.challenge_id,
+      userId: row.user_id,
+      kind: row.kind,
+      destination: row.destination,
+      emailCodeHash: row.email_code_hash,
+      expiresAtMs: Number(row.expires_at_ms)
+    };
   }
 
   async close(): Promise<void> {
@@ -1016,9 +1121,11 @@ export class PortalStore {
     derivedAddress?: string;
     createdAtMs: number;
     acknowledgedAtMs?: number;
+    /** Set by migratePayoutDestinations: the derived address was server-generated and is never paid. */
+    invalidatedAtMs?: number;
   } | null> {
     const result = await this.pool.query(
-      `SELECT user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms, acknowledged_at_ms
+      `SELECT user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms, acknowledged_at_ms, invalidated_at_ms
        FROM portal_wallet_onboarding
        WHERE user_id = $1`,
       [userId]
@@ -1033,67 +1140,9 @@ export class PortalStore {
       encryptedPrivateKeyRef: row.encrypted_private_key_ref,
       derivedAddress: row.derived_address ?? undefined,
       createdAtMs: Number(row.created_at_ms),
-      acknowledgedAtMs: row.acknowledged_at_ms ? Number(row.acknowledged_at_ms) : undefined
+      acknowledgedAtMs: row.acknowledged_at_ms ? Number(row.acknowledged_at_ms) : undefined,
+      invalidatedAtMs: row.invalidated_at_ms ? Number(row.invalidated_at_ms) : undefined
     };
-  }
-
-  async createWalletOnboarding(input: {
-    userId: string;
-    accountId: string;
-    network: string;
-    seedPhraseHash: string;
-    encryptedPrivateKeyRef: string;
-    derivedAddress?: string;
-  }): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO portal_wallet_onboarding (
-        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-      ON CONFLICT (user_id) DO NOTHING`,
-      [
-        input.userId,
-        input.accountId,
-        input.network,
-        input.seedPhraseHash,
-        input.encryptedPrivateKeyRef,
-        input.derivedAddress ?? null,
-        Date.now()
-      ]
-    );
-  }
-
-  async upsertWalletOnboardingSeed(input: {
-    userId: string;
-    accountId: string;
-    network: string;
-    seedPhraseHash: string;
-    encryptedPrivateKeyRef: string;
-    derivedAddress?: string;
-  }): Promise<void> {
-    const now = Date.now();
-    await this.pool.query(
-      `INSERT INTO portal_wallet_onboarding (
-        user_id, account_id, network, seed_phrase_hash, encrypted_private_key_ref, derived_address, created_at_ms, acknowledged_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)
-      ON CONFLICT (user_id) DO UPDATE SET
-        account_id = EXCLUDED.account_id,
-        network = EXCLUDED.network,
-        seed_phrase_hash = EXCLUDED.seed_phrase_hash,
-        encrypted_private_key_ref = EXCLUDED.encrypted_private_key_ref,
-        derived_address = EXCLUDED.derived_address,
-        created_at_ms = EXCLUDED.created_at_ms,
-        acknowledged_at_ms = NULL`,
-      [input.userId, input.accountId, input.network, input.seedPhraseHash, input.encryptedPrivateKeyRef, input.derivedAddress ?? null, now]
-    );
-  }
-
-  async acknowledgeWalletOnboarding(userId: string): Promise<void> {
-    await this.pool.query(
-      `UPDATE portal_wallet_onboarding
-       SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, $2)
-       WHERE user_id = $1`,
-      [userId, Date.now()]
-    );
   }
 
   async createWalletSendMfaChallenge(input: {

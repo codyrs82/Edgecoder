@@ -681,22 +681,22 @@ export async function disconnectGitHub(): Promise<void> {
 // Wallet API (portal)
 // ---------------------------------------------------------------------------
 
-export interface WalletOnboarding {
+/** Where payouts go: a Lightning address from the user's own wallet (portal /wallet/payout-destination). */
+export interface PayoutDestinationView {
   accountId: string;
   network: string;
-  derivedAddress: string | null;
-  createdAtMs: number;
-  acknowledgedAtMs: number | null;
+  destination: { kind: string; destination: string; updatedAtMs: number } | null;
+  needsDestination: boolean;
+  legacyAddressRetired: boolean;
+  supportedKinds: string[];
+  onchainSupported: boolean;
+  registration?: { controlPlane: string; coordinator: string };
 }
 
-export interface WalletSeedSetup {
-  ok: boolean;
-  accountId: string;
-  network: string;
-  seedPhrase: string;
-  derivedAddress: string | null;
-  guidance: { title: string; steps: string[] };
-}
+export type PayoutDestinationSaveResult =
+  | { status: "saved"; view: PayoutDestinationView }
+  | { status: "verification_required"; challengeId: string; detail: string }
+  | { status: "error"; error: string; detail: string };
 
 export interface WalletSendRequest {
   requestId: string;
@@ -707,39 +707,36 @@ export interface WalletSendRequest {
   createdAtMs: number;
 }
 
-export async function getWalletOnboarding(): Promise<WalletOnboarding | null> {
-  try {
-    const res = await fetch(`${portalBase()}/wallet/onboarding`, {
-      headers: { ...authHeaders() },
-      credentials: "include",
-    });
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`Wallet status: ${res.status}`);
-    return res.json();
-  } catch {
-    return null;
-  }
-}
-
-export async function setupWalletSeed(): Promise<WalletSeedSetup> {
-  const res = await fetch(`${portalBase()}/wallet/onboarding/setup-seed`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
+export async function getPayoutDestination(): Promise<PayoutDestinationView> {
+  const res = await fetch(`${portalBase()}/wallet/payout-destination`, {
+    headers: { ...authHeaders() },
     credentials: "include",
-    body: JSON.stringify({}),
   });
-  if (!res.ok) throw new Error("Failed to generate seed phrase");
+  if (res.status === 401) throw new Error("Sign in to see where payouts go.");
+  if (!res.ok) throw new Error("Could not load your payout destination.");
   return res.json();
 }
 
-export async function acknowledgeWalletSeed(): Promise<void> {
-  const res = await fetch(`${portalBase()}/wallet/onboarding/acknowledge`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
-    credentials: "include",
-    body: JSON.stringify({}),
-  });
-  if (!res.ok) throw new Error("Failed to acknowledge seed backup");
+/** Save (or change) the payout destination. A change returns verification_required until the emailed code is sent back. */
+export async function savePayoutDestination(input: { destination: string; challengeId?: string; emailCode?: string }): Promise<PayoutDestinationSaveResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${portalBase()}/wallet/payout-destination`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      credentials: "include",
+      body: JSON.stringify(input),
+    });
+  } catch {
+    return { status: "error", error: "network", detail: "Could not reach EdgeCoder. Check your connection and try again." };
+  }
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.status === 200) return { status: "saved", view: body as unknown as PayoutDestinationView };
+  if (res.status === 202 && body.verificationRequired) {
+    return { status: "verification_required", challengeId: String(body.challengeId), detail: String(body.detail ?? "We emailed you a code.") };
+  }
+  if (res.status === 429) return { status: "error", error: "rate_limited", detail: "Too many attempts. Wait a minute and try again." };
+  return { status: "error", error: String(body.error ?? res.status), detail: String(body.detail ?? `Could not save (${body.error ?? res.status}).`) };
 }
 
 export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {

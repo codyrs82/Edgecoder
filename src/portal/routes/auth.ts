@@ -20,7 +20,7 @@ import { isAgentPlaceholderEmail } from "../store.js";
 import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
@@ -73,12 +73,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     });
     await sendVerificationEmail(user.email, verifyToken);
     await ensureCreditAccountForUser(user);
-    const walletOnboarding = await ensureStarterWalletForUser(user);
+    // No wallet is created here: the user sets a payout destination from their own wallet
+    // (routes/payout-destination.ts). The server never generates wallet keys.
     return reply.send({
       ok: true,
       userId: user.userId,
-      emailVerification: "sent",
-      walletOnboarding
+      emailVerification: "sent"
     });
   });
 
@@ -324,7 +324,6 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
         displayName: undefined
       });
       await ensureCreditAccountForUser(user);
-      await ensureStarterWalletForUser(user);
     } else if (emailVerified && !user.emailVerified) {
       await portalStore.markUserEmailVerified(user.userId);
       user = await portalStore.getUserById(user.userId);

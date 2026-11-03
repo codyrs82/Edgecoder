@@ -66,17 +66,15 @@
 </script>
 
 <div class="profile-area" bind:this={rowEl}>
-  {#if update.state === "available" || update.state === "downloading" || update.state === "installing"}
-    <button class="update-row" onclick={() => update.state === "available" && downloadAndInstall()} disabled={update.state !== "available"}>
+  {#if update.state === "downloading" || update.state === "installing"}
+    <div class="update-row" role="status">
       <ArrowUpCircle size={14} />
-      {#if update.state === "available"}
-        <span>Update to {update.update.version}</span><span class="go">Relaunch →</span>
-      {:else if update.state === "downloading"}
+      {#if update.state === "downloading"}
         <span>Downloading update… {update.progress}%</span>
       {:else}
         <span>Installing, restarting shortly…</span>
       {/if}
-    </button>
+    </div>
   {/if}
 
   {#if menuOpen}
@@ -106,8 +104,8 @@
         <span class="sub">{cSats === null ? "EdgeCoder" : `${fmt(cSats)} cSats`}</span>
       </span>
     </button>
-    {#if update.state === "available"}
-      <button class="pill" onclick={() => downloadAndInstall()} title="Install {update.update.version} and relaunch">Update</button>
+    {#if update.state === "ready" || update.state === "available"}
+      <button class="pill" onclick={() => downloadAndInstall()} title="Install EdgeCoder {update.update.version} and restart">Restart to update</button>
     {/if}
     <button class="gear" onclick={() => onOpenSettings()} title="Settings" aria-label="Settings"><Settings size={16} /></button>
   </div>
@@ -119,8 +117,6 @@
     display: flex; align-items: center; gap: 8px; width: 100%; margin-bottom: 6px; padding: 8px 10px; border: none; border-radius: 8px;
     background: var(--bg-surface); color: var(--text-primary); font-size: 12.5px; cursor: pointer; text-align: left;
   }
-  .update-row:disabled { cursor: default; }
-  .update-row .go { margin-left: auto; color: var(--text-secondary); }
   .row { display: flex; align-items: center; gap: 4px; }
   .who {
     flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 6px; border: none; border-radius: 8px;

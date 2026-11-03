@@ -47,6 +47,41 @@ describe("runAgentLoop", () => {
     ]);
   });
 
+  it("native: acts on plan and tool_call blocks a small model writes as text instead of stopping", async () => {
+    const plan = '```plan\n[{"index":0,"description":"Read the file","status":"pending"}]\n```';
+    const call = '```tool_call\n{"tool":"read_file","args":{"path":"a.ts"}}\n```';
+    const { chat, seen } = scripted([
+      { content: `First I'll read it.\n${plan}`, toolCalls: [] },
+      { content: call, toolCalls: [] },
+      { content: "Done.", toolCalls: [] },
+    ]);
+    const events: IdeStreamEvent[] = [];
+    const ran: string[] = [];
+    await runAgentLoop({
+      chat,
+      systemPrompt: () => "",
+      messages: [{ role: "user", content: "fix it" }],
+      sendEvent: (e) => events.push(e),
+      isCancelled: () => false,
+      runTool: async (tool, args) => {
+        ran.push(`${tool}:${args.path}`);
+        return "ok";
+      },
+      native: true,
+    });
+    expect(events.some((e) => e.type === "plan")).toBe(true);
+    expect(seen[1].messages.at(-1)?.content).toMatch(/Carry out the plan now/);
+    expect(ran).toEqual(["read_file:a.ts"]);
+    expect(seen[2].messages.at(-1)?.content).toBe("[Tool read_file result]: ok");
+  });
+
+  it("native: nudges only once when the model keeps answering with a plan", async () => {
+    const plan = '```plan\n[{"index":0,"description":"Read","status":"pending"}]\n```';
+    const { chat, seen } = scripted([{ content: plan, toolCalls: [] }, { content: plan, toolCalls: [] }, { content: plan, toolCalls: [] }]);
+    await runAgentLoop({ chat, systemPrompt: () => "", messages: [{ role: "user", content: "x" }], sendEvent: () => {}, isCancelled: () => false, runTool: async () => "", native: true });
+    expect(seen.length).toBe(2);
+  });
+
   it("falls back to text mode when the model has no tool support", async () => {
     const { chat, seen } = scripted([
       new ToolsUnsupportedError("model does not support tools"),

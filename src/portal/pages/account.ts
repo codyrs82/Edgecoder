@@ -18,24 +18,37 @@ export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "io
 export function registerAccountPages(app: FastifyInstance): void {
 app.get("/portal/wallet", async (_req, reply) => {
   const content = `
-    <div class="card">
-      <h2 style="margin-top:0;">Wallet security checklist</h2>
-      <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
+    <div class="card" id="payoutDestinationCard">
+      <h2 style="margin-top:0;">Where should we pay you?</h2>
+      <p class="muted" style="margin-top:0;">
+        Earnings are paid to a wallet you control. Enter the Lightning address your wallet gives you
+        (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.
+        On-chain Bitcoin addresses are not supported for payouts yet.
+      </p>
+      <div id="payoutDestRetired" class="hidden" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
+        The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
+        Nothing was ever paid to it. Your earnings are kept until you set a destination below.
+      </div>
+      <table>
+        <tbody>
+          <tr><th style="width:34%;">Current destination</th><td id="payoutDestCurrent">Loading...</td></tr>
+          <tr><th>Network</th><td id="payoutDestNetwork">-</td></tr>
+        </tbody>
+      </table>
+      <label for="payoutDestInput">Lightning address</label>
       <div class="row">
-        <button class="primary" id="setupSeedBtn">Set up recovery seed phrase</button>
-        <button id="walletAckBtn">I backed up my seed phrase</button>
+        <input id="payoutDestInput" type="text" autocomplete="off" spellcheck="false" placeholder="you@wallet.example" style="flex:1;" />
+        <button class="primary" id="payoutDestSaveBtn">Save</button>
       </div>
-      <div id="seedPhraseWrap" class="hidden" style="margin-top:10px;">
-        <p class="muted">
-          Record this seed phrase now. It is shown only for this setup action and cannot be recovered later.
-        </p>
-        <div id="seedPhraseValue" class="token-box"></div>
-        <div id="derivedAddressWrap" class="hidden" style="margin-top:10px;">
-          <strong>Your Bitcoin address (BIP84 native SegWit):</strong>
-          <div id="derivedAddressValue" class="token-box" style="margin-top:4px;word-break:break-all;"></div>
+      <div id="payoutDestCodeWrap" class="hidden" style="margin-top:8px;">
+        <label for="payoutDestCode">Email code</label>
+        <div class="row">
+          <input id="payoutDestCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+          <button class="primary" id="payoutDestConfirmBtn">Confirm change</button>
         </div>
-        <div id="seedGuidance" class="muted" style="margin-top:8px;"></div>
       </div>
+      <div id="payoutDestError" role="alert" class="hidden" style="margin-top:8px;color:var(--danger, #dc2626);"></div>
+      <div id="payoutDestInfo" class="muted hidden" style="margin-top:8px;"></div>
     </div>
     <div class="grid2">
       <div class="card">
@@ -86,11 +99,7 @@ app.get("/portal/wallet", async (_req, reply) => {
           <button class="primary" id="withdrawBtn">Pay invoice</button>
           <span class="muted" id="payoutPolicyNote"></span>
         </div>
-        <label style="margin-top:14px;">Lightning address for automatic payouts</label>
-        <div class="row">
-          <input id="lightningAddress" type="text" placeholder="you@wallet.example" style="flex:1;" />
-          <button id="saveLightningAddressBtn">Save</button>
-        </div>
+        <p class="muted" style="margin:14px 0 0;">Automatic payouts go to the Lightning address under "Where should we pay you?".</p>
         <table style="margin-top:14px;">
           <thead><tr><th>Time</th><th>Kind</th><th>Sats</th><th>Fee</th><th>Status</th></tr></thead>
           <tbody id="payoutsBody"></tbody>
@@ -168,15 +177,6 @@ app.get("/portal/wallet", async (_req, reply) => {
       const el = document.getElementById(targetId);
       el.innerHTML = rowsHtml.length > 0 ? rowsHtml.join("") : "<tr><td colspan='" + colspan + "'>" + emptyText + "</td></tr>";
     }
-    function renderSeedGuidance(guidance) {
-      const target = document.getElementById("seedGuidance");
-      if (!guidance || !Array.isArray(guidance.steps) || guidance.steps.length === 0) {
-        target.textContent = "";
-        return;
-      }
-      target.innerHTML = "<strong>" + (guidance.title || "Seed phrase safety guidance") + "</strong><br/>" +
-        guidance.steps.map((step, idx) => (idx + 1) + ". " + step).join("<br/>");
-    }
     let pendingSendMfa = null;
     let allPaymentIntents = [];
     function sats(msat) { return (Number(msat || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 0 }); }
@@ -208,13 +208,81 @@ app.get("/portal/wallet", async (_req, reply) => {
       } catch (err) { showToast("Withdrawal failed: " + String(err.message || err), true); }
       loadPayouts();
     });
-    document.getElementById("saveLightningAddressBtn").addEventListener("click", async () => {
-      const lightningAddress = document.getElementById("lightningAddress").value.trim() || null;
-      try {
-        await api("/wallet/payouts/address", { method: "POST", body: JSON.stringify({ lightningAddress }) });
-        showToast(lightningAddress ? "Automatic payouts will go to " + lightningAddress : "Automatic payouts disabled.");
-      } catch (err) { showToast("Could not save address: " + String(err.message || err), true); }
-    });
+    let payoutDestChallenge = null;
+    function payoutDestMessage(kind, text) {
+      const err = document.getElementById("payoutDestError");
+      const info = document.getElementById("payoutDestInfo");
+      err.classList.add("hidden"); info.classList.add("hidden");
+      if (!text) return;
+      const el = kind === "error" ? err : info;
+      el.textContent = text;
+      el.classList.remove("hidden");
+    }
+    async function payoutDestRequest(method, body) {
+      const res = await fetch("/wallet/payout-destination", {
+        method,
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      let payload = {};
+      try { payload = await res.json(); } catch {}
+      return { status: res.status, payload };
+    }
+    function renderPayoutDest(v) {
+      const current = v.destination ? v.destination.destination : null;
+      document.getElementById("payoutDestCurrent").textContent = current || "Not set. Payouts are held until you add one.";
+      document.getElementById("payoutDestNetwork").textContent = v.network || "-";
+      document.getElementById("payoutDestRetired").classList.toggle("hidden", !(v.legacyAddressRetired && !current));
+      const input = document.getElementById("payoutDestInput");
+      if (current && !input.value) input.value = current;
+    }
+    async function loadPayoutDestination() {
+      const r = await payoutDestRequest("GET");
+      if (r.status !== 200) {
+        document.getElementById("payoutDestCurrent").textContent = "Unavailable";
+        payoutDestMessage("error", "Could not load your payout destination (" + (r.payload.error || r.status) + ").");
+        return;
+      }
+      renderPayoutDest(r.payload);
+    }
+    function payoutDestSaved(r) {
+      payoutDestChallenge = null;
+      document.getElementById("payoutDestCodeWrap").classList.add("hidden");
+      document.getElementById("payoutDestCode").value = "";
+      renderPayoutDest(r.payload);
+      const reg = r.payload.registration || {};
+      const registered = reg.controlPlane === "ok" || reg.coordinator === "ok";
+      payoutDestMessage("info", registered
+        ? "Saved. Payouts will go to " + r.payload.destination.destination + "."
+        : "Saved here, but the payout service could not be reached. Save again later so payouts can reach you.");
+    }
+    async function savePayoutDest(withCode) {
+      const destination = document.getElementById("payoutDestInput").value.trim();
+      if (!destination) { payoutDestMessage("error", "Enter a Lightning address from your wallet."); return; }
+      const body = { destination };
+      if (withCode) {
+        const emailCode = document.getElementById("payoutDestCode").value.trim();
+        if (!emailCode || !payoutDestChallenge) { payoutDestMessage("error", "Enter the code from the email."); return; }
+        body.challengeId = payoutDestChallenge;
+        body.emailCode = emailCode;
+      }
+      payoutDestMessage(null);
+      const r = await payoutDestRequest("PUT", body);
+      if (r.status === 200) return payoutDestSaved(r);
+      if (r.status === 202 && r.payload.verificationRequired) {
+        payoutDestChallenge = r.payload.challengeId;
+        document.getElementById("payoutDestCodeWrap").classList.remove("hidden");
+        payoutDestMessage("info", r.payload.detail || "We emailed you a code. Enter it to confirm the change.");
+        return;
+      }
+      if (r.status === 429) { payoutDestMessage("error", "Too many attempts. Wait a minute and try again."); return; }
+      if (withCode) { payoutDestChallenge = null; document.getElementById("payoutDestCodeWrap").classList.add("hidden"); }
+      payoutDestMessage("error", r.payload.detail || ("Could not save: " + (r.payload.error || r.status)));
+    }
+    document.getElementById("payoutDestSaveBtn").addEventListener("click", () => savePayoutDest(false).catch((e) => payoutDestMessage("error", String(e.message || e))));
+    document.getElementById("payoutDestConfirmBtn").addEventListener("click", () => savePayoutDest(true).catch((e) => payoutDestMessage("error", String(e.message || e))));
+    loadPayoutDestination().catch(() => undefined);
     loadPayouts();
     let allSendRequests = [];
     function renderDepositDetails(accountId, wallet) {
@@ -277,43 +345,12 @@ app.get("/portal/wallet", async (_req, reply) => {
       renderDepositDetails(accountId, wallets[0] || null);
       allPaymentIntents = walletSnapshot.paymentIntents || [];
       applyPaymentIntentView();
-      try {
-        const onboarding = await api("/wallet/onboarding", { method: "GET", headers: {} });
-        const status = onboarding.acknowledgedAtMs
-          ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
-          : "Backup not yet confirmed. Generate and record your seed phrase now.";
-        var addressInfo = onboarding.derivedAddress ? " | Address: " + onboarding.derivedAddress : "";
-        document.getElementById("walletOnboardingMeta").textContent =
-          "Network: " + onboarding.network + " | Account: " + onboarding.accountId + addressInfo + " | " + status;
-        if (onboarding.derivedAddress) {
-          document.getElementById("depositAddressValue").textContent = onboarding.derivedAddress;
-        }
-      } catch {
-        document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
-      }
       await loadSendRequests();
     }
     document.getElementById("intentStatusFilter").addEventListener("change", applyPaymentIntentView);
     document.getElementById("intentSortOrder").addEventListener("change", applyPaymentIntentView);
     document.getElementById("sendRequestStatusFilter").addEventListener("change", applySendRequestView);
     document.getElementById("sendRequestSortOrder").addEventListener("change", applySendRequestView);
-    document.getElementById("setupSeedBtn").addEventListener("click", async () => {
-      try {
-        await requireAuth();
-        const setup = await api("/wallet/onboarding/setup-seed", { method: "POST", body: JSON.stringify({}) });
-        document.getElementById("seedPhraseWrap").classList.remove("hidden");
-        document.getElementById("seedPhraseValue").textContent = setup.seedPhrase;
-        if (setup.derivedAddress) {
-          document.getElementById("derivedAddressWrap").classList.remove("hidden");
-          document.getElementById("derivedAddressValue").textContent = setup.derivedAddress;
-        }
-        renderSeedGuidance(setup.guidance);
-        await loadWalletView();
-        showToast("New recovery seed phrase generated. Record it before leaving this page.");
-      } catch (err) {
-        showToast("Could not set up seed phrase: " + String(err.message || err), true);
-      }
-    });
     document.getElementById("startSendMfaBtn").addEventListener("click", async () => {
       try {
         await requireAuth();
@@ -379,23 +416,13 @@ app.get("/portal/wallet", async (_req, reply) => {
         showToast("Could not confirm secure send: " + String(err.message || err), true);
       }
     });
-    document.getElementById("walletAckBtn").addEventListener("click", async () => {
-      try {
-        await requireAuth();
-        await api("/wallet/onboarding/acknowledge", { method: "POST", body: JSON.stringify({}) });
-        await loadWalletView();
-        showToast("Seed backup acknowledgement saved.");
-      } catch (err) {
-        showToast("Could not save acknowledgement: " + String(err.message || err), true);
-      }
-    });
     loadWalletView().catch((err) => showToast("Could not load wallet data: " + String(err.message || err), true));
   `;
   return reply.type("text/html").send(portalAuthedPageHtml({
     title: "EdgeCoder Portal | Wallet",
     activeTab: "wallet",
     heading: "Wallet & Credits",
-    subtitle: "Credits, payment intents, and wallet onboarding status.",
+    subtitle: "Credits, payouts and where we pay you.",
     content,
     script
   }));

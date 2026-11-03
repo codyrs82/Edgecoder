@@ -37,7 +37,6 @@ function createMockStore() {
     updatePasskeyCounter: vi.fn(),
     listNodesByOwner: vi.fn().mockResolvedValue([]),
     getWalletOnboardingByUserId: vi.fn().mockResolvedValue(null),
-    createWalletOnboarding: vi.fn(),
     setUserTheme: vi.fn(),
   };
 }

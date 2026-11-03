@@ -30,8 +30,8 @@ const API_ROUTES: Array<[string, string]> = [
   ["POST", "/auth/passkey/login/options"],
   ["POST", "/auth/passkey/login/verify"],
   ["GET", "/wallet/onboarding"],
-  ["POST", "/wallet/onboarding/setup-seed"],
-  ["POST", "/wallet/onboarding/acknowledge"],
+  ["GET", "/wallet/payout-destination"],
+  ["PUT", "/wallet/payout-destination"],
   ["GET", "/wallet/send/requests"],
   ["POST", "/wallet/send/mfa/start"],
   ["POST", "/wallet/send/mfa/confirm"],
@@ -46,6 +46,7 @@ const API_ROUTES: Array<[string, string]> = [
   ["GET", "/nodes/discover-coordinator"],
   ["GET", "/nodes/me"],
   ["GET", "/dashboard/summary"],
+  ["GET", "/dashboard/network-status"],
   ["GET", "/dashboard/network-insights"],
   ["GET", "/coordinator/ops/summary"],
   ["GET", "/coordinator/ops/agent-diagnostics"],
@@ -84,6 +85,13 @@ describe("portal API routes after the #16 split", () => {
     await portalServer.ready();
     const missing = API_ROUTES.filter(([method, url]) => !portalServer.hasRoute({ method: method as "GET", url }));
     expect(missing).toEqual([]);
+  });
+
+  it("no longer registers the server-side seed wallet routes (the server never creates wallet keys)", async () => {
+    await portalServer.ready();
+    expect(portalServer.hasRoute({ method: "POST", url: "/wallet/onboarding/setup-seed" })).toBe(false);
+    expect(portalServer.hasRoute({ method: "POST", url: "/wallet/onboarding/acknowledge" })).toBe(false);
+    expect(portalServer.hasRoute({ method: "POST", url: "/wallet/payouts/address" })).toBe(false);
   });
 
   // Still over the limit, split in a later #16 slice. Remove an entry once its file is split.

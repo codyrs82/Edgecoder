@@ -8,7 +8,26 @@
   let { source, onOpenInEditor }: Props = $props();
 
   const renderer = new marked.Renderer();
+  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // A plan a model wrote as text (```plan with a JSON step list) reads as a checklist, not JSON.
+  function planHtml(text: string): string | null {
+    try {
+      const steps = JSON.parse(text);
+      if (!Array.isArray(steps) || steps.length === 0) return null;
+      const items = steps.map((s: { description?: unknown; status?: unknown }) => {
+        const done = s.status === 'completed';
+        return `<li class="${done ? 'done' : ''}"><span class="plan-box">${done ? '✓' : ''}</span>${esc(String(s.description ?? ''))}</li>`;
+      });
+      return `<div class="plan-list"><div class="plan-title">Plan</div><ol>${items.join('')}</ol></div>`;
+    } catch {
+      return null;
+    }
+  }
   renderer.code = function({ text, lang }) {
+    if (lang === 'plan') {
+      const html = planHtml(text);
+      if (html) return html;
+    }
     const escapedCode = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return `<div class="code-block-wrapper">
       <div class="code-block-header">
@@ -105,6 +124,20 @@
     color: var(--text-secondary);
   }
   /* Code block wrapper styles */
+  .markdown :global(.plan-list) {
+    margin: 8px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .markdown :global(.plan-title) { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 6px; }
+  .markdown :global(.plan-list ol) { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .markdown :global(.plan-list li) { display: flex; gap: 8px; align-items: center; }
+  .markdown :global(.plan-list li.done) { color: var(--text-secondary); text-decoration: line-through; }
+  .markdown :global(.plan-box) {
+    width: 14px; height: 14px; flex: none; border-radius: 4px; display: inline-grid; place-items: center;
+    border: 1px solid var(--text-secondary); font-size: 10px;
+  }
   .markdown :global(.code-block-wrapper) {
     position: relative;
     margin: 0.75em 0;

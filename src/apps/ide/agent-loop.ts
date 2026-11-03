@@ -168,6 +168,30 @@ export function parseTextBlocks(text: string): Block[] {
   return out.sort((a, b) => a.start - b.start);
 }
 
+type PlanStatus = "pending" | "in_progress" | "completed" | "failed";
+
+/** The steps of a ```plan block, or null when it isn't a JSON list of steps. */
+export function parsePlan(body: string): Array<{ index: number; description: string; status: PlanStatus }> | null {
+  try {
+    const steps = JSON.parse(body) as Array<{ index?: number; description?: string; status?: string }>;
+    if (!Array.isArray(steps)) return null;
+    return steps.map((s, i) => ({ index: typeof s.index === "number" ? s.index : i, description: String(s.description ?? ""), status: (s.status as PlanStatus) || "pending" }));
+  } catch {
+    return null;
+  }
+}
+
+/** The tool and arguments of a ```tool_call block, or null when malformed. */
+export function parseToolCallBlock(body: string): { tool: string; args: Record<string, unknown> } | null {
+  try {
+    const parsed = JSON.parse(body) as { tool?: unknown; args?: unknown };
+    if (typeof parsed.tool !== "string" || !parsed.tool) return null;
+    return { tool: parsed.tool, args: parsed.args && typeof parsed.args === "object" ? (parsed.args as Record<string, unknown>) : {} };
+  } catch {
+    return null;
+  }
+}
+
 export interface AgentLoopDeps {
   chat: ChatFn;
   /** System prompt for the tool format in use. */
@@ -200,6 +224,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   // Separate replies (and text-mode segments) with a blank line instead of running them together.
   let emitted = false;
   let needBreak = false;
+  let nudged = false;
   const say = (text: string) => {
     if (!text) return;
     d.sendEvent({ type: "text", content: needBreak && emitted ? `\n\n${text}` : text });
@@ -224,7 +249,35 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         say(`Error contacting model: ${(err as Error).message}`);
         return;
       }
-      if (reply.toolCalls.length === 0) return;
+      if (reply.toolCalls.length === 0) {
+        // Small models sometimes write ```plan / ```tool_call blocks as text instead of calling tools.
+        // The text is already on screen; act on the blocks so the turn doesn't just stop.
+        const blocks = parseTextBlocks(reply.content);
+        if (blocks.length === 0) return;
+        const results: string[] = [];
+        for (const b of blocks) {
+          if (d.isCancelled()) return;
+          if (b.kind === "plan") {
+            const steps = parsePlan(b.body);
+            if (steps) d.sendEvent({ type: "plan", steps, status: "proposed" });
+            continue;
+          }
+          const call = parseToolCallBlock(b.body);
+          if (!call) continue;
+          const result = known.has(call.tool) ? await d.runTool(call.tool as ToolName, call.args) : `[Error]: unknown tool ${call.tool}`;
+          results.push(`[Tool ${call.tool} result]: ${result}`);
+        }
+        messages.push({ role: "assistant", content: reply.content });
+        if (results.length > 0) {
+          messages.push({ role: "user", content: results.join("\n\n") });
+        } else {
+          // Only a plan: ask once for the first step as a real tool call.
+          if (nudged) return;
+          nudged = true;
+          messages.push({ role: "user", content: "Carry out the plan now: call the tools for the first step (don't describe it, call it)." });
+        }
+        continue;
+      }
       messages.push({ role: "assistant", content: reply.content, tool_calls: reply.toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) });
       for (const call of reply.toolCalls) {
         if (d.isCancelled()) return;
@@ -261,29 +314,20 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       }
       cursor = b.end;
       if (b.kind === "plan") {
-        try {
-          const steps = JSON.parse(b.body) as Array<{ index: number; description: string; status: string }>;
-          d.sendEvent({
-            type: "plan",
-            steps: steps.map((s) => ({ index: s.index, description: s.description, status: (s.status as "pending" | "in_progress" | "completed" | "failed") || "pending" })),
-            status: "proposed",
-          });
-        } catch {
-          say(b.body);
-        }
+        const steps = parsePlan(b.body);
+        if (steps) d.sendEvent({ type: "plan", steps, status: "proposed" });
+        else say(b.body);
         continue;
       }
-      let parsed: { tool?: string; args?: Record<string, unknown> };
-      try {
-        parsed = JSON.parse(b.body);
-      } catch {
+      const call = parseToolCallBlock(b.body);
+      if (!call) {
         say(`(malformed tool call: ${b.body})`);
         continue;
       }
       hadToolCall = true;
       if (d.isCancelled()) return;
-      const name = String(parsed.tool ?? "");
-      const result = known.has(name) ? await d.runTool(name as ToolName, parsed.args ?? {}) : `[Error]: unknown tool ${name}`;
+      const name = call.tool;
+      const result = known.has(name) ? await d.runTool(name as ToolName, call.args) : `[Error]: unknown tool ${name}`;
       results.push(`[Tool ${name} result]: ${result}`);
     }
     const trailing = content.slice(cursor).trim();

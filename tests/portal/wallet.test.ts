@@ -18,9 +18,6 @@ function createMockStore() {
     getSessionByTokenHash: vi.fn(),
     getUserById: vi.fn(),
     getWalletOnboardingByUserId: vi.fn(),
-    createWalletOnboarding: vi.fn(),
-    upsertWalletOnboardingSeed: vi.fn(),
-    acknowledgeWalletOnboarding: vi.fn(),
     listWalletSendRequestsByUser: vi.fn(),
     createWalletSendMfaChallenge: vi.fn(),
     consumeWalletSendMfaChallenge: vi.fn(),
@@ -49,28 +46,6 @@ async function buildApp(store: MockStore) {
     return await store.getUserById(session.userId);
   }
 
-  // GET /wallet/onboarding
-  app.get("/wallet/onboarding", async (req, reply) => {
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const onboarding = await store.getWalletOnboardingByUserId(user.userId);
-    if (!onboarding) return reply.code(404).send({ error: "wallet_onboarding_not_found" });
-    return reply.send({
-      accountId: onboarding.accountId,
-      network: onboarding.network,
-      createdAtMs: onboarding.createdAtMs,
-      acknowledgedAtMs: onboarding.acknowledgedAtMs,
-    });
-  });
-
-  // POST /wallet/onboarding/acknowledge
-  app.post("/wallet/onboarding/acknowledge", async (req, reply) => {
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    await store.acknowledgeWalletOnboarding(user.userId);
-    return reply.send({ ok: true });
-  });
-
   // GET /wallet/send/requests
   app.get("/wallet/send/requests", async (req, reply) => {
     const user = await getCurrentUser(req as any);
@@ -87,8 +62,8 @@ async function buildApp(store: MockStore) {
     if (!body.destination || !body.amountSats || body.amountSats <= 0) {
       return reply.code(400).send({ error: "validation_failed" });
     }
-    const walletOnboarding = await store.getWalletOnboardingByUserId(user.userId);
-    if (!walletOnboarding) return reply.code(409).send({ error: "wallet_onboarding_required" });
+    // No wallet onboarding row is needed any more: the account id is derived from the user.
+    const accountId = `acct-${user.userId}`;
     const passkeys = await store.listPasskeysByUserId(user.userId);
     if (passkeys.length === 0) {
       return reply.code(409).send({ error: "passkey_required_for_wallet_send" });
@@ -100,7 +75,7 @@ async function buildApp(store: MockStore) {
     await store.createWalletSendMfaChallenge({
       challengeId,
       userId: user.userId,
-      accountId: walletOnboarding.accountId,
+      accountId,
       destination: body.destination.trim(),
       amountSats: body.amountSats,
       note: body.note?.trim() || undefined,
@@ -220,94 +195,6 @@ const MOCK_PASSKEY = {
 };
 
 // ---------------------------------------------------------------------------
-// Wallet onboarding tests
-// ---------------------------------------------------------------------------
-describe("GET /wallet/onboarding", () => {
-  let store: MockStore;
-  let app: FastifyInstance;
-
-  beforeEach(async () => {
-    store = createMockStore();
-    app = await buildApp(store);
-  });
-
-  it("returns 401 when unauthenticated", async () => {
-    const res = await app.inject({ method: "GET", url: "/wallet/onboarding" });
-    expect(res.statusCode).toBe(401);
-  });
-
-  it("returns 404 when no wallet onboarding exists", async () => {
-    withAuth(store);
-    store.getWalletOnboardingByUserId.mockResolvedValue(null);
-    const res = await app.inject({
-      method: "GET",
-      url: "/wallet/onboarding",
-      headers: { cookie: sessionCookie() },
-    });
-    expect(res.statusCode).toBe(404);
-    expect(JSON.parse(res.body).error).toBe("wallet_onboarding_not_found");
-  });
-
-  it("returns wallet onboarding details", async () => {
-    withAuth(store);
-    store.getWalletOnboardingByUserId.mockResolvedValue(MOCK_ONBOARDING);
-    const res = await app.inject({
-      method: "GET",
-      url: "/wallet/onboarding",
-      headers: { cookie: sessionCookie() },
-    });
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
-    expect(body.accountId).toBe(MOCK_ONBOARDING.accountId);
-    expect(body.network).toBe("signet");
-    expect(body.createdAtMs).toBe(MOCK_ONBOARDING.createdAtMs);
-  });
-
-  it("returns acknowledgedAtMs when the wallet backup has been confirmed", async () => {
-    withAuth(store);
-    const ackTime = Date.now();
-    store.getWalletOnboardingByUserId.mockResolvedValue({ ...MOCK_ONBOARDING, acknowledgedAtMs: ackTime });
-    const res = await app.inject({
-      method: "GET",
-      url: "/wallet/onboarding",
-      headers: { cookie: sessionCookie() },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).acknowledgedAtMs).toBe(ackTime);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Acknowledge wallet onboarding
-// ---------------------------------------------------------------------------
-describe("POST /wallet/onboarding/acknowledge", () => {
-  let store: MockStore;
-  let app: FastifyInstance;
-
-  beforeEach(async () => {
-    store = createMockStore();
-    app = await buildApp(store);
-  });
-
-  it("returns 401 when unauthenticated", async () => {
-    const res = await app.inject({ method: "POST", url: "/wallet/onboarding/acknowledge" });
-    expect(res.statusCode).toBe(401);
-  });
-
-  it("acknowledges wallet onboarding for the current user", async () => {
-    withAuth(store);
-    const res = await app.inject({
-      method: "POST",
-      url: "/wallet/onboarding/acknowledge",
-      headers: { cookie: sessionCookie() },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).ok).toBe(true);
-    expect(store.acknowledgeWalletOnboarding).toHaveBeenCalledWith(TEST_USER.userId);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Transaction history (send requests)
 // ---------------------------------------------------------------------------
 describe("GET /wallet/send/requests", () => {
@@ -405,7 +292,7 @@ describe("POST /wallet/send/mfa/start", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("returns 409 when no wallet onboarding exists", async () => {
+  it("does not require a wallet onboarding row (the server no longer creates wallets)", async () => {
     withAuth(store);
     store.getWalletOnboardingByUserId.mockResolvedValue(null);
     store.listPasskeysByUserId.mockResolvedValue([MOCK_PASSKEY]);
@@ -415,8 +302,8 @@ describe("POST /wallet/send/mfa/start", () => {
       payload: { destination: "bc1qtest123456", amountSats: 1000 },
       headers: { cookie: sessionCookie() },
     });
-    expect(res.statusCode).toBe(409);
-    expect(JSON.parse(res.body).error).toBe("wallet_onboarding_required");
+    expect(res.statusCode).toBe(200);
+    expect(store.createWalletSendMfaChallenge.mock.calls[0][0].accountId).toBe(`acct-${TEST_USER.userId}`);
   });
 
   it("returns 409 when user has no passkeys", async () => {

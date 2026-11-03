@@ -241,12 +241,10 @@ app.get("/portal-legacy", async (_req, reply) => {
           </div>
 
           <div class="card">
-            <h3>Wallet Security Checklist</h3>
-            <p class="muted">Your seed phrase is shown only once at signup. Confirm you have safely backed it up offline.</p>
-            <div id="walletOnboardingMeta" class="muted">Loading wallet onboarding status...</div>
-            <div class="row" style="margin-top:8px;">
-              <button id="walletAckBtn">I backed up my seed phrase</button>
-            </div>
+            <h3>Where should we pay you?</h3>
+            <p class="muted">Payouts go to a Lightning address from your own wallet. EdgeCoder never creates or stores wallet keys.
+            Set it on the <a href="/portal/wallet">wallet page</a>.</p>
+          </div>
           </div>
 
           <div class="grid">
@@ -433,18 +431,6 @@ app.get("/portal-legacy", async (_req, reply) => {
             "</td><td>" + fmtTime(p.createdAtMs) + "</td></tr>"
           );
           renderRows("paymentIntentsBody", intentRows, 5, "No payment intents.");
-
-          try {
-            const onboarding = await api("/wallet/onboarding", { method: "GET", headers: {} });
-            const status = onboarding.acknowledgedAtMs
-              ? "Seed backup confirmed on " + fmtTime(onboarding.acknowledgedAtMs)
-              : "Backup not yet confirmed. Please secure your seed phrase offline.";
-            var addressInfo = onboarding.derivedAddress ? " | Address: " + onboarding.derivedAddress : "";
-            document.getElementById("walletOnboardingMeta").textContent =
-              "Network: " + onboarding.network + " | Account: " + onboarding.accountId + addressInfo + " | " + status;
-          } catch {
-            document.getElementById("walletOnboardingMeta").textContent = "Wallet onboarding status unavailable.";
-          }
         }
 
         async function bootstrap() {
@@ -459,7 +445,7 @@ app.get("/portal-legacy", async (_req, reply) => {
 
         document.getElementById("signupBtn").addEventListener("click", async () => {
           try {
-            const signup = await api("/auth/signup", {
+            await api("/auth/signup", {
               method: "POST",
               body: JSON.stringify({
                 email: document.getElementById("signupEmail").value,
@@ -467,16 +453,7 @@ app.get("/portal-legacy", async (_req, reply) => {
                 displayName: document.getElementById("signupDisplayName").value || undefined
               })
             });
-            const onboarding = signup.walletOnboarding;
-            if (onboarding && onboarding.seedPhrase) {
-              showToast(
-                "Signup complete. Save this seed phrase now: " + onboarding.seedPhrase + " | " +
-                (onboarding.guidance && onboarding.guidance.steps ? onboarding.guidance.steps.join(" ") : ""),
-                false
-              );
-            } else {
-              showToast("Signup complete. Check your email for verification.");
-            }
+            showToast("Signup complete. Check your email for verification.");
           } catch (err) {
             showToast("Signup failed: " + String(err.message || err), true);
           }
@@ -511,16 +488,6 @@ app.get("/portal-legacy", async (_req, reply) => {
             }
           } catch (err) {
             showToast("Resend failed: " + String(err.message || err), true);
-          }
-        });
-
-        document.getElementById("walletAckBtn").addEventListener("click", async () => {
-          try {
-            await api("/wallet/onboarding/acknowledge", { method: "POST", body: JSON.stringify({}) });
-            await loadDashboard();
-            showToast("Seed backup acknowledgement saved.");
-          } catch (err) {
-            showToast("Could not save acknowledgement: " + String(err.message || err), true);
           }
         });
 

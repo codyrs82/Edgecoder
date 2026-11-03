@@ -75,6 +75,8 @@ export function buildChatSystemPrompt(ctx: SystemPromptContext): string {
 
 const NATIVE_TOOLS_SECTION = `
 Call the tools you were given to read, search and change the project. Several calls in one reply run in order; their results come back to you before your next reply. Writes and shell commands wait for the user's approval.
+
+Act, don't narrate: when you know the next step, call its tool in this reply instead of describing it. Don't ask the user for file names or paths you can find yourself; list or search the project first.
 `;
 
 function textToolsSection(toolDocs: string): string {
@@ -94,6 +96,22 @@ To invoke a tool, emit a fenced code block with the language tag \`tool_call\`:
 You may include multiple tool_call blocks in a single response. Each will be executed in order.
 `;
 }
+
+// Only for text-mode tools. With native tools, small models given a plan format write plans as text
+// instead of calling tools, and copy a concrete example verbatim, so the example is placeholders.
+const PLAN_FORMAT_SECTION = `## Plan Format
+
+To propose a multi-step plan before executing, emit a fenced code block with the language tag \`plan\`
+(one entry per step, in your own words for the task at hand):
+
+\`\`\`plan
+[
+  {"index": 0, "description": "<first step>", "status": "pending"},
+  {"index": 1, "description": "<next step>", "status": "pending"}
+]
+\`\`\`
+
+`;
 
 export function buildIdeAgentSystemPrompt(
   ctx: SystemPromptContext,
@@ -131,18 +149,7 @@ Project root: ${projectRoot}
 
 You are an autonomous coding agent operating inside the user's IDE. You have access to the following tools to read, edit, and manage files in the project.
 ${toolFormat === "native" ? NATIVE_TOOLS_SECTION : textToolsSection(toolDocs)}
-## Plan Format
-
-To propose a multi-step plan before executing, emit a fenced code block with the language tag \`plan\`:
-
-\`\`\`plan
-[
-  {"index": 0, "description": "Read the existing file to understand structure", "status": "pending"},
-  {"index": 1, "description": "Edit the function to fix the bug", "status": "pending"}
-]
-\`\`\`
-
-## Rules
+${toolFormat === "native" ? "" : PLAN_FORMAT_SECTION}## Rules
 
 1. **Read before edit** — always read a file before modifying it so you understand the current content.
 2. **Prefer edit_file over write_file** — use edit_file for modifications to existing files; only use write_file for creating new files.

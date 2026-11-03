@@ -8,7 +8,7 @@
     return onUpdateStatus((s) => {
       status = s;
       // Un-dismiss when a new update becomes available
-      if (s.state === "available") dismissed = false;
+      if (s.state === "available" || s.state === "ready") dismissed = false;
     });
   });
 
@@ -21,28 +21,22 @@
   }
 
   let visible = $derived(
-    !dismissed && (status.state === "available" || status.state === "downloading" || status.state === "installing")
+    !dismissed && (status.state === "available" || status.state === "ready" || status.state === "installing")
   );
 
-  let version = $derived(status.state === "available" ? status.update.version : "");
-  let progressPct = $derived(status.state === "downloading" ? status.progress : 0);
+  let version = $derived(status.state === "available" || status.state === "ready" ? status.update.version : "");
 </script>
 
 {#if visible}
   <div class="update-banner">
-    {#if status.state === "available"}
-      <span class="update-text">EdgeCoder v{version} is available.</span>
-      <button class="update-btn" onclick={handleUpdate}>Update Now</button>
+    {#if status.state === "available" || status.state === "ready"}
+      <span class="update-text">EdgeCoder v{version} is ready.</span>
+      <button class="update-btn" onclick={handleUpdate}>Restart to update</button>
       <button class="dismiss-btn" onclick={handleDismiss} title="Dismiss">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 6L6 18M6 6l12 12"/>
         </svg>
       </button>
-    {:else if status.state === "downloading"}
-      <span class="update-text">Downloading update... {progressPct}%</span>
-      <div class="progress-bar">
-        <div class="progress-fill" style="width: {progressPct}%"></div>
-      </div>
     {:else if status.state === "installing"}
       <span class="update-text">Installing update... Restarting shortly.</span>
     {/if}
@@ -96,17 +90,5 @@
     color: var(--text-primary);
   }
 
-  .progress-bar {
-    width: 120px;
-    height: 4px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 2px;
-    overflow: hidden;
-  }
 
-  .progress-fill {
-    height: 100%;
-    background: var(--accent-secondary, #4a90d9);
-    transition: width 0.3s ease;
-  }
 </style>

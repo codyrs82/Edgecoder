@@ -9,7 +9,7 @@ import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
   app.get("/ios/dashboard", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
@@ -275,6 +275,26 @@ export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_A
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const nodes = await store.listNodesByOwner(user.userId);
     return reply.send({ nodes });
+  });
+
+  // Network status for the dashboard's status cards: any signed-in user (the coordinator's public
+  // /health/runtime), not the operator-only /coordinator/ops/summary.
+  app.get("/dashboard/network-status", async (req, reply) => {
+    const user = await getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const [url] = await discoverCoordinatorUrlsForPortal();
+    if (!url) return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
+    try {
+      const res = await request(`${url}/health/runtime`, { method: "GET", headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS });
+      if (res.statusCode !== 200) {
+        await res.body.dump();
+        return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
+      }
+      const body = (await res.body.json()) as { coordinator?: { agents?: number; queued?: number } };
+      return reply.send({ coordinatorOnline: true, agents: Number(body.coordinator?.agents ?? 0), queued: Number(body.coordinator?.queued ?? 0) });
+    } catch {
+      return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
+    }
   });
 
   app.get("/dashboard/summary", async (req, reply) => {

@@ -18,7 +18,9 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
     const options = await generateRegistrationOptions({
       rpName: PASSKEY_RP_NAME,
       rpID: PASSKEY_RP_ID,
+      // Password managers list a passkey by these: show which EdgeCoder account it signs in to.
       userName: user.email,
+      userDisplayName: user.displayName?.trim() ? `${user.displayName.trim()} (${user.email})` : user.email,
       userID: webauthnUserId,
       attestationType: "none",
       timeout: 60000,

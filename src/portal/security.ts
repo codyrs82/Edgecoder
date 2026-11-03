@@ -97,6 +97,7 @@ const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export function rateLimitFor(url: string, method: string | string[] = "POST"): { max: number; timeWindow: string } | undefined {
   const methods = (Array.isArray(method) ? method : [method]).map((m) => m.toUpperCase());
   if (methods.includes("POST") && WALLET_ROUTES.some((r) => r.test(url))) return WALLET_RATE_LIMIT;
+  if (methods.includes("PUT") && url === "/wallet/payout-destination") return WALLET_RATE_LIMIT;
   if (methods.includes("POST") && TOPUP_ROUTES.some((r) => r.test(url))) return TOPUP_RATE_LIMIT;
   if (methods.includes("POST") && PASSWORD_RESET_ROUTES.some((r) => r.test(url))) return PASSWORD_RESET_RATE_LIMIT;
   if (AUTH_ROUTES.some((r) => r.test(url))) return AUTH_RATE_LIMIT;
