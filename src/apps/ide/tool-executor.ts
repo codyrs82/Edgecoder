@@ -11,8 +11,9 @@ import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { realpathSync, lstatSync } from "node:fs";
+import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
+import { gitExecEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -158,6 +159,106 @@ export function realPathEscape(root: string, abs: string, rootReal = safeRealpat
   }
 }
 
+// ---------------------------------------------------------------------------
+// Protected paths: the git directory, and files git or common tools act on by themselves
+// ---------------------------------------------------------------------------
+
+/**
+ * Path segment compared the way case-insensitive and Windows filesystems match names: lower case,
+ * NTFS stream suffix (`:...`) and trailing dots/spaces dropped, and the zero-width characters
+ * HFS+ ignores removed (git's own `.git` checks do the same).
+ */
+function normalizeSegment(seg: string): string {
+  let s = seg.normalize("NFC").replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").toLowerCase();
+  const colon = s.indexOf(":");
+  if (colon > 0) s = s.slice(0, colon);
+  return s.replace(/[. ]+$/, "");
+}
+
+/** True for a segment that names a git directory (`.git`, or its 8.3 short name `git~1`). */
+function isGitDirSegment(seg: string): boolean {
+  const s = normalizeSegment(seg);
+  return s === ".git" || s === "git~1";
+}
+
+/**
+ * Files that need the user's explicit approval for every agent write (never auto-approved):
+ * git reads them for submodule URLs and filter/diff drivers, and hook runners or the shell
+ * execute what they name.
+ */
+const APPROVAL_FILES = new Set([
+  ".gitmodules", ".gitattributes", ".envrc", ".pre-commit-config.yaml",
+  "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml", ".lefthookrc",
+]);
+/** Directories whose contents are executed by tooling (git hook managers, editor task runners). */
+const APPROVAL_DIRS = new Set([".husky", ".githooks", ".vscode"]);
+
+export type ProtectedPathKind = "git_dir" | "needs_approval";
+
+/** Classify a project-relative path by its segments alone (no filesystem access). */
+export function classifyRelativePath(relPath: string): ProtectedPathKind | null {
+  const segs = relPath.split(/[\\/]+/).filter((s) => s !== "" && s !== ".");
+  if (segs.some(isGitDirSegment)) return "git_dir";
+  if (segs.length > 0 && APPROVAL_FILES.has(normalizeSegment(segs[segs.length - 1]))) return "needs_approval";
+  if (segs.slice(0, -1).some((s) => APPROVAL_DIRS.has(normalizeSegment(s)))) return "needs_approval";
+  return null;
+}
+
+/**
+ * Lexical check for a tool's `path` argument, for deciding approval before anything runs.
+ * The executor repeats it with symlinks resolved.
+ */
+export function protectedToolPath(path: unknown): ProtectedPathKind | null {
+  if (typeof path !== "string") return null;
+  return classifyRelativePath(path);
+}
+
+/**
+ * Classify `abs` (inside `root`) both as written and with symlinks resolved, so `link/config`
+ * with `link -> .git` and a leaf symlink into the git directory are caught. `gitDirs` are
+ * additional real git directories to protect (a `.git` file's `gitdir:` target).
+ */
+export function classifyProjectPath(root: string, abs: string, rootReal: string, gitDirs: string[] = []): ProtectedPathKind | null {
+  const lexical = classifyRelativePath(relative(root, abs));
+  if (lexical === "git_dir") return lexical;
+  let real: string | null = null;
+  let probe = abs;
+  const tail: string[] = [];
+  for (;;) {
+    const r = safeRealpath(probe);
+    if (r !== null) {
+      real = tail.length ? join(r, ...tail.reverse()) : r;
+      break;
+    }
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    tail.push(relative(parent, probe));
+    probe = parent;
+  }
+  if (real !== null) {
+    if (gitDirs.some((g) => isWithin(g, real!))) return "git_dir";
+    if (isWithin(rootReal, real)) {
+      const resolved = classifyRelativePath(relative(rootReal, real));
+      if (resolved === "git_dir") return resolved;
+      return lexical ?? resolved;
+    }
+  }
+  return lexical;
+}
+
+/** Real path of the git directory a `<root>/.git` file points to (worktrees, submodules), if any. */
+function gitFileTarget(root: string): string | null {
+  try {
+    const dotGit = join(root, ".git");
+    if (!lstatSync(dotGit).isFile()) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
+    if (!m) return null;
+    return safeRealpath(resolve(root, m[1]));
+  } catch {
+    return null;
+  }
+}
+
 function safeRealpath(p: string): string | null {
   try {
     return realpathSync(p);
@@ -292,6 +393,23 @@ export class ToolExecutor {
     return abs;
   }
 
+  /**
+   * Refuse agent writes into the git directory (git runs commands named in its config and hooks,
+   * and the IDE runs git), and writes to files that tooling executes unless the user approved this
+   * very call. `approved` is true only for an explicit approval, never for auto-approved edits.
+   */
+  private assertWritable(abs: string, approved: boolean): void {
+    const gitFile = gitFileTarget(this.root);
+    const kind = classifyProjectPath(this.root, abs, this.rootReal, gitFile ? [gitFile] : []);
+    const rel = relative(this.root, abs) || ".";
+    if (kind === "git_dir") {
+      throw new Error(`Refusing to modify ${rel}: agent tools can't write inside the git directory (.git).`);
+    }
+    if (kind === "needs_approval" && !approved) {
+      throw new Error(`Refusing to modify ${rel} without explicit approval: git or other tools run commands named in this file.`);
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Main dispatch
   // -----------------------------------------------------------------------
@@ -313,9 +431,9 @@ export class ToolExecutor {
           if (!this.codebaseSearch) return { error: "No codebase index for this project yet. Use search_files instead." };
           return { result: await this.codebaseSearch(String(args.query ?? "")) };
         case "write_file":
-          return await this.writeFileImpl(args);
+          return await this.writeFileImpl(args, opts.approved === true);
         case "edit_file":
-          return await this.editFile(args);
+          return await this.editFile(args, opts.approved === true);
         case "run_shell":
           return await this.runShell(args, opts.approved === true);
         case "git_status":
@@ -481,8 +599,10 @@ export class ToolExecutor {
 
   private async writeFileImpl(
     args: Record<string, unknown>,
+    approved = false,
   ): Promise<ToolResult> {
     const filePath = this.resolvePath(String(args.path ?? ""));
+    this.assertWritable(filePath, approved);
     const content = String(args.content ?? "");
 
     // Ensure parent directories exist
@@ -499,8 +619,9 @@ export class ToolExecutor {
   // edit_file
   // -----------------------------------------------------------------------
 
-  private async editFile(args: Record<string, unknown>): Promise<ToolResult> {
+  private async editFile(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
     const filePath = this.resolvePath(String(args.path ?? ""));
+    this.assertWritable(filePath, approved);
     const oldString = String(args.old_string ?? "");
     const newString = String(args.new_string ?? "");
 
@@ -538,15 +659,18 @@ export class ToolExecutor {
     return new Promise<ToolResult>((resolvePromise) => {
       // Default: no shell, parsed argv. Only an explicitly approved command that
       // needs shell syntax (pipes, &&, …) is run through sh -c.
+      // git run by the agent (directly or from a script) gets the IDE's git hardening.
       const [cmd, cmdArgs] = decision.useShell
         ? ["sh", ["-c", command]]
-        : [decision.argv[0], decision.argv.slice(1)];
+        : decision.argv[0] === "git"
+          ? ["git", hardenedGitArgs(decision.argv.slice(1))]
+          : [decision.argv[0], decision.argv.slice(1)];
       let proc: ReturnType<typeof spawn>;
       try {
         proc = spawn(cmd, cmdArgs, {
           cwd: this.root,
           shell: false,
-          env: scrubShellEnv(process.env),
+          env: hardenedGitEnv(scrubShellEnv(process.env)),
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (error) {
@@ -600,7 +724,8 @@ export class ToolExecutor {
 
   private gitStatus(): ToolResult {
     try {
-      const out = execFileSync("git", ["status", "--porcelain"], {
+      const out = execFileSync("git", hardenedGitArgs(["status", "--porcelain"]), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -626,7 +751,8 @@ export class ToolExecutor {
     if (filePath) gitArgs.push("--", filePath);
 
     try {
-      const out = execFileSync("git", gitArgs, {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -652,7 +778,8 @@ export class ToolExecutor {
     if (ref) gitArgs.push(ref);
 
     try {
-      const out = execFileSync("git", gitArgs, {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -680,14 +807,16 @@ export class ToolExecutor {
     try {
       // Stage files — split on whitespace to pass as separate arguments
       const fileList = files.split(/\s+/).filter(Boolean);
-      execFileSync("git", ["add", ...fileList], {
+      execFileSync("git", hardenedGitArgs(["add", ...fileList]), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
       });
 
       // Commit — execFileSync passes message as argument, no shell interpolation
-      const out = execFileSync("git", ["commit", "-m", message], {
+      const out = execFileSync("git", hardenedGitArgs(["commit", "-m", message]), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -711,7 +840,8 @@ export class ToolExecutor {
     try {
       if (!name) {
         // List branches
-        const out = execFileSync("git", ["branch"], {
+        const out = execFileSync("git", hardenedGitArgs(["branch"]), {
+        env: gitExecEnv(),
           cwd: this.root,
           encoding: "utf-8",
           timeout: 10_000,
@@ -723,7 +853,8 @@ export class ToolExecutor {
         ? ["checkout", "-b", name]
         : ["checkout", name];
 
-      const out = execFileSync("git", gitArgs, {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 10_000,
@@ -748,7 +879,8 @@ export class ToolExecutor {
       args.push("-c", `credential.helper=${helper}`);
     }
     args.push(...gitArgs);
-    return execFileSync("git", args, {
+    return execFileSync("git", hardenedGitArgs(args), {
+        env: gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
       timeout: timeoutMs,
@@ -815,7 +947,8 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private getGitHubRepo(): { owner: string; repo: string } {
-    const url = execFileSync("git", ["remote", "get-url", "origin"], {
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), {
+        env: gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
       timeout: 5_000,
@@ -872,7 +1005,8 @@ export class ToolExecutor {
     let head = typeof args.head === "string" ? args.head : "";
 
     if (!head) {
-      head = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      head = execFileSync("git", hardenedGitArgs(["rev-parse", "--abbrev-ref", "HEAD"]), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
         timeout: 5_000,

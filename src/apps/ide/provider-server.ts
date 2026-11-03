@@ -44,6 +44,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
@@ -93,7 +94,8 @@ const providers = new ProviderRegistry();
 function projectHeadCommit(): string | undefined {
   if (!activeProjectRoot) return undefined;
   try {
-    const head = execFileSync("git", ["-C", activeProjectRoot, "rev-parse", "HEAD"], {
+    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"]), {
+        env: gitExecEnv(),
       encoding: "utf8",
       timeout: 3_000,
       stdio: ["ignore", "pipe", "ignore"]

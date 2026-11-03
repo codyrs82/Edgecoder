@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { protectedToolPath } from "./tool-executor.js";
 
 export interface ChatMessage {
   role: string;
@@ -362,7 +363,10 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
     // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
     const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
-    const editAutoApprove = d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file");
+    // Edits to the git directory or to files tooling executes (.gitmodules, .husky/, ...) are never
+    // auto-approved; the executor refuses .git outright and the rest without an explicit approval.
+    const editAutoApprove =
+      d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
     const requiresApproval = !READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove;
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
@@ -372,7 +376,8 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     }
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
-    const result = await d.execute(tool, args, { approved: requiresApproval || editAutoApprove });
+    // `approved` means the user approved this call; auto-approved edits don't count.
+    const result = await d.execute(tool, args, { approved: requiresApproval });
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
     if (tool === "run_shell" && result.result) {
       try {

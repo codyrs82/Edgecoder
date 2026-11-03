@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 
 export function projectsHome(): string {
   return process.env.EDGECODER_PROJECTS_DIR || join(homedir(), "EdgeCoder Projects");
@@ -28,7 +29,7 @@ export function createNewProject(name: string): string {
   for (let n = 2; existsSync(dir); n++) dir = join(home, `${base}-${n}`);
   mkdirSync(dir);
   try {
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, stdio: "ignore", timeout: 10_000 });
+    execFileSync("git", hardenedGitArgs(["init", "-q", "-b", "main"]), { env: gitExecEnv(), cwd: dir, stdio: "ignore", timeout: 10_000 });
   } catch {
     // git missing: still a usable folder
   }

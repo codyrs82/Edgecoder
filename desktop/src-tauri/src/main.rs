@@ -378,6 +378,17 @@ fn project_write_file(
     }
 
     let target = canonical_parent.join(candidate.file_name().ok_or("Invalid file name")?);
+    // Never write inside the git directory: git runs commands named in its config and hooks.
+    let is_git_dir = |s: &str| {
+        let s = s.to_lowercase();
+        let s = s.split(':').next().unwrap_or("").trim_end_matches(|c| c == '.' || c == ' ');
+        s == ".git" || s == "git~1"
+    };
+    if let Ok(rel) = target.strip_prefix(&canonical_root) {
+        if rel.components().any(|c| is_git_dir(&c.as_os_str().to_string_lossy())) {
+            return Err(format!("Refusing to write inside the git directory: {}", path));
+        }
+    }
 
     let mut file = fs::File::create(&target)
         .map_err(|e| format!("Cannot create file '{}': {}", path, e))?;
@@ -572,7 +583,23 @@ fn project_run_shell(
 
 fn run_git_command(root: &PathBuf, args: &[&str]) -> Result<ShellResult, String> {
     let canonical_root = root.canonicalize().map_err(|e| format!("Cannot canonicalize root: {}", e))?;
+    // Same hardening as the IDE's git calls (src/apps/ide/git-safe.ts): no fsmonitor, no hooks,
+    // no ext:: transport, no implicit bare repositories.
+    let hooks_path = if cfg!(windows) {
+        let dir = std::env::temp_dir().join("edgecoder-nohooks");
+        let _ = fs::create_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    } else {
+        "/dev/null".to_string()
+    };
+    let hooks_arg = format!("core.hooksPath={}", hooks_path);
     let output = Command::new("git")
+        .args([
+            "-c", "core.fsmonitor=false",
+            "-c", hooks_arg.as_str(),
+            "-c", "protocol.ext.allow=never",
+            "-c", "safe.bareRepository=explicit",
+        ])
         .args(args)
         .current_dir(&canonical_root)
         .output()
