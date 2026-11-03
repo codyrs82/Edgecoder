@@ -97,6 +97,10 @@
     "tar": "^7.5.22",
     "@mapbox/node-pre-gyp": "^2.0.3",
     "node-gyp": "^11.5.0",
+    "glob": "^14.0.3",
+    "mermaid": {
+      "katex": "^0.18.2"
+    },
     "vitepress": {
       "vite": "^6.4.1"
     }
