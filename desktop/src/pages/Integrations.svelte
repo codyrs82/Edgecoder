@@ -34,8 +34,8 @@
   });
 
   async function handleConnect() {
-    const url = getOAuthStartUrl("github");
     try {
+      const url = await getOAuthStartUrl("github");
       await open(url);
     } catch {
       // Fallback — browser may not open

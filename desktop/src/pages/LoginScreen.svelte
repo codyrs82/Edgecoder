@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { login, getOAuthStartUrl, completeOAuthWithToken } from "../lib/api";
+  import { login, getOAuthStartUrl, completeOAuthWithToken, pendingOAuthVerifier } from "../lib/api";
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { portalResetPasswordUrl, portalSignupUrl } from "../lib/endpoints";
@@ -36,8 +36,8 @@
 
   async function handleOAuth(provider: "google" | "microsoft") {
     error = "";
-    const url = getOAuthStartUrl(provider);
     try {
+      const url = await getOAuthStartUrl(provider);
       await open(url);
     } catch (err) {
       error = "Could not open browser for sign-in";
@@ -66,6 +66,8 @@
 
   // Handle deep link callback from OAuth (edgecoder://oauth-callback?mobile_token=...)
   (window as any).__handleDeepLink = async (urlStr: string) => {
+    // Only a callback for a sign-in this app started.
+    if (!pendingOAuthVerifier()) return;
     try {
       const raw = typeof urlStr === "string" ? urlStr : String(urlStr);
       // Deep link payload may be JSON-encoded or a raw URL

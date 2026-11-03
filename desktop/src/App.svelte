@@ -14,7 +14,7 @@
   import StarterModel from "./components/StarterModel.svelte";
   import { getLocalComputeStatus, needsSetupScreen, ollamaBaseFor, startLocalComputeSetup, type ComputeStatus } from "./lib/local-compute";
   import type { AuthUser } from "./lib/api";
-  import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, fsFind, ideNewProject } from "./lib/api";
+  import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, pendingOAuthVerifier, fsFind, ideNewProject } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
@@ -141,6 +141,8 @@
   $effect(() => {
     if (!user) return;
     (window as any).__handleDeepLink = async (urlStr: string) => {
+      // Only a callback for a sign-in or GitHub connect this app started.
+      if (!pendingOAuthVerifier()) return;
       try {
         const raw = typeof urlStr === "string" ? urlStr : String(urlStr);
         const cleaned = raw.startsWith('"') ? JSON.parse(raw) : raw;
