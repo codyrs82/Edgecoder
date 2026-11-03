@@ -50,6 +50,47 @@ describe("ProjectFs", () => {
     expect(fs.list("").some((e) => e.name === "link")).toBe(false);
   });
 
+  it("follows a leaf symlink that stays inside the project", () => {
+    symlinkSync(join(root, "src", "a.ts"), join(root, "alias.ts"));
+    const fs = new ProjectFs(root);
+    expect(fs.read("alias.ts").content).toBe("export const a = 1;\n");
+    fs.write("alias.ts", "export const a = 3;\n");
+    expect(readFileSync(join(root, "src", "a.ts"), "utf8")).toBe("export const a = 3;\n");
+  });
+
+  it("refuses a file or directory swapped for an outside symlink after the path check", () => {
+    // resolve() passes, then the path is replaced before the open (the race the open closes).
+    class Racy extends ProjectFs {
+      swap: (() => void) | null = null;
+      override resolve(rel: string): string {
+        const abs = super.resolve(rel);
+        this.swap?.();
+        this.swap = null;
+        return abs;
+      }
+    }
+    const fs = new Racy(root);
+    fs.swap = () => {
+      rmSync(join(root, "README.md"));
+      symlinkSync(join(outside, "secret.txt"), join(root, "README.md"));
+    };
+    expect(code(() => fs.read("README.md"))).toBe("escape");
+    fs.swap = () => {
+      rmSync(join(root, "README.md"), { force: true });
+      symlinkSync(join(outside, "secret.txt"), join(root, "README.md"));
+    };
+    expect(code(() => fs.write("README.md", "overwritten"))).toBe("escape");
+    expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("nope");
+    // An ancestor directory swapped for a symlink to outside.
+    fs.swap = () => {
+      rmSync(join(root, "src"), { recursive: true });
+      symlinkSync(outside, join(root, "src"));
+      writeFileSync(join(outside, "a.ts"), "outside file");
+    };
+    expect(code(() => fs.write("src/a.ts", "overwritten"))).toBe("escape");
+    expect(readFileSync(join(outside, "a.ts"), "utf8")).toBe("outside file");
+  });
+
   it("reads, writes and refuses to overwrite a file changed on disk since it was opened", () => {
     const fs = new ProjectFs(root);
     const opened = fs.read("src/a.ts");

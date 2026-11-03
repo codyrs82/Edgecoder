@@ -81,7 +81,8 @@ describe("discoverCoordinators", () => {
       resolver,
       connect: relayWith(events),
       fetch: f.fetch,
-      now: () => NOW
+      now: () => NOW,
+      allowUnpinnedNostr: true
     });
     expect(found.map((c) => [c.url, c.source])).toEqual([
       ["https://current.example", "current"],
@@ -95,6 +96,20 @@ describe("discoverCoordinators", () => {
     expect(found[4].announcement?.peerId).toBe(peerCoord.peerId);
     // Peer expansion is asked of non-nostr seeds only.
     expect(f.calls.filter((u) => u.endsWith("/discovery/peers")).map((u) => new URL(u).host).sort()).toEqual(["current.example", "dns.example", "static.example"]);
+  });
+
+  it("skips unpinned Nostr unless authors, a key filter or the explicit opt-in is given", async () => {
+    const nk = nostrKeysFromSecret("44".repeat(32))!;
+    const events = [buildAnnouncementEvent(ann(nostrCoord, "https://nostr.example", "sjc"), nk)];
+    const base = { staticUrls: [], domain: false as const, relays: ["wss://r"], expandPeers: false, connect: relayWith(events), fetch: fakeFetch().fetch, now: () => NOW };
+    expect(await discoverCoordinators(base)).toEqual([]);
+    expect((await discoverCoordinators({ ...base, acceptNostrCandidate: () => false }))).toEqual([]);
+    const trusted = await discoverCoordinators({ ...base, acceptNostrCandidate: (c) => c.peerId === nostrCoord.peerId });
+    expect(trusted.map((c) => c.url)).toEqual(["https://nostr.example"]);
+    const byAuthor = await discoverCoordinators({ ...base, nostrAuthors: [nk.pubkeyHex] });
+    expect(byAuthor.map((c) => c.url)).toEqual(["https://nostr.example"]);
+    expect(selectOptionsFromEnv({ env: { EDGECODER_NOSTR_ALLOW_UNPINNED: "1" } }).allowUnpinnedNostr).toBe(true);
+    expect(selectOptionsFromEnv({ env: {} }).allowUnpinnedNostr).toBe(false);
   });
 
   it("can disable DNS, Nostr and peer expansion and copes with failing sources", async () => {

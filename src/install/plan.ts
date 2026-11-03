@@ -6,6 +6,7 @@
  * each with its own Ollama server, model and env file. The same plan is realised by systemd,
  * launchd and Windows scheduled tasks (services.ts), so every platform installs the same thing.
  */
+import { EDGECODER_SEED_KEYS, isEdgecoderNetworkUrl } from "../trust/seed-keys.js";
 import { gpuModelForVram, MODEL_CATALOG, type CatalogModel } from "../model/catalog.js";
 import { parallelInferenceFor } from "../swarm/parallelism.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
@@ -94,6 +95,11 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       AGENT_PARALLEL_INFERENCE: String(parallelInferenceFor(memoryGb * 1024 ** 3)),
       EDGECODER_INSTANCE: String(index)
     };
+    // On the edgecoder.io network the agent trusts only the seeds' published keys, as the desktop app does.
+    if (isEdgecoderNetworkUrl(opts.coordinatorUrl)) {
+      env.EDGECODER_TRUST_MODE = "strict";
+      env.TRUSTED_COORDINATOR_KEYS = EDGECODER_SEED_KEYS.join(",");
+    }
     if (gpu && gpu.vendor !== "apple") {
       // The agent detects its card itself (nvidia-smi / rocm-smi, picked by EDGECODER_GPU_INDEX).
       // AGENT_GPU_* are not written: they are the container override, and an overridden profile

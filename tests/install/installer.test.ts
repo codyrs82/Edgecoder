@@ -10,15 +10,16 @@ const NVIDIA_8X = Array.from({ length: 8 }, (_, i) => `${i}, NVIDIA RTX 6000 Ada
 
 function fakeHost(platform: NodeJS.Platform) {
   const files = new Map<string, string>();
+  const modes = new Map<string, number | undefined>();
   const commands: string[] = [];
   const host: Host = {
     platform,
-    writeFile: (p, c) => { files.set(p, c); },
+    writeFile: (p, c, m) => { files.set(p, c); modes.set(p, m); },
     removeFile: (p) => { files.delete(p); },
     run: (cmd, args) => { commands.push([cmd, ...args].join(" ")); return { code: 0, stdout: "active\n", stderr: "" }; },
     exists: (p) => files.has(p)
   };
-  return { host, files, commands };
+  return { host, files, commands, modes };
 }
 
 describe("hardware detection", () => {
@@ -96,6 +97,16 @@ describe("plan", () => {
     expect(plan.instances.map((i) => i.agentId)).toEqual(Array.from({ length: 8 }, (_, n) => `gpu-box-local-gpu${n}`));
     expect(plan.warnings.filter((w) => w.includes("no registration token"))).toHaveLength(7);
     expect(renderEnvFile(i3.env)).toContain("AGENT_ID=gpu-box-local-gpu3\n");
+  });
+
+  it("edgecoder.io agents get strict trust with the seed keys; other coordinators keep the default", () => {
+    const net = planInstall(gpuBox, parseInstallArgs(["apply", "--token", "t", "--coordinator-url=https://coordinator.edgecoder.io"]), true);
+    for (const i of net.instances) {
+      expect(i.env.EDGECODER_TRUST_MODE).toBe("strict");
+      expect(i.env.TRUSTED_COORDINATOR_KEYS).toMatch(/^coord-25bacdd7b3f3:[0-9a-f]{64},coord-b17fb990ea6b:[0-9a-f]{64}$/);
+    }
+    const own = planInstall(gpuBox, parseInstallArgs(["apply", "--token", "t", "--coordinator-url=https://c.example"]), true);
+    expect(own.instances[0].env.EDGECODER_TRUST_MODE).toBeUndefined();
   });
 
   it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for gpt-oss:120b", () => {
@@ -191,9 +202,12 @@ describe("services: the same plan on every platform", () => {
     const hw = detectHardware({ probe: () => null, platform: "darwin", arch: "arm64", ramGb: 64, cpuModel: "Apple M2 Ultra", cpuCores: 24, hostname: "studio" });
     const plan = planInstall(hw, o, true);
     const p = defaultPaths("darwin", { nodeBin: "/opt/homebrew/bin/node" });
-    const { host, files, commands } = fakeHost("darwin");
+    const { host, files, commands, modes } = fakeHost("darwin");
     const r = applyPlan(plan, host, p, false);
     expect(r.services).toEqual(["io.edgecoder.ollama.0", "io.edgecoder.agent.0"]);
+    // The agent plist holds the mesh and registration tokens: root-only.
+    expect(modes.get("/Library/LaunchDaemons/io.edgecoder.agent.0.plist")).toBe(0o600);
+    expect(modes.get("/Library/LaunchDaemons/io.edgecoder.ollama.0.plist")).toBe(0o644);
     const agent = files.get("/Library/LaunchDaemons/io.edgecoder.agent.0.plist")!;
     expect(agent).toContain("<key>OLLAMA_MODEL</key>");
     expect(agent).toContain("<string>qwen3-coder:30b</string>");

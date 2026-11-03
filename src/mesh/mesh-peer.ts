@@ -236,14 +236,13 @@ export class MeshPeer {
     }
 
     // Validate signature using sender's public key
+    // Only peers in the table (added by bootstrap or /mesh/register-peer) are heard, and only
+    // with a valid signature from the key on file.
     const sender = this.peerTable.get(message.fromPeerId);
-    if (sender) {
-      const validation = this.protocol.validateMessage(message, sender.identity.publicKeyPem);
-      if (!validation.ok) return validation;
-      // Update lastSeen on valid message
-      sender.lastSeenMs = Date.now();
-    }
-    // If sender is unknown, we still process (they may be a new peer introducing themselves)
+    if (!sender) return { ok: false, reason: "unknown_sender" };
+    const validation = this.protocol.validateMessage(message, sender.identity.publicKeyPem);
+    if (!validation.ok) return validation;
+    sender.lastSeenMs = Date.now();
 
     // Handle peer_exchange internally
     if (message.type === "peer_exchange") {
