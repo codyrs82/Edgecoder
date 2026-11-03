@@ -364,6 +364,16 @@ async function listInstalledModels(): Promise<string[]> {
   }
 }
 
+/** #54: installed models, re-read at most once a minute; reported (signed) with register and heartbeats. */
+const INSTALLED_MODELS_REFRESH_MS = 60_000;
+let installedModelsCache: { models: string[]; atMs: number } | undefined;
+async function installedModelsCached(nowMs = Date.now()): Promise<string[]> {
+  if (!installedModelsCache || nowMs - installedModelsCache.atMs >= INSTALLED_MODELS_REFRESH_MS) {
+    installedModelsCache = { models: await listInstalledModels(), atMs: nowMs };
+  }
+  return installedModelsCache.models;
+}
+
 function backoffMs(): number {
   return Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveFailures, 10), BACKOFF_MAX_MS);
 }
@@ -1093,7 +1103,8 @@ async function loop(): Promise<void> {
           }
         }
         if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
-          const installedModels = currentProvider === "ollama-local" ? await listInstalledModels() : [];
+          if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
+          const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
           const registerBody = {
             ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
             agentId: AGENT_ID,
@@ -1127,7 +1138,9 @@ async function loop(): Promise<void> {
         }
 
         const hbStart = Date.now();
-        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+        // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
+        const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
         const hb = (await post("/heartbeat", hbBody, { signed: true })) as {
           ok?: boolean;
           blacklisted?: boolean;
@@ -1387,6 +1400,10 @@ async function loop(): Promise<void> {
               if (sealed.encrypted) console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
               else console.error(`[agent:${AGENT_ID}] result encryption failed for ${result.subtaskId}; reporting failure without output: ${sealed.error}`);
             }
+            // #54: say which model produced the result (inside the signed request); the coordinator
+            // rejects a result whose model isn't the one the subtask requested.
+            const ranModel = st.kind === "inference" ? st.requestedModel : currentProvider === "ollama-local" ? OLLAMA_MODEL : undefined;
+            if (ranModel) resultPayload.model = ranModel;
             // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
             const finishedAtMs = Date.now();
             resultPayload.receipt = signReceiptAsAgent(
