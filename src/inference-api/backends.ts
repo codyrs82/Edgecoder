@@ -5,7 +5,7 @@
 
 import { NetworkInferenceError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { ollamaChat } from "./ollama.js";
-import { rankRoutes, sizeWorkload, type Route, type RouteInputs } from "./auto-route.js";
+import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
 export function localBackend(ollamaHost: string, model: string): ChatBackend {
@@ -50,14 +50,26 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
  * place when one can't start (no machine has the model, not enough cSats, offline). The last
  * piece says where it ran.
  */
-export function autoBackend(opts: { inputs: () => Promise<RouteInputs>; run: (r: Route) => ChatBackend; onRoute?: (r: Route) => void; maxTries?: number }): ChatBackend {
+export function autoBackend(opts: {
+  inputs: () => Promise<RouteInputs>;
+  run: (r: Route) => ChatBackend;
+  onRoute?: (r: Route) => void;
+  maxTries?: number;
+  /** Where calls may run (default "auto": the cheapest place that fits). */
+  policy?: ComputePolicy;
+  /** Per request: what the network may cost (a bot's budget left today) and the "model" policy's model. */
+  plan?: () => PlanOptions;
+}): ChatBackend {
   return async function* (req, signal) {
-    const routes = rankRoutes(sizeWorkload(req), await opts.inputs());
-    if (!routes.length) {
-      throw new ChatBackendError("Auto found no model that fits this request: install a coder model (7B or larger) on one of your machines, or try again when the network has one.", 404);
-    }
+    const inputs = await opts.inputs();
+    const policy = opts.policy ?? "auto";
+    const planOpts = opts.plan?.() ?? {};
+    const routes = planRoutes(sizeWorkload(req), inputs, policy, planOpts);
+    if (!routes.length) throw new ChatBackendError(noRouteMessage(policy, inputs, planOpts), 404);
+    // The small free fallback is always tried, whatever maxTries cuts.
+    const main = routes.filter((r) => !r.fallback).slice(0, opts.maxTries ?? 4);
     let lastErr: unknown;
-    for (const r of routes.slice(0, opts.maxTries ?? 4)) {
+    for (const r of [...main, ...routes.filter((r) => r.fallback)]) {
       const it = opts.run(r)(req, signal);
       let first: IteratorResult<ChatPiece>;
       try {
@@ -72,6 +84,9 @@ export function autoBackend(opts: { inputs: () => Promise<RouteInputs>; run: (r:
       }
       return;
     }
-    throw lastErr instanceof ChatBackendError ? lastErr : new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);
+    if (lastErr instanceof ChatBackendError && lastErr.status === 402 && routes.every((r) => r.placement === "network")) {
+      throw new ChatBackendError(`${lastErr.message} No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.`, 402);
+    }
+    throw lastErr instanceof ChatBackendError ? lastErr :new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);
   };
 }

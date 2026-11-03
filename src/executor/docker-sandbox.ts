@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { Language, RunResult, SandboxPolicy } from "../common/types.js";
 
 const DOCKER_IMAGES: Record<Language, string> = {
@@ -144,6 +145,33 @@ export interface DockerSandboxOptions {
   cpuPercent?: number;     // CPU limit as percentage, 100 = 1 full core (default: 50)
   networkAccess?: boolean; // Allow network access (default: false)
   readOnly?: boolean;      // Read-only filesystem (default: true)
+  /** Container name (`--name`); runInDockerSandbox sets a unique one per run so it can kill it. */
+  name?: string;
+  /** Aborting stops the container like a timeout does. */
+  signal?: AbortSignal;
+  /** Per-stream capture cap in bytes (default SANDBOX_MAX_OUTPUT_BYTES, else 1 MiB). */
+  maxOutputBytes?: number;
+}
+
+const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+export const OUTPUT_TRUNCATED_MARKER = "\n[edgecoder: output truncated]";
+
+/** SANDBOX_MAX_OUTPUT_BYTES, falling back to 1 MiB when unset or invalid. */
+export function sandboxMaxOutputBytes(raw: string | undefined = process.env.SANDBOX_MAX_OUTPUT_BYTES): number {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_OUTPUT_BYTES;
+}
+
+/**
+ * Stop a sandbox container on the daemon side: killing the `docker run` client does not stop the
+ * container. `docker kill`, then `docker rm -f`, then `docker inspect` to confirm it is gone.
+ */
+export async function stopSandboxContainer(name: string, timeoutMs = 15_000): Promise<{ removed: boolean }> {
+  await dockerExit(["kill", name], undefined, timeoutMs);
+  await dockerExit(["rm", "-f", name], undefined, timeoutMs);
+  // inspect fails (non-zero) once the container no longer exists.
+  const inspect = await dockerExit(["container", "inspect", name], undefined, timeoutMs);
+  return { removed: inspect.code !== 0 };
 }
 
 /** Build the Docker CLI flags from a SandboxPolicy or explicit options. */
@@ -158,6 +186,7 @@ export function buildDockerArgs(
   const readOnly = options?.readOnly ?? true;
 
   const args: string[] = ["run", "--rm"];
+  if (options?.name) args.push(`--name=${options.name}`);
 
   if (!networkAccess) {
     args.push("--network=none");
@@ -205,64 +234,98 @@ export async function runInDockerSandbox(
 ): Promise<RunResult> {
   const start = Date.now();
   const image = DOCKER_IMAGES[language];
+  const name = options?.name ?? `edgecoder-sbx-${randomUUID()}`;
+  const maxBytes = options?.maxOutputBytes ?? sandboxMaxOutputBytes();
+  const signal = options?.signal;
 
   return new Promise<RunResult>((resolve) => {
-    const args = buildDockerArgs(image, code, options);
+    const args = buildDockerArgs(image, code, { ...options, name });
 
     const proc = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"]
     });
 
-    let stdout = "";
-    let stderr = "";
+    const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    const size = { stdout: 0, stderr: 0 };
+    let truncated = false;
     let settled = false;
+    let stopping = false;
+    const text = (k: "stdout" | "stderr") => Buffer.concat(out[k]).toString() + (truncated && size[k] >= maxBytes ? OUTPUT_TRUNCATED_MARKER : "");
 
-    const timer = setTimeout(() => {
-      if (!settled) {
-        proc.kill("SIGKILL");
-        settled = true;
-        resolve({
-          language,
+    const finish = (result: Omit<RunResult, "language" | "durationMs">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ language, durationMs: Date.now() - start, ...result });
+    };
+
+    /** Stop the run: kill the client, then the container itself, and report why. */
+    const stop = (reason: "timeout" | "aborted" | "output_limit") => {
+      if (settled || stopping) return;
+      stopping = true;
+      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+      const note = reason === "timeout" ? "Docker execution timed out" : reason === "aborted" ? "Docker execution aborted" : `Docker execution stopped: output exceeded ${maxBytes} bytes`;
+      void stopSandboxContainer(name).then(({ removed }) => {
+        const cleanup = removed ? "" : `\nsandbox container ${name} could not be confirmed removed`;
+        if (!removed) console.warn(`[sandbox] container ${name} still present after kill/rm`);
+        finish({
           ok: false,
-          stdout,
-          stderr: `${stderr}\nDocker execution timed out`,
-          exitCode: 124,
-          durationMs: Date.now() - start,
-          queueForCloud: true,
-          queueReason: "timeout"
+          stdout: text("stdout"),
+          stderr: `${text("stderr")}\n${note}${cleanup}`,
+          exitCode: reason === "timeout" ? 124 : 137,
+          queueForCloud: reason === "timeout",
+          ...(reason === "timeout" ? { queueReason: "timeout" as const } : {})
         });
-      }
-    }, timeoutMs);
+      });
+      // Nothing more is captured once stopping.
+      proc.stdout?.removeAllListeners("data");
+      proc.stderr?.removeAllListeners("data");
+    };
 
-    proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => stop("timeout"), timeoutMs);
+    const onAbort = () => stop("aborted");
+    if (signal) {
+      if (signal.aborted) queueMicrotask(onAbort);
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const capture = (k: "stdout" | "stderr") => (chunk: Buffer) => {
+      if (settled || stopping) return;
+      const room = maxBytes - size[k];
+      if (chunk.length > room) {
+        if (room > 0) out[k].push(chunk.subarray(0, room));
+        size[k] = maxBytes;
+        truncated = true;
+        stop("output_limit");
+        return;
+      }
+      out[k].push(chunk);
+      size[k] += chunk.length;
+    };
+    proc.stdout.on("data", capture("stdout"));
+    proc.stderr.on("data", capture("stderr"));
 
     proc.on("close", (exitCode) => {
-      if (settled) return;
-      clearTimeout(timer);
-      settled = true;
-      resolve({
-        language,
+      if (settled || stopping) return;
+      finish({
         ok: (exitCode ?? 1) === 0,
-        stdout,
-        stderr,
+        stdout: text("stdout"),
+        stderr: text("stderr"),
         exitCode: exitCode ?? 1,
-        durationMs: Date.now() - start,
         queueForCloud: false
       });
     });
 
     proc.on("error", (error) => {
-      if (settled) return;
-      clearTimeout(timer);
-      settled = true;
-      resolve({
-        language,
+      if (settled || stopping) return;
+      // The client failed (e.g. docker missing); make sure no container was left behind.
+      void stopSandboxContainer(name).catch(() => undefined);
+      finish({
         ok: false,
-        stdout,
+        stdout: text("stdout"),
         stderr: `Docker sandbox error: ${error.message}`,
         exitCode: 1,
-        durationMs: Date.now() - start,
         queueForCloud: false
       });
     });

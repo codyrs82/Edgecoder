@@ -23,7 +23,8 @@ export const FORGOT_PASSWORD_RESPONSE = {
 export const RESET_LINK_INVALID = "reset_link_invalid";
 
 export interface PasswordResetStore {
-  getUserByEmail(email: string): Promise<{ userId: string; email: string; passwordHash?: string | null } | null>;
+  getUserByEmail(email: string): Promise<{ userId: string; email: string; passwordHash?: string | null; emailVerified: boolean } | null>;
+  getUserById(userId: string): Promise<{ userId: string; emailVerified: boolean } | null>;
   createPasswordReset(input: { tokenHash: string; userId: string; expiresAtMs: number }): Promise<void>;
   consumePasswordReset(tokenHash: string): Promise<{ userId: string } | null>;
   invalidatePasswordResets(userId: string): Promise<void>;
@@ -31,6 +32,10 @@ export interface PasswordResetStore {
   setUserPassword(userId: string, passwordHash: string): Promise<void>;
   deleteSessionsForUser(userId: string): Promise<void>;
   markUserEmailVerified(userId: string): Promise<void>;
+  revokeAllApiKeys(userId: string): Promise<number>;
+  deletePasskeysForUser(userId: string): Promise<void>;
+  deleteOauthLinksForUser(userId: string): Promise<void>;
+  deleteGitHubToken(userId: string): Promise<void>;
 }
 
 export interface PasswordResetDeps {
@@ -45,7 +50,11 @@ export interface PasswordResetDeps {
 /**
  * Forgot / reset password (/auth/password/*). Per-IP rate limits come from security.ts rateLimitFor.
  * Accounts without a password (OAuth- or passkey-only) get an email pointing them at their SSO
- * provider instead of a link, so a reset can never add a password to an SSO account.
+ * provider instead of a link, so a reset can never add a password to a verified SSO account.
+ *
+ * A reset on an account whose email was never verified is how the inbox owner claims it: nobody
+ * had proven the address before, so every other way in that the earlier registrant may have set
+ * up (sessions, API keys, passkeys, linked OAuth identities, GitHub token) is revoked.
  */
 export function registerPasswordResetRoutes(app: FastifyInstance, deps: PasswordResetDeps): void {
   const { store, hashPassword, normalizeEmail, sha256Hex } = deps;
@@ -56,7 +65,7 @@ export function registerPasswordResetRoutes(app: FastifyInstance, deps: Password
     if (!user) return;
     const recent = await store.countRecentPasswordResets(user.userId, Date.now() - PASSWORD_RESET_EMAIL_WINDOW_MS);
     if (recent >= PASSWORD_RESET_MAX_PER_EMAIL) return;
-    if (!user.passwordHash) {
+    if (!user.passwordHash && user.emailVerified) {
       // Recorded as an (unusable) row so the per-email limit also covers these notices.
       await store.createPasswordReset({ tokenHash: sha256Hex(randomBytes(32).toString("hex")), userId: user.userId, expiresAtMs: Date.now() });
       await deps.sendPasswordResetSsoNoticeEmail(user.email);
@@ -86,6 +95,13 @@ export function registerPasswordResetRoutes(app: FastifyInstance, deps: Password
     }
     const consumed = await store.consumePasswordReset(sha256Hex(parsed.data.token));
     if (!consumed) return reply.code(400).send({ error: RESET_LINK_INVALID, message: "This reset link has expired or was already used." });
+    const before = await store.getUserById(consumed.userId);
+    if (before && !before.emailVerified) {
+      await store.revokeAllApiKeys(consumed.userId);
+      await store.deletePasskeysForUser(consumed.userId);
+      await store.deleteOauthLinksForUser(consumed.userId);
+      await store.deleteGitHubToken(consumed.userId);
+    }
     await store.setUserPassword(consumed.userId, hashPassword(password.data));
     await store.invalidatePasswordResets(consumed.userId);
     await store.deleteSessionsForUser(consumed.userId);

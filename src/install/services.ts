@@ -3,11 +3,15 @@
 
 /*
  * Realise an install plan as platform services. Each instance gets an Ollama server bound to its
- * own port (pinned to its GPU) and an agent process; both restart on failure and start at boot.
- *   Linux   systemd units  edgecoder-ollama-<n>.service, edgecoder-agent-<n>.service
- *   macOS   launchd        io.edgecoder.ollama.<n>, io.edgecoder.agent.<n>  (LaunchDaemons)
- *   Windows scheduled tasks EdgeCoder\ollama-<n>, EdgeCoder\agent-<n> (ONSTART, SYSTEM) driven by
- *           generated .cmd wrappers that set the instance env.
+ * own port (pinned to its GPU) and an agent process; both restart on failure.
+ *   Linux   systemd units  edgecoder-ollama-<n>.service, edgecoder-agent-<n>.service, as the
+ *           `edgecoder` system user, sandboxed (ProtectSystem=strict, NoNewPrivileges, ...).
+ *   macOS   launchd        io.edgecoder.ollama.<n>, io.edgecoder.agent.<n>  (LaunchDaemons, start
+ *           at boot) as the `_edgecoder` role account.
+ *   Windows scheduled tasks EdgeCoder\ollama-<n>, EdgeCoder\agent-<n> (at logon, as the installing
+ *           user, limited token) driven by generated .cmd wrappers that set the instance env.
+ * No service runs as root/SYSTEM. On Linux and macOS the binaries they run are root-owned
+ * (binaries.ts stages a root-owned copy when they are not), so the service user cannot swap them.
  * File writes and commands go through an injected `Host` so the exact output is unit-tested.
  */
 import type { AgentInstance, InstallPlan } from "./plan.js";
@@ -29,8 +33,21 @@ export interface ServicePaths {
   /** Shared model store so N instances download each model once. */
   modelsDir: string;
   logDir: string;
-  /** Linux: service user. */
+  /** Account the services run as: Linux `edgecoder`, macOS `_edgecoder`, Windows the installing user. */
   user: string;
+  /** Linux/macOS: per-instance agent HOMEs live under here (agent-<n>). */
+  stateDir: string;
+  /** Linux/macOS: root-owned copies of node/ollama when the originals are user-writable. */
+  stageDir: string;
+}
+
+/** The macOS role account (leading underscore, hidden, no shell), like _postgres or _www. */
+export const MAC_SERVICE_USER = "_edgecoder";
+
+function windowsUser(): string {
+  const user = process.env.USERNAME ?? "";
+  const domain = process.env.USERDOMAIN ?? "";
+  return user && domain ? `${domain}\\${user}` : user;
 }
 
 export function defaultPaths(platform: NodeJS.Platform, overrides: Partial<ServicePaths> = {}): ServicePaths {
@@ -43,7 +60,9 @@ export function defaultPaths(platform: NodeJS.Platform, overrides: Partial<Servi
       ollamaBin: `${process.env.LOCALAPPDATA ?? "C:\\Users\\Default\\AppData\\Local"}\\Programs\\Ollama\\ollama.exe`,
       modelsDir: `${pd}\\EdgeCoder\\ollama`,
       logDir: `${pd}\\EdgeCoder\\logs`,
-      user: "SYSTEM",
+      user: windowsUser(),
+      stateDir: `${pd}\\EdgeCoder\\state`,
+      stageDir: `${process.env.ProgramFiles ?? "C:\\Program Files"}\\EdgeCoder`,
       ...overrides
     };
   }
@@ -55,7 +74,9 @@ export function defaultPaths(platform: NodeJS.Platform, overrides: Partial<Servi
     ollamaBin: mac ? "/usr/local/bin/ollama" : "/usr/local/bin/ollama",
     modelsDir: mac ? "/var/lib/edgecoder/ollama" : "/var/lib/edgecoder/ollama",
     logDir: "/var/log/edgecoder",
-    user: "edgecoder",
+    user: mac ? MAC_SERVICE_USER : "edgecoder",
+    stateDir: "/var/lib/edgecoder",
+    stageDir: "/opt/edgecoder/libexec",
     ...overrides
   };
 }
@@ -83,6 +104,28 @@ function ollamaEnv(p: ServicePaths, inst: AgentInstance): Record<string, string>
 }
 
 // ───────────────────────────── Linux (systemd) ─────────────────────────────
+/**
+ * Sandboxing that leaves GPUs and the Docker socket alone: no PrivateDevices (CUDA needs
+ * /dev/nvidia*), no MemoryDenyWriteExecute (V8 JIT), no RestrictAddressFamilies (docker CLI uses
+ * AF_UNIX, Ollama and the agent use TCP). The sandbox containers get no host mounts, so a private
+ * /tmp does not hide anything from dockerd.
+ */
+export function systemdHardening(writable: string[]): string {
+  return [
+    "NoNewPrivileges=yes",
+    "ProtectSystem=strict",
+    ...(writable.length ? [`ReadWritePaths=${writable.join(" ")}`] : []),
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectControlGroups=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "UMask=0027"
+  ].join("\n");
+}
+
 export function systemdOllamaUnit(p: ServicePaths, inst: AgentInstance): string {
   const env = Object.entries(ollamaEnv(p, inst)).map(([k, v]) => `Environment="${k}=${v}"`).join("\n");
   return `[Unit]
@@ -99,6 +142,7 @@ ${env}
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+${systemdHardening([p.modelsDir])}
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=edgecoder-ollama-${inst.index}
@@ -131,6 +175,9 @@ Restart=always
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=20
+# The state directory above is the only writable path. The docker group (SANDBOX_MODE=docker)
+# reaches /run/docker.sock: connecting to a socket is not a write, so it still works.
+${systemdHardening([])}
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=edgecoder-agent-${inst.index}
@@ -141,7 +188,7 @@ WantedBy=multi-user.target
 }
 
 // ───────────────────────────── macOS (launchd) ─────────────────────────────
-function plist(label: string, args: string[], env: Record<string, string>, cwd: string, logDir: string): string {
+function plist(label: string, user: string, args: string[], env: Record<string, string>, cwd: string, logDir: string): string {
   const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const envXml = Object.entries(env).map(([k, v]) => `      <key>${xml(k)}</key>\n      <string>${xml(v)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -150,6 +197,12 @@ function plist(label: string, args: string[], env: Record<string, string>, cwd: 
   <dict>
     <key>Label</key>
     <string>${label}</string>
+    <key>UserName</key>
+    <string>${xml(user)}</string>
+    <key>GroupName</key>
+    <string>${xml(user)}</string>
+    <key>Umask</key>
+    <integer>23</integer>
     <key>ProgramArguments</key>
     <array>
 ${args.map((a) => `      <string>${xml(a)}</string>`).join("\n")}
@@ -173,12 +226,24 @@ ${envXml}
 `;
 }
 
+/**
+ * System directories first; /usr/local/bin last only so the agent finds Docker Desktop's CLI. No
+ * /opt/homebrew. The services are not root, so a user-writable entry on PATH gains nothing beyond
+ * the service account.
+ */
+export const LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin";
+
+export function agentHome(p: ServicePaths, inst: Pick<AgentInstance, "index">): string {
+  return `${p.stateDir}/agent-${inst.index}`;
+}
+
 export function launchdOllamaPlist(p: ServicePaths, inst: AgentInstance): string {
-  return plist(`io.edgecoder.ollama.${inst.index}`, [p.ollamaBin, "serve"], { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", ...ollamaEnv(p, inst) }, p.modelsDir, p.logDir);
+  return plist(`io.edgecoder.ollama.${inst.index}`, p.user, [p.ollamaBin, "serve"], { PATH: LAUNCHD_PATH, ...ollamaEnv(p, inst) }, p.modelsDir, p.logDir);
 }
 
 export function launchdAgentPlist(p: ServicePaths, inst: AgentInstance): string {
-  return plist(`io.edgecoder.agent.${inst.index}`, [p.nodeBin, `${p.appDir}/dist/swarm/worker-runner.js`], { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", NODE_ENV: "production", ...inst.env }, p.appDir, p.logDir);
+  // Own HOME per instance (worker.db and its pending-results queue), as on Linux.
+  return plist(`io.edgecoder.agent.${inst.index}`, p.user, [p.nodeBin, `${p.appDir}/dist/swarm/worker-runner.js`], { PATH: LAUNCHD_PATH, NODE_ENV: "production", ...inst.env, HOME: agentHome(p, inst) }, p.appDir, p.logDir);
 }
 
 // ───────────────────────────── Windows (scheduled tasks) ─────────────────────────────
@@ -195,6 +260,68 @@ export function windowsOllamaCmd(p: ServicePaths, inst: AgentInstance): string {
 
 export function windowsAgentCmd(p: ServicePaths, inst: AgentInstance): string {
   return cmdWrapper({ NODE_ENV: "production", ...inst.env }, p.nodeBin, [`${p.appDir}\\dist\\swarm\\worker-runner.js`], p.appDir, `${p.logDir}\\agent-${inst.index}.log`);
+}
+
+// ───────────────────────────── service account ─────────────────────────────
+type Run = (cmd: string, args: string[]) => { code: number; stdout: string; stderr: string };
+
+/** First id in the role-account range (macOS: 200-400) free as both a uid and a gid. */
+export function pickMacServiceId(usedUids: Set<number>, usedGids: Set<number>, from = 300, to = 399): number {
+  for (let id = from; id <= to; id++) if (!usedUids.has(id) && !usedGids.has(id)) return id;
+  throw new Error(`no free uid/gid between ${from} and ${to} for ${MAC_SERVICE_USER}`);
+}
+
+function dsclIds(out: string): Set<number> {
+  return new Set(out.split(/\r?\n/).map((l) => Number(l.trim().split(/\s+/).pop())).filter((n) => Number.isInteger(n)));
+}
+
+/** Create the service account and give it exactly the directories it writes. */
+export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: NodeJS.Platform, run: Run): void {
+  if (platform === "linux") {
+    if (run("id", ["-u", p.user]).code !== 0) run("useradd", ["--system", "--create-home", "--home-dir", p.stateDir, "--shell", "/usr/sbin/nologin", p.user]);
+    // Models and logs only. /etc/edgecoder stays root's (lockConfigDir); agent HOMEs are systemd StateDirectory.
+    run("chown", ["-R", `${p.user}:${p.user}`, p.modelsDir, p.logDir]);
+    // The docker group is root-equivalent on the host: the price of the container sandbox (docs/install.md).
+    if (plan.sandboxMode === "docker") run("usermod", ["-aG", "docker", p.user]);
+  } else if (platform === "darwin") {
+    const u = p.user;
+    if (run("dscl", [".", "-read", `/Users/${u}`, "UniqueID"]).code !== 0) {
+      const g = run("dscl", [".", "-read", `/Groups/${u}`, "PrimaryGroupID"]);
+      const existingGid = g.code === 0 ? [...dsclIds(g.stdout)][0] : undefined;
+      const id = existingGid ?? pickMacServiceId(dsclIds(run("dscl", [".", "-list", "/Users", "UniqueID"]).stdout), dsclIds(run("dscl", [".", "-list", "/Groups", "PrimaryGroupID"]).stdout));
+      if (existingGid === undefined) {
+        run("dscl", [".", "-create", `/Groups/${u}`]);
+        run("dscl", [".", "-create", `/Groups/${u}`, "PrimaryGroupID", String(id)]);
+        run("dscl", [".", "-create", `/Groups/${u}`, "Password", "*"]);
+        run("dscl", [".", "-create", `/Groups/${u}`, "RealName", "EdgeCoder agent"]);
+      }
+      run("dscl", [".", "-create", `/Users/${u}`]);
+      run("dscl", [".", "-create", `/Users/${u}`, "UniqueID", String(id)]);
+      run("dscl", [".", "-create", `/Users/${u}`, "PrimaryGroupID", String(id)]);
+      run("dscl", [".", "-create", `/Users/${u}`, "UserShell", "/usr/bin/false"]);
+      run("dscl", [".", "-create", `/Users/${u}`, "NFSHomeDirectory", p.stateDir]);
+      run("dscl", [".", "-create", `/Users/${u}`, "RealName", "EdgeCoder agent"]);
+      run("dscl", [".", "-create", `/Users/${u}`, "Password", "*"]);
+      run("dscl", [".", "-create", `/Users/${u}`, "IsHidden", "1"]);
+    }
+    run("chown", ["-R", `${u}:${u}`, p.modelsDir, p.logDir]);
+    for (const inst of plan.instances) run("install", ["-d", "-o", u, "-g", u, "-m", "0750", agentHome(p, inst)]);
+  } else if (platform === "win32") {
+    // The user's own tasks write models, logs and state; everything else under ProgramData\EdgeCoder is admin-only.
+    for (const dir of [p.modelsDir, p.logDir, p.stateDir]) run("icacls", [`"${dir}"`, "/grant", `"${p.user}:(OI)(CI)M"`]);
+  }
+}
+
+/** Env files (registration and mesh tokens) and the Windows .cmd wrappers: root/Administrators only. */
+export function lockConfigDir(p: ServicePaths, platform: NodeJS.Platform, run: Run): void {
+  if (platform === "win32") {
+    // No inheritance from ProgramData, where every user may create files. Administrators and SYSTEM
+    // full, the task user read (it runs the wrappers).
+    run("icacls", [`"${p.configDir}"`, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", `"${p.user}:(OI)(CI)RX"`]);
+    return;
+  }
+  run("chown", ["-R", `root:${platform === "darwin" ? "wheel" : "root"}`, p.configDir]);
+  run("chmod", ["0755", p.configDir]);
 }
 
 // ───────────────────────────── apply / remove ─────────────────────────────
@@ -215,7 +342,9 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
     if (dryRun) return { code: 0, stdout: "", stderr: "" };
     return host.run(cmd, args);
   };
+  prepareAccount(plan, p, host.platform, run);
   for (const inst of plan.instances) write(envFilePath(p, inst), renderEnvFile(inst.env), 0o600);
+  lockConfigDir(p, host.platform, run);
 
   if (host.platform === "linux") {
     for (const inst of plan.instances) {
@@ -248,7 +377,10 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
       write(agentCmd, windowsAgentCmd(p, inst));
       for (const [name, cmd] of [[`EdgeCoder\\ollama-${inst.index}`, ollamaCmd], [`EdgeCoder\\agent-${inst.index}`, agentCmd]] as const) {
         result.services.push(name);
-        run("schtasks", ["/Create", "/F", "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/TN", name, "/TR", `"${cmd}"`]);
+        // At the user's logon, as that user, with its limited (non-elevated) token: Ollama sits in
+        // the user's profile and Docker Desktop is per user, so neither runs with more rights than
+        // the user has. /IT needs no stored password.
+        run("schtasks", ["/Create", "/F", "/SC", "ONLOGON", "/RU", `"${p.user}"`, "/IT", "/RL", "LIMITED", "/TN", name, "/TR", `"${cmd}"`]);
         run("schtasks", ["/Run", "/TN", name]);
       }
     }

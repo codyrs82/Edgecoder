@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { BotManager, agentBotRunner, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
+import { FALLBACK_NOTE } from "../../src/inference-api/auto-route.js";
+import { BotManager, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
 import type { ChatFn } from "../../src/apps/ide/agent-loop.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "bots-"));
@@ -297,5 +298,72 @@ describe("/v1/ide/bots routes", () => {
     expect((await app.inject({ method: "DELETE", url: `/v1/ide/bots/${id}` })).json()).toEqual({ ok: true });
     expect((await app.inject({ method: "GET", url: "/v1/ide/bots" })).json().bots).toHaveLength(0);
     await app.close();
+  });
+});
+
+describe("bot compute policy", () => {
+  it("new bots default to Local first; the policy saves and loads; old bots become Auto", () => {
+    const file = join(dir(), "bots.json");
+    const m = manager(gatedRunner().runner, { file });
+    const a = m.create({ name: "Harry", projectRoot: dir() });
+    expect(a.compute).toEqual({ policy: "local_first" });
+    const b = m.create({ name: "Pinned", projectRoot: dir(), compute: { policy: "model", model: " network/qwen3.5:9b@gpu " } });
+    expect(b.compute).toEqual({ policy: "model", model: "network/qwen3.5:9b@gpu" });
+    // Switching away from a specific model drops the model.
+    expect(m.update(b.id, { compute: { policy: "local_only", model: "x" } }).compute).toEqual({ policy: "local_only" });
+    const m2 = manager(gatedRunner().runner, { file });
+    m2.load();
+    expect(m2.get(a.id).compute).toEqual({ policy: "local_first" });
+    expect(m2.get(b.id).compute).toEqual({ policy: "local_only" });
+
+    // A bots.json from before compute policies: those bots keep Auto (and the file is migrated).
+    const old = JSON.parse(readFileSync(file, "utf8"));
+    for (const bot of old.bots) delete bot.compute;
+    writeFileSync(file, JSON.stringify(old));
+    const m3 = manager(gatedRunner().runner, { file });
+    m3.load();
+    expect(m3.list().map((x) => x.compute)).toEqual([{ policy: "auto" }, { policy: "auto" }]);
+    expect(JSON.parse(readFileSync(file, "utf8")).bots[0].compute).toEqual({ policy: "auto" });
+  });
+
+  it("keeps the avatar shape the user picked", async () => {
+    const m = manager(gatedRunner().runner);
+    const b = m.create({ name: "Harry", projectRoot: dir(), avatarShape: "hex", color: "#46a758" });
+    expect(b).toMatchObject({ avatarShape: "hex", color: "#46a758" });
+    expect(m.update(b.id, { avatarShape: "orb" }).avatarShape).toBe("orb");
+    expect(m.create({ name: "Plain", projectRoot: dir() }).avatarShape).toBeUndefined();
+    const app = Fastify();
+    registerBotRoutes(app, m);
+    const bad = await app.inject({ method: "PATCH", url: `/v1/ide/bots/${b.id}`, payload: { avatarShape: "blob" } });
+    expect(bad.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it("rejects a specific-model policy without a model, and unknown policies", () => {
+    const m = manager(gatedRunner().runner);
+    expect(() => m.create({ name: "X", projectRoot: dir(), compute: { policy: "model" } })).toThrow(/Pick the model/);
+    expect(() => m.create({ name: "X", projectRoot: dir(), compute: { policy: "cloud" as never } })).toThrow(/Unknown compute policy/);
+  });
+
+  it("gives each model call the budget left today, and notes a small-model fallback", async () => {
+    const seen: Array<{ policy: string; allowance?: number }> = [];
+    const runner: BotRunner = async (ctx) => {
+      const chat = botComputeChat(ctx, (policy, plan, onRoute) => async function* () {
+        seen.push({ policy, allowance: plan().allowanceCSats });
+        const fallback = seen.length === 2;
+        onRoute({ placement: "local", model: "qwen2.5-coder:1.5b", cSatsPerSecond: 0, fallback, reason: fallback ? `this computer · qwen2.5-coder:1.5b · ${FALLBACK_NOTE}` : "network gpu" });
+        yield { delta: "ok" };
+        yield { done: true, cSatsSpent: fallback ? 0 : 3 };
+      });
+      await chat({ messages: [{ role: "user", content: "go" }] });
+      await chat({ messages: [{ role: "user", content: "go" }] });
+    };
+    const m = manager(runner);
+    const bot = m.create({ name: "Harry", projectRoot: dir(), budgetCSatsPerDay: 10 });
+    m.runNow(bot.id);
+    await m.idle(bot.id);
+    expect(seen).toEqual([{ policy: "local_first", allowance: 10 }, { policy: "local_first", allowance: 7 }]);
+    const [run] = m.history(bot.id);
+    expect(run).toMatchObject({ status: "done", cSats: 3, where: "This computer · qwen2.5-coder:1.5b", note: FALLBACK_NOTE });
   });
 });

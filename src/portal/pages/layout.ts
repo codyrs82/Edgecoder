@@ -3,6 +3,8 @@
 
 import { BASE_CSS, TOKENS_CSS, THEME_SCRIPT, brandMark, icon } from "./design-system.js";
 import { DOCS_SITE_URL } from "./urls.js";
+import { CSP_NONCE } from "../csp-nonce.js";
+import { CLIENT_ESCAPE_JS } from "./escape.js";
 
 /** Account menu entries (the popup above the avatar row), in the desktop app's order. */
 export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
@@ -239,9 +241,10 @@ export function portalAuthedPageHtml(input: {
         </div>
       </div>
       <div id="toast" class="card hidden" role="status" aria-live="polite"></div>
-      <script>
+      <script nonce="${CSP_NONCE}">
         const toast = document.getElementById("toast");
         ${THEME_SCRIPT}
+        ${CLIENT_ESCAPE_JS}
         function showToast(message, isError = false) {
           toast.textContent = message;
           toast.classList.remove("hidden");
@@ -270,7 +273,7 @@ export function portalAuthedPageHtml(input: {
         }
         function statusBadge(text, tone = "neutral") {
           const toneClass = tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "danger" ? "danger" : tone === "info" ? "info" : "";
-          return "<span class='status-badge " + toneClass + "'>" + String(text) + "</span>";
+          return "<span class='status-badge " + toneClass + "'>" + escapeHtml(text) + "</span>";
         }
         function boolBadge(value, trueLabel = "YES", falseLabel = "NO") {
           return value ? statusBadge(trueLabel, "ok") : statusBadge(falseLabel, "warn");
@@ -367,10 +370,9 @@ export function portalAuthedPageHtml(input: {
           menu.addEventListener("click", function(e) { if (e.target.closest && e.target.closest("a[role=menuitem]")) closeMenu(false); });
         })();
         /* ── Recent chats, grouped like the desktop: Today, Yesterday, Previous 7 days, Older ── */
-        function shellEsc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function(ch) { return "&#" + ch.charCodeAt(0) + ";"; }); }
         function sidebarConversationsHtml(list, activeId, opts) {
           opts = opts || {};
-          if (!list || !list.length) return '<div class="conv-empty">' + shellEsc(opts.emptyText || "No chats yet") + "</div>";
+          if (!list || !list.length) return '<div class="conv-empty">' + escapeHtml(opts.emptyText || "No chats yet") + "</div>";
           var start = new Date(); start.setHours(0, 0, 0, 0);
           var t0 = start.getTime(), day = 86400000;
           var groups = [["Today", []], ["Yesterday", []], ["Previous 7 days", []], ["Older", []]];
@@ -381,7 +383,7 @@ export function portalAuthedPageHtml(input: {
           });
           return groups.filter(function(g) { return g[1].length; }).map(function(g) {
             return '<div class="conv-group-label">' + g[0] + "</div>" + g[1].map(function(c) {
-              var id = shellEsc(c.conversationId), title = shellEsc(c.title || "New chat");
+              var id = escapeHtml(c.conversationId), title = escapeHtml(c.title || "New chat");
               var cls = "conv-item" + (c.conversationId === activeId ? " active" : "");
               if (opts.links) return '<a class="' + cls + '" href="/portal/chat?c=' + encodeURIComponent(c.conversationId) + '" title="' + title + '">' + title + "</a>";
               return '<div class="' + cls + '" data-id="' + id + '" title="' + title + '">' + title + '<button type="button" class="conv-delete" data-delete-id="' + id + '" title="Delete" aria-label="Delete chat">&times;</button></div>';
@@ -437,7 +439,7 @@ export function portalAuthedPageHtml(input: {
         loadTopTicker();
         loadReviewsBadge();
       </script>
-      <script>
+      <script nonce="${CSP_NONCE}">
         ${input.script}
       </script>
     </body>

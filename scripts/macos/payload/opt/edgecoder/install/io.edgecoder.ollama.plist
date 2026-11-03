@@ -5,6 +5,12 @@
     <key>Label</key>
     <string>io.edgecoder.ollama</string>
 
+    <key>UserName</key>
+    <string>_edgecoder</string>
+
+    <key>GroupName</key>
+    <string>_edgecoder</string>
+
     <key>ProgramArguments</key>
     <array>
       <string>/usr/local/bin/ollama</string>
@@ -23,9 +29,11 @@
     <key>EnvironmentVariables</key>
     <dict>
       <key>PATH</key>
-      <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+      <string>/opt/edgecoder/node/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
       <key>HOME</key>
-      <string>/var/root</string>
+      <string>/var/lib/edgecoder/ollama</string>
+      <key>OLLAMA_MODELS</key>
+      <string>/var/lib/edgecoder/ollama</string>
     </dict>
 
     <key>StandardOutPath</key>

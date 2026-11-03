@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isWithin, realPathEscape } from "./tool-executor.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 
 /** Largest file the editor opens. Bigger files are listed but not loaded. */
 export const MAX_EDITOR_FILE_BYTES = 2 * 1024 * 1024;
@@ -184,7 +185,8 @@ export class ProjectFs {
   gitStatus(): { branch: string | null; files: Record<string, string> } | null {
     let raw: string;
     try {
-      raw = execFileSync("git", ["status", "--porcelain=v1", "-b", "-z", "--untracked-files=all"], {
+      raw = execFileSync("git", hardenedGitArgs(["status", "--porcelain=v1", "-b", "-z", "--untracked-files=all"]), {
+        env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf8",
         timeout: 10_000,

@@ -7,18 +7,14 @@ import { resolve } from "node:path";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPricing } from "../public-pricing.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL, supportEmail } from "./urls.js";
-
-// #16: moved verbatim from src/portal/server.ts.
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+import { escapeHtml } from "./escape.js";
 
 /** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
 function priceCell(c: { satsPerHour?: number; usdPerHour: number }): string {
   if (c.satsPerHour === undefined) {
     return `<span class="sats muted">${escapeHtml(formatUsd(c.usdPerHour))}/h</span><span class="usd">sats rate on the live portal</span>`;
   }
-  return `<span class="sats">${formatSats(c.satsPerHour)} <small>sats/h</small></span><span class="usd">≈ ${escapeHtml(formatUsd(c.usdPerHour))}/h</span>`;
+  return `<span class="sats">${escapeHtml(formatSats(c.satsPerHour))} <small>sats/h</small></span><span class="usd">≈ ${escapeHtml(formatUsd(c.usdPerHour))}/h</span>`;
 }
 
 function pricingMeta(p: PublicPricing): string {
@@ -31,15 +27,15 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
   const byId = new Map(pricing.classes.map((c) => [c.id, c]));
   const heroRows = HERO_CLASSES.map((id) => byId.get(id))
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
-    .map((c) => `<div class="ticker-row"><span class="pair">${escapeHtml(c.label)} / BTC<span class="cls">${escapeHtml(c.hardware)}</span></span><span class="px">${priceCell(c)}</span><span class="px mono-id">${c.id}</span></div>`)
+    .map((c) => `<div class="ticker-row"><span class="pair">${escapeHtml(c.label)} / BTC<span class="cls">${escapeHtml(c.hardware)}</span></span><span class="px">${priceCell(c)}</span><span class="px mono-id">${escapeHtml(c.id)}</span></div>`)
     .join("");
   // One row per class (its credit-hour), then its weight table: a tier's hour = credit-hour × weight.
   const tableRows = pricing.classes
     .map(
       (c) =>
-        `<tr><td class="mono"><b>${c.id}</b></td><td><b>${escapeHtml(c.label)}</b> · ${escapeHtml(c.hardware)}</td><td class="num">1 credit/s</td><td class="num">${priceCell(c)}</td></tr>` +
+        `<tr><td class="mono"><b>${escapeHtml(c.id)}</b></td><td><b>${escapeHtml(c.label)}</b> · ${escapeHtml(c.hardware)}</td><td class="num">1 credit/s</td><td class="num">${priceCell(c)}</td></tr>` +
         c.tiers
-          .map((t) => `<tr><td class="mono muted">${t.id}</td><td>${escapeHtml(t.label)}</td><td class="num">${t.creditsPerSecond}×</td><td class="num">${priceCell(t)}</td></tr>`)
+          .map((t) => `<tr><td class="mono muted">${escapeHtml(t.id)}</td><td>${escapeHtml(t.label)}</td><td class="num">${escapeHtml(t.creditsPerSecond)}×</td><td class="num">${priceCell(t)}</td></tr>`)
           .join("")
     )
     .join("");

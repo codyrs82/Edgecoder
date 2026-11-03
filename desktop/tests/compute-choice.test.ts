@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { choiceId, choiceLabel, parseChoice } from "../src/lib/compute-choice";
+import { choiceId, choiceLabel, parseChoice, usageText } from "../src/lib/compute-choice";
 import { computeFields } from "../src/lib/api";
+
+describe("reply usage text", () => {
+  it("says free only where it is free, and nothing when the reply never ran", () => {
+    expect(usageText({ cSats: 0 })).toBeNull();
+    expect(usageText({ cSats: 0, where: "This computer · qwen2.5-coder:1.5b" })).toBe("This computer · qwen2.5-coder:1.5b · free");
+    expect(usageText({ cSats: 0, where: "My machines · qwen3.5:9b" })).toBe("My machines · qwen3.5:9b · free");
+    expect(usageText({ cSats: 0, where: "Network GPU · qwen3.5:9b" })).toBe("Network GPU · qwen3.5:9b · 0 cSats");
+    expect(usageText({ cSats: 0, where: "Reserved GPU · m" })).toBe("Reserved GPU · m · prepaid");
+    expect(usageText({ cSats: 1.5, where: "Network GPU · m" })).toBe("Network GPU · m · 1.5 cSats");
+    expect(usageText({ cSats: 2 })).toBe("Network · 2 cSats");
+  });
+});
 
 describe("compute choice", () => {
   it("round-trips every kind of id", () => {

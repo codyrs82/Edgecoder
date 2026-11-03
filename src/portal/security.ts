@@ -5,6 +5,8 @@ import { isIP } from "node:net";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { ServerResponse } from "node:http";
+import { applyCspNonce, newCspNonce } from "./csp-nonce.js";
 
 /**
  * Edge in front of the portal. With "cloudflare" the client IP for rate limiting is taken from
@@ -63,7 +65,7 @@ export function clientIp(
 export const AUTH_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 /** Forgot/reset password: 5 requests per 15 minutes per client IP (the forgot route also caps links per email). */
 export const PASSWORD_RESET_RATE_LIMIT = { max: 5, timeWindow: "15 minutes" } as const;
-/** Wallet send + MFA: 5 requests per minute per client IP. */
+/** Wallet send + MFA, payout destination change and withdraw: 5 requests per minute per client IP. */
 export const WALLET_RATE_LIMIT = { max: 5, timeWindow: "1 minute" } as const;
 
 const AUTH_ROUTES: RegExp[] = [
@@ -79,7 +81,8 @@ const AUTH_ROUTES: RegExp[] = [
 // Only the send-code start and confirm steps (POST). GET /wallet/send/requests (the wallet
 // page's list) must not share this bucket.
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/];
+// Withdraw (the code request and the confirm) shares the wallet bucket.
+const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
@@ -143,7 +146,10 @@ export interface PortalSecurityOptions {
   trustedOrigins: string[];
   /** Extra connect-src origins (PORTAL_CONNECT_ORIGINS). */
   connectOrigins?: string[];
-  /** Enforce the CSP instead of sending it as Report-Only (first release ships report-only). */
+  /**
+   * Enforce the CSP (the default). false sends it as Content-Security-Policy-Report-Only, an
+   * escape hatch (PORTAL_CSP_ENFORCE=0) for diagnosing a page the policy breaks.
+   */
   enforceCsp?: boolean;
   /** PORTAL_EDGE: which proxy sits in front of Fly (affects client-IP resolution). */
   edge?: EdgeMode;
@@ -152,6 +158,8 @@ export interface PortalSecurityOptions {
   /** PORTAL_SERVICE_TOKEN: callers presenting it bypass the origin lock (coordinators). */
   serviceToken?: string;
 }
+
+type NonceResponse = ServerResponse & { cspNonce?: string };
 
 /**
  * Register helmet, the CSRF origin check and rate limits on `app`.
@@ -185,18 +193,40 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
     errorResponseBuilder: (_req, ctx) => ({ statusCode: 429, error: "rate_limited", retryAfter: ctx.after }),
   });
 
+  // Per-request nonce for the pages' inline <script> blocks (csp-nonce.ts). Set before helmet's
+  // own onRequest hook builds the header, and written into HTML bodies on send.
+  app.addHook("onRequest", async (_req, reply) => {
+    (reply.raw as NonceResponse).cspNonce = newCspNonce();
+  });
+  app.addHook("onSend", async (_req, reply, payload) => {
+    if (typeof payload !== "string") return payload;
+    const type = String(reply.getHeader("content-type") ?? "");
+    if (!type.includes("text/html")) return payload;
+    const nonce = (reply.raw as NonceResponse).cspNonce;
+    return nonce ? applyCspNonce(payload, nonce) : payload;
+  });
+  const enforce = opts.enforceCsp !== false;
+  let httpsOrigin = false;
+  try {
+    httpsOrigin = new URL(opts.publicOrigin).protocol === "https:";
+  } catch {
+    httpsOrigin = false;
+  }
   await app.register(helmet, {
     contentSecurityPolicy: {
       useDefaults: true,
-      reportOnly: !opts.enforceCsp,
+      reportOnly: !enforce,
       directives: {
         "default-src": ["'self'"],
-        "script-src": ["'self'"],
+        // Inline scripts run only with this request's nonce; inline event handlers
+        // (script-src-attr 'none', a helmet default) and injected <script> tags do not.
+        "script-src": ["'self'", (_req, res) => `'nonce-${(res as NonceResponse).cspNonce ?? ""}'`],
         "style-src": ["'self'", "'unsafe-inline'"],
         "img-src": ["'self'", "data:", "https:"],
         "connect-src": ["'self'", ...(opts.connectOrigins ?? [])],
         "frame-ancestors": ["'none'"],
-        "upgrade-insecure-requests": opts.enforceCsp ? [] : null,
+        // Only for an https deployment: on a plain-http dev portal it would break same-origin fetches.
+        "upgrade-insecure-requests": enforce && httpsOrigin ? [] : null,
       },
     },
     hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },

@@ -89,11 +89,11 @@ describe("portal pages module (#16)", () => {
     expect(plan).toContain("Where should we pay you?");
     for (const id of ["payoutDestInput", "withdrawBtn", "creditHistoryBody"]) expect(plan, id).toContain(`id="${id}"`);
 
-    // Install agent: no inline handlers, and the token is escaped.
+    // Install agent: no inline handlers, and a malformed token falls back to the placeholder.
     const install = (await app.inject({ url: "/portal/settings/install?token=%3Cb%3E", headers: { "user-agent": "Macintosh" } })).body;
     expect(install).toContain('data-copy="install-sh"');
     expect(install).not.toMatch(/ onclick=/);
-    expect(install).toContain("&#60;b&#62;");
+    expect(install).toContain("--token YOUR_TOKEN");
     expect(install).not.toContain("<b>");
 
     const nodes = (await app.inject({ url: "/portal/settings/nodes" })).body;

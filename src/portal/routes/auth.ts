@@ -17,6 +17,7 @@ import {
 } from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
+import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
 import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
@@ -155,23 +156,23 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     return reply.code(404).send({ error: "oauth_provider_disabled" });
   });
 
-  app.get("/auth/oauth/:provider/start", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
-    const query = z.object({ appRedirect: z.string().optional() }).parse(req.query);
-    const provider = oauthProviders[params.provider];
+  // Shared by sign-in (/start) and connect-from-Settings (/connect): for a connect the state row
+  // carries the signed-in user, and the callback checks that the same session finishes it.
+  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string }) {
+    const portalStore = store!;
+    const provider = oauthProviders[providerName];
     if (!provider.clientId || !provider.clientSecret) {
-      return reply.code(503).send({ error: `${params.provider}_oauth_not_configured` });
+      return reply.code(503).send({ error: `${providerName}_oauth_not_configured` });
     }
-    const nativeRedirect = normalizeNativeOauthRedirect(query.appRedirect);
     const state = randomUUID();
-    const callbackUrl = `${PORTAL_PUBLIC_URL}/auth/oauth/${params.provider}/callback`;
-    await store.createOauthState({
+    const callbackUrl = `${PORTAL_PUBLIC_URL}/auth/oauth/${providerName}/callback`;
+    await portalStore.createOauthState({
       stateId: state,
-      provider: params.provider,
+      provider: providerName,
       redirectUri: callbackUrl,
       expiresAtMs: Date.now() + 10 * 60 * 1000,
-      ...(nativeRedirect ? { nativeRedirect } : {})
+      ...(opts.nativeRedirect ? { nativeRedirect: opts.nativeRedirect } : {}),
+      ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {})
     });
     const authorize = new URL(provider.authorizeUrl);
     authorize.searchParams.set("client_id", provider.clientId);
@@ -180,13 +181,31 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     authorize.searchParams.set("scope", provider.scopes);
     authorize.searchParams.set("state", state);
     // #137: PKCE S256 for every provider (the verifier goes only to the token endpoint).
-    authorize.searchParams.set("code_challenge", pkceChallenge(pkceVerifier(oauthStateHmacKey, params.provider, state)));
+    authorize.searchParams.set("code_challenge", pkceChallenge(pkceVerifier(oauthStateHmacKey, providerName, state)));
     authorize.searchParams.set("code_challenge_method", "S256");
-    if (params.provider === "microsoft" && OAUTH_MICROSOFT_PROMPT) {
+    if (providerName === "microsoft" && OAUTH_MICROSOFT_PROMPT) {
       authorize.searchParams.set("prompt", OAUTH_MICROSOFT_PROMPT);
     }
-    appendSetCookie(reply, oauthStateSetCookie(oauthStateHmacKey, params.provider, state));
+    appendSetCookie(reply, oauthStateSetCookie(oauthStateHmacKey, providerName, state));
+    // Connect is started by the Settings page with fetch(); it navigates to the URL itself.
+    if (opts.linkUserId) return reply.send({ ok: true, authorizeUrl: authorize.toString() });
     return reply.redirect(authorize.toString());
+  }
+
+  app.get("/auth/oauth/:provider/start", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
+    const query = z.object({ appRedirect: z.string().optional() }).parse(req.query);
+    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect) });
+  });
+
+  /** Connect a provider to the signed-in account, from Settings. A POST (origin-checked), so other sites can't start it. */
+  app.post("/auth/oauth/:provider/connect", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
+    const user = await getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    return beginOauth(params.provider, reply, { linkUserId: user.userId });
   });
 
   app.get("/auth/oauth/:provider/callback", async (req, reply) => {
@@ -202,6 +221,15 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     const body = z.object({ code: z.string(), state: z.string() }).parse(req.body);
     return handleOauthCallback(params.provider, body.code, body.state, req, reply);
   });
+
+  async function fetchProviderJson(url: string, accessToken: string): Promise<unknown> {
+    const res = await request(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json", "user-agent": "EdgeCoder-Portal" }
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    return res.body.json();
+  }
 
   async function handleOauthCallback(
     providerName: ProviderName,
@@ -224,6 +252,16 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       return reply.code(403).send({ error: "oauth_state_invalid" });
     }
     const nativeRedirect = state.nativeRedirect;
+    const refuse = (status: number, error: string, message: string) => {
+      if (nativeRedirect) {
+        const redirect = new URL(nativeRedirect);
+        redirect.searchParams.set("status", "error");
+        redirect.searchParams.set("provider", providerName);
+        redirect.searchParams.set("error", error);
+        return reply.redirect(redirect.toString());
+      }
+      return reply.code(status).type("text/html").send(oauthErrorPage(message));
+    };
 
     const tokenExchangeHeaders: Record<string, string> = {
       "content-type": "application/x-www-form-urlencoded",
@@ -248,102 +286,72 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       return reply.code(502).send({ error: "oauth_token_exchange_failed" });
     }
     const tokenPayload = (await tokenRes.body.json()) as { access_token?: string; id_token?: string };
-    const claimsFromIdToken = tokenPayload.id_token
-      ? decodeJwtPayload<{ sub?: string; email?: string; email_verified?: boolean | string | number }>(tokenPayload.id_token)
-      : null;
-
-    let subject = claimsFromIdToken?.sub;
-    let email = claimsFromIdToken?.email;
-    let emailVerified = claimIsTrue(claimsFromIdToken?.email_verified);
-    let ghLogin: string | undefined;
-    let ghAvatarUrl: string | undefined;
-
-    if (provider.userinfoUrl && tokenPayload.access_token) {
-      const userRes = await request(provider.userinfoUrl, {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${tokenPayload.access_token}`,
-          accept: "application/json",
-          "user-agent": "EdgeCoder-Portal",
-        },
-      });
-      if (userRes.statusCode >= 200 && userRes.statusCode < 300) {
-        const userInfo = (await userRes.body.json()) as {
-          sub?: string; email?: string; email_verified?: boolean | string | number;
-          id?: number; login?: string; avatar_url?: string;
-        };
-
-        if (providerName === "github") {
-          // GitHub returns { id, login, email, avatar_url } — not OIDC format
-          subject = subject ?? (userInfo.id != null ? String(userInfo.id) : undefined);
-          ghLogin = userInfo.login;
-          ghAvatarUrl = userInfo.avatar_url;
-          email = email ?? userInfo.email ?? undefined;
-          // If email is null, fetch from /user/emails and pick primary verified
-          if (!email && tokenPayload.access_token) {
-            const emailsRes = await request("https://api.github.com/user/emails", {
-              method: "GET",
-              headers: {
-                authorization: `Bearer ${tokenPayload.access_token}`,
-                accept: "application/json",
-                "user-agent": "EdgeCoder-Portal",
-              },
-            });
-            if (emailsRes.statusCode >= 200 && emailsRes.statusCode < 300) {
-              const emails = (await emailsRes.body.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
-              const primary = emails.find((e) => e.primary && e.verified) ?? emails.find((e) => e.verified);
-              if (primary) {
-                email = primary.email;
-                emailVerified = true;
-              }
-            }
-          }
-          if (email) emailVerified = true;
-        } else {
-          subject = subject ?? userInfo.sub;
-          email = email ?? userInfo.email;
-          emailVerified = emailVerified || claimIsTrue(userInfo.email_verified);
-        }
-      }
-    }
+    const accessToken = tokenPayload.access_token;
+    const idClaims = tokenPayload.id_token ? decodeJwtPayload<Record<string, unknown>>(tokenPayload.id_token) : null;
+    const userInfo = provider.userinfoUrl && accessToken ? ((await fetchProviderJson(provider.userinfoUrl, accessToken)) as Record<string, unknown> | null) : null;
+    // GitHub: the address used is the primary one, and only if GitHub marks it verified.
+    const githubEmails = providerName === "github" && accessToken ? await fetchProviderJson("https://api.github.com/user/emails", accessToken) : null;
+    const profile = oauthProfileFrom(providerName, idClaims, userInfo, Array.isArray(githubEmails) ? (githubEmails as GithubEmail[]) : null);
+    const subject = profile.subject;
 
     if (!subject) return reply.code(400).send({ error: "oauth_subject_missing" });
-    if (!email || isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "oauth_email_missing" });
+    if (!profile.email || isAgentPlaceholderEmail(profile.email)) return reply.code(400).send({ error: "oauth_email_missing" });
+    const email = normalizeEmail(profile.email);
 
-    email = normalizeEmail(email);
-    const linked = await portalStore.findOauthIdentity(providerName, subject);
+    let linked = await portalStore.findOauthIdentity(providerName, subject);
+    // Microsoft links made before (tid, oid) keying used the per-app `sub`; they are re-keyed below.
+    if (!linked && profile.legacySubject && profile.legacySubject !== subject) {
+      linked = await portalStore.findOauthIdentity(providerName, profile.legacySubject);
+    }
+    const linkTo = (userId: string) =>
+      portalStore.linkOauthIdentity({
+        provider: providerName,
+        providerSubject: subject,
+        userId,
+        emailSnapshot: email,
+        ...(profile.tenantId ? { tenantId: profile.tenantId } : {})
+      });
+    const saveGithubToken = async (userId: string) => {
+      if (providerName !== "github" || !accessToken) return;
+      await portalStore.saveGitHubToken({ userId, accessToken, githubLogin: profile.githubLogin, githubAvatarUrl: profile.githubAvatarUrl, scopes: provider.scopes });
+    };
+    // An address counts as proven only when the provider verified it and it is the account's own address.
+    const provesEmailOf = (u: { email: string }) => profile.emailVerified && normalizeEmail(u.email) === email;
+
+    if (state.linkUserId) {
+      // Connect from Settings: the same signed-in session must finish the flow it started.
+      const current = await getCurrentUser(req as any);
+      if (!current || current.userId !== state.linkUserId) return refuse(403, "oauth_connect_session_mismatch", oauthErrorMessage("connect_session", providerName));
+      if (linked && linked.userId !== current.userId) return refuse(409, "oauth_identity_linked_elsewhere", oauthErrorMessage("already_linked", providerName));
+      await linkTo(current.userId);
+      await saveGithubToken(current.userId);
+      if (!current.emailVerified && provesEmailOf(current)) {
+        await portalStore.markUserEmailVerified(current.userId);
+        const refreshed = await portalStore.getUserById(current.userId);
+        if (refreshed) await ensureCreditAccountForUser(refreshed);
+      }
+      return reply.redirect(`/portal/settings?connected=${providerName}`);
+    }
+
     let user = linked ? await portalStore.getUserById(linked.userId) : null;
     if (!user) {
-      user = (await portalStore.getUserByEmail(email)) ?? null;
-    }
-    if (!user) {
-      user = await portalStore.createUser({
-        userId: randomUUID(),
-        email,
-        emailVerified,
-        displayName: undefined
-      });
-      await ensureCreditAccountForUser(user);
-    } else if (emailVerified && !user.emailVerified) {
+      const existing = await portalStore.getUserByEmail(email);
+      const decision = decideUnlinkedOauthLogin(profile, existing);
+      if (decision.kind === "account_exists") return refuse(409, "oauth_account_exists", oauthErrorMessage("account_exists", providerName));
+      if (decision.kind === "account_unclaimed") return refuse(409, "oauth_account_unverified", oauthErrorMessage("account_unclaimed", providerName));
+      if (decision.kind === "use_existing") {
+        user = existing;
+      } else {
+        user = await portalStore.createUser({ userId: randomUUID(), email, emailVerified: profile.emailVerified, displayName: undefined });
+        await ensureCreditAccountForUser(user);
+      }
+    } else if (!user.emailVerified && provesEmailOf(user)) {
       await portalStore.markUserEmailVerified(user.userId);
       user = await portalStore.getUserById(user.userId);
     }
     if (!user) return reply.code(500).send({ error: "oauth_user_resolution_failed" });
-    await portalStore.linkOauthIdentity({
-      provider: providerName,
-      providerSubject: subject,
-      userId: user.userId,
-      emailSnapshot: email
-    });
-    if (providerName === "github" && tokenPayload.access_token) {
-      await portalStore.saveGitHubToken({
-        userId: user.userId,
-        accessToken: tokenPayload.access_token,
-        githubLogin: ghLogin,
-        githubAvatarUrl: ghAvatarUrl,
-        scopes: provider.scopes,
-      });
-    }
+    await linkTo(user.userId);
+    await saveGithubToken(user.userId);
     if (user.emailVerified) await ensureCreditAccountForUser(user);
 
     await createSessionForUser(user.userId, reply);

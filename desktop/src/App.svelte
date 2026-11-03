@@ -20,7 +20,8 @@
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
-  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, Bot } from "@lucide/svelte";
+  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Bot } from "@lucide/svelte";
+  import type { RepoConnection } from "./lib/api";
   import BotView from "./pages/BotView.svelte";
   import BotForm from "./components/BotForm.svelte";
   import { bots, activeBotId, pollBots, refreshBots } from "./lib/bots-store";
@@ -231,6 +232,16 @@
     activeTab = "chat";
     if (chatView) {
       await chatView.loadConversation(id);
+      // The chat remembers its project: reopen it (a connected repo or a folder).
+      const root = chatView.getProjectRoot();
+      if (root && root !== projectRoot) {
+        try {
+          await ideSetProject(root);
+          adoptProject(root);
+        } catch {
+          // moved or deleted: keep the current project
+        }
+      }
     }
   }
 
@@ -265,10 +276,37 @@
     }
   }
 
+  // The + menu's "Connect repository…": a new chat with the cursor in its Connect field.
+  async function connectRepoHere() {
+    newChatHere();
+    await tick();
+    chatView?.focusConnect();
+  }
+
+  /** A repository connected from a new chat or the EdgeCoder tab: open it and say what happened. */
+  async function repoConnected(r: RepoConnection) {
+    adoptProject(r.path);
+    await tick();
+    const where = r.path.replace(/^\/Users\/[^/]+/, "~");
+    const state = r.dirty ? " It has local changes, so nothing was pulled." : r.behind > 0 ? ` It is ${r.behind} commit${r.behind === 1 ? "" : "s"} behind.` : "";
+    chatView?.addNote(`${r.action === "cloned" ? "Cloned" : "Opened"} **${r.name}**${r.branch ? ` on \`${r.branch}\`` : ""} in \`${where}\`.${r.action === "updated" && r.fastForwarded ? " Pulled the latest commits." : ""}${state} Ask about the code or what to change.`);
+  }
+
   /** A folder the IDE server already made the open project (a clone from Source Control). */
   function adoptProject(root: string) {
     projectRoot = root;
     try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
+  }
+
+  /** Open a folder (a bot's home folder) as the editor's project. */
+  async function openFolderInEditor(root: string) {
+    try {
+      await ideSetProject(root);
+      adoptProject(root);
+      activeTab = "editor";
+    } catch (err) {
+      console.warn("Failed to open folder:", err);
+    }
   }
 
   async function openProject() {
@@ -329,6 +367,7 @@
           <div class="new-menu" role="menu" tabindex="-1" onkeydown={(e) => e.key === "Escape" && (newMenuOpen = false)}>
             <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
             <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
+            <button role="menuitem" onclick={connectRepoHere} title="Clone or update a repository in your projects folder"><FolderGit2 size={15} /> Connect repository…</button>
             <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
             <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
           </div>
@@ -375,11 +414,11 @@
         </div>
         {#if activeBot}
           <div class="chat-main">
-            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} />
+            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} onOpenFolder={openFolderInEditor} />
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
+          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
           <div class="composer">
             <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet toolbar()}
@@ -390,7 +429,7 @@
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"}>
-        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} onProjectOpened={adoptProject} />
+        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} onProjectOpened={adoptProject} onRepoConnected={(r) => void repoConnected(r)} />
       </div>
     </main>
 

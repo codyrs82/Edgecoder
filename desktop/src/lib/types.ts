@@ -163,6 +163,8 @@ export interface Conversation {
   selectedModel?: string;
   /** When synced with the portal server, stores the server-side conversation ID */
   portalConversationId?: string;
+  /** The project folder the chat works in (a connected repo or an opened folder). */
+  projectRoot?: string;
 }
 
 export interface ChatCompletionChunk {

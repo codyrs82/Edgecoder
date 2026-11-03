@@ -30,20 +30,22 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./git-setup.js";
+import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
-import { BotManager, agentBotRunner, registerBotRoutes, type ApprovalEntry } from "./bots.js";
+import { BotManager, agentBotRunner, botComputeChat, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
-import { AUTO_MODEL_ID, routeInputsFrom, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
-import type { ChatBackend } from "../../inference-api/types.js";
+import { AUTO_MODEL_ID, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
+import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
@@ -93,7 +95,8 @@ const providers = new ProviderRegistry();
 function projectHeadCommit(): string | undefined {
   if (!activeProjectRoot) return undefined;
   try {
-    const head = execFileSync("git", ["-C", activeProjectRoot, "rev-parse", "HEAD"], {
+    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"]), {
+        env: gitExecEnv(),
       encoding: "utf8",
       timeout: 3_000,
       stdio: ["ignore", "pipe", "ignore"]
@@ -140,13 +143,18 @@ async function routeInputsHere(): Promise<RouteInputs> {
         listReservations(networkDeps).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => []),
       ])
     : [null, []];
-  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases, balanceCSats: ov?.account?.cSats });
   routeCache = { at: Date.now(), inputs };
   return inputs;
 }
 
 function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
-  if (r.placement === "local" || !networkDeps) return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
+  if (r.placement === "local") return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", r.model);
+  if (!networkDeps) {
+    return async function* () {
+      throw new ChatBackendError("This computer isn't connected to the network, so it can't reach your other machines or network models.", 503);
+    };
+  }
   return networkBackend(networkDeps, {
     model: r.model,
     computeClass: r.placement === "network" ? r.computeClass ?? "any" : "any",
@@ -156,7 +164,8 @@ function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
   });
 }
 
-const autoHere = (onRoute?: (r: Route) => void, source?: string) => autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute });
+const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions) =>
+  autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute, policy, plan });
 
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
@@ -686,6 +695,61 @@ app.post("/v1/ide/git/clone", async (req, reply) => {
 });
 app.get("/v1/ide/git/github/status", async (_req, reply) => reply.send(await githubStatus()));
 
+// The projects folder (default ~/EdgeCoder) and connecting a repository into it (repo-connect.ts).
+app.get("/v1/ide/settings/projects-folder", async (_req, reply) => {
+  const f = getProjectsFolder();
+  return reply.send({ path: f.path, source: f.source, defaultPath: defaultProjectsFolder() });
+});
+app.post("/v1/ide/settings/projects-folder", async (req, reply) => {
+  const b = z.object({ path: z.string().min(1).max(4096) }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  try {
+    return reply.send({ path: setProjectsFolder(b.data.path), source: getProjectsFolder().source });
+  } catch (err) {
+    if (err instanceof GitSetupError) return reply.status(400).send({ error: "invalid", message: err.message });
+    throw err;
+  }
+});
+app.get("/v1/ide/repos/recent", async (_req, reply) => {
+  const st = await githubStatus();
+  return reply.send({ ...st, repos: st.loggedIn ? await recentGitHubRepos(20) : [] });
+});
+app.post("/v1/ide/repos/connect", async (req, reply) => {
+  const b = z.object({ repo: remoteUrl, stream: z.boolean().default(false) }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  if (!b.data.stream) {
+    try {
+      const r = await connectRepoUrl(b.data.repo);
+      activeProjectRoot = r.path;
+      return reply.send(r);
+    } catch (err) {
+      if (err instanceof GitSetupError) return reply.status(400).send({ error: "git", message: err.message });
+      throw err;
+    }
+  }
+  // Streamed: progress lines from git as they come, then the result (or the error).
+  writeSseHead(reply);
+  const send = (ev: Record<string, unknown>) => reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+  let lastAt = 0;
+  try {
+    const r = await connectRepoUrl(b.data.repo, {
+      onProgress: (line) => {
+        const now = Date.now();
+        if (now - lastAt < 120 && !/done\.?$/.test(line)) return;
+        lastAt = now;
+        send({ type: "progress", line: line.slice(0, 300) });
+      },
+    });
+    activeProjectRoot = r.path;
+    send({ type: "done", result: r });
+  } catch (err) {
+    send({ type: "error", message: err instanceof GitSetupError ? err.message : "Couldn't connect the repository." });
+    if (!(err instanceof GitSetupError)) req.log.error({ err }, "repo connect failed");
+  }
+  reply.raw.end();
+  return reply;
+});
+
 // Background jobs on the network (network-tasks.ts).
 const networkTasks = new NetworkTasks(router);
 
@@ -720,7 +784,7 @@ app.get("/v1/ide/preview", async (req, reply) => {
   return reply.send({ url: preview.urlFor(previewPort, path) });
 });
 
-// A new project for something the user asked to build from chat: ~/EdgeCoder Projects/<name>.
+// A new project for something the user asked to build from chat: <projects folder>/<name>.
 app.post("/v1/ide/projects/new", async (req, reply) => {
   const { name } = z.object({ name: z.string().max(200).default("") }).parse(req.body ?? {});
   const projectRoot = createNewProject(name);
@@ -770,8 +834,8 @@ const bots = new BotManager({
   approvals: pendingApprovals,
   log: (msg, extra) => app.log.warn({ extra }, msg),
   runner: agentBotRunner({
-    // Bots run on Auto: each step at the cheapest place that fits it.
-    chat: (ctx) => chatFnFor({ target: "auto" }, process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", ctx.sendEvent, ctx.signal, `bot ${ctx.bot.name}`),
+    // Each step on the bot's compute policy (Local first by default), within its budget and your balance.
+    chat: (ctx) => botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
     execute: (bot) => {
       const executor = new ToolExecutor(bot.projectRoot);
       return (tool, args, opts) => executor.execute(tool, args, opts);
@@ -927,15 +991,22 @@ const ideChatSchema = z.object({
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
-    let where = "auto";
+    // When the network isn't affordable, Auto falls back to the biggest free model (planRoutes).
+    let where = "Auto";
     const backend = autoHere((r) => {
-      where = r.reason;
+      where = routeLabel(r);
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
     return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
   }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
-  const where = compute.target === "mine" ? "your machines" : compute.target === "reserved" ? "reserved machine" : `network${compute.computeClass && compute.computeClass !== "any" ? ` (${compute.computeClass})` : ""}`;
+  const where = routeLabel({
+    placement: compute.target,
+    model,
+    cSatsPerSecond: 0,
+    reason: "",
+    ...(compute.target === "network" ? { computeClass: compute.computeClass ?? "any" } : {}),
+  });
   const backend = networkBackend(networkDeps, {
     model,
     computeClass: compute.target === "network" ? compute.computeClass ?? "any" : "any",

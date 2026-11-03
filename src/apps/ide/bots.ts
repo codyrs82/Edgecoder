@@ -6,7 +6,7 @@
  * Engineer", a billing bot, a security reviewer). Each keeps its instructions, a short memory file
  * it can append to, the tools it may use, a daily cSat budget and a history of its runs.
  *
- * A run is one agent turn in the bot's project (the same loop as the IDE chat, on Auto compute).
+ * A run is one agent turn in the bot's project (the same loop as the IDE chat, on the bot's compute policy: Local first by default).
  * Runs start on the bot's schedule, on "Run now", or when you message it; never two at once for
  * one bot. A tool call that needs approval pauses the run ("Needs approval") until you answer.
  *
@@ -20,8 +20,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
+import type { ChatBackend } from "../../inference-api/types.js";
 
 // ---------------------------------------------------------------------------
 // Schedules: "every 30 minutes", "every 2 hours", "hourly", "daily at 09:00", or 5-field cron
@@ -181,11 +183,26 @@ export interface BotConfig {
   allowedTools: ToolName[];
   /** Apply write_file / edit_file without asking (each run's checkpoint keeps them undoable). */
   autoApproveEdits: boolean;
+  /** Where its model calls run. New bots: Local first; bots saved before this existed: Auto. */
+  compute: BotCompute;
   color: string;
+  /** The avatar character's shape (the app picks one from the name when unset). */
+  avatarShape?: BotAvatarShape;
   createdAtMs: number;
   updatedAtMs: number;
   nextRunAtMs?: number;
 }
+
+/** A bot's compute policy; `model` (a model id like "qwen3.5:9b" or "network/x@gpu") only for "model". */
+export interface BotCompute {
+  policy: ComputePolicy;
+  model?: string;
+}
+export const BOT_AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
+export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
+export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "local_first" };
+/** What bots saved before compute policies existed keep doing. */
+export const LEGACY_BOT_COMPUTE: BotCompute = { policy: "auto" };
 
 export type BotTrigger = "schedule" | "manual" | "message";
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
@@ -198,8 +215,10 @@ export interface BotRun {
   status: BotRunStatus;
   summary: string;
   cSats: number;
-  /** Where the model calls ran (Auto's last decision, e.g. "local qwen3.5:9b"). */
+  /** Where the model calls ran (the last route, e.g. "This computer · qwen3.5:9b"). */
   where?: string;
+  /** Something worth knowing about how it ran, e.g. "ran on a smaller local model (no cSats)". */
+  note?: string;
   error?: string;
 }
 
@@ -245,6 +264,8 @@ export interface BotRunContext {
   /** Pauses the run until the user answers (resolves false on reject, cancel or timeout). */
   waitForApproval: ToolRunnerDeps["waitForApproval"];
   remember: (note: string) => void;
+  /** cSats left in today's budget (null: no limit); the network never gets more than this. */
+  budgetLeft: () => number | null;
 }
 
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
@@ -324,7 +345,9 @@ export interface BotInput {
   budgetCSatsPerDay?: number | null;
   allowedTools?: ToolName[];
   autoApproveEdits?: boolean;
+  compute?: BotCompute;
   color?: string;
+  avatarShape?: BotAvatarShape;
 }
 
 export type BotPatch = Partial<BotInput> & { memory?: string };
@@ -380,8 +403,14 @@ export class BotManager {
       const data = JSON.parse(readFileSync(this.file, "utf8")) as { bots?: BotConfig[]; runs?: Record<string, BotRun[]> };
       this.bots = data.bots ?? [];
       this.runs = new Map(Object.entries(data.runs ?? {}));
-      // Runs that were going when the server stopped can't be resumed.
       let changed = false;
+      // Bots saved before compute policies existed keep running on Auto.
+      for (const b of this.bots)
+        if (!b.compute || !COMPUTE_POLICIES.includes(b.compute.policy)) {
+          b.compute = { ...LEGACY_BOT_COMPUTE };
+          changed = true;
+        }
+      // Runs that were going when the server stopped can't be resumed.
       for (const list of this.runs.values())
         for (const r of list)
           if (r.status === "running" || r.status === "needs_approval") {
@@ -523,6 +552,14 @@ export class BotManager {
       }
     }
     if (input.budgetCSatsPerDay != null && !(input.budgetCSatsPerDay > 0)) throw new BotError("The budget must be more than 0 cSats a day (or no limit)");
+    if (input.compute !== undefined) {
+      if (!COMPUTE_POLICIES.includes(input.compute.policy)) throw new BotError(`Unknown compute policy "${input.compute.policy}"`);
+      if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bot runs on (or choose another compute option)");
+    }
+  }
+
+  private static compute(c: BotCompute): BotCompute {
+    return c.policy === "model" ? { policy: "model", model: c.model!.trim() } : { policy: c.policy };
   }
 
   private nextFor(bot: BotConfig): number | undefined {
@@ -544,7 +581,9 @@ export class BotManager {
       budgetCSatsPerDay: input.budgetCSatsPerDay === undefined ? DEFAULT_BUDGET_CSATS_PER_DAY : input.budgetCSatsPerDay,
       allowedTools: input.allowedTools ?? [...DEFAULT_BOT_TOOLS],
       autoApproveEdits: input.autoApproveEdits ?? true,
+      compute: input.compute ? BotManager.compute(input.compute) : { ...DEFAULT_BOT_COMPUTE },
       color: input.color ?? COLORS[this.bots.length % COLORS.length],
+      ...(input.avatarShape ? { avatarShape: input.avatarShape } : {}),
       createdAtMs: now,
       updatedAtMs: now,
     };
@@ -564,6 +603,7 @@ export class BotManager {
     Object.assign(bot, Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
     if (fields.name !== undefined) bot.name = fields.name.trim();
     if (fields.schedule !== undefined) bot.schedule = fields.schedule.trim();
+    if (fields.compute !== undefined) bot.compute = BotManager.compute(fields.compute);
     if (scheduleChanged || resumed) bot.nextRunAtMs = this.nextFor(bot);
     bot.updatedAtMs = this.now();
     if (memory !== undefined) this.setMemory(id, memory);
@@ -731,7 +771,7 @@ export class BotManager {
       }
     } else if (event.type === "status") {
       act.activity = event.message;
-      if (!act.run.where && event.message.startsWith("Auto: ")) act.run.where = event.message.slice(6);
+      if (COMPUTE_STATUS.test(event.message) && event.message.includes(FALLBACK_NOTE)) act.run.note = FALLBACK_NOTE;
     } else if (event.type === "tool_call") {
       act.activity = `Using ${event.tool}`;
     }
@@ -779,6 +819,10 @@ export class BotManager {
         isCancelled: () => act.cancelReason !== undefined,
         waitForApproval,
         remember: (note) => this.remember(id, note),
+        budgetLeft: () => {
+          const cap = (this.bots.find((b) => b.id === id) ?? bot).budgetCSatsPerDay;
+          return cap == null ? null : Math.max(0, cap - this.spentToday(id));
+        },
       });
     } catch (err) {
       error = (err as Error).message ?? String(err);
@@ -849,6 +893,38 @@ export class BotManager {
 }
 
 // ---------------------------------------------------------------------------
+// Compute: where a bot's model calls run
+// ---------------------------------------------------------------------------
+
+/** The status line a run's route announces ("Compute: this computer (free) · qwen3.5:9b …"). */
+const COMPUTE_STATUS = /^(Auto|Compute): /;
+
+/**
+ * A bot's model calls on its compute policy. `auto` builds the routed backend (autoBackend in the
+ * IDE server); each call gets the budget left today, so the network never gets more than that or
+ * the balance. Usage events say where each call ran and what it cost.
+ */
+export function botComputeChat(
+  ctx: Pick<BotRunContext, "bot" | "sendEvent" | "signal" | "budgetLeft">,
+  auto: (policy: ComputePolicy, plan: () => PlanOptions, onRoute: (r: Route) => void) => ChatBackend,
+): ChatFn {
+  const compute = ctx.bot.compute ?? LEGACY_BOT_COMPUTE;
+  let where = "";
+  const backend = auto(
+    compute.policy,
+    () => {
+      const left = ctx.budgetLeft();
+      return { ...(left === null ? {} : { allowanceCSats: left }), ...(compute.model ? { model: compute.model } : {}) };
+    },
+    (r) => {
+      where = routeLabel(r);
+      ctx.sendEvent({ type: "status", message: `Compute: ${r.reason}` });
+    },
+  );
+  return backendChat(backend, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
+}
+
+// ---------------------------------------------------------------------------
 // The real runner: the IDE agent loop in the bot's project, with the bot's tool policy
 // ---------------------------------------------------------------------------
 
@@ -913,7 +989,9 @@ const botFields = {
   budgetCSatsPerDay: z.number().positive().max(1e9).nullable(),
   allowedTools: z.array(toolEnum).max(ALL_TOOLS.length),
   autoApproveEdits: z.boolean(),
+  compute: z.object({ policy: z.enum(COMPUTE_POLICIES as [ComputePolicy, ...ComputePolicy[]]), model: z.string().trim().min(1).max(300).optional() }),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  avatarShape: z.enum(BOT_AVATAR_SHAPES),
 };
 const createSchema = z.object(botFields).partial().required({ name: true, projectRoot: true });
 const patchSchema = z.object({ ...botFields, memory: z.string().max(MAX_MEMORY_BYTES) }).partial();

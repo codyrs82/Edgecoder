@@ -17,8 +17,11 @@
     isRemoteMode,
     backendReady,
     getGitHubToken,
+    fsGitStatus,
   } from "../lib/api";
-  import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
+  import type { StreamProgress, ModelPullProgress, IdeStreamEvent, RepoConnection } from "../lib/api";
+  import ConnectRepo from "../components/ConnectRepo.svelte";
+  import { GitBranch } from "@lucide/svelte";
   import {
     createConversation,
     addMessage,
@@ -36,8 +39,39 @@
     /** Open a project file in the editor tab (from an agent reply's changes card). */
     onOpenPath?: (path: string) => void;
     onPreview?: (path: string) => void;
+    /** A repository was connected from this chat's empty state; it is now the open project. */
+    onRepoConnected?: (r: RepoConnection) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected }: Props = $props();
+
+  let connectRepoBox: ConnectRepo | undefined = $state(undefined);
+  /** The open project's folder name and branch, for the header. */
+  let projectBranch = $state<string | null>(null);
+  const projectName = $derived(projectRoot ? projectRoot.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? null : null);
+  $effect(() => {
+    const root = projectRoot;
+    void isStreaming; // a reply may have switched branches
+    if (!root || usePortalChat) {
+      projectBranch = null;
+      return;
+    }
+    fsGitStatus().then((s) => { if (root === projectRoot) projectBranch = s.branch; }).catch(() => { projectBranch = null; });
+  });
+
+  /** Put the cursor in the "Connect a repository" field (new chat). */
+  export function focusConnect() {
+    connectRepoBox?.focus();
+  }
+
+  /** The project folder this chat was working in, if any (reopened when the chat is). */
+  export function getProjectRoot(): string | null {
+    return conversation.projectRoot ?? null;
+  }
+
+  function repoConnected(r: RepoConnection) {
+    conversation.projectRoot = r.path;
+    onRepoConnected?.(r);
+  }
 
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
@@ -143,6 +177,7 @@
     addMessage(conversation, "user", text);
     // Where this chat ran last (the sidebar's laptop / server / cloud icon).
     conversation.selectedModel = get(computeChoice);
+    if (projectRoot) conversation.projectRoot = projectRoot;
     conversation = conversation; // trigger reactivity
 
     isStreaming = true;
@@ -343,6 +378,12 @@
 
 <div class="chat-view" bind:this={scrollContainer}>
   <div class="chat-header">
+    {#if projectName && !usePortalChat}
+      <span class="repo-badge" title={projectRoot}>
+        <span class="repo-name">{projectName}</span>
+        {#if projectBranch}<span class="repo-branch"><GitBranch size={11} /> {projectBranch}</span>{/if}
+      </span>
+    {/if}
     {#if usePortalChat}
       <span class="portal-badge" title="Chat synced with portal server">
         <span class="portal-dot"></span>
@@ -379,6 +420,11 @@
           </button>
         {/each}
       </div>
+      {#if onRepoConnected && !usePortalChat}
+        <div class="connect-slot">
+          <ConnectRepo bind:this={connectRepoBox} onConnected={repoConnected} />
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="messages">
@@ -405,6 +451,41 @@
     gap: 8px;
     padding: 8px 16px;
     flex-shrink: 0;
+  }
+  .repo-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 2px 10px;
+    border: 0.5px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-surface);
+    max-width: 60%;
+    overflow: hidden;
+  }
+  .repo-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .repo-branch {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    color: var(--text-muted, var(--text-secondary));
+    white-space: nowrap;
+  }
+  .connect-slot {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
   }
   .portal-badge {
     display: inline-flex;

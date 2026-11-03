@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "../routes/password-reset.js";
 import { BASE_CSS, TOKENS_CSS, brandMark } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 /**
  * /portal/reset-password: without ?token it asks for the email (POST /auth/password/forgot);
@@ -58,7 +59,7 @@ export function registerResetPasswordPage(app: FastifyInstance): void {
           <p class="muted" style="margin-top:16px;"><a href="/portal">Back to sign in</a></p>
         </div>
       </div>
-      <script>
+      <script nonce="${CSP_NONCE}">
         const MIN = ${PASSWORD_MIN_LENGTH};
         const MAX = ${PASSWORD_MAX_LENGTH};
         const params = new URLSearchParams(location.search);

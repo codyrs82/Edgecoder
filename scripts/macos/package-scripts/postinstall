@@ -11,12 +11,51 @@ CONFIG_WIZARD="/opt/edgecoder/bin/edgecoder-configure.sh"
 OLLAMA_INSTALLER="/opt/edgecoder/bin/edgecoder-install-ollama.sh"
 LOG_DIR="/var/log/edgecoder"
 
-mkdir -p "$LOG_DIR"
+SERVICE_USER="_edgecoder"
+STATE_DIR="/var/lib/edgecoder"
+
+# The daemons run as the _edgecoder role account, never as root (edgecoder-install creates the
+# same account; this covers a package install without Node).
+ensure_service_user() {
+  dscl . -read "/Users/$SERVICE_USER" UniqueID >/dev/null 2>&1 && return 0
+  local id
+  id="$(dscl . -read "/Groups/$SERVICE_USER" PrimaryGroupID 2>/dev/null | awk '{print $2}')"
+  if [[ -z "$id" ]]; then
+    for id in $(seq 300 399); do
+      dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$id" && continue
+      dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$id" && continue
+      break
+    done
+    dscl . -create "/Groups/$SERVICE_USER"
+    dscl . -create "/Groups/$SERVICE_USER" PrimaryGroupID "$id"
+    dscl . -create "/Groups/$SERVICE_USER" Password "*"
+    dscl . -create "/Groups/$SERVICE_USER" RealName "EdgeCoder agent"
+  fi
+  dscl . -create "/Users/$SERVICE_USER"
+  dscl . -create "/Users/$SERVICE_USER" UniqueID "$id"
+  dscl . -create "/Users/$SERVICE_USER" PrimaryGroupID "$id"
+  dscl . -create "/Users/$SERVICE_USER" UserShell /usr/bin/false
+  dscl . -create "/Users/$SERVICE_USER" NFSHomeDirectory "$STATE_DIR"
+  dscl . -create "/Users/$SERVICE_USER" RealName "EdgeCoder agent"
+  dscl . -create "/Users/$SERVICE_USER" Password "*"
+  dscl . -create "/Users/$SERVICE_USER" IsHidden 1
+}
+ensure_service_user
+
+mkdir -p "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
 chmod 755 "$LOG_DIR"
+# The app, scripts and plists stay root's: the service account must not be able to change its own code.
+chown -R root:wheel /opt/edgecoder/app /opt/edgecoder/bin /opt/edgecoder/install
+chmod -R go-w /opt/edgecoder/app /opt/edgecoder/bin /opt/edgecoder/install
 
 if [[ ! -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
+fi
+# Read by edgecoder-runtime.sh running as the service account; written only by root.
+if [[ -f "$ENV_FILE" ]]; then
+  chown "root:$SERVICE_USER" "$ENV_FILE"
+  chmod 640 "$ENV_FILE"
 fi
 
 # Package scripts run in a non-interactive PackageKit context, so we cannot
@@ -27,7 +66,9 @@ echo "  sudo $CONFIG_WIZARD"
 # The shared installer (same options on macOS, Linux and Windows): detects the hardware and
 # creates the per-instance agent + Ollama daemons. Tokens are added later with
 # `sudo edgecoder-install apply --token <agent-id>=<token>`.
-NODE_BIN="$(command -v node || ls /opt/homebrew/bin/node /usr/local/bin/node 2>/dev/null | head -n1 || true)"
+# edgecoder-install copies a node a user can replace (Homebrew) to a root-owned dir, or refuses one
+# that links user-writable libraries; the nodejs.org build in /opt/edgecoder/node is used as is.
+NODE_BIN="$(ls /opt/edgecoder/node/bin/node 2>/dev/null || command -v node || ls /opt/homebrew/bin/node /usr/local/bin/node 2>/dev/null | head -n1 || true)"
 if [[ -n "$NODE_BIN" ]]; then
   printf '#!/bin/sh\nexec "%s" /opt/edgecoder/app/dist/install/cli.js "$@"\n' "$NODE_BIN" > /usr/local/bin/edgecoder-install
   chmod 755 /usr/local/bin/edgecoder-install

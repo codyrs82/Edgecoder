@@ -56,6 +56,16 @@ export type PayoutDestinationChallenge = {
   expiresAtMs: number;
 };
 
+/** Emailed one-time code for one withdrawal, bound to the exact invoice (by hash) and amount. */
+export type WithdrawChallenge = {
+  challengeId: string;
+  userId: string;
+  bolt11Hash: string;
+  amountMsat: number;
+  emailCodeHash: string;
+  expiresAtMs: number;
+};
+
 export type PortalConversation = {
   conversationId: string;
   userId: string;
@@ -253,6 +263,9 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
     // Native-app OAuth hand-off lives in Postgres: Cloudflare spreads one sign-in across portal instances.
     await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS native_redirect TEXT`);
+    // Connect-from-Settings flows record the signed-in user; Microsoft links record the tenant.
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS link_user_id TEXT`);
+    await this.pool.query(`ALTER TABLE portal_oauth_links ADD COLUMN IF NOT EXISTS tenant_id TEXT`);
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
     );
@@ -312,6 +325,13 @@ export class PortalStore {
          challenge_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, destination TEXT NOT NULL,
          email_code_hash TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, consumed_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
     );
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_withdraw_challenges (
+         challenge_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, bolt11_hash TEXT NOT NULL, amount_msat BIGINT NOT NULL,
+         email_code_hash TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, consumed_at_ms BIGINT, approved_at_ms BIGINT,
+         released_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_withdraw_challenges_user_idx ON portal_withdraw_challenges (user_id, created_at_ms)`);
     await this.pool.query(`ALTER TABLE portal_wallet_onboarding ADD COLUMN IF NOT EXISTS invalidated_at_ms BIGINT`);
     const res = await this.pool.query(
       `UPDATE portal_wallet_onboarding SET invalidated_at_ms = $1
@@ -656,15 +676,28 @@ export class PortalStore {
     providerSubject: string;
     userId: string;
     emailSnapshot?: string;
+    /** Microsoft: the Entra tenant (tid) of the identity. */
+    tenantId?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_links (provider, provider_subject, user_id, email_snapshot, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO portal_oauth_links (provider, provider_subject, user_id, email_snapshot, created_at_ms, tenant_id)
+       VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (provider, provider_subject) DO UPDATE SET
          user_id = EXCLUDED.user_id,
-         email_snapshot = EXCLUDED.email_snapshot`,
-      [input.provider, input.providerSubject, input.userId, input.emailSnapshot ?? null, Date.now()]
+         email_snapshot = EXCLUDED.email_snapshot,
+         tenant_id = COALESCE(EXCLUDED.tenant_id, portal_oauth_links.tenant_id)`,
+      [input.provider, input.providerSubject, input.userId, input.emailSnapshot ?? null, Date.now(), input.tenantId ?? null]
     );
+  }
+
+  /** Remove every OAuth identity linked to a user. */
+  async deleteOauthLinksForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_oauth_links WHERE user_id = $1`, [userId]);
+  }
+
+  /** Remove every passkey registered to a user. */
+  async deletePasskeysForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_passkey_credentials WHERE user_id = $1`, [userId]);
   }
 
   async findOauthIdentity(provider: string, providerSubject: string): Promise<{ userId: string } | null> {
@@ -802,25 +835,32 @@ export class PortalStore {
     expiresAtMs: number;
     /** Deep link to hand the session back to a native app (desktop/iOS), if the flow started there. */
     nativeRedirect?: string;
+    /** Set when a signed-in user connects this provider from Settings. */
+    linkUserId?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id`,
       [stateId, now]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { provider: row.provider, redirectUri: row.redirect_uri, ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}) };
+    return {
+      provider: row.provider,
+      redirectUri: row.redirect_uri,
+      ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
+      ...(row.link_user_id ? { linkUserId: row.link_user_id } : {})
+    };
   }
 
   /** One-time code a native app redeems for a session after OAuth (stored hashed, single use). */
@@ -841,6 +881,74 @@ export class PortalStore {
     return result.rows[0]?.user_id ?? null;
   }
 
+  async createWithdrawChallenge(input: { challengeId: string; userId: string; bolt11Hash: string; amountMsat: number; emailCodeHash: string; expiresAtMs: number }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_withdraw_challenges (challenge_id, user_id, bolt11_hash, amount_msat, email_code_hash, expires_at_ms, created_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [input.challengeId, input.userId, input.bolt11Hash, input.amountMsat, input.emailCodeHash, input.expiresAtMs, Date.now()]
+    );
+  }
+
+  /** Withdrawal codes issued to the user since `sinceMs` (caps how many emails one session can trigger). */
+  async countWithdrawChallengesSince(userId: string, sinceMs: number): Promise<number> {
+    const r = await this.pool.query(`SELECT COUNT(*)::int AS n FROM portal_withdraw_challenges WHERE user_id = $1 AND created_at_ms > $2`, [userId, sinceMs]);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
+  /** Single use: marks the challenge consumed and returns it, or null when unknown, used or expired. */
+  async consumeWithdrawChallenge(challengeId: string): Promise<WithdrawChallenge | null> {
+    const now = Date.now();
+    const r = await this.pool.query(
+      `UPDATE portal_withdraw_challenges SET consumed_at_ms = $2
+       WHERE challenge_id = $1 AND consumed_at_ms IS NULL AND expires_at_ms > $2
+       RETURNING challenge_id, user_id, bolt11_hash, amount_msat, email_code_hash, expires_at_ms`,
+      [challengeId, now]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      challengeId: row.challenge_id,
+      userId: row.user_id,
+      bolt11Hash: row.bolt11_hash,
+      amountMsat: Number(row.amount_msat),
+      emailCodeHash: row.email_code_hash,
+      expiresAtMs: Number(row.expires_at_ms)
+    };
+  }
+
+  /** msat of the user's approved (and not released) withdrawals since `sinceMs`: the daily cap's running total. */
+  async withdrawnMsatSince(userId: string, sinceMs: number): Promise<number> {
+    const r = await this.pool.query(
+      `SELECT COALESCE(SUM(amount_msat), 0)::bigint AS total FROM portal_withdraw_challenges
+       WHERE user_id = $1 AND approved_at_ms > $2 AND released_at_ms IS NULL`,
+      [userId, sinceMs]
+    );
+    return Number(r.rows[0]?.total ?? 0);
+  }
+
+  /**
+   * Counts a verified withdrawal against the daily cap. Atomic with the cap check, so two
+   * concurrent confirmations cannot both fit under it. Returns false when it would exceed `capMsat`.
+   */
+  async approveWithdrawChallenge(input: { challengeId: string; userId: string; capMsat: number; sinceMs: number }): Promise<boolean> {
+    const now = Date.now();
+    const r = await this.pool.query(
+      `UPDATE portal_withdraw_challenges c SET approved_at_ms = $3
+       WHERE c.challenge_id = $1 AND c.user_id = $2 AND c.approved_at_ms IS NULL
+         AND ($4::bigint <= 0 OR c.amount_msat + (
+           SELECT COALESCE(SUM(o.amount_msat), 0) FROM portal_withdraw_challenges o
+           WHERE o.user_id = $2 AND o.approved_at_ms > $5 AND o.released_at_ms IS NULL) <= $4::bigint)
+       RETURNING challenge_id`,
+      [input.challengeId, input.userId, now, input.capMsat, input.sinceMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** The coordinator refused the payout: it no longer counts against the daily cap. */
+  async releaseWithdrawChallenge(challengeId: string): Promise<void> {
+    await this.pool.query(`UPDATE portal_withdraw_challenges SET released_at_ms = $2 WHERE challenge_id = $1`, [challengeId, Date.now()]);
+  }
+
   async upsertNodeEnrollment(input: {
     nodeId: string;
     deviceId?: string;
@@ -856,6 +964,13 @@ export class PortalStore {
     if (normalizedDeviceId) {
       const existingByDevice = await this.getNodeEnrollmentByDeviceId(normalizedDeviceId);
       if (existingByDevice) {
+        // The device's canonical node is used, but only for that node's owner (the upsert's WHERE
+        // enforces it), and never when the requested node ID is someone else's enrollment.
+        if (existingByDevice.ownerUserId !== input.ownerUserId) return null;
+        if (existingByDevice.nodeId !== input.nodeId) {
+          const requested = await this.getNodeEnrollment(input.nodeId);
+          if (requested && requested.ownerUserId !== input.ownerUserId) return null;
+        }
         targetNodeId = existingByDevice.nodeId;
       }
     }

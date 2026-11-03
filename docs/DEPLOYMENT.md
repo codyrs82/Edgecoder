@@ -503,7 +503,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `PORTAL_COOKIE_SECURE` | unset (on when `NODE_ENV=production`) | `1` forces `Secure` + `__Host-` session cookies outside production (#10). Renaming the cookie logs everyone out once. |
 | `PORTAL_CONNECT_ORIGINS` | | Comma list of extra CSP `connect-src` origins (#10) |
 | `PORTAL_TRUSTED_ORIGINS` | | Comma list of extra origins allowed to send state-changing requests (CSRF check). The desktop origins are always allowed (#10) |
-| `PORTAL_CSP_ENFORCE` | unset | `1` enforces the CSP. Otherwise it is sent as `Content-Security-Policy-Report-Only` (#10) |
+| `PORTAL_CSP_ENFORCE` | unset | The CSP is enforced, with a per-request nonce on the pages' inline scripts. `0` sends it as `Content-Security-Policy-Report-Only` instead, for diagnosing a page the policy breaks (#10) |
 | `PORTAL_TRUST_PROXY_HOPS` | `1` | Proxy hops to trust for the client IP (Fly = 1). Used by rate limits (#10) |
 
 ### Passkey / WebAuthn

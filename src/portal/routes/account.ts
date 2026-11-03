@@ -7,6 +7,7 @@ import { request } from "undici";
 import { z } from "zod";
 import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
+import { NODE_ID_PATTERN } from "../pages/escape.js";
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
@@ -155,15 +156,29 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     const user = await enrollingUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
+    // Node ids are shown in admin and owner pages and used in DNS names: a safe charset only.
+    const raw = (req.body ?? {}) as { nodeId?: unknown };
+    if (typeof raw.nodeId === "string" && !NODE_ID_PATTERN.test(raw.nodeId)) {
+      return reply.code(400).send({ error: "invalid_node_id", detail: "Use 3-128 letters, digits, '.', '_' or '-'." });
+    }
     const body = z
       .object({
-        nodeId: z.string().min(3),
+        nodeId: z.string().regex(NODE_ID_PATTERN),
         nodeKind: z.enum(["agent", "coordinator"]),
         deviceId: z.string().min(3).max(128).optional()
       })
       .parse(req.body);
     const enrollmentDeviceId =
       body.deviceId?.trim().toLowerCase() || (body.nodeKind === "agent" ? deriveIosDeviceIdFromNodeId(body.nodeId) : undefined);
+    // A node ID or device ID enrolled by another user is theirs: it can't be enrolled, linked or
+    // redirected to this account. The store enforces the same; checking here keeps the 409 explicit.
+    const [byNodeId, byDeviceId] = await Promise.all([
+      store.getNodeEnrollment(body.nodeId),
+      enrollmentDeviceId ? store.getNodeEnrollmentByDeviceId(enrollmentDeviceId) : Promise.resolve(null)
+    ]);
+    if ((byNodeId && byNodeId.ownerUserId !== user.userId) || (byDeviceId && byDeviceId.ownerUserId !== user.userId)) {
+      return reply.code(409).send({ error: "node_owned_by_another_user" });
+    }
     const registrationToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
     let record = await store.upsertNodeEnrollment({
       nodeId: body.nodeId,
@@ -174,14 +189,15 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       registrationTokenHash: sha256Hex(registrationToken),
       emailVerified: user.emailVerified
     });
-    if (!record) return reply.code(409).send({ error: "node_owned_by_another_user" });
+    if (!record || record.ownerUserId !== user.userId) return reply.code(409).send({ error: "node_owned_by_another_user" });
     if (body.nodeKind === "agent" && user.emailVerified && !record.nodeApproved) {
       const approved = await store.setNodeApproval(record.nodeId, true);
       if (approved) {
         record = approved;
       }
     }
-    // Link agent ownership so credits earned by this node flow to the user's account
+    // Link agent ownership so credits earned by this node flow to the user's account. Only the
+    // enrollment the caller owns (record.nodeId, which a device redirect may have changed) is linked.
     if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
       const accountId = `acct-${user.userId}`;
       await ensureCreditAccountForUser(user);
@@ -191,7 +207,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
         headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
         bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
         body: JSON.stringify({
-          agentId: body.nodeId,
+          agentId: record.nodeId,
           ownerUserId: user.userId
         })
       }).catch(() => undefined);
@@ -199,7 +215,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     // Assign DNS hostname for coordinator nodes
     let dnsHostname: string | undefined;
     if (body.nodeKind === "coordinator" && store) {
-      dnsHostname = getCoordinatorHostname(body.nodeId);
+      dnsHostname = getCoordinatorHostname(record.nodeId);
       await store.updateNodeDns({
         nodeId: record.nodeId,
         dnsHostname,
@@ -302,10 +318,10 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const [nodes, walletSnapshot] = await Promise.all([store.listNodesByOwner(user.userId), loadWalletSnapshotForUser(user.userId)]);
-    // Self-heal: ensure agent ownership is linked for all enrolled nodes
+    // Self-heal: ensure agent ownership is linked for every node this user owns (and only those).
     if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN && nodes.length > 0) {
       const accountId = `acct-${user.userId}`;
-      for (const node of nodes) {
+      for (const node of nodes.filter((n) => n.ownerUserId === user.userId)) {
         request(`${CONTROL_PLANE_URL}/credits/accounts/${encodeURIComponent(accountId)}/agents/link`, {
           method: "POST",
           headers: controlPlaneHeaders(true),

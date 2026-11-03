@@ -47,7 +47,17 @@ const PROFILE = section(
       settingRow("User ID", "Your account is <code id=\"profileAccountId\"></code> on the network.", `<span class="set-value" id="profileUserId"></span>`, { keywords: "user id account" })
   ) +
     group("Sign-in") +
-    card(settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }))
+    card(
+      settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }) +
+        settingRow(
+          "Connected sign-in",
+          "Connect a Google, Microsoft or GitHub account so you can sign in to this account with it.",
+          ["google", "microsoft", "github"]
+            .map((p) => `<button type="button" data-oauth-connect="${p}">Connect ${p === "github" ? "GitHub" : p[0].toUpperCase() + p.slice(1)}</button>`)
+            .join(" "),
+          { keywords: "google microsoft github sso oauth connect link sign-in" }
+        )
+    )
 );
 
 const USAGE = section(
@@ -310,6 +320,19 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
         showToast("Passkey enrollment failed: " + String(err.message || err), true);
       }
     });
+
+    /* ── Connected sign-in (OAuth connect while signed in) ── */
+    document.querySelectorAll("[data-oauth-connect]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          const res = await api("/auth/oauth/" + btn.getAttribute("data-oauth-connect") + "/connect", { method: "POST", body: JSON.stringify({}) });
+          window.location.href = res.authorizeUrl;
+        } catch (err) {
+          showToast("Could not start: " + String(err.message || err), true);
+        }
+      });
+    });
+    if (new URLSearchParams(location.search).get("connected")) showToast("Sign-in method connected.");
 
     showSection(sectionFromHash());
     (function() {

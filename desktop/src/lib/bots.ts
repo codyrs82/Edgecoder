@@ -15,6 +15,8 @@ export interface BotRun {
   summary: string;
   cSats: number;
   where?: string;
+  /** e.g. "ran on a smaller local model (no cSats)" */
+  note?: string;
   error?: string;
 }
 
@@ -35,7 +37,11 @@ export interface Bot {
   budgetCSatsPerDay: number | null;
   allowedTools: string[];
   autoApproveEdits: boolean;
+  /** Where its model calls run (older servers don't send it: Auto). */
+  compute?: BotCompute;
   color: string;
+  /** "robot" | "orb" | "hex" | "block"; unset: picked from the name (lib/bot-avatar). */
+  avatarShape?: string;
   createdAtMs: number;
   updatedAtMs: number;
   nextRunAtMs?: number;
@@ -66,8 +72,57 @@ export interface BotInput {
   budgetCSatsPerDay?: number | null;
   allowedTools?: string[];
   autoApproveEdits?: boolean;
+  compute?: BotCompute;
   color?: string;
+  avatarShape?: string;
 }
+
+/** A tool call the bot asked you about, as a card in the conversation. */
+export interface AskCard {
+  id: string;
+  question: string;
+  detail?: string;
+  /** null while it waits for you. */
+  answer: "Allowed" | "Denied" | null;
+}
+
+/** The approvals in a run's tool events, as cards: waiting ones have no answer yet. */
+export function askCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string }>, botName: string): AskCard[] {
+  return events
+    .filter((e) => e.type === "tool_call" && e.requires_approval && e.id)
+    .map((e) => {
+      const args = e.args ?? {};
+      const cmd = typeof args.command === "string" ? args.command : undefined;
+      const path = typeof args.path === "string" ? args.path : undefined;
+      const tool = e.tool ?? "a tool";
+      const question =
+        tool === "run_shell" ? `${botName} wants to run a command` :
+        tool === "git_commit" ? `${botName} wants to commit` :
+        tool === "git_push" ? `${botName} wants to push` :
+        tool === "write_file" || tool === "edit_file" ? `${botName} wants to ${tool === "write_file" ? "write" : "edit"} a file` :
+        `${botName} wants to use ${tool.replace(/_/g, " ")}`;
+      const detail = cmd ?? path ?? (typeof args.message === "string" ? args.message : undefined);
+      const answer = e.approval_status === "approved" ? "Allowed" : e.approval_status === "rejected" ? "Denied" : null;
+      return { id: e.id!, question, ...(detail ? { detail } : {}), answer };
+    });
+}
+
+export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model";
+export interface BotCompute {
+  policy: ComputePolicy;
+  /** Only for "model": a ComputePicker id ("qwen3.5:9b", "mine/...", "network/...@gpu", "reserved/<id>/..."). */
+  model?: string;
+}
+
+/** The form's choices, in order; new bots start on Local first. */
+export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputePolicy; title: string; desc: string }> = [
+  { value: "local_first", title: "Local first", desc: "This computer, then your machines, then the network within the daily budget." },
+  { value: "auto", title: "Auto", desc: "The cheapest place that fits each step, network included (within the budget)." },
+  { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
+  { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
+  { value: "model", title: "Specific model", desc: "Always the model you pick below." },
+];
+export const DEFAULT_COMPUTE: BotCompute = { policy: "local_first" };
 
 /** Read-only tools every bot has; the form toggles the rest. */
 export const BOT_READ_TOOLS = ["read_file", "list_directory", "search_files", "search_codebase", "git_status", "git_diff", "git_log", "git_fetch", "github_list_prs", "github_list_issues"];
@@ -93,6 +148,78 @@ export const SCHEDULE_PRESETS: Array<{ value: string; label: string }> = [
   { value: "daily at 09:00", label: "Daily at 09:00" },
   { value: "0 9 * * 1-5", label: "Weekdays at 09:00" },
 ];
+
+/** The bot's compute, as the server treats it (bots from older servers run on Auto). */
+export function botCompute(bot: Pick<Bot, "compute">): BotCompute {
+  return bot.compute ?? { policy: "auto" };
+}
+
+/** Header text for the policy: "Local first", "This computer only", "qwen3.5:9b · Network GPU". */
+export function computeText(c: BotCompute, label?: (id: string) => { model: string; where: string }): string {
+  if (c.policy === "model") {
+    if (!c.model) return "Specific model";
+    const l = label?.(c.model);
+    return l ? `${l.model} · ${l.where}` : c.model;
+  }
+  return COMPUTE_POLICY_OPTIONS.find((o) => o.value === c.policy)?.title ?? "Auto";
+}
+
+/** The status chip in the bot header. */
+export function statusChip(bot: Pick<Bot, "status">): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
+  switch (bot.status) {
+    case "running":
+      return { text: "Running", tone: "accent" };
+    case "needs_approval":
+      return { text: "Needs approval", tone: "warn" };
+    case "error":
+      return { text: "Failed", tone: "err" };
+    case "paused":
+      return { text: "Paused", tone: "muted" };
+    case "over_budget":
+      return { text: "Budget spent", tone: "warn" };
+    default:
+      return { text: "Idle", tone: "muted" };
+  }
+}
+
+/** "Harry the Engineer" from "/Users/me/Dropbox/Agents/Harry the Engineer". */
+export function folderName(path: string): string {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+export type NoticeAction = "buy" | "local_only" | "edit";
+export interface FailureNotice {
+  runId: string;
+  title: string;
+  detail: string;
+  actions: NoticeAction[];
+}
+
+/** The last run's failure in plain words, with what the user can do about it; null when it didn't fail. */
+export function failureNotice(bot: Pick<Bot, "name" | "lastRun" | "compute">): FailureNotice | null {
+  const r = bot.lastRun;
+  if (!r || r.status !== "failed") return null;
+  const err = (r.error ?? r.summary ?? "").replace(/^Failed:\s*/, "").trim();
+  const onlyHere = botCompute(bot).policy === "local_only";
+  const base = { runId: r.id, title: `${bot.name}'s last run didn't finish` };
+  if (/not enough cSats|no cSats|insufficient|budget is spent/i.test(err)) {
+    return {
+      ...base,
+      detail: "It needed the network, and there weren't enough cSats for it. Buy cSats, or keep it on this computer (free).",
+      actions: onlyHere ? ["buy", "edit"] : ["buy", "local_only"],
+    };
+  }
+  if (/isn't installed|no model is installed|no model is available|no model fits|isn't running/i.test(err)) {
+    return { ...base, detail: err, actions: ["edit"] };
+  }
+  if (/isn't connected|not connected|offline/i.test(err)) {
+    return { ...base, detail: err, actions: onlyHere ? ["edit"] : ["local_only", "edit"] };
+  }
+  return { ...base, detail: err || "It stopped with an error.", actions: ["edit"] };
+}
+
+export const NOTICE_ACTION_TEXT: Record<NoticeAction, string> = { buy: "Buy cSats", local_only: "Switch to This computer", edit: "Edit compute" };
 
 /** The avatar letter: the first letter or digit of the name. */
 export function botInitial(name: string): string {
@@ -147,7 +274,7 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
       return `Needs approval: ${what}`;
     }
     case "running":
-      return bot.activity && !bot.activity.startsWith("Auto: ") ? `Working: ${bot.activity}` : "Working…";
+      return bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…";
     case "over_budget":
       return "Paused: today's budget is spent";
     case "paused":

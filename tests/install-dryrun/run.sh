@@ -8,7 +8,7 @@
 #
 # Installs the real thing inside the container (Node, Ollama, NVIDIA container toolkit, the agent
 # from this checkout's current branch, as committed) but points the agents at a dead local coordinator, so nothing
-# joins the network. Checks: 8 agents + 8 Ollama servers active, per-GPU env, `edgecoder-install
+# joins the network. Checks (--per-gpu layout): 8 agents + 8 Ollama servers active, per-GPU env, `edgecoder-install
 # status`. Not covered: real GPUs/CUDA, a real Docker daemon, x86_64 when run on Apple silicon,
 # model pulls, enrolment against a live portal. Needs Docker (Colima works).
 set -euo pipefail
@@ -36,7 +36,7 @@ docker exec "$NAME" bash -c 'systemctl daemon-reload && systemctl enable --now d
 
 echo "Installing $REF on $BASE (8 simulated RTX 6000 Ada)..."
 docker exec -e EDGECODER_REPO_URL=file:///repo -e EDGECODER_REPO_REF="$REF" "$NAME" bash -c \
-  'bash /repo/deploy/install.sh --mesh-token test-mesh-token --coordinator-url http://127.0.0.1:4301 --portal-url http://127.0.0.1:4310 --token test-reg-token' \
+  'bash /repo/deploy/install.sh --per-gpu --mesh-token test-mesh-token --coordinator-url http://127.0.0.1:4301 --portal-url http://127.0.0.1:4310 --token test-reg-token' \
   > "/tmp/$NAME.log" 2>&1 || { tail -40 "/tmp/$NAME.log"; echo "FAIL: installer exited non-zero (log /tmp/$NAME.log)"; exit 1; }
 
 sleep 8
@@ -49,6 +49,12 @@ for n in 0 7; do
   env="$(docker exec "$NAME" bash -c "cat /etc/edgecoder/agent-$n.env 2>/dev/null || true")"
   echo "$env" | grep -q "CUDA_VISIBLE_DEVICES=$n" || { echo "agent-$n: CUDA_VISIBLE_DEVICES not $n"; fail=1; }
   echo "$env" | grep -q "SANDBOX_MODE=docker" || { echo "agent-$n: no SANDBOX_MODE=docker"; fail=1; }
+done
+for unit in edgecoder-agent-0 edgecoder-ollama-7; do
+  props="$(docker exec "$NAME" systemctl show -p User -p NoNewPrivileges -p ProtectSystem "$unit")"
+  echo "$props" | grep -qx "User=edgecoder" || { echo "$unit: not running as edgecoder"; fail=1; }
+  echo "$props" | grep -qx "NoNewPrivileges=yes" || { echo "$unit: NoNewPrivileges not set"; fail=1; }
+  echo "$props" | grep -qx "ProtectSystem=strict" || { echo "$unit: ProtectSystem not strict"; fail=1; }
 done
 docker exec "$NAME" edgecoder-install status >/dev/null || { echo "edgecoder-install status failed"; fail=1; }
 [ "$fail" -eq 0 ] && echo "PASS" || { echo "FAIL (installer log /tmp/$NAME.log)"; exit 1; }

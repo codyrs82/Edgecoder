@@ -77,7 +77,7 @@ await app.register(cors, {
   credentials: true,
 });
 
-// #10: helmet (CSP report-only for the first release), CSRF origin check, rate limits.
+// #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
   publicOrigin: (() => {
@@ -89,7 +89,7 @@ await registerPortalSecurity(app, {
   })(),
   trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
   connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
-  enforceCsp: process.env.PORTAL_CSP_ENFORCE === "1",
+  enforceCsp: !["0", "false"].includes(process.env.PORTAL_CSP_ENFORCE ?? ""),
   // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
   edge: edgeModeFrom(process.env.PORTAL_EDGE),
   originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
@@ -288,7 +288,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail } = createPortalMailer(
+const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -410,8 +410,9 @@ type PortalAccessContext = {
   canManageCoordinatorOps: boolean;
 };
 
-async function buildAccessContext(user: { userId: string; email: string; role?: "user" | "admin" }): Promise<PortalAccessContext> {
-  const normalizedEmail = normalizeEmail(user.email);
+async function buildAccessContext(user: { userId: string; email: string; role?: "user" | "admin"; emailVerified?: boolean }): Promise<PortalAccessContext> {
+  // Email allowlists apply only to a verified address (an unverified one proves nothing).
+  const normalizedEmail = user.emailVerified === true ? normalizeEmail(user.email) : "";
   const dbAdmin = user.role === "admin";
   const isSystemAdmin = dbAdmin || SYSTEM_ADMIN_EMAILS.has(normalizedEmail);
   const isCoordinatorAdmin = isSystemAdmin || COORDINATOR_ADMIN_EMAILS.has(normalizedEmail);
@@ -841,7 +842,11 @@ registerReviewRoutes(app, reviewsRouteDeps);
 
 const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser };
 export type MarketRoutesDeps = typeof marketRouteDeps;
-registerMarketRoutes(app, marketRouteDeps); registerPayoutRoutes(app, marketRouteDeps);
+registerMarketRoutes(app, marketRouteDeps);
+registerPayoutRoutes(app, marketRouteDeps, {
+  store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, dailyCapSats: C.PORTAL_WITHDRAW_DAILY_CAP_SATS,
+  sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
+});
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

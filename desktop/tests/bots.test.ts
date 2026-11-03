@@ -1,5 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { botInitial, botStatusLine, botTitle, budgetText, foldBotReply, formatCSats, groupsOf, relativeTime, scheduleText, toolsFor, type Bot } from "../src/lib/bots";
+import { botCompute, botInitial, botStatusLine, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
+
+describe("bot header helpers", () => {
+  it("status chip, folder name and compute text", () => {
+    expect(statusChip(bot({ status: "error" }))).toEqual({ text: "Failed", tone: "err" });
+    expect(statusChip(bot({ status: "needs_approval" })).text).toBe("Needs approval");
+    expect(statusChip(bot({ status: "paused" })).text).toBe("Paused");
+    expect(statusChip(bot()).text).toBe("Idle");
+    expect(folderName("/Users/me/Library/CloudStorage/Dropbox/Agents/Harry the Engineer/")).toBe("Harry the Engineer");
+    expect(folderName("C:\\code\\proj")).toBe("proj");
+    expect(botCompute(bot())).toEqual({ policy: "auto" });
+    expect(computeText({ policy: "local_first" })).toBe("Local first");
+    expect(computeText({ policy: "model", model: "network/x@gpu" }, () => ({ model: "x", where: "Network GPU" }))).toBe("x · Network GPU");
+  });
+
+  it("turns a cSats failure into a plain notice with actions", () => {
+    const error = "Not enough cSats for this request (it sets aside up to 91.8 cSats; unused cSats come back).";
+    const failed = bot({ status: "error", lastRun: { id: "run_9", trigger: "schedule", startedAtMs: 0, status: "failed", summary: `Failed: ${error}`, cSats: 0, error } });
+    const n = failureNotice(failed)!;
+    expect(n.runId).toBe("run_9");
+    expect(n.detail).not.toMatch(/91\.8/);
+    expect(n.actions).toEqual(["buy", "local_only"]);
+    expect(failureNotice({ ...failed, compute: { policy: "local_only" } })!.actions).toEqual(["buy", "edit"]);
+    expect(failureNotice(bot())).toBeNull();
+    expect(failureNotice(bot({ lastRun: { ...failed.lastRun!, error: "No model is installed on this computer." } }))!.actions).toEqual(["edit"]);
+  });
+});
 
 const bot = (over: Partial<Bot> = {}): Bot => ({
   id: "bot_1",

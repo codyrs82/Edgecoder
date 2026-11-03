@@ -48,11 +48,6 @@ export function redirectKeepingQuery(target: string) {
   };
 }
 
-/** HTML-escapes text placed into server-rendered markup. */
-export function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
-}
-
 /** One settings row: title and description on the left, the control on the right. */
 export function settingRow(title: string, desc: string, control: string, opts: { keywords?: string; id?: string; wide?: boolean } = {}): string {
   const kw = opts.keywords ? ` data-keywords="${opts.keywords}"` : "";
