@@ -61,6 +61,7 @@ export const IDE_ROUTES = [
   { method: "GET", path: "/v1/ide/reservations", auth: true },
   { method: "POST", path: "/v1/ide/reservations", auth: true },
   { method: "POST", path: "/v1/ide/reservations/cancel", auth: true },
+  { method: "GET", path: "/v1/ide/usage", auth: true },
   { method: "POST", path: "/v1/messages", auth: true },
   { method: "POST", path: "/v1/messages/count_tokens", auth: true }
 ] as const;

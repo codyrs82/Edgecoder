@@ -979,7 +979,7 @@ export async function ideSendToolApproval(id: string, approved: boolean): Promis
 }
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "done";
   [key: string]: unknown;
 }
 
@@ -987,8 +987,9 @@ export interface IdeStreamEvent {
  * A model id from the compute picker as the IDE chat takes it: "network/m@gpu", "mine/m" and
  * "reserved/<id>/m" run off this computer (billed in cSats on the network), anything else here.
  */
-export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved"; computeClass?: string; reservationId?: string } } {
+export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved" | "auto"; computeClass?: string; reservationId?: string } } {
   if (!id) return {};
+  if (id === "auto") return { compute: { target: "auto" } };
   if (id.startsWith("mine/")) return { model: id.slice(5), compute: { target: "mine" } };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
   if (reserved) return { model: reserved[2], compute: { target: "reserved", reservationId: reserved[1] } };
@@ -1238,7 +1239,8 @@ export interface ComputeOverview {
     coordinator?: { peerId: string; url: string };
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
-  models?: Array<{ model: string; agents: number; classes: string[] }>;
+  /** Network models; model calls are priced per token (cSats per million tokens in / out). */
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
 }
 export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
 export const computeBuy = (amountSats: number) =>
@@ -1258,10 +1260,12 @@ export interface Machine {
   activeModel: string | null;
   models: string[];
   reservedUntilMs: number | null;
+  /** Hardware verification: the tier claimed, the tier paid after the coordinator's challenge, and evidence from real work. */
+  verification?: { status: string; claimedTier: string; grantedTier: string; reason: string | null; lastPassAtMs: number | null; score: number | null; tokensPerSec: number | null };
 }
 
 // Connect to compute: one local port per connection (:4304 /v1/ide/connections)
-export type ConnectionTarget = "local" | "mine" | "network" | "reserved";
+export type ConnectionTarget = "local" | "mine" | "network" | "reserved" | "auto";
 export interface Connection {
   id: string;
   name: string;
@@ -1314,6 +1318,35 @@ export const listReservations = () => fsCall<ReservationOptions>("GET", "/v1/ide
 export const createReservation = (r: { computeClass: string; minutes: number; model?: string }) =>
   fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations", r).then((x) => x.reservation);
 export const cancelReservation = (reservationId: string) => fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations/cancel", { reservationId }).then((x) => x.reservation);
+
+// Usage: what you ran, where, and what it cost (coordinator usage records, via :4304 /v1/ide/usage)
+export interface UsageRecord {
+  id: string;
+  atMs: number;
+  kind: "inference" | "job" | "reservation";
+  placement: "network" | "mine" | "reserved";
+  model?: string;
+  computeClass?: string;
+  agentId?: string;
+  source?: string;
+  ok: boolean;
+  durationMs: number;
+  costMsat: number;
+  promptTokens?: number;
+  outputTokens?: number;
+}
+export interface UsageSlice { key: string; requests: number; cSats: number; seconds: number; promptTokens: number; outputTokens: number }
+export interface UsageSummary {
+  sinceMs: number;
+  totals: { requests: number; cSats: number; seconds: number; failed: number; promptTokens: number; outputTokens: number };
+  byDay: Array<{ day: string; requests: number; cSats: number }>;
+  byModel: UsageSlice[];
+  byClass: UsageSlice[];
+  bySource: UsageSlice[];
+  byPlacement: UsageSlice[];
+  records: UsageRecord[];
+}
+export const getUsage = (days: number) => fsCall<UsageSummary>("GET", `/v1/ide/usage?days=${days}`);
 
 /** A page on the web portal (opens in the browser). */
 export const portalWebUrl = (path = "") => `${portalBase()}${path}`;

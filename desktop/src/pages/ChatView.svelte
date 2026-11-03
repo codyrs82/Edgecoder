@@ -4,7 +4,7 @@
   import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
-  import { computeChoice } from "../lib/compute-choice";
+  import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
   import {
     streamChat,
@@ -26,7 +26,7 @@
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
   } from "../lib/chat-store";
-  import type { Conversation, ToolEvent } from "../lib/types";
+  import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
   interface Props {
     onOpenInEditor?: (code: string, language: string) => void;
@@ -53,6 +53,7 @@
   /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
   let streamingTurnId: string | undefined = $state(undefined);
+  let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
 
   /** Cached GitHub token for IDE agent remote operations */
@@ -161,6 +162,7 @@
         if (attached) apiMessages[apiMessages.length - 1] = { role: "user", content: `${attached}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
+        streamingUsage = undefined;
         streamingChanged = [];
 
         await streamIdeChat(
@@ -168,12 +170,13 @@
           projectRoot,
           (event: IdeStreamEvent) => {
             const next = applyAgentEvent(
-              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged },
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
               event,
             ).turn;
             if (next.text !== streamingContent) streamingContent = next.text;
             if (next.toolEvents !== streamingToolEvents) streamingToolEvents = next.toolEvents;
             streamingTurnId = next.turnId;
+            streamingUsage = next.usage;
             if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
@@ -266,6 +269,8 @@
     const lastMsg = conversation.messages[conversation.messages.length - 1];
     if (!lastMsg) return;
     if (streamingToolEvents.length > 0) lastMsg.toolEvents = [...streamingToolEvents];
+    const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
+    if (usage) lastMsg.usage = usage;
     if (streamingTurnId && streamingChanged.length > 0) {
       lastMsg.turnId = streamingTurnId;
       lastMsg.changedFiles = [...streamingChanged];
@@ -378,7 +383,7 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
         <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />

@@ -37,3 +37,28 @@ describe("job pricing (cSats = sats)", () => {
     expect(cSatsToMsat(11.16)).toBe(11_160);
   });
 });
+
+import { cSatsPerMTokens, inferenceCostMsat, tokenPriceUsdPerM } from "../../src/economy/job-pricing.js";
+
+describe("per-token pricing for model calls", () => {
+  const base = { paramsB: 9, btcUsd: 100_000, durationMs: 10_000, computeClass: "apple", tierWeight: 3, perSecondCostMsat: 1_560 };
+
+  it("prices by size, below hosted list prices", () => {
+    expect(tokenPriceUsdPerM(1.5)).toEqual({ input: 0.01, output: 0.03 });
+    expect(tokenPriceUsdPerM(9)).toEqual({ input: 0.04, output: 0.1 });
+    expect(tokenPriceUsdPerM(70)).toEqual({ input: 0.3, output: 0.8 });
+    // 9B at $100k BTC: 40 sats in, 100 sats out per million tokens.
+    expect(cSatsPerMTokens(9, 100_000)).toEqual({ input: 40, output: 100 });
+  });
+
+  it("charges tokens when that covers the power, else the power floor", () => {
+    // A Claude Code step: 25k in, 300 out on a 9B: 1.03 sats; 10 s of an Apple tier-3 machine is 0.0083 sats of power.
+    expect(inferenceCostMsat({ ...base, promptTokens: 25_000, outputTokens: 300 })).toEqual({ costMsat: 1030, basis: "tokens" });
+    // A tiny reply that took a long time: the floor wins.
+    expect(inferenceCostMsat({ ...base, promptTokens: 10, outputTokens: 5, durationMs: 600_000 })).toMatchObject({ basis: "power_floor" });
+  });
+
+  it("falls back to per-second without token counts", () => {
+    expect(inferenceCostMsat(base)).toEqual({ costMsat: 1_560, basis: "per_second" });
+  });
+});

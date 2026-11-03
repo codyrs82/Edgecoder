@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Settings, User, CreditCard, Cpu, Plug, Globe, LogOut, ArrowUpCircle } from "@lucide/svelte";
+  import { Settings, User, CreditCard, BarChart3, Cpu, Plug, Globe, LogOut, ArrowUpCircle } from "@lucide/svelte";
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import { computeOverview, portalWebUrl, type AuthUser } from "../lib/api";
   import { onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
@@ -88,6 +88,7 @@
       </div>
       <button bind:this={firstItem} role="menuitem" onclick={() => go("profile")}><User size={15} /> Profile</button>
       <button role="menuitem" onclick={() => go("plan")}><CreditCard size={15} /> Plan &amp; usage {#if cSats !== null}<span class="hint">{fmt(cSats)} cSats</span>{/if}</button>
+      <button role="menuitem" onclick={() => go("usage")}><BarChart3 size={15} /> Usage</button>
       <button role="menuitem" onclick={() => go("compute")}><Cpu size={15} /> Compute</button>
       <button role="menuitem" onclick={() => go("connect")}><Plug size={15} /> Connect your tools</button>
       <button role="menuitem" onclick={() => go()}><Settings size={15} /> Settings</button>

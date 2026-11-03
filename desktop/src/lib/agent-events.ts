@@ -11,6 +11,8 @@ export interface AgentTurn {
   turnId?: string;
   /** Project files the turn wrote, in first-write order. */
   changedFiles?: string[];
+  /** cSats the turn's model calls cost, and where the last one ran. */
+  usage?: { cSats: number; where?: string };
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -52,6 +54,11 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
     }
     case "turn":
       return { turn: { ...turn, turnId: String(event.id) }, filesChanged: false };
+    case "usage": {
+      const cSats = Number(event.cSats ?? 0);
+      const where = typeof event.where === "string" ? event.where : turn.usage?.where;
+      return { turn: { ...turn, usage: { cSats: Number(((turn.usage?.cSats ?? 0) + (Number.isFinite(cSats) ? cSats : 0)).toFixed(6)), where } }, filesChanged: false };
+    }
     case "file_change": {
       const path = String(event.path);
       const changed = turn.changedFiles ?? [];
@@ -74,6 +81,11 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
         turn: { ...turn, toolEvents: [...turn.toolEvents, { type: "plan", steps: event.steps as ToolEvent["steps"], plan_status: event.status as string }] },
         filesChanged: false,
       };
+    case "status": {
+      // Auto says where each model call went ("Auto: this computer (free) · qwen3.5:9b for agent work").
+      const msg = String(event.message ?? "");
+      return msg.startsWith("Auto: ") ? { turn: { ...turn, usage: { cSats: turn.usage?.cSats ?? 0, where: msg.slice(6) } }, filesChanged: false } : { turn, filesChanged: false };
+    }
     default:
       return { turn, filesChanged: false };
   }

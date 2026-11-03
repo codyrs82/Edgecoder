@@ -71,6 +71,8 @@ function ollamaEnv(p: ServicePaths, inst: AgentInstance): Record<string, string>
     OLLAMA_KEEP_ALIVE: "30m",
     HOME: p.modelsDir
   };
+  // Same slot count the agent sends at once (plan.ts AGENT_PARALLEL_INFERENCE).
+  if (inst.env?.AGENT_PARALLEL_INFERENCE) env.OLLAMA_NUM_PARALLEL = inst.env.AGENT_PARALLEL_INFERENCE;
   if (inst.gpu && inst.gpu.vendor !== "apple") {
     env.CUDA_VISIBLE_DEVICES = String(inst.gpu.index);
     env.HIP_VISIBLE_DEVICES = String(inst.gpu.index);
@@ -117,6 +119,11 @@ Group=${p.user}
 WorkingDirectory=${p.appDir}
 EnvironmentFile=${envFilePath(p, inst)}
 Environment="NODE_ENV=production"
+# Own state per instance (~/.edgecoder worker.db with its pending-results queue, ~/.config/edgecoder):
+# systemd creates /var/lib/edgecoder/agent-${inst.index} owned by ${p.user}; a shared HOME would let one agent
+# sync another's queued results, and the useradd home is root-owned when it already existed.
+StateDirectory=edgecoder/agent-${inst.index}
+Environment="HOME=/var/lib/edgecoder/agent-${inst.index}"
 ExecStart=${p.nodeBin} ${p.appDir}/dist/swarm/worker-runner.js
 Restart=always
 RestartSec=5
@@ -215,7 +222,10 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
       result.services.push(`edgecoder-ollama-${inst.index}.service`, `edgecoder-agent-${inst.index}.service`);
     }
     run("systemctl", ["daemon-reload"]);
-    run("systemctl", ["enable", "--now", ...result.services]);
+    // enable --now does not restart a running unit, so a re-run with tokens would not take
+    // effect; restart (which also starts) picks up the rewritten env files and units.
+    run("systemctl", ["enable", ...result.services]);
+    run("systemctl", ["restart", ...result.services]);
   } else if (host.platform === "darwin") {
     for (const inst of plan.instances) {
       for (const [label, content] of [[`io.edgecoder.ollama.${inst.index}`, launchdOllamaPlist(p, inst)], [`io.edgecoder.agent.${inst.index}`, launchdAgentPlist(p, inst)]] as const) {

@@ -198,6 +198,12 @@
               <div class="sp-text">
                 <span class="sp-title">{m.agentId}</span>
                 <span class="sp-desc">{CLASS_LABELS[m.computeClass] ?? m.computeClass}{m.tier ? ` · ${m.tier}` : ""} · {m.online ? "online" : `last seen ${new Date(m.lastSeenMs).toLocaleString()}`}{m.reservedUntilMs ? " · reserved by someone" : ""}</span>
+                {#if m.verification}
+                  {@const v = m.verification}
+                  <span class="sp-desc">
+                    {#if v.status === "verified"}<span class="sp-ok">Verified {v.grantedTier}</span>{:else if v.status === "base"}Base tier (nothing to prove){:else if v.status === "demoted"}<span class="sp-warn">Paid as {v.grantedTier}, claimed {v.claimedTier}{v.reason ? ` · ${v.reason.replace(/_/g, " ")}` : ""}</span>{:else}<span class="sp-warn">Not verified yet: paid as {v.grantedTier} until it passes the speed check</span>{/if}{#if v.tokensPerSec} · {Math.round(v.tokensPerSec)} tokens/s on real work{/if}
+                  </span>
+                {/if}
               </div>
               <span class="sp-muted">{m.models.map(shortModel).join(", ")}</span>
             </div>
@@ -207,7 +213,26 @@
     </div>
 
     <div class="sp-group">
-      <div class="sp-group-title">Network prices</div>
+      <div class="sp-group-title">Model calls: per token</div>
+      <div class="sp-card">
+        {#if (overview.models ?? []).length === 0}
+          <div class="sp-row"><span class="sp-muted">No machines are offering models right now.</span></div>
+        {:else}
+          <table>
+            <thead><tr><th>Model</th><th class="num">Machines</th><th class="num">cSats / M tokens in</th><th class="num">cSats / M tokens out</th></tr></thead>
+            <tbody>
+              {#each overview.models ?? [] as m (m.model)}
+                <tr><td>{m.model}</td><td class="num">{m.agents}</td><td class="num">{m.cSatsPerMTokens?.input ?? "–"}</td><td class="num">{m.cSatsPerMTokens?.output ?? "–"}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+      <p class="sp-muted">Model calls are priced per token, below typical hosted prices for models that size, and never below the electricity the machine used. The same price on every class; faster hardware just finishes sooner.</p>
+    </div>
+
+    <div class="sp-group">
+      <div class="sp-group-title">Reservations and code jobs: per second</div>
       <div class="sp-card">
         <table>
           <thead><tr><th>Class</th><th class="num">cSats / second</th><th class="num">cSats / hour</th><th class="num">Machines free</th></tr></thead>

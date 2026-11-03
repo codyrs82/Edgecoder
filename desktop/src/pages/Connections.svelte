@@ -79,8 +79,8 @@
 
   function startNew(target: ConnectionTarget = "local") {
     creating = true;
-    const names: Record<ConnectionTarget, string> = { local: "This computer", mine: "My machines", network: "Network", reserved: "Reserved machine" };
-    form = { name: names[target], target, model: "", computeClass: target === "network" ? "gpu" : "any", reservationId: leases[0]?.id ?? "", maxCSatsPerSecond: "", budgetCSats: "", port: "" };
+    const names: Record<ConnectionTarget, string> = { auto: "Auto", local: "This computer", mine: "My machines", network: "Network", reserved: "Reserved machine" };
+    form = { name: names[target], target, model: target === "auto" ? "auto" : "", computeClass: target === "network" ? "gpu" : "any", reservationId: leases[0]?.id ?? "", maxCSatsPerSecond: "", budgetCSats: "", port: "" };
   }
 
   async function create() {
@@ -121,6 +121,7 @@
   }
 
   function whereText(c: Pick<Connection, "target" | "computeClass" | "reservationId">) {
+    if (c.target === "auto") return "Auto · cheapest place per request";
     if (c.target === "local") return "This computer · free";
     if (c.target === "mine") return "My machines · free";
     if (c.target === "reserved") return "Reserved machine · prepaid";
@@ -128,6 +129,9 @@
   }
 
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 3 });
+
+  /** A reserved connection whose reservation is no longer active: its requests fail. */
+  const leaseEnded = (c: Connection) => c.target === "reserved" && !loading && !leases.some((l) => l.id === c.reservationId && l.endMs > Date.now());
   const mask = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 
   // Setup steps for the selected connection
@@ -194,6 +198,7 @@
         <div class="sp-row">
           <div class="sp-text"><span class="sp-title">No connections yet</span><span class="sp-desc">Start with one of these; you can add more any time.</span></div>
           <div class="sp-controls">
+            <button class="primary" onclick={() => startNew("auto")}>Auto</button>
             <button onclick={() => startNew("local")}>This computer</button>
             <button onclick={() => startNew("mine")} disabled={!networkConnected}>My machines</button>
             <button onclick={() => startNew("network")} disabled={!networkConnected}>Network GPU</button>
@@ -207,7 +212,7 @@
             <span class="sp-title">{c.name} <span class="sp-pill">{shortModel(c.model)}</span></span>
             <span class="sp-desc">
               <span class="sp-dot" class:on={c.listening} class:err={!!c.error}></span>
-              {c.error ? c.error : c.enabled ? (c.listening ? c.url : "Starting…") : "Off"} · {whereText(c)}{#if c.target === "network"} · spent {fmt(c.spentCSats)}{c.budgetCSats ? ` of ${fmt(c.budgetCSats)}` : ""} cSats{/if}
+              {c.error ? c.error : c.enabled ? (c.listening ? c.url : "Starting…") : "Off"} · {whereText(c)}{#if c.target === "network" || c.target === "auto"} · spent {fmt(c.spentCSats)}{c.budgetCSats ? ` of ${fmt(c.budgetCSats)}` : ""} cSats{/if}
             </span>
           </button>
           <div class="sp-controls">
@@ -219,6 +224,18 @@
           </div>
         </div>
         {#if shownKeys[c.id]}<div class="sp-row"><code>{c.key}</code></div>{/if}
+        {#if leaseEnded(c)}
+          <div class="sp-row warn-row">
+            <div class="sp-text">
+              <span class="sp-title sp-warn">Its reservation has ended</span>
+              <span class="sp-desc">Tools using "{c.name}" get an error until you point it somewhere else. Auto keeps the same address and key.</span>
+            </div>
+            <div class="sp-controls">
+              <button class="primary small" onclick={() => patch(c, { target: "auto", model: "auto" })}>Switch to Auto</button>
+              <button class="small" onclick={() => onNavigate?.("compute")}>Reserve again</button>
+            </div>
+          </div>
+        {/if}
       {/each}
 
       {#if creating}
@@ -229,8 +246,8 @@
 
             <span>Runs on</span>
             <div class="sp-seg">
-              {#each [["local", "This computer"], ["mine", "My machines"], ["network", "Network"], ["reserved", "Reserved"]] as [t, label]}
-                <button class:active={form.target === t} disabled={t !== "local" && !networkConnected} onclick={() => { form.target = t as ConnectionTarget; form.model = ""; }}>{label}</button>
+              {#each [["auto", "Auto"], ["local", "This computer"], ["mine", "My machines"], ["network", "Network"], ["reserved", "Reserved"]] as [t, label]}
+                <button class:active={form.target === t} disabled={t !== "local" && t !== "auto" && !networkConnected} onclick={() => { form.target = t as ConnectionTarget; form.model = t === "auto" ? "auto" : ""; }}>{label}</button>
               {/each}
             </div>
 
@@ -256,11 +273,16 @@
               {/if}
             {/if}
 
-            <label for="cn-model">Model</label>
-            <select id="cn-model" bind:value={form.model}>
-              <option value="" disabled>Choose a model</option>
-              {#each formModels as m}<option value={m}>{m}</option>{/each}
-            </select>
+            {#if form.target === "auto"}
+              <span>Model</span>
+              <span class="sp-muted">Chosen per request: the cheapest place and smallest model that fits (your free machines first, network GPUs for heavy work).</span>
+            {:else}
+              <label for="cn-model">Model</label>
+              <select id="cn-model" bind:value={form.model}>
+                <option value="" disabled>Choose a model</option>
+                {#each formModels as m}<option value={m}>{m}</option>{/each}
+              </select>
+            {/if}
 
             {#if form.target !== "local" && form.target !== "mine"}
               <label for="cn-budget">Budget</label>
@@ -331,6 +353,7 @@
 
 <style>
   .conn.selected { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .warn-row { background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); }
   .conn-main {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;

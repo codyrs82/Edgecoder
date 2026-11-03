@@ -21,6 +21,27 @@ For full multi-node rollout (self-installed agents + additional coordinators), u
 - macOS with Xcode Command Line Tools (`pkgbuild` available)
 - Node.js 22+ installed on target machines
 
+## Signing and notarization (desktop app)
+
+Without an Apple Developer ID the desktop app is not notarized, so the first launch on a new Mac is
+blocked until you allow it: System Settings → Privacy & Security → **Open Anyway**. The release
+workflow (`.github/workflows/desktop-release.yml`) signs and notarizes automatically once these
+GitHub Actions secrets exist:
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | The "Developer ID Application" certificate exported as .p12, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+| `APPLE_CERTIFICATE_PASSWORD` | The password you set when exporting the .p12 |
+| `APPLE_SIGNING_IDENTITY` | The certificate's name, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | The Apple ID email of the developer account |
+| `APPLE_PASSWORD` | An app-specific password for that Apple ID (appleid.apple.com → Sign-In and Security) |
+| `APPLE_TEAM_ID` | The 10-character team id (developer.apple.com → Membership) |
+
+Steps: join the Apple Developer Program, create a Developer ID Application certificate in Xcode or
+on developer.apple.com, export it with its private key as .p12, then add the six secrets with
+`gh secret set NAME` (never paste them into a file in the repo). The next release tag builds a
+signed, notarized app; the build log says "Developer ID signing and notarization on".
+
 ## Build installer package
 
 From repo root:

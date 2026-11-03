@@ -32,7 +32,8 @@ export interface CheckResult {
 
 function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolveRun) => {
-    execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1" } }, (_err, stdout, stderr) =>
+    // .cmd shims only run through the shell on Windows.
+    execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1" }, shell: /\.cmd$/i.test(cmd) }, (_err, stdout, stderr) =>
       resolveRun({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
     );
   });
@@ -134,7 +135,9 @@ async function doCheck(root: string, relPaths: string[]): Promise<CheckResult> {
 
   if (ts.length) {
     const dir = nearest(root, dirname(resolve(root, ts[0])), "tsconfig.json");
-    const tsc = dir ? [join(dir, "node_modules/.bin/tsc"), join(root, "node_modules/.bin/tsc")].find((p) => existsSync(p)) : undefined;
+    // On Windows the runnable shim is tsc.cmd (node_modules/.bin/tsc is a shell script there).
+    const bin = process.platform === "win32" ? "node_modules/.bin/tsc.cmd" : "node_modules/.bin/tsc";
+    const tsc = dir ? [join(dir, bin), join(root, bin)].find((p) => existsSync(p)) : undefined;
     if (dir && tsc) {
       const { stdout } = await run(tsc, ["--noEmit", "--pretty", "false", "-p", dir], dir, 180_000);
       add(parseTsc(stdout, root, dir));

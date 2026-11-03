@@ -7,6 +7,7 @@ import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
 import type { Reservation } from "../economy/reservations.js";
+import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
@@ -381,6 +382,14 @@ CREATE TABLE IF NOT EXISTS hardware_verifications (
   record_json JSONB NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
+-- Usage (src/economy/usage.ts): one record per settled request, for the usage page.
+CREATE TABLE IF NOT EXISTS usage_records (
+  usage_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  at_ms BIGINT NOT NULL,
+  record_json JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_records_account_at ON usage_records (account_id, at_ms);
 -- Reserved capacity leases (src/economy/reservations.ts): one JSON record per lease.
 CREATE TABLE IF NOT EXISTS compute_reservations (
   reservation_id TEXT PRIMARY KEY,
@@ -2689,6 +2698,18 @@ export class PostgresStore {
        ON CONFLICT (reservation_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms`,
       [r.id, r.accountId, JSON.stringify(r), Date.now()]
     );
+  }
+
+  async insertUsage(r: UsageRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO usage_records (usage_id, account_id, at_ms, record_json) VALUES ($1,$2,$3,$4) ON CONFLICT (usage_id) DO UPDATE SET record_json = EXCLUDED.record_json`,
+      [r.id, r.accountId, r.atMs, JSON.stringify(r)]
+    );
+  }
+
+  async listUsage(accountId: string, sinceMs: number, limit = 20_000): Promise<UsageRecord[]> {
+    const r = await this.pool.query(`SELECT record_json FROM usage_records WHERE account_id = $1 AND at_ms >= $2 ORDER BY at_ms DESC LIMIT $3`, [accountId, sinceMs, limit]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as UsageRecord);
   }
 
   /** Active leases and those ended in the last week. */

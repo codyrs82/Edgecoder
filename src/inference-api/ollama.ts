@@ -19,7 +19,7 @@ export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | un
   return ctx;
 }
 
-export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string };
+export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number };
 
 export async function* ollamaChat(
   host: string,
@@ -62,7 +62,7 @@ export async function* ollamaChat(
     buf = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
-      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string };
+      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string; prompt_eval_count?: number; eval_count?: number };
       try {
         chunk = JSON.parse(line);
       } catch {
@@ -71,7 +71,7 @@ export async function* ollamaChat(
       if (chunk.error) throw new Error(chunk.error);
       if (chunk.message?.content) yield { delta: chunk.message.content };
       if (chunk.message?.tool_calls?.length) yield { toolCalls: chunk.message.tool_calls };
-      if (chunk.done) yield { doneReason: chunk.done_reason ?? "stop" };
+      if (chunk.done) yield { doneReason: chunk.done_reason ?? "stop", promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count };
     }
   }
 }
