@@ -100,15 +100,96 @@ export class ReservationBook {
 
   /** Mark a lease ended and work out the split (the caller pays and refunds, idempotently). */
   end(id: string, atMs: number, reason: ReservationEndReason): Reservation | undefined {
+    const ended = this.endedCopy(id, atMs, reason);
+    if (ended) this.byId.set(id, ended);
+    return ended;
+  }
+
+  /** What ending the lease now would record, without changing the book (see claimReservationEnd). */
+  endedCopy(id: string, atMs: number, reason: ReservationEndReason): Reservation | undefined {
     const r = this.byId.get(id);
     if (!r || r.status !== "active") return undefined;
     const endAt = reason === "expired" ? r.endMs : Math.min(atMs, r.endMs);
     const { usedMsat, refundMsat } = reservationUsage(r, endAt);
-    Object.assign(r, { status: "ended", endedAtMs: endAt, endReason: reason, usedMsat, refundMsat });
-    return r;
+    return { ...r, status: "ended", endedAtMs: endAt, endReason: reason, usedMsat, refundMsat };
+  }
+
+  /** Replace one lease with the stored (authoritative) copy. */
+  put(r: Reservation): void {
+    this.byId.set(r.id, r);
+  }
+
+  /** Ids of the leases still active in this book. */
+  activeAgentIds(): string[] {
+    return [...new Set([...this.byId.values()].filter((r) => r.status === "active").map((r) => r.agentId))];
   }
 
   prune(now = Date.now()): void {
     for (const [id, r] of this.byId) if (r.status === "ended" && now - (r.endedAtMs ?? 0) > 7 * 24 * 3_600_000) this.byId.delete(id);
   }
+}
+
+/**
+ * Leases across coordinators. Every coordinator on one database holds a ReservationBook; the
+ * compute_reservations table is the source of truth. A coordinator refreshes its book from it,
+ * judges "agent offline" by the newest heartbeat any coordinator recorded (agent_registry), and
+ * ends a lease only by winning a compare-and-set on the stored row, so exactly one coordinator
+ * pays the agent and refunds the requester.
+ */
+export interface SharedReservationStore {
+  listReservations(): Promise<Reservation[]>;
+  getReservation(id: string): Promise<Reservation | null>;
+  /** Stores `ended` only if the stored lease is still active (or absent). True = this caller won. */
+  endReservationIfActive(ended: Reservation): Promise<boolean>;
+  /** Newest heartbeat any coordinator recorded for each agent. */
+  agentLastSeenMs(agentIds: string[]): Promise<Map<string, number>>;
+}
+
+/** Load every stored lease into the book (stored state wins over what this coordinator remembers). */
+export async function syncReservations(book: ReservationBook, store: SharedReservationStore | null | undefined): Promise<void> {
+  if (!store) return;
+  book.load(await store.listReservations());
+}
+
+/** Active leases due to end, using this coordinator's and every other coordinator's view of the agent. */
+export async function dueReservations(
+  book: ReservationBook,
+  store: SharedReservationStore | null | undefined,
+  now: number,
+  localLastSeenMs: (agentId: string) => number | undefined
+): Promise<Array<{ r: Reservation; reason: ReservationEndReason }>> {
+  const shared = store ? await store.agentLastSeenMs(book.activeAgentIds()) : new Map<string, number>();
+  return book.due(now, (agentId) => {
+    const local = localLastSeenMs(agentId);
+    const remote = shared.get(agentId);
+    if (local === undefined) return remote;
+    return remote === undefined ? local : Math.max(local, remote);
+  });
+}
+
+/**
+ * End a lease once across coordinators. Returns the ended lease when this caller won (it must
+ * then settle it); undefined when it was not active here or another coordinator ended it first
+ * (the book then holds the stored copy). A store error leaves the lease active so a later tick retries.
+ */
+export async function claimReservationEnd(
+  book: ReservationBook,
+  store: SharedReservationStore | null | undefined,
+  id: string,
+  atMs: number,
+  reason: ReservationEndReason
+): Promise<Reservation | undefined> {
+  const ended = book.endedCopy(id, atMs, reason);
+  if (!ended) return undefined;
+  if (!store) {
+    book.put(ended);
+    return ended;
+  }
+  if (await store.endReservationIfActive(ended)) {
+    book.put(ended);
+    return ended;
+  }
+  const stored = await store.getReservation(id);
+  if (stored) book.put(stored);
+  return undefined;
 }

@@ -91,7 +91,8 @@ import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { hashRecordPayload } from "../ledger/record.js";
-import { NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
+import { finalizeStatsCheckpoint, statsCheckpointPeriodMs, statsFinalityState } from "../ledger/stats-checkpoint.js";
+import { DuplicateDebitError, NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { clampToBand, cSatsPerMTokens, inferenceCostMsat, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import { InferenceStreams } from "./inference-streams.js";
@@ -118,7 +119,7 @@ import {
   type HardwareClassification,
   type HardwareProfile, satsPerCreditForClass } from "../economy/compute-classes.js";
 import { MemoryUsageStore, summarizeUsage, type UsageRecord } from "../economy/usage.js";
-import { ReservationBook, RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES, reservationPriceMsat, type Reservation, type ReservationEndReason } from "../economy/reservations.js";
+import { ReservationBook, RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES, claimReservationEnd, dueReservations, reservationPriceMsat, syncReservations, type Reservation, type ReservationEndReason } from "../economy/reservations.js";
 import { ComputeOrderBook, capabilityConstraints, clampToClassReference, meetsCapability, type AskCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
@@ -1572,8 +1573,10 @@ async function persistStatsLedgerRecord(record: {
   hash: string;
   signature: string;
 }): Promise<void> {
-  await pgStore?.persistStatsLedgerRecord(record);
-  await applyStatsProjectionRecord(record);
+  // Projections (earnings totals, node status) apply once per record: a row another coordinator on
+  // this database already stored, or one sync re-ingests, is not counted again.
+  const inserted = pgStore ? await pgStore.persistStatsLedgerRecord(record) : false;
+  if (inserted) await applyStatsProjectionRecord(record);
 }
 
 app.addHook("onRequest", async (req, reply) => {
@@ -1981,44 +1984,53 @@ function statsQuorumThreshold(): number {
   return Math.max(1, Math.floor(totalCoordinators / 2) + 1);
 }
 
+/** One checkpoint per period; the settle delay covers records still being written by any coordinator. */
+const STATS_CHECKPOINT_PERIOD_MS = statsCheckpointPeriodMs(STATS_LEDGER_SYNC_INTERVAL_MS);
+const STATS_CHECKPOINT_SETTLE_MS = Math.max(5_000, STATS_LEDGER_SYNC_INTERVAL_MS);
+
+/**
+ * Sign the shared checkpoint target (src/ledger/stats-checkpoint.ts) and commit once a quorum of
+ * coordinators signed it. Signing never moves the target, so coordinators converge on one hash
+ * instead of each signing the other's last signature.
+ */
 async function maybeFinalizeStatsCheckpoint(): Promise<void> {
   if (!pgStore) return;
-  const head = await pgStore.latestStatsLedgerHead();
-  if (!head) return;
-  const checkpointHash = head.hash;
-  const { hasCommit, signers } = await pgStore.checkpointSignatureStatus(checkpointHash);
-  const signatures = new Set<string>(signers);
-  const hasLocalSignature = signatures.has(identity.peerId);
-
-  const threshold = statsQuorumThreshold();
-  if (!hasLocalSignature) {
-    const signatureRecord = ordering.append({
-      eventType: "stats_checkpoint_signature",
-      taskId: "stats-ledger",
-      actorId: identity.peerId,
-      coordinatorId: identity.peerId,
-      checkpointHeight: head.count,
-      checkpointHash,
-      payloadJson: JSON.stringify({ threshold, signerPeerId: identity.peerId })
-    });
-    await pgStore.persistLedgerRecord(signatureRecord);
-    await persistStatsLedgerRecord(signatureRecord);
-    signatures.add(identity.peerId);
-  }
-
-  if (!hasCommit && signatures.size >= threshold) {
-    const commitRecord = ordering.append({
-      eventType: "stats_checkpoint_commit",
-      taskId: "stats-ledger",
-      actorId: identity.peerId,
-      coordinatorId: identity.peerId,
-      checkpointHeight: head.count,
-      checkpointHash,
-      payloadJson: JSON.stringify({ threshold, signerSet: [...signatures] })
-    });
-    await pgStore.persistLedgerRecord(commitRecord);
-    await persistStatsLedgerRecord(commitRecord);
-  }
+  const store = pgStore;
+  const outcome = await finalizeStatsCheckpoint({
+    store,
+    selfId: identity.peerId,
+    threshold: statsQuorumThreshold(),
+    nowMs: Date.now(),
+    periodMs: STATS_CHECKPOINT_PERIOD_MS,
+    settleMs: STATS_CHECKPOINT_SETTLE_MS,
+    writeSignature: async (target, threshold) => {
+      const signatureRecord = ordering.append({
+        eventType: "stats_checkpoint_signature",
+        taskId: "stats-ledger",
+        actorId: identity.peerId,
+        coordinatorId: identity.peerId,
+        checkpointHeight: target.height,
+        checkpointHash: target.hash,
+        payloadJson: JSON.stringify({ threshold, signerPeerId: identity.peerId, targetIssuedAtMs: target.issuedAtMs })
+      });
+      await store.persistLedgerRecord(signatureRecord);
+      await persistStatsLedgerRecord(signatureRecord);
+    },
+    writeCommit: async (target, threshold, signers) => {
+      const commitRecord = ordering.append({
+        eventType: "stats_checkpoint_commit",
+        taskId: "stats-ledger",
+        actorId: identity.peerId,
+        coordinatorId: identity.peerId,
+        checkpointHeight: target.height,
+        checkpointHash: target.hash,
+        payloadJson: JSON.stringify({ threshold, signerSet: signers, targetIssuedAtMs: target.issuedAtMs })
+      });
+      await store.persistLedgerRecord(commitRecord);
+      await persistStatsLedgerRecord(commitRecord);
+    }
+  });
+  if (outcome.committed) app.log.info({ checkpointHash: outcome.target?.hash, signers: outcome.signers }, "stats_checkpoint_committed");
 }
 
 /**
@@ -2047,9 +2059,10 @@ function anchorConfirmations(anchor: BitcoinAnchorRecord | null | undefined): nu
 async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
   const deps = anchorDeps();
   if (!deps || !pgStore) return null;
-  const head = await pgStore.latestStatsLedgerHead();
-  if (!head) return null;
-  return anchorCheckpoint(deps, { epochId: `stats:${head.count}`, checkpointHash: head.hash });
+  // Anchor what the quorum committed (latestStatsFinality looks the anchor up by that hash).
+  const checkpoint = await pgStore.latestStatsCheckpoint();
+  if (!checkpoint) return null;
+  return anchorCheckpoint(deps, { epochId: `stats:${checkpoint.height ?? 0}`, checkpointHash: checkpoint.hash });
 }
 
 /** #46: poll pending anchors (and re-verify the latest ones for reorgs). */
@@ -2110,13 +2123,15 @@ async function latestStatsFinality(): Promise<{
   }
   const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.hash);
   const confirmations = anchorConfirmations(anchor);
-  const hardFinalized = confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
+  const hardFinalized = Boolean(anchor) && confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
   return {
     checkpointHash: latestCommit.hash,
     checkpointHeight: latestCommit.height ?? undefined,
     softFinalized: true,
     hardFinalized,
-    finalityState: hardFinalized ? "anchored_confirmed" : "anchored_pending",
+    // Without an anchor provider (production default) the quorum commit is final: say so instead of
+    // reporting an anchor that will never come.
+    finalityState: statsFinalityState({ hasCommit: true, anchoringEnabled: anchorDeps() !== null, anchorExists: Boolean(anchor), hardFinalized }),
     anchor: anchor
       ? {
           txRef: anchor.txRef,
@@ -3149,11 +3164,13 @@ app.post("/submit", async (req, reply) => {
       // to the actual cost when it finishes (job-pricing.ts).
       const early = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
       const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
-      await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId);
+      // One charge per task id network-wide: the same task sent again (retry, or to the other seed) is refused.
+      await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: `task_reserve:${body.taskId}` });
       taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
       usagePending.set(body.taskId, { id: body.taskId, accountId: body.submitterAccountId, atMs: Date.now(), kind: "job", placement: "network", computeClass: early.computeClass ?? undefined, ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
       if (message.startsWith("insufficient_credits")) {
         return reply.code(402).send({ error: "insufficient_credits" });
       }
@@ -3223,7 +3240,7 @@ app.post("/submit", async (req, reply) => {
   if (billingEntry && payload.subtasks.length > 1) {
     const extra = billingEntry.perSubtaskReserveMsat * (payload.subtasks.length - 1);
     try {
-      await spendCredits(billingEntry.accountId, msatToCSats(extra), "task_reserve", body.taskId);
+      await spendCredits(billingEntry.accountId, msatToCSats(extra), "task_reserve", body.taskId, { idempotencyKey: `task_reserve_topup:${body.taskId}` });
       billingEntry.reservedMsat += extra;
     } catch (err) {
       await refundTaskSubmit(body.taskId);
@@ -4145,9 +4162,16 @@ function publicReservation(r: Reservation) {
 
 /** End a lease: pay the agent's owner for the time held (minus the network fee) and refund the rest. */
 async function endReservation(id: string, reason: ReservationEndReason, atMs = Date.now()): Promise<Reservation | undefined> {
-  const r = reservations.end(id, atMs, reason);
+  // Coordinators sharing the database race to end a lease; only the one that wins the stored
+  // compare-and-set pays and refunds (the loser's book takes the stored copy).
+  let r: Reservation | undefined;
+  try {
+    r = await claimReservationEnd(reservations, pgStore, id, atMs, reason);
+  } catch (err) {
+    app.log.warn({ err, reservationId: id }, "reservation_end_claim_failed");
+    return undefined;
+  }
   if (!r) return undefined;
-  await pgStore?.upsertReservation(r).catch(() => undefined);
   const used = r.usedMsat ?? 0;
   const { agentMsat, feeMsat } = splitJobCost(used, NETWORK_FEE_BPS);
   const heldSeconds = Math.max(0, ((r.endedAtMs ?? atMs) - r.startMs) / 1000);
@@ -4174,7 +4198,14 @@ async function endReservation(id: string, reason: ReservationEndReason, atMs = D
 
 setInterval(async () => {
   const now = Date.now();
-  for (const { r, reason } of reservations.due(now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs)) await endReservation(r.id, reason, now);
+  try {
+    // Leases made or ended on another coordinator, and heartbeats it saw, come from the shared store.
+    await syncReservations(reservations, pgStore);
+    const due = await dueReservations(reservations, pgStore, now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs);
+    for (const { r, reason } of due) await endReservation(r.id, reason, now);
+  } catch (err) {
+    app.log.warn({ err }, "reservation_tick_failed");
+  }
   reservations.prune(now);
   // Usage records whose task never settled (lost, timed out without a result): drop after a day.
   for (const [id, u] of usagePending) if (now - u.atMs > 86_400_000) usagePending.delete(id);
@@ -4195,6 +4226,7 @@ app.post("/account/usage", async (req, reply) => {
 app.post("/account/reservations/list", async (req, reply) => {
   const caller = await callerAccount(req, "/account/reservations/list", (req.body as { accountId?: string } | undefined)?.accountId);
   if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
   const options: Record<string, { available: number; cSatsPerSecond?: number; tiers: string[]; models: string[] }> = {};
   for (const cls of ["cpu", "apple", "gpu", "gpu.dc"] as ComputeClassId[]) {
     const free = await reservableAgents(caller.accountId, cls);
@@ -4244,10 +4276,13 @@ app.post("/account/reservations/cancel", async (req, reply) => {
   const body = z.object({ reservationId: z.string().min(1).max(100), accountId: z.string().max(200).optional() }).parse(req.body);
   const caller = await callerAccount(req, "/account/reservations/cancel", body.accountId);
   if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+  // Made on another coordinator (the portal moved seeds): read it from the shared store.
+  if (!reservations.get(body.reservationId)) await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
   const r = reservations.get(body.reservationId);
   if (!r || r.accountId !== caller.accountId) return reply.code(404).send({ error: "unknown_reservation" });
   const ended = r.status === "active" ? await endReservation(r.id, "cancelled") : r;
-  return reply.send({ reservation: publicReservation(ended ?? r) });
+  // Lost the race to another coordinator: the book now holds the stored (already ended) copy.
+  return reply.send({ reservation: publicReservation(ended ?? reservations.get(r.id) ?? r) });
 });
 
 /** Models agents on the network can run now, with how many agents and the price per class. */
@@ -4288,6 +4323,7 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
   let onlyAccountId: string | undefined;
   let reservationId: string | undefined;
   if (body.reservationId) {
+    if (reservations.get(body.reservationId)?.status !== "active") await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
     const lease = reservations.get(body.reservationId);
     if (!lease || lease.accountId !== accountId || lease.status !== "active" || Date.now() >= lease.endMs) return reply.code(404).send({ error: "reservation_not_active" });
     const cap = agentCapabilities.get(lease.agentId);
@@ -4308,9 +4344,10 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
   const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
   if (reserve > 0) {
     try {
-      await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId);
+      await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: `inference_reserve:${body.taskId}` });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
       if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
       req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
       return reply.code(500).send({ error: "credit_debit_failed" });
