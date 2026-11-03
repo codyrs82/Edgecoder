@@ -62,6 +62,17 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/reservations", auth: true },
   { method: "POST", path: "/v1/ide/reservations/cancel", auth: true },
   { method: "GET", path: "/v1/ide/usage", auth: true },
+  { method: "GET", path: "/v1/ide/bots", auth: true },
+  { method: "POST", path: "/v1/ide/bots", auth: true },
+  { method: "GET", path: "/v1/ide/bots/:id", auth: true },
+  { method: "PATCH", path: "/v1/ide/bots/:id", auth: true },
+  { method: "DELETE", path: "/v1/ide/bots/:id", auth: true },
+  { method: "POST", path: "/v1/ide/bots/:id/run", auth: true },
+  { method: "POST", path: "/v1/ide/bots/:id/cancel", auth: true },
+  { method: "GET", path: "/v1/ide/bots/:id/messages", auth: true },
+  { method: "POST", path: "/v1/ide/bots/:id/messages", auth: true },
+  { method: "GET", path: "/v1/ide/bots/:id/history", auth: true },
+  { method: "POST", path: "/v1/ide/bots/:id/approve", auth: true },
   { method: "POST", path: "/v1/messages", auth: true },
   { method: "POST", path: "/v1/messages/count_tokens", auth: true }
 ] as const;

@@ -1373,3 +1373,20 @@ export function computeErrorText(err: unknown): string {
   };
   return known[code] ?? (err as Error)?.message ?? String(err);
 }
+
+// Persistent bots (:4304 /v1/ide/bots): named agents that own a job in a project folder
+import type { Bot, BotInput, BotMessage, BotRun } from "./bots";
+const botPath = (id: string, rest = "") => `/v1/ide/bots/${encodeURIComponent(id)}${rest}`;
+export const listBots = () => fsCall<{ bots: Bot[] }>("GET", "/v1/ide/bots").then((r) => r.bots);
+export const getBot = (id: string) => fsCall<{ bot: Bot; memory: string }>("GET", botPath(id));
+export const createBot = (b: BotInput) => fsCall<{ bot: Bot }>("POST", "/v1/ide/bots", b).then((r) => r.bot);
+export const updateBot = (id: string, patch: Partial<BotInput> & { memory?: string }) => fsCall<{ bot: Bot }>("PATCH", botPath(id), patch).then((r) => r.bot);
+export const deleteBot = (id: string) => fsCall<{ ok: boolean }>("DELETE", botPath(id));
+export const runBot = (id: string) => fsCall<{ started: boolean; runId?: string; bot: Bot }>("POST", botPath(id, "/run"), {});
+export const cancelBotRun = (id: string) => fsCall<{ cancelled: boolean }>("POST", botPath(id, "/cancel"), {});
+export const botMessages = (id: string) => fsCall<{ messages: BotMessage[] }>("GET", botPath(id, "/messages")).then((r) => r.messages);
+export const sendBotMessage = (id: string, content: string) => fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content });
+export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
+export const approveBotCall = (id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
+/** The server's message for a failed bot call (its `error` field). */
+export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));
