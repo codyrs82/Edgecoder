@@ -12,6 +12,8 @@ beforeEach(() => {
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@t");
   git("config", "user.name", "t");
+  // Windows runners default to core.autocrlf=true, which rewrites "one\n" as "one\r\n" on restore.
+  git("config", "core.autocrlf", "false");
   writeFileSync(join(root, "a.txt"), "one\n");
   writeFileSync(join(root, "b.txt"), "bee\n");
   git("add", ".");
