@@ -6,8 +6,8 @@ describe("hosted endpoint", () => {
   it("reads where to run from the model name", () => {
     expect(hostedTarget("network/qwen3.5:9b@gpu")).toEqual({ model: "qwen3.5:9b", computeClass: "gpu" });
     expect(hostedTarget("qwen3.5:9b")).toEqual({ model: "qwen3.5:9b", computeClass: "any" });
-    expect(hostedTarget("mine/qwen2.5-coder:7b")).toEqual({ model: "qwen2.5-coder:7b", target: "mine" });
-    expect(hostedTarget("reserved/res-1/qwen2.5-coder:32b")).toEqual({ model: "qwen2.5-coder:32b", reservationId: "res-1" });
+    expect(hostedTarget("mine/qwen2.5-coder:7b")).toEqual({ model: "qwen2.5-coder:7b", computeClass: "any", target: "mine" });
+    expect(hostedTarget("reserved/res-1/qwen2.5-coder:32b")).toEqual({ model: "qwen2.5-coder:32b", computeClass: "any", reservationId: "res-1" });
     expect(hostedTarget(undefined)).toBeNull();
   });
 
