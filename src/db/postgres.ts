@@ -12,6 +12,7 @@ import type { HardwareVerificationRecord } from "../swarm/hardware-verification.
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
+import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 function rowToPayout(row: Record<string, unknown>): PayoutRecord {
@@ -649,6 +650,20 @@ CREATE TABLE IF NOT EXISTS request_nonces (
   expires_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_nonces_expiry ON request_nonces (expires_at_ms);
+
+-- LNURL callback pins (src/economy/lnurl-callback-pin.ts): the callback origin a payout
+-- destination resolved to on first use. changed_origin is set while a different origin waits for
+-- the owner's emailed-code confirmation; notified_at_ms makes the owner notification one-shot.
+CREATE TABLE IF NOT EXISTS payout_callback_pins (
+  account_id TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  callback_origin TEXT NOT NULL,
+  pinned_at_ms BIGINT NOT NULL,
+  changed_origin TEXT,
+  changed_at_ms BIGINT,
+  notified_at_ms BIGINT,
+  PRIMARY KEY (account_id, destination)
+);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -697,6 +712,11 @@ export class PostgresStore {
   /** Request-signing nonces (src/security/nonce-verifier.ts) on the same pool. */
   nonceStore(): PostgresNonceStore {
     return new PostgresNonceStore(this.pool);
+  }
+
+  /** LNURL callback pins (src/economy/lnurl-callback-pin.ts) on the same pool. */
+  callbackPinStore(): PostgresCallbackPinStore {
+    return new PostgresCallbackPinStore(this.pool);
   }
 
   async close(): Promise<void> {
@@ -1075,6 +1095,8 @@ export class PostgresStore {
 
   /** Lightning address (user@domain or LNURL) used for automatic payouts of an account. */
   async setLightningAddress(accountId: string, lightningAddress: string | null, network: string): Promise<void> {
+    // A new destination starts unpinned; the old destination's pin (and any pending change) goes.
+    await this.callbackPinStore().resetCallbackPins(accountId, lightningAddress);
     await this.pool.query(
       `INSERT INTO wallet_accounts (account_id, wallet_type, network, payout_address, created_at_ms)
        VALUES ($1, 'lightning', $3, $2, $4)
@@ -2138,6 +2160,7 @@ export class PostgresStore {
   }
 
   async upsertWalletAccount(wallet: WalletAccount): Promise<void> {
+    await this.callbackPinStore().resetCallbackPins(wallet.accountId, wallet.payoutAddress ?? null);
     await this.pool.query(
       `INSERT INTO wallet_accounts (
         account_id, wallet_type, network, xpub, ln_node_pubkey, payout_address, encrypted_secret_ref, created_at_ms
@@ -3060,5 +3083,82 @@ export class PostgresNonceStore implements NonceStore {
 
   async prune(): Promise<void> {
     await this.pool.query(`DELETE FROM request_nonces WHERE expires_at_ms < $1`, [Date.now()]);
+  }
+}
+
+function rowToCallbackPin(row: any): CallbackPin {
+  return {
+    accountId: row.account_id,
+    destination: row.destination,
+    origin: row.callback_origin,
+    pinnedAtMs: Number(row.pinned_at_ms),
+    ...(row.changed_origin ? { changedOrigin: row.changed_origin, changedAtMs: Number(row.changed_at_ms) } : {}),
+    ...(row.notified_at_ms != null ? { notifiedAtMs: Number(row.notified_at_ms) } : {})
+  };
+}
+
+const PIN_COLUMNS = "account_id, destination, callback_origin, pinned_at_ms, changed_origin, changed_at_ms, notified_at_ms";
+
+/** LNURL callback pins (`payout_callback_pins`), shared by every coordinator on this database. */
+export class PostgresCallbackPinStore implements CallbackPinStore {
+  constructor(private readonly pool: Pool) {}
+
+  async getCallbackPin(accountId: string, destination: string): Promise<CallbackPin | null> {
+    const r = await this.pool.query(`SELECT ${PIN_COLUMNS} FROM payout_callback_pins WHERE account_id = $1 AND destination = $2`, [accountId, destination]);
+    return r.rows[0] ? rowToCallbackPin(r.rows[0]) : null;
+  }
+
+  async listCallbackPins(accountId: string): Promise<CallbackPin[]> {
+    const r = await this.pool.query(`SELECT ${PIN_COLUMNS} FROM payout_callback_pins WHERE account_id = $1 ORDER BY pinned_at_ms`, [accountId]);
+    return r.rows.map(rowToCallbackPin);
+  }
+
+  async pinCallbackOrigin(accountId: string, destination: string, origin: string, nowMs: number): Promise<CallbackPin> {
+    await this.pool.query(
+      `INSERT INTO payout_callback_pins (account_id, destination, callback_origin, pinned_at_ms) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (account_id, destination) DO NOTHING`,
+      [accountId, destination, origin, nowMs]
+    );
+    return (await this.getCallbackPin(accountId, destination))!;
+  }
+
+  async markCallbackChanged(accountId: string, destination: string, changedOrigin: string, nowMs: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE payout_callback_pins SET changed_origin = $3, changed_at_ms = $4, notified_at_ms = NULL
+       WHERE account_id = $1 AND destination = $2 AND changed_origin IS DISTINCT FROM $3`,
+      [accountId, destination, changedOrigin, nowMs]
+    );
+  }
+
+  async claimCallbackNotification(accountId: string, destination: string, nowMs: number): Promise<CallbackPin | null> {
+    const r = await this.pool.query(
+      `UPDATE payout_callback_pins SET notified_at_ms = $3
+       WHERE account_id = $1 AND destination = $2 AND changed_origin IS NOT NULL AND notified_at_ms IS NULL
+       RETURNING ${PIN_COLUMNS}`,
+      [accountId, destination, nowMs]
+    );
+    return r.rows[0] ? rowToCallbackPin(r.rows[0]) : null;
+  }
+
+  async releaseCallbackNotification(accountId: string, destination: string): Promise<void> {
+    await this.pool.query(`UPDATE payout_callback_pins SET notified_at_ms = NULL WHERE account_id = $1 AND destination = $2`, [accountId, destination]);
+  }
+
+  async confirmCallbackChange(accountId: string, destination: string, changedOrigin: string, nowMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `UPDATE payout_callback_pins SET callback_origin = changed_origin, pinned_at_ms = $4, changed_origin = NULL, changed_at_ms = NULL, notified_at_ms = NULL
+       WHERE account_id = $1 AND destination = $2 AND changed_origin = $3`,
+      [accountId, destination, changedOrigin, nowMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** Infrastructure-host addresses of the same account keep their pins (they did not change). */
+  async resetCallbackPins(accountId: string, keepDestination: string | null): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM payout_callback_pins WHERE account_id = $1 AND destination IS DISTINCT FROM $2
+         AND destination NOT IN (SELECT lightning_address FROM infrastructure_hosts WHERE account_id = $1 AND lightning_address IS NOT NULL)`,
+      [accountId, keepDestination]
+    );
   }
 }

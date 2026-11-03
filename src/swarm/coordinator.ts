@@ -99,6 +99,7 @@ import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type Payout
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
 import { payoutPolicyFromEnv } from "../economy/payouts.js";
+import { MemoryCallbackPinStore, callbackPinStatus, type CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { validateLightningAddress } from "../economy/payout-destination.js";
 import { fetchPublicJson } from "../security/public-fetch.js";
 import type { CreditTransaction, InfrastructureHost } from "../common/types.js";
@@ -975,8 +976,27 @@ const payoutProvider: LightningProvider = {
   getBalances: lightningProvider.getBalances ? () => lightningProvider.getBalances!() : undefined,
   listPayments: lightningProvider.listPayments ? (input) => lightningProvider.listPayments!(input) : undefined
 };
+// LNURL callback pins (src/economy/lnurl-callback-pin.ts). A changed callback host holds the
+// account's auto payouts and tells the portal once, which emails the owner (/internal/payouts/callback-changed).
+const callbackPins: CallbackPinStore = pgStore ? pgStore.callbackPinStore() : new MemoryCallbackPinStore();
+async function notifyPortalCallbackChanged(info: { accountId: string; destination: string; previousOrigin: string; newOrigin: string }): Promise<boolean> {
+  if (!PORTAL_SERVICE_URL) return false;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
+  const res = await request(`${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/payouts/callback-changed`, {
+    method: "POST",
+    headers,
+    headersTimeout: 5_000,
+    bodyTimeout: 5_000,
+    body: JSON.stringify(info)
+  });
+  await res.body.dump();
+  return res.statusCode >= 200 && res.statusCode < 300;
+}
 const payoutService = new PayoutService({
   store: payoutStore,
+  pins: callbackPins,
+  onCallbackChanged: notifyPortalCallbackChanged,
   provider: payoutProvider,
   policy: payoutPolicy,
   limits: payoutLimits,
@@ -4574,8 +4594,8 @@ app.get("/economy/rates/history", async (req, reply) => {
 app.get("/economy/payouts/:accountId", async (req, reply) => {
   if (!requirePortalServiceToken(req as any, reply)) return;
   const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const [balance, payouts] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100)]);
-  return { accountId, balance, payouts, policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused() } };
+  const [balance, payouts, pins] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100), callbackPins.listCallbackPins(accountId)]);
+  return { accountId, balance, payouts, callbackPins: callbackPinStatus(pins), policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused() } };
 });
 app.post("/economy/payouts/withdraw", async (req, reply) => {
   if (!requirePortalServiceToken(req as any, reply)) return;
@@ -4595,12 +4615,32 @@ app.post("/economy/payouts/address", async (req, reply) => {
   if (address && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) && !/^https:\/\//i.test(address) && !/^lnurl1/i.test(address)) {
     return reply.code(400).send({ error: "invalid_lightning_address" });
   }
-  if (pgStore) await pgStore.setLightningAddress(body.accountId, address, BITCOIN_NETWORK);
+  if (pgStore) await pgStore.setLightningAddress(body.accountId, address, BITCOIN_NETWORK); // resets the old destination's callback pin
   else if (memoryPayoutStore) {
+    await callbackPins.resetCallbackPins(body.accountId, address);
     if (address) memoryPayoutStore.autoAccounts.set(body.accountId, address);
     else memoryPayoutStore.autoAccounts.delete(body.accountId);
   }
+  // Pin the callback host now, in the background so the portal's save is not held up by the
+  // wallet's server; if the address does not resolve, it is pinned at its first payout.
+  if (address) {
+    void payoutService.pinDestination(body.accountId, address)
+      .then((r) => app.log.info({ accountId: body.accountId, result: r.ok ? r.pinned : r.code }, "payout_callback_pin_on_save"))
+      .catch((error) => app.log.warn({ error: String(error) }, "payout_callback_pin_on_save_failed"));
+  }
   return { accountId: body.accountId, lightningAddress: address };
+});
+// The owner confirmed (portal, emailed code) that the destination's new payment server is theirs:
+// re-pin to it and resume payouts. Only the change on record can be confirmed.
+app.post("/economy/payouts/callback/confirm", async (req, reply) => {
+  if (!requirePortalServiceToken(req as any, reply)) return;
+  const parsed = z.object({ accountId: z.string().min(1).max(128), destination: z.string().min(3).max(512), newOrigin: z.string().min(8).max(300) }).safeParse(req.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ ok: false, error: "invalid_request" });
+  const { accountId, destination, newOrigin } = parsed.data;
+  const ok = await callbackPins.confirmCallbackChange(accountId, destination, newOrigin, Date.now());
+  if (!ok) return reply.code(409).send({ ok: false, error: "callback_change_not_pending" });
+  app.log.info({ accountId, destination, newOrigin }, "payout_callback_change_confirmed");
+  return { ok: true, callbackPins: callbackPinStatus(await callbackPins.listCallbackPins(accountId)) };
 });
 // Remote infrastructure hosts: signed by the host's coordinator key (the one the mesh admitted for
 // hostId), single-use, and only attested services count (src/economy/host-attestation.ts).

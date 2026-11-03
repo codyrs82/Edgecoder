@@ -27,6 +27,7 @@ export type SecurityEventType =
   | "host_heartbeat_rejected"
   | "payout_limit_exceeded"
   | "payout_blocked_paused"
+  | "payout_callback_changed"
   | "payouts_paused"
   | "payouts_resumed"
   | "payout_reconciliation_mismatch"
@@ -66,6 +67,7 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   host_heartbeat_rejected: "HIGH",
   payout_limit_exceeded: "HIGH",
   payout_blocked_paused: "WARN",
+  payout_callback_changed: "HIGH",
   payouts_paused: "CRITICAL",
   payouts_resumed: "HIGH",
   payout_reconciliation_mismatch: "CRITICAL",

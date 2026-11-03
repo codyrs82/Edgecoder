@@ -83,7 +83,7 @@ const AUTH_ROUTES: RegExp[] = [
 // page's list) must not share this bucket.
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
 // Withdraw (the code request and the confirm) shares the wallet bucket.
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/];
+const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/, /^\/wallet\/payout-destination\/callback\/confirm$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
