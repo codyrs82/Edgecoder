@@ -138,6 +138,35 @@ account.
 - **Lifecycle:** it stops when idle and starts again when you pick it in the chat box. Settings are
   kept, and nothing runs without your say-so.
 
+### Organization pools: one company, one cluster
+
+Every account whose email is on the same company domain pools its machines. Inside the pool,
+compute is "free first", as it already is between one person's own machines. Together the
+company's computers work as one large cluster.
+
+- **Who's in the organization:**
+  - Membership comes from a verified domain, not from the email claim alone. An admin proves
+    ownership with a DNS TXT record. Accounts then join after verifying their email on that
+    domain, either with a link sent to them or through the company's SSO.
+  - Generic and free-mail domains (gmail.com, outlook.com, icloud.com, proton.me and so on) can
+    never form an organization.
+  - An SSO provider's email claim is never trusted unless it is verified.
+- **Routing:** Auto tries the user's reserved machines first, then this computer, then their own
+  machines, then the organization's machines (free), and only then paid network compute.
+  - Organization machines are used at no charge.
+  - Admins can cap how much of each machine the pool may use, and can keep specific machines out.
+  - Work stays inside the organization unless a user allows network compute.
+- **Pricing:**
+  - Membership is $9.99 per user per month, charged on every account.
+  - Enterprise licensing is "contact us": SSO and SCIM, admin controls, usage reports, and
+    private coordinators.
+  - In line with "value moves in bitcoin" above, the subscription settles in sats: the USD price
+    is converted at the live rate.
+- **Admin:**
+  - An organization page lists members and machines, shows pooled capacity and usage per member,
+    and lets admins remove members or machines.
+  - Leaving the domain or being removed takes a user out of the pool right away.
+
 ### Global coordinator entry points
 
 Question: should `coordinator.edgecoder.io` (or `mesh.edgecoder.io`) be load balancers that send
