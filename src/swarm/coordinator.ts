@@ -186,6 +186,7 @@ import {
   type VerificationOutcome
 } from "./verification.js";
 import { HardwareVerifier, hardwareVerificationConfigFromEnv, type HardwareVerificationRecord } from "./hardware-verification.js";
+import { agentHasModel, normalizeReportedModels, resultModelMismatch, routableModels, subtaskModelEligible } from "./model-catalog.js";
 import type { ChallengeResponse } from "./benchmark.js";
 import {
   applyBleSyncBatch,
@@ -543,6 +544,8 @@ const agentCapabilities = new Map<
     localModelEnabled: boolean;
     localModelProvider: "edgecoder-local" | "ollama-local";
     localModelCatalog: string[];
+    /** #54: localModelCatalog came from the agent's signed /api/tags report (not assumed or gossiped). */
+    modelsReported?: boolean;
     clientType: string;
     swarmEnabled: boolean;
     ideEnabled: boolean;
@@ -2697,6 +2700,8 @@ const heartbeatSchema = z.object({
     .optional(),
   activeModel: z.string().optional(),
   activeModelParamSize: z.number().optional(),
+  /** #54: models in the agent's Ollama (/api/tags); refreshes the catalog. Signed heartbeats only. */
+  installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
   modelSwapInProgress: z.boolean().optional(),
   sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
   /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
@@ -2784,6 +2789,8 @@ const resultSchema = z.object({
   durationMs: z.number(),
   reportNonce: z.string().optional(),
   reportSignature: z.string().optional(),
+  /** #54: the model that produced the result (newer agents; covered by the request signature). */
+  model: z.string().min(1).max(200).optional(),
   receipt: agentReceiptClaimSchema.optional() // work receipt claim signed by the agent (src/receipts)
 });
 
@@ -2846,15 +2853,18 @@ app.post("/register", async (req, reply) => {
     mode: body.mode,
     localModelEnabled: true
   });
+  const reportedModels = normalizeReportedModels(body.installedModels);
   agentCapabilities.set(body.agentId, {
     os: body.os,
     version: body.version,
     mode: body.mode,
     localModelEnabled: true,
     localModelProvider: body.localModelProvider,
-    // What the agent reports it has installed; older agents don't say, so assume the default model.
-    localModelCatalog: body.installedModels?.length ? body.installedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
-    ...(body.activeModel || body.installedModels?.length ? { activeModel: body.activeModel ?? body.installedModels![0] } : {}),
+    // What the agent reports it has installed (signed /register). Older agents don't say: the default
+    // model is assumed for display, but an assumed catalog never makes them eligible for a named model (#54).
+    localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
+    modelsReported: reportedModels.length > 0,
+    ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
     clientType: body.clientType,
     swarmEnabled: true,
     ideEnabled: body.mode === "ide-enabled",
@@ -3028,6 +3038,17 @@ app.post("/heartbeat", async (req, reply) => {
     if (existing) {
       existing.lastSeenMs = now;
       agentCapabilities.set(body.agentId, existing);
+    }
+  }
+  // #54: a signed heartbeat refreshes the installed-model catalog (a model pulled or removed since
+  // /register). Unsigned heartbeats (non-production only) can't change what the agent is routed.
+  if (body.installedModels !== undefined && verified) {
+    const existing = agentCapabilities.get(body.agentId);
+    const models = normalizeReportedModels(body.installedModels);
+    if (existing && models.length) {
+      existing.localModelCatalog = models;
+      existing.modelsReported = true;
+      if (!existing.activeModel || !models.includes(existing.activeModel)) existing.activeModel = models[0];
     }
   }
   if (body.activeModel !== undefined) {
@@ -3433,8 +3454,9 @@ app.post("/pull", async (req, reply) => {
     // The book enforces the bid's class, price and constraints. The subtask's own constraints are
     // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
     (subtask) => {
-      // Inference runs the requested model as is: only an agent that has it may take the job.
-      const hasModel = subtask.kind !== "inference" || agentHasModel(capability, subtask.requestedModel);
+      // #54: a job that names a model goes only to an agent that reported it (inference: installed;
+      // code: its active model, which is what code work runs on).
+      const hasModel = subtaskModelEligible(capability, subtask);
       const meta = subtask.projectMeta;
       if (lease) return meta.reservationId === lease.id && hasModel;
       if (meta.reservationId) return false;
@@ -3920,6 +3942,7 @@ app.post("/result", async (req, reply) => {
         agentId: rawBody.agentId,
         reportNonce: rawBody.reportNonce,
         reportSignature: rawBody.reportSignature,
+        model: rawBody.model,
         receipt: rawBody.receipt,
       });
       app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
@@ -3987,6 +4010,11 @@ app.post("/result", async (req, reply) => {
     if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
   }
   const subtask = isPeerForward ? undefined : claim?.subtask;
+  // #54: the agent says (signed) which model ran; it must be the one requested.
+  if (subtask && resultModelMismatch(subtask.requestedModel, body.model)) {
+    app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId, requestedModel: subtask.requestedModel, reportedModel: body.model }, "result_model_mismatch");
+    return reply.code(409).send({ error: "result_model_mismatch", requestedModel: subtask.requestedModel });
+  }
   // The claimed subtask says which task this result belongs to. Workers before 1.4.12 derived the
   // task id of an encrypted (envelope) task from the subtask id, so the requester's poll, which
   // matches on task id, never found the result.
@@ -4069,11 +4097,6 @@ app.post("/result", async (req, reply) => {
 const inferenceStreams = new InferenceStreams();
 setInterval(() => inferenceStreams.prune(), 60_000).unref?.();
 const INFERENCE_MAX_TIMEOUT_MS = 300_000;
-
-function agentHasModel(cap: { activeModel?: string; localModelCatalog?: string[] } | undefined, model: string | undefined): boolean {
-  if (!cap || !model) return false;
-  return cap.activeModel === model || (cap.localModelCatalog ?? []).includes(model);
-}
 
 const inferenceSubmitSchema = z.object({
   taskId: z.string().min(1).max(200),
@@ -4327,8 +4350,8 @@ app.get("/inference/models", async () => {
   for (const [id, cap] of agentCapabilities) {
     if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
     const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
-    for (const m of new Set([...(cap.localModelCatalog ?? []), ...(cap.activeModel ? [cap.activeModel] : [])])) {
-      if (!m || m === "edgecoder-default") continue;
+    // #54: only models the agent reported (what it can actually be routed).
+    for (const m of new Set(routableModels(cap))) {
       const e = byModel.get(m) ?? { agents: 0, classes: new Set<ComputeClassId>() };
       e.agents++;
       e.classes.add(cls);
@@ -5661,7 +5684,10 @@ async function handleMeshIngest(
       // knows they can accept task_offers via gossip (without full /register).
       if (payload.role === "agent" || payload.role === "phone") {
         const existing = agentCapabilities.get(payload.peerId);
-        if (existing) {
+        // #54: gossip never rewrites the models of an agent that registered here (signed report).
+        if (existing && existing.version !== "mesh-peer") {
+          existing.lastSeenMs = Date.now();
+        } else if (existing) {
           existing.activeModel = payload.models[0];
           existing.localModelCatalog = payload.models;
           existing.maxConcurrentTasks = payload.maxConcurrentTasks;
@@ -6890,7 +6916,8 @@ app.post("/orchestration/agents/:agentId/ack", async (req, reply) => {
     const cap = agentCapabilities.get(params.agentId);
     if (cap) {
       cap.localModelProvider = current.provider;
-      cap.localModelCatalog = current.provider === "ollama-local" ? [current.model ?? OLLAMA_MODEL] : ["edgecoder-default"];
+      // #54: a reported catalog is refreshed by the agent's own next report, not assumed here.
+      if (!cap.modelsReported) cap.localModelCatalog = current.provider === "ollama-local" ? [current.model ?? OLLAMA_MODEL] : ["edgecoder-default"];
       agentCapabilities.set(params.agentId, cap);
     }
   }
