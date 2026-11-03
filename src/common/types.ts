@@ -373,6 +373,8 @@ export interface WalletAccount {
   payoutAddress?: string;
   encryptedSecretRef?: string;
   createdAtMs: number;
+  /** The old server-generated payout address was retired; the user must set a destination. */
+  payoutInvalidatedAtMs?: number;
 }
 
 export interface PaymentIntent {

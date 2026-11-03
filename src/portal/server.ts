@@ -19,6 +19,7 @@ import { registerPasskeyRoutes } from "./routes/passkey.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
+import { createPayoutRegistrar, registerPayoutDestinationRoutes } from "./routes/payout-destination.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
@@ -39,7 +40,6 @@ import {
   verifyAuthenticationResponse
 } from "@simplewebauthn/server";
 import { PortalStore } from "./store.js";
-import { generateMnemonic } from "bip39";
 import {
   sha256Hex,
   normalizeEmail,
@@ -55,8 +55,6 @@ import {
   base64UrlFromBuffer,
   bufferFromBase64Url,
   normalizeBase64UrlString,
-  deriveWalletSecretRef,
-  deriveBitcoinAddress,
   generateSixDigitCode,
   deriveIosDeviceIdFromNodeId,
   normalizePasskeyResponsePayload,
@@ -171,7 +169,6 @@ const PASSKEY_ALLOWED_ORIGINS = (() => {
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./pages/urls.js";
 const WALLET_DEFAULT_NETWORK = C.WALLET_DEFAULT_NETWORK;
 const NODE_ENV = C.NODE_ENV;
-const WALLET_SECRET_PEPPER = C.WALLET_SECRET_PEPPER ?? "";
 const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
   (C.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
     .split(",")
@@ -239,11 +236,6 @@ function validatePortalSecurityConfig(): void {
     throw new Error("PASSKEY_CHALLENGE_TTL_MS must be a positive number.");
   }
 
-  // No default pepper is allowed; wallet onboarding requires an explicit secret.
-  if (!WALLET_SECRET_PEPPER) {
-    throw new Error("WALLET_SECRET_PEPPER is required for wallet onboarding.");
-  }
-
   if (NODE_ENV !== "production") return;
 
   const problems = portalProductionProblems(C, discoveryConfigured());
@@ -296,7 +288,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail } = createPortalMailer(
+const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -372,126 +364,6 @@ async function ensureCreditAccountForUser(user: { userId: string; email: string 
       ownerUserId: user.userId
     })
   }).catch(() => undefined);
-}
-
-async function ensureStarterWalletForUser(user: { userId: string; email: string }): Promise<{
-  created: boolean;
-  accountId: string;
-  network: "bitcoin" | "testnet" | "signet";
-  derivedAddress?: string;
-  seedPhrase?: string;
-  guidance?: { title: string; steps: string[] };
-}> {
-  const accountId = `acct-${user.userId}`;
-  const existing = await store?.getWalletOnboardingByUserId(user.userId);
-  if (existing) {
-    return { created: false, accountId: existing.accountId, network: existing.network as any };
-  }
-
-  const seedPhrase = generateMnemonic(128);
-  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
-  const derivedAddress = deriveBitcoinAddress(seedPhrase, WALLET_DEFAULT_NETWORK);
-  await store?.createWalletOnboarding({
-    userId: user.userId,
-    accountId,
-    network: WALLET_DEFAULT_NETWORK,
-    seedPhraseHash: sha256Hex(seedPhrase),
-    encryptedPrivateKeyRef,
-    derivedAddress
-  });
-
-  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
-    await request(`${CONTROL_PLANE_URL}/economy/wallets/register`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}`
-      },
-      body: JSON.stringify({
-        accountId,
-        walletType: "lightning",
-        network: WALLET_DEFAULT_NETWORK,
-        encryptedSecretRef: encryptedPrivateKeyRef,
-        payoutAddress: derivedAddress
-      })
-    }).catch(() => undefined);
-  }
-
-  return {
-    created: true,
-    accountId,
-    network: WALLET_DEFAULT_NETWORK,
-    seedPhrase,
-    derivedAddress,
-    guidance: {
-      title: "Protect your recovery seed and private key",
-      steps: [
-        "Write the seed phrase on paper and store it offline in two separate secure locations.",
-        "Never screenshot or send the seed phrase over email, chat, or cloud notes.",
-        "Enable device passcode/biometric lock and keep iOS updated.",
-        "Treat the private key as high-risk secret material; export only with explicit intent.",
-        "Confirm backup by re-entering the seed phrase in-app before moving funds."
-      ]
-    }
-  };
-}
-
-async function setupWalletSeedForUser(user: { userId: string; email: string }): Promise<{
-  accountId: string;
-  network: "bitcoin" | "testnet" | "signet";
-  seedPhrase: string;
-  derivedAddress: string;
-  guidance: { title: string; steps: string[] };
-}> {
-  const existing = await store?.getWalletOnboardingByUserId(user.userId);
-  const accountId = existing?.accountId ?? `acct-${user.userId}`;
-  const network = (existing?.network as "bitcoin" | "testnet" | "signet" | undefined) ?? WALLET_DEFAULT_NETWORK;
-  const seedPhrase = generateMnemonic(128);
-  const encryptedPrivateKeyRef = deriveWalletSecretRef(seedPhrase, accountId, WALLET_SECRET_PEPPER);
-  const derivedAddress = deriveBitcoinAddress(seedPhrase, network);
-
-  await store?.upsertWalletOnboardingSeed({
-    userId: user.userId,
-    accountId,
-    network,
-    seedPhraseHash: sha256Hex(seedPhrase),
-    encryptedPrivateKeyRef,
-    derivedAddress
-  });
-
-  if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
-    await request(`${CONTROL_PLANE_URL}/economy/wallets/register`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${CONTROL_PLANE_ADMIN_TOKEN}`
-      },
-      body: JSON.stringify({
-        accountId,
-        walletType: "lightning",
-        network,
-        encryptedSecretRef: encryptedPrivateKeyRef,
-        payoutAddress: derivedAddress
-      })
-    }).catch(() => undefined);
-  }
-
-  return {
-    accountId,
-    network,
-    seedPhrase,
-    derivedAddress,
-    guidance: {
-      title: "Protect your recovery seed and private key",
-      steps: [
-        "Write the seed phrase on paper and store it offline in two separate secure locations.",
-        "Never screenshot or send the seed phrase over email, chat, or cloud notes.",
-        "Enable device passcode/biometric lock and keep iOS updated.",
-        "Treat the private key as high-risk secret material; export only with explicit intent.",
-        "Confirm backup by re-entering the seed phrase in-app before moving funds."
-      ]
-    }
-  };
 }
 
 async function createSessionForUser(userId: string, reply: any): Promise<string> {
@@ -933,16 +805,21 @@ app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
 
-const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword };
+const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
 const passkeyRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse };
 export type PasskeyRoutesDeps = typeof passkeyRouteDeps;
 registerPasskeyRoutes(app, passkeyRouteDeps);
-const walletRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_SEND_MFA_TTL_MS, ensureCreditAccountForUser, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, setupWalletSeedForUser, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse };
+const walletRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_DEFAULT_NETWORK, WALLET_SEND_MFA_TTL_MS, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse };
 export type WalletRoutesDeps = typeof walletRouteDeps;
 registerWalletRoutes(app, walletRouteDeps);
+registerPayoutDestinationRoutes(app, {
+  store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
+  sendCode: sendPayoutDestinationCodeEmail, generateSixDigitCode, sha256Hex, secureCompare,
+  register: createPayoutRegistrar({ controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal })
+});
 const accountRouteDeps = { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);

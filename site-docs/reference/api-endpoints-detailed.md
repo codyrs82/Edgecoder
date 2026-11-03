@@ -80,8 +80,9 @@ Authentication and payload specifics should be validated against runtime code an
 | POST | `/nodes/enroll` | enroll new node |
 | GET | `/dashboard/summary` | account dashboard summary |
 | GET | `/portal/coordinator-ops` | coordinator operations dashboard |
-| GET | `/wallet/onboarding` | wallet bootstrap flow |
-| POST | `/wallet/onboarding/acknowledge` | wallet backup acknowledgement |
+| GET | `/wallet/payout-destination` | where payouts go (the user's own Lightning address) |
+| PUT | `/wallet/payout-destination` | set it; changing it needs an emailed code |
+| GET | `/wallet/onboarding` | deprecated status for old clients (no wallet is created) |
 
 ## Inference Service
 

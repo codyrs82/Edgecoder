@@ -52,9 +52,9 @@ describe("portal payout routes", () => {
     expect(w.json()).toMatchObject({ ok: false, code: "below_minimum" });
     expect(seen[1].body).toMatchObject({ accountId: "acct-u1", bolt11: "lnbc10u1p0000000000000000000000000000" });
 
+    // The address for automatic payouts moved to PUT /wallet/payout-destination (email code on change).
     const a = await portal.inject({ method: "POST", url: "/wallet/payouts/address", payload: { lightningAddress: "cody@example.com" } });
-    expect(a.statusCode).toBe(200);
-    expect(a.json()).toEqual({ accountId: "acct-u1", lightningAddress: "cody@example.com" });
+    expect(a.statusCode).toBe(404);
   });
 
   it("requires a session", async () => {

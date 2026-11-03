@@ -11,7 +11,6 @@ import {
   base64UrlFromBuffer,
   bufferFromBase64Url,
   normalizeBase64UrlString,
-  deriveWalletSecretRef,
   generateSixDigitCode,
   deriveIosDeviceIdFromNodeId,
   encodeCookie,
@@ -211,28 +210,6 @@ describe("normalizeBase64UrlString", () => {
 
   test("returns undefined for empty string", () => {
     expect(normalizeBase64UrlString("")).toBeUndefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// deriveWalletSecretRef
-// ---------------------------------------------------------------------------
-describe("deriveWalletSecretRef", () => {
-  test("deterministic: same inputs produce same output", () => {
-    const a = deriveWalletSecretRef("seed", "acct1", "pepper1");
-    const b = deriveWalletSecretRef("seed", "acct1", "pepper1");
-    expect(a).toBe(b);
-  });
-
-  test("output starts with 'seed-sha256:'", () => {
-    const ref = deriveWalletSecretRef("seed", "acct1", "pepper1");
-    expect(ref.startsWith("seed-sha256:")).toBe(true);
-  });
-
-  test("different pepper produces a different result", () => {
-    const a = deriveWalletSecretRef("seed", "acct1", "pepper1");
-    const b = deriveWalletSecretRef("seed", "acct1", "pepper2");
-    expect(a).not.toBe(b);
   });
 });
 

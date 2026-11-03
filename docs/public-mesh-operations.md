@@ -223,7 +223,7 @@ Model access boundary:
 - Passkeys are supported for portal and iOS login (`/auth/passkey/*` endpoints).
 - Email verification is required (Resend integration with `RESEND_API_KEY`, `RESEND_FROM_EMAIL`).
 - First-time signup bootstraps a starter wallet onboarding record and returns seed-protection guidance.
-- Seed backup acknowledgement endpoints: `GET /wallet/onboarding`, `POST /wallet/onboarding/acknowledge`.
+- Payout destination: `GET`/`PUT /wallet/payout-destination` (a Lightning address from the user's own wallet; the server never generates wallet keys).
 - iOS/mobile summary endpoint: `GET /ios/dashboard`.
 - Unverified accounts with enrolled agents/coordinators remain dormant and cannot register.
 - Even after email verification, nodes require coordinator approval to become active.

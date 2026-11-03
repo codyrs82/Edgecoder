@@ -1058,13 +1058,16 @@ app.post("/economy/wallets/register", async (req, reply) => {
     .object({
       accountId: z.string(),
       walletType: z.enum(["lightning", "onchain"]),
-      network: z.enum(["bitcoin", "testnet", "signet"]).default("testnet"),
+      network: z.enum(["bitcoin", "testnet", "signet", "regtest"]).default("testnet"),
       xpub: z.string().optional(),
       lnNodePubkey: z.string().optional(),
-      payoutAddress: z.string().optional(),
+      payoutAddress: z.string().max(256).optional(),
       encryptedSecretRef: z.string().optional()
     })
     .parse(req.body);
+  // Server-generated seed wallets are retired (PostgresStore.invalidateServerSeedWallets); a stale
+  // portal must not register a new one.
+  if (body.encryptedSecretRef?.startsWith("seed-sha256:")) return reply.code(400).send({ error: "server_generated_wallets_retired" });
   await pgStore.upsertWalletAccount({
     accountId: body.accountId,
     walletType: body.walletType,

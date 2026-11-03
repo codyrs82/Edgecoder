@@ -1,33 +1,32 @@
 <script lang="ts">
   import ErrorBanner from "../components/ErrorBanner.svelte";
-  import SeedPhraseModal from "../components/SeedPhraseModal.svelte";
   import {
-    getWalletOnboarding,
-    setupWalletSeed,
+    getPayoutDestination,
+    savePayoutDestination,
     getWalletSendRequests,
-    type WalletOnboarding,
-    type WalletSeedSetup,
+    type PayoutDestinationView,
     type WalletSendRequest,
   } from "../lib/api";
 
-  let onboarding = $state<WalletOnboarding | null>(null);
+  let payout = $state<PayoutDestinationView | null>(null);
   let sendRequests = $state<WalletSendRequest[]>([]);
   let loading = $state(true);
   let error = $state("");
 
-  // Seed phrase modal state
-  let seedSetup = $state<WalletSeedSetup | null>(null);
-  let showSeedModal = $state(false);
-  let settingUpSeed = $state(false);
+  // "Where should we pay you?" card
+  let destInput = $state("");
+  let emailCode = $state("");
+  let challengeId = $state<string | null>(null);
+  let destError = $state("");
+  let destInfo = $state("");
+  let saving = $state(false);
 
   async function loadWallet() {
     error = "";
     try {
-      const [ob, reqs] = await Promise.all([
-        getWalletOnboarding(),
-        getWalletSendRequests(),
-      ]);
-      onboarding = ob;
+      const [view, reqs] = await Promise.all([getPayoutDestination(), getWalletSendRequests()]);
+      payout = view;
+      if (view.destination && !destInput) destInput = view.destination.destination;
       sendRequests = reqs;
     } catch (e) {
       error = (e as Error).message;
@@ -36,25 +35,41 @@
     }
   }
 
-  async function handleSetupSeed() {
-    settingUpSeed = true;
-    error = "";
-    try {
-      const setup = await setupWalletSeed();
-      seedSetup = setup;
-      showSeedModal = true;
-      await loadWallet();
-    } catch (e) {
-      error = (e as Error).message;
-    } finally {
-      settingUpSeed = false;
+  async function saveDestination(withCode: boolean) {
+    destError = "";
+    destInfo = "";
+    const destination = destInput.trim();
+    if (!destination) {
+      destError = "Enter a Lightning address from your wallet.";
+      return;
     }
-  }
-
-  function handleSeedDone() {
-    showSeedModal = false;
-    seedSetup = null;
-    loadWallet();
+    if (withCode && (!challengeId || !emailCode.trim())) {
+      destError = "Enter the code from the email.";
+      return;
+    }
+    saving = true;
+    try {
+      const r = await savePayoutDestination(
+        withCode ? { destination, challengeId: challengeId!, emailCode: emailCode.trim() } : { destination },
+      );
+      if (r.status === "saved") {
+        payout = r.view;
+        challengeId = null;
+        emailCode = "";
+        const reg = r.view.registration;
+        destInfo = reg && (reg.controlPlane === "ok" || reg.coordinator === "ok")
+          ? `Saved. Payouts will go to ${r.view.destination?.destination}.`
+          : "Saved here, but the payout service could not be reached. Save again later so payouts can reach you.";
+      } else if (r.status === "verification_required") {
+        challengeId = r.challengeId;
+        destInfo = r.detail;
+      } else {
+        if (withCode) challengeId = null;
+        destError = r.detail;
+      }
+    } finally {
+      saving = false;
+    }
   }
 
   function timeAgo(ts: number): string {
@@ -77,38 +92,60 @@
 
   {#if loading}
     <p class="muted">Loading wallet...</p>
-  {:else if !onboarding}
-    <div class="setup-section">
-      <h2>Set Up Your Wallet</h2>
-      <p>Generate a recovery seed phrase to receive credits for contributing compute to the mesh.</p>
-      <button class="btn-primary" onclick={handleSetupSeed} disabled={settingUpSeed}>
-        {settingUpSeed ? "Generating..." : "Set up recovery seed phrase"}
-      </button>
-    </div>
   {:else}
     <div class="section">
-      <h2>Account</h2>
+      <h2>Where should we pay you?</h2>
+      <p class="hint">
+        Earnings are paid to a wallet you control. Enter the Lightning address your wallet gives you
+        (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.
+        On-chain Bitcoin addresses are not supported for payouts yet.
+      </p>
+      {#if payout?.legacyAddressRetired && !payout?.destination}
+        <p class="notice">
+          The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
+          Nothing was ever paid to it. Your earnings are kept until you set a destination below.
+        </p>
+      {/if}
       <div class="info-grid">
-        <span class="info-label">Account ID</span>
-        <span class="info-value mono">{onboarding.accountId}</span>
-        <span class="info-label">Network</span>
-        <span class="info-value">{onboarding.network}</span>
-        {#if onboarding.derivedAddress}
-          <span class="info-label">Address</span>
-          <span class="info-value mono">{onboarding.derivedAddress}</span>
-        {/if}
-        <span class="info-label">Seed Backup</span>
-        <span class="info-value">
-          {#if onboarding.acknowledgedAtMs}
-            <span class="badge-ok">Confirmed</span>
-          {:else}
-            <span class="badge-warn">Not confirmed</span>
-            <button class="btn-sm" onclick={handleSetupSeed} disabled={settingUpSeed}>
-              {settingUpSeed ? "..." : "Generate new seed"}
-            </button>
-          {/if}
+        <span class="info-label">Current</span>
+        <span class="info-value mono">
+          {payout?.destination ? payout.destination.destination : "Not set. Payouts are held until you add one."}
         </span>
+        {#if payout}
+          <span class="info-label">Network</span>
+          <span class="info-value">{payout.network}</span>
+        {/if}
       </div>
+      <label class="field-label" for="payout-dest">Lightning address</label>
+      <div class="field-row">
+        <input
+          id="payout-dest"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="you@wallet.example"
+          bind:value={destInput}
+          aria-invalid={destError ? "true" : undefined}
+        />
+        <button class="btn-primary" onclick={() => saveDestination(false)} disabled={saving}>
+          {saving && !challengeId ? "Saving..." : "Save"}
+        </button>
+      </div>
+      {#if challengeId}
+        <label class="field-label" for="payout-code">Email code</label>
+        <div class="field-row">
+          <input id="payout-code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" bind:value={emailCode} />
+          <button class="btn-primary" onclick={() => saveDestination(true)} disabled={saving}>
+            {saving ? "Confirming..." : "Confirm change"}
+          </button>
+        </div>
+      {/if}
+      {#if destError}
+        <p class="field-error" role="alert">{destError}</p>
+      {/if}
+      {#if destInfo}
+        <p class="muted">{destInfo}</p>
+      {/if}
     </div>
 
     <div class="section">
@@ -134,21 +171,37 @@
       {/if}
     </div>
   {/if}
-
-  {#if showSeedModal && seedSetup}
-    <SeedPhraseModal
-      seedPhrase={seedSetup.seedPhrase}
-      derivedAddress={seedSetup.derivedAddress}
-      guidance={seedSetup.guidance}
-      onDone={handleSeedDone}
-    />
-  {/if}
 </div>
 
 <style>
+  .hint { color: var(--text-secondary, #94a3b8); font-size: 0.85rem; margin: 0 0 1rem; line-height: 1.5; }
+  .notice {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid #facc15;
+    border-radius: 7px;
+    color: var(--text-primary, #e2e8f0);
+  }
+  .field-label { display: block; margin: 1rem 0 0.35rem; font-size: 0.82rem; color: var(--text-muted, #94a3b8); }
+  .field-row { display: flex; gap: 0.5rem; }
+  .field-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.5rem 0.7rem;
+    border-radius: 7px;
+    border: 1px solid var(--border, #1e1e3f);
+    background: var(--bg-input, #0f0f23);
+    color: var(--text-primary, #e2e8f0);
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.85rem;
+  }
+  .field-row input[aria-invalid="true"] { border-color: #f87171; }
+  .field-error { color: #f87171; font-size: 0.85rem; margin: 0.5rem 0 0; }
   .wallet { padding: 1.5rem; max-width: 640px; }
   h1 { font-size: 1.4rem; margin: 0 0 1.5rem; color: var(--text-primary, #e2e8f0); }
-  .section, .setup-section {
+  .section {
     background: var(--bg-surface, #1a1a2e);
     border: 1px solid var(--border, #1e1e3f);
     padding: 1.2rem 1.4rem;
@@ -163,7 +216,6 @@
     letter-spacing: 0.04em;
     font-weight: 600;
   }
-  .setup-section p { color: var(--text-secondary, #94a3b8); font-size: 0.9rem; margin: 0 0 1rem; line-height: 1.5; }
   .info-grid {
     display: grid;
     grid-template-columns: 120px 1fr;
@@ -187,19 +239,6 @@
   }
   .btn-primary:hover { opacity: 0.9; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-sm {
-    padding: 0.3rem 0.6rem;
-    background: var(--accent, #3b82f6);
-    color: white;
-    border: none;
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.78rem;
-    font-weight: 600;
-  }
-  .btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
-  .badge-ok { color: var(--green, #4ade80); font-weight: 600; font-size: 0.85rem; }
-  .badge-warn { color: #facc15; font-weight: 600; font-size: 0.85rem; }
   .tx-list { display: flex; flex-direction: column; gap: 0.5rem; }
   .tx-row {
     display: flex;

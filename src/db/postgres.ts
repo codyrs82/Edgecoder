@@ -256,6 +256,8 @@ CREATE TABLE IF NOT EXISTS wallet_accounts (
   encrypted_secret_ref TEXT,
   created_at_ms BIGINT NOT NULL
 );
+ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS legacy_payout_address TEXT;
+ALTER TABLE wallet_accounts ADD COLUMN IF NOT EXISTS payout_invalidated_at_ms BIGINT;
 
 CREATE TABLE IF NOT EXISTS payment_intents (
   intent_id TEXT PRIMARY KEY,
@@ -649,6 +651,12 @@ CREATE TABLE IF NOT EXISTS request_nonces (
 CREATE INDEX IF NOT EXISTS idx_request_nonces_expiry ON request_nonces (expires_at_ms);
 `;
 
+/** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
+export const INVALIDATE_SERVER_SEED_WALLETS_SQL = `UPDATE wallet_accounts
+  SET legacy_payout_address = payout_address, payout_address = NULL, encrypted_secret_ref = NULL, payout_invalidated_at_ms = $1
+  WHERE encrypted_secret_ref LIKE 'seed-sha256:%'
+     OR (wallet_type = 'lightning' AND payout_address ~* '^(bc1|tb1|bcrt1)[a-z0-9]+$')`;
+
 /** Balance and "enough to cover $2" computed in SQL on NUMERIC, so no float comparison (#108). */
 const BALANCE_CHECK_SQL = `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
          COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) >= round($2::numeric, 6) AS enough
@@ -666,6 +674,19 @@ export class PostgresStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
+    await this.invalidateServerSeedWallets();
+  }
+
+  /**
+   * Retire payout addresses the portal derived from seeds it generated itself (the removed
+   * wallet onboarding flow registered them with a `seed-sha256:` secret ref). Nobody holds those
+   * keys, so the address moves to legacy_payout_address and payout_address becomes NULL:
+   * listAutoPayoutAccounts skips the account and its earnings stay payable until the user sets a
+   * destination. Ledger and payout rows are untouched. Idempotent (the ref is cleared).
+   */
+  async invalidateServerSeedWallets(nowMs = Date.now()): Promise<number> {
+    const r = await this.pool.query(INVALIDATE_SERVER_SEED_WALLETS_SQL, [nowMs]);
+    return Number(r.rowCount ?? 0);
   }
 
   /** Work receipts and Merkle epochs (src/receipts) on the same pool. */
@@ -1057,7 +1078,8 @@ export class PostgresStore {
     await this.pool.query(
       `INSERT INTO wallet_accounts (account_id, wallet_type, network, payout_address, created_at_ms)
        VALUES ($1, 'lightning', $3, $2, $4)
-       ON CONFLICT (account_id) DO UPDATE SET payout_address = EXCLUDED.payout_address`,
+       ON CONFLICT (account_id) DO UPDATE SET payout_address = EXCLUDED.payout_address,
+         payout_invalidated_at_ms = CASE WHEN EXCLUDED.payout_address IS NULL THEN wallet_accounts.payout_invalidated_at_ms ELSE NULL END`,
       [accountId, lightningAddress, network, Date.now()]
     );
   }
@@ -2126,7 +2148,8 @@ export class PostgresStore {
         xpub = EXCLUDED.xpub,
         ln_node_pubkey = EXCLUDED.ln_node_pubkey,
         payout_address = EXCLUDED.payout_address,
-        encrypted_secret_ref = EXCLUDED.encrypted_secret_ref`,
+        encrypted_secret_ref = EXCLUDED.encrypted_secret_ref,
+        payout_invalidated_at_ms = CASE WHEN EXCLUDED.payout_address IS NULL THEN wallet_accounts.payout_invalidated_at_ms ELSE NULL END`,
       [
         wallet.accountId,
         wallet.walletType,
@@ -2142,7 +2165,7 @@ export class PostgresStore {
 
   async getWalletAccount(accountId: string): Promise<WalletAccount | null> {
     const result = await this.pool.query(
-      `SELECT account_id, wallet_type, network, xpub, ln_node_pubkey, payout_address, encrypted_secret_ref, created_at_ms
+      `SELECT account_id, wallet_type, network, xpub, ln_node_pubkey, payout_address, encrypted_secret_ref, created_at_ms, payout_invalidated_at_ms
        FROM wallet_accounts WHERE account_id = $1`,
       [accountId]
     );
@@ -2156,7 +2179,8 @@ export class PostgresStore {
       lnNodePubkey: row.ln_node_pubkey ?? undefined,
       payoutAddress: row.payout_address ?? undefined,
       encryptedSecretRef: row.encrypted_secret_ref ?? undefined,
-      createdAtMs: Number(row.created_at_ms)
+      createdAtMs: Number(row.created_at_ms),
+      payoutInvalidatedAtMs: row.payout_invalidated_at_ms ? Number(row.payout_invalidated_at_ms) : undefined
     };
   }
 

@@ -314,7 +314,7 @@ This section was merged in from the old `README.dev.md` (#21). See [CONTRIBUTING
 - `GET /auth/verify-email`, `POST /auth/resend-verification`
 - `POST /auth/passkey/register/options` + `/verify`, `POST /auth/passkey/login/options` + `/verify`
 - `POST /nodes/enroll`, `GET /dashboard/summary`, `POST /me/theme`
-- `GET /ios/dashboard`; `GET /wallet/onboarding` + `POST /wallet/onboarding/acknowledge`
+- `GET /ios/dashboard`; `GET`/`PUT /wallet/payout-destination`
 
 The full list is in [API endpoints](site-docs/reference/api-endpoints-detailed.md).
 
