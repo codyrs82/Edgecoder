@@ -449,9 +449,9 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/wallet/onboarding` | Wallet onboarding status | session |
-| `POST` | `/wallet/onboarding/setup-seed` | Generate wallet seed | session |
-| `POST` | `/wallet/onboarding/acknowledge` | Acknowledge seed backup | session |
+| `GET` | `/wallet/payout-destination` | Where payouts go, and whether one is needed | session |
+| `PUT` | `/wallet/payout-destination` | Set the Lightning address for payouts; a change returns 202 and needs the emailed code (`{ destination, challengeId, emailCode }`). On-chain addresses are validated but refused (422) until on-chain payouts exist | session, 5/min |
+| `GET` | `/wallet/onboarding` | Deprecated status for older clients; no wallet or seed is created | session |
 | `GET` | `/wallet/send/requests` | List pending send requests | session |
 | `POST` | `/wallet/send/mfa/start` | Start MFA for wallet send | session |
 | `POST` | `/wallet/send/mfa/confirm` | Confirm MFA for wallet send | session |

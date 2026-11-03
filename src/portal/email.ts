@@ -11,6 +11,10 @@ export interface PortalMailerConfig {
   walletSendMfaTtlMs: number;
 }
 
+function escapeHtml(v: string): string {
+  return v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+}
+
 export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: string) => void }) {
   async function sendVerificationEmail(email: string, verifyToken: string): Promise<void> {
     if (!cfg.resendApiKey || !cfg.resendFromEmail) {
@@ -124,5 +128,19 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(email, "Signing in to EdgeCoder", html, "password_reset_sso_email");
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail };
+  /** One-time code to confirm changing where payouts go (routes/payout-destination.ts). */
+  async function sendPayoutDestinationCodeEmail(input: { email: string; code: string; destination: string }): Promise<void> {
+    if (!cfg.resendApiKey || !cfg.resendFromEmail) throw new Error("email_mfa_not_configured");
+    const html = `
+      <p>Someone asked to change where your EdgeCoder payouts are sent.</p>
+      <p>New payout destination: <strong>${escapeHtml(input.destination)}</strong></p>
+      <p>Your one-time code is:</p>
+      <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
+      <p>This code expires in ${Math.floor(cfg.walletSendMfaTtlMs / 60000)} minutes.</p>
+      <p>If you did not ask for this, do not share the code and change your password now.</p>
+    `;
+    await sendResendEmail(input.email, "Confirm your new EdgeCoder payout destination", html, "payout_destination_email");
+  }
+
+  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail };
 }

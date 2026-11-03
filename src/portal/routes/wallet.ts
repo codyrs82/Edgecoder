@@ -6,44 +6,26 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { WalletRoutesDeps } from "../server.js";
 
-/** #16: Wallet onboarding and send MFA (/wallet/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerWalletRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_SEND_MFA_TTL_MS, ensureCreditAccountForUser, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, setupWalletSeedForUser, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse }: WalletRoutesDeps): void {
+/** #16: Wallet send MFA (/wallet/*) and the legacy onboarding status. Moved unchanged from server.ts; server.ts passes in what it needs. */
+export function registerWalletRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_SEND_MFA_TTL_MS, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, sha256Hex, WALLET_DEFAULT_NETWORK, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse }: WalletRoutesDeps): void {
+  /**
+   * Kept for older desktop and iOS builds. The server no longer creates wallets or seed phrases;
+   * payouts go to the destination at /wallet/payout-destination. derivedAddress is always null.
+   */
   app.get("/wallet/onboarding", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const onboarding = await store.getWalletOnboardingByUserId(user.userId);
-    if (!onboarding) return reply.code(404).send({ error: "wallet_onboarding_not_found" });
+    const [legacy, destination] = await Promise.all([store.getWalletOnboardingByUserId(user.userId), store.getPayoutDestination(user.userId)]);
     return reply.send({
-      accountId: onboarding.accountId,
-      network: onboarding.network,
-      derivedAddress: onboarding.derivedAddress,
-      createdAtMs: onboarding.createdAtMs,
-      acknowledgedAtMs: onboarding.acknowledgedAtMs
+      accountId: `acct-${user.userId}`,
+      network: destination?.network ?? WALLET_DEFAULT_NETWORK,
+      derivedAddress: null,
+      createdAtMs: legacy?.createdAtMs ?? destination?.createdAtMs ?? Date.now(),
+      acknowledgedAtMs: null,
+      payoutDestination: destination ? { kind: destination.kind, destination: destination.destination } : null,
+      deprecated: "Use GET /wallet/payout-destination."
     });
-  });
-
-  app.post("/wallet/onboarding/setup-seed", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    await ensureCreditAccountForUser(user);
-    const setup = await setupWalletSeedForUser(user);
-    return reply.send({
-      ok: true,
-      accountId: setup.accountId,
-      network: setup.network,
-      derivedAddress: setup.derivedAddress,
-      guidance: setup.guidance
-    });
-  });
-
-  app.post("/wallet/onboarding/acknowledge", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    await store.acknowledgeWalletOnboarding(user.userId);
-    return reply.send({ ok: true });
   });
 
   app.get("/wallet/send/requests", async (req, reply) => {
@@ -66,8 +48,7 @@ export function registerWalletRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORI
       })
       .parse(req.body);
 
-    const walletOnboarding = await store.getWalletOnboardingByUserId(user.userId);
-    if (!walletOnboarding) return reply.code(409).send({ error: "wallet_onboarding_required" });
+    const accountId = `acct-${user.userId}`;
     const passkeys = await store.listPasskeysByUserId(user.userId);
     if (passkeys.length === 0) {
       return reply.code(409).send({ error: "passkey_required_for_wallet_send" });
@@ -91,7 +72,7 @@ export function registerWalletRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORI
     await store.createWalletSendMfaChallenge({
       challengeId,
       userId: user.userId,
-      accountId: walletOnboarding.accountId,
+      accountId,
       destination: body.destination.trim(),
       amountSats: body.amountSats,
       note: body.note?.trim() || undefined,

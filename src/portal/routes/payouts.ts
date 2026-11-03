@@ -8,7 +8,7 @@ import type { MarketRoutesDeps } from "../server.js";
 
 /**
  * Sats payouts for the logged-in user (docs/economy-math.md "Payouts"): balance and history,
- * withdraw to a BOLT11 invoice, and the Lightning address for automatic payouts. Proxies the
+ * and withdraw to a BOLT11 invoice. Proxies the
  * coordinator's /economy/payouts/* for the user's credit account with the portal service token.
  */
 export function registerPayoutRoutes(
@@ -51,11 +51,6 @@ export function registerPayoutRoutes(
     const body = z.object({ bolt11: z.string().min(20).max(4096) }).parse(req.body ?? {});
     return call("POST", "/economy/payouts/withdraw", reply, { accountId: `acct-${user.userId}`, bolt11: body.bolt11.trim() });
   });
-
-  app.post("/wallet/payouts/address", async (req, reply) => {
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const body = z.object({ lightningAddress: z.string().max(256).nullable() }).parse(req.body ?? {});
-    return call("POST", "/economy/payouts/address", reply, { accountId: `acct-${user.userId}`, lightningAddress: body.lightningAddress });
-  });
+  // The Lightning address for automatic payouts is set through PUT /wallet/payout-destination
+  // (routes/payout-destination.ts), which validates it and asks for an email code on change.
 }

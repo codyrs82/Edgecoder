@@ -538,7 +538,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WALLET_SECRET_PEPPER` | **required** | Secret pepper for wallet key derivation |
+| `WALLET_SECRET_PEPPER` | unused | Was the pepper for server-side wallet seeds, which were removed; ignored if set |
 | `WALLET_DEFAULT_NETWORK` | `signet` | Default Bitcoin network for wallets |
 | `WALLET_SEND_MFA_TTL_MS` | `600000` | MFA challenge TTL for wallet sends |
 

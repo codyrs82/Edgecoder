@@ -39,7 +39,8 @@ export const portalConfigSchema = z.object({
   GITHUB_REPO_URL: envUrl("https://github.com/codyrs82/Edgecoder"),
   /** Required in production (no localhost fallback there). */
   DOCS_SITE_URL: envUrl(),
-  WALLET_DEFAULT_NETWORK: z.enum(["bitcoin", "testnet", "signet"], { message: "must be bitcoin, testnet or signet" }).default("signet"),
+  WALLET_DEFAULT_NETWORK: z.enum(["bitcoin", "testnet", "signet", "regtest"], { message: "must be bitcoin, testnet, signet or regtest" }).default("signet"),
+  // Unused since the server stopped generating wallet seeds; still accepted so old env files parse.
   WALLET_SECRET_PEPPER: optStr,
   COORDINATOR_OPERATIONS_OWNER_EMAILS: optStr,
   SYSTEM_ADMIN_EMAILS: optStr,
@@ -66,7 +67,6 @@ export function portalProductionProblems(c: PortalConfig, discoveryConfigured: b
   if (c.NODE_ENV !== "production") return [];
   const missing: string[] = [];
   if (!c.PORTAL_SERVICE_TOKEN) missing.push("PORTAL_SERVICE_TOKEN");
-  if (!c.WALLET_SECRET_PEPPER) missing.push("WALLET_SECRET_PEPPER");
   if (!c.RESEND_API_KEY) missing.push("RESEND_API_KEY");
   if (!c.CONTROL_PLANE_URL && !discoveryConfigured) missing.push("CONTROL_PLANE_URL or COORDINATOR_DISCOVERY_URLS");
   if (c.CONTROL_PLANE_URL && !c.CONTROL_PLANE_ADMIN_TOKEN) missing.push("CONTROL_PLANE_ADMIN_TOKEN");
