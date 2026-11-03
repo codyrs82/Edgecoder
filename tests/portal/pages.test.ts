@@ -10,6 +10,7 @@ const PAGES: Record<string, string> = {
   "/terms": "Terms of Service | EdgeCoder",
   "/portal-legacy": "EdgeCoder Portal",
   "/portal": "EdgeCoder Portal | Sign in",
+  "/portal/reset-password": "EdgeCoder Portal | Reset password",
   "/portal/chat": "EdgeCoder Portal | Chat",
   "/portal/dashboard": "EdgeCoder Portal | Dashboard",
   "/portal/wallet": "EdgeCoder Portal | Wallet",

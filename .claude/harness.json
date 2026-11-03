@@ -1,0 +1,35 @@
+{
+  "_doc": "Per-repo config for .claude/hooks/*. TypeScript (npm, tsconfig.json includes src/**/*.ts). The repo has no formatter or ESLint config, so the edit hook only type-checks the project the way CI's `npm run build` does (tsc, no emit). The Stop hook runs `npm test` (vitest run), as CI's build-test job does; CI also runs test:integration, desktop, Rust and Docker jobs.",
+  "format_command": "",
+  "lint_command": ": {file}; npx --no-install tsc --noEmit -p tsconfig.json",
+  "file_globs": [
+    "src/**/*.ts"
+  ],
+  "protected_paths": [
+    ".claude/settings.json",
+    ".claude/harness.json",
+    ".claude/hooks/**",
+    ".github/workflows/**",
+    "**/migrations/**",
+    "package-lock.json",
+    "**/package-lock.json",
+    "**/Cargo.lock",
+    "deploy/**",
+    "**/Dockerfile*",
+    "**/fly*.toml",
+    ".nvmrc",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12"
+  ],
+  "generated_paths": [
+    "dist/**",
+    "**/dist/**"
+  ],
+  "test_command": "npm test",
+  "test_timeout_seconds": 900,
+  "skip_tests_when_git_clean": true,
+  "max_feedback_chars": 4000
+}

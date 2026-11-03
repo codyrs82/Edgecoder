@@ -1,0 +1,12 @@
+{
+  "_doc": "Example only. Copy the values you want into harness.json.",
+  "format_command": "ruff format {file}",
+  "lint_command": "ruff check --fix {file}",
+  "file_globs": ["*.py"],
+  "protected_paths": [".claude/settings.json", ".claude/hooks/**", ".github/workflows/**", "migrations/**", "*.lock"],
+  "generated_paths": ["gen/**", "**/*.generated.*", "**/__generated__/**", "dist/**"],
+  "test_command": "python3 -m pytest -q -x",
+  "test_timeout_seconds": 600,
+  "skip_tests_when_git_clean": true,
+  "max_feedback_chars": 4000
+}

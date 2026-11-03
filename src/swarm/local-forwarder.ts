@@ -11,7 +11,7 @@
  *   POST /forward/inference/submit | /forward/inference/stream -> the coordinator's (signed)
  *   GET  /forward/inference/models                            -> GET  {coordinator}/inference/models
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
- *   GET  /forward/health                                      -> forwarder state
+ *   GET  /forward/health                                      -> forwarder state (+ coordinator steering)
  *
  * Every route needs `Authorization: Bearer <IDE token>`; browser requests (an Origin header)
  * are refused, and the server binds 127.0.0.1 only.
@@ -43,6 +43,8 @@ export interface LocalForwarderDeps {
   token: () => string;
   /** The coordinator this agent is registered with right now, or null before registration. */
   coordinatorUrl: () => string | null;
+  /** The last coordinator-steering decision (registry pick, region, latency), for the app's Settings. */
+  steering?: () => unknown;
   /** x-mesh-token for the coordinator's global hook. */
   meshHeaders: () => Record<string, string>;
   /** Agent request-signing headers over the exact body bytes. */
@@ -91,7 +93,7 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       const coordinator = deps.coordinatorUrl();
 
       if (req.method === "GET" && path === "/forward/health") {
-        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator) });
+        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null });
       }
       if (!coordinator) return send(res, 503, { error: "agent_not_registered" });
 

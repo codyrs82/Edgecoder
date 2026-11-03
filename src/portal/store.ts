@@ -255,6 +255,13 @@ export class PortalStore {
       `CREATE TABLE IF NOT EXISTS portal_agent_challenges (
          nonce_hash TEXT PRIMARY KEY, key_type TEXT NOT NULL, public_key TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
     );
+    // Password reset links: only the SHA-256 of the token is kept; single use, short expiry.
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_password_resets (
+         token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL,
+         used_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_password_resets_user_idx ON portal_password_resets (user_id)`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -593,6 +600,60 @@ export class PortalStore {
     const row = result.rows[0];
     if (!row) return null;
     return { userId: row.user_id };
+  }
+
+  /** New reset token for a user; any older unused token for that user is invalidated in the same statement. */
+  async createPasswordReset(input: { tokenHash: string; userId: string; expiresAtMs: number }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(`DELETE FROM portal_password_resets WHERE expires_at_ms < $1`, [now - 24 * 60 * 60 * 1000]);
+    await this.pool.query(
+      `WITH invalidated AS (
+         UPDATE portal_password_resets SET used_at_ms = $4 WHERE user_id = $2 AND used_at_ms IS NULL
+       )
+       INSERT INTO portal_password_resets (token_hash, user_id, expires_at_ms, used_at_ms, created_at_ms)
+       VALUES ($1, $2, $3, NULL, $4)`,
+      [input.tokenHash, input.userId, input.expiresAtMs, now]
+    );
+  }
+
+  /** Redeem a reset token: the conditional UPDATE ... RETURNING makes it single use across instances. */
+  async consumePasswordReset(tokenHash: string): Promise<{ userId: string } | null> {
+    const now = Date.now();
+    const result = await this.pool.query(
+      `UPDATE portal_password_resets SET used_at_ms = $2
+       WHERE token_hash = $1 AND used_at_ms IS NULL AND expires_at_ms > $2
+       RETURNING user_id`,
+      [tokenHash, now]
+    );
+    const row = result.rows[0];
+    return row ? { userId: row.user_id } : null;
+  }
+
+  /** Mark every outstanding reset token for a user as used. */
+  async invalidatePasswordResets(userId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE portal_password_resets SET used_at_ms = $2 WHERE user_id = $1 AND used_at_ms IS NULL`,
+      [userId, Date.now()]
+    );
+  }
+
+  /** Reset links issued to a user since `sinceMs` (per-email rate limit). */
+  async countRecentPasswordResets(userId: string, sinceMs: number): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM portal_password_resets WHERE user_id = $1 AND created_at_ms >= $2`,
+      [userId, sinceMs]
+    );
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
+  async setUserPassword(userId: string, passwordHash: string): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET password_hash = $2 WHERE user_id = $1`, [userId, passwordHash]);
+  }
+
+  /** Sign a user out everywhere (sessions and pending native-app OAuth codes). */
+  async deleteSessionsForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_sessions WHERE user_id = $1`, [userId]);
+    await this.pool.query(`DELETE FROM portal_mobile_oauth_tokens WHERE user_id = $1`, [userId]);
   }
 
   async createSession(input: {

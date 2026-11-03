@@ -32,6 +32,7 @@ import { GitError, GitOps } from "./git-ops.js";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ConnectionManager } from "./connections.js";
+import { BotManager, agentBotRunner, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
 import { AUTO_MODEL_ID, routeInputsFrom, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
@@ -115,14 +116,8 @@ const idePullTracker = new PullTracker();
 // --- IDE Agent state ---
 
 let activeProjectRoot: string | null = null;
-const pendingApprovals = new Map<
-  string,
-  {
-    resolve: (approved: boolean) => void;
-    tool: ToolName;
-    args: Record<string, unknown>;
-  }
->();
+/** Tool calls waiting for the user, from chat turns and bot runs (`owner` says whose). */
+const pendingApprovals = new Map<string, ApprovalEntry>();
 
 // --- OpenAI-compatible endpoints ---
 
@@ -718,6 +713,34 @@ app.addHook("onClose", async () => {
   await connections.stopAll();
 });
 
+// --- Persistent bots: named agents that own a job in a project (src/apps/ide/bots.ts) ---
+
+const bots = new BotManager({
+  approvals: pendingApprovals,
+  log: (msg, extra) => app.log.warn({ extra }, msg),
+  runner: agentBotRunner({
+    // Bots run on Auto: each step at the cheapest place that fits it.
+    chat: (ctx) => chatFnFor({ target: "auto" }, process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", ctx.sendEvent, ctx.signal, `bot ${ctx.bot.name}`),
+    execute: (bot) => {
+      const executor = new ToolExecutor(bot.projectRoot);
+      return (tool, args, opts) => executor.execute(tool, args, opts);
+    },
+    systemPrompt: async (bot) => {
+      const ctx = await agentPromptContext(process.env.OLLAMA_MODEL || "qwen3.5:9b");
+      const rules = readProjectRules(bot.projectRoot);
+      return (format) => buildIdeAgentSystemPrompt(ctx, bot.projectRoot, rules, format);
+    },
+    checkpoints,
+  }),
+});
+registerBotRoutes(app, bots);
+app.addHook("onReady", async () => {
+  bots.load();
+});
+app.addHook("onClose", async () => {
+  await bots.shutdown();
+});
+
 const connectionSchema = z.object({
   name: z.string().min(1).max(80),
   target: z.enum(["local", "mine", "network", "reserved", "auto"]),
@@ -850,14 +873,14 @@ const ideChatSchema = z.object({
 });
 
 /** The agent's model calls, on the compute the chat picked. */
-function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal) {
+function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
     let where = "auto";
     const backend = autoHere((r) => {
       where = r.reason;
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
-    }, "EdgeCoder chat");
+    }, source);
     return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
   }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
@@ -867,9 +890,30 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     computeClass: compute.target === "network" ? compute.computeClass ?? "any" : "any",
     ...(compute.target === "mine" ? { target: "mine" as const } : {}),
     ...(compute.target === "reserved" ? { reservationId: compute.reservationId } : {}),
-    source: "EdgeCoder chat",
+    source,
   });
   return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+}
+
+/** What the agent's system prompt says about the models here. */
+async function agentPromptContext(chatModel: string): Promise<SystemPromptContext> {
+  let ollamaHealthy = true;
+  let installedModels: Array<{ name: string; paramSize: number }> = [];
+  let activeModelParamSize = 0;
+  let activeModelQuantization: string | undefined;
+  const size = (s: string | undefined) => parseFloat(s?.match(/([\d.]+)/)?.[1] ?? "0");
+  try {
+    const tags = await ollamaTags();
+    installedModels = tags.models.map((m) => ({ name: m.name, paramSize: size(m.details?.parameter_size) }));
+    const entry = tags.models.find((m) => m.name === chatModel);
+    if (entry) {
+      activeModelParamSize = size(entry.details?.parameter_size);
+      activeModelQuantization = entry.details?.quantization_level;
+    }
+  } catch {
+    ollamaHealthy = false;
+  }
+  return { activeModel: chatModel, activeModelParamSize, activeModelQuantization, installedModels, swarmModels: [], ollamaHealthy, queueDepth: 0, connectedAgents: 0 };
 }
 
 app.post("/v1/ide/chat", async (req, reply) => {
@@ -892,60 +936,22 @@ app.post("/v1/ide/chat", async (req, reply) => {
   const chatModel =
     body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
 
-  // Build system prompt
-  let promptCtx: SystemPromptContext | null = null;
-  try {
-    let ollamaHealthy = true;
-    let installedModels: Array<{ name: string; paramSize: number }> = [];
-    let activeModelParamSize = 0;
-    let activeModelQuantization: string | undefined;
-
-    try {
-      const tags = await ollamaTags();
-      installedModels = tags.models.map((m) => ({
-        name: m.name,
-        paramSize: parseFloat(
-          m.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0",
-        ),
-      }));
-      const entry = tags.models.find((m) => m.name === chatModel);
-      if (entry) {
-        activeModelParamSize = parseFloat(
-          entry.details.parameter_size.match(/([\d.]+)/)?.[1] ?? "0",
-        );
-        activeModelQuantization = entry.details.quantization_level;
-      }
-    } catch {
-      ollamaHealthy = false;
-    }
-
-    const ctx: SystemPromptContext = {
-      activeModel: chatModel,
-      activeModelParamSize,
-      activeModelQuantization,
-      installedModels,
-      swarmModels: [],
-      ollamaHealthy,
-      queueDepth: 0,
-      connectedAgents: 0,
-    };
-    promptCtx = ctx;
-  } catch {
-    // Non-critical — proceed without system prompt
-  }
+  const promptCtx = await agentPromptContext(chatModel);
   const projectRules = readProjectRules(projectRoot);
 
   // SSE setup
   writeSseHead(reply);
 
+  const turnId = randomUUID();
   let clientDisconnected = false;
   // The response closing before the stream ended means the client went away (the request's own
   // "close" fires as soon as its body has been read).
   reply.raw.on("close", () => {
     if (reply.raw.writableEnded) return;
     clientDisconnected = true;
-    // Clean up any pending approvals for this request
+    // Reject this request's pending approvals (not other chats' or bots').
     for (const [id, entry] of pendingApprovals) {
+      if (entry.owner !== turnId) continue;
       entry.resolve(false);
       pendingApprovals.delete(id);
     }
@@ -956,7 +962,6 @@ app.post("/v1/ide/chat", async (req, reply) => {
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
-  const turnId = randomUUID();
   checkpoints.begin(turnId, projectRoot);
   sendEvent({ type: "turn", id: turnId });
 
@@ -987,6 +992,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
             },
             tool,
             args,
+            owner: turnId,
           });
         }),
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
@@ -1081,6 +1087,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     app.log.error(error);
     process.exit(1);
   }
+  // The bot scheduler runs only in the real server (not when tests import the app).
+  bots.start();
   app.listen(listenOptions).catch((error) => {
     app.log.error(error);
     process.exit(1);

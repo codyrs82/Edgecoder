@@ -20,6 +20,8 @@ import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
 import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
+import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
+import { registryPublicKeysFromEnv } from "../discovery/registry.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
@@ -177,6 +179,53 @@ async function discoverCoordinatorFromPortal(): Promise<string | null> {
 
 let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
+/*
+ * One platform URL, steered (src/discovery/steering.ts): fetch the signed registry from the
+ * configured URL (or the portal, or the cache), verify it against the pinned registry key, and
+ * work for the lowest-latency healthy coordinator whose identity matches the registry. Off for a
+ * loopback coordinator, with EDGECODER_STEERING=off, or while no registry key is pinned.
+ */
+const REGISTRY_PUBLIC_KEYS = registryPublicKeysFromEnv(process.env);
+const STEERING_ENABLED =
+  !["off", "0", "false"].includes((process.env.EDGECODER_STEERING ?? "").trim().toLowerCase()) &&
+  !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL) &&
+  REGISTRY_PUBLIC_KEYS.length > 0;
+const STEERING_INTERVAL_MS = Math.max(60_000, Number(process.env.EDGECODER_STEERING_INTERVAL_MS ?? "600000") || 600_000);
+const coordinatorSteering = STEERING_ENABLED
+  ? createCoordinatorSteering({
+      registryUrls: registryUrlsFor(COORDINATOR_BOOTSTRAP_URL, PORTAL_URL || undefined),
+      publicKeys: REGISTRY_PUBLIC_KEYS,
+      fallbackUrl: COORDINATOR_BOOTSTRAP_URL,
+      cache: {
+        read: () => localStore.getConfig("coordinator_registry") ?? null,
+        write: (text) => localStore.setConfig("coordinator_registry", text)
+      }
+    })
+  : null;
+/** The last steering decision (shown in the app's Settings via the local forwarder). */
+let steeringStatus: SteeringResult | null = null;
+let lastSteeredAtMs = 0;
+/** True once the signed registry chose the coordinator (unsigned discovery must not override it). */
+const steeredByRegistry = (): boolean => steeringStatus?.source === "registry";
+
+/** One steering round; returns the registry pick, or null when steering is off or fell back. */
+async function steerCoordinator(): Promise<SteeringResult | null> {
+  if (!coordinatorSteering) return null;
+  lastSteeredAtMs = Date.now();
+  const result = await coordinatorSteering.steer();
+  steeringStatus = result;
+  // Coordinators the signed registry lists are trusted with exactly the listed key.
+  coordinatorTrustStore.setRegistryEntries(coordinatorSteering.trustedEntries());
+  if (result.source === "registry") {
+    if (!result.kept || result.url !== activeCoordinatorUrl) {
+      console.log(`[worker] steering: ${result.url} (${result.peerId}, region=${result.region}, ${result.latencyMs}ms${result.kept ? ", kept" : ""}; registry from ${result.registry?.from})`);
+    }
+    return result;
+  }
+  console.log(`[worker] steering fell back to ${result.url}: ${result.reason}`);
+  return null;
+}
+
 // Attempt portal-based coordinator discovery at startup
 (async () => {
   if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
@@ -185,14 +234,17 @@ let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
     const acceptCandidate =
       coordinatorTrustStore.mode === "strict" ? (c: { peerId?: string; publicKeyPem?: string }) => !c.publicKeyPem || coordinatorTrustStore.wouldTrust(c.peerId, c.publicKeyPem) : undefined;
     const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined, acceptCandidate });
-    if (picked) {
+    // A signed-registry pick (steering) wins over unsigned discovery.
+    if (picked && !steeredByRegistry()) {
       console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
       activeCoordinatorUrl = picked.url;
     }
   }
   if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
-    if (discovered) {
+    if (steeredByRegistry()) {
+      // The signed registry already chose; portal discovery does not override it.
+    } else if (discovered) {
       console.log(`[worker] Discovered coordinator from portal: ${discovered}`);
       activeCoordinatorUrl = discovered;
     } else {
@@ -234,6 +286,7 @@ if (LOCAL_FORWARD_PORT > 0) {
   createLocalForwarder({
     token: () => (forwardToken ??= resolveIdeToken()),
     coordinatorUrl: () => registeredWithUrl,
+    steering: () => steeringStatus,
     meshHeaders,
     signedHeaders,
     agentId: AGENT_ID
@@ -408,7 +461,9 @@ async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
   }
 }
 
-async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry" | "cache" | "bootstrap" }> {
+async function resolveCoordinatorUrl(): Promise<{ url: string; source: "steering" | "registry" | "cache" | "bootstrap" }> {
+  const steered = await steerCoordinator();
+  if (steered) return { url: steered.url, source: "steering" };
   const discovered = await discoverCoordinatorUrlFromRegistry();
   if (discovered) return { url: discovered, source: "registry" };
   const cached = readCachedCoordinatorUrl();
@@ -845,6 +900,15 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
+        // Re-steer now and then; hysteresis keeps the current coordinator unless another is clearly faster.
+        if (coordinatorSteering && Date.now() - lastSteeredAtMs >= STEERING_INTERVAL_MS) {
+          const steered = await steerCoordinator();
+          if (steered && steered.url !== activeCoordinatorUrl) {
+            console.log(`[agent:${AGENT_ID}] steering moved from ${activeCoordinatorUrl} to ${steered.url}`);
+            activeCoordinatorUrl = steered.url;
+            cacheCoordinatorUrl(activeCoordinatorUrl);
+          }
+        }
         // ── Sandbox policy enforcement ──
         const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
         if (sandboxError?.startsWith("sandbox_required")) {

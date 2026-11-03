@@ -14,6 +14,8 @@ export * from "./types.js";
 export * from "./dns.js";
 export * from "./nostr.js";
 export * from "./selector.js";
+export * from "./registry.js";
+export * from "./steering.js";
 
 export interface DiscoverOptions {
   /** Operator-configured URLs (COORDINATOR_DISCOVERY_URLS / COORDINATOR_BOOTSTRAP_URLS). */

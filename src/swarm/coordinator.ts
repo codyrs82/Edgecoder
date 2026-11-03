@@ -32,6 +32,7 @@ import {
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
 import { registerDiscoveryRoutes, startCoordinatorAnnouncer } from "../discovery/announce.js";
+import { createRegistryMirror } from "../discovery/registry-mirror.js";
 import { extractCode } from "../model/extract.js";
 import { SwarmQueue, leaseConfigFromEnv } from "./queue.js";
 import {
@@ -1531,6 +1532,8 @@ app.addHook("onRequest", async (req, reply) => {
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
   if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
+  // Mirror of the signed coordinator registry (clients verify the signature; no auth needed).
+  if (reqPath === "/network/registry") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
   // WARNING: register /admin/* routes ONLY inside the admin plugin below — a route added with
   // app.get("/admin/...") outside it would get no auth at all because of this skip.
@@ -5242,6 +5245,18 @@ app.get("/identity", async () => ({
   legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem)
 }));
 app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
+
+// The portal's signed coordinator registry, mirrored so the one platform URL serves it too
+// (src/discovery/registry-mirror.ts). REGISTRY_UPSTREAM_URL overrides the source.
+const REGISTRY_PORTAL_URL = PORTAL_SERVICE_URL || (process.env.PORTAL_PUBLIC_URL ?? "https://edgecoder.io");
+const registryMirror = createRegistryMirror({
+  upstreamUrl: process.env.REGISTRY_UPSTREAM_URL?.trim() || `${REGISTRY_PORTAL_URL.replace(/\/+$/, "")}/network/registry`
+});
+app.get("/network/registry", async (_req, reply) => {
+  const doc = await registryMirror.get();
+  if (!doc) return reply.code(503).send({ error: "registry_unavailable" });
+  return reply.header("cache-control", "public, max-age=30").send(doc);
+});
 
 const peerSchema = z.object({
   peerId: z.string(),

@@ -10,7 +10,9 @@
   } from "../lib/api";
   import type { Conversation } from "../lib/types";
   import type { AuthUser } from "../lib/api";
-  import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud } from "@lucide/svelte";
+  import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud, Plus } from "@lucide/svelte";
+  import { bots } from "../lib/bots-store";
+  import { botInitial, botStatusLine } from "../lib/bots";
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
 
@@ -26,9 +28,13 @@
     user?: AuthUser;
     onOpenSettings?: (section?: string) => void;
     onLogout?: () => void;
+    /** Persistent bots: shown in their own section when these are set. */
+    onSelectBot?: (id: string) => void;
+    onNewBot?: () => void;
+    activeBotId?: string | null;
   }
 
-  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout }: Props = $props();
+  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout, onSelectBot, onNewBot, activeBotId = null }: Props = $props();
 
   let searchOpen = $state(false);
   let searchEl: HTMLInputElement | undefined = $state();
@@ -251,6 +257,37 @@
     {/if}
   </nav>
 
+  {#if onSelectBot}
+    <div class="bots-section" aria-label="Bots">
+      <div class="group-label bots-label">
+        <span>Bots</span>
+        {#if onNewBot}<button class="bots-add" type="button" title="New bot" aria-label="New bot" onclick={onNewBot}><Plus size={13} /></button>{/if}
+      </div>
+      {#if $bots.length === 0}
+        {#if onNewBot}<button class="bot-row empty-bot" type="button" onclick={onNewBot}>Create a bot that owns a job</button>{/if}
+      {:else}
+        {#each $bots as bot (bot.id)}
+          <button
+            class="bot-row"
+            type="button"
+            class:active={bot.id === activeBotId}
+            aria-current={bot.id === activeBotId ? "true" : undefined}
+            onclick={() => { onSelectBot?.(bot.id); if (!inline) onClose(); }}
+            title="{bot.name}{bot.role ? ` · ${bot.role}` : ''}: {botStatusLine(bot)}"
+          >
+            <span class="bot-avatar" style="background: {bot.color}">{botInitial(bot.name)}
+              {#if bot.status === "running" || bot.status === "needs_approval"}<span class="bot-dot" class:warn={bot.status === "needs_approval"}></span>{/if}
+            </span>
+            <span class="bot-text">
+              <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
+              <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget"} class:err={bot.status === "error"}>{botStatusLine(bot)}</span>
+            </span>
+          </button>
+        {/each}
+      {/if}
+    </div>
+  {/if}
+
   {#if searchOpen || !inline}
   <div class="search-wrapper">
     <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -356,6 +393,109 @@
 </div>
 
 <style>
+  .bots-section {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    max-height: 40vh;
+    overflow-y: auto;
+    padding: 0 8px 4px;
+  }
+  .bots-label {
+    display: flex;
+    align-items: center;
+    padding-left: 4px !important;
+    padding-right: 2px !important;
+  }
+  .bots-add {
+    margin-left: auto;
+    display: inline-flex;
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    padding: 2px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .bots-add:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+  .bot-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    min-width: 0;
+  }
+  .bot-row:hover,
+  .bot-row.active {
+    background: var(--bg-surface);
+  }
+  .bot-row.empty-bot {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .bot-avatar {
+    position: relative;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .bot-dot {
+    position: absolute;
+    right: -1px;
+    bottom: -1px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--green);
+    border: 2px solid var(--bg-deep);
+  }
+  .bot-dot.warn {
+    background: var(--yellow);
+  }
+  .bot-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .bot-name {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bot-role {
+    color: var(--text-secondary);
+  }
+  .bot-status {
+    font-size: 11.5px;
+    color: var(--text-muted, var(--text-secondary));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bot-status.warn {
+    color: var(--yellow);
+  }
+  .bot-status.err {
+    color: var(--danger);
+  }
   .side-nav {
     display: flex;
     flex-direction: column;

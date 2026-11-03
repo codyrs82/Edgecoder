@@ -84,5 +84,45 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     }
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail };
+  async function sendResendEmail(to: string, subject: string, html: string, errorTag: string): Promise<boolean> {
+    if (!cfg.resendApiKey || !cfg.resendFromEmail) {
+      log.warn(`cfg.resendApiKey/cfg.resendFromEmail not set; skipping ${errorTag} send.`);
+      return false;
+    }
+    const res = await request("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { authorization: `Bearer ${cfg.resendApiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ from: cfg.resendFromEmail, to, subject, html })
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const body = await res.body.text();
+      throw new Error(`${errorTag}_failed:${res.statusCode}:${body}`);
+    }
+    return true;
+  }
+
+  /** Password reset link (the token is single use and expires after `ttlMinutes`). */
+  async function sendPasswordResetEmail(email: string, resetToken: string, ttlMinutes: number): Promise<void> {
+    const link = `${cfg.portalPublicUrl}/portal/reset-password?token=${encodeURIComponent(resetToken)}`;
+    const html = `
+      <p>Someone asked to reset the password for your EdgeCoder account.</p>
+      <p><a href="${link}">${link}</a></p>
+      <p>This link works once and expires in ${ttlMinutes} minutes. Resetting signs you out on every device.</p>
+      <p>If you did not ask for this, ignore this email; your password stays the same.</p>
+    `;
+    await sendResendEmail(email, "Reset your EdgeCoder password", html, "password_reset_email");
+  }
+
+  /** Reset requested for an account that has no password (it signs in with SSO or a passkey). */
+  async function sendPasswordResetSsoNoticeEmail(email: string): Promise<void> {
+    const html = `
+      <p>Someone asked to reset the password for your EdgeCoder account.</p>
+      <p>This account has no password: it signs in with single sign-on (Google, Microsoft or GitHub) or a passkey.
+      Use that option on the <a href="${cfg.portalPublicUrl}/portal">sign-in page</a>.</p>
+      <p>If you did not ask for this, you can ignore this email.</p>
+    `;
+    await sendResendEmail(email, "Signing in to EdgeCoder", html, "password_reset_sso_email");
+  }
+
+  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail };
 }
