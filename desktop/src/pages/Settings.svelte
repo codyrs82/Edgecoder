@@ -385,9 +385,9 @@
           <span class="update-checking">Checking...</span>
         {:else if updateStatus.state === "up-to-date"}
           <span class="update-ok">Up to date</span>
-        {:else if updateStatus.state === "available"}
-          <span class="update-available">v{updateStatus.update.version} available</span>
-          <button class="btn-sm" onclick={handleInstallUpdate}>Update Now</button>
+        {:else if updateStatus.state === "available" || updateStatus.state === "ready"}
+          <span class="update-available">v{updateStatus.update.version} {updateStatus.state === "ready" ? "ready" : "available"}</span>
+          <button class="btn-sm" onclick={handleInstallUpdate}>Restart to update</button>
         {:else if updateStatus.state === "downloading"}
           <span class="update-checking">Downloading... {updateStatus.progress}%</span>
         {:else if updateStatus.state === "installing"}
@@ -399,7 +399,7 @@
         {/if}
       </span>
     </div>
-    {#if updateStatus.state !== "checking" && updateStatus.state !== "downloading" && updateStatus.state !== "installing" && updateStatus.state !== "available"}
+    {#if updateStatus.state !== "checking" && updateStatus.state !== "downloading" && updateStatus.state !== "installing" && updateStatus.state !== "available" && updateStatus.state !== "ready"}
       <div class="about-row" style="margin-top: 0.5rem;">
         <span></span>
         <button class="btn-check-update" onclick={handleCheckUpdate}>
