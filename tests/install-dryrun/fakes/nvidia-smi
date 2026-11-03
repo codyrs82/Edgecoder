@@ -1,0 +1,38 @@
+#!/bin/sh
+# Fake nvidia-smi: 8x RTX 6000 Ada (49140 MiB). Handles --query-gpu=<fields> --format=csv[,noheader][,nounits].
+q=""; fmt=""
+for a in "$@"; do
+  case "$a" in
+    --query-gpu=*) q="${a#--query-gpu=}";;
+    --format=*) fmt="${a#--format=}";;
+  esac
+done
+if [ -z "$q" ]; then
+  echo "Fake NVIDIA-SMI 550.90.07   Driver Version: 550.90.07   CUDA Version: 12.4"
+  i=0; while [ $i -lt 8 ]; do echo "|   $i  NVIDIA RTX 6000 Ada Generation   |  0MiB / 49140MiB |"; i=$((i+1)); done
+  exit 0
+fi
+case "$fmt" in *noheader*) ;; *) echo "$q" | sed 's/,/, /g';; esac
+i=0
+while [ $i -lt 8 ]; do
+  line=""
+  for f in $(echo "$q" | tr ',' ' '); do
+    case "$f" in
+      index) v="$i";;
+      name) v="NVIDIA RTX 6000 Ada Generation";;
+      memory.total) v="49140";;
+      memory.used) v="1";;
+      memory.free) v="48632";;
+      uuid) v="GPU-0000000$i-fake-fake-fake-00000000000$i";;
+      pci.bus_id) v="00000000:0$i:00.0";;
+      driver_version) v="550.90.07";;
+      utilization.gpu) v="0";;
+      temperature.gpu) v="34";;
+      compute_cap) v="8.9";;
+      *) v="[N/A]";;
+    esac
+    line="${line:+$line, }$v"
+  done
+  echo "$line"
+  i=$((i+1))
+done
