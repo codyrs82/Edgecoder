@@ -279,7 +279,7 @@
     } catch (e) {
       // fetch() rejects with a TypeError when nothing answers on the Ollama port.
       error = e instanceof TypeError
-        ? "Couldn't reach Ollama on this computer (localhost:11434). Install it from ollama.com or with `brew install ollama`, start it, then try again."
+        ? "Couldn't reach Ollama on this computer. EdgeCoder starts it when the app opens; restart EdgeCoder (details in ~/.edgecoder/ollama.log), then try again."
         : e instanceof Error ? e.message : "Pull failed";
       pullError = { modelId: name, message: error };
     } finally {
