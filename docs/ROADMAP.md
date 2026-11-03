@@ -103,7 +103,15 @@ billing bot, a security reviewer.
   - on an event (a PR, a failed CI run, an email or webhook, a file change);
   - or when you message it.
 - **Where it lives:** in the app's sidebar, with its latest status. You create one from the
-  header's **+ → New bot**, which is there today, disabled, and marked Phase 2.
+  header's **+ → New bot**.
+
+**Status (MVP shipped):** bots with instructions, a memory file, a project folder, allowed tools,
+a schedule ("every N minutes/hours", "daily at HH:MM", cron), a daily cSat budget, run history,
+Run now / Pause / Stop, and messaging, on Auto compute (`src/apps/ide/bots.ts`, routes under
+`/v1/ide/bots`, sidebar section and bot page in the desktop app). Shell commands, commits and
+pushes pause the run as "Needs approval". Not yet: event triggers (PRs, CI, email, webhooks,
+file changes), reaching bots through MCP and the hosted endpoint, and a per-bot row on the usage
+page.
 - **Runs on Auto compute.** Each step goes to the cheapest place that fits it: small local models
   for quick steps, your own machines next, network GPUs for heavy steps. The decision is the same
   one Auto uses today (`src/inference-api/auto-route.ts`). It is made fresh for every request from

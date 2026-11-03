@@ -21,6 +21,10 @@
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
   import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, Bot } from "@lucide/svelte";
+  import BotView from "./pages/BotView.svelte";
+  import BotForm from "./components/BotForm.svelte";
+  import { bots, activeBotId, pollBots, refreshBots } from "./lib/bots-store";
+  import type { Bot as BotRecord } from "./lib/bots";
 
   let activeTab: "chat" | "editor" = $state("chat");
   let settingsOpen = $state(false);
@@ -202,7 +206,28 @@
     }, 50);
   }
 
+  // Persistent bots: the sidebar lists them; one can be open in place of the chat.
+  const activeBot = $derived($bots.find((b) => b.id === $activeBotId) ?? null);
+  /** The bot form: null closed, "new", or the bot being edited. */
+  let botForm = $state<null | "new" | BotRecord>(null);
+  $effect(() => {
+    if (!user) return;
+    let stop: (() => void) | undefined;
+    backendReady.then(() => { stop = pollBots(); });
+    return () => stop?.();
+  });
+  function openBot(id: string) {
+    activeTab = "chat";
+    activeBotId.set(id);
+  }
+  async function botSaved(b: BotRecord) {
+    botForm = null;
+    await refreshBots();
+    openBot(b.id);
+  }
+
   async function handleSelectConversation(id: string) {
+    activeBotId.set(null);
     activeTab = "chat";
     if (chatView) {
       await chatView.loadConversation(id);
@@ -210,6 +235,7 @@
   }
 
   function handleNewChatFromSidebar() {
+    activeBotId.set(null);
     activeTab = "chat";
     chatView?.newChat();
   }
@@ -218,6 +244,7 @@
   let newMenuOpen = $state(false);
   function newChatHere() {
     newMenuOpen = false;
+    activeBotId.set(null);
     activeTab = "chat";
     chatView?.newChat();
     queueMicrotask(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus());
@@ -297,7 +324,7 @@
             <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
             <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
             <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
-            <button role="menuitem" disabled title="Persistent bots that run jobs on Auto compute are on the Phase 2 roadmap"><Bot size={15} /> New bot <span class="soon">Phase 2</span></button>
+            <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
           </div>
         {/if}
       </div>
@@ -335,9 +362,17 @@
             user={user!}
             onOpenSettings={openSettings}
             onLogout={logout}
+            onSelectBot={openBot}
+            onNewBot={() => (botForm = "new")}
+            activeBotId={$activeBotId}
           />
         </div>
-        <div class="chat-main">
+        {#if activeBot}
+          <div class="chat-main">
+            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} />
+          </div>
+        {/if}
+        <div class="chat-main" class:hidden={!!activeBot}>
           <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
           <div class="composer">
             <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
@@ -352,6 +387,10 @@
         <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} />
       </div>
     </main>
+
+    {#if botForm}
+      <BotForm bot={botForm === "new" ? null : botForm} defaultProject={projectRoot} onClose={() => (botForm = null)} onSaved={botSaved} />
+    {/if}
 
     {#if settingsOpen}
       <SettingsOverlay
@@ -472,6 +511,9 @@
     overflow: hidden;
     min-width: 0;
   }
+  .chat-main.hidden {
+    display: none;
+  }
   /* Composer: the chat box under the conversation, centered like the messages */
   .composer {
     flex-shrink: 0;
@@ -531,10 +573,5 @@
   .new-menu button:disabled {
     color: var(--text-secondary);
     cursor: default;
-  }
-  .new-menu .soon {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--text-muted, var(--text-secondary));
   }
 </style>

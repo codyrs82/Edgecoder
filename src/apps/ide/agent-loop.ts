@@ -181,13 +181,16 @@ export interface AgentLoopDeps {
   /** Start in native mode (default true; IDE_NATIVE_TOOLS=0 turns it off). */
   native?: boolean;
   maxIterations?: number;
+  /** The tools offered to the model (default: every IDE tool). Calls to others are refused. */
+  tools?: ToolSchema[];
 }
 
 const KNOWN_TOOLS = new Set<string>(TOOL_DEFINITIONS.map((t) => t.name));
 
 export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   let native = d.native ?? process.env.IDE_NATIVE_TOOLS !== "0";
-  const tools = toolSchemas();
+  const tools = d.tools ?? toolSchemas();
+  const known = d.tools ? new Set(d.tools.map((t) => t.function.name)) : KNOWN_TOOLS;
   const history = (format: "native" | "text"): ChatMessage[] => {
     const sys = d.systemPrompt(format);
     return [...(sys ? [{ role: "system", content: sys }] : []), ...d.messages];
@@ -225,7 +228,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       messages.push({ role: "assistant", content: reply.content, tool_calls: reply.toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) });
       for (const call of reply.toolCalls) {
         if (d.isCancelled()) return;
-        const result = KNOWN_TOOLS.has(call.name)
+        const result = known.has(call.name)
           ? await d.runTool(call.name as ToolName, call.arguments)
           : `[Error]: unknown tool ${call.name}`;
         messages.push({ role: "tool", content: result, tool_name: call.name });
@@ -280,7 +283,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       hadToolCall = true;
       if (d.isCancelled()) return;
       const name = String(parsed.tool ?? "");
-      const result = KNOWN_TOOLS.has(name) ? await d.runTool(name as ToolName, parsed.args ?? {}) : `[Error]: unknown tool ${name}`;
+      const result = known.has(name) ? await d.runTool(name as ToolName, parsed.args ?? {}) : `[Error]: unknown tool ${name}`;
       results.push(`[Tool ${name} result]: ${result}`);
     }
     const trailing = content.slice(cursor).trim();
@@ -304,6 +307,8 @@ export interface ToolRunnerDeps {
   turnId: string;
   /** Apply write_file / edit_file without asking (the turn's checkpoint keeps them undoable). */
   autoApproveEdits?: boolean;
+  /** Honour IDE_SHELL_AUTO_APPROVE=1 (default true; bots pass false so their commands always ask). */
+  allowShellAutoApprove?: boolean;
 }
 
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
@@ -312,7 +317,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const callId = `tc_${randomUUID().slice(0, 8)}`;
     // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
     // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
-    const shellAutoApprove = tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
+    const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
     const editAutoApprove = d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file");
     const requiresApproval = !READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove;
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
