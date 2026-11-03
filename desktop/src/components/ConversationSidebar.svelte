@@ -853,6 +853,6 @@
     outline-offset: -2px;
   }
 
-  /* #161: no red color-mix() tint behind "Delete": a 10% wash dropped the red text below 4.5:1
+  /* Issue 161: no red color-mix() tint behind "Delete": a 10% wash dropped the red text below 4.5:1
      in both themes. The neutral hover above keeps AA contrast (and needs no WebKitGTK fallback). */
 </style>
