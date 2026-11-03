@@ -88,9 +88,18 @@ describe("local compute: progress", () => {
 describe("local compute: setup screen", () => {
   it("shows until ready", () => {
     expect(needsSetupScreen(null)).toBe(false);
-    expect(needsSetupScreen(status({ state: "running" }))).toBe(true);
+    expect(needsSetupScreen(status({ state: "running", ollama: comp({ state: "downloading" }) }))).toBe(true);
+    expect(needsSetupScreen(status({ state: "running", docker: comp({ state: "installing" }) }))).toBe(true);
     expect(needsSetupScreen(status({ state: "error" }))).toBe(true);
     expect(needsSetupScreen(status({ state: "ready" }))).toBe(false);
+  });
+
+  it("stays hidden for the routine Docker VM start on later launches", () => {
+    const starting = (detail: string) =>
+      status({ state: "running", ollama: comp({ state: "ready" }), docker: comp({ state: "starting", detail }) });
+    expect(needsSetupScreen(starting("Starting the Docker VM"))).toBe(false);
+    expect(needsSetupScreen(starting("Creating the Docker VM (the first start downloads a Linux image and can take a few minutes)"))).toBe(true);
+    expect(needsSetupScreen(status({ state: "running", ollama: comp({ state: "checking" }), docker: comp({ state: "pending" }) }))).toBe(false);
   });
 
   it("lists only blocking errors", () => {

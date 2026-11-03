@@ -1134,6 +1134,7 @@ impl Manager {
             c.source = source.into();
             c.downloaded = 0;
             c.total = 0;
+            // The webview shows its setup screen only for "Creating…" (desktop/src/lib/local-compute.ts).
             c.detail = if profile_exists {
                 "Starting the Docker VM".into()
             } else {
