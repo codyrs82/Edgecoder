@@ -86,6 +86,7 @@ import { MeshProtocol } from "../mesh/protocol.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
+import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
@@ -490,6 +491,10 @@ const OLLAMA_AUTO_INSTALL = CC.OLLAMA_AUTO_INSTALL;
 const INFERENCE_URL = CC.INFERENCE_URL;
 const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
 const identity = createPeerIdentity(coordinatorKeys, COORDINATOR_PUBLIC_URL, networkMode);
+// Every response to an agent request (one carrying x-agent-nonce: register, heartbeat, pull, result,
+// agent-mesh, inference, orchestration, errors included) is signed with the identity key, in headers
+// or, for a streamed body, in a trailer (src/trust/response-signing.ts). Advertised as responseSigning.
+registerResponseSigning(app, { peerId: identity.peerId, privateKeyPem: coordinatorKeys.privateKeyPem });
 const ordering = new OrderingChain(identity.peerId, coordinatorKeys.privateKeyPem);
 let coordinatorProvider = PROVIDER;
 const agentOrchestration = new Map<
@@ -5306,7 +5311,8 @@ app.get("/identity", async () => ({
   ...identity,
   fingerprint: IDENTITY_FINGERPRINT,
   trustEntry: `${identity.peerId}:${IDENTITY_FINGERPRINT}`,
-  legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem)
+  legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem),
+  responseSigning: RESPONSE_SIGNING_VERSION
 }));
 // Agents send a fresh nonce; the answer is signed with this coordinator's identity key, so a
 // replayed /identity does not pass their pinned-key check.
@@ -5318,7 +5324,7 @@ app.post(IDENTITY_CHALLENGE_PATH, async (req, reply) => {
     publicUrl: COORDINATOR_PUBLIC_URL
   });
   if (!answer) return reply.code(400).send({ error: "invalid_challenge" });
-  return answer;
+  return { ...answer, responseSigning: RESPONSE_SIGNING_VERSION };
 });
 app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
 

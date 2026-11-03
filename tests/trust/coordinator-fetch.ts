@@ -20,6 +20,8 @@ export function coordinatorFetch(
     /** Replace the GET /identity body. */
     identityBody?: unknown;
     status?: number;
+    /** Advertise signed responses (responseSigning: 1) like current coordinators. */
+    responseSigning?: boolean;
   } = {}
 ): IdentityFetch & { calls: string[] } {
   const calls: string[] = [];
@@ -31,10 +33,10 @@ export function coordinatorFetch(
       const signer = opts.signWith ?? keys;
       const answer =
         opts.challengeBody ??
-        { ...answerIdentityChallenge(JSON.parse(init?.body ?? "{}"), { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, privateKeyPem: signer.privateKeyPem, publicUrl: "https://coord.example" }), publicKeyPem: keys.publicKeyPem };
+        { ...answerIdentityChallenge(JSON.parse(init?.body ?? "{}"), { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, privateKeyPem: signer.privateKeyPem, publicUrl: "https://coord.example" }), publicKeyPem: keys.publicKeyPem, ...(opts.responseSigning ? { responseSigning: 1 } : {}) };
       return { ok: status < 300, status, json: async () => answer };
     }
-    return { ok: status < 300, status, json: async () => opts.identityBody ?? { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem } };
+    return { ok: status < 300, status, json: async () => opts.identityBody ?? { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, ...(opts.responseSigning ? { responseSigning: 1 } : {}) } };
   }) as IdentityFetch & { calls: string[] };
   fn.calls = calls;
   return fn;

@@ -132,3 +132,67 @@ keys listed at all is a startup error. Switch-over steps: [going-to-mainnet.md](
 
 To rotate a coordinator key, publish the new fingerprint to operators and either add it to
 `TRUSTED_COORDINATOR_KEYS` or edit the trust file; tofu agents will not accept it silently.
+
+## Signed coordinator responses
+
+The challenge proves the key once; after that every response the agent acts on is signed too, so
+a man-in-the-middle cannot change tasks, heartbeat orders (model switches, orchestration,
+installs), tunnel tokens or acks after verification. Code: `src/trust/response-signing.ts`
+(both sides), `src/swarm/coordinator-client.ts` (the agent's only request path).
+
+**Request binding.** The worker sends a fresh random `x-agent-nonce` on every coordinator call
+(`post()`, the signed agent-mesh posts and the agent-mesh GETs all go through
+`createCoordinatorClient`). The coordinator's `onSend` hook signs the response to any request
+that carries one, on every route (register, heartbeat, pull, result, agent-mesh, inference,
+orchestration, benchmark), error responses included. Requests without the header (portal,
+browsers, peers) are unchanged.
+
+**Signature.** Ed25519 with the identity key (`COORDINATOR_PRIVATE_KEY_PEM`) over
+
+```
+edgecoder-coord-response:v1 \n METHOD \n path?query \n status \n sha256(body bytes) \n
+agentId \n x-agent-nonce \n x-coord-ts \n coordinator peerId
+```
+
+`agentId` is the request's `x-agent-id` (the signed-request identity; empty when absent). The
+signature travels in headers so bodies are unchanged: `x-coord-sig` (base64), `x-coord-ts`
+(coordinator ms clock) and `x-coord-peer`. Because the nonce is the agent's own and single-use,
+an old response does not verify for a new request; the timestamp is informative, not checked
+against the agent clock.
+
+**Streaming.** A route that replies with a stream cannot hash its body before the headers go
+out. Such responses use chunked transfer with `Trailer: x-coord-sig`: the bytes stream unchanged
+through a hashing pass-through and, after the last chunk, the coordinator signs the same
+canonical string over the hash of every byte sent and emits it as the `x-coord-sig` trailer
+(`x-coord-ts`/`x-coord-peer` are in the head). The agent buffers the whole body and acts on
+none of it until the trailer verifies. A proxy that strips trailers makes the response unsigned,
+which fails closed. No agent-facing route streams today; inference output flows agent -> coordinator
+as `POST /inference/chunks`, each of whose acks is signed like any other response.
+
+**Agent verification.** Before a response reaches its caller the client checks the signature
+against the key pinned and proven in the identity challenge, the nonce and agentId it sent, the
+method, path and status. On failure the response is discarded (nothing in it is acted on, no
+retry), `failures` is counted and logged, and the coordinator's verification is dropped so the
+next loop iteration runs the identity challenge again before any further request.
+
+**Compatibility.** Coordinators advertise `responseSigning: 1` in `GET /identity` and in their
+`/identity/challenge` answer.
+
+| | coordinator signs | older coordinator (no `responseSigning`) |
+|---|---|---|
+| strict (`EDGECODER_RESPONSE_SIGNING=required`, the strict default) | verified | **refused** |
+| tofu / open (`optional`) | verified | accepted unsigned, warned once per coordinator |
+
+In optional mode a coordinator that advertises signing, or was ever seen signing (remembered in
+the local store, `coordinator_response_signers`), must keep signing: stripping the advertisement
+does not downgrade it. A response that carries a signature is always verified, whatever the mode.
+Mesh WebSocket messages are outside this scheme: each carries its own Ed25519 signature checked
+by the mesh layer.
+
+**Deploy order.** Seeds (coordinators) first, then agents. Agents on the edgecoder.io network
+default to strict mode with the seed keys, so an updated agent refuses a seed that has not been
+redeployed yet.
+
+**Cost.** One sha256 of the body and one Ed25519 signature per agent response (~33 us on an M-series
+Mac with the parsed key cached), ~85 us to verify on the agent, and about 150 bytes of headers.
+For a heartbeat every few seconds this is negligible.

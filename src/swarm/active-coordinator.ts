@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { CoordinatorTrustCheck } from "../trust/pinned-keys.js";
+import type { VerifiedCoordinator } from "../trust/response-signing.js";
 
 /*
  * The one place the worker's coordinator URL changes. A new URL starts unverified, and nothing that
@@ -25,6 +26,7 @@ const normalize = (url: string) => url.trim().replace(/\/+$/, "");
 export class ActiveCoordinator {
   private current: string;
   private verifiedUrl: string | null = null;
+  private verifiedIdentity: VerifiedCoordinator | null = null;
 
   constructor(initialUrl: string, private readonly trust: TrustChecker, private readonly onChange?: (from: string, to: string, reason: string) => void) {
     this.current = normalize(initialUrl);
@@ -41,6 +43,7 @@ export class ActiveCoordinator {
     const prev = this.current;
     this.current = next;
     this.verifiedUrl = null;
+    this.verifiedIdentity = null;
     this.trust.forget(next);
     this.onChange?.(prev, next, reason);
     return true;
@@ -49,6 +52,7 @@ export class ActiveCoordinator {
   /** Drop the verification (reconnect, failure): the next verify() challenges again. */
   invalidate(): void {
     this.verifiedUrl = null;
+    this.verifiedIdentity = null;
     this.trust.forget(this.current);
   }
 
@@ -62,11 +66,27 @@ export class ActiveCoordinator {
     const result = await this.trust.check(url);
     if (url !== this.current) return { trusted: false, coordinatorUrl: url, error: "coordinator_changed_during_verification" };
     this.verifiedUrl = result.trusted ? url : null;
+    this.verifiedIdentity =
+      result.trusted && result.peerId && result.publicKeyPem
+        ? { peerId: result.peerId, publicKeyPem: result.publicKeyPem, responseSigning: result.responseSigning === true }
+        : result.trusted
+          ? this.verifiedIdentity
+          : null;
     return result;
   }
 
   isVerified(): boolean {
     return this.verifiedUrl !== null && this.verifiedUrl === this.current;
+  }
+
+  /**
+   * The URL plus the identity proven for it (peerId, pinned key, whether it signs responses):
+   * responses from that URL are verified against this key. Throws when not verified.
+   */
+  requireVerifiedIdentity(): { url: string; identity: VerifiedCoordinator } {
+    const url = this.requireVerified();
+    if (!this.verifiedIdentity) throw new CoordinatorNotVerifiedError(url);
+    return { url, identity: this.verifiedIdentity };
   }
 
   /** The URL to send requests to; throws when it has not been verified. */
