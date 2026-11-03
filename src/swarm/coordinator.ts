@@ -179,6 +179,8 @@ import {
   classifyResultAuth,
   creditedDurationMs,
   requireSignedAgentRequests,
+  RESULT_ROUTE_BODY_LIMIT_BYTES,
+  resultBodyTooLarge,
   resultReportId,
   unsignedRequestDecision
 } from "./result-integrity.js";
@@ -3948,7 +3950,16 @@ async function refundTaskSubmit(taskId: string): Promise<boolean> {
   }
 }
 
-app.post("/result", async (req, reply) => {
+// #122: a peer forward carries the output twice (plaintext + the agent's signed body), so the route
+// limit fits a forwarded max-size agent result; agents themselves stay at the old 1 MiB.
+app.post("/result", { bodyLimit: RESULT_ROUTE_BODY_LIMIT_BYTES }, async (req, reply) => {
+  {
+    const h = (req as any).headers ?? {};
+    const peerForwardCandidate = !extractSignedHeaders(h) && hasMeshToken(h);
+    if (resultBodyTooLarge(Buffer.byteLength(rawBodyOf(req)), peerForwardCandidate)) {
+      return reply.code(413).send({ error: "payload_too_large" });
+    }
+  }
   // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
   // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
   const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req) });
