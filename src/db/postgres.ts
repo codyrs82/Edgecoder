@@ -12,6 +12,7 @@ import type { HardwareVerificationRecord } from "../swarm/hardware-verification.
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
+import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 function rowToPayout(row: Record<string, unknown>): PayoutRecord {
@@ -82,6 +83,11 @@ export const FEE_POOL_LOCK_KEY = 1;
 /** Payout reservations: one at a time, so the global 24 h cap and node capacity are checked exactly. */
 export const PAYOUT_LOCK_NAMESPACE = 0x45430003;
 export const PAYOUT_GLOBAL_LOCK_KEY = 0;
+/** Stats-ledger checkpoint signing: coordinators sharing a database sign and commit one at a time. */
+export const STATS_CHECKPOINT_LOCK_NAMESPACE = 0x45430004;
+export const STATS_CHECKPOINT_LOCK_KEY = 1;
+/** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
+export const STATS_CHECKPOINT_EVENT_TYPES = ["stats_checkpoint_signature", "stats_checkpoint_commit"] as const;
 /** What a payout row has or may still move: pending rows count at their fee cap. */
 const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fee_msat, max_fee_msat) ELSE fee_msat END`;
 
@@ -542,6 +548,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at ON stats_ledger_records (i
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_issued_at_desc ON stats_ledger_records (issued_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_checkpoint ON stats_ledger_records (checkpoint_hash, event_type) WHERE checkpoint_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_ledger_event_type ON stats_ledger_records (event_type, issued_at_ms DESC) WHERE event_type = 'stats_checkpoint_commit';
+-- Checkpoint targets: the newest work record at or before a boundary (signature/commit rows excluded).
+CREATE INDEX IF NOT EXISTS idx_stats_ledger_data_issued_at ON stats_ledger_records (issued_at_ms DESC, id DESC)
+  WHERE event_type NOT IN ('stats_checkpoint_signature', 'stats_checkpoint_commit');
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_account ON credit_transactions (account_id, timestamp_ms DESC);
 -- #41: persistent dedupe for /credits/ble-sync
 CREATE TABLE IF NOT EXISTS ble_synced_tx (
@@ -649,6 +658,20 @@ CREATE TABLE IF NOT EXISTS request_nonces (
   expires_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_nonces_expiry ON request_nonces (expires_at_ms);
+
+-- LNURL callback pins (src/economy/lnurl-callback-pin.ts): the callback origin a payout
+-- destination resolved to on first use. changed_origin is set while a different origin waits for
+-- the owner's emailed-code confirmation; notified_at_ms makes the owner notification one-shot.
+CREATE TABLE IF NOT EXISTS payout_callback_pins (
+  account_id TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  callback_origin TEXT NOT NULL,
+  pinned_at_ms BIGINT NOT NULL,
+  changed_origin TEXT,
+  changed_at_ms BIGINT,
+  notified_at_ms BIGINT,
+  PRIMARY KEY (account_id, destination)
+);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -697,6 +720,11 @@ export class PostgresStore {
   /** Request-signing nonces (src/security/nonce-verifier.ts) on the same pool. */
   nonceStore(): PostgresNonceStore {
     return new PostgresNonceStore(this.pool);
+  }
+
+  /** LNURL callback pins (src/economy/lnurl-callback-pin.ts) on the same pool. */
+  callbackPinStore(): PostgresCallbackPinStore {
+    return new PostgresCallbackPinStore(this.pool);
   }
 
   async close(): Promise<void> {
@@ -777,13 +805,18 @@ export class PostgresStore {
     );
   }
 
-  async persistStatsLedgerRecord(record: QueueEventRecord): Promise<void> {
-    await this.pool.query(
+  /**
+   * Returns true only when this call stored the row. A record already present (same id or hash:
+   * written by another coordinator on this database, or re-ingested by sync) returns false, so
+   * callers apply its projections exactly once.
+   */
+  async persistStatsLedgerRecord(record: QueueEventRecord): Promise<boolean> {
+    const result = await this.pool.query(
       `INSERT INTO stats_ledger_records (
          id, event_type, task_id, subtask_id, actor_id, sequence, issued_at_ms, prev_hash,
          coordinator_id, checkpoint_height, checkpoint_hash, payload_json, hash, signature, ingested_at_ms
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       [
         record.id,
         record.eventType,
@@ -802,6 +835,7 @@ export class PostgresStore {
         Date.now()
       ]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async listStatsLedgerRecords(limit = 1000): Promise<QueueEventRecord[]> {
@@ -894,16 +928,55 @@ export class PostgresStore {
     }));
   }
 
+  /**
+   * The checkpoint target for a boundary: the newest work record issued at or before `atOrBeforeMs`.
+   * Signature and commit rows are excluded, so signing never moves the target and every
+   * coordinator on this database (or with this data synced) picks the same record.
+   */
+  async latestStatsDataRecordAtOrBefore(atOrBeforeMs: number): Promise<{ hash: string; issuedAtMs: number; height: number } | null> {
+    const result = await this.pool.query(
+      `SELECT s.hash, s.issued_at_ms, GREATEST(c.reltuples, 0)::BIGINT AS height
+       FROM stats_ledger_records s, pg_class c
+       WHERE c.oid = 'stats_ledger_records'::regclass
+         AND s.event_type NOT IN ('stats_checkpoint_signature', 'stats_checkpoint_commit')
+         AND s.issued_at_ms <= $1
+       ORDER BY s.issued_at_ms DESC, s.id DESC
+       LIMIT 1`,
+      [atOrBeforeMs]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return { hash: row.hash, issuedAtMs: Number(row.issued_at_ms), height: Number(row.height ?? 0) };
+  }
+
+  /**
+   * Session advisory lock (blocking) on a dedicated connection: coordinators sharing this database
+   * take turns signing, so the second one sees the first one's signature and commits.
+   */
+  async withStatsCheckpointLock<T>(fn: () => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock($1, $2)", [STATS_CHECKPOINT_LOCK_NAMESPACE, STATS_CHECKPOINT_LOCK_KEY]);
+      try {
+        return await fn();
+      } finally {
+        await client.query("SELECT pg_advisory_unlock($1, $2)", [STATS_CHECKPOINT_LOCK_NAMESPACE, STATS_CHECKPOINT_LOCK_KEY]).catch(() => undefined);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
   async latestStatsLedgerHead(): Promise<{
     issuedAtMs: number;
     hash: string;
     count: number;
   } | null> {
     const result = await this.pool.query(
-      `SELECT s.issued_at_ms, s.hash, c.reltuples::BIGINT AS count
+      `SELECT s.issued_at_ms, s.hash, GREATEST(c.reltuples, 0)::BIGINT AS count
        FROM stats_ledger_records s,
             pg_class c
-       WHERE c.relname = 'stats_ledger_records'
+       WHERE c.oid = 'stats_ledger_records'::regclass
        ORDER BY s.issued_at_ms DESC, s.id DESC
        LIMIT 1`
     );
@@ -1075,6 +1148,8 @@ export class PostgresStore {
 
   /** Lightning address (user@domain or LNURL) used for automatic payouts of an account. */
   async setLightningAddress(accountId: string, lightningAddress: string | null, network: string): Promise<void> {
+    // A new destination starts unpinned; the old destination's pin (and any pending change) goes.
+    await this.callbackPinStore().resetCallbackPins(accountId, lightningAddress);
     await this.pool.query(
       `INSERT INTO wallet_accounts (account_id, wallet_type, network, payout_address, created_at_ms)
        VALUES ($1, 'lightning', $3, $2, $4)
@@ -1101,13 +1176,21 @@ export class PostgresStore {
    * transaction under the same per-account advisory lock as applyBleTransfer,
    * so concurrent debits of one account serialise and the balance can't go negative.
    */
-  async debitCredits(tx: CreditTransaction): Promise<{ status: "applied" | "insufficient"; balance: number }> {
+  async debitCredits(tx: CreditTransaction): Promise<{ status: "applied" | "insufficient" | "duplicate"; balance: number }> {
     if (tx.type !== "spend") throw new Error("debitCredits requires a spend transaction");
     if (!Number.isFinite(tx.credits) || tx.credits <= 0) throw new Error("invalid_credit_amount");
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, tx.accountId]);
+      // A deterministic tx id (spendCredits with an idempotency key) already charged, here or by
+      // another coordinator on this database: charge nothing. Checked under the account lock, so
+      // two coordinators debiting the same key at once serialise and only one row is written.
+      const seen = await client.query("SELECT 1 FROM credit_transactions WHERE tx_id = $1", [tx.txId]);
+      if ((seen.rowCount ?? 0) > 0) {
+        await client.query("ROLLBACK");
+        return { status: "duplicate", balance: 0 };
+      }
       const bal = await client.query(BALANCE_CHECK_SQL, [tx.accountId, String(tx.credits)]);
       const balance = Number(bal.rows[0]?.balance ?? 0);
       if (bal.rows[0]?.enough !== true) {
@@ -2138,6 +2221,7 @@ export class PostgresStore {
   }
 
   async upsertWalletAccount(wallet: WalletAccount): Promise<void> {
+    await this.callbackPinStore().resetCallbackPins(wallet.accountId, wallet.payoutAddress ?? null);
     await this.pool.query(
       `INSERT INTO wallet_accounts (
         account_id, wallet_type, network, xpub, ln_node_pubkey, payout_address, encrypted_secret_ref, created_at_ms
@@ -2736,6 +2820,37 @@ export class PostgresStore {
     return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as UsageRecord);
   }
 
+  async getReservation(id: string): Promise<Reservation | null> {
+    const r = await this.pool.query(`SELECT record_json FROM compute_reservations WHERE reservation_id = $1`, [id]);
+    const row = r.rows[0];
+    if (!row) return null;
+    return (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as Reservation;
+  }
+
+  /**
+   * Compare-and-set end of a lease: writes `ended` only while the stored row is still active (or
+   * missing). Coordinators sharing this database race here; exactly one gets true and settles.
+   */
+  async endReservationIfActive(ended: Reservation): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO compute_reservations (reservation_id, account_id, record_json, updated_at_ms) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (reservation_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE compute_reservations.record_json->>'status' = 'active'
+       RETURNING reservation_id`,
+      [ended.id, ended.accountId, JSON.stringify(ended), Date.now()]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** Newest heartbeat any coordinator on this database recorded per agent (agent_registry). */
+  async agentLastSeenMs(agentIds: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (agentIds.length === 0) return out;
+    const r = await this.pool.query(`SELECT agent_id, last_seen_ms FROM agent_registry WHERE agent_id = ANY($1::text[])`, [agentIds]);
+    for (const row of r.rows) out.set(row.agent_id, Number(row.last_seen_ms));
+    return out;
+  }
+
   /** Active leases and those ended in the last week. */
   async listReservations(): Promise<Reservation[]> {
     const r = await this.pool.query(`SELECT record_json FROM compute_reservations WHERE updated_at_ms > $1`, [Date.now() - 7 * 24 * 3_600_000]);
@@ -3060,5 +3175,82 @@ export class PostgresNonceStore implements NonceStore {
 
   async prune(): Promise<void> {
     await this.pool.query(`DELETE FROM request_nonces WHERE expires_at_ms < $1`, [Date.now()]);
+  }
+}
+
+function rowToCallbackPin(row: any): CallbackPin {
+  return {
+    accountId: row.account_id,
+    destination: row.destination,
+    origin: row.callback_origin,
+    pinnedAtMs: Number(row.pinned_at_ms),
+    ...(row.changed_origin ? { changedOrigin: row.changed_origin, changedAtMs: Number(row.changed_at_ms) } : {}),
+    ...(row.notified_at_ms != null ? { notifiedAtMs: Number(row.notified_at_ms) } : {})
+  };
+}
+
+const PIN_COLUMNS = "account_id, destination, callback_origin, pinned_at_ms, changed_origin, changed_at_ms, notified_at_ms";
+
+/** LNURL callback pins (`payout_callback_pins`), shared by every coordinator on this database. */
+export class PostgresCallbackPinStore implements CallbackPinStore {
+  constructor(private readonly pool: Pool) {}
+
+  async getCallbackPin(accountId: string, destination: string): Promise<CallbackPin | null> {
+    const r = await this.pool.query(`SELECT ${PIN_COLUMNS} FROM payout_callback_pins WHERE account_id = $1 AND destination = $2`, [accountId, destination]);
+    return r.rows[0] ? rowToCallbackPin(r.rows[0]) : null;
+  }
+
+  async listCallbackPins(accountId: string): Promise<CallbackPin[]> {
+    const r = await this.pool.query(`SELECT ${PIN_COLUMNS} FROM payout_callback_pins WHERE account_id = $1 ORDER BY pinned_at_ms`, [accountId]);
+    return r.rows.map(rowToCallbackPin);
+  }
+
+  async pinCallbackOrigin(accountId: string, destination: string, origin: string, nowMs: number): Promise<CallbackPin> {
+    await this.pool.query(
+      `INSERT INTO payout_callback_pins (account_id, destination, callback_origin, pinned_at_ms) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (account_id, destination) DO NOTHING`,
+      [accountId, destination, origin, nowMs]
+    );
+    return (await this.getCallbackPin(accountId, destination))!;
+  }
+
+  async markCallbackChanged(accountId: string, destination: string, changedOrigin: string, nowMs: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE payout_callback_pins SET changed_origin = $3, changed_at_ms = $4, notified_at_ms = NULL
+       WHERE account_id = $1 AND destination = $2 AND changed_origin IS DISTINCT FROM $3`,
+      [accountId, destination, changedOrigin, nowMs]
+    );
+  }
+
+  async claimCallbackNotification(accountId: string, destination: string, nowMs: number): Promise<CallbackPin | null> {
+    const r = await this.pool.query(
+      `UPDATE payout_callback_pins SET notified_at_ms = $3
+       WHERE account_id = $1 AND destination = $2 AND changed_origin IS NOT NULL AND notified_at_ms IS NULL
+       RETURNING ${PIN_COLUMNS}`,
+      [accountId, destination, nowMs]
+    );
+    return r.rows[0] ? rowToCallbackPin(r.rows[0]) : null;
+  }
+
+  async releaseCallbackNotification(accountId: string, destination: string): Promise<void> {
+    await this.pool.query(`UPDATE payout_callback_pins SET notified_at_ms = NULL WHERE account_id = $1 AND destination = $2`, [accountId, destination]);
+  }
+
+  async confirmCallbackChange(accountId: string, destination: string, changedOrigin: string, nowMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `UPDATE payout_callback_pins SET callback_origin = changed_origin, pinned_at_ms = $4, changed_origin = NULL, changed_at_ms = NULL, notified_at_ms = NULL
+       WHERE account_id = $1 AND destination = $2 AND changed_origin = $3`,
+      [accountId, destination, changedOrigin, nowMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** Infrastructure-host addresses of the same account keep their pins (they did not change). */
+  async resetCallbackPins(accountId: string, keepDestination: string | null): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM payout_callback_pins WHERE account_id = $1 AND destination IS DISTINCT FROM $2
+         AND destination NOT IN (SELECT lightning_address FROM infrastructure_hosts WHERE account_id = $1 AND lightning_address IS NOT NULL)`,
+      [accountId, keepDestination]
+    );
   }
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { Pool } from "pg";
+import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 
 export type PortalUser = {
   userId: string;
@@ -248,7 +249,8 @@ CREATE INDEX IF NOT EXISTS idx_portal_conversations_user ON portal_conversations
 `;
 
 export class PortalStore {
-  constructor(private readonly pool: Pool) {}
+  /** Also handed to the shared rate-limit store (security.ts) before routes are declared. */
+  constructor(readonly pool: Pool) {}
 
   static fromEnv(): PortalStore | null {
     const url = process.env.PORTAL_DATABASE_URL;
@@ -258,6 +260,7 @@ export class PortalStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
+    await this.pool.query(RATE_LIMIT_SCHEMA_SQL);
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'warm'`);
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);

@@ -31,6 +31,19 @@ app.get("/portal/settings/plan", async (_req, reply) => {
         The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
         Nothing was ever paid to it. Your earnings are kept until you set a destination below.
       </div>
+      <div id="payoutCallbackChanged" class="hidden" role="alert" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
+        <p style="margin:0 0 6px;"><strong id="payoutCallbackText"></strong></p>
+        <p class="muted" style="margin:0 0 6px;">Payouts to this address are paused and your earnings are kept. Confirm only if your wallet provider moved its servers; otherwise change your address to a wallet you trust.</p>
+        <div class="row"><button class="primary" id="payoutCallbackSendBtn">Email me a code</button></div>
+        <div id="payoutCallbackCodeWrap" class="hidden" style="margin-top:8px;">
+          <label for="payoutCallbackCode">Email code</label>
+          <div class="row">
+            <input id="payoutCallbackCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+            <button class="primary" id="payoutCallbackConfirmBtn">Confirm payment server</button>
+          </div>
+        </div>
+        <div id="payoutCallbackMsg" class="muted hidden" style="margin-top:6px;"></div>
+      </div>
       <table>
         <tbody>
           <tr><th style="width:34%;">Current destination</th><td id="payoutDestCurrent">Loading...</td></tr>
@@ -274,7 +287,43 @@ app.get("/portal/settings/plan", async (_req, reply) => {
       document.getElementById("payoutDestRetired").classList.toggle("hidden", !(v.legacyAddressRetired && !current));
       const input = document.getElementById("payoutDestInput");
       if (current && !input.value) input.value = current;
+      const cc = v.callbackChange;
+      document.getElementById("payoutCallbackChanged").classList.toggle("hidden", !cc);
+      if (cc) document.getElementById("payoutCallbackText").textContent = "Your wallet's payment server changed from " + originHost(cc.previousOrigin) + " to " + originHost(cc.newOrigin) + ". Confirm to keep receiving payouts.";
     }
+    function originHost(o) { try { return new URL(o).host; } catch { return String(o); } }
+    let payoutCallbackChallenge = null;
+    function payoutCallbackMsg(text, isError) {
+      const el = document.getElementById("payoutCallbackMsg");
+      el.textContent = text || "";
+      el.classList.toggle("hidden", !text);
+      el.style.color = isError ? "var(--danger, #dc2626)" : "";
+    }
+    async function confirmPayoutCallback(withCode) {
+      const body = {};
+      if (withCode) {
+        const emailCode = document.getElementById("payoutCallbackCode").value.trim();
+        if (!emailCode || !payoutCallbackChallenge) { payoutCallbackMsg("Enter the code from the email.", true); return; }
+        body.challengeId = payoutCallbackChallenge;
+        body.emailCode = emailCode;
+      }
+      const res = await fetch("/wallet/payout-destination/callback/confirm", { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      let r = {};
+      try { r = await res.json(); } catch {}
+      if (res.status === 202 && r.verificationRequired) {
+        payoutCallbackChallenge = r.challengeId;
+        document.getElementById("payoutCallbackCodeWrap").classList.remove("hidden");
+        payoutCallbackMsg(r.detail || "We emailed you a code.");
+        return;
+      }
+      payoutCallbackChallenge = null;
+      document.getElementById("payoutCallbackCodeWrap").classList.add("hidden");
+      document.getElementById("payoutCallbackCode").value = "";
+      if (res.ok && r.ok) { payoutCallbackMsg(""); showToast("Confirmed. Payouts will resume."); loadPayoutDestination().catch(() => undefined); return; }
+      payoutCallbackMsg(res.status === 429 ? "Too many attempts. Wait a minute and try again." : (r.detail || ("Could not confirm: " + (r.error || res.status))), true);
+    }
+    document.getElementById("payoutCallbackSendBtn").addEventListener("click", () => confirmPayoutCallback(false).catch((e) => payoutCallbackMsg(String(e.message || e), true)));
+    document.getElementById("payoutCallbackConfirmBtn").addEventListener("click", () => confirmPayoutCallback(true).catch((e) => payoutCallbackMsg(String(e.message || e), true)));
     async function loadPayoutDestination() {
       const r = await payoutDestRequest("GET");
       if (r.status !== 200) {
@@ -549,7 +598,7 @@ app.get("/portal/settings/install", async (req, reply) => {
   // One installer for every platform (docs/install.md): detects GPUs, one agent per GPU.
   const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 style="margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
     <p style="margin:0 0 12px;font-size:13px;color:var(--muted);">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
-    <div class="code-block" id="install-sh"><code>curl -fsSL ${portalBase}/install.sh | sudo bash -s -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-sh">Copy</button></div>
+    <div class="code-block" id="install-sh"><code>curl -fsSLo install.sh ${portalBase}/install.sh && sudo bash install.sh --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-sh">Copy</button></div>
     <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-ps1">Copy</button></div>
     <div style="font-size:12px;color:var(--muted);margin-top:8px;">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
   const secondaryCards = universalCard + Object.entries(allCards)

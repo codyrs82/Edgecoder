@@ -124,27 +124,34 @@ export function lnurlPayEndpoint(destination: string): string {
   return `https://${m[2].toLowerCase()}/.well-known/lnurlp/${m[1]}`;
 }
 
+type LnurlPayMeta = { tag?: string; callback?: string; minSendable?: number; maxSendable?: number; metadata?: unknown; status?: string; reason?: string };
+
+async function fetchLnurlPayMeta(destination: string, fetcher: JsonFetcher): Promise<LnurlPayMeta & { callback: string }> {
+  const meta = (await fetcher(lnurlPayEndpoint(destination))) as LnurlPayMeta;
+  if (meta?.status === "ERROR") throw new Error(`lnurl_error:${meta.reason ?? "unknown"}`);
+  if (meta?.tag !== "payRequest" || typeof meta.callback !== "string" || !/^https:\/\//i.test(meta.callback)) throw new Error("lnurl_not_pay_request");
+  return meta as LnurlPayMeta & { callback: string };
+}
+
+/** The LNURL-pay callback URL a destination resolves to now (used to pin it when it is saved). */
+export async function resolveLnurlCallback(destination: string, fetcher: JsonFetcher): Promise<string> {
+  return (await fetchLnurlPayMeta(destination, fetcher)).callback;
+}
+
 /**
  * Fetch an invoice for `amountMsat` from a Lightning address / LNURL-pay endpoint and check the
  * invoice is for that amount on the right network. The invoice's payment hash is what we pay.
+ * `beforeCallback` sees the callback URL before it is called (callback pinning) and may throw to stop.
  */
 export async function requestLnurlInvoice(
   destination: string,
   amountMsat: number,
   fetcher: JsonFetcher,
-  network: BitcoinNetwork
+  network: BitcoinNetwork,
+  opts: { beforeCallback?: (callbackUrl: string) => Promise<void> } = {}
 ): Promise<{ bolt11: string; decoded: DecodedBolt11 }> {
-  const meta = (await fetcher(lnurlPayEndpoint(destination))) as {
-    tag?: string;
-    callback?: string;
-    minSendable?: number;
-    maxSendable?: number;
-    metadata?: unknown;
-    status?: string;
-    reason?: string;
-  };
-  if (meta?.status === "ERROR") throw new Error(`lnurl_error:${meta.reason ?? "unknown"}`);
-  if (meta?.tag !== "payRequest" || typeof meta.callback !== "string" || !/^https:\/\//i.test(meta.callback)) throw new Error("lnurl_not_pay_request");
+  const meta = await fetchLnurlPayMeta(destination, fetcher);
+  await opts.beforeCallback?.(meta.callback);
   if (typeof meta.minSendable === "number" && amountMsat < meta.minSendable) throw new Error(`lnurl_below_min:${meta.minSendable}`);
   if (typeof meta.maxSendable === "number" && amountMsat > meta.maxSendable) throw new Error(`lnurl_above_max:${meta.maxSendable}`);
   // LUD-06: the invoice must commit to the metadata (description_hash = sha256(metadata)).

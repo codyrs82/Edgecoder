@@ -7,6 +7,7 @@ import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ServerResponse } from "node:http";
 import { applyCspNonce, newCspNonce } from "./csp-nonce.js";
+import { createPgRateLimitStore, type PgRateLimitStoreOptions, type RateLimitPool } from "./rate-limit-store.js";
 
 /**
  * Edge in front of the portal. With "cloudflare" the client IP for rate limiting is taken from
@@ -82,7 +83,7 @@ const AUTH_ROUTES: RegExp[] = [
 // page's list) must not share this bucket.
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
 // Withdraw (the code request and the confirm) shares the wallet bucket.
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/];
+const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/, /^\/wallet\/payout-destination\/callback\/confirm$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
@@ -159,6 +160,24 @@ export interface PortalSecurityOptions {
   serviceToken?: string;
   /** PORTAL_COORDINATOR_TOKEN: coordinators calling /internal/* directly also pass the origin lock. */
   coordinatorToken?: string;
+  /**
+   * Postgres pool (PORTAL_DATABASE_URL) for the shared rate-limit store, so every portal machine
+   * counts against the same limits. Without it (dev, tests) the plugin's in-memory store is used.
+   */
+  rateLimitPool?: RateLimitPool;
+  /** Tuning for the shared store (timeouts, cleanup); mainly for tests. */
+  rateLimitStoreOptions?: Omit<PgRateLimitStoreOptions, "log">;
+  /** Environment for PORTAL_TRUST_FLY_CLIENT_IP / FLY_APP_NAME (default process.env). */
+  env?: NodeJS.ProcessEnv;
+}
+
+export type RateLimitKeySource = "cf-connecting-ip (origin lock on)" | "fly-client-ip" | "socket address";
+
+/** Which address clientIp() keys rate limits on for requests that pass the origin lock. */
+export function rateLimitKeySource(opts: { edge?: EdgeMode; originLockToken?: string; env?: NodeJS.ProcessEnv }): RateLimitKeySource {
+  if (opts.edge === "cloudflare" && opts.originLockToken) return "cf-connecting-ip (origin lock on)";
+  if (flyClientIpEnabled(opts.env ?? process.env)) return "fly-client-ip";
+  return "socket address";
 }
 
 type NonceResponse = ServerResponse & { cspNonce?: string };
@@ -190,9 +209,19 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
       return reply.code(403).send({ error: "origin_locked", detail: "This portal is only reachable through its public domain." });
     });
   }
+  const env = opts.env ?? process.env;
+  const sharedStore = opts.rateLimitPool
+    ? createPgRateLimitStore(opts.rateLimitPool, { ...opts.rateLimitStoreOptions, log: app.log })
+    : undefined;
+  if (sharedStore) app.addHook("onClose", async () => sharedStore.stop());
+  const keySource = rateLimitKeySource({ edge: opts.edge, originLockToken: opts.originLockToken, env });
+  const storeName = sharedStore ? "postgres" : "memory";
+  app.log.info({ rateLimitKeySource: keySource, rateLimitStore: storeName }, `rate-limit key: ${keySource}; store: ${storeName}`);
   await app.register(rateLimit, {
     global: false,
-    keyGenerator: (req: FastifyRequest) => clientIp(req, { edge: opts.edge, originLockToken: opts.originLockToken }),
+    ...(sharedStore ? { store: sharedStore.Store } : {}),
+    // env is passed so PORTAL_TRUST_FLY_CLIENT_IP takes effect (it was previously dropped here).
+    keyGenerator: (req: FastifyRequest) => clientIp(req, { ...env, edge: opts.edge, originLockToken: opts.originLockToken }),
     errorResponseBuilder: (_req, ctx) => ({ statusCode: 429, error: "rate_limited", retryAfter: ctx.after }),
   });
 

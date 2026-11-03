@@ -7,7 +7,7 @@ import type { CreditTransaction } from "../../src/common/types.js";
 
 // #48: concurrent debits must never overspend, and the balance never goes negative.
 
-type Row = { account_id: string; tx_type: string; credits: number };
+type Row = { account_id: string; tx_type: string; credits: number; tx_id?: string };
 
 /**
  * Minimal fake pg.Pool. It models what debitCredits relies on: transactions only
@@ -48,6 +48,10 @@ function fakePool() {
             locks.set(key, new Promise<void>((r) => { release = r; }));
             return { rows: [], rowCount: 1 };
           }
+          if (sql.includes("SELECT 1 FROM credit_transactions WHERE tx_id")) {
+            const n = committed.filter((r) => r.tx_id === params[0]).length;
+            return { rows: Array.from({ length: n }, () => ({})), rowCount: n };
+          }
           if (sql.includes("SUM(CASE WHEN tx_type = 'spend'")) {
             const bal = committed.filter((r) => r.account_id === params[0])
               .reduce((s, r) => s + (r.tx_type === "spend" ? -r.credits : r.credits), 0);
@@ -56,7 +60,7 @@ function fakePool() {
             return { rows: [{ balance: bal, enough }], rowCount: 1 };
           }
           if (sql.includes("INSERT INTO credit_transactions")) {
-            pending.push({ account_id: String(params[1]), tx_type: "spend", credits: Number(params[2]) });
+            pending.push({ tx_id: String(params[0]), account_id: String(params[1]), tx_type: "spend", credits: Number(params[2]) });
             return { rows: [], rowCount: 1 };
           }
           throw new Error(`unexpected sql: ${sql}`);
@@ -179,6 +183,53 @@ describe.skipIf(!PG_URL)("debitCredits against real Postgres (#48)", () => {
       expect(await store.creditBalance(acct)).toBe(0);
     } finally {
       await pool.end();
+    }
+  }, 60_000);
+});
+
+describe("idempotent debits: one charge per key across coordinators", () => {
+  it("fake pool: the same key debited by two stores at once is charged once", async () => {
+    const { debitTxId } = await import("../../src/credits/store.js");
+    const pool = fakePool();
+    pool.committed.push({ account_id: "acct", tx_type: "earn", credits: 10 });
+    const us = new PostgresStore(pool as unknown as pg.Pool);
+    const eu = new PostgresStore(pool as unknown as pg.Pool);
+    const tx = { ...spendTx("acct", 4), txId: debitTxId("inference_reserve:task-1") };
+    const results = await Promise.all([us.debitCredits(tx), eu.debitCredits({ ...tx })]);
+    expect(results.map((r) => r.status).sort()).toEqual(["applied", "duplicate"]);
+    expect(balanceOf(pool.committed, "acct")).toBe(6);
+  });
+
+  it("in-memory: a repeated idempotency key throws DuplicateDebitError and takes nothing", async () => {
+    const { creditEngine, spendCredits, DuplicateDebitError } = await import("../../src/credits/store.js");
+    const acct = `idem-${randomUUID()}`;
+    creditEngine.adjust(acct, 5, "seed");
+    await spendCredits(acct, 2, "task_reserve", "task-a", { idempotencyKey: "task_reserve:task-a" });
+    await expect(spendCredits(acct, 2, "task_reserve", "task-a", { idempotencyKey: "task_reserve:task-a" })).rejects.toBeInstanceOf(DuplicateDebitError);
+    await spendCredits(acct, 1, "task_reserve", "task-a"); // no key: an ordinary second debit
+    expect(creditEngine.balance(acct)).toBe(2);
+  });
+});
+
+describe.skipIf(!PG_URL)("idempotent debits against one Postgres shared by two coordinators", () => {
+  it("a task submitted to both seeds is reserved once; the second seed gets duplicate", async () => {
+    const { debitTxId } = await import("../../src/credits/store.js");
+    const poolUs = new pg.Pool({ connectionString: PG_URL, max: 4 });
+    const poolEu = new pg.Pool({ connectionString: PG_URL, max: 4 });
+    try {
+      await poolUs.query(SCHEMA_SQL);
+      const us = new PostgresStore(poolUs);
+      const eu = new PostgresStore(poolEu);
+      const acct = `acct-${randomUUID()}`;
+      await us.persistCreditTransaction({ ...spendTx(acct, 10), type: "earn", reason: "seed" });
+      const txId = debitTxId(`inference_reserve:task-${randomUUID()}`);
+      const results = await Promise.all(Array.from({ length: 6 }, (_, i) => (i % 2 ? eu : us).debitCredits({ ...spendTx(acct, 3), txId })));
+      expect(results.filter((r) => r.status === "applied")).toHaveLength(1);
+      expect(results.filter((r) => r.status === "duplicate")).toHaveLength(5);
+      expect(await eu.creditBalance(acct)).toBe(7);
+    } finally {
+      await poolUs.end();
+      await poolEu.end();
     }
   }, 60_000);
 });

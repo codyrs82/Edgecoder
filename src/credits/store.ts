@@ -183,13 +183,13 @@ export function roundCredits(credits: number): number {
  * per-account advisory lock. In-memory: synchronous check + insert.
  * Throws `insufficient_credits: <balance> < <credits>`; the balance never goes negative.
  */
-async function debit(accountId: string, rawCredits: number, reason: string, relatedTaskId?: string): Promise<CreditTransaction> {
+async function debit(accountId: string, rawCredits: number, reason: string, relatedTaskId?: string, txId?: string): Promise<CreditTransaction> {
   assertAmount(rawCredits);
   const credits = roundCredits(rawCredits);
   assertAmount(credits);
   if (pgStore) {
     const tx: CreditTransaction = {
-      txId: randomUUID(),
+      txId: txId ?? randomUUID(),
       accountId,
       type: "spend",
       credits,
@@ -198,21 +198,50 @@ async function debit(accountId: string, rawCredits: number, reason: string, rela
       timestampMs: Date.now()
     };
     const result = await pgStore.debitCredits(tx);
+    if (result.status === "duplicate") throw new DuplicateDebitError(tx.txId);
     if (result.status === "insufficient") {
       throw new Error(`insufficient_credits: ${result.balance} < ${credits}`);
     }
     return tx;
   }
+  if (txId) {
+    if (creditEngine.history(accountId).some((t) => t.txId === txId)) throw new DuplicateDebitError(txId);
+    const spent = creditEngine.spend(accountId, credits, reason, relatedTaskId);
+    spent.txId = txId; // the engine keeps the same object, so the stored row carries the key too
+    return spent;
+  }
   return creditEngine.spend(accountId, credits, reason, relatedTaskId);
 }
 
+/**
+ * A debit whose idempotency key was already charged (here or by another coordinator sharing
+ * the database). Nothing was taken this time.
+ */
+export class DuplicateDebitError extends Error {
+  constructor(readonly txId: string) {
+    super(`duplicate_debit: ${txId}`);
+    this.name = "DuplicateDebitError";
+  }
+}
+
+/**
+ * Debit `credits`. With `opts.idempotencyKey` the row's tx id is derived from it, so the same
+ * charge submitted twice (a retry, or the same task sent to both seeds) is taken once; the
+ * second call throws DuplicateDebitError.
+ */
 export async function spendCredits(
   accountId: string,
   credits: number,
   reason: string,
-  relatedTaskId?: string
+  relatedTaskId?: string,
+  opts: { idempotencyKey?: string } = {}
 ) {
-  return debit(accountId, credits, reason, relatedTaskId);
+  return debit(accountId, credits, reason, relatedTaskId, opts.idempotencyKey ? debitTxId(opts.idempotencyKey) : undefined);
+}
+
+/** Deterministic tx id for an idempotent debit (same shape as refundTxId). */
+export function debitTxId(idempotencyKey: string): string {
+  return `debit:${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32)}`;
 }
 
 /**

@@ -20,6 +20,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
 import { createPayoutRegistrar, registerPayoutDestinationRoutes } from "./routes/payout-destination.js";
+import { createPayoutCallbackClient, registerPayoutCallbackNotifyRoute, registerPayoutCallbackRoutes } from "./routes/payout-callback.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
@@ -80,6 +81,8 @@ await app.register(cors, {
   credentials: true,
 });
 
+const store = PortalStore.fromEnv();
+
 // #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
@@ -98,9 +101,9 @@ await registerPortalSecurity(app, {
   originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
   serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
   coordinatorToken: process.env.PORTAL_COORDINATOR_TOKEN?.trim() || undefined,
+  // Shared Postgres rate-limit counters across portal machines (memory store without a database).
+  rateLimitPool: store?.pool,
 });
-
-const store = PortalStore.fromEnv();
 
 // #15: validated once at import; invalid values exit with every problem listed.
 const C = loadConfigOrExit("portal", portalConfigSchema);
@@ -284,7 +287,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail } = createPortalMailer(
+const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -817,9 +820,15 @@ registerPasskeyRoutes(app, passkeyRouteDeps);
 const walletRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_DEFAULT_NETWORK, WALLET_SEND_MFA_TTL_MS, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse };
 export type WalletRoutesDeps = typeof walletRouteDeps;
 registerWalletRoutes(app, walletRouteDeps);
+// Lightning callback pinning (routes/payout-callback.ts): banner state, emailed-code confirm, owner notice.
+const payoutCallbackClient = createPayoutCallbackClient({ portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal });
+registerPayoutCallbackRoutes(app, {
+  store, getCurrentUser, client: payoutCallbackClient, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
+  sendCode: sendPayoutCallbackCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
+});
 registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
-  sendCode: sendPayoutDestinationCodeEmail, generateSixDigitCode, sha256Hex, secureCompare,
+  sendCode: sendPayoutDestinationCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest),
   register: createPayoutRegistrar({ controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal })
 });
 const accountRouteDeps = { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
@@ -857,6 +866,7 @@ const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoo
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
+  registerPayoutCallbackNotifyRoute(internal, { store, client: payoutCallbackClient, sendNotice: sendPayoutCallbackChangedEmail });
 }); // end /internal plugin (#40)
 
 registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry

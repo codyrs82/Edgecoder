@@ -152,5 +152,33 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(input.email, "Confirm your EdgeCoder withdrawal", html, "withdraw_code_email");
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail };
+  /** The wallet's payment server (LNURL callback host) changed; payouts are held (routes/payout-callback.ts). Resolves false when email is not configured. */
+  async function sendPayoutCallbackChangedEmail(input: { email: string; destination: string; previousHost: string; newHost: string }): Promise<boolean> {
+    const link = `${cfg.portalPublicUrl}/portal/settings/plan`;
+    const html = `
+      <p>Your wallet's payment server changed from <strong>${escapeHtml(input.previousHost)}</strong> to <strong>${escapeHtml(input.newHost)}</strong>
+      for your payout address <strong>${escapeHtml(input.destination)}</strong>.</p>
+      <p>We have paused payouts to that address. Your earnings are safe and still payable.</p>
+      <p>If your wallet provider moved its servers, confirm the change under Settings, Plan &amp; usage to keep receiving payouts:
+      <a href="${link}">${link}</a></p>
+      <p>If you did not expect this, do not confirm. Change your payout address to a wallet you trust instead.</p>
+    `;
+    return sendResendEmail(input.email, "Action needed: your EdgeCoder payouts are paused", html, "payout_callback_changed_email");
+  }
+
+  /** One-time code to confirm a changed payment server (routes/payout-callback.ts). */
+  async function sendPayoutCallbackCodeEmail(input: { email: string; code: string; destination: string; previousHost: string; newHost: string }): Promise<void> {
+    if (!cfg.resendApiKey || !cfg.resendFromEmail) throw new Error("email_mfa_not_configured");
+    const html = `
+      <p>Someone asked to confirm that payouts to <strong>${escapeHtml(input.destination)}</strong> may go through the payment server
+      <strong>${escapeHtml(input.newHost)}</strong> (it was <strong>${escapeHtml(input.previousHost)}</strong>).</p>
+      <p>Your one-time code is:</p>
+      <p><strong style="font-size:22px;letter-spacing:0.18em;">${input.code}</strong></p>
+      <p>This code expires in ${Math.floor(cfg.walletSendMfaTtlMs / 60000)} minutes.</p>
+      <p>If you did not ask for this, do not share the code and change your password now.</p>
+    `;
+    await sendResendEmail(input.email, "Confirm your wallet's new payment server", html, "payout_callback_code_email");
+  }
+
+  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
 }
