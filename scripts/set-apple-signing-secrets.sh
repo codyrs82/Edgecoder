@@ -3,7 +3,7 @@
 # secrets into GitHub Actions for the desktop release workflow, without the values ever being
 # printed, written to a file in the repo, or kept in shell history.
 #
-#   bash scripts/set-apple-signing-secrets.sh ~/Desktop/developer-id.p12
+#   bash scripts/set-apple-signing-secrets.sh ~/Documents/Certificates.p12
 #
 # Needs: the exported Developer ID Application .p12, its export password, your Apple ID and an
 # app-specific password (account.apple.com → Sign-In and Security → App-Specific Passwords),
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-P12="${1:-$HOME/Desktop/developer-id.p12}"
+P12="${1:-$HOME/Documents/Certificates.p12}"
 REPO="${EDGECODER_REPO:-codyrs82/Edgecoder}"
 [ -f "$P12" ] || { echo "No .p12 at $P12 (pass its path as the first argument)."; exit 1; }
 command -v gh >/dev/null || { echo "Install the GitHub CLI (brew install gh) and run gh auth login."; exit 1; }
@@ -23,14 +23,19 @@ TEAM_ID="$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p')"
 echo "Certificate: $IDENTITY"
 echo "Team ID:     $TEAM_ID"
 
-read -rsp "Password you set when exporting the .p12: " P12_PASSWORD; echo
+read -rsp "Password you set when exporting the .p12: " P12_PASSWORD; echo; export P12_PASSWORD
 read -rp  "Apple ID email: " APPLE_ID
 read -rsp "App-specific password (xxxx-xxxx-xxxx-xxxx): " APPLE_PASSWORD; echo
 
-# Check the .p12 password before uploading anything.
-openssl pkcs12 -in "$P12" -passin "pass:$P12_PASSWORD" -nokeys -legacy >/dev/null 2>&1 \
-  || openssl pkcs12 -in "$P12" -passin "pass:$P12_PASSWORD" -nokeys >/dev/null 2>&1 \
+# Check the .p12 password, and that it holds exactly the Developer ID certificate (an export of
+# several identities would put unrelated certificates into GitHub), before uploading anything.
+CERTS="$(openssl pkcs12 -in "$P12" -passin env:P12_PASSWORD -nokeys -legacy 2>/dev/null \
+  || openssl pkcs12 -in "$P12" -passin env:P12_PASSWORD -nokeys 2>/dev/null)" \
   || { echo "That password doesn't open $P12."; exit 1; }
+SUBJECTS="$(printf '%s\n' "$CERTS" | grep -E '^subject=' || true)"
+printf '%s\n' "$SUBJECTS" | grep -q "Developer ID Application" || { echo "$P12 doesn't contain a Developer ID Application certificate. Export it from Keychain Access → My Certificates."; exit 1; }
+OTHERS="$(printf '%s\n' "$SUBJECTS" | grep -v "Developer ID Application" | grep -v "Developer ID Certification Authority" | grep -v "Apple Root CA" || true)"
+[ -z "$OTHERS" ] || { echo "$P12 also contains other certificates:"; printf '%s\n' "$OTHERS"; echo "Export only the Developer ID Application certificate (select just that row)."; exit 1; }
 
 base64 -i "$P12" | gh secret set APPLE_CERTIFICATE --repo "$REPO"
 printf '%s' "$P12_PASSWORD"   | gh secret set APPLE_CERTIFICATE_PASSWORD --repo "$REPO"

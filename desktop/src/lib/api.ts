@@ -1260,6 +1260,8 @@ export interface Machine {
   activeModel: string | null;
   models: string[];
   reservedUntilMs: number | null;
+  /** Hardware verification: the tier claimed, the tier paid after the coordinator's challenge, and evidence from real work. */
+  verification?: { status: string; claimedTier: string; grantedTier: string; reason: string | null; lastPassAtMs: number | null; score: number | null; tokensPerSec: number | null };
 }
 
 // Connect to compute: one local port per connection (:4304 /v1/ide/connections)

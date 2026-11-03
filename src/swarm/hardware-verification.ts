@@ -786,7 +786,7 @@ export class HardwareVerifier {
    * Ongoing evidence from one task result (server-measured claim-to-result time). Returns true when
    * the grant changed (real work far below the challenge baseline demotes to base and re-challenges).
    */
-  recordTask(agentId: string, input: { ok: boolean; outputChars: number; elapsedMs: number }, nowMs: number): boolean {
+  recordTask(agentId: string, input: { ok: boolean; outputChars: number; elapsedMs: number; outputTokens?: number }, nowMs: number): boolean {
     const rec = this.records.get(agentId);
     if (!rec) return false;
     const e = rec.evidence;
@@ -795,7 +795,7 @@ export class HardwareVerifier {
     e.okRate = e.samples === 1 ? (input.ok ? 1 : 0) : e.okRate + alpha * ((input.ok ? 1 : 0) - e.okRate);
     // Speed only from results with real output (~100+ tokens): a short answer after a long sandbox run says nothing about decode speed.
     if (input.ok && input.outputChars >= 400 && input.elapsedMs > 0) {
-      const tps = input.outputChars / 4 / (input.elapsedMs / 1000);
+      const tps = workTokens(input.outputChars, input.outputTokens) / (input.elapsedMs / 1000);
       e.tokensPerSec = e.tokensPerSec === undefined ? tps : e.tokensPerSec + alpha * (tps - e.tokensPerSec);
     }
     e.speedRatio = e.baselineTokensPerSec && e.tokensPerSec !== undefined ? Number((e.tokensPerSec / e.baselineTokensPerSec).toFixed(3)) : undefined;
@@ -815,4 +815,14 @@ export class HardwareVerifier {
     if (changed || nowMs - (this.lastPersistMs.get(agentId) ?? 0) >= persistEveryMs) this.save(rec, nowMs);
     return changed;
   }
+}
+
+/**
+ * Tokens a result produced: the model's own count when the agent reported it, kept within what
+ * the text can hold (1.5 to 8 characters a token) so an inflated count can't make slow hardware
+ * look fast; about 4 characters a token otherwise.
+ */
+export function workTokens(outputChars: number, reportedTokens?: number): number {
+  if (reportedTokens === undefined || !Number.isFinite(reportedTokens) || reportedTokens <= 0) return outputChars / 4;
+  return Math.min(outputChars / 1.5, Math.max(outputChars / 8, reportedTokens));
 }

@@ -198,6 +198,12 @@
               <div class="sp-text">
                 <span class="sp-title">{m.agentId}</span>
                 <span class="sp-desc">{CLASS_LABELS[m.computeClass] ?? m.computeClass}{m.tier ? ` · ${m.tier}` : ""} · {m.online ? "online" : `last seen ${new Date(m.lastSeenMs).toLocaleString()}`}{m.reservedUntilMs ? " · reserved by someone" : ""}</span>
+                {#if m.verification}
+                  {@const v = m.verification}
+                  <span class="sp-desc">
+                    {#if v.status === "verified"}<span class="sp-ok">Verified {v.grantedTier}</span>{:else if v.status === "base"}Base tier (nothing to prove){:else if v.status === "demoted"}<span class="sp-warn">Paid as {v.grantedTier}, claimed {v.claimedTier}{v.reason ? ` · ${v.reason.replace(/_/g, " ")}` : ""}</span>{:else}<span class="sp-warn">Not verified yet: paid as {v.grantedTier} until it passes the speed check</span>{/if}{#if v.tokensPerSec} · {Math.round(v.tokensPerSec)} tokens/s on real work{/if}
+                  </span>
+                {/if}
               </div>
               <span class="sp-muted">{m.models.map(shortModel).join(", ")}</span>
             </div>
