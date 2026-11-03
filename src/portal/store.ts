@@ -253,6 +253,9 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
     // Native-app OAuth hand-off lives in Postgres: Cloudflare spreads one sign-in across portal instances.
     await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS native_redirect TEXT`);
+    // Connect-from-Settings flows record the signed-in user; Microsoft links record the tenant.
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS link_user_id TEXT`);
+    await this.pool.query(`ALTER TABLE portal_oauth_links ADD COLUMN IF NOT EXISTS tenant_id TEXT`);
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
     );
@@ -656,15 +659,28 @@ export class PortalStore {
     providerSubject: string;
     userId: string;
     emailSnapshot?: string;
+    /** Microsoft: the Entra tenant (tid) of the identity. */
+    tenantId?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_links (provider, provider_subject, user_id, email_snapshot, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO portal_oauth_links (provider, provider_subject, user_id, email_snapshot, created_at_ms, tenant_id)
+       VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (provider, provider_subject) DO UPDATE SET
          user_id = EXCLUDED.user_id,
-         email_snapshot = EXCLUDED.email_snapshot`,
-      [input.provider, input.providerSubject, input.userId, input.emailSnapshot ?? null, Date.now()]
+         email_snapshot = EXCLUDED.email_snapshot,
+         tenant_id = COALESCE(EXCLUDED.tenant_id, portal_oauth_links.tenant_id)`,
+      [input.provider, input.providerSubject, input.userId, input.emailSnapshot ?? null, Date.now(), input.tenantId ?? null]
     );
+  }
+
+  /** Remove every OAuth identity linked to a user. */
+  async deleteOauthLinksForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_oauth_links WHERE user_id = $1`, [userId]);
+  }
+
+  /** Remove every passkey registered to a user. */
+  async deletePasskeysForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_passkey_credentials WHERE user_id = $1`, [userId]);
   }
 
   async findOauthIdentity(provider: string, providerSubject: string): Promise<{ userId: string } | null> {
@@ -802,25 +818,32 @@ export class PortalStore {
     expiresAtMs: number;
     /** Deep link to hand the session back to a native app (desktop/iOS), if the flow started there. */
     nativeRedirect?: string;
+    /** Set when a signed-in user connects this provider from Settings. */
+    linkUserId?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id`,
       [stateId, now]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { provider: row.provider, redirectUri: row.redirect_uri, ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}) };
+    return {
+      provider: row.provider,
+      redirectUri: row.redirect_uri,
+      ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
+      ...(row.link_user_id ? { linkUserId: row.link_user_id } : {})
+    };
   }
 
   /** One-time code a native app redeems for a session after OAuth (stored hashed, single use). */
