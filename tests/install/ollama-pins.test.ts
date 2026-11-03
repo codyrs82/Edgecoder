@@ -28,22 +28,19 @@ describe("Ollama pins stay in sync (src/install/ollama-pins.ts is the source of 
     expect(sh).toContain(`OLLAMA_SHA256="${OLLAMA_ASSETS.darwin.sha256}"`);
   });
 
-  // deploy/install.{sh,ps1} gain their pins in PR #241; from then on they must match too.
-  it("deploy/install.sh, when it pins Ollama, pins the same release", () => {
+  it("deploy/install.sh pins the same release", () => {
     const sh = read("deploy/install.sh");
     const m = sh.match(/^OLLAMA_VERSION=(\S+)$/m);
-    if (!m) return;
-    expect(m[1]).toBe(OLLAMA_VERSION);
+    expect(m?.[1]).toBe(OLLAMA_VERSION);
     for (const t of ["linux-x64", "linux-arm64", "darwin"] as const) {
       expect(sh).toContain(`${OLLAMA_ASSETS[t].name} ${OLLAMA_ASSETS[t].sha256}`);
     }
   });
 
-  it("deploy/install.ps1, when it pins Ollama, pins the same release", () => {
+  it("deploy/install.ps1 pins the same release", () => {
     const ps = read("deploy/install.ps1");
     const v = ps.match(/^\$OllamaVersion\s*=\s*'([^']+)'/m);
-    if (!v) return;
-    expect(v[1]).toBe(OLLAMA_VERSION);
+    expect(v?.[1]).toBe(OLLAMA_VERSION);
     expect(ps).toMatch(new RegExp(`^\\$OllamaSha256\\s*=\\s*'${OLLAMA_ASSETS["win-x64"].sha256}'`, "m"));
     expect(ps).toContain(OLLAMA_ASSETS["win-x64"].name);
   });
@@ -63,9 +60,6 @@ describe("nothing pipes downloaded content into a shell", () => {
     /\|\s*iex\b/i,
     /\bInvoke-Expression\b/i
   ];
-  // Until PR #241 lands, these still carry the old bootstrap; once they say so, they are checked too.
-  const PENDING_241 = ["deploy/install.sh", "deploy/install.ps1", "docs/install.md"];
-  const isPending = (f: string) => PENDING_241.includes(f) && !read("deploy/install.sh").includes("Nothing downloaded is piped into a shell");
 
   // Hostile-input fixtures: tests that feed \`curl … | sh\` to the app to check it is escaped or refused.
   const FIXTURES = new Set([
@@ -79,7 +73,7 @@ describe("nothing pipes downloaded content into a shell", () => {
     const files = execFileSync("git", ["-c", "safe.directory=*", "ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
     const offenders: string[] = [];
     for (const f of files) {
-      if (f === "tests/install/ollama-pins.test.ts" || FIXTURES.has(f) || isPending(f)) continue;
+      if (f === "tests/install/ollama-pins.test.ts" || FIXTURES.has(f)) continue;
       if (!/\.(sh|ps1|psm1|ts|js|mjs|cjs|md|ya?ml|rs|toml|json|html|txt|service|plist)$|(^|\/)(preinst|postinst|postinstall|preinstall|prerm|postrm|Dockerfile[^/]*)$/.test(f)) continue;
       if (!existsSync(f)) continue;
       const lines = read(f).split("\n");

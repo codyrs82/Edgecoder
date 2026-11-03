@@ -15,10 +15,19 @@ platform entry point or this page falls behind.
 | macOS | `curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --mesh-token <token>` |
 | Windows (admin PowerShell) | `irm https://edgecoder.io/install.ps1 -OutFile install.ps1; .\install.ps1 -- --mesh-token <token>` |
 
-`curl -fsSL https://edgecoder.io/install.sh | sudo bash -s -- --mesh-token <token>` still works,
-but downloading first lets you read the script (and compare it with `deploy/install.sh` in this
-repository) before it runs as root. The script does nothing until its last line, so a
-truncated download runs nothing.
+Download the script, check it, then run it. Do not pipe it into a shell: downloading first lets
+you read what will run as root.
+
+```bash
+curl -fsSLo install.sh https://edgecoder.io/install.sh
+# check: it must be identical to deploy/install.sh in this repository
+curl -fsSL https://raw.githubusercontent.com/codyrs82/Edgecoder/main/deploy/install.sh | diff - install.sh && echo identical
+less install.sh                      # optional: read it
+sudo bash install.sh --mesh-token <token>
+```
+
+The script itself then verifies everything it downloads (next section). It does nothing until
+its last line, so a truncated download runs nothing.
 
 The bootstrap installs the pinned Node.js build into `/opt/edgecoder/node` (Windows:
 `C:\Program Files\EdgeCoder\node`), Ollama, Docker on Linux from the distribution's packages
@@ -180,7 +189,8 @@ still install.
 
 ```bash
 read -rs EDGECODER_API_KEY   # paste the key; nothing is echoed or saved in history
-curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash -s -- --mesh-token "$MESH" --pull-models
+curl -fsSLo install.sh https://edgecoder.io/install.sh   # check it as in "One line" above
+sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH" --pull-models
 # later runs: sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" edgecoder-install apply
 ```
 
@@ -230,7 +240,8 @@ Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 
 ```bash
 read -rs EDGECODER_API_KEY   # eck_... from Settings → API keys
-curl -fsSL https://edgecoder.io/install.sh | sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash -s -- --mesh-token "$MESH" --pull-models
+curl -fsSLo install.sh https://edgecoder.io/install.sh   # check it as in "One line" above
+sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH" --pull-models
 sudo edgecoder-install status
 ```
 
