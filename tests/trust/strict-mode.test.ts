@@ -8,15 +8,14 @@ import { PinnedKeyStore, checkCoordinatorTrust, fingerprint, type IdentityFetch 
 import { selectCoordinator, selectOptionsFromEnv } from "../../src/discovery/index.js";
 import { signAnnouncement } from "../../src/discovery/types.js";
 import type { FetchLike } from "../../src/discovery/selector.js";
+import { coordinatorFetch } from "./coordinator-fetch.js";
 
 // Pentest #6: EDGECODER_TRUST_MODE stays tofu by default; strict must be correct before production flips it.
 const listed = createPeerKeys("coord-listed");
 const unlisted = createPeerKeys("coord-unlisted");
 const entry = (k: ReturnType<typeof createPeerKeys>) => `${k.peerId}:${fingerprint(k.publicKeyPem)}`;
 
-function identityFetch(k: ReturnType<typeof createPeerKeys>): IdentityFetch {
-  return async () => ({ ok: true, status: 200, json: async () => ({ peerId: k.peerId, publicKeyPem: k.publicKeyPem }) });
-}
+const identityFetch = (k: ReturnType<typeof createPeerKeys>): IdentityFetch => coordinatorFetch(k);
 
 describe("strict trust mode", () => {
   it("strict with nothing listed is a startup error; tofu (the default) and listed strict are fine", () => {
@@ -32,7 +31,7 @@ describe("strict trust mode", () => {
     expect(await checkCoordinatorTrust("https://a", { store, fetch: identityFetch(listed) })).toMatchObject({ trusted: true, decision: { reason: "pinned_match" } });
     expect(await checkCoordinatorTrust("https://b", { store, fetch: identityFetch(unlisted) })).toMatchObject({ trusted: false, decision: { reason: "strict_unlisted" } });
     // An unlisted coordinator presenting a listed peerId with its own key is a mismatch, not a pass.
-    const impostor: IdentityFetch = async () => ({ ok: true, status: 200, json: async () => ({ peerId: listed.peerId, publicKeyPem: unlisted.publicKeyPem }) });
+    const impostor: IdentityFetch = coordinatorFetch({ ...unlisted, peerId: listed.peerId });
     expect(await checkCoordinatorTrust("https://c", { store, fetch: impostor })).toMatchObject({ trusted: false, decision: { reason: "pinned_mismatch" } });
     expect(existsSync(pinFile)).toBe(false);
   });
