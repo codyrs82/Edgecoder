@@ -49,13 +49,14 @@ export async function runInferenceSubtask(
   let lastFlush = Date.now();
   let full = "";
   const toolCalls: ToolCall[] = [];
+  let tokens: { promptTokens?: number; outputTokens?: number } = {};
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
     const delta = pending;
     pending = "";
     lastFlush = Date.now();
     try {
-      await deps.post("/inference/chunks", { subtaskId: st.id, seq: seq++, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}) });
+      await deps.post("/inference/chunks", { subtaskId: st.id, seq: seq++, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
     } catch {
       // The final result still carries the whole reply.
     }
@@ -66,6 +67,7 @@ export async function runInferenceSubtask(
   try {
     for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal)) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
+      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens };
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;

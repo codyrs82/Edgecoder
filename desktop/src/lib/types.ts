@@ -144,6 +144,13 @@ export interface ChatMessage {
   /** A background job sent to the network from this message (its card shows progress and output). */
   networkTaskId?: string;
   toolEvents?: ToolEvent[];
+  /** What the reply cost and where it ran ("Network GPU · qwen3.5:9b", 0.42 cSats). */
+  usage?: ReplyUsage;
+}
+
+export interface ReplyUsage {
+  cSats: number;
+  where?: string;
 }
 
 export interface Conversation {

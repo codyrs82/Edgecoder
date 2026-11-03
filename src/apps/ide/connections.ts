@@ -19,7 +19,7 @@ import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { ChatBackend, ChatPiece } from "../../inference-api/types.js";
 import type { NetworkDeps } from "./network-inference.js";
 
-export type ConnectionTarget = "local" | "mine" | "network" | "reserved";
+export type ConnectionTarget = "local" | "mine" | "network" | "reserved" | "auto";
 
 export interface Connection {
   id: string;
@@ -58,6 +58,7 @@ export const newKey = () => `ec-${randomBytes(24).toString("base64url")}`;
 
 /** The display name of what a connection runs, also what /v1/models lists. */
 export function connectionModelId(c: Pick<Connection, "target" | "model" | "computeClass">): string {
+  if (c.target === "auto") return "auto";
   if (c.target === "local") return c.model;
   if (c.target === "mine") return `mine/${c.model}`;
   if (c.target === "reserved") return `reserved/${c.model}`;
@@ -73,6 +74,8 @@ export class ConnectionManager {
     private readonly deps: {
       ollamaHost: string;
       network?: NetworkDeps;
+      /** Auto routing (cheapest place that fits each request), when this machine offers it. */
+      auto?: (source: string) => ChatBackend;
       file?: string;
       log?: (msg: string, extra?: unknown) => void;
     },
@@ -128,12 +131,13 @@ export class ConnectionManager {
 
   validate(c: Partial<Connection>): string | null {
     if (!c.name?.trim()) return "Give the connection a name.";
-    if (!c.model?.trim()) return "Pick a model.";
-    if (!c.target || !["local", "mine", "network", "reserved"].includes(c.target)) return "Pick where it runs.";
+    if (!c.target || !["local", "mine", "network", "reserved", "auto"].includes(c.target)) return "Pick where it runs.";
+    if (c.target !== "auto" && !c.model?.trim()) return "Pick a model.";
+    if (c.target === "auto" && !this.deps.auto) return "Auto isn't available on this computer.";
     if (c.target === "reserved" && !c.reservationId) return "Pick a reservation.";
     if (c.port !== undefined && (!Number.isInteger(c.port) || c.port < 1024 || c.port > 65535 || RESERVED_PORTS.has(c.port))) return "Use a port from 1024 to 65535 that EdgeCoder doesn't already use (4301–4306).";
     if (c.port !== undefined && this.conns.some((o) => o.port === c.port && o.id !== c.id)) return `Port ${c.port} is used by another connection.`;
-    if (c.target !== "local" && !this.deps.network) return "This computer's agent isn't connected to the network.";
+    if (c.target !== "local" && c.target !== "auto" && !this.deps.network) return "This computer's agent isn't connected to the network.";
     return null;
   }
 
@@ -192,7 +196,9 @@ export class ConnectionManager {
   /** What runs a connection's requests (its spend is counted against its budget). */
   backendFor(c: Connection): ChatBackend {
     const inner =
-      c.target === "local"
+      c.target === "auto"
+        ? this.deps.auto!(c.name)
+        : c.target === "local"
         ? localBackend(this.deps.ollamaHost, c.model)
         : networkBackend(this.deps.network!, {
             model: c.model,
@@ -200,6 +206,7 @@ export class ConnectionManager {
             ...(c.target === "mine" ? { target: "mine" as const } : {}),
             ...(c.target === "reserved" ? { reservationId: c.reservationId } : {}),
             ...(c.target === "network" && c.maxCSatsPerSecond ? { maxCSatsPerSecond: c.maxCSatsPerSecond } : {}),
+            source: c.name,
           });
     const self = this;
     return async function* (req, signal) {

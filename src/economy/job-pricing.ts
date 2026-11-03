@@ -63,3 +63,63 @@ export function msatToCSats(msat: number): number {
 export function cSatsToMsat(cSats: number): number {
   return Math.round(cSats * 1000);
 }
+
+/**
+ * Model calls are priced per token, tied to the market (2026-11-03): a reference price per
+ * million tokens by model size, set below typical hosted prices for open models of that size,
+ * with a floor of the electricity the seconds cost so the machine's owner never loses money.
+ * Code jobs and reservations stay per second.
+ */
+
+/** USD per million tokens (input, output) by model size; below hosted list prices for open models. */
+export const TOKEN_PRICE_USD_PER_M: Array<{ maxB: number; input: number; output: number }> = [
+  { maxB: 2, input: 0.01, output: 0.03 },
+  { maxB: 4, input: 0.02, output: 0.05 },
+  { maxB: 9, input: 0.04, output: 0.1 },
+  { maxB: 16, input: 0.07, output: 0.2 },
+  { maxB: 35, input: 0.12, output: 0.35 },
+  { maxB: 80, input: 0.3, output: 0.8 },
+  { maxB: Infinity, input: 0.6, output: 1.5 },
+];
+
+/** Electricity floor per class (USD per hour of the base tier; tiers scale by weight). */
+export const POWER_FLOOR_USD_PER_HOUR: Record<string, number> = { cpu: 0.005, apple: 0.01, gpu: 0.05, "gpu.dc": 0.15 };
+
+export function tokenPriceUsdPerM(paramsB: number): { input: number; output: number } {
+  const row = TOKEN_PRICE_USD_PER_M.find((r) => paramsB <= r.maxB) ?? TOKEN_PRICE_USD_PER_M[TOKEN_PRICE_USD_PER_M.length - 1];
+  return { input: row.input, output: row.output };
+}
+
+/** USD to msat at a BTC/USD price. */
+export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / btcUsd) * 1e8 * 1000 : 0);
+
+/**
+ * What a model call costs (msat): its tokens at the reference price, never below the power floor
+ * for the seconds it ran. Without token counts (an agent that doesn't report them) it is the
+ * per-second cost, as before.
+ */
+export function inferenceCostMsat(input: {
+  promptTokens?: number;
+  outputTokens?: number;
+  paramsB: number;
+  btcUsd: number;
+  durationMs: number;
+  computeClass: string;
+  tierWeight: number;
+  /** The per-second cost, used when there are no token counts. */
+  perSecondCostMsat: number;
+}): { costMsat: number; basis: "tokens" | "power_floor" | "per_second" } {
+  if (input.promptTokens === undefined && input.outputTokens === undefined) return { costMsat: input.perSecondCostMsat, basis: "per_second" };
+  const price = tokenPriceUsdPerM(input.paramsB);
+  const tokenUsd = ((input.promptTokens ?? 0) * price.input + (input.outputTokens ?? 0) * price.output) / 1_000_000;
+  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * Math.max(0, input.durationMs)) / 3_600_000;
+  const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
+  const floorMsat = usdToMsat(floorUsd, input.btcUsd);
+  return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };
+}
+
+/** cSats per million tokens (input, output) for a model size at a BTC price: what the UI shows. */
+export function cSatsPerMTokens(paramsB: number, btcUsd: number): { input: number; output: number } {
+  const p = tokenPriceUsdPerM(paramsB);
+  return { input: Number((usdToMsat(p.input, btcUsd) / 1000).toFixed(1)), output: Number((usdToMsat(p.output, btcUsd) / 1000).toFixed(1)) };
+}

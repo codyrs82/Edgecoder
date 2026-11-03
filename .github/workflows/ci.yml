@@ -26,6 +26,8 @@ jobs:
       # BLE native modules (@abandonware/noble, bleno) are optionalDependencies:
       # if they can't compile on a runner, npm ci skips them instead of failing.
       - run: npm ci
+      # The root test run includes desktop/tests, which import the desktop app's packages.
+      - run: npm ci --prefix desktop --ignore-scripts
       - run: npm run check:scripts
       - run: npm run check:fly-configs
       - run: npm run build
@@ -78,6 +80,7 @@ jobs:
           apt-get install -y nodejs
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: npm ci
+      - run: npm ci --prefix desktop --ignore-scripts
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
       - run: npm run test:integration

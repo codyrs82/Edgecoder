@@ -107,7 +107,7 @@ export async function* anthropicStream(pieces: AsyncIterable<ChatPiece>, model: 
         yield ev("content_block_stop", { index });
         textOpen = false;
       }
-      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { output_tokens: Math.ceil(outChars / 4) }, ...(p.cSatsSpent !== undefined ? { edgecoder: { cSatsSpent: p.cSatsSpent } } : {}) });
+      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { output_tokens: Math.ceil(outChars / 4) }, ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {}) });
     }
   }
   yield ev("message_stop", {});
@@ -132,6 +132,6 @@ export async function anthropicResponse(pieces: AsyncIterable<ChatPiece>, model:
     stop_reason: stopReason(calls.length, done),
     stop_sequence: null,
     usage: { input_tokens: 0, output_tokens: Math.ceil(text.length / 4) },
-    ...(done?.cSatsSpent !== undefined ? { edgecoder: { cSatsSpent: done.cSatsSpent } } : {}),
+    ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
   };
 }

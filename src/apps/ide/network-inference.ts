@@ -97,6 +97,8 @@ export interface NetworkTarget {
   reservationId?: string;
   /** Price ceiling, cSats per second on the class's base tier (sent as msat per credit). */
   maxCSatsPerSecond?: number;
+  /** What sent it, for the usage page. */
+  source?: string;
 }
 
 export class NetworkInferenceError extends Error {
@@ -125,6 +127,7 @@ export async function* streamNetworkCompletion(
     ...(req.tools?.length ? { tools: req.tools } : {}),
     ...(req.target ? { target: req.target } : {}),
     ...(req.reservationId ? { reservationId: req.reservationId } : {}),
+    ...(req.source ? { source: req.source.slice(0, 80) } : {}),
     ...(req.maxCSatsPerSecond ? { maxBidMsatPerCredit: Math.round(req.maxCSatsPerSecond * 1000) } : {}),
     ...(req.maxTokens ? { maxTokens: Math.min(32_768, req.maxTokens) } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
@@ -185,7 +188,7 @@ export interface ComputeOverview {
     coordinator?: { peerId: string; url: string };
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
-  models?: Array<{ model: string; agents: number; classes: string[] }>;
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
 }
 
 /** Balance, prices per class and the network's models, for the app's Compute page. */
@@ -221,6 +224,11 @@ export async function listReservations(d: NetworkDeps) {
 /** Reserve one machine of a class for some minutes (paid now; unused time comes back). */
 export async function createReservation(d: NetworkDeps, body: { computeClass: string; minutes: number; model?: string; minVramGb?: number }) {
   return call(d, "POST", "/account/reservations", body);
+}
+
+/** Your usage over the last N days (summary for the usage page). */
+export async function usageSummary(d: NetworkDeps, days: number) {
+  return call(d, "POST", "/account/usage", { days });
 }
 
 export async function cancelReservation(d: NetworkDeps, reservationId: string) {

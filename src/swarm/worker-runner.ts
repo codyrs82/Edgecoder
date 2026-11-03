@@ -5,6 +5,7 @@ import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
+import { parallelInferenceFor } from "./parallelism.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
@@ -70,6 +71,8 @@ const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
+const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
+const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = Number(process.env.COORDINATOR_HTTP_TIMEOUT_MS ?? "15000");
 const COORDINATOR_POST_RETRIES = Number(process.env.COORDINATOR_POST_RETRIES ?? "2");
@@ -1140,79 +1143,92 @@ async function loop(): Promise<void> {
           }
 
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
-          try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
-          // #51: keep the coordinator's claim lease alive while the subtask runs.
-          const stopLeaseHeartbeat = startLeaseHeartbeat();
-          const run = st.kind === "inference"
-            ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
-            : worker.runSubtask(st, AGENT_ID);
-          if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
-          const result = await run.finally(stopLeaseHeartbeat);
-          result.snapshotRef = st.snapshotRef;
-          try {
-            if (result.ok) {
-              localStore.recordTaskComplete(st.id, result.output, result.durationMs);
-            } else {
-              localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
-            }
-          } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
-          const reportNonce = randomUUID();
-          const reportSignature = signPayload(
-            JSON.stringify({
-              subtaskId: result.subtaskId,
-              taskId: result.taskId,
-              agentId: result.agentId,
-              ok: result.ok,
-              durationMs: result.durationMs,
-              reportNonce
-            }),
-            keys.privateKeyPem
-          );
-          result.reportNonce = reportNonce;
-          result.reportSignature = reportSignature;
-
-          // Encrypt result if task was received as an envelope
-          let resultPayload: Record<string, unknown> = { ...result };
-          if (taskEnvelope) {
+          const envelopeForTask = taskEnvelope;
+          const runAndReport = async () => {
+            try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+            // #51: keep the coordinator's claim lease alive while the subtask runs.
+            const stopLeaseHeartbeat = startLeaseHeartbeat();
+            const run = st.kind === "inference"
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              : worker.runSubtask(st, AGENT_ID);
+            if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
+            const result = await run.finally(stopLeaseHeartbeat);
+            result.snapshotRef = st.snapshotRef;
             try {
-              const encrypted = encryptResult(
-                { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
-                taskEnvelope,
-                envelopeKeys.privateKey
-              );
-              resultPayload = {
-                ...encrypted,
+              if (result.ok) {
+                localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+              } else {
+                localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+              }
+            } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+            const reportNonce = randomUUID();
+            const reportSignature = signPayload(
+              JSON.stringify({
+                subtaskId: result.subtaskId,
                 taskId: result.taskId,
                 agentId: result.agentId,
-                reportNonce,
-                reportSignature,
-              };
-              console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
-            } catch (encryptErr) {
-              console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
-            }
-          }
-          // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
-          const finishedAtMs = Date.now();
-          resultPayload.receipt = signReceiptAsAgent(
-            {
-              taskId: result.taskId,
-              subtaskId: result.subtaskId,
-              agentId: result.agentId,
-              agentPublicKeyPem: keys.publicKeyPem,
-              startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
-              finishedAtMs,
-              resultHash: hashResultOutput(result.output)
-            },
-            keys.privateKeyPem
-          );
+                ok: result.ok,
+                durationMs: result.durationMs,
+                reportNonce
+              }),
+              keys.privateKeyPem
+            );
+            result.reportNonce = reportNonce;
+            result.reportSignature = reportSignature;
 
-          try {
-            await post("/result", resultPayload, { signed: true });
-          } catch (resultErr) {
-            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
-            console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            // Encrypt result if task was received as an envelope
+            let resultPayload: Record<string, unknown> = { ...result };
+            if (envelopeForTask) {
+              try {
+                const encrypted = encryptResult(
+                  { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
+                  envelopeForTask,
+                  envelopeKeys.privateKey
+                );
+                resultPayload = {
+                  ...encrypted,
+                  taskId: result.taskId,
+                  agentId: result.agentId,
+                  reportNonce,
+                  reportSignature,
+                };
+                console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
+              } catch (encryptErr) {
+                console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
+              }
+            }
+            // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
+            const finishedAtMs = Date.now();
+            resultPayload.receipt = signReceiptAsAgent(
+              {
+                taskId: result.taskId,
+                subtaskId: result.subtaskId,
+                agentId: result.agentId,
+                agentPublicKeyPem: keys.publicKeyPem,
+                startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
+                finishedAtMs,
+                resultHash: hashResultOutput(result.output)
+              },
+              keys.privateKeyPem
+            );
+
+            try {
+              await post("/result", resultPayload, { signed: true });
+            } catch (resultErr) {
+              try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+              console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            }
+          };
+          // Model calls run side by side (Ollama serves several at once); code jobs one at a time.
+          if (st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1) {
+            while (inflightInference.size >= MAX_PARALLEL_INFERENCE) await Promise.race(inflightInference);
+            const job: Promise<void> = runAndReport()
+              .catch((e) => console.warn(`[agent:${AGENT_ID}] inference ${st.id} failed: ${String(e)}`))
+              .finally(() => inflightInference.delete(job));
+            inflightInference.add(job);
+            continue;
           }
+          await runAndReport();
           continue;
         }
 

@@ -91,6 +91,30 @@ the desktop app.
   the app keep the local ports. Both meet on the same network, so the network serves a mix of
   people, people's own agents, and independent agents.
 
+### Persistent bots for jobs (Phase 2)
+
+Named, long-lived bots that own a job, like the bots list in the Claude app: "Harry the Engineer", a
+billing bot, a security reviewer.
+
+- **What a bot keeps:** its own instructions, memory, tools and project or repo, with a history of
+  its work.
+- **How it starts work:**
+  - on a schedule;
+  - on an event (a PR, a failed CI run, an email or webhook, a file change);
+  - or when you message it.
+- **Where it lives:** in the app's sidebar, with its latest status. You create one from the
+  header's **+ → New bot**, which is there today, disabled, and marked Phase 2.
+- **Runs on Auto compute.** Each step goes to the cheapest place that fits it: small local models
+  for quick steps, your own machines next, network GPUs for heavy steps. The decision is the same
+  one Auto uses today (`src/inference-api/auto-route.ts`). It is made fresh for every request from
+  a cached view of what's available, so it adds no noticeable time.
+- **Spending limits:**
+  - a cSat budget per bot, and per day;
+  - an approval step for anything that changes things outside its project;
+  - every action is recorded on the usage page.
+- **The same bots can be reached through MCP and the hosted endpoint,** so agents and people work
+  with them in the same way.
+
 ### Cloud sessions on your own Fly.io or Azure account (Phase 3)
 
 Choose a cloud session instead of a local one, and EdgeCoder provisions it on your own cloud

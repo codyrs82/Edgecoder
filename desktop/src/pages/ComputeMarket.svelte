@@ -207,7 +207,26 @@
     </div>
 
     <div class="sp-group">
-      <div class="sp-group-title">Network prices</div>
+      <div class="sp-group-title">Model calls: per token</div>
+      <div class="sp-card">
+        {#if (overview.models ?? []).length === 0}
+          <div class="sp-row"><span class="sp-muted">No machines are offering models right now.</span></div>
+        {:else}
+          <table>
+            <thead><tr><th>Model</th><th class="num">Machines</th><th class="num">cSats / M tokens in</th><th class="num">cSats / M tokens out</th></tr></thead>
+            <tbody>
+              {#each overview.models ?? [] as m (m.model)}
+                <tr><td>{m.model}</td><td class="num">{m.agents}</td><td class="num">{m.cSatsPerMTokens?.input ?? "–"}</td><td class="num">{m.cSatsPerMTokens?.output ?? "–"}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+      <p class="sp-muted">Model calls are priced per token, below typical hosted prices for models that size, and never below the electricity the machine used. The same price on every class; faster hardware just finishes sooner.</p>
+    </div>
+
+    <div class="sp-group">
+      <div class="sp-group-title">Reservations and code jobs: per second</div>
       <div class="sp-card">
         <table>
           <thead><tr><th>Class</th><th class="num">cSats / second</th><th class="num">cSats / hour</th><th class="num">Machines free</th></tr></thead>

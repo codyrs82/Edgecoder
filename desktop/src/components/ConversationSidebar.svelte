@@ -54,7 +54,7 @@
 
   function ranOnText(c: Conversation): string {
     const w = parseChoice(c.selectedModel).where;
-    return w === "mine" ? "Ran on your machines" : w === "network" || w === "reserved" ? "Ran on network compute" : "Ran on this computer";
+    return w === "mine" ? "Ran on your machines" : w === "anywhere" ? "Auto: cheapest place for each request" : w === "network" || w === "reserved" ? "Ran on network compute" : "Ran on this computer";
   }
 
   function toggleSearch() {
@@ -308,7 +308,7 @@
             {/if}
           </div>
           <span class="ran-on" title={ranOnText(convo)}>
-            {#if parseChoice(convo.selectedModel).where === "mine"}<Server size={13} />{:else if ["network", "reserved"].includes(parseChoice(convo.selectedModel).where)}<Cloud size={13} />{:else}<Laptop size={13} />{/if}
+            {#if parseChoice(convo.selectedModel).where === "mine"}<Server size={13} />{:else if ["network", "reserved", "anywhere"].includes(parseChoice(convo.selectedModel).where)}<Cloud size={13} />{:else}<Laptop size={13} />{/if}
           </span>
           <div class="convo-actions">
             <button

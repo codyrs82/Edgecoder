@@ -29,7 +29,7 @@ export function apiKeyOf(req: FastifyRequest): string {
   return String(req.headers["x-api-key"] ?? "").trim();
 }
 
-type Format = "openai" | "anthropic";
+export type Format = "openai" | "anthropic";
 
 function sendError(reply: FastifyReply, format: Format, status: number, message: string) {
   return format === "anthropic"
@@ -38,6 +38,51 @@ function sendError(reply: FastifyReply, format: Format, status: number, message:
 }
 
 const statusOf = (err: unknown) => (err instanceof ChatBackendError ? err.status : typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 502);
+
+/** Run a request on a backend and answer in the tool's format, streamed or whole. */
+export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string) {
+  const body = (req.body ?? {}) as { stream?: boolean };
+  const chat = format === "anthropic" ? fromAnthropic(body as never) : fromOpenAi(body as never);
+  const abort = new AbortController();
+  // The client went away when the response closes before it ended (the request's own "close"
+  // fires as soon as its body has been read, which aborted fast requests).
+  reply.raw.on("close", () => {
+    if (!reply.raw.writableEnded) abort.abort();
+  });
+  const iter = backend(chat, abort.signal);
+  // The first piece decides the status: a request that can't start is an HTTP error, not a broken stream.
+  let first: IteratorResult<ChatPiece>;
+  try {
+    first = await iter.next();
+  } catch (err) {
+    return sendError(reply, format, statusOf(err), (err as Error).message);
+  }
+  async function* all(): AsyncGenerator<ChatPiece> {
+    if (!first.done) yield first.value;
+    for (;;) {
+      const n = await iter.next();
+      if (n.done) return;
+      yield n.value;
+    }
+  }
+  if (!body.stream) {
+    try {
+      return reply.send(format === "anthropic" ? await anthropicResponse(all(), model) : await openAiResponse(all(), model));
+    } catch (err) {
+      return sendError(reply, format, statusOf(err), (err as Error).message);
+    }
+  }
+  writeSseHead(reply);
+  reply.hijack();
+  try {
+    for await (const line of format === "anthropic" ? anthropicStream(all(), model) : openAiStream(all(), model)) reply.raw.write(line);
+  } catch (err) {
+    const message = (err as Error).message;
+    reply.raw.write(format === "anthropic" ? `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n` : `data: ${JSON.stringify({ error: { message } })}\n\ndata: [DONE]\n\n`);
+  }
+  reply.raw.end();
+  return reply;
+}
 
 export function registerCompatRoutes<Ctx>(app: FastifyInstance, opts: CompatRoutes<Ctx>, prefix = "", formats: { openai?: boolean } = {}): void {
   const auth = async (req: FastifyRequest, reply: FastifyReply, format: Format): Promise<Ctx | null> => {
@@ -62,44 +107,7 @@ export function registerCompatRoutes<Ctx>(app: FastifyInstance, opts: CompatRout
     if (!Array.isArray(body.messages) || body.messages.length === 0) return sendError(reply, format, 400, "messages is required");
     const resolved = await opts.resolve(ctx, body.model);
     if ("error" in resolved) return sendError(reply, format, resolved.status, resolved.error);
-    const chat = format === "anthropic" ? fromAnthropic(body as never) : fromOpenAi(body as never);
-    const abort = new AbortController();
-    req.raw.on("close", () => {
-      if (!reply.raw.writableEnded) abort.abort();
-    });
-    const iter = resolved.backend(chat, abort.signal);
-    // The first piece decides the status: a request that can't start is an HTTP error, not a broken stream.
-    let first: IteratorResult<ChatPiece>;
-    try {
-      first = await iter.next();
-    } catch (err) {
-      return sendError(reply, format, statusOf(err), (err as Error).message);
-    }
-    async function* all(): AsyncGenerator<ChatPiece> {
-      if (!first.done) yield first.value;
-      for (;;) {
-        const n = await iter.next();
-        if (n.done) return;
-        yield n.value;
-      }
-    }
-    if (!body.stream) {
-      try {
-        return reply.send(format === "anthropic" ? await anthropicResponse(all(), resolved.model) : await openAiResponse(all(), resolved.model));
-      } catch (err) {
-        return sendError(reply, format, statusOf(err), (err as Error).message);
-      }
-    }
-    writeSseHead(reply);
-    reply.hijack();
-    try {
-      for await (const line of format === "anthropic" ? anthropicStream(all(), resolved.model) : openAiStream(all(), resolved.model)) reply.raw.write(line);
-    } catch (err) {
-      const message = (err as Error).message;
-      reply.raw.write(format === "anthropic" ? `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n` : `data: ${JSON.stringify({ error: { message } })}\n\ndata: [DONE]\n\n`);
-    }
-    reply.raw.end();
-    return reply;
+    return respondWith(req, reply, format, resolved.backend, resolved.model);
   };
 
   if (formats.openai !== false) app.post(`${prefix}/v1/chat/completions`, { bodyLimit: 16 * 1024 * 1024 }, (req, reply) => run(req, reply, "openai"));
