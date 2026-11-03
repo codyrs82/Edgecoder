@@ -6,7 +6,9 @@ item was added or finished.
 ## Shipped (2026-11-02)
 
 - **Compute you can buy and point tools at.**
-  - cSats are priced per second by compute class (cpu, apple, gpu, gpu.dc).
+  - cSats (1 cSat = 1 sat). Model calls are priced per token by model size, with a power floor
+    per compute class; code jobs and reservations are priced per second by compute class (cpu,
+    apple, gpu, gpu.dc). See docs/economy-math.md.
   - Network models are streamed to your own tools.
   - Connections give each tool its own local port, key and budget, fixed to one place to run: this
     computer, your machines, any network machine (with a class and price ceiling), or a reserved
@@ -24,31 +26,26 @@ item was added or finished.
   - Editable display name.
 - **Local compute set up by the app.** Ollama and the Colima sandbox are downloaded (pinned and
   checksummed), started and kept running, with no terminal step.
+- **Usage page** in the desktop app (the same data over `GET /v1/account/usage`): spend over
+  time, split by model, compute class, connection or tool, and machine; a monthly budget warning;
+  CSV export of every request.
 
 ## Next
 
-1. **Usage tracking page** (desktop and web, like Cursor's Plan & Usage).
-   - Spend over time (day, week, month), split by model, compute class, connection or tool, and
-     machine.
-   - A per-request log: time, model, where it ran, seconds, cSats, and tokens when known.
-   - Budget alerts, and CSV export.
-   - Needs a usage ledger written at settlement: today the credit ledger records the reason and task
-     only, not the model, class or connection.
-2. **BLE mesh, fully tested.**
+1. **BLE mesh, fully tested.**
    - Two machines discover each other over Bluetooth with no network.
    - A task runs over BLE and is paid when back online.
    - Covered by an automated two-process test where the hardware allows, plus a scripted test on
      two Macs.
-3. **Release and verify live:** deploy the seeds and portal, then on the user's two Macs check
-   reservations, connections and the hosted endpoint.
-4. Carried over:
+2. **Live release checks:** after each deploy of the seeds and portal, verify reservations,
+   connections and the hosted endpoint end to end on real machines.
+3. Carried over:
    - model fallback;
    - LSP in the editor;
    - remote branch agents;
-   - GPU box install (8x RTX 6000 Ada);
-   - Dependabot alerts;
-   - CRS-NODE-001 cleanup;
-   - wipe the regtest balances before mainnet.
+   - verify the multi-GPU host install (one agent per GPU, docs/install.md) on real hardware;
+   - resolve the remaining dependency advisories (docs/dependency-audit.md);
+   - reset test-network balances before mainnet launch.
 
 ## Direction
 

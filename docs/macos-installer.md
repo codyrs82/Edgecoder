@@ -42,6 +42,27 @@ on developer.apple.com, export it with its private key as .p12, then add the six
 `gh secret set NAME` (never paste them into a file in the repo). The next release tag builds a
 signed, notarized app; the build log says "Developer ID signing and notarization on".
 
+### Signing the bundled agent
+
+Tauri signs the app itself but not the agent bundled in its resources (the Node runtime and the
+agent's native modules), and notarization rejects an app with any unsigned Mach-O inside.
+`scripts/bundle-agent-resources.sh`, which Tauri runs as its `beforeBuildCommand`, signs them when
+`EDGECODER_CODESIGN_IDENTITY` is set on macOS:
+
+- the bundled `node` binary with the hardened runtime, a secure timestamp and
+  `desktop/src-tauri/agent-node.entitlements` (`allow-jit` and `allow-unsigned-executable-memory`,
+  which V8 needs to compile JavaScript at run time);
+- every other Mach-O (`.node`, `.dylib`, `.so`, executables) with the hardened runtime and a
+  timestamp;
+- then it runs `codesign --verify --strict` on each one and fails the build if any does not verify.
+
+In the release workflow the step "Import Developer ID certificate" decodes `APPLE_CERTIFICATE`
+into a temporary keychain, imports Apple's Developer ID G2 intermediate, checks that a
+"Developer ID Application" identity is usable, and exports
+`EDGECODER_CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY` for the build. Without the secrets it skips,
+and the agent stays unsigned as before. For a local signed build, set the variable to your
+identity's name before `npx tauri build`.
+
 ## Build installer package
 
 From repo root:
@@ -92,12 +113,12 @@ sudo /opt/edgecoder/bin/edgecoder-install-ollama.sh
 
 ## Associate local macOS agent to your portal account
 
-1. Sign in at `https://portal.edgecoder.io/portal`.
+1. Sign in at `https://edgecoder.io/portal`.
 2. Verify your email address from the Resend email link.
 3. In the portal dashboard, enroll a node (agent kind) and copy the returned `registrationToken`.
 4. Set that token in the local runtime config as `AGENT_REGISTRATION_TOKEN`.
 5. Restart local service and wait for first registration.
-6. Approve the node in portal coordinator operations (`https://portal.edgecoder.io/portal/coordinator-ops`) if not auto-approved by policy.
+6. The node becomes active once the coordinator operator approves it (unless policy approves it automatically).
 
 The agent is associated to your portal account through the enrollment token minted for your authenticated user.
 
@@ -129,7 +150,7 @@ LOCAL_MODEL_PROVIDER=edgecoder-local
 Where values come from:
 
 - `AGENT_ID` and `AGENT_REGISTRATION_TOKEN`:
-  - create/sign in account at `https://portal.edgecoder.io/portal`
+  - create/sign in account at `https://edgecoder.io/portal`
   - verify email
   - enroll node and copy node id + registration token
 - `MESH_AUTH_TOKEN`:

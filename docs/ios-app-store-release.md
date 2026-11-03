@@ -9,9 +9,8 @@ This guide covers simulator validation, signing setup, TestFlight upload, and fi
 - A unique bundle id (default scaffold: `io.edgecoder.ios`)
 - App Store Connect app record created
 - Production backend endpoints:
-  - `https://edgecoder.io`
-  - `https://control.edgecoder.io`
-  - `https://coordinator.edgecoder.io`
+  - `https://edgecoder.io` (portal)
+  - `https://coordinator.edgecoder.io` (coordinator; the control plane runs in the same all-in-one process)
 
 ## 2) Project setup
 

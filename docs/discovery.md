@@ -292,7 +292,7 @@ through", as the coordinator, its region and its latency.
 
 ### Latency DNS (later ops step)
 
-`coordinator.edgecoder.io` is a plain GoDaddy record today, so a client's first contact always
+`coordinator.edgecoder.io` is a plain DNS record today, so a client's first contact always
 lands on the seeds, and steering happens after that. That is enough for correctness. To also make
 the first contact the nearest healthy coordinator, the name needs a DNS provider that steers by
 latency or geography with health checks:

@@ -61,7 +61,7 @@
 
 <div class="sp">
   <h1>Usage</h1>
-  <p class="sp-lead">What you ran, where it ran and what it cost. Your own machines are free; network compute is paid by the second in cSats.</p>
+  <p class="sp-lead">What you ran, where it ran and what it cost. Your own machines are free. Network model calls are paid per token and code jobs and reservations per second, in cSats (1 cSat = 1 sat).</p>
 
   <div class="sp-group">
     <div class="sp-group-title">

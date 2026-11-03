@@ -102,9 +102,11 @@ For production workloads that exceed a single node, EdgeCoder supports federatio
 
 | App | URL |
 |---|---|
-| Portal | `https://portal.edgecoder.io` |
-| Control Plane | `https://control.edgecoder.io` |
-| Coordinator | `https://coordinator.edgecoder.io` |
+| Portal | `https://edgecoder.io` |
+| Coordinator (US, `edgecoder-seed`) | `https://coordinator.edgecoder.io` |
+| Coordinator (EU, `edgecoder-seed-eu`) | `https://coordinator-eu.edgecoder.io` |
+
+The control plane runs inside each all-in-one seed, so it has no host of its own.
 
 ### Fly-Oriented Topology Pattern
 
