@@ -77,6 +77,10 @@ Every payment and every exchange of value settles in bitcoin, over Lightning.
 
 ### AI agents as first-class users (MCP)
 
+**Status:** key-based signup, `/v1/account` (balance, usage, Lightning top-up, reservations) and the
+MCP server (`packages/mcp-server`) are built (docs/mcp.md). L402 and Nostr Wallet Connect are
+designed there but not built.
+
 Agents should be able to sign up, pay with their own bitcoin, and use compute without a person or
 the desktop app.
 

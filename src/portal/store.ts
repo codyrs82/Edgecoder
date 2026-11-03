@@ -55,6 +55,10 @@ export type PortalMessage = {
   createdAtMs: number;
 };
 
+/** Agent accounts have no email; the NOT NULL UNIQUE column holds `agent-<userId>@agents.invalid` (RFC 2606, never delivered). */
+export const AGENT_EMAIL_DOMAIN = "agents.invalid";
+export const isAgentPlaceholderEmail = (email: string | undefined | null) => (email ?? "").toLowerCase().endsWith(`@${AGENT_EMAIL_DOMAIN}`);
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS portal_users (
   user_id TEXT PRIMARY KEY,
@@ -240,6 +244,17 @@ export class PortalStore {
          created_at_ms BIGINT NOT NULL, last_used_ms BIGINT, revoked_at_ms BIGINT)`
     );
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_api_keys_user_idx ON portal_api_keys (user_id)`);
+    // AI agents sign up with a public key instead of an email (routes/agents.ts).
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS account_kind TEXT NOT NULL DEFAULT 'person'`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_agent_identities (
+         key_type TEXT NOT NULL, public_key TEXT NOT NULL, user_id TEXT NOT NULL UNIQUE, created_at_ms BIGINT NOT NULL,
+         PRIMARY KEY (key_type, public_key))`
+    );
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_agent_challenges (
+         nonce_hash TEXT PRIMARY KEY, key_type TEXT NOT NULL, public_key TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
+    );
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -401,6 +416,71 @@ export class PortalStore {
     const now = Date.now();
     if (!row.last_used_ms || now - Number(row.last_used_ms) > 60_000) await this.pool.query(`UPDATE portal_api_keys SET last_used_ms = $2 WHERE key_id = $1`, [row.key_id, now]);
     return row.user_id as string;
+  }
+
+  /** Revokes every live API key of a user (an agent rotating its key); returns how many. */
+  async revokeAllApiKeys(userId: string): Promise<number> {
+    const r = await this.pool.query(`UPDATE portal_api_keys SET revoked_at_ms = $2 WHERE user_id = $1 AND revoked_at_ms IS NULL`, [userId, Date.now()]);
+    return r.rowCount ?? 0;
+  }
+
+  // ── AI agent accounts (public-key signup) ──
+
+  /** Stores a signup challenge (only a hash of the nonce) and drops long-expired ones. */
+  async createAgentChallenge(c: { nonceHash: string; keyType: string; publicKey: string; expiresAtMs: number }): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_agent_challenges WHERE expires_at_ms < $1`, [Date.now() - 3_600_000]);
+    await this.pool.query(`INSERT INTO portal_agent_challenges (nonce_hash, key_type, public_key, expires_at_ms) VALUES ($1,$2,$3,$4)`, [
+      c.nonceHash,
+      c.keyType,
+      c.publicKey,
+      c.expiresAtMs,
+    ]);
+  }
+
+  /** Takes a challenge out (single use: a second call for the same nonce returns null). Expiry is checked by the caller. */
+  async consumeAgentChallenge(nonceHash: string): Promise<{ keyType: string; publicKey: string; expiresAtMs: number } | null> {
+    const r = await this.pool.query(`DELETE FROM portal_agent_challenges WHERE nonce_hash = $1 RETURNING key_type, public_key, expires_at_ms`, [nonceHash]);
+    const row = r.rows[0];
+    return row ? { keyType: row.key_type, publicKey: row.public_key, expiresAtMs: Number(row.expires_at_ms) } : null;
+  }
+
+  async userForAgentKey(keyType: string, publicKey: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT user_id FROM portal_agent_identities WHERE key_type = $1 AND public_key = $2`, [keyType, publicKey]);
+    return (r.rows[0]?.user_id as string | undefined) ?? null;
+  }
+
+  /**
+   * A portal user for an agent: no password, no deliverable email (a reserved `.invalid`
+   * placeholder keeps the email column's NOT NULL UNIQUE), never email-verified, kind "agent".
+   * Returns the owning user id (an existing one when the key raced another signup).
+   */
+  async createAgentAccount(a: { userId: string; keyType: string; publicKey: string; displayName?: string }): Promise<string> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const now = Date.now();
+      const claimed = await client.query(
+        `INSERT INTO portal_agent_identities (key_type, public_key, user_id, created_at_ms) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (key_type, public_key) DO NOTHING RETURNING user_id`,
+        [a.keyType, a.publicKey, a.userId, now]
+      );
+      if (!claimed.rows[0]) {
+        await client.query("ROLLBACK");
+        return (await this.userForAgentKey(a.keyType, a.publicKey)) as string;
+      }
+      await client.query(
+        `INSERT INTO portal_users (user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms, account_kind)
+         VALUES ($1,$2,false,'warm',NULL,$3,$4,NULL,'agent')`,
+        [a.userId, `agent-${a.userId}@${AGENT_EMAIL_DOMAIN}`, a.displayName ?? null, now]
+      );
+      await client.query("COMMIT");
+      return a.userId;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async setUserRole(userId: string, role: "user" | "admin"): Promise<void> {

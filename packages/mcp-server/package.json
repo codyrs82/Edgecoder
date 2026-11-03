@@ -1,0 +1,29 @@
+{
+  "name": "@edgecoder/mcp-server",
+  "version": "0.1.0",
+  "description": "EdgeCoder for AI agents: an MCP server (stdio) for EdgeCoder's hosted compute, paid in bitcoin over Lightning.",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "bin": {
+    "edgecoder-mcp": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@noble/curves": "2.0.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  }
+}
