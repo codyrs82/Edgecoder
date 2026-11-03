@@ -1,0 +1,34 @@
+# #3: gitleaks configuration (used by .github/workflows/secret-scan.yml and
+# `gitleaks git` locally). Extends the built-in rule set; only the allowlist is ours.
+#
+# The allowlist covers test fixtures only. src/, deploy/, scripts/ and the
+# workflows are never allowlisted: a real value there must fail the scan.
+
+title = "edgecoder secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documentation placeholders"
+paths = [
+  # Unit/integration fixtures: dummy tokens, throwaway keypairs, example PEMs.
+  '''^tests/.*''',
+  '''^desktop/tests/.*''',
+  '''^packages/[^/]+/tests/.*''',
+  '''^src/.*/__tests__/.*''',
+  # Lockfiles: integrity hashes trip entropy rules and are not secrets.
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)Cargo\.lock$''',
+]
+regexes = [
+  # AWS's documented example access key, used by the handshake sanitizer tests.
+  '''AKIAIOSFODNN7EXAMPLE''',
+  # Dummy webhook secret literal in the coordinator auth tests.
+  '''whsec_abc123xyz''',
+  # Swift/CryptoKit type names that the generic rule reads as a "privateKey" value.
+  '''Curve25519\.Signing\.PrivateKey''',
+  # Redacted placeholders in docs and .env.example.
+  '''<(token|secret|key|id|hex|pepper)>''',
+  '''\b(changeme|REDACTED|xxxxxxxx+)\b''',
+]

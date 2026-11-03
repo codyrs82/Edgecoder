@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import type { AccountApiRoutesDeps } from "../server.js";
+import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
@@ -140,9 +141,18 @@ export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_A
     return reply.send({ ok: true, userId, role: body.role });
   });
 
+  // Enrolment (and only enrolment) also takes a portal API key, so `edgecoder-install --enroll eck_...` needs no browser session token.
+  const enrollingUser = async (req: { headers: Record<string, unknown> }) => {
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!key.startsWith(API_KEY_PREFIX)) return getCurrentUser(req as any);
+    const userId = store ? await store.userForApiKeyHash(hashApiKey(key)) : null;
+    return userId && store ? store.getUserById(userId) : null;
+  };
+
   app.post("/nodes/enroll", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
+    const user = await enrollingUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
     const body = z
@@ -164,6 +174,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { CONTROL_PLANE_A
       registrationTokenHash: sha256Hex(registrationToken),
       emailVerified: user.emailVerified
     });
+    if (!record) return reply.code(409).send({ error: "node_owned_by_another_user" });
     if (body.nodeKind === "agent" && user.emailVerified && !record.nodeApproved) {
       const approved = await store.setNodeApproval(record.nodeId, true);
       if (approved) {

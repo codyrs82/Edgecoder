@@ -70,6 +70,11 @@ export class AutoBlacklister {
     return null;
   }
 
+  /** Forget an agent's strikes (an admin lifted its blacklist). */
+  clearStrikes(agentId: string): void {
+    this.strikes.delete(agentId);
+  }
+
   getStrikeCount(agentId: string, nowMs: number = Date.now()): number {
     const agentStrikes = this.strikes.get(agentId);
     if (!agentStrikes) return 0;

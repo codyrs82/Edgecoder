@@ -114,7 +114,7 @@ describe("portal coordinator discovery config (#35)", () => {
 
   it("falls back to the EU seed when nothing is configured", () => {
     expect(parseDiscoveryUrls({})).toEqual([DEFAULT_DISCOVERY_URL]);
-    expect(DEFAULT_DISCOVERY_URL).toBe("https://edgecoder-seed-eu.fly.dev");
+    expect(DEFAULT_DISCOVERY_URL).toBe("https://coordinator.edgecoder.io");
     expect(discoveryConfigured({})).toBe(false);
   });
 

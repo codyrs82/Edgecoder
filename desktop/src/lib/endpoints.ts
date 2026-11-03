@@ -9,7 +9,7 @@ export const PORTAL_KEY = "edgecoder_portalUrl";
 /** Pre-#35 "Seed Node URL" setting; read as a fallback for the coordinator. */
 export const LEGACY_SEED_KEY = "edgecoder_seedNodeUrl";
 
-export const FALLBACK_COORDINATOR_URL = "https://edgecoder-seed-eu.fly.dev";
+export const FALLBACK_COORDINATOR_URL = "https://coordinator.edgecoder.io";
 export const FALLBACK_PORTAL_URL = "https://edgecoder.io";
 export const ENDPOINT_TIMEOUT_MS = 8_000;
 
@@ -54,26 +54,44 @@ export function defaultEndpoints(env: EndpointEnv = buildEnv): Record<EndpointKi
 /** The pre-#35 default; a legacy "Seed Node URL" equal to it is ignored (NXDOMAIN). */
 export const DEAD_SEED_URL = "https://edgecoder-seed" + ".fly.dev"; // split so the repo guard test stays simple
 
-function legacySeed(s: KV | null): string | null {
-  const v = validateEndpointUrl(s?.getItem(LEGACY_SEED_KEY));
-  return v === DEAD_SEED_URL ? null : v;
+/**
+ * Raw Fly origins EdgeCoder used to publish. The portal now refuses traffic that skips its public
+ * domain (origin lock) and the coordinators answer on edgecoder.io hosts, so a saved override still
+ * pointing at one of these is ignored in favour of the default (otherwise sign-in hits origin_locked).
+ */
+export const RETIRED_ORIGINS = new Set([
+  DEAD_SEED_URL,
+  "https://edgecoder-seed-eu" + ".fly.dev",
+  "https://edgecoder-portal" + ".fly.dev"
+]);
+
+/** A saved override, unless it is invalid or one of the retired origins. */
+function saved(s: KV | null, key: string): string | null {
+  const v = validateEndpointUrl(s?.getItem(key));
+  if (!v) return null;
+  try {
+    return RETIRED_ORIGINS.has(new URL(v).origin) ? null : v;
+  } catch {
+    return null;
+  }
 }
 
 export function coordinatorUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
-  return (
-    validateEndpointUrl(s?.getItem(COORDINATOR_KEY)) ??
-    legacySeed(s) ??
-    defaultEndpoints(env).coordinator
-  );
+  return saved(s, COORDINATOR_KEY) ?? saved(s, LEGACY_SEED_KEY) ?? defaultEndpoints(env).coordinator;
 }
 
 export function portalUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
-  return validateEndpointUrl(s?.getItem(PORTAL_KEY)) ?? defaultEndpoints(env).portal;
+  return saved(s, PORTAL_KEY) ?? defaultEndpoints(env).portal;
 }
 
 /** The portal's sign-up page (the /portal page hosts the create-account form). Opened in the system browser. */
 export function portalSignupUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
   return `${portalUrl(s, env).replace(/\/+$/, "")}/portal`;
+}
+
+/** The portal's password reset page ("Forgot password?"). Opened in the system browser. */
+export function portalResetPasswordUrl(s: KV | null = storage(), env: EndpointEnv = buildEnv): string {
+  return `${portalUrl(s, env).replace(/\/+$/, "")}/portal/reset-password`;
 }
 
 /** Save an override; throws on an invalid URL. Empty string clears it. */

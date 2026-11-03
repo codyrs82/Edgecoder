@@ -15,9 +15,14 @@ use serde::Serialize;
 use glob::glob;
 
 mod agent_guard;
+mod agent_settings;
+mod local_compute;
+mod network_enrollment;
+mod terminal;
 mod token;
-use agent_guard::{port_in_use, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
+use agent_guard::{port_in_use, reclaim_stale_agent, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
+use network_enrollment::{NetworkEnrollment, NetworkEnrollmentSummary};
 
 struct AgentProcess(Arc<Mutex<Option<Child>>>);
 struct LocalToken(String);
@@ -92,13 +97,20 @@ fn get_system_metrics() -> SystemMetrics {
     let memory_used_mb = sys.used_memory() / 1_048_576;
     let memory_total_mb = sys.total_memory() / 1_048_576;
 
+    // The disk holding the user's files. Summing every mount double-counts: on macOS the system
+    // and data volumes share one APFS container and each reports its full size.
     let disks = Disks::new_with_refreshed_list();
-    let disk_total_bytes: u64 = disks.iter().map(|d| d.total_space()).sum();
-    let disk_available_bytes: u64 = disks.iter().map(|d| d.available_space()).sum();
+    let mounts: Vec<(String, u64, u64)> = disks
+        .iter()
+        .map(|d| (d.mount_point().to_string_lossy().into_owned(), d.total_space(), d.available_space()))
+        .collect();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let (disk_total_bytes, disk_available_bytes) = disk_for_path(&mounts, &home).unwrap_or((0, 0));
     let disk_used_bytes = disk_total_bytes.saturating_sub(disk_available_bytes);
 
-    let disk_total_gb = disk_total_bytes as f64 / 1_073_741_824.0;
-    let disk_used_gb = disk_used_bytes as f64 / 1_073_741_824.0;
+    // Decimal GB, as Finder and About This Mac show it.
+    let disk_total_gb = disk_total_bytes as f64 / 1e9;
+    let disk_used_gb = disk_used_bytes as f64 / 1e9;
 
     SystemMetrics {
         cpu_usage_percent,
@@ -107,6 +119,17 @@ fn get_system_metrics() -> SystemMetrics {
         disk_used_gb,
         disk_total_gb,
     }
+}
+
+/// (total, available) bytes of the mount that holds `path`: the longest mount point it sits under.
+fn disk_for_path(mounts: &[(String, u64, u64)], path: &str) -> Option<(u64, u64)> {
+    mounts
+        .iter()
+        .filter(|(m, total, _)| {
+            *total > 0 && (m == "/" || path == m || path.starts_with(&format!("{}/", m.trim_end_matches('/'))))
+        })
+        .max_by_key(|(m, _, _)| m.len())
+        .map(|(_, t, a)| (*t, *a))
 }
 
 /// #72: the inference token goes to the webview only while :4301 is the agent this app spawned.
@@ -155,7 +178,7 @@ fn retry_local_agent(
     if !alive {
         control.guard.apply(AgentEvent::Exited);
     }
-    if port_in_use(AGENT_ADDR) {
+    if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
         return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
     }
     let child = control.agent_dir.as_ref().and_then(|dir| spawn_agent_process(dir, &control.tokens));
@@ -165,6 +188,77 @@ fn retry_local_agent(
         *guard = child;
     }
     control.guard.apply(event).as_str().to_string()
+}
+
+/// Kill the agent so the monitor thread respawns it with the current local-compute env.
+fn restart_agent(agent: &Arc<Mutex<Option<Child>>>) {
+    if let Ok(mut guard) = agent.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Settings > General choices that the agent reads at start (BLE mesh on or off).
+#[tauri::command]
+fn get_agent_settings() -> agent_settings::AgentSettings {
+    agent_settings::load()
+}
+
+/// Save the BLE mesh choice and restart the agent so it takes effect (the monitor respawns it).
+#[tauri::command]
+fn set_agent_ble(enabled: bool, process: tauri::State<'_, AgentProcess>) -> Result<agent_settings::AgentSettings, String> {
+    let mut s = agent_settings::load();
+    if s.ble_enabled != enabled {
+        s.ble_enabled = enabled;
+        agent_settings::save(&s)?;
+        restart_agent(&process.0);
+    }
+    Ok(s)
+}
+
+/// First-run local compute (Ollama + the Colima Docker sandbox): progress for the setup screen.
+#[tauri::command]
+fn get_local_compute_status() -> local_compute::ComputeStatus {
+    local_compute::manager().status()
+}
+
+/// Start (or retry) local compute setup in the background; no-op while it is already running.
+#[tauri::command]
+fn start_local_compute_setup(process: tauri::State<'_, AgentProcess>) -> local_compute::ComputeStatus {
+    let agent = Arc::clone(&process.0);
+    let manager = local_compute::manager();
+    manager.start(move || restart_agent(&agent));
+    manager.status()
+}
+
+/// This machine's network node id: the enrolled one, else a stable proposal for enrolling.
+#[tauri::command]
+fn get_network_node_id() -> Result<String, String> {
+    network_enrollment::node_id()
+}
+
+/// Whether this machine is enrolled (never returns the registration token).
+#[tauri::command]
+fn get_network_enrollment() -> Option<NetworkEnrollmentSummary> {
+    network_enrollment::load().map(|e| e.summary())
+}
+
+/// Store the portal's enrollment for this machine and restart the agent on it
+/// (the monitor thread respawns the agent, which then reads the new enrollment).
+#[tauri::command]
+fn save_network_enrollment(
+    enrollment: NetworkEnrollment,
+    process: tauri::State<'_, AgentProcess>,
+) -> Result<NetworkEnrollmentSummary, String> {
+    enrollment.validate()?;
+    network_enrollment::save(&enrollment)?;
+    if let Ok(mut guard) = process.0.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+        }
+    }
+    Ok(enrollment.summary())
 }
 
 /// Path of the IDE provider token written by the IDE server (#4): ~/.edgecoder/ide-token.
@@ -580,14 +674,157 @@ fn project_git_branch(
     }
 }
 
+/// Major version from `node -p process.versions.node` output ("22.23.4\n" -> 22).
+fn parse_node_major(out: &str) -> Option<u32> {
+    out.trim().split('.').next()?.parse().ok()
+}
+
+fn node_major(node: &PathBuf) -> Option<u32> {
+    let out = Command::new(node).args(["-p", "process.versions.node"]).output().ok()?;
+    parse_node_major(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Apps launched from Finder/the Dock get a bare PATH (/usr/bin:/bin:...), so a Homebrew or nvm
+/// Node is invisible to `Command::new("node")` and the agent never starts. Look where Node
+/// actually lives (EDGECODER_NODE wins), require >= 22, then fall back to the user's login shell.
+/// The Node runtime shipped inside the bundle (scripts/bundle-agent-resources.sh), if present.
+fn bundled_node(agent_dir: &PathBuf) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    Some(agent_dir.join("node").join(name)).filter(|p| p.exists())
+}
+
+fn resolve_node_binary(agent_dir: &PathBuf) -> Option<PathBuf> {
+    const MIN_MAJOR: u32 = 22;
+    if let Ok(p) = std::env::var("EDGECODER_NODE") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // The bundled runtime matches the native modules it was built with, so it comes first.
+    if let Some(p) = bundled_node(agent_dir) {
+        return Some(p);
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut candidates: Vec<PathBuf> = [
+        "/opt/homebrew/opt/node@22/bin/node",
+        "/usr/local/opt/node@22/bin/node",
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+        r"C:\Program Files\nodejs\node.exe",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Ok(entries) = std::fs::read_dir(format!("{home}/.nvm/versions/node")) {
+        let mut nvm: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("bin/node")).collect();
+        nvm.sort();
+        nvm.reverse();
+        candidates.extend(nvm);
+    }
+    if let Some(found) = candidates
+        .into_iter()
+        .find(|p| p.exists() && node_major(p).is_some_and(|m| m >= MIN_MAJOR))
+    {
+        return Some(found);
+    }
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        if let Ok(out) = Command::new(shell).args(["-lc", "command -v node"]).output() {
+            let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if p.exists() && node_major(&p).is_some_and(|m| m >= MIN_MAJOR) {
+                return Some(p);
+            }
+        }
+    }
+    // Last resort: whatever PATH has (fine on Windows/Linux desktops with a normal PATH).
+    Some(PathBuf::from("node")).filter(|p| node_major(p).is_some_and(|m| m >= MIN_MAJOR))
+}
+
+/// PATH for the agent. A Finder launch gets /usr/bin:/bin:..., where the `docker` CLI (Homebrew,
+/// Docker Desktop, OrbStack, Colima) is missing, so the agent would report Docker as down and never
+/// take swarm work. Prepend the usual install locations that exist.
+fn agent_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    if cfg!(windows) {
+        return current;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    // The app's own Docker CLI / Colima (local_compute) come after the user's installs.
+    let managed = local_compute::manager().agent_path_dirs().into_iter().map(|d| d.to_string_lossy().to_string());
+    let extra: Vec<String> = [
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/Applications/Docker.app/Contents/Resources/bin".to_string(),
+        format!("{home}/.docker/bin"),
+        format!("{home}/.orbstack/bin"),
+    ]
+    .into_iter()
+    .chain(managed)
+    .filter(|d| PathBuf::from(d).is_dir() && !current.split(':').any(|c| c == d))
+    .collect();
+    if extra.is_empty() {
+        current
+    } else if current.is_empty() {
+        extra.join(":")
+    } else {
+        format!("{}:{current}", extra.join(":"))
+    }
+}
+
 fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
-    Command::new("node")
-        .arg("dist/index.js")
+    let log = agent_log();
+    let Some(node) = resolve_node_binary(agent_dir) else {
+        let msg = "Node.js 22+ not found (bundle, Homebrew, nvm, /usr/local, PATH, login shell); not starting the agent";
+        eprintln!("{msg}");
+        if let Some(mut f) = log {
+            let _ = writeln!(f, "{msg}");
+        }
+        return None;
+    };
+    eprintln!("Starting agent with {:?}", node);
+    let mut cmd = Command::new(node);
+    // Agent output goes to ~/.edgecoder/agent.log so a failed start can be diagnosed from a
+    // Finder launch, where stderr goes nowhere.
+    if let Some(f) = log {
+        if let Ok(err) = f.try_clone() {
+            cmd.stdout(f).stderr(err);
+        }
+    }
+    cmd.arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
+        .env("PATH", agent_path())
+        // The app's local coordinator never pays out (payouts run on the network seeds), so it
+        // needs no Lightning node; without this it refuses to start (mock Lightning is disabled).
+        .env("ECONOMY_PAYMENTS_ENABLED", "0")
         .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
         .env("ADMIN_API_TOKEN", &tokens.admin)
+        // OLLAMA_HOST / DOCKER_HOST of the Ollama and Docker sandbox the app sets up (local_compute).
+        .envs(local_compute::manager().agent_env())
+        // Settings > General: BLE mesh on or off.
+        .envs(agent_settings::load().agent_env())
+        // Once the signed-in user has enrolled this machine, its worker joins the network
+        // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
+        .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
         .spawn()
+        .ok()
+}
+
+/// ~/.edgecoder/agent.log, truncated at each spawn once it passes 5 MB.
+fn agent_log() -> Option<fs::File> {
+    let dir = PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?).join(".edgecoder");
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("agent.log");
+    let too_big = fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false);
+    fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(&path)
         .ok()
 }
 
@@ -616,8 +853,9 @@ fn resolve_agent_dir(app: &tauri::App) -> Option<PathBuf> {
 
 fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard) -> (Option<Child>, Option<PathBuf>) {
     let agent_dir = resolve_agent_dir(app);
-    // #72: an existing listener never got this launch's tokens, so don't trust it.
-    if port_in_use(AGENT_ADDR) {
+    // #72: an existing listener never got this launch's tokens, so don't trust it. One left by an
+    // earlier launch of this app is stopped and replaced; anything else is left alone.
+    if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
         eprintln!("Something is already listening on :4301 — not spawning, inference token withheld");
         guard.apply(AgentEvent::PortBusy);
         return (None, agent_dir);
@@ -724,11 +962,23 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(LocalToken(local_token.clone()))
         .manage(ProjectRoot(Arc::new(Mutex::new(None))))
+        .manage(terminal::Terminals::default())
         .invoke_handler(tauri::generate_handler![
+            terminal::term_spawn,
+            terminal::term_write,
+            terminal::term_resize,
+            terminal::term_kill,
             get_system_metrics,
             get_local_token,
             get_agent_status,
             retry_local_agent,
+            get_network_node_id,
+            get_network_enrollment,
+            save_network_enrollment,
+            get_local_compute_status,
+            get_agent_settings,
+            set_agent_ble,
+            start_local_compute_setup,
             get_ide_token,
             set_project_root,
             get_project_root,
@@ -747,9 +997,21 @@ fn main() {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
+            // Decide (fast probes) where Ollama and Docker will be before the agent spawns, so it
+            // starts with the right OLLAMA_HOST / DOCKER_HOST; downloads and starts run after.
+            let compute = local_compute::manager();
+            compute.prepare();
+
             let agent_guard = Arc::new(AgentGuard::new());
             let (child, agent_dir) = start_agent(app, &tokens, &agent_guard);
             let agent_mutex = Arc::new(Mutex::new(child));
+
+            let agent_for_compute = Arc::clone(&agent_mutex);
+            compute.start(move || restart_agent(&agent_for_compute));
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(10));
+                compute.watchdog();
+            });
             app.manage(AgentProcess(Arc::clone(&agent_mutex)));
             app.manage(AgentControl {
                 guard: Arc::clone(&agent_guard),
@@ -790,6 +1052,50 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error running EdgeCoder desktop app");
+        .build(tauri::generate_context!())
+        .expect("error building EdgeCoder desktop app")
+        .run(|app, event| {
+            // Quit and the updater's relaunch end the app without destroying its window, which
+            // left the agent running and holding the port for the next launch.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(terms) = app.try_state::<terminal::Terminals>() {
+                    terminal::kill_all(&terms);
+                }
+                // Our `ollama serve`, and the Colima VM if this launch booted it.
+                local_compute::manager().shutdown();
+                if let Some(state) = app.try_state::<AgentProcess>() {
+                    if let Ok(mut guard) = state.0.lock() {
+                        if let Some(ref mut child) = *guard {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod node_resolution_tests {
+    #[test]
+    fn disk_is_the_mount_holding_home_not_the_sum_of_volumes() {
+        let mounts = vec![
+            ("/".to_string(), 994_000_000_000, 167_000_000_000),
+            ("/System/Volumes/Data".to_string(), 994_000_000_000, 167_000_000_000),
+            ("/Volumes/USB".to_string(), 64_000_000_000, 10_000_000_000),
+        ];
+        assert_eq!(super::disk_for_path(&mounts, "/Users/me"), Some((994_000_000_000, 167_000_000_000)));
+        assert_eq!(super::disk_for_path(&mounts, "/Volumes/USB/x"), Some((64_000_000_000, 10_000_000_000)));
+        assert_eq!(super::disk_for_path(&mounts, "/Volumes/USBX"), Some((994_000_000_000, 167_000_000_000)));
+    }
+
+    use super::parse_node_major;
+
+    #[test]
+    fn parses_node_major_versions() {
+        assert_eq!(parse_node_major("22.23.4\n"), Some(22));
+        assert_eq!(parse_node_major("v22.1.0"), None); // `-p process.versions.node` never prints a v
+        assert_eq!(parse_node_major("20.18.0"), Some(20));
+        assert_eq!(parse_node_major(""), None);
+    }
 }

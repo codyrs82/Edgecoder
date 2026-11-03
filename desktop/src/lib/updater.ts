@@ -10,7 +10,22 @@ export type UpdateStatus =
   | { state: "installing" }
   | { state: "error"; message: string };
 
-const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+/** Install updates without asking (default on). Opt out with localStorage edgecoder_autoUpdate = "off". */
+export const AUTO_UPDATE_KEY = "edgecoder_autoUpdate";
+
+export function autoUpdateEnabled(store: Pick<Storage, "getItem"> | null = safeStorage()): boolean {
+  return store?.getItem(AUTO_UPDATE_KEY) !== "off";
+}
+
+function safeStorage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
 
 let statusListeners: Array<(s: UpdateStatus) => void> = [];
 let currentStatus: UpdateStatus = { state: "idle" };
@@ -46,6 +61,10 @@ export async function checkForUpdate(): Promise<void> {
     if (update) {
       cachedUpdate = update;
       setStatus({ state: "available", update });
+      // Signed update found: fetch, verify (the plugin checks the signature against the
+      // public key baked into this build), install and relaunch. The bundled agent
+      // restarts with the app; in-flight swarm tasks are re-leased by the coordinator.
+      if (autoUpdateEnabled()) await downloadAndInstall();
     } else {
       cachedUpdate = null;
       setStatus({ state: "up-to-date" });

@@ -31,6 +31,7 @@ export function registerConversationRoutes(app: FastifyInstance, { store, getCur
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const { id } = req.params as { id: string };
+    if ((await store.getConversationOwner(id)) !== user.userId) return reply.code(404).send({ error: "not_found" });
     const messages = await store.getConversationMessages(id);
     return reply.send({ messages });
   });
@@ -40,6 +41,7 @@ export function registerConversationRoutes(app: FastifyInstance, { store, getCur
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const { id } = req.params as { id: string };
+    if ((await store.getConversationOwner(id)) !== user.userId) return reply.code(404).send({ error: "not_found" });
     const body = z.object({ title: z.string().min(1) }).parse(req.body);
     await store.renameConversation(id, body.title);
     return reply.send({ ok: true });
@@ -50,6 +52,7 @@ export function registerConversationRoutes(app: FastifyInstance, { store, getCur
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const { id } = req.params as { id: string };
+    if ((await store.getConversationOwner(id)) !== user.userId) return reply.code(404).send({ error: "not_found" });
     await store.deleteConversation(id);
     return reply.send({ ok: true });
   });

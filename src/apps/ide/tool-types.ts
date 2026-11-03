@@ -12,6 +12,7 @@ export type ToolName =
   | "read_file"
   | "list_directory"
   | "search_files"
+  | "search_codebase"
   | "write_file"
   | "edit_file"
   | "run_shell"
@@ -32,6 +33,7 @@ export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "read_file",
   "list_directory",
   "search_files",
+  "search_codebase",
   "git_status",
   "git_diff",
   "git_log",
@@ -105,6 +107,12 @@ export type IdeStreamEvent =
       steps: PlanStep[];
       status: "proposed" | "approved" | "executing";
     }
+  /** First event of an agent turn: its id, for checkpoints (review and undo of its file changes). */
+  | { type: "turn"; id: string }
+  /** The turn wrote this project file (its original is kept under the turn's checkpoint). */
+  | { type: "file_change"; turnId: string; path: string }
+  /** cSats a model call on the network cost (0 on this computer or your own machines). */
+  | { type: "usage"; cSats: number; where: string }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------
@@ -217,6 +225,19 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       ref: {
         type: "string",
         description: "Branch or ref to show log for. Defaults to HEAD.",
+      },
+    },
+  },
+
+  {
+    name: "search_codebase",
+    description:
+      "Find code by meaning rather than exact text (e.g. 'where are payouts retried', 'the login form'). Returns the most relevant file regions with line numbers. Use search_files for exact names or strings.",
+    parameters: {
+      query: {
+        type: "string",
+        description: "What you are looking for, in plain words.",
+        required: true,
       },
     },
   },

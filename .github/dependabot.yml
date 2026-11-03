@@ -28,5 +28,20 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    labels: [dependencies, github-actions]
     groups:
       actions: { patterns: ["*"] }
+  # #84: base images are pinned by digest; this entry keeps the pins moving so Node 22 and
+  # Debian security patches reach rebuilds. One entry with `directories:` and one group means
+  # every image bump across all four folders lands in a single PR, and
+  # tests/repo/docker-digests.test.ts fails if the node digest ever differs between Dockerfiles.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /deploy/docker
+      - /docker
+      - /tests/e2e
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+    groups:
+      base-images: { patterns: ["*"] }

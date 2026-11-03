@@ -3,6 +3,13 @@
   "version": "1.0.0",
   "description": "EdgeCoder on-device and swarm runtime scaffold",
   "main": "dist/index.js",
+  "bin": {
+    "edgecoder": "dist/cli/edgecoder.js",
+    "edgecoder-agent": "dist/cli/edgecoder-agent.js",
+    "edgecoder-coordinator": "dist/cli/edgecoder-coordinator.js",
+    "edgecoder-portal": "dist/cli/edgecoder-portal.js",
+    "edgecoder-install": "dist/cli/edgecoder-install.js"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "dev:alt": "INFERENCE_PORT=4312 COORDINATOR_PORT=4311 CONTROL_PLANE_PORT=4313 INFERENCE_URL=http://127.0.0.1:4312 COORDINATOR_URL=http://127.0.0.1:4311 tsx src/index.ts",
@@ -26,16 +33,21 @@
     "test:integration": "vitest run --config vitest.e2e.config.ts",
     "docs:dev": "vitepress dev site-docs",
     "docs:build": "vitepress build site-docs",
+    "site:export": "tsx scripts/export-static-site.ts",
     "docs:preview": "vitepress preview site-docs",
     "model:list": "tsx bin/swap-model.ts list",
     "model:swap": "tsx bin/swap-model.ts swap",
     "model:status": "tsx bin/swap-model.ts status",
     "model:pull": "tsx bin/swap-model.ts pull",
+    "models:verify-catalog": "tsx scripts/check-model-catalog.ts",
+    "models:sync-catalog": "node scripts/sync-model-catalog.mjs",
     "test:e2e": "npx playwright test --config tests/e2e/playwright.config.ts",
     "test:e2e:up": "docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build",
     "test:e2e:down": "docker compose -f tests/e2e/docker-compose.e2e.yml down -v",
     "check:scripts": "node scripts/check-scripts.mjs",
-    "check:fly-configs": "node scripts/check-fly-configs.mjs"
+    "check:fly-configs": "node scripts/check-fly-configs.mjs",
+    "fly:bootstrap": "bash scripts/fly-bootstrap-org.sh",
+    "test:desktop-ui": "cd desktop && npx playwright test --config e2e/playwright.config.ts"
   },
   "keywords": [],
   "author": "",
@@ -46,6 +58,7 @@
     "@fastify/helmet": "^13.2.0",
     "@fastify/rate-limit": "^11.2.1",
     "@fastify/websocket": "^11.2.0",
+    "@noble/curves": "2.0.1",
     "@scure/base": "^2.0.0",
     "@scure/bip32": "^2.0.1",
     "@simplewebauthn/server": "^13.2.2",
@@ -53,6 +66,7 @@
     "better-sqlite3": "^12.6.2",
     "bip39": "^3.1.0",
     "fastify": "^5.7.4",
+    "lightweight-charts": "^4.2.3",
     "pg": "^8.18.0",
     "undici": "^7.22.0",
     "zod": "^4.3.6"
@@ -83,6 +97,10 @@
     "tar": "^7.5.22",
     "@mapbox/node-pre-gyp": "^2.0.3",
     "node-gyp": "^11.5.0",
+    "glob": "^14.0.3",
+    "mermaid": {
+      "katex": "^0.18.2"
+    },
     "vitepress": {
       "vite": "^6.4.1"
     }

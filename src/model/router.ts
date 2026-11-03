@@ -62,13 +62,51 @@ export interface RouterConfig {
   coordinatorUrl: string;
   /** Mesh auth token for coordinator API. */
   meshAuthToken: string;
+  /**
+   * The user's own agent (its loopback forwarder, src/swarm/local-forwarder.ts). When set, swarm
+   * work goes through it: the agent signs the submission, so it spends the agent owner's account.
+   */
+  localAgentUrl?: string;
+  /** Bearer token for the local forwarder (the IDE token). */
+  localAgentToken?: () => string;
   /** Agent account ID used for credit billing on swarm submissions. */
   agentAccountId: string;
   /** Bluetooth transport status endpoint (localhost). Default: disabled */
   bluetoothStatusUrl?: string;
   /** Language for swarm task submission. Default: "python" */
   swarmLanguage?: "python" | "javascript";
+  /**
+   * Frozen snapshot the coordinator requires on POST /submit (design decision #8): a
+   * 40-hex git commit or an https:// tarball URL. Resolved per request so the IDE
+   * can pass the active project's HEAD. Falls back to IDE_SWARM_SNAPSHOT_REF.
+   */
+  resolveSnapshotRef?: () => string | undefined;
 }
+
+/**
+ * #159: undici/socket error codes that prove the request never left this host, so a
+ * failed POST /submit with one of these cannot have been charged by the coordinator.
+ * Anything else (headers/body timeout, reset after send, unknown) is treated as
+ * "possibly submitted" and surfaces as SwarmPostSubmitError.
+ */
+const NOT_SENT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EADDRNOTAVAIL",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_INVALID_ARG"
+]);
+
+export function submitErrorWasNeverSent(err: unknown): boolean {
+  const code = (err as { code?: unknown; cause?: { code?: unknown } } | null)?.code
+    ?? (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return typeof code === "string" && NOT_SENT_ERROR_CODES.has(code);
+}
+
+const SNAPSHOT_REF_RE = /^(?:[0-9a-f]{40}|https:\/\/.+)$/i;
 
 export interface RouterResult {
   text: string;
@@ -144,6 +182,7 @@ export class IntelligentRouter {
       localLatencyThresholdMs: 8000,
       coordinatorUrl: process.env.COORDINATOR_URL ?? "https://coordinator.edgecoder.io",
       meshAuthToken: process.env.MESH_AUTH_TOKEN ?? "",
+      localAgentUrl: process.env.SWARM_VIA_LOCAL_AGENT_URL?.trim() || undefined,
       agentAccountId: process.env.AGENT_ACCOUNT_ID ?? process.env.AGENT_ID ?? "local-agent",
       bluetoothStatusUrl: process.env.BT_STATUS_URL,
       swarmLanguage: "python",
@@ -185,7 +224,7 @@ export class IntelligentRouter {
     }
 
     // 3. Swarm — submit to coordinator task queue
-    if (this.cfg.meshAuthToken) {
+    if (this.swarmEnabled) {
       try {
         const result = await this.runViaSwarm(prompt);
         return { ...result, route: "swarm", latencyMs: Date.now() - started };
@@ -199,14 +238,14 @@ export class IntelligentRouter {
     return { text: res.text, route: "edgecoder-local", latencyMs: Date.now() - started };
   }
 
-  /** True when swarm routing is configured (a mesh token is set). */
+  /** True when swarm routing is configured (the local agent forwarder or a mesh token). */
   get swarmEnabled(): boolean {
-    return !!this.cfg.meshAuthToken;
+    return !!this.cfg.localAgentUrl || !!this.cfg.meshAuthToken;
   }
 
   /** #36: explicit swarm route for the IDE /run/swarm endpoint. Throws if swarm is not configured. */
   async routeSwarm(prompt: string, maxTokens?: number): Promise<RouterResult> {
-    if (!this.cfg.meshAuthToken) throw new Error("swarm_unavailable");
+    if (!this.swarmEnabled) throw new Error("swarm_unavailable");
     const started = Date.now();
     const result = await this.runViaSwarm(prompt, undefined, maxTokens);
     return { ...result, route: "swarm", latencyMs: Date.now() - started };
@@ -280,37 +319,58 @@ export class IntelligentRouter {
   // Swarm route — submit task to coordinator queue, poll for result
   // -------------------------------------------------------------------------
 
-  private async runViaSwarm(
-    prompt: string,
-    requestedModel?: string,
-    maxTokens?: number
-  ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
-    const coordinatorUrl = this.cfg.coordinatorUrl.replace(/\/$/, "");
-    const headers = {
-      "content-type": "application/json",
-      "x-mesh-token": this.cfg.meshAuthToken
-    };
+  /** Where swarm requests go: through this machine's agent (signed, billed to its owner) or a coordinator. */
+  private swarmEndpoint(): { base: string; headers: Record<string, string> } {
+    // Through the local agent, its forwarder mirrors the coordinator routes under /forward.
+    const viaAgent = this.cfg.localAgentUrl?.replace(/\/$/, "");
+    return viaAgent
+      ? { base: `${viaAgent}/forward`, headers: { "content-type": "application/json", authorization: `Bearer ${this.cfg.localAgentToken?.() ?? ""}` } }
+      : { base: this.cfg.coordinatorUrl.replace(/\/$/, ""), headers: { "content-type": "application/json", "x-mesh-token": this.cfg.meshAuthToken } };
+  }
 
-    // Submit task
-    const submitRes = await request(`${coordinatorUrl}/tasks`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        taskId: `ide-${Date.now()}`,
-        prompt,
-        language: this.cfg.swarmLanguage ?? "python",
-        submitterAccountId: this.cfg.agentAccountId,
-        projectId: "ide-requests",
-        resourceClass: "cpu",
-        priority: 60,
-        requestedModel,
-        // #71: forwarded so the coordinator can price and limit the request.
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
-        subtasks: [{ prompt, language: this.cfg.swarmLanguage ?? "python" }]
-      }),
-      headersTimeout: 15_000,
-      bodyTimeout: 15_000
-    });
+  /**
+   * Submit a task to the swarm (one credit). Returns its ids; poll with pollSwarm. Errors before
+   * the request was written are plain Errors (nothing charged); later ones are SwarmPostSubmitError.
+   */
+  async submitSwarm(prompt: string, opts: { language?: "python" | "javascript" } = {}): Promise<{ taskId: string; subtaskId: string }> {
+    const { base, headers } = this.swarmEndpoint();
+    // The coordinator's submit route is POST /submit (not /tasks) and it requires a
+    // frozen snapshot reference (#8). Without one the request is rejected before any
+    // charge, so fail here with an actionable message instead of a coordinator 500.
+    const snapshotRef = this.cfg.resolveSnapshotRef?.() ?? process.env.IDE_SWARM_SNAPSHOT_REF?.trim();
+    if (!snapshotRef || !SNAPSHOT_REF_RE.test(snapshotRef)) {
+      throw new Error(
+        "swarm_snapshot_ref_required: the swarm needs a frozen snapshot (40-hex git commit or https:// tarball). " +
+          "Open a git project in the IDE or set IDE_SWARM_SNAPSHOT_REF."
+      );
+    }
+
+    const taskId = `ide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let submitRes: Awaited<ReturnType<typeof request>>;
+    try {
+      submitRes = await request(`${base}/submit`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          taskId,
+          prompt,
+          language: opts.language ?? this.cfg.swarmLanguage ?? "python",
+          snapshotRef,
+          submitterAccountId: this.cfg.agentAccountId,
+        }),
+        headersTimeout: 70_000,
+        bodyTimeout: 70_000
+      });
+    } catch (err) {
+      // A connection failure before the request was written: nothing was submitted or
+      // charged. A headers/body timeout after the request was written may have been
+      // processed, so report it as an outcome-unknown post-submit failure.
+      if (submitErrorWasNeverSent(err)) throw err;
+      throw new SwarmPostSubmitError(
+        `Swarm submit outcome unknown (${err instanceof Error ? err.message : String(err)})`,
+        taskId
+      );
+    }
 
     if (submitRes.statusCode < 200 || submitRes.statusCode >= 300) {
       const errBody = await submitRes.body.text();
@@ -321,33 +381,45 @@ export class IntelligentRouter {
     try {
       submitBody = (await submitRes.body.json()) as { taskId: string; subtasks: string[] };
     } catch {
-      throw new SwarmPostSubmitError("Swarm: unreadable submit response");
+      throw new SwarmPostSubmitError("Swarm: unreadable submit response", taskId);
     }
-    const taskId = submitBody.taskId;
     const subtaskId = submitBody.subtasks?.[0];
-
     if (!subtaskId) throw new SwarmPostSubmitError("Swarm: no subtaskId returned", taskId);
+    return { taskId, subtaskId };
+  }
 
+  /** One look at a swarm task's result; null while it is still queued or running. */
+  async pollSwarm(taskId: string, subtaskId: string): Promise<{ output: string; ok?: boolean; error?: string; creditsSpent?: number } | null> {
+    const { base, headers } = this.swarmEndpoint();
+    const pollUrl = `${base}/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}/result`;
+    const pollRes = await request(pollUrl, { method: "GET", headers, headersTimeout: 10_000, bodyTimeout: 10_000 });
+    if (pollRes.statusCode !== 200) {
+      await pollRes.body.dump();
+      return null;
+    }
+    const result = (await pollRes.body.json()) as { output?: string; ok?: boolean; error?: string; creditsSpent?: number };
+    return result.output !== undefined ? { output: result.output, ok: result.ok, error: result.error, creditsSpent: result.creditsSpent } : null;
+  }
+
+  private async runViaSwarm(
+    prompt: string,
+    _requestedModel?: string,
+    _maxTokens?: number
+  ): Promise<Omit<RouterResult, "route" | "latencyMs">> {
+    const { taskId, subtaskId } = await this.submitSwarm(prompt);
     // Poll for result — up to 90s
-    const pollUrl = `${coordinatorUrl}/tasks/${taskId}/subtasks/${subtaskId}/result`;
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
-        const pollRes = await request(pollUrl, { method: "GET", headers });
-        if (pollRes.statusCode === 200) {
-          const result = (await pollRes.body.json()) as {
-            output?: string;
-            ok?: boolean;
-            creditsSpent?: number;
+        const result = await this.pollSwarm(taskId, subtaskId);
+        if (result) {
+          return {
+            text: result.output,
+            creditsSpent: result.creditsSpent,
+            swarmTaskId: taskId,
+            ...(result.ok === false && result.error ? { error: result.error } : {})
           };
-          if (result.output !== undefined) {
-            return {
-              text: result.output,
-              creditsSpent: result.creditsSpent,
-              swarmTaskId: taskId
-            };
-          }
         }
       } catch {
         // continue polling
@@ -427,7 +499,7 @@ export class IntelligentRouter {
     }
 
     // 3. Swarm — submit the last user message as a task to the coordinator
-    if (this.cfg.meshAuthToken) {
+    if (this.swarmEnabled) {
       const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
       if (lastUserMsg) {
         try {
@@ -501,7 +573,7 @@ export class IntelligentRouter {
       latencyThresholdMs: this.cfg.localLatencyThresholdMs,
       latencySamples: this.latency.sampleCount,
       bluetoothEnabled: !!this.cfg.bluetoothStatusUrl,
-      swarmEnabled: !!this.cfg.meshAuthToken
+      swarmEnabled: this.swarmEnabled
     };
   }
 }

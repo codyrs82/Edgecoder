@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# End-to-end regtest money flow through the US seed and the edgecoder-lnd-test hub/payee:
+#   1. purchase: the coordinator issues an invoice, the payee node pays it, the coordinator settles it
+#      (this funds the payout pool);
+#   2. a test earnings row for ACCOUNT (reason regtest_e2e_test, wiped before mainnet);
+#   3. withdrawal: the payee node issues an invoice and the coordinator pays it out over Lightning.
+# SKIP_SETUP=1 runs only the withdrawal (after a run that already bought and earned).
+# BUY_ONLY=1 runs only the purchase (buyer credits for a proof-of-concept job).
+# OWNER_OF=<agentId> prints the account that agent is linked to, then exits.
+# BALANCE=1 prints ACCOUNT's earnings balance, then exits.
+# BLACKLIST_OF=<agentId> prints that agent's blacklist history, then exits.
+# AGENTS=1 lists the agents registered with the US seed, then exits.
+# Prints invoices, statuses and balances only; no tokens or macaroons.
+set -euo pipefail
+trap 'echo "e2e-payout: stopped at line $LINENO" >&2' ERR
+export FLY_API_TOKEN="${FLY_API_TOKEN:-$(cat ~/.config/edgecoder/fly.token)}"
+ACCOUNT=${ACCOUNT:-regtest-e2e-test}
+BUY_SATS=${BUY_SATS:-50000}
+EARN_SATS=${EARN_SATS:-20000}
+WITHDRAW_SATS=${WITHDRAW_SATS:-10000}
+SEED=edgecoder-seed
+LT=edgecoder-lnd-test
+here=$(cd "$(dirname "$0")" && pwd)
+js=$(base64 < "$here/e2e-seed.mjs" | tr -d '\n')
+# Remote output is shown in full when it is not the expected JSON line, so a failure is never silent.
+seed() {
+  local raw; raw=$(fly ssh console -a "$SEED" -q -C "sh -c 'echo $js | base64 -d > /tmp/e2e-seed.mjs && cd /app && node /tmp/e2e-seed.mjs $*'" 2>&1 || true)
+  local line; line=$(grep -E '^[{[]' <<<"$raw" | tail -1 || true)
+  if [ -z "$line" ]; then echo "seed $1 failed; remote output:" >&2; sed 's/^/  | /' <<<"$raw" >&2; exit 1; fi
+  printf '%s\n' "$line"
+}
+PAYEE=$(fly machines list -a "$LT" --json | jq -r '.[] | select(.config.metadata.fly_process_group=="payee") | .id')
+payee() { fly ssh console -a "$LT" --machine "$PAYEE" -q -C "lncli --lnddir=/data --network=regtest $*" 2>&1 | { grep -v '^Connecting' || true; }; }
+
+if [ -n "${OWNER_OF:-}" ]; then seed owner "$OWNER_OF"; exit 0; fi
+if [ "${BALANCE:-0}" = 1 ]; then seed payouts "$ACCOUNT" | jq -c '.body.balance'; exit 0; fi
+if [ -n "${BLACKLIST_OF:-}" ]; then seed blacklist "$BLACKLIST_OF" | jq -c '.[]'; exit 0; fi
+if [ "${AGENTS:-0}" = 1 ]; then seed agents | jq -c '.[]'; exit 0; fi
+
+if [ "${SKIP_SETUP:-0}" != 1 ]; then
+echo "== 1. purchase $BUY_SATS sats for $ACCOUNT"
+intent=$(seed intent "$ACCOUNT" "$BUY_SATS")
+id=$(jq -r '.body.intent.intentId' <<<"$intent"); bolt=$(jq -r '.body.intent.invoiceRef' <<<"$intent")
+[ "$id" != null ] || { echo "intent failed: $intent"; exit 1; }
+echo "intent $id"
+payee payinvoice --force "$bolt" | grep -iE 'status|payment_error|fee' || true
+seed reconcile | jq -c '.body'
+seed intent-status "$id" | jq -c '.body.intent | {status, amountSats, netSats, quotedCredits}'
+
+if [ "${BUY_ONLY:-0}" = 1 ]; then seed payouts "$ACCOUNT" | jq -c '.body.balance'; exit 0; fi
+
+echo "== 2. test earnings: $EARN_SATS sats"
+seed earn "$ACCOUNT" "$EARN_SATS" | jq -c .
+fi
+
+echo "== 3. withdraw $WITHDRAW_SATS sats to the payee node"
+inv=$(payee addinvoice --amt "$WITHDRAW_SATS" --memo regtest-e2e | jq -r .payment_request)
+seed withdraw "$ACCOUNT" "$inv" | jq -c '.status, .body'
+seed payouts "$ACCOUNT" | jq -c '.body | {balance, payouts: [.payouts[] | {status, amountMsat, feeMsat}], limits: .policy.limits, paused: .policy.paused}'
+payee lookupinvoice "$(payee decodepayreq "$inv" | jq -r .payment_hash)" | jq -c '{state, amt_paid_sat}'

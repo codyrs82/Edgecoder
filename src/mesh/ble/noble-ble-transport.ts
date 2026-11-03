@@ -40,6 +40,11 @@ export class NobleBLETransport implements BLETransport {
 
   constructor(private readonly localId: string) {}
 
+  /** Which halves loaded: scanning (noble) and advertising (bleno). Both false means no BLE at all. */
+  capabilities(): { scanning: boolean; advertising: boolean } {
+    return { scanning: !!this.noble, advertising: !!this.bleno };
+  }
+
   async init(): Promise<void> {
     try {
       const nobleModule = await import("@anthropic-ai/noble" as string).catch(
@@ -88,6 +93,11 @@ export class NobleBLETransport implements BLETransport {
     if (this.bleno) {
       this.bleno.on("stateChange", (state: string) => {
         console.log(`[BLE] bleno state: ${state}`);
+        if (state !== "poweredOn") {
+          // Bluetooth went off: the system dropped our service and advertising.
+          this.servicesRegistered = false;
+          this.advertisingActive = false;
+        }
         if (state === "poweredOn" && this.advertisement) {
           this.doStartAdvertising();
         }
@@ -102,52 +112,70 @@ export class NobleBLETransport implements BLETransport {
     }
   }
 
+  /** The GATT service is registered once per Bluetooth power-on (macOS only ever adds services). */
+  private servicesRegistered = false;
+  private advertisingActive = false;
+
+  /** Current identity and capabilities, read when a peer asks (so updates need no re-registration). */
+  private identityBytes(): Buffer {
+    const ad = this.advertisement;
+    return Buffer.from(JSON.stringify({ agentId: ad?.agentId, model: ad?.model, modelParamSize: ad?.modelParamSize, meshTokenHash: ad?.meshTokenHash ?? "" }));
+  }
+
+  private capabilityBytes(): Buffer {
+    const ad = this.advertisement;
+    return Buffer.from(JSON.stringify({ memoryMB: ad?.memoryMB, batteryPct: ad?.batteryPct, currentLoad: ad?.currentLoad, deviceType: ad?.deviceType }));
+  }
+
   private doStartAdvertising(): void {
     if (!this.bleno || !this.advertisement) return;
-
     const Bleno = this.bleno;
-    const ad = this.advertisement;
+    const localName = `EC-${this.advertisement.agentId.substring(0, 8)}`;
+    const advertise = () => {
+      if (this.advertisingActive) return;
+      Bleno.startAdvertising(localName, [BLE_SERVICE_UUID.replace(/-/g, "")], (advErr: Error | null) => {
+        if (advErr) {
+          console.error("[BLE] advertising failed:", advErr);
+        } else {
+          this.advertisingActive = true;
+          console.log(`[BLE] advertising as ${localName}`);
+        }
+      });
+    };
+    if (this.servicesRegistered) {
+      advertise();
+      return;
+    }
 
-    const identityData = Buffer.from(
-      JSON.stringify({
-        agentId: ad.agentId,
-        model: ad.model,
-        modelParamSize: ad.modelParamSize,
-        meshTokenHash: ad.meshTokenHash ?? "",
-      })
-    );
-
-    const BlenoPrimaryService =
-      Bleno.PrimaryService ?? Bleno.default?.PrimaryService;
-    const BlenoCharacteristic =
-      Bleno.Characteristic ?? Bleno.default?.Characteristic;
-
+    const BlenoPrimaryService = Bleno.PrimaryService ?? Bleno.default?.PrimaryService;
+    const BlenoCharacteristic = Bleno.Characteristic ?? Bleno.default?.Characteristic;
     if (!BlenoPrimaryService || !BlenoCharacteristic) {
       console.warn("[BLE] bleno PrimaryService/Characteristic not found");
       return;
     }
 
+    const self = this;
+    // Long reads arrive in pieces (offset); answer each from the current value.
+    const readOf = (bytes: () => Buffer) =>
+      function onReadRequest(offset: number, callback: (result: number, data?: Buffer) => void) {
+        const data = bytes();
+        if (offset > data.length) return callback(0x07); // invalid offset
+        callback(0, data.subarray(offset));
+      };
+
     const identityChar = new BlenoCharacteristic({
       uuid: BLE_CHAR_PEER_IDENTITY.replace(/-/g, ""),
       properties: ["read"],
-      value: identityData,
+      onReadRequest: readOf(() => self.identityBytes()),
     });
 
     const capabilitiesChar = new BlenoCharacteristic({
       uuid: BLE_CHAR_CAPABILITIES.replace(/-/g, ""),
       properties: ["read"],
-      value: Buffer.from(
-        JSON.stringify({
-          memoryMB: ad.memoryMB,
-          batteryPct: ad.batteryPct,
-          currentLoad: ad.currentLoad,
-          deviceType: ad.deviceType,
-        })
-      ),
+      onReadRequest: readOf(() => self.capabilityBytes()),
     });
 
     // Task request characteristic — writable by remote peers
-    const self = this;
     const taskRequestChar = new BlenoCharacteristic({
       uuid: BLE_CHAR_TASK_REQUEST.replace(/-/g, ""),
       properties: ["write", "writeWithoutResponse"],
@@ -181,31 +209,37 @@ export class NobleBLETransport implements BLETransport {
 
     const service = new BlenoPrimaryService({
       uuid: BLE_SERVICE_UUID.replace(/-/g, ""),
-      characteristics: [
-        identityChar,
-        capabilitiesChar,
-        taskRequestChar,
-        taskResponseChar,
-      ],
+      characteristics: [identityChar, capabilitiesChar, taskRequestChar, taskResponseChar],
     });
 
+    this.servicesRegistered = true;
     Bleno.setServices([service], (err: Error | null) => {
       if (err) {
+        this.servicesRegistered = false;
         console.error("[BLE] failed to set services:", err);
         return;
       }
-      const localName = `EC-${ad.agentId.substring(0, 8)}`;
-      Bleno.startAdvertising(
-        localName,
-        [BLE_SERVICE_UUID.replace(/-/g, "")],
-        (advErr: Error | null) => {
-          if (advErr) {
-            console.error("[BLE] advertising failed:", advErr);
-          } else {
-            console.log(`[BLE] advertising as ${localName}`);
-          }
-        }
-      );
+      advertise();
+    });
+  }
+
+  /**
+   * The characteristics of a peer's first EdgeCoder service. Looking only at the first copy matters:
+   * peers on versions before 1.4.27 registered the service again on every update (hundreds of
+   * copies), and discovering characteristics across all of them never finished.
+   */
+  private discoverPeerChars(peripheral: any, charUUIDs: string[], timeoutMs: number, done: (err: Error | null, chars: any[]) => void): void {
+    let finished = false;
+    const finish = (err: Error | null, chars: any[] = []) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      done(err, chars);
+    };
+    const timer = setTimeout(() => finish(new Error(`service discovery timed out after ${timeoutMs} ms`)), timeoutMs);
+    peripheral.discoverServices([BLE_SERVICE_UUID.replace(/-/g, "")], (err: Error | null, services: any[]) => {
+      if (err || !services?.length) return finish(err ?? new Error("no EdgeCoder service"));
+      services[0].discoverCharacteristics(charUUIDs, (cErr: Error | null, chars: any[]) => finish(cErr, chars ?? []));
     });
   }
 
@@ -243,6 +277,7 @@ export class NobleBLETransport implements BLETransport {
 
   stopAdvertising(): void {
     this.advertisement = null;
+    this.advertisingActive = false;
     if (this.bleno) {
       this.bleno.stopAdvertising();
     }
@@ -391,12 +426,12 @@ export class NobleBLETransport implements BLETransport {
           BLE_CHAR_TASK_RESPONSE.replace(/-/g, ""),
         ];
 
-        peripheral.discoverSomeServicesAndCharacteristics(
-          serviceUUIDs,
+        this.discoverPeerChars(
+          peripheral,
           charUUIDs,
+          15_000,
           (
             discErr: Error | null,
-            _services: any[],
             characteristics: any[]
           ) => {
             if (discErr || !characteristics?.length) {
@@ -564,23 +599,26 @@ export class NobleBLETransport implements BLETransport {
     // Connect to read identity characteristic (one-time)
     this.connectedPeripherals.set(peripheralId, peripheral);
 
+    console.log(`[BLE] found EdgeCoder device ${peripheralId} (rssi ${peripheral.rssi}); reading its identity`);
     peripheral.connect((err: Error | null) => {
       if (err) {
+        console.warn(`[BLE] could not connect to ${peripheralId}: ${String(err)}`);
         this.connectedPeripherals.delete(peripheralId);
         return;
       }
 
-      const serviceUUIDs = [BLE_SERVICE_UUID.replace(/-/g, "")];
       const charUUIDs = [
         BLE_CHAR_PEER_IDENTITY.replace(/-/g, ""),
         BLE_CHAR_CAPABILITIES.replace(/-/g, ""),
       ];
 
-      peripheral.discoverSomeServicesAndCharacteristics(
-        serviceUUIDs,
+      this.discoverPeerChars(
+        peripheral,
         charUUIDs,
-        (discErr: Error | null, _services: any[], characteristics: any[]) => {
+        15_000,
+        (discErr: Error | null, characteristics: any[]) => {
           if (discErr || !characteristics?.length) {
+            console.warn(`[BLE] could not read ${peripheralId}'s EdgeCoder service: ${discErr ? String(discErr) : "no characteristics"}`);
             peripheral.disconnect();
             this.connectedPeripherals.delete(peripheralId);
             return;

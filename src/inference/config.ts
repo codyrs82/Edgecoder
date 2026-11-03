@@ -41,7 +41,10 @@ export const inferenceConfigSchema = z
     INFERENCE_TRUSTED_COORDINATOR_KEYS_JSON: trustedKeysJson,
     OLLAMA_HOST: envUrl("http://127.0.0.1:11434"),
     OLLAMA_MODEL: z.string().default("qwen3.5:9b"),
-    OLLAMA_COORDINATOR_MODEL: z.string().optional()
+    OLLAMA_COORDINATOR_MODEL: z.string().optional(),
+    // Cap on the model call that splits a submitted prompt into subtasks. On a CPU-only seed a 9B
+    // model can take minutes; past the cap the task runs as one subtask. 0 skips the model.
+    DECOMPOSE_MODEL_TIMEOUT_MS: envInt(10_000, { min: 0, max: 300_000 })
   })
   // Note (zod 4): this cross-field check runs only once every field-level check passes, so the
   // "all problems at once" message can omit these until the field errors are fixed.

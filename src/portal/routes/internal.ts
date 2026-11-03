@@ -90,6 +90,7 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
         nodeId: refreshed.nodeId,
         deviceId: refreshed.deviceId,
         nodeKind: refreshed.nodeKind,
+        ownerUserId: refreshed.ownerUserId,
         ownerEmail: refreshed.ownerEmail,
         emailVerified: refreshed.emailVerified,
         nodeApproved: refreshed.nodeApproved,

@@ -24,21 +24,33 @@ Workers     Inference (4302)
 - **Portal** -- user-facing web app with passkey/SSO auth, chat, code reviews, wallet, and coordinator operations dashboard.
 - **Coordinator** -- task queue, swarm orchestration, P2P gossip mesh, BLE local mesh, agent lifecycle, economy APIs.
 - **Inference Service** -- LLM-powered task decomposition and escalation. Breaks large prompts into subtasks.
-- **Control Plane** -- admin API for agent management, rollouts, network mode, credits, and economy operations.
+- **Control Plane** -- admin API for agent management, rollouts, network mode, cSat balances, and economy operations.
 - **Worker Runner** -- swarm agent that registers with a coordinator, pulls subtasks, executes code in a sandbox, and returns results.
 - **Desktop App** -- Tauri + Svelte desktop client (`desktop/`).
 - **iOS App** -- native Swift BLE proxy + WebView (`ios/`).
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed walkthrough of data flows, mesh networking, and the credit economy.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed walkthrough of data flows, mesh networking, and the cSat economy.
 
 ## Production URLs
 
 | Service | URL |
 |---------|-----|
-| Portal | `https://portal.edgecoder.io/portal` |
-| Control Plane | `https://control.edgecoder.io` |
-| Coordinator | `https://coordinator.edgecoder.io` (mesh-auth required) |
-| Docs | `https://codyrs82.github.io/Edgecoder/` (GitHub Pages) |
+| Portal | `https://edgecoder.io` (web app at `/portal`) |
+| Hosted API | `https://edgecoder.io/v1` (OpenAI- and Anthropic-compatible, `eck_` API keys; see [docs/API.md](docs/API.md)) |
+| Coordinators | `https://coordinator.edgecoder.io` (US, Fly app `edgecoder-seed`) and `https://coordinator-eu.edgecoder.io` (EU, Fly app `edgecoder-seed-eu`); mesh-auth required. The control plane runs inside these all-in-one seeds. |
+| Docs | `https://docs.edgecoder.io` (GitHub Pages) |
+
+## The cSat economy
+
+Compute is priced in **cSats**: 1 cSat = 1 sat. Model calls are priced per token by model size,
+with a power floor per compute class so a machine's owner never runs at a loss, converted at a
+live BTC price. Code jobs and reservations are priced per second by compute class. Agents earn
+what requesters pay, minus the network fee. The maths is in
+[docs/economy-math.md](docs/economy-math.md). Bitcoin settlement is being redesigned (PR #195).
+
+To use compute from the desktop app or point Claude Code, Cursor and other tools at it, see
+[docs/using-compute.md](docs/using-compute.md). AI agents can sign up and use compute through the
+MCP server ([docs/mcp.md](docs/mcp.md), [packages/mcp-server](packages/mcp-server/README.md)).
 
 ## Quick Start
 
@@ -125,7 +137,7 @@ Key environment variables (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the 
 | `AGENT_ID` | `worker-1` | Unique agent identifier |
 | `AGENT_MODE` | `swarm-only` | Agent mode (`swarm-only` or `ide-enabled`) |
 | `AGENT_OS` | auto-detected | Operating system (`macos`, `linux`, `windows`, `ios`) |
-| `SANDBOX_MODE` | `docker` | Sandbox mode (`docker`, `process`, `none`) |
+| `SANDBOX_MODE` | `docker` | Sandbox mode (`docker`, `none`, `vm`). Anything else is treated as `none` (node registers but pulls no swarm tasks). |
 | `DATABASE_URL` | | PostgreSQL connection string |
 | `BITCOIN_NETWORK` | `testnet` | Bitcoin network (`bitcoin`, `testnet`, `signet`) |
 
@@ -143,7 +155,7 @@ User-facing web application serving the signup/login flow, chat interface, code 
 - Code review queue with approve/reject decisions
 - Human escalation handling for tasks that exceed swarm capacity
 - Node enrollment and token issuance
-- Credit wallet with BTC/Lightning purchase intents
+- cSat wallet with BTC/Lightning purchase intents
 - Wallet seed backup acknowledgement flow
 - User-selectable themes (Midnight, Emerald, Light Pro)
 - Coordinator operations dashboard (node approval, model rollouts, diagnostics)
@@ -151,7 +163,7 @@ User-facing web application serving the signup/login flow, chat interface, code 
 
 ### Coordinator (port 4301)
 
-Central task queue and swarm orchestrator. Manages agent registration, task submission, decomposition via the inference service, subtask assignment, result collection, and the credit economy.
+Central task queue and swarm orchestrator. Manages agent registration, task submission, decomposition via the inference service, subtask assignment, result collection, and cSat accounting.
 
 **Key features:**
 - Agent registration with portal-based node approval
@@ -160,7 +172,7 @@ Central task queue and swarm orchestrator. Manages agent registration, task subm
 - Peer exchange, capability announcement, and peer scoring
 - BLE mesh for local device-to-device task routing
 - Agent-mesh direct work offers for lightweight peer collaboration
-- Credit economy: dynamic pricing, payment intents, Lightning settlement
+- cSat economy: per-token and per-second pricing, payment intents, Lightning settlement
 - Issuance system: daily token pool, load-curve allocation, quorum voting
 - Treasury policy management and Bitcoin anchoring
 - Tamper-evident ordering chain (hash-chain ledger)
@@ -180,12 +192,12 @@ Handles LLM-powered task decomposition and escalation. When a coordinator receiv
 
 ### Control Plane (port 4303)
 
-Admin API and dashboard for operators. Provides agent management, network mode control, rollout orchestration, credit management, and economy APIs.
+Admin API and dashboard for operators. Provides agent management, network mode control, rollout orchestration, cSat account management, and economy APIs.
 
 **Key features:**
 - Agent catalog with mode, model, and approval management
 - Canary/percentage/full rollout orchestration with promote/rollback
-- Credit accounts, faucet, and balance queries
+- cSat accounts, faucet, and balance queries
 - Economy APIs: pricing, issuance, wallets, payment intents, treasury
 - Network summary (capacity, jobs, pricing)
 - Coordinator discovery and mesh peer listing
@@ -199,7 +211,7 @@ Swarm agent process that registers with a coordinator, enters a poll loop, pulls
 **Key features:**
 - Coordinator discovery with failover and cache
 - Concurrent task execution (configurable via `MAX_CONCURRENT_TASKS`)
-- Sandbox enforcement: Docker, process-level (`sandbox-exec` on macOS, seccomp/namespaces on Linux), or none
+- Sandbox enforcement: Docker (required for swarm compute) or none (node registers but pulls no swarm tasks)
 - Offline resilience with exponential backoff and reconnect probes
 - BLE mesh participation for local peer discovery
 - Agent-mesh HTTP server for direct peer-to-peer work
@@ -260,7 +272,7 @@ This installs Node.js, clones the repo, builds, and installs a systemd service. 
 - **Mesh authentication** via shared `MESH_AUTH_TOKEN` on all coordinator routes
 - **Request signing** (Ed25519) on agent-to-coordinator communication with nonce and timestamp validation
 - **Task envelope encryption** (X25519 ECDH + AES-256-GCM) for subtask payloads
-- **Sandbox enforcement** -- Docker isolation (default for swarm workers), process-level sandboxing (`sandbox-exec` on macOS, seccomp/namespaces on Linux)
+- **Sandbox enforcement** -- Docker isolation (default and required for swarm workers); remote tasks are never executed on the host
 - **Blacklist propagation** with evidence hashing, reporter signature verification, and gossip broadcast
 - **Tamper-evident audit ledger** (hash-chain) with Bitcoin anchoring for integrity verification
 - **Rate limiting** per agent with configurable window
@@ -380,7 +392,11 @@ tests/            - test suites
 
 ## Docs
 
+- **Using compute (connections, Auto, reservations, bots):** [docs/using-compute.md](docs/using-compute.md)
 - **API reference:** [docs/API.md](docs/API.md)
+- **Economy maths:** [docs/economy-math.md](docs/economy-math.md)
+- **MCP server for AI agents:** [docs/mcp.md](docs/mcp.md) · [packages/mcp-server](packages/mcp-server/README.md)
+- **Packages:** [docs/packages.md](docs/packages.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Deployment:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Security:** [SECURITY.md](SECURITY.md) · **Code of conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
@@ -393,4 +409,4 @@ tests/            - test suites
 
 ## License
 
-ISC
+Business Source License 1.1 ([LICENSE](LICENSE)).

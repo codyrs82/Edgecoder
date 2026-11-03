@@ -76,3 +76,35 @@ describe("sendWalletSendMfaCodeEmail output (#129)", () => {
     ).rejects.toThrow("wallet_send_mfa_email_failed:422:bad");
   });
 });
+
+describe("password reset emails", () => {
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it("links to /portal/reset-password on PORTAL_PUBLIC_URL with the encoded token", async () => {
+    const mailer = createPortalMailer(cfg, { warn: () => {} });
+    await mailer.sendPasswordResetEmail("user@example.test", "tok_en-123", 30);
+    const body = JSON.parse(calls[0].opts.body);
+    expect(body.to).toBe("user@example.test");
+    expect(body.subject).toBe("Reset your EdgeCoder password");
+    expect(body.html).toContain('href="https://portal.example.test/portal/reset-password?token=tok_en-123"');
+    expect(body.html).toContain("expires in 30 minutes");
+  });
+
+  it("sends SSO-only accounts a notice with no reset link", async () => {
+    const mailer = createPortalMailer(cfg, { warn: () => {} });
+    await mailer.sendPasswordResetSsoNoticeEmail("sso@example.test");
+    const body = JSON.parse(calls[0].opts.body);
+    expect(body.html).not.toContain("reset-password");
+    expect(body.html).toContain("single sign-on");
+  });
+
+  it("skips quietly without Resend config", async () => {
+    const warn = vi.fn();
+    const mailer = createPortalMailer({ ...cfg, resendApiKey: "" }, { warn });
+    await mailer.sendPasswordResetEmail("user@example.test", "t", 30);
+    expect(calls).toHaveLength(0);
+    expect(warn).toHaveBeenCalled();
+  });
+});

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { testMeshToken, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
+  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
@@ -38,7 +38,6 @@
   let installedModels = $state<string[]>([]);
 
   // --- Reactive state ---
-  let meshToken = $state("");
   // #35: coordinator / portal endpoints (endpoints.ts), with Test connection and Reset.
   let coordinatorUrl = $state(currentCoordinatorUrl());
   let portalUrl = $state(currentPortalUrl());
@@ -61,10 +60,35 @@
   let maxConcurrentTasks = $state(1);
   let cpuCapPercent = $state(50);
   let idleOnly = $state(true);
-  let bleEnabled = $state(false);
+  let bleEnabled = $state(true);
+  let bleSaving = $state(false);
+  let bleNote = $state("");
+
+  // BLE peer discovery: the app keeps the choice and restarts its agent with it.
+  $effect(() => {
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<{ bleEnabled: boolean }>("get_agent_settings"))
+      .then((s) => (bleEnabled = s.bleEnabled))
+      .catch(() => (bleNote = "Only available in the desktop app."));
+  });
+
+  async function setBle(on: boolean) {
+    bleSaving = true;
+    bleNote = "";
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s = await invoke<{ bleEnabled: boolean }>("set_agent_ble", { enabled: on });
+      bleEnabled = s.bleEnabled;
+      bleNote = on ? "Saved. The agent is restarting with Bluetooth on (macOS may ask to allow Bluetooth)." : "Saved. The agent is restarting with Bluetooth off.";
+    } catch (e) {
+      bleEnabled = !on;
+      bleNote = `Couldn't save: ${(e as Error).message ?? e}`;
+    } finally {
+      bleSaving = false;
+    }
+  }
 
   // Token test state
-  let tokenTestResult: "idle" | "testing" | "valid" | "invalid" = $state("idle");
 
   // Identity state
   let identity: NodeIdentity | null = $state(null);
@@ -88,7 +112,6 @@
   // Load settings + identity on mount
   $effect(() => {
     const s = loadSettings();
-    meshToken = s.meshToken;
     maxConcurrentTasks = s.maxConcurrentTasks;
     cpuCapPercent = s.cpuCapPercent;
     idleOnly = s.idleOnly;
@@ -123,13 +146,30 @@
     });
   });
 
-  // Test mesh token
-  async function handleTestToken() {
-    if (!meshToken.trim()) return;
-    tokenTestResult = "testing";
-    const ok = await testMeshToken(meshToken);
-    tokenTestResult = ok ? "valid" : "invalid";
-  }
+  // Which coordinator this computer is connected through: the agent's steering pick (signed registry,
+  // lowest latency) when there is one, else the coordinator the account summary came from.
+  type MeshStatus = { url: string; machines: number; agents: number; region: string | null; latencyMs: number | null; steered: boolean; fallbackReason: string | null };
+  let meshStatus = $state<"loading" | MeshStatus | null>("loading");
+  $effect(() => {
+    computeOverview()
+      .then((ov) => {
+        const a = ov.account;
+        const s = ov.steering ?? null;
+        const url = s?.source === "registry" ? s.url : a?.coordinator?.url;
+        meshStatus = url && a
+          ? {
+              url,
+              machines: (a.machines ?? []).filter((m) => m.online).length,
+              agents: a.networkAgents ?? 0,
+              region: s?.source === "registry" ? s.region ?? null : null,
+              latencyMs: s?.source === "registry" ? s.latencyMs ?? null : null,
+              steered: s?.source === "registry",
+              fallbackReason: s?.source === "fallback" ? s.reason : null,
+            }
+          : null;
+      })
+      .catch(() => (meshStatus = null));
+  });
 
   // Copy public key to clipboard
   async function copyPublicKey() {
@@ -146,7 +186,6 @@
 
   // Save all settings
   function save() {
-    saveSetting("meshToken", meshToken);
     endpointError = "";
     for (const [kind, value] of [["coordinator", coordinatorUrl], ["portal", portalUrl]] as const) {
       if (value.trim() && !validateEndpointUrl(value)) {
@@ -193,22 +232,31 @@
   <div class="section">
     <h2>Mesh Configuration</h2>
 
-    <label>
-      <span class="label-text">Mesh Token</span>
-      <div class="input-row">
-        <input type="password" bind:value={meshToken} placeholder="Paste mesh token..." />
-        <button class="btn-sm" onclick={handleTestToken} disabled={tokenTestResult === "testing"}>
-          {tokenTestResult === "testing" ? "Testing..." : "Test Connection"}
-        </button>
-        {#if tokenTestResult === "valid"}
-          <span class="badge valid">Valid</span>
-        {/if}
-        {#if tokenTestResult === "invalid"}
-          <span class="badge invalid">Invalid</span>
-        {/if}
-      </div>
-    </label>
+    <div class="mesh-status">
+      <span class="label-text">Connected through</span>
+      {#if meshStatus === "loading"}
+        <span class="hint">Checking…</span>
+      {:else if meshStatus}
+        <div class="input-row">
+          <code>{meshStatus.url}</code>
+          {#if meshStatus.region}<span class="badge" title="Coordinator region">{meshStatus.region}</span>{/if}
+          {#if meshStatus.latencyMs !== null}<span class="badge" title="Median /identity round trip">{meshStatus.latencyMs} ms</span>{/if}
+          <span class="badge valid">Joined</span>
+        </div>
+        <span class="hint">
+          {#if meshStatus.steered}
+            Chosen as the fastest healthy coordinator in EdgeCoder's signed registry; its identity key matched the registry.
+          {:else if meshStatus.fallbackReason}
+            Using the default coordinator (the coordinator registry was not usable: {meshStatus.fallbackReason.split(":")[0].replaceAll("_", " ")}).
+          {/if}
+          This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.
+        </span>
+      {:else}
+        <span class="hint">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
+      {/if}
+    </div>
 
+    <span class="label-text override-title">Overrides (advanced)</span>
     {#each [["coordinator", "Coordinator URL"], ["portal", "Portal URL"]] as const as [kind, label]}
       <label>
         <span class="label-text">{label}</span>
@@ -258,8 +306,9 @@
     <h2>Local Mesh</h2>
 
     <label class="toggle">
-      <input type="checkbox" bind:checked={bleEnabled} />
+      <input type="checkbox" checked={bleEnabled} disabled={bleSaving} onchange={(e) => setBle((e.currentTarget as HTMLInputElement).checked)} />
       <span>Enable BLE peer discovery (macOS)</span>
+      {#if bleNote}<span class="hint">{bleNote}</span>{/if}
     </label>
   </div>
 
@@ -402,7 +451,6 @@
   }
 
   input[type="text"],
-  input[type="password"],
   input[type="number"] {
     width: 100%;
     padding: 0.45rem 0.6rem;
@@ -424,7 +472,7 @@
     gap: 0.5rem;
   }
 
-  .input-row input[type="password"] {
+  .input-row input[type="text"] {
     flex: 1;
   }
 
@@ -654,5 +702,20 @@
   .btn-check-update:hover {
     background: var(--bg-surface, #3a3a37);
     color: var(--text-primary, #f7f5f0);
+  }
+  .mesh-status {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .hint {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .override-title {
+    display: block;
+    margin: 6px 0 4px;
   }
 </style>

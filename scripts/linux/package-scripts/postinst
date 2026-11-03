@@ -18,6 +18,9 @@ if [[ ! -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]]; then
 fi
 
 ln -sf /usr/lib/edgecoder/bin/edgecoder-configure.sh /usr/local/bin/edgecoder
+# The shared installer (same options on macOS, Linux and Windows): detects GPUs, one agent per GPU.
+printf '#!/bin/sh\nexec node /usr/lib/edgecoder/app/dist/install/cli.js "$@"\n' > /usr/local/bin/edgecoder-install
+chmod 755 /usr/local/bin/edgecoder-install
 
 if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running --quiet 2>/dev/null || true; then
   systemctl daemon-reload
@@ -30,15 +33,19 @@ if [[ -x "$OLLAMA_INSTALLER" ]]; then
   "$OLLAMA_INSTALLER" || true
 fi
 
+# Plan and create per-GPU services non-interactively; tokens are added later with
+# `edgecoder-install apply --token <agent-id>=<token>`.
+node /usr/lib/edgecoder/app/dist/install/cli.js apply --from-package --app-dir /usr/lib/edgecoder/app || true
+
 echo ""
 echo "EdgeCoder installed successfully."
 echo "  Config: $ENV_FILE"
 echo "  Logs:   journalctl -u $SERVICE -f"
 echo "  Status: systemctl status $SERVICE"
 echo ""
-echo "Set EDGE_RUNTIME_MODE=worker (agent) or coordinator in $ENV_FILE,"
-echo "then set your AGENT_REGISTRATION_TOKEN or COORDINATOR_REGISTRATION_TOKEN"
-echo "and run: sudo systemctl restart $SERVICE"
+echo "Agents: sudo edgecoder-install plan   (what was detected and created)"
+echo "        sudo edgecoder-install apply --mesh-token <token> --token <agent-id>=<registration token>"
+echo "Coordinator role: set EDGE_RUNTIME_MODE=coordinator in $ENV_FILE and restart $SERVICE"
 echo ""
 
 exit 0

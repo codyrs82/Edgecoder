@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>harness</title></head>
+<body style="margin:0;background:#0d1117">
+<div id="ed" style="width:1000px;height:400px"></div>
+<script type="module">
+  await import("/src/lib/monaco-setup.ts");
+  const monaco = await import("monaco-editor");
+  const { registerAutocomplete } = await import("/src/lib/autocomplete.ts");
+  const editor = monaco.editor.create(document.getElementById("ed"), { value: "", language: "python", inlineSuggest: { enabled: true } });
+  window.calls = [];
+  window.notices = [];
+  window.mode = "ok";
+  registerAutocomplete(monaco, editor, {
+    request: async (prefix, suffix) => {
+      window.calls.push({ prefix, suffix });
+      if (window.mode === "missing") return { completion: "", model: "m", reason: "model_missing", message: "install m" };
+      return { completion: "n <= 1:\n        return n", model: "m" };
+    },
+    enabled: () => true,
+    onUnavailable: (m) => window.notices.push(m),
+  });
+  window.editor = editor;
+  window.ready = true;
+</script>
+</body></html>

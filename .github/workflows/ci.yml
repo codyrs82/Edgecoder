@@ -18,14 +18,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
       # BLE native modules (@abandonware/noble, bleno) are optionalDependencies:
       # if they can't compile on a runner, npm ci skips them instead of failing.
       - run: npm ci
+      # The root test run includes desktop/tests, which import the desktop app's packages.
+      - run: npm ci --prefix desktop --ignore-scripts
       - run: npm run check:scripts
       - run: npm run check:fly-configs
       - run: npm run build
@@ -33,7 +35,7 @@ jobs:
       - run: npm run test:integration
       - name: Upload test report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: junit-${{ matrix.os }}
           path: junit.xml
@@ -51,8 +53,8 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -76,14 +78,15 @@ jobs:
         run: |
           curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
           apt-get install -y nodejs
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: npm ci
+      - run: npm ci --prefix desktop --ignore-scripts
       - run: npm run build
       - run: npm test -- --reporter=default --reporter=junit --outputFile.junit=junit.xml
       - run: npm run test:integration
       - name: Upload test report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: junit-debian
           path: junit.xml
@@ -101,8 +104,8 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U ci -d credits" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -118,8 +121,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable # pinned by SHA, so the toolchain must be named explicitly
       - name: cargo test token module
         run: |
           mkdir -p /tmp/token-test/src
@@ -132,6 +137,12 @@ jobs:
           cp desktop/src-tauri/src/agent_guard.rs /tmp/agent-guard-test/src/lib.rs
           printf '[package]\nname = "agent-guard-test"\nversion = "0.0.0"\nedition = "2021"\n' > /tmp/agent-guard-test/Cargo.toml
           cargo test --manifest-path /tmp/agent-guard-test/Cargo.toml
+      - name: cargo test local_compute module (managed Ollama + Colima setup)
+        run: |
+          mkdir -p /tmp/local-compute-test/src
+          cp desktop/src-tauri/src/local_compute.rs /tmp/local-compute-test/src/lib.rs
+          printf '[package]\nname = "local-compute-test"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", features = ["derive"] }\nserde_json = "1"\nsha2 = "0.10"\nhex = "0.4"\n' > /tmp/local-compute-test/Cargo.toml
+          cargo test --manifest-path /tmp/local-compute-test/Cargo.toml
 
   # #11: build the desktop web bundle and make sure the production CSP holds:
   # no eval / new Function in the main-thread JS (Monaco workers are bundled separately).
@@ -142,8 +153,8 @@ jobs:
       run:
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -174,8 +185,8 @@ jobs:
       run:
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -185,7 +196,7 @@ jobs:
       - run: npm run build
       - run: npm run test:a11y
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: a11y-report
           path: |
@@ -201,7 +212,7 @@ jobs:
       run:
         working-directory: ios/EdgeCoderIOS
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: xcodebuild -version
       - name: Build for iOS Simulator (unsigned)
         run: |
@@ -237,7 +248,7 @@ jobs:
           node Scripts/request-signing-vectors/verify-with-node.mjs \
             ../../tests/security/fixtures/request-signing-vectors.json "$RUNNER_TEMP/swift-signed-headers.json"
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: xcodebuild-log
           path: ${{ runner.temp }}/xcodebuild.log
@@ -257,7 +268,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U smoke -d portal" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build server image
         run: docker build -f deploy/docker/Dockerfile.server -t edgecoder-server:ci .
       - name: Build agent image

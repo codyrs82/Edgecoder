@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The bundled agent finds and serves nearby EdgeCoder machines over Bluetooth (BLE mesh).
+       Without this, macOS stops any process in the app that touches Bluetooth. -->
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>EdgeCoder uses Bluetooth to find your other EdgeCoder machines nearby and share compute with them when there is no internet.</string>
+</dict>
+</plist>

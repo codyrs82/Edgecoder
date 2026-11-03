@@ -2,9 +2,15 @@
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
-  import ModelPicker from "./ModelPicker.svelte";
-  import { streamChat, streamPortalChat, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
-  import type { StreamProgress, ModelPullProgress } from "../lib/api";
+  import ComputePicker from "./ComputePicker.svelte";
+  import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
+  import { get } from "svelte/store";
+  import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
+  import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
+  import { applyAgentEvent, markApproval } from "../lib/agent-events";
+  import { expandMentions, mentionSuggestions } from "../lib/mentions";
+  import { autoApplyEdits, setAutoApplyEdits } from "../lib/project-mode";
+  import { fsFind } from "../lib/api";
   import {
     createConversation,
     addMessage,
@@ -12,13 +18,37 @@
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
   } from "../lib/chat-store";
-  import type { Conversation } from "../lib/types";
+  import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
-  interface Props {
-    onApplyCode?: (code: string, language: string) => void;
-    getFileContext?: () => { path: string; content: string; language: string } | null;
+  interface FileContext {
+    path: string;
+    content: string;
+    language: string;
+    selection?: { text: string; startLine: number; endLine: number };
   }
-  let { onApplyCode, getFileContext }: Props = $props();
+  interface Props {
+    /** The open project: the panel runs the agent (with file and shell tools) against it. */
+    projectRoot?: string | null;
+    onApplyCode?: (code: string, language: string) => void;
+    getFileContext?: () => FileContext | null;
+    /** The agent wrote files (or ran a command that may have): reload open buffers and the tree. */
+    onFilesChanged?: () => void;
+    onOpenPath?: (path: string) => void;
+    onPreview?: (path: string) => void;
+  }
+  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview }: Props = $props();
+
+  let streamingToolEvents: ToolEvent[] = $state([]);
+  /** Where a message goes: the local agent, or a background job on the network. */
+  /** Apply the agent's file edits without asking, in this project (commands still ask). */
+  let autoApply = $state(false);
+  $effect(() => {
+    autoApply = autoApplyEdits(projectRoot);
+  });
+  let streamingTurnId: string | undefined = $state(undefined);
+  let streamingUsage: ReplyUsage | undefined = $state(undefined);
+  let streamingChanged: string[] = $state([]);
+  let githubToken: string | null = null;
 
   let conversation: Conversation = $state(createConversation("editor"));
   let streamingContent = $state("");
@@ -60,6 +90,8 @@
       }
     }
     recentConversations = await listConversationsBySource("editor");
+
+    getGitHubToken().then((t) => { githubToken = t; }).catch(() => {});
 
     // Poll for model download progress
     pullPollTimer = setInterval(async () => {
@@ -130,6 +162,38 @@
             streamProgress = progress;
           },
         );
+      } else if (projectRoot) {
+        // Agent mode: tools for reading, editing and searching the project and running commands.
+        const ctx = getFileContext?.();
+        const attached = await expandMentions(text);
+        const apiMessages = conversation.messages.map((m) => ({ role: m.role, content: m.content }));
+        const preface = [ctx ? editorContextNote(ctx) : "", attached].filter(Boolean).join("\n\n");
+        if (preface) apiMessages[apiMessages.length - 1] = { role: "user", content: `${preface}\n\n${text}` };
+        streamingToolEvents = [];
+        streamingTurnId = undefined;
+        streamingUsage = undefined;
+        streamingChanged = [];
+        await streamIdeChat(
+          apiMessages,
+          projectRoot,
+          (event: IdeStreamEvent) => {
+            const { turn, filesChanged } = applyAgentEvent(
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
+              event,
+            );
+            if (turn.text !== streamingContent) streamingContent = turn.text;
+            if (turn.toolEvents !== streamingToolEvents) streamingToolEvents = turn.toolEvents;
+            streamingTurnId = turn.turnId;
+            streamingUsage = turn.usage;
+            if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
+            if (filesChanged) onFilesChanged?.();
+            if (event.type !== "status" && event.type !== "done") scrollToBottom();
+          },
+          abortController.signal,
+          get(computeChoice),
+          githubToken,
+          autoApply ? "edits" : "none",
+        );
       } else {
         // Stream through local IDE provider (OpenAI-compatible format)
         const fileContext = getFileContext?.();
@@ -152,25 +216,61 @@
           (progress) => {
             streamProgress = progress;
           },
-          conversation.selectedModel,
+          get(computeChoice),
         );
       }
-      addMessage(conversation, "assistant", streamingContent);
-      conversation = conversation;
+      finishTurn(streamingContent);
       await saveConversation(conversation);
       localStorage.setItem("edgecoder-last-editor-id", conversation.id);
       await refreshConversationList();
     } catch (err) {
-      if ((err as Error).name !== "AbortError") {
+      if ((err as Error).name === "AbortError") {
+        // Stopped: keep what arrived so far.
+        if (streamingContent || streamingToolEvents.length > 0) {
+          finishTurn(`${streamingContent}\n\n_(stopped)_`);
+          await saveConversation(conversation);
+        }
+      } else {
         addMessage(conversation, "assistant", `Error: ${(err as Error).message}`);
         conversation = conversation;
       }
     } finally {
       streamingContent = "";
+      streamingToolEvents = [];
       isStreaming = false;
       streamProgress = undefined;
       abortController = null;
     }
+  }
+
+  function finishTurn(content: string) {
+    addMessage(conversation, "assistant", content);
+    const last = conversation.messages[conversation.messages.length - 1];
+    if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
+    const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
+    if (last && usage) last.usage = usage;
+    if (last && streamingTurnId && streamingChanged.length > 0) {
+      last.turnId = streamingTurnId;
+      last.changedFiles = [...streamingChanged];
+    }
+    conversation = conversation;
+  }
+
+  /** What the user is looking at, sent with their message: the open file and any selection. */
+  function editorContextNote(ctx: FileContext): string {
+    if (ctx.selection) {
+      return `[Editor: ${ctx.path}, lines ${ctx.selection.startLine}-${ctx.selection.endLine} selected]\n\`\`\`${ctx.language}\n${ctx.selection.text}\n\`\`\``;
+    }
+    return `[Editor: the user has ${ctx.path} open. Read it with read_file if you need its contents.]`;
+  }
+
+  export function stop() {
+    abortController?.abort();
+  }
+
+  function handleToolApproval(id: string, approved: boolean) {
+    void ideSendToolApproval(id, approved);
+    streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
   export async function newChat() {
@@ -226,10 +326,7 @@
         <polyline points="6 9 12 15 18 9"/>
       </svg>
     </button>
-    <ModelPicker
-      selectedModel={conversation.selectedModel}
-      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
-    />
+    <ComputePicker selected={$computeChoice} up={false} onSelect={(id) => computeChoice.set(id)} />
     <button class="new-chat-btn" onclick={newChat} title="New coding chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 5v14M5 12h14"/>
@@ -271,7 +368,12 @@
   <div class="messages-scroll" bind:this={scrollContainer}>
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
-        <p>Ask about your code, request changes, or get explanations.</p>
+        {#if projectRoot}
+          <p>The agent can read, search and edit files in this project and run commands. Edits and commands ask for your approval first.</p>
+          <p class="hint">It sees the open file and your selection.</p>
+        {:else}
+          <p>Ask about your code, request changes, or get explanations. Open a folder to let the agent edit files.</p>
+        {/if}
       </div>
     {:else}
       <div class="messages">
@@ -279,16 +381,26 @@
           <ChatMessage
             role={msg.role as "user" | "assistant"}
             content={msg.content}
+            toolEvents={msg.toolEvents}
+            networkTaskId={msg.networkTaskId}
+            turnId={msg.turnId}
+            changedFiles={msg.changedFiles}
+            usage={msg.usage}
+            onFilesReverted={onFilesChanged}
+            {onOpenPath}
+            {onPreview}
             onOpenInEditor={onApplyCode}
           />
         {/each}
-        {#if isStreaming && streamingContent}
+        {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
           <ChatMessage
             role="assistant"
             content={streamingContent}
             streaming={true}
             {streamProgress}
+            toolEvents={streamingToolEvents}
             onOpenInEditor={onApplyCode}
+            onToolApproval={handleToolApproval}
           />
         {/if}
       </div>
@@ -296,7 +408,22 @@
   </div>
 
   <div class="panel-input">
-    <ChatInput onSend={handleSend} placeholder="Ask about your code..." disabled={isStreaming} />
+    {#if projectRoot && !usePortalChat}
+      <!-- Where the model runs (this computer, your machines, the network) is the compute picker above. -->
+      <div class="run-on">
+        <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
+          <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
+          Auto-apply edits
+        </label>
+      </div>
+    {/if}
+    <ChatInput
+      onSend={handleSend}
+      placeholder={!projectRoot ? "Ask about your code…" : "Ask the agent… (@ to mention a file)"}
+      streaming={isStreaming}
+      onStop={stop}
+      mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}
+    />
   </div>
 </div>
 
@@ -449,6 +576,21 @@
     padding: 12px 0;
   }
 
+  .run-on {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .auto-apply {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
   .panel-input {
     border-top: 0.5px solid var(--border);
     padding: 8px;

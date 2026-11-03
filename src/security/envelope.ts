@@ -18,6 +18,12 @@ export interface X25519KeyPair {
 }
 
 export interface EnvelopeMetadata {
+  /** The subtask's parent task (the requester polls results by task id). */
+  taskId?: string;
+  /** Subtask kind ("micro_loop", "single_step", "inference"). */
+  kind?: string;
+  /** Model the requester asked for (inference runs exactly this model). */
+  requestedModel?: string;
   resourceClass?: string;
   priority?: number;
   language?: string;

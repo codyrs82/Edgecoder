@@ -4,18 +4,29 @@
 import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
-import { totalmem } from "node:os";
+import { cpus, hostname, totalmem } from "node:os";
+import { parallelInferenceFor } from "./parallelism.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
-import { isDockerAvailable } from "../executor/docker-sandbox.js";
-import { enforceSandboxPolicy, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { execFileSync } from "node:child_process";
+import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
+import { runInferenceSubtask } from "./inference-runner.js";
+import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
+import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
+import { signMeshWsBind } from "../mesh/ws-auth.js";
+import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
+import { CoordinatorTrustGate, PinnedKeyStore, describeTrustFailure } from "../trust/pinned-keys.js";
+import { selectCoordinatorFromEnv } from "../discovery/index.js";
+import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
+import { registryPublicKeysFromEnv } from "../discovery/registry.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { localStore } from "../db/local-store.js";
-import { signRequest } from "../security/request-signing.js";
+import { hashRequestBody, signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
 import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
@@ -24,10 +35,27 @@ import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
+import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
+import { createLocalForwarder } from "./local-forwarder.js";
+import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 
 const platformInfo: PlatformInfo = detectPlatform();
 const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
 const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
+// Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
+const coordinatorTrustStore = PinnedKeyStore.fromEnv(process.env, { pinFile: `${PLATFORM_CONFIG_DIR}/trusted-coordinators` });
+const coordinatorTrust = new CoordinatorTrustGate({ store: coordinatorTrustStore });
+{
+  // Strict mode with nothing listed would refuse every coordinator: say so once and stop.
+  const problem = coordinatorTrustStore.configProblem();
+  if (problem) {
+    console.error(`[worker] ${problem}`);
+    process.exit(1);
+  }
+}
+
+// Forked by the all-in-one agent: exit with it rather than linger as an orphan.
+if (process.send) process.on("disconnect", () => process.exit(0));
 
 const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = process.env.SNAPSHOT_ENFORCEMENT ?? "warn";
@@ -35,7 +63,8 @@ const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
-const AGENT_ID = process.env.AGENT_ID ?? "worker-1";
+// #96: default to a per-host id so N replicas without AGENT_ID (docker compose --scale) don't all register as "worker-1".
+const AGENT_ID = process.env.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
 const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
 const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
 const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
@@ -44,6 +73,8 @@ const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 const OLLAMA_HOST = process.env.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
+const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
+const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = Number(process.env.COORDINATOR_HTTP_TIMEOUT_MS ?? "15000");
 const COORDINATOR_POST_RETRIES = Number(process.env.COORDINATOR_POST_RETRIES ?? "2");
@@ -51,9 +82,63 @@ const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
 const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
 const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
-const SANDBOX_MODE: SandboxMode = (process.env.SANDBOX_MODE ?? (
-  (process.env.AGENT_MODE ?? "swarm-only") === "swarm-only" ? "docker" : "none"
-)) as SandboxMode;
+const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
+const hardwareProbe: Probe = (cmd, args) => {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+};
+/**
+ * Hardware profile reported at registration; the coordinator classifies it into a compute class
+ * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
+ * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
+ * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
+ * override detection (containers and unusual hardware); such a profile is marked `overridden` and
+ * the coordinator re-proves it with a benchmark challenge every session.
+ */
+function buildHardwareProfile(): Record<string, unknown> {
+  const hw = detectHardware({ probe: hardwareProbe });
+  const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
+  const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
+  if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
+    return {
+      ...hardwareProfileFor(hw, undefined),
+      gpu: {
+        vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+        model: gpuModel || undefined,
+        vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
+        datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+      },
+      overridden: true
+    };
+  }
+  return hardwareProfileFor(hw, selectGpu(hw, process.env));
+}
+const HARDWARE_PROFILE = buildHardwareProfile();
+/**
+ * Throughput benchmark (src/swarm/benchmark.ts): a < ~30 s self-benchmark at startup and every
+ * AGENT_BENCHMARK_INTERVAL_MS (default 6 h), reported with the profile, plus answers to the
+ * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
+ * (the agent then earns at its class base tier).
+ */
+const BENCHMARK_ENABLED = process.env.AGENT_BENCHMARK !== "0";
+const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, Number(process.env.AGENT_BENCHMARK_INTERVAL_MS ?? 6 * 60 * 60_000) || 6 * 60 * 60_000);
+let lastBenchmark: AgentBenchmarkReport | undefined;
+let benchmarkDueAtMs = 0;
+let benchmarkUnreported = false;
+/** Refuse challenges no honest tier needs (a trusted coordinator never sends these; this bounds a bad config). */
+function challengeAcceptable(c: BenchmarkChallenge): boolean {
+  if (!c || typeof c.challengeId !== "string" || !(c.deadlineMs > 0 && c.deadlineMs <= 15 * 60_000)) return false;
+  if (c.kind === "cpu") return typeof c.seed === "string" && Number.isInteger(c.workUnits) && c.workUnits > 0 && c.workUnits <= 2_000_000 && c.target > 0;
+  return c.kind === "gpu" && typeof c.model === "string" && typeof c.nonce === "string" && c.numPredict > 0 && c.numPredict <= 4096 && c.lines > 0 && c.lines <= 200;
+}
+/** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
+const ASK_MSAT_PER_CREDIT = (() => {
+  const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+})();
 const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
@@ -94,11 +179,72 @@ async function discoverCoordinatorFromPortal(): Promise<string | null> {
 
 let activeCoordinatorUrl = COORDINATOR_BOOTSTRAP_URL;
 
+/*
+ * One platform URL, steered (src/discovery/steering.ts): fetch the signed registry from the
+ * configured URL (or the portal, or the cache), verify it against the pinned registry key, and
+ * work for the lowest-latency healthy coordinator whose identity matches the registry. Off for a
+ * loopback coordinator, with EDGECODER_STEERING=off, or while no registry key is pinned.
+ */
+const REGISTRY_PUBLIC_KEYS = registryPublicKeysFromEnv(process.env);
+const STEERING_ENABLED =
+  !["off", "0", "false"].includes((process.env.EDGECODER_STEERING ?? "").trim().toLowerCase()) &&
+  !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL) &&
+  REGISTRY_PUBLIC_KEYS.length > 0;
+const STEERING_INTERVAL_MS = Math.max(60_000, Number(process.env.EDGECODER_STEERING_INTERVAL_MS ?? "600000") || 600_000);
+const coordinatorSteering = STEERING_ENABLED
+  ? createCoordinatorSteering({
+      registryUrls: registryUrlsFor(COORDINATOR_BOOTSTRAP_URL, PORTAL_URL || undefined),
+      publicKeys: REGISTRY_PUBLIC_KEYS,
+      fallbackUrl: COORDINATOR_BOOTSTRAP_URL,
+      cache: {
+        read: () => localStore.getConfig("coordinator_registry") ?? null,
+        write: (text) => localStore.setConfig("coordinator_registry", text)
+      }
+    })
+  : null;
+/** The last steering decision (shown in the app's Settings via the local forwarder). */
+let steeringStatus: SteeringResult | null = null;
+let lastSteeredAtMs = 0;
+/** True once the signed registry chose the coordinator (unsigned discovery must not override it). */
+const steeredByRegistry = (): boolean => steeringStatus?.source === "registry";
+
+/** One steering round; returns the registry pick, or null when steering is off or fell back. */
+async function steerCoordinator(): Promise<SteeringResult | null> {
+  if (!coordinatorSteering) return null;
+  lastSteeredAtMs = Date.now();
+  const result = await coordinatorSteering.steer();
+  steeringStatus = result;
+  // Coordinators the signed registry lists are trusted with exactly the listed key.
+  coordinatorTrustStore.setRegistryEntries(coordinatorSteering.trustedEntries());
+  if (result.source === "registry") {
+    if (!result.kept || result.url !== activeCoordinatorUrl) {
+      console.log(`[worker] steering: ${result.url} (${result.peerId}, region=${result.region}, ${result.latencyMs}ms${result.kept ? ", kept" : ""}; registry from ${result.registry?.from})`);
+    }
+    return result;
+  }
+  console.log(`[worker] steering fell back to ${result.url}: ${result.reason}`);
+  return null;
+}
+
 // Attempt portal-based coordinator discovery at startup
 (async () => {
+  if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
+    // Strict trust: never pick an announced coordinator whose key is not listed (key-less
+    // candidates are still checked against /identity by the trust gate before registering).
+    const acceptCandidate =
+      coordinatorTrustStore.mode === "strict" ? (c: { peerId?: string; publicKeyPem?: string }) => !c.publicKeyPem || coordinatorTrustStore.wouldTrust(c.peerId, c.publicKeyPem) : undefined;
+    const picked = await selectCoordinatorFromEnv({ currentUrl: COORDINATOR_BOOTSTRAP_URL, meshToken: meshAuthToken || undefined, acceptCandidate });
+    // A signed-registry pick (steering) wins over unsigned discovery.
+    if (picked && !steeredByRegistry()) {
+      console.log(`[worker] Discovery selected coordinator ${picked.url} (source=${picked.source} score=${picked.score} latency=${picked.latencyMs}ms)`);
+      activeCoordinatorUrl = picked.url;
+    }
+  }
   if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
-    if (discovered) {
+    if (steeredByRegistry()) {
+      // The signed registry already chose; portal discovery does not override it.
+    } else if (discovered) {
       console.log(`[worker] Discovered coordinator from portal: ${discovered}`);
       activeCoordinatorUrl = discovered;
     } else {
@@ -113,9 +259,54 @@ let coordinatorOnline = true;
 const OFFLINE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 1500;
 const BACKOFF_MAX_MS = 30_000;
-const RECONNECT_PROBE_INTERVAL_MS = 15_000;
+// Each failed probe doubles the wait (15 s .. 5 min). A probe registers, and registering every
+// 15 s while offline tripped the coordinator's registration-storm rule (BHV008), whose ban then
+// kept the agent offline for good.
+const RECONNECT_PROBE_MIN_MS = 15_000;
+const RECONNECT_PROBE_MAX_MS = 5 * 60_000;
+let reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
 const COORDINATOR_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let lastReconnectProbeMs = 0;
+
+// ── Registration state (see registration-policy.ts for why this is not every tick) ──
+const REGISTER_REFRESH_MS = registerRefreshMsFromEnv();
+let registeredWithUrl: string | null = null;
+let lastRegisteredAtMs = 0;
+/** SANDBOX_MODE=docker but the daemon isn't reachable right now. */
+let sandboxDown = false;
+// The sandbox images are built locally on first use (see ensureSandboxImages); until then the
+// sandbox counts as down. The build runs in the background so heartbeats keep flowing.
+let sandboxImagesReady = SANDBOX_MODE !== "docker";
+let sandboxImagesBuilding = false;
+
+// The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
+const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT ?? "");
+if (LOCAL_FORWARD_PORT > 0) {
+  let forwardToken: string | undefined;
+  createLocalForwarder({
+    token: () => (forwardToken ??= resolveIdeToken()),
+    coordinatorUrl: () => registeredWithUrl,
+    steering: () => steeringStatus,
+    meshHeaders,
+    signedHeaders,
+    agentId: AGENT_ID
+  })
+    .on("error", (err) => console.warn(`[agent:${AGENT_ID}] local forwarder unavailable: ${String(err)}`))
+    .listen(LOCAL_FORWARD_PORT, "127.0.0.1", () =>
+      console.log(`[agent:${AGENT_ID}] local forwarder on 127.0.0.1:${LOCAL_FORWARD_PORT}`)
+    );
+}
+
+/** Models in this machine's Ollama (embedding-only models left out); [] when it can't be reached. */
+async function listInstalledModels(): Promise<string[]> {
+  try {
+    const res = await request(`${OLLAMA_HOST ?? "http://127.0.0.1:11434"}/api/tags`, { method: "GET", headersTimeout: 3000, bodyTimeout: 3000 });
+    const body = (await res.body.json()) as { models?: Array<{ name: string }> };
+    return (body.models ?? []).map((m) => m.name).filter((n) => !/embed/i.test(n)).slice(0, 200);
+  } catch {
+    return [];
+  }
+}
 
 function backoffMs(): number {
   return Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveFailures, 10), BACKOFF_MAX_MS);
@@ -199,9 +390,13 @@ function meshHeaders(): Record<string, string> {
   return { "x-mesh-token": meshAuthToken };
 }
 
+/**
+ * Request-signing headers. The coordinator checks `x-body-sha256` against the raw bytes it
+ * receives, so pass the exact serialized body that goes on the wire (post() does this).
+ */
 function signedHeaders(path: string, body: unknown): Record<string, string> {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  const bodyHash = createHash("sha256").update(raw).digest("hex");
+  const bodyHash = hashRequestBody(raw);
   return signRequest({
     method: "POST",
     path,
@@ -233,6 +428,15 @@ function normalizeUrl(value: string | undefined): string | null {
   }
 }
 
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
 function readCachedCoordinatorUrl(): string | null {
   const cached = localStore.getConfigWithTTL("coordinator_url", COORDINATOR_CACHE_TTL_MS);
   return cached ? normalizeUrl(cached) : null;
@@ -257,11 +461,17 @@ async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
   }
 }
 
-async function resolveCoordinatorUrl(): Promise<{ url: string; source: "registry" | "cache" | "bootstrap" }> {
+async function resolveCoordinatorUrl(): Promise<{ url: string; source: "steering" | "registry" | "cache" | "bootstrap" }> {
+  const steered = await steerCoordinator();
+  if (steered) return { url: steered.url, source: "steering" };
   const discovered = await discoverCoordinatorUrlFromRegistry();
   if (discovered) return { url: discovered, source: "registry" };
   const cached = readCachedCoordinatorUrl();
-  if (cached) return { url: cached, source: "cache" };
+  // A loopback URL cached by a local-only run must not override a network bootstrap URL:
+  // the local coordinator's key changes per run and would fail the pin forever.
+  if (cached && !(isLoopbackUrl(cached) && !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL))) {
+    return { url: cached, source: "cache" };
+  }
   return { url: COORDINATOR_BOOTSTRAP_URL, source: "bootstrap" };
 }
 
@@ -280,7 +490,7 @@ const LEASE_HEARTBEAT_MS = Math.max(1_000, Number(process.env.LEASE_HEARTBEAT_MS
 function startLeaseHeartbeat(): () => void {
   const timer = setInterval(() => {
     const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE, leaseOnly: true };
-    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", body) }).catch(
+    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, signed: true }).catch(
       (e) => console.warn(`[agent:${AGENT_ID}] lease heartbeat failed: ${e}`)
     );
   }, LEASE_HEARTBEAT_MS);
@@ -291,19 +501,24 @@ function startLeaseHeartbeat(): () => void {
 async function post(
   path: string,
   body: unknown,
-  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string> }
+  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string>; signed?: boolean }
 ): Promise<any> {
   const retries = Math.max(0, options?.retries ?? COORDINATOR_POST_RETRIES);
   const timeoutMs = Math.max(1000, options?.timeoutMs ?? COORDINATOR_HTTP_TIMEOUT_MS);
+  // Serialize once: the signature's body hash covers exactly these bytes.
+  const payload = JSON.stringify(body);
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
+      // Signed requests get a fresh nonce per attempt; a retry of a request the coordinator
+      // already saw would otherwise be refused as a replay.
+      const signature = options?.signed ? signedHeaders(path, payload) : {};
       const res = await request(`${activeCoordinatorUrl}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}) },
+        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
         headersTimeout: timeoutMs,
         bodyTimeout: timeoutMs,
-        body: JSON.stringify(body)
+        body: payload
       });
       const parsed = (await parseJsonBodySafe(res)) as unknown;
       const rawText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
@@ -351,7 +566,7 @@ async function flushPendingResults(): Promise<void> {
   for (const row of pending) {
     try {
       const resultPayload = JSON.parse(row.payload);
-      await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
+      await post("/result", resultPayload, { signed: true });
       localStore.markResultSynced(row.subtaskId);
       console.log(`[agent:${AGENT_ID}] flushed result: ${row.subtaskId}`);
     } catch {
@@ -381,7 +596,7 @@ async function flushOfflineLedger(): Promise<void> {
       providerSignature: row.providerSig,
     }));
     const bleSyncBody = { transactions };
-    await post("/credits/ble-sync", bleSyncBody, { extraHeaders: signedHeaders("/credits/ble-sync", bleSyncBody) });
+    await post("/credits/ble-sync", bleSyncBody, { signed: true });
     localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
     console.log(`[agent:${AGENT_ID}] BLE credits synced`);
   } catch (e) {
@@ -410,8 +625,10 @@ function connectMeshWebSocket(
     }
     // Build URL on each connect so it picks up the latest meshAuthToken
     // (token may be provisioned from coordinator after initial registration)
+    // Token in a header (not the URL), and a signed bind so the coordinator ties this connection to
+    // AGENT_ID's registered key (src/mesh/ws-auth.ts). The query token stays for older coordinators.
     const fullUrl = `${wsUrl}/mesh/ws?token=${encodeURIComponent(meshAuthToken)}&peerId=${encodeURIComponent(AGENT_ID)}`;
-    const ws = new WebSocket(fullUrl);
+    const ws = new WebSocket(fullUrl, { headers: { "x-mesh-token": meshAuthToken, ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
 
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
@@ -576,7 +793,9 @@ async function loop(): Promise<void> {
   // Initialize BLE mesh transport for local peer discovery
   let bleMesh: BLEMeshManager | null = null;
   let bleTransport: NobleBLETransport | null = null;
-  if (OS === "macos") {
+  // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
+  if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
+  if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
@@ -646,7 +865,10 @@ async function loop(): Promise<void> {
         }
       });
 
-      console.log(`[agent:${AGENT_ID}] BLE mesh transport initialized`);
+      // Say what actually works: the transport "initializes" even when its native parts are missing.
+      const caps = bleTransport?.capabilities();
+      if (caps && !caps.scanning && !caps.advertising) console.warn(`[agent:${AGENT_ID}] BLE mesh unavailable: Bluetooth native modules are missing from this install`);
+      else console.log(`[agent:${AGENT_ID}] BLE mesh transport initialized${caps ? ` (scanning ${caps.scanning ? "on" : "off"}, advertising ${caps.advertising ? "on" : "off"})` : ""}`);
     } catch (e) {
       console.warn(`[agent:${AGENT_ID}] BLE mesh init failed (non-fatal): ${String(e)}`);
       bleTransport = null;
@@ -678,48 +900,103 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
+        // Re-steer now and then; hysteresis keeps the current coordinator unless another is clearly faster.
+        if (coordinatorSteering && Date.now() - lastSteeredAtMs >= STEERING_INTERVAL_MS) {
+          const steered = await steerCoordinator();
+          if (steered && steered.url !== activeCoordinatorUrl) {
+            console.log(`[agent:${AGENT_ID}] steering moved from ${activeCoordinatorUrl} to ${steered.url}`);
+            activeCoordinatorUrl = steered.url;
+            cacheCoordinatorUrl(activeCoordinatorUrl);
+          }
+        }
         // ── Sandbox policy enforcement ──
         const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
-        if (sandboxError) {
+        if (sandboxError?.startsWith("sandbox_required")) {
           console.error(`[agent:${AGENT_ID}] ${sandboxError}`);
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
+        // Docker configured but not running: stay registered (the IDE forwarder and heartbeats
+        // keep working) but pull nothing until it is back.
+        if (!sandboxError && !sandboxImagesReady && !sandboxImagesBuilding) {
+          sandboxImagesBuilding = true;
+          console.log(`[agent:${AGENT_ID}] preparing sandbox images (first run builds them; this can take a few minutes)`);
+          void ensureSandboxImages().then((r) => {
+            sandboxImagesBuilding = false;
+            sandboxImagesReady = r.ok;
+            if (!r.ok) console.warn(`[agent:${AGENT_ID}] sandbox images not ready: ${r.error}`);
+          });
+        }
+        const sandboxProblem = sandboxError ?? (sandboxImagesReady ? null : "sandbox images not ready");
+        if (Boolean(sandboxProblem) !== sandboxDown) {
+          sandboxDown = Boolean(sandboxProblem);
+          console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxProblem}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
+        }
 
-        const registerBody = {
-          agentId: AGENT_ID,
-          ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-          os: OS,
-          version: "0.1.0",
-          mode: effectiveMode,
-          registrationToken: AGENT_REGISTRATION_TOKEN,
-          localModelProvider: currentProvider,
-          clientType: AGENT_CLIENT_TYPE,
-          maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-          sandboxMode: SANDBOX_MODE,
-          powerTelemetry,
-          publicKeyPem: keys.publicKeyPem,
-          x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
-          ...(binaryIntegrity ? { binaryIntegrity } : {})
-        };
-        const registerResponse = (await post("/register", registerBody, {
-          extraHeaders: signedHeaders("/register", registerBody),
-        })) as {
-          accepted?: boolean;
-          meshToken?: string;
-        };
-        if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
-          if (meshAuthToken !== registerResponse.meshToken) {
-            meshAuthToken = registerResponse.meshToken;
-            console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-            if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
-            if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+        // Pinned-key trust: never register with a coordinator whose key is not trusted (checked once per URL).
+        const trust = await coordinatorTrust.check(activeCoordinatorUrl);
+        if (!trust.trusted) {
+          console.error(`[agent:${AGENT_ID}] refusing to work for ${activeCoordinatorUrl}: ${describeTrustFailure(trust)}`);
+          // A key mismatch for a pinned id is a possible impersonation: stop. An unlisted coordinator
+          // (strict mode) is just not ours to work for: back off and fail over to another one.
+          if (trust.decision?.reason === "pinned_mismatch") process.exit(1);
+          throw new Error(trust.decision ? "coordinator_not_trusted" : "coordinator_identity_unavailable");
+        }
+        // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
+        if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
+          benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
+          try {
+            lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL } : undefined });
+            benchmarkUnreported = true;
+            console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
+          } catch (e) {
+            console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
+          }
+        }
+        if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, activeCoordinatorUrl, Date.now(), REGISTER_REFRESH_MS)) {
+          const installedModels = currentProvider === "ollama-local" ? await listInstalledModels() : [];
+          const registerBody = {
+            ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+            agentId: AGENT_ID,
+            ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+            os: OS,
+            version: "0.1.0",
+            mode: effectiveMode,
+            registrationToken: AGENT_REGISTRATION_TOKEN,
+            localModelProvider: currentProvider,
+            clientType: AGENT_CLIENT_TYPE,
+            maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+            sandboxMode: SANDBOX_MODE,
+            powerTelemetry,
+            publicKeyPem: keys.publicKeyPem,
+            x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+            hardwareProfile: HARDWARE_PROFILE,
+            ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
+            ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
+            ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
+            ...(binaryIntegrity ? { binaryIntegrity } : {})
+          };
+          const registerResponse = (await post("/register", registerBody, {
+            signed: true,
+          })) as {
+            accepted?: boolean;
+            meshToken?: string;
+          };
+          registeredWithUrl = activeCoordinatorUrl;
+          lastRegisteredAtMs = Date.now();
+          if (typeof registerResponse.meshToken === "string" && registerResponse.meshToken.length > 0) {
+            if (meshAuthToken !== registerResponse.meshToken) {
+              meshAuthToken = registerResponse.meshToken;
+              console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
+              if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
+              if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+            }
           }
         }
 
         const hbStart = Date.now();
-        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE };
-        const hb = (await post("/heartbeat", hbBody, { extraHeaders: signedHeaders("/heartbeat", hbBody) })) as {
+        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+        const hb = (await post("/heartbeat", hbBody, { signed: true })) as {
           ok?: boolean;
           blacklisted?: boolean;
           reason?: string;
@@ -740,7 +1017,10 @@ async function loop(): Promise<void> {
             input: string;
           }>;
           blacklist?: { version: number; agents: string[] };
+          benchmarkChallenge?: BenchmarkChallenge;
+          hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
         };
+        if ("benchmark" in hbBody) benchmarkUnreported = false;
         try { localStore.recordHeartbeat(activeCoordinatorUrl, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 
         // Heartbeat succeeded — reset failure counter and cache proven URL
@@ -751,6 +1031,20 @@ async function loop(): Promise<void> {
           console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
           await new Promise((r) => setTimeout(r, 5000));
           continue;
+        }
+        // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
+        if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
+          const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST });
+          const answerBody = { agentId: AGENT_ID, ...answer };
+          try {
+            const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
+              verification?: { status?: string; grantedTier?: string; claimedTier?: string } | null;
+            };
+            const v = res?.verification;
+            console.log(`[agent:${AGENT_ID}] benchmark challenge ${answer.kind}${answer.declined ? ` declined (${answer.declined})` : ""}: ${v ? `${v.status} ${v.grantedTier}/${v.claimedTier}` : "answered"}`);
+          } catch (e) {
+            console.warn(`[agent:${AGENT_ID}] benchmark challenge answer failed: ${e}`);
+          }
         }
         const blacklistSet = new Set(hb.blacklist?.agents ?? []);
         for (const notice of hb.tunnelCloseNotices ?? []) {
@@ -853,8 +1147,8 @@ async function loop(): Promise<void> {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
         }
-        const pulled = (SWARM_EXECUTION_ENABLED
-          ? await post("/pull", pullBody, { extraHeaders: signedHeaders("/pull", pullBody) })
+        const pulled = (SWARM_EXECUTION_ENABLED && !sandboxDown
+          ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
           envelope?: TaskEnvelope;
@@ -867,8 +1161,10 @@ async function loop(): Promise<void> {
             const decrypted = decryptTaskEnvelope(pulled.envelope, envelopeKeys.privateKey);
             pulled.subtask = {
               id: pulled.envelope.subtaskId,
-              taskId: pulled.envelope.subtaskId.split(":")[0] ?? pulled.envelope.subtaskId,
-              kind: "single_step",
+              // Coordinators before this change did not send taskId; they now correct it on /result.
+              taskId: pulled.envelope.metadata.taskId ?? pulled.envelope.subtaskId,
+              kind: (pulled.envelope.metadata.kind as Subtask["kind"] | undefined) ?? "single_step",
+              ...(pulled.envelope.metadata.requestedModel ? { requestedModel: pulled.envelope.metadata.requestedModel } : {}),
               input: decrypted.input,
               snapshotRef: decrypted.snapshotRef,
               language: decrypted.kind as Language,
@@ -890,7 +1186,8 @@ async function loop(): Promise<void> {
           const st = pulled.subtask;
 
           // ── Frozen snapshot enforcement (Design Decision #8) ──
-          if (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef)) {
+          // Inference runs a model, not the project's code: no snapshot involved.
+          if (st.kind !== "inference" && (!st.snapshotRef || !isValidSnapshotRef(st.snapshotRef))) {
             if (SNAPSHOT_ENFORCEMENT === "strict") {
               console.error(`[agent:${AGENT_ID}] snapshot enforcement STRICT: refusing subtask ${st.id} — invalid snapshotRef: "${st.snapshotRef ?? ""}"`);
               try {
@@ -900,71 +1197,102 @@ async function loop(): Promise<void> {
                   ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
                   durationMs: 0,
                 };
-                await post("/result", snapshotRejection, { extraHeaders: signedHeaders("/result", snapshotRejection) });
+                await post("/result", snapshotRejection, { signed: true });
               } catch { /* best effort */ }
               continue;
             }
             console.warn(`[agent:${AGENT_ID}] snapshot warning: subtask ${st.id} has invalid snapshotRef: "${st.snapshotRef ?? ""}" — proceeding (enforcement=${SNAPSHOT_ENFORCEMENT})`);
-          } else {
+          } else if (st.kind !== "inference") {
             console.log(`[agent:${AGENT_ID}] snapshot verified for subtask ${st.id}: ${st.snapshotRef}`);
           }
 
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
-          try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
-          // #51: keep the coordinator's claim lease alive while the subtask runs.
-          const stopLeaseHeartbeat = startLeaseHeartbeat();
-          const result = await worker.runSubtask(st, AGENT_ID).finally(stopLeaseHeartbeat);
-          result.snapshotRef = st.snapshotRef;
-          try {
-            if (result.ok) {
-              localStore.recordTaskComplete(st.id, result.output, result.durationMs);
-            } else {
-              localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
-            }
-          } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
-          const reportNonce = randomUUID();
-          const reportSignature = signPayload(
-            JSON.stringify({
-              subtaskId: result.subtaskId,
-              taskId: result.taskId,
-              agentId: result.agentId,
-              ok: result.ok,
-              durationMs: result.durationMs,
-              reportNonce
-            }),
-            keys.privateKeyPem
-          );
-          result.reportNonce = reportNonce;
-          result.reportSignature = reportSignature;
-
-          // Encrypt result if task was received as an envelope
-          let resultPayload: Record<string, unknown> = { ...result };
-          if (taskEnvelope) {
+          const envelopeForTask = taskEnvelope;
+          const runAndReport = async () => {
+            try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, activeCoordinatorUrl); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
+            // #51: keep the coordinator's claim lease alive while the subtask runs.
+            const stopLeaseHeartbeat = startLeaseHeartbeat();
+            const run = st.kind === "inference"
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              : worker.runSubtask(st, AGENT_ID);
+            if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
+            const result = await run.finally(stopLeaseHeartbeat);
+            result.snapshotRef = st.snapshotRef;
             try {
-              const encrypted = encryptResult(
-                { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
-                taskEnvelope,
-                envelopeKeys.privateKey
-              );
-              resultPayload = {
-                ...encrypted,
+              if (result.ok) {
+                localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+              } else {
+                localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+              }
+            } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+            const reportNonce = randomUUID();
+            const reportSignature = signPayload(
+              JSON.stringify({
+                subtaskId: result.subtaskId,
                 taskId: result.taskId,
                 agentId: result.agentId,
-                reportNonce,
-                reportSignature,
-              };
-              console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
-            } catch (encryptErr) {
-              console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
-            }
-          }
+                ok: result.ok,
+                durationMs: result.durationMs,
+                reportNonce
+              }),
+              keys.privateKeyPem
+            );
+            result.reportNonce = reportNonce;
+            result.reportSignature = reportSignature;
 
-          try {
-            await post("/result", resultPayload, { extraHeaders: signedHeaders("/result", resultPayload) });
-          } catch (resultErr) {
-            try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
-            console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            // Encrypt result if task was received as an envelope
+            let resultPayload: Record<string, unknown> = { ...result };
+            if (envelopeForTask) {
+              try {
+                const encrypted = encryptResult(
+                  { ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs },
+                  envelopeForTask,
+                  envelopeKeys.privateKey
+                );
+                resultPayload = {
+                  ...encrypted,
+                  taskId: result.taskId,
+                  agentId: result.agentId,
+                  reportNonce,
+                  reportSignature,
+                };
+                console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
+              } catch (encryptErr) {
+                console.warn(`[agent:${AGENT_ID}] result encryption failed, sending plaintext: ${encryptErr}`);
+              }
+            }
+            // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
+            const finishedAtMs = Date.now();
+            resultPayload.receipt = signReceiptAsAgent(
+              {
+                taskId: result.taskId,
+                subtaskId: result.subtaskId,
+                agentId: result.agentId,
+                agentPublicKeyPem: keys.publicKeyPem,
+                startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
+                finishedAtMs,
+                resultHash: hashResultOutput(result.output)
+              },
+              keys.privateKeyPem
+            );
+
+            try {
+              await post("/result", resultPayload, { signed: true });
+            } catch (resultErr) {
+              try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+              console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            }
+          };
+          // Model calls run side by side (Ollama serves several at once); code jobs one at a time.
+          if (st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1) {
+            while (inflightInference.size >= MAX_PARALLEL_INFERENCE) await Promise.race(inflightInference);
+            const job: Promise<void> = runAndReport()
+              .catch((e) => console.warn(`[agent:${AGENT_ID}] inference ${st.id} failed: ${String(e)}`))
+              .finally(() => inflightInference.delete(job));
+            inflightInference.add(job);
+            continue;
           }
+          await runAndReport();
           continue;
         }
 
@@ -1001,7 +1329,7 @@ async function loop(): Promise<void> {
             );
             result.reportNonce = reportNonce;
             result.reportSignature = reportSignature;
-            await post("/result", result, { extraHeaders: signedHeaders("/result", result) });
+            await post("/result", result, { signed: true });
           } catch { /* mesh broadcast is primary delivery */ }
           console.log(`[agent:${AGENT_ID}] mesh task ${st.id} complete: ok=${result.ok}`);
           continue;
@@ -1122,10 +1450,15 @@ async function loop(): Promise<void> {
       } else {
         // ═══ OFFLINE PATH: periodic reconnect probe ═══
         const now = Date.now();
-        if (now - lastReconnectProbeMs > RECONNECT_PROBE_INTERVAL_MS) {
+        if (now - lastReconnectProbeMs > reconnectProbeIntervalMs) {
           lastReconnectProbeMs = now;
           try {
             const probeStart = Date.now();
+            // Only register once the coordinator answers at all: an unauthenticated read costs
+            // nothing against the registration-storm rule.
+            const reach = await request(`${activeCoordinatorUrl}/identity`, { method: "GET", headersTimeout: 5000, bodyTimeout: 5000 });
+            await reach.body.dump();
+            if (reach.statusCode < 200 || reach.statusCode >= 300) throw new Error(`coordinator unreachable (${reach.statusCode})`);
             // Re-register first (coordinator may have restarted and lost agent state)
             const registerBody = {
               agentId: AGENT_ID,
@@ -1138,9 +1471,9 @@ async function loop(): Promise<void> {
               powerTelemetry,
               publicKeyPem: keys.publicKeyPem
             };
-            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/register", registerBody) });
+            await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
-            await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, extraHeaders: signedHeaders("/heartbeat", probeBody) });
+            await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;
             try { localStore.recordHeartbeat(activeCoordinatorUrl, "reconnected", probeLatency); } catch {}
             // Probe succeeded — back online
@@ -1148,11 +1481,16 @@ async function loop(): Promise<void> {
             consecutiveFailures = 0;
             cacheCoordinatorUrl(activeCoordinatorUrl);
             bleMesh?.setOffline(false);
+            // The probe just registered: don't register again on the next online tick.
+            registeredWithUrl = activeCoordinatorUrl;
+            lastRegisteredAtMs = Date.now();
+            reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
             await flushOfflineLedger();
-          } catch {
-            console.log(`[agent:${AGENT_ID}] offline probe failed, still offline`);
+          } catch (err) {
+            reconnectProbeIntervalMs = Math.min(reconnectProbeIntervalMs * 2, RECONNECT_PROBE_MAX_MS);
+            console.log(`[agent:${AGENT_ID}] offline probe failed (${String(err).slice(0, 200)}); next probe in ${Math.round(reconnectProbeIntervalMs / 1000)}s`);
           }
         }
 
@@ -1248,7 +1586,12 @@ async function loop(): Promise<void> {
     } catch (error) {
       consecutiveFailures++;
       console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
+      if (isAgentNotRegisteredError(error)) {
+        // Coordinator restarted or evicted us: register again on the next tick.
+        registeredWithUrl = null;
+      }
       if (coordinatorOnline && consecutiveFailures >= OFFLINE_THRESHOLD) {
+        registeredWithUrl = null;
         coordinatorOnline = false;
         bleMesh?.setOffline(true);
         try { localStore.deleteConfig("coordinator_url"); } catch {}

@@ -16,6 +16,18 @@ describe("envelope encryption", () => {
     expect(kp.privateKey.length).toBe(32);
   });
 
+  test("envelope metadata carries the parent task id (results are polled by task id)", () => {
+    const agentKeys = generateX25519KeyPair();
+    const { envelope } = createTaskEnvelope(
+      { input: "print(1)", snapshotRef: "abc123", kind: "micro_loop" as const },
+      agentKeys.publicKey,
+      "3f1c2a4e-0000-4000-8000-000000000001",
+      { taskId: "ide-1793648074-abc123", timeoutMs: 30_000 }
+    );
+    expect(envelope.metadata.taskId).toBe("ide-1793648074-abc123");
+    expect(envelope.metadata.timeoutMs).toBe(30_000);
+  });
+
   test("createTaskEnvelope encrypts and decryptTaskEnvelope recovers", () => {
     const agentKeys = generateX25519KeyPair();
     const task = {

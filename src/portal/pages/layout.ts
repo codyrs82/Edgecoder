@@ -1,396 +1,224 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-// #16: moved verbatim from src/portal/server.ts.
+import { BASE_CSS, TOKENS_CSS, THEME_SCRIPT, brandMark, icon } from "./design-system.js";
+import { DOCS_SITE_URL } from "./urls.js";
+
+/**
+ * Authenticated app shell: left sidebar (brand, navigation, profile row with account menu), top bar (page
+ * title, subtitle, actions), content area. Pages supply `content` (HTML) and `script` (JS) and
+ * keep using the shell's helpers: api(), requireAuth(), showToast(), statusBadge(), boolBadge(),
+ * applyTheme(). Element ids used by pages are unchanged: toast, topTickerCredits, reviewsBadge,
+ * logoutBtn, hamburgerBtn, topbarNav.
+ */
 export function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "chat" | "dashboard" | "wallet" | "settings" | "download" | "reviews";
+  activeTab: "chat" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews";
   heading: string;
   subtitle: string;
   content: string;
   script: string;
+  /** Optional HTML rendered on the right of the top bar (buttons, filters). */
+  actions?: string;
 }): string {
-
-  const navItems = [
-    { key: "dashboard", href: "/portal/dashboard", label: "Dashboard", icon: "&#9632;" },
-    { key: "chat", href: "/portal/chat", label: "Chat", icon: "&#9993;" },
-    { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "&#9998;", hasBadge: true },
-    { key: "wallet", href: "/portal/wallet", label: "Wallet", icon: "&#9733;" },
-    { key: "settings", href: "/portal/settings", label: "Settings", icon: "&#9881;" },
+  const groups: Array<{ label: string; items: Array<{ key: string; href: string; label: string; icon: string; badge?: string; external?: boolean }> }> = [
+    {
+      label: "Workspace",
+      items: [
+        { key: "dashboard", href: "/portal/dashboard", label: "Dashboard", icon: "dashboard" },
+        { key: "chat", href: "/portal/chat", label: "Chat", icon: "chat" },
+        { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "reviews", badge: "reviewsBadge" }
+      ]
+    },
+    {
+      label: "Economy",
+      items: [
+        { key: "market", href: "/portal/market", label: "Market", icon: "market" },
+        { key: "wallet", href: "/portal/wallet", label: "Wallet", icon: "wallet" }
+      ]
+    },
+    {
+      label: "Account",
+      items: [
+        { key: "download", href: "/portal/download", label: "Install agent", icon: "download" },
+        { key: "settings", href: "/portal/settings", label: "Settings", icon: "settings" },
+        { key: "docs", href: DOCS_SITE_URL, label: "Documentation", icon: "docs", external: true }
+      ]
+    }
   ];
-  const navHtml = navItems.map((item) => {
-    const active = item.key === input.activeTab ? " topbar-nav-active" : "";
-    const badge = item.hasBadge ? `<span class="nav-badge" id="reviewsBadge" style="display:none;">0</span>` : "";
-    return `<a class="topbar-nav-link${active}" href="${item.href}" title="${item.label}"><span class="nav-icon">${item.icon}</span><span class="nav-label">${item.label}</span>${badge}</a>`;
-  }).join("");
+  // The account menu above the profile row (like Cursor's): where you manage yourself, not the network.
+  const accountMenuItems: Array<{ href: string; label: string; icon: string; external?: boolean }> = [
+    { href: "/portal/settings#profile", label: "Profile", icon: "user" },
+    { href: "/portal/settings", label: "Settings", icon: "settings" },
+    { href: "/portal/settings#compute", label: "Compute &amp; usage", icon: "cpu" },
+    { href: "/portal/settings#tools", label: "Connect your tools", icon: "key" },
+    { href: "/portal/download", label: "Install agent", icon: "download" },
+    { href: DOCS_SITE_URL, label: "Docs", icon: "docs", external: true }
+  ];
+  const navHtml = groups
+    .map(
+      (g) => `
+      <div class="nav-group">
+        <div class="nav-group-label">${g.label}</div>
+        ${g.items
+          .map((item) => {
+            const active = item.key === input.activeTab ? " active" : "";
+            const badge = item.badge ? `<span class="nav-badge" id="${item.badge}" style="display:none;">0</span>` : "";
+            const ext = item.external ? ` target="_blank" rel="noreferrer"` : "";
+            return `<a class="nav-link${active}" href="${item.href}"${ext} title="${item.label}"${active ? ' aria-current="page"' : ""}>${icon(item.icon, 16)}<span class="nav-label">${item.label}</span>${badge}${item.external ? icon("external", 12, "nav-ext") : ""}</a>`;
+          })
+          .join("")}
+      </div>`
+    )
+    .join("");
 
   return `<!doctype html>
-  <html>
+  <html lang="en">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${input.title}</title>
       <style>
-        :root {
-          --bg: #1a1a18;
-          --bg-soft: #2f2f2d;
-          --bg-surface: #3a3a37;
-          --bg-elevated: #454542;
-          --bg-input: #262624;
-          --card: rgba(58, 58, 55, 0.96);
-          --card-border: rgba(214, 204, 194, 0.08);
-          --border-strong: rgba(214, 204, 194, 0.15);
-          --text: #f7f5f0;
-          --text-secondary: #b8b0a4;
-          --muted: #8a8478;
-          --brand: #c17850;
-          --brand-2: #d4895f;
-          --ok: #4ade80;
-          --danger: #f87171;
-          --yellow: #fbbf24;
-          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-          --transition-fast: 0.15s ease;
-          --transition-med: 0.25s ease;
-          --radius-sm: 6px;
-          --radius-md: 10px;
-          --radius-lg: 14px;
+        ${TOKENS_CSS}
+        ${BASE_CSS}
+        /* ── Shell ── */
+        .app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 100vh; }
+        .sidebar {
+          position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+          background: var(--bg-soft); border-right: 1px solid var(--card-border);
         }
-        * { box-sizing: border-box; }
-        body {
-          font-family: system-ui, -apple-system, sans-serif;
-          font-size: 14px;
-          line-height: 1.5;
-          margin: 0;
-          color: var(--text);
-          background: var(--bg);
-          min-height: 100vh;
-          -webkit-font-smoothing: antialiased;
+        .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px; height: var(--topbar-h); border-bottom: 1px solid var(--card-border); }
+        .sidebar-brand a { display: flex; align-items: center; gap: 10px; color: var(--text); }
+        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); flex: none; }
+        .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
+        .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
+        .sidebar-nav { padding: 10px 10px; flex: 1; overflow-y: auto; }
+        .nav-group { margin-bottom: 14px; }
+        .nav-group-label { font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding: 6px 10px; }
+        .nav-link {
+          position: relative; display: flex; align-items: center; gap: 10px;
+          padding: 8px 10px; margin: 1px 0; border-radius: var(--radius-sm);
+          font-size: 13px; font-weight: 500; color: var(--text-secondary);
+          transition: background var(--transition-fast), color var(--transition-fast);
         }
-        .shell { max-width: 1360px; margin: 0 auto; padding: 0 14px; }
-        /* ── Topbar ── */
-        .topbar {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 6px 16px;
-          border-bottom: 1px solid var(--card-border);
-          background: var(--bg-soft);
-          position: sticky;
-          top: 0;
-          z-index: 50;
-          backdrop-filter: blur(12px);
-        }
-        .topbar-left { display: flex; align-items: center; gap: 10px; }
-        .topbar-left a { text-decoration: none; color: var(--text); display: flex; align-items: center; gap: 8px; }
-        .topbar-nav { display: flex; align-items: center; gap: 2px; margin-left: 16px; }
-        .topbar-nav-link {
-          display: inline-flex; align-items: center; gap: 5px;
-          padding: 6px 12px; border-radius: var(--radius-sm);
-          font-size: 13px; font-weight: 500; color: var(--muted);
-          text-decoration: none; transition: all var(--transition-fast);
-          position: relative; border: 1px solid transparent;
-        }
-        .topbar-nav-link:hover { color: var(--text); background: var(--bg-surface); }
-        .topbar-nav-link.topbar-nav-active {
-          color: var(--brand); background: rgba(193, 120, 80, 0.1);
-          border-color: rgba(193, 120, 80, 0.25);
-        }
-        .topbar-nav-link .nav-icon { font-size: 14px; }
+        .nav-link:hover { background: var(--bg-elevated); color: var(--text); }
+        .nav-link.active { background: var(--brand-soft); color: var(--brand-2); }
+        .nav-link.active::before { content: ""; position: absolute; left: -10px; top: 7px; bottom: 7px; width: 3px; border-radius: 0 2px 2px 0; background: var(--brand); }
+        .nav-link .icon { flex: none; opacity: 0.9; }
+        .nav-link .nav-ext { margin-left: auto; opacity: 0.5; }
         .nav-badge {
-          position: absolute; top: -4px; right: -2px;
-          background: var(--danger); color: #fff; font-size: 9px;
-          font-weight: 700; min-width: 16px; height: 16px;
-          border-radius: 999px; display: inline-flex;
-          align-items: center; justify-content: center;
-          padding: 0 4px; line-height: 1;
+          margin-left: auto; background: var(--brand); color: #111; font-size: 10px; font-weight: 700;
+          min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
         }
-        .topbar-right { display: flex; align-items: center; gap: 10px; }
-        .topbar-credits {
-          font-family: var(--font-mono);
-          font-size: 12px;
-          color: var(--muted);
-          padding: 4px 10px;
-          border: 1px solid var(--card-border);
-          border-radius: var(--radius-sm);
-          background: var(--bg);
-          transition: border-color var(--transition-fast);
+        /* ── Profile row + account menu (bottom of the sidebar) ── */
+        .sidebar-foot { position: relative; border-top: 1px solid var(--card-border); padding: 8px; }
+        .profile-row { display: flex; align-items: center; gap: 4px; border-radius: var(--radius-sm); }
+        .profile-row:hover, .profile-row.open { background: var(--bg-elevated); }
+        .profile-btn {
+          flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 7px 8px;
+          background: none; border: none; border-radius: var(--radius-sm); color: var(--text); text-align: left; cursor: pointer; min-height: 0;
         }
-        .topbar-credits:hover { border-color: var(--brand); }
-        .topbar-icon {
-          width: 32px; height: 32px;
-          display: inline-flex; align-items: center; justify-content: center;
-          border-radius: var(--radius-sm); border: 1px solid var(--card-border);
-          background: var(--bg); color: var(--muted); text-decoration: none;
-          font-size: 16px; cursor: pointer; transition: all var(--transition-fast);
+        .profile-btn:hover { background: none; }
+        .avatar {
+          flex: none; width: 30px; height: 30px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+          background: var(--brand); color: #111; font-weight: 700; font-size: 13px; text-transform: uppercase; user-select: none;
         }
-        .topbar-icon:hover { background: var(--card); color: var(--text); border-color: var(--brand); }
-        /* ── Hamburger (mobile) ── */
-        .hamburger-btn {
-          display: none; background: none; border: none; color: var(--text);
-          font-size: 22px; cursor: pointer; padding: 4px 6px; line-height: 1;
+        .profile-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+        .profile-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .profile-sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .profile-gear { flex: none; width: 30px; height: 30px; min-height: 0; padding: 0; margin-right: 4px; background: none; border: none; color: var(--muted); border-radius: var(--radius-sm); }
+        .profile-gear:hover { color: var(--text); background: var(--bg-surface); }
+        .account-menu {
+          position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 70;
+          background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+          box-shadow: var(--shadow-2, 0 12px 32px rgba(0,0,0,0.45)); padding: 5px;
         }
-        .main { min-width: 0; }
-        .brand { display: inline-flex; align-items: center; gap: 10px; }
-        .mark {
-          width: 28px;
-          height: 28px;
-          border-radius: 7px;
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset;
-          font-size: 12px;
+        .account-menu[hidden] { display: none; }
+        .account-menu .menu-head { padding: 8px 10px 6px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .account-menu a[role="menuitem"], .account-menu button[role="menuitem"] {
+          display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; min-height: 0;
+          background: none; border: none; border-radius: var(--radius-sm); color: var(--text-secondary); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
         }
-        .topbar-title { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
-        .muted { color: var(--muted); font-size: 11px; }
-        /* ── Cards ── */
-        .card {
-          background: var(--card);
-          border: 1px solid var(--card-border);
-          border-radius: var(--radius-md);
-          padding: 14px;
-          margin-bottom: 10px;
-          backdrop-filter: blur(10px);
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
-          transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-          animation: fadeSlideIn 0.3s ease both;
+        .account-menu [role="menuitem"]:hover, .account-menu [role="menuitem"]:focus-visible { background: var(--bg-elevated); color: var(--text); outline: none; }
+        .account-menu [role="menuitem"] .icon { flex: none; opacity: 0.85; }
+        .account-menu [role="menuitem"] .nav-ext { margin-left: auto; opacity: 0.5; }
+        .account-menu hr { border: none; border-top: 1px solid var(--card-border); margin: 5px 2px; }
+        /* ── Top bar + content ── */
+        .main { min-width: 0; display: flex; flex-direction: column; }
+        .topbar {
+          position: sticky; top: 0; z-index: 40; height: var(--topbar-h);
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          padding: 0 24px; background: var(--bg); border-bottom: 1px solid var(--card-border);
         }
-        @keyframes fadeSlideIn {
-          from { opacity: 0; transform: translateY(8px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .content-stack { margin-top: 0; }
-        .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-        /* ── Buttons ── */
-        button {
-          padding: 7px 12px;
-          border-radius: var(--radius-sm);
-          border: 1px solid var(--card-border);
-          background: var(--bg-soft);
-          color: var(--text);
-          cursor: pointer;
-          font-size: 12px;
-          font-weight: 500;
-          transition: all var(--transition-fast);
-        }
-        button:hover { border-color: var(--border-strong); background: var(--bg-surface); transform: translateY(-1px); }
-        button:active { transform: translateY(0); }
-        button.primary {
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
-          border-color: rgba(193, 120, 80, 0.75);
-          color: white;
-        }
-        button.primary:hover { filter: brightness(1.1); box-shadow: 0 2px 12px rgba(193, 120, 80, 0.3); }
-        /* ── Inputs ── */
-        input, select, textarea {
-          width: 100%;
-          padding: 8px 10px;
-          border: 1px solid var(--card-border);
-          border-radius: var(--radius-sm);
-          background: var(--bg-input);
-          color: var(--text);
-          font-size: 13px;
-          font-family: inherit;
-          transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-        }
-        input:focus, select:focus, textarea:focus {
-          outline: none;
-          border-color: var(--brand);
-          box-shadow: 0 0 0 2px rgba(193, 120, 80, 0.15);
-        }
-        input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.7; }
-        label {
-          display: block;
-          margin: 8px 0 4px;
-          font-size: 10px;
-          color: var(--muted);
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          font-weight: 600;
-        }
-        table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        th, td {
-          border-bottom: 1px solid var(--card-border);
-          text-align: left;
-          padding: 6px 5px;
-          vertical-align: top;
-          font-family: inherit;
-        }
-        th {
-          color: var(--muted);
-          font-weight: 600;
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.05em;
-        }
-        .grid2 { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 10px; }
-        .kpis { display: grid; grid-template-columns: repeat(3, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
-        .kpi {
-          border: 1px solid var(--card-border); border-radius: var(--radius-sm);
-          padding: 10px; background: var(--card);
-          transition: border-color var(--transition-fast), transform var(--transition-fast);
-        }
-        .kpi:hover { border-color: rgba(193, 120, 80, 0.25); transform: translateY(-1px); }
-        .kpi .label {
-          color: var(--muted);
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-        }
-        .kpi .value {
-          font-size: 15px;
-          font-weight: 700;
-          margin-top: 2px;
-          font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-        }
-        .status-badge {
-          display: inline-flex;
-          align-items: center;
-          padding: 2px 7px;
-          border-radius: 999px;
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          border: 1px solid var(--card-border);
-          background: var(--bg-soft);
-          color: var(--text);
-        }
-        .status-badge.ok {
-          border-color: rgba(34, 197, 94, 0.6);
-          color: #86efac;
-          background: rgba(20, 83, 45, 0.35);
-        }
-        .status-badge.warn {
-          border-color: rgba(245, 158, 11, 0.62);
-          color: #fcd34d;
-          background: rgba(120, 53, 15, 0.32);
-        }
-        .status-badge.danger {
-          border-color: rgba(239, 68, 68, 0.62);
-          color: #fca5a5;
-          background: rgba(127, 29, 29, 0.32);
-        }
-        .table-controls {
-          display: flex;
-          gap: 6px;
-          align-items: center;
-          flex-wrap: wrap;
-          margin: 0 0 8px;
-        }
-        .table-controls input, .table-controls select {
-          width: auto;
-          min-width: 150px;
-        }
-        .token-box {
-          border: 1px dashed rgba(193, 120, 80, 0.42);
-          border-radius: var(--radius-sm);
-          padding: 8px;
-          background: var(--bg-soft);
-          word-break: break-all;
-          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          font-size: 12px;
-        }
-        /* ── Loading spinner ── */
-        .loading-spinner {
-          width: 20px; height: 20px;
-          border: 2px solid var(--card-border);
-          border-top-color: var(--brand);
-          border-radius: 50%;
-          animation: spin 0.7s linear infinite;
-          display: inline-block;
-        }
-        .loading-spinner.sm { width: 14px; height: 14px; border-width: 2px; }
-        .loading-spinner.lg { width: 32px; height: 32px; border-width: 3px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .loading-state {
-          display: flex; align-items: center; gap: 8px;
-          color: var(--muted); font-size: 12px; padding: 12px 0;
-        }
-        /* ── Toast ── */
-        #toast {
-          position: fixed;
-          top: 12px;
-          right: 12px;
-          width: min(420px, calc(100vw - 32px));
-          z-index: 100;
-          margin: 0;
-          animation: slideInRight 0.3s ease;
-        }
-        @keyframes slideInRight {
-          from { opacity: 0; transform: translateX(40px); }
-          to { opacity: 1; transform: translateX(0); }
-        }
-        .hidden { display: none !important; }
-        /* ── Mobile responsive ── */
-        @media (max-width: 920px) {
-          .grid2 { grid-template-columns: 1fr; }
-          .kpis { grid-template-columns: 1fr 1fr; }
-        }
-        @media (max-width: 680px) {
-          .kpis { grid-template-columns: 1fr; }
-          .topbar-nav { display: none; }
-          .topbar-nav.mobile-open {
-            display: flex; flex-direction: column;
-            position: absolute; top: 100%; left: 0; right: 0;
-            background: var(--bg-soft); border-bottom: 1px solid var(--card-border);
-            padding: 8px 16px; gap: 2px; z-index: 49;
-            animation: fadeSlideIn 0.2s ease;
-          }
-          .topbar-nav.mobile-open .topbar-nav-link {
-            padding: 10px 12px; width: 100%; border-radius: var(--radius-sm);
-          }
-          .hamburger-btn { display: block; }
-          .topbar-nav-link .nav-label { display: inline; }
-          .topbar-right .topbar-credits { font-size: 10px; padding: 3px 6px; }
-        }
-        @media (min-width: 681px) {
-          .topbar-nav-link .nav-label { display: none; }
-        }
-        @media (min-width: 900px) {
-          .topbar-nav-link .nav-label { display: inline; }
+        .topbar-title h1 { font-size: 16px; font-weight: 600; }
+        .topbar-title .sub { font-size: 12px; color: var(--muted); margin-top: 1px; }
+        .topbar-actions { display: flex; align-items: center; gap: 8px; }
+        .hamburger-btn { display: none; }
+        .scrim { display: none; }
+        .shell { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: 20px 24px 40px; }
+        .content-stack { min-width: 0; }
+        /* ── Mobile ── */
+        @media (max-width: 900px) {
+          .app { grid-template-columns: 1fr; }
+          .sidebar { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); transform: translateX(-100%); transition: transform var(--transition-med); z-index: 60; box-shadow: var(--shadow-2); }
+          .sidebar.mobile-open { transform: translateX(0); }
+          .scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 55; display: none; }
+          .scrim.show { display: block; }
+          .hamburger-btn { display: inline-flex; }
+          .topbar { padding: 0 14px; }
+          .shell { padding: 14px 14px 32px; }
         }
       </style>
     </head>
     <body>
-      <div class="topbar">
-        <div class="topbar-left">
-          <a href="/portal/dashboard">
-            <div class="mark">E</div>
-            <span class="topbar-title">EdgeCoder</span>
-          </a>
-          <button class="hamburger-btn" id="hamburgerBtn" aria-label="Menu">&#9776;</button>
-          <nav class="topbar-nav" id="topbarNav">
-            ${navHtml}
-          </nav>
-        </div>
-        <div class="topbar-right">
-          <span class="topbar-credits" id="topTickerCredits" title="Credits"><span class="loading-spinner sm"></span></span>
-          <a class="topbar-icon" id="logoutBtn" href="#" title="Sign out">&#10140;</a>
+      <div class="app">
+        <aside class="sidebar" id="topbarNav">
+          <div class="sidebar-brand">
+            <a href="/portal/dashboard">${brandMark(28)}<span><div class="brand-name">EdgeCoder</div><div class="brand-sub">Compute network</div></span></a>
+          </div>
+          <nav class="sidebar-nav" aria-label="Primary">${navHtml}</nav>
+          <div class="sidebar-foot">
+            <div class="account-menu" id="accountMenu" role="menu" aria-labelledby="profileBtn" hidden>
+              <div class="menu-head" id="accountMenuEmail"></div>
+              ${accountMenuItems.map((m) => `<a role="menuitem" tabindex="-1" href="${m.href}"${m.external ? ' target="_blank" rel="noreferrer"' : ""}>${icon(m.icon, 15)}<span>${m.label}</span>${m.external ? icon("external", 12, "nav-ext") : ""}</a>`).join("")}
+              <hr />
+              <button type="button" role="menuitem" tabindex="-1" id="logoutBtn">${icon("logout", 15)}<span>Log out</span></button>
+            </div>
+            <div class="profile-row" id="profileRow">
+              <button type="button" class="profile-btn" id="profileBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="accountMenu">
+                <span class="avatar" id="profileAvatar" aria-hidden="true"></span>
+                <span class="profile-text"><span class="profile-name" id="profileName">&nbsp;</span><span class="profile-sub" id="topTickerCredits" title="cSats balance"><span class="loading-spinner sm"></span></span></span>
+              </button>
+              <button type="button" class="profile-gear" id="profileGear" aria-label="Account menu" aria-haspopup="menu" aria-expanded="false" aria-controls="accountMenu">${icon("settings", 16)}</button>
+            </div>
+          </div>
+        </aside>
+        <div class="scrim" id="navScrim"></div>
+        <div class="main">
+          <header class="topbar">
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+              <button class="hamburger-btn ghost" id="hamburgerBtn" aria-label="Open navigation">${icon("menu", 18)}</button>
+              <div class="topbar-title"><h1>${input.heading}</h1><div class="sub">${input.subtitle}</div></div>
+            </div>
+            <div class="topbar-actions">${input.actions ?? ""}</div>
+          </header>
+          <div class="shell">
+            <div class="content-stack">
+              ${input.content}
+            </div>
+          </div>
         </div>
       </div>
-      <div class="shell">
-        <div class="content-stack" style="padding-top:12px;">
-          ${input.content}
-        </div>
-      </div>
-      <div id="toast" class="card hidden"></div>
+      <div id="toast" class="card hidden" role="status" aria-live="polite"></div>
       <script>
         const toast = document.getElementById("toast");
-        const themePalettes = {
-          warm: { "--bg": "#1a1a18", "--bg-soft": "#2f2f2d", "--bg-surface": "#3a3a37", "--bg-elevated": "#454542", "--bg-input": "#262624", "--card": "rgba(58, 58, 55, 0.96)", "--card-border": "rgba(214, 204, 194, 0.08)", "--border-strong": "rgba(214, 204, 194, 0.15)", "--text": "#f7f5f0", "--text-secondary": "#b8b0a4", "--muted": "#8a8478", "--brand": "#c17850", "--brand-2": "#d4895f" },
-          midnight: { "--bg": "#0f0f1e", "--bg-soft": "#1a1a2e", "--bg-surface": "#252540", "--bg-elevated": "#30304a", "--bg-input": "#141428", "--card": "rgba(37, 37, 64, 0.96)", "--card-border": "rgba(99, 102, 241, 0.12)", "--border-strong": "rgba(99, 102, 241, 0.2)", "--text": "#e8e8f0", "--text-secondary": "#a0a0c0", "--muted": "#8888a0", "--brand": "#6366f1", "--brand-2": "#818cf8" },
-          emerald: { "--bg": "#0f1e0f", "--bg-soft": "#1a2e1a", "--bg-surface": "#253025", "--bg-elevated": "#304030", "--bg-input": "#142814", "--card": "rgba(37, 48, 37, 0.96)", "--card-border": "rgba(34, 197, 94, 0.12)", "--border-strong": "rgba(34, 197, 94, 0.2)", "--text": "#e8f0e8", "--text-secondary": "#a0c0a0", "--muted": "#88a088", "--brand": "#22c55e", "--brand-2": "#4ade80" }
-        };
-        function applyTheme(theme) {
-          const palette = themePalettes[theme] || themePalettes.warm;
-          for (const [key, value] of Object.entries(palette)) document.documentElement.style.setProperty(key, value);
-        }
+        ${THEME_SCRIPT}
         function showToast(message, isError = false) {
           toast.textContent = message;
           toast.classList.remove("hidden");
-          toast.style.borderColor = isError ? "#ef4444" : "#22c55e";
-          setTimeout(() => toast.classList.add("hidden"), 5000);
+          toast.style.borderLeftColor = isError ? "var(--danger)" : "var(--ok)";
+          clearTimeout(toast._t);
+          toast._t = setTimeout(() => toast.classList.add("hidden"), 5000);
         }
         async function api(path, options = {}) {
           const res = await fetch(path, {
@@ -405,48 +233,106 @@ export function portalAuthedPageHtml(input: {
         }
         async function requireAuth() {
           try {
-            const me = await api("/me", { method: "GET", headers: {} });
-            applyTheme("warm");
-            return me;
+            return await api("/me", { method: "GET", headers: {} });
           } catch {
             window.location.href = "/portal";
             throw new Error("not_authenticated");
           }
         }
         function statusBadge(text, tone = "neutral") {
-          const toneClass = tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "danger" ? "danger" : "";
+          const toneClass = tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "danger" ? "danger" : tone === "info" ? "info" : "";
           return "<span class='status-badge " + toneClass + "'>" + String(text) + "</span>";
         }
         function boolBadge(value, trueLabel = "YES", falseLabel = "NO") {
           return value ? statusBadge(trueLabel, "ok") : statusBadge(falseLabel, "warn");
         }
-        /* ── Hamburger toggle ── */
+        /* ── Mobile navigation ── */
         (function() {
           var btn = document.getElementById("hamburgerBtn");
           var nav = document.getElementById("topbarNav");
+          var scrim = document.getElementById("navScrim");
+          function close() { nav.classList.remove("mobile-open"); scrim.classList.remove("show"); }
           if (btn && nav) {
-            btn.addEventListener("click", function() {
-              nav.classList.toggle("mobile-open");
-            });
-            document.addEventListener("click", function(e) {
-              if (!btn.contains(e.target) && !nav.contains(e.target)) {
-                nav.classList.remove("mobile-open");
-              }
-            });
+            btn.addEventListener("click", function() { nav.classList.toggle("mobile-open"); scrim.classList.toggle("show", nav.classList.contains("mobile-open")); });
+            scrim.addEventListener("click", close);
+            document.addEventListener("keydown", function(e) { if (e.key === "Escape") close(); });
           }
         })();
-        /* ── Top ticker and reviews badge ── */
+        /* ── Profile row: who you are and your cSats balance ── */
+        function formatCSats(n) {
+          var v = Number(n);
+          if (!isFinite(v)) return "";
+          return v.toLocaleString(undefined, { maximumFractionDigits: Math.abs(v) >= 100 ? 0 : 2 }) + " cSats";
+        }
+        function profileDisplayName(user) {
+          var name = String((user && user.displayName) || "").trim();
+          if (name) return name;
+          var email = String((user && user.email) || "");
+          return email ? email.split("@")[0] : "Account";
+        }
         async function loadTopTicker() {
+          var sub = document.getElementById("topTickerCredits");
           try {
-            await requireAuth();
+            var me = await requireAuth();
+            var user = (me && me.user) || {};
+            var name = profileDisplayName(user);
+            document.getElementById("profileName").textContent = name;
+            document.getElementById("profileAvatar").textContent = name.charAt(0) || "?";
+            document.getElementById("accountMenuEmail").textContent = user.email || "";
+            document.getElementById("profileBtn").setAttribute("title", user.email || name);
+          } catch { return; }
+          // The balance lives on the coordinator (cSats); the control plane's credits are a fallback.
+          try {
+            var s = await api("/portal/api/compute/summary", { method: "GET", headers: {} });
+            if (s && s.connected && typeof s.cSats === "number") { sub.textContent = formatCSats(s.cSats); return; }
+          } catch {}
+          try {
             var summary = await api("/dashboard/summary", { method: "GET", headers: {} });
             var credits = (summary.walletSnapshot || {}).credits;
-            var creditVal = credits && typeof credits.balance !== "undefined" ? String(credits.balance) : "n/a";
-            document.getElementById("topTickerCredits").textContent = creditVal + " credits";
-          } catch {
-            document.getElementById("topTickerCredits").textContent = "-";
-          }
+            if (credits && typeof credits.balance !== "undefined") { sub.textContent = formatCSats(credits.balance); return; }
+          } catch {}
+          sub.textContent = "Balance unavailable";
         }
+        /* ── Account menu: opens above the profile row; Esc, outside click or Tab closes ── */
+        (function() {
+          var menu = document.getElementById("accountMenu");
+          var row = document.getElementById("profileRow");
+          var triggers = [document.getElementById("profileBtn"), document.getElementById("profileGear")];
+          var lastTrigger = triggers[0];
+          function items() { return Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]')); }
+          function isOpen() { return !menu.hidden; }
+          function setExpanded(v) { triggers.forEach(function(t) { t.setAttribute("aria-expanded", v ? "true" : "false"); }); row.classList.toggle("open", v); }
+          function openMenu(trigger, focusLast) {
+            lastTrigger = trigger || lastTrigger;
+            menu.hidden = false; setExpanded(true);
+            var list = items(); var target = focusLast ? list[list.length - 1] : list[0];
+            if (target) target.focus();
+          }
+          function closeMenu(restoreFocus) {
+            if (!isOpen()) return;
+            menu.hidden = true; setExpanded(false);
+            if (restoreFocus && lastTrigger) lastTrigger.focus();
+          }
+          triggers.forEach(function(t) {
+            t.addEventListener("click", function(e) { e.stopPropagation(); if (isOpen()) closeMenu(true); else openMenu(t); });
+            t.addEventListener("keydown", function(e) {
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); openMenu(t, e.key === "ArrowUp"); }
+            });
+          });
+          menu.addEventListener("keydown", function(e) {
+            var list = items(); var i = list.indexOf(document.activeElement);
+            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); }
+            else if (e.key === "ArrowDown") { e.preventDefault(); list[(i + 1) % list.length].focus(); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
+            else if (e.key === "Home") { e.preventDefault(); list[0].focus(); }
+            else if (e.key === "End") { e.preventDefault(); list[list.length - 1].focus(); }
+            else if (e.key === "Tab") { closeMenu(false); }
+          });
+          document.addEventListener("click", function(e) { if (isOpen() && !menu.contains(e.target) && !row.contains(e.target)) closeMenu(false); });
+          document.addEventListener("keydown", function(e) { if (e.key === "Escape" && isOpen()) closeMenu(true); });
+          // Same-page anchors (Settings sections) still navigate; close the menu after.
+          menu.addEventListener("click", function(e) { if (e.target.closest && e.target.closest("a[role=menuitem]")) closeMenu(false); });
+        })();
         async function loadReviewsBadge() {
           try {
             var res = await api("/portal/api/reviews");

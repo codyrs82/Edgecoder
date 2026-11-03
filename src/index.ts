@@ -13,6 +13,9 @@ import { LISTEN_HOST } from "./common/env-guard.js";
 const INFERENCE_PORT = Number(process.env.INFERENCE_PORT) || 4302;
 const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT) || 4301;
 const CONTROL_PLANE_PORT = Number(process.env.CONTROL_PLANE_PORT) || 4303;
+const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT) || 4305;
+// The worker joins the network coordinator once the desktop app has enrolled this machine.
+const NETWORK_COORDINATOR_URL = process.env.AGENT_NETWORK_COORDINATOR_URL?.trim() || "";
 
 function isEaddrInUse(err: unknown): err is NodeJS.ErrnoException {
   return typeof err === "object" && err !== null && "code" in err && (err as NodeJS.ErrnoException).code === "EADDRINUSE";
@@ -22,13 +25,35 @@ function helpForPorts(): string {
   return `One of the EdgeCoder ports is already in use (inference: ${INFERENCE_PORT}, coordinator: ${COORDINATOR_PORT}, control-plane: ${CONTROL_PLANE_PORT}).\nStop other EdgeCoder processes (e.g. another "npm run dev" or separate dev:inference/coordinator/control) or free the port:\n  lsof -i :${INFERENCE_PORT} -i :${COORDINATOR_PORT} -i :${CONTROL_PLANE_PORT}\n  kill <pid>`;
 }
 
+/**
+ * Provider for the embedded worker when LOCAL_MODEL_PROVIDER is unset: Ollama if it answers on
+ * this machine, else the edgecoder-local stub (which only echoes the task, so a stub worker
+ * cannot do real swarm work). Decided once at boot.
+ */
+let workerModelProvider = process.env.LOCAL_MODEL_PROVIDER;
+async function detectWorkerModelProvider(): Promise<void> {
+  if (workerModelProvider) return;
+  const host = (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
+    workerModelProvider = res.ok ? "ollama-local" : "edgecoder-local";
+  } catch {
+    workerModelProvider = "edgecoder-local";
+  }
+  if (workerModelProvider === "edgecoder-local") {
+    console.warn(`[unified-agent] Ollama not reachable at ${host}; the worker uses the edgecoder-local stub and cannot do real swarm work`);
+  }
+}
+
 function startWorkerProcess(): void {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
   const workerScript = join(__dirname, "swarm", "worker-runner.js");
 
   const agentId = process.env.AGENT_ID || `node-${hostname().slice(0, 8)}`;
-  const coordinatorUrl = `http://127.0.0.1:${COORDINATOR_PORT}`;
+  // The desktop app sets AGENT_NETWORK_COORDINATOR_URL once the signed-in user has enrolled this
+  // machine, so the worker contributes to the network; otherwise it stays on the local coordinator.
+  const coordinatorUrl = NETWORK_COORDINATOR_URL || `http://127.0.0.1:${COORDINATOR_PORT}`;
 
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
@@ -36,7 +61,9 @@ function startWorkerProcess(): void {
     COORDINATOR_URL: coordinatorUrl,
     AGENT_MODE: process.env.AGENT_MODE ?? "swarm-only",
     AGENT_OS: process.env.AGENT_OS ?? "macos",
-    LOCAL_MODEL_PROVIDER: process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local",
+    LOCAL_MODEL_PROVIDER: workerModelProvider ?? "edgecoder-local",
+    // A networked worker relays the IDE's swarm work (signed, billed to this machine's owner).
+    ...(NETWORK_COORDINATOR_URL ? { LOCAL_FORWARD_PORT: String(LOCAL_FORWARD_PORT) } : {}),
   };
 
   // Forward optional env vars if set
@@ -61,6 +88,26 @@ function startWorkerProcess(): void {
 
   child.unref();
   console.log(`[unified-agent] worker started as pid=${child.pid} (agent=${agentId}, coordinator=${coordinatorUrl})`);
+}
+
+/** The IDE provider (:4304, OpenAI-compatible) the app's IDE and local coding agents talk to. */
+function startIdeProvider(): void {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    // Swarm work goes through this machine's own agent rather than to a coordinator directly.
+    ...(NETWORK_COORDINATOR_URL ? { SWARM_VIA_LOCAL_AGENT_URL: `http://127.0.0.1:${LOCAL_FORWARD_PORT}` } : {}),
+  };
+  const child = fork(join(__dirname, "apps", "ide", "provider-server.js"), [], {
+    env,
+    stdio: ["ignore", "inherit", "inherit", "ipc"],
+  });
+  child.on("exit", (code) => {
+    console.warn(`[unified-agent] IDE provider exited (code=${code}), restarting in 5s...`);
+    setTimeout(startIdeProvider, 5000);
+  });
+  child.unref();
+  console.log(`[unified-agent] IDE provider started as pid=${child.pid}`);
 }
 
 async function boot(): Promise<void> {
@@ -89,8 +136,10 @@ async function boot(): Promise<void> {
   if (process.env.DISABLE_SELF_AGENT === "1") {
     console.log("[unified-agent] self-agent disabled (DISABLE_SELF_AGENT=1)");
   } else {
+    await detectWorkerModelProvider();
     startWorkerProcess();
   }
+  if (process.env.DISABLE_IDE_PROVIDER !== "1") startIdeProvider();
 }
 
 boot().catch((error) => {

@@ -25,7 +25,8 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/ollama/, ""),
       },
       "/chat": {
-        target: "http://localhost:4304",
+        // EDGECODER_IDE_URL points the dev UI at another IDE server (a test stack).
+        target: process.env.EDGECODER_IDE_URL ?? "http://localhost:4304",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/chat/, ""),
       },

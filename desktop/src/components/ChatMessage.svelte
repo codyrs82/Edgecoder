@@ -5,6 +5,8 @@
   import ShellBlock from "./ShellBlock.svelte";
   import DiffBlock from "./DiffBlock.svelte";
   import PlanBlock from "./PlanBlock.svelte";
+  import ChangesCard from "./ChangesCard.svelte";
+  import NetworkTaskCard from "./NetworkTaskCard.svelte";
   import type { StreamProgress } from "../lib/api";
   import type { ToolEvent } from "../lib/types";
 
@@ -16,8 +18,17 @@
     onOpenInEditor?: (code: string, language: string) => void;
     toolEvents?: ToolEvent[];
     onToolApproval?: (id: string, approved: boolean) => void;
+    /** Agent turn checkpoint and the files it wrote: shows the review / undo card. */
+    turnId?: string;
+    changedFiles?: string[];
+    onFilesReverted?: () => void;
+    onOpenPath?: (path: string) => void;
+    networkTaskId?: string;
+    onPreview?: (path: string) => void;
+    /** What the reply cost and where it ran. */
+    usage?: { cSats: number; where?: string };
   }
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
 </script>
 
 <div class="message {role}">
@@ -66,8 +77,19 @@
           {/each}
         </div>
       {/if}
+      {#if networkTaskId}
+        <NetworkTaskCard taskId={networkTaskId} />
+      {/if}
+      {#if turnId && changedFiles && changedFiles.length > 0 && !streaming}
+        <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} {onPreview} />
+      {/if}
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
+      {/if}
+      {#if usage && !streaming}
+        <div class="reply-usage" title="Where this reply ran and what it cost">
+          {usage.where ?? "Network"} · {usage.cSats > 0 ? `${usage.cSats.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats` : "free"}
+        </div>
       {/if}
     </div>
   {/if}
@@ -105,5 +127,10 @@
   }
   .message:hover {
     opacity: 1;
+  }
+  .reply-usage {
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: var(--text-muted, var(--text-secondary));
   }
 </style>

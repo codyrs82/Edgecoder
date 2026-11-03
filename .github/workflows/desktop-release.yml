@@ -1,0 +1,191 @@
+name: desktop-release
+# Signed desktop releases with in-app auto-update. Push a tag desktop-vX.Y.Z (matching
+# desktop/src-tauri/tauri.conf.json "version") and this workflow:
+#   1. builds the signed updater bundles (macOS .app.tar.gz, Windows NSIS setup.exe) plus a DMG,
+#   2. publishes them to the release desktop-vX.Y.Z,
+#   3. writes latest.json and replaces it in the fixed release "desktop-updates", which is the
+#      feed every installed app polls (plugins.updater.endpoints).
+# The Tauri updater verifies each bundle's minisign signature against the pubkey baked into
+# the app, so only builds signed with TAURI_SIGNING_PRIVATE_KEY are ever installed.
+on:
+  push:
+    tags: ["desktop-v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-latest, platform: darwin-aarch64, bundles: "app,dmg" }
+          - { os: windows-latest, platform: windows-x86_64, bundles: nsis }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tag must match tauri.conf.json version
+        shell: bash
+        run: |
+          set -eu
+          conf=$(node -p 'require("./desktop/src-tauri/tauri.conf.json").version')
+          [ "desktop-v$conf" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME != desktop-v$conf"; exit 1; }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop/src-tauri
+      - run: npm ci
+      - run: npm ci
+        working-directory: desktop
+      - name: Import Developer ID certificate (macOS, for signing the bundled agent)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          # Without the secrets the build is unsigned for Apple, as before.
+          [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ] || { echo "No Apple signing secrets: skipping"; exit 0; }
+          KEYCHAIN="$RUNNER_TEMP/edgecoder-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # codesign may use the key without a prompt.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Apple's Developer ID G2 intermediate, so the identity validates on the runner.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" >/dev/null || true
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application" || { echo "::error::Developer ID identity not usable after import"; exit 1; }
+          # The bundling step (Tauri's beforeBuildCommand) signs the agent's binaries with this identity.
+          echo "EDGECODER_CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+      - name: tauri build (signed updater artifacts)
+        working-directory: desktop
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple Developer ID signing + notarization (macOS): Tauri signs with the certificate and
+          # notarizes with the Apple ID when these are set, so the app opens without "Open Anyway".
+          # Unset (no secrets yet) = unsigned for Apple, as before. See docs/macos-installer.md.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set"; exit 1; }
+          # Empty Apple variables would make Tauri try (and fail) to import a certificate: drop them.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ]; then echo "macOS build: Developer ID signing and notarization on"
+            else echo "::notice::macOS build is not notarized (APPLE_* secrets not set); first launch needs Open Anyway"; fi
+          fi
+          node scripts/gen-tauri-csp.mjs
+          npx tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.csp.json
+      - name: Collect bundles
+        shell: bash
+        run: |
+          set -eu
+          ver=${GITHUB_REF_NAME#desktop-v}
+          b=desktop/src-tauri/target/release/bundle
+          mkdir -p out
+          if [ "${{ runner.os }}" = macOS ]; then
+            cp "$b/macos/EdgeCoder.app.tar.gz"     "out/EdgeCoder_${ver}_aarch64.app.tar.gz"
+            cp "$b/macos/EdgeCoder.app.tar.gz.sig" "out/EdgeCoder_${ver}_aarch64.app.tar.gz.sig"
+            cp "$b"/dmg/*.dmg                       "out/EdgeCoder_${ver}_aarch64.dmg"
+            echo "EdgeCoder_${ver}_aarch64.app.tar.gz" > out/${{ matrix.platform }}.asset
+          else
+            exe=$(ls "$b"/nsis/*-setup.exe | head -n1)
+            cp "$exe"     "out/EdgeCoder_${ver}_x64-setup.exe"
+            cp "$exe.sig" "out/EdgeCoder_${ver}_x64-setup.exe.sig"
+            echo "EdgeCoder_${ver}_x64-setup.exe" > out/${{ matrix.platform }}.asset
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: out
+          merge-multiple: true
+      - name: Write latest.json
+        shell: bash
+        run: |
+          set -eu
+          ver=${GITHUB_REF_NAME#desktop-v}
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          cd out
+          node - "$ver" "$base" <<'JS'
+          const fs = require("fs");
+          const [ver, base] = process.argv.slice(2);
+          const platforms = {};
+          for (const f of fs.readdirSync(".").filter((f) => f.endsWith(".asset"))) {
+            const asset = fs.readFileSync(f, "utf8").trim();
+            platforms[f.replace(/\.asset$/, "")] = {
+              signature: fs.readFileSync(`${asset}.sig`, "utf8").trim(),
+              url: `${base}/${asset}`,
+            };
+          }
+          if (!platforms["darwin-aarch64"] || !platforms["windows-x86_64"]) throw new Error("missing platform bundle");
+          fs.writeFileSync("latest.json", JSON.stringify({
+            version: ver,
+            notes: `EdgeCoder ${ver}`,
+            pub_date: new Date().toISOString(),
+            platforms,
+          }, null, 2));
+          JS
+          rm -f *.asset
+          cat latest.json
+      - name: Publish release and update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -eu
+          cd out
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "EdgeCoder Desktop ${GITHUB_REF_NAME#desktop-v}" \
+            --notes "Signed desktop build. Installed apps update automatically." ./*
+          # The fixed feed release: apps poll .../releases/download/desktop-updates/latest.json.
+          gh release view desktop-updates -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create desktop-updates -R "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title "Desktop update feed" \
+              --notes "Auto-update feed for EdgeCoder Desktop. Do not delete."
+          gh release upload desktop-updates latest.json -R "$GITHUB_REPOSITORY" --clobber

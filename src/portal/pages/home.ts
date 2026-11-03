@@ -2,171 +2,120 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
+import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 import { siteLabel } from "./urls.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerHomePage(app: FastifyInstance): void {
 app.get("/portal", async (_req, reply) => {
+  // Only offer SSO for providers actually configured on this portal, so we never show a dead
+  // button (e.g. Microsoft after the tenant was dropped). Email + passkey are always available.
+  const googleOn = Boolean(process.env.OAUTH_GOOGLE_CLIENT_ID && process.env.OAUTH_GOOGLE_CLIENT_SECRET);
+  const microsoftOn = Boolean(process.env.OAUTH_MICROSOFT_CLIENT_ID && process.env.OAUTH_MICROSOFT_CLIENT_SECRET);
+  const ssoButtons = [googleOn ? `<a href="/auth/oauth/google/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4z"/></svg> Google</button></a>` : "", microsoftOn ? `<a href="/auth/oauth/microsoft/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" fill="#F25022"/><rect x="13" y="2" width="9" height="9" fill="#7FBA00"/><rect x="2" y="13" width="9" height="9" fill="#00A4EF"/><rect x="13" y="13" width="9" height="9" fill="#FFB900"/></svg> Microsoft 365</button></a>` : ""].filter(Boolean).join("");
+  const ssoBlock = ssoButtons ? `<div class="or">or continue with</div><div class="sso">${ssoButtons}</div>` : "";
   const html = `<!doctype html>
-  <html>
+  <html lang="en">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>EdgeCoder Portal | Sign in</title>
       <style>
-        :root {
-          --bg: #1a1a18;
-          --bg-soft: #2f2f2d;
-          --bg-surface: #3a3a37;
-          --bg-elevated: #454542;
-          --bg-input: #262624;
-          --card: rgba(58, 58, 55, 0.96);
-          --card-border: rgba(214, 204, 194, 0.08);
-          --border-strong: rgba(214, 204, 194, 0.15);
-          --text: #f7f5f0;
-          --text-secondary: #b8b0a4;
-          --muted: #8a8478;
-          --brand: #c17850;
-          --brand-2: #d4895f;
-          --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+        ${TOKENS_CSS}
+        ${BASE_CSS}
+        .auth { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
+        .auth-brand {
+          display: flex; flex-direction: column; justify-content: space-between;
+          padding: 36px 44px; background: var(--bg-soft); border-right: 1px solid var(--card-border);
         }
-        * { box-sizing: border-box; }
-        body {
-          font-family: system-ui, -apple-system, sans-serif;
-          font-size: 14px;
-          line-height: 1.5;
-          margin: 0;
-          color: var(--text);
-          background: var(--bg);
-          min-height: 100vh;
-          -webkit-font-smoothing: antialiased;
-        }
-        .shell { max-width: 980px; margin: 28px auto 42px; padding: 0 16px; }
-        .hero { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-        .brand { display: inline-flex; align-items: center; gap: 10px; }
-        .mark {
-          width: 36px;
-          height: 36px;
-          border-radius: 11px;
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-        }
-        .muted { color: var(--muted); font-size: 13px; }
-        .layout { display: grid; grid-template-columns: 1fr; gap: 12px; }
-        .auth-stack { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(260px, 1fr)); }
-        .card {
-          background: var(--card);
-          border: 1px solid var(--card-border);
-          border-radius: 12px;
-          padding: 16px;
-          backdrop-filter: blur(10px);
-          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
-        }
-        .simple-intro { background: var(--bg-soft); }
-        .simple-intro h2 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.02em; }
-        .simple-intro p { margin: 0; color: var(--muted); line-height: 1.6; max-width: 760px; }
-        label { display: block; margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
-        input {
-          width: 100%;
-          padding: 10px 11px;
-          border: 1px solid var(--card-border);
-          border-radius: 10px;
-          background: var(--bg);
-          color: var(--text);
-        }
-        .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
-        button {
-          padding: 9px 12px;
-          border-radius: 10px;
-          border: 1px solid var(--card-border);
-          background: var(--bg-soft);
-          color: var(--text);
-          cursor: pointer;
-        }
-        button.primary {
-          background: linear-gradient(140deg, var(--brand), var(--brand-2));
-          border-color: rgba(193, 120, 80, 0.75);
-          color: white;
-        }
-        a { color: inherit; }
-        #toast {
-          position: fixed;
-          top: 20px;
-          right: 20px;
-          width: min(420px, calc(100vw - 32px));
-          z-index: 100;
-          margin: 0;
-        }
-        .hidden { display: none; }
-        .session-banner {
-          border: 1px solid rgba(193, 120, 80, 0.34);
-          background: rgba(58, 58, 55, 0.8);
-        }
-        @media (max-width: 920px) {
-          .auth-stack { grid-template-columns: 1fr; }
-        }
+        .auth-brand .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
+        .auth-brand h1 { font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 12px; max-width: 480px; }
+        .auth-brand .lead { color: var(--text-secondary); font-size: 15px; max-width: 480px; margin-bottom: 28px; }
+        .props { display: grid; gap: 14px; max-width: 480px; }
+        .prop { display: flex; gap: 12px; align-items: flex-start; }
+        .prop .icon { flex: none; width: 32px; height: 32px; border-radius: var(--radius-sm); border: 1px solid var(--card-border); background: var(--bg-surface); display: inline-flex; align-items: center; justify-content: center; color: var(--brand-2); }
+        .prop b { display: block; font-size: 13px; margin-bottom: 2px; }
+        .prop span { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+        .auth-foot { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; margin-top: 28px; }
+        .auth-foot a { color: var(--muted); } .auth-foot a:hover { color: var(--text); }
+        .auth-main { display: flex; align-items: center; justify-content: center; padding: 36px 24px; }
+        .auth-card { width: min(440px, 100%); }
+        .tabs { display: flex; border: 1px solid var(--card-border); border-radius: var(--radius-sm); padding: 3px; background: var(--bg-surface); margin-bottom: 18px; }
+        .tabs button { flex: 1; border: none; background: transparent; color: var(--muted); min-height: 30px; }
+        .tabs button.active { background: var(--bg-elevated); color: var(--text); }
+        .pane { display: none; } .pane.active { display: block; }
+        .sso { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .sso a { display: block; }
+        .sso button { width: 100%; }
+        .or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; margin: 16px 0; }
+        .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--card-border); }
+        .auth-card h2 { font-size: 20px; margin-bottom: 4px; }
+        .auth-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+        .session-banner { margin-top: 14px; }
+        .link-btn { background: none; border: none; color: var(--text-secondary); padding: 0; min-height: 0; font-size: 12px; }
+        .link-btn:hover { color: var(--brand-2); background: none; }
+        @media (max-width: 860px) { .auth { grid-template-columns: 1fr; } .auth-brand { border-right: none; border-bottom: 1px solid var(--card-border); padding: 24px; } .auth-brand h1 { font-size: 24px; } }
       </style>
     </head>
     <body>
-      <div class="shell">
-        <div class="hero">
-          <div class="brand">
-            <div class="mark">E</div>
-            <div>
-              <h1 style="margin:0;">EdgeCoder Portal</h1>
-              <div class="muted">Sign in to access dashboard, nodes, wallet, and settings pages.</div>
+      <div class="auth">
+        <section class="auth-brand">
+          <div>
+            <div class="brand">${brandMark(30)}<span>EdgeCoder</span></div>
+            <div style="height:48px"></div>
+            <h1>Compute, priced in Bitcoin.</h1>
+            <p class="lead">Run AI coding workloads on a global mesh of machines. Contribute capacity and earn sats, or buy capacity with sats at a market rate recalibrated daily.</p>
+            <div class="props">
+              <div class="prop"><span class="icon">${icon("shield", 16)}</span><div><b>Private by default</b><span>Your code runs on your machines first. Only what you allow crosses to approved public capacity.</span></div></div>
+              <div class="prop"><span class="icon">${icon("bitcoin", 16)}</span><div><b>Lightning settlement</b><span>Buy credits with a Lightning invoice. Workers and infrastructure hosts are paid in sats for measured work.</span></div></div>
+              <div class="prop"><span class="icon">${icon("market", 16)}</span><div><b>An open market for compute</b><span>Agents post asks, tasks carry bids, and every hardware class trades against BTC on the market page.</span></div></div>
             </div>
           </div>
-          <a href="/">Back to ${siteLabel()}</a>
-        </div>
-        <div class="layout">
-          <div class="card simple-intro">
-            <h2>Simple, secure sign-in</h2>
-            <p>
-              Access your EdgeCoder workspace with enterprise authentication controls,
-              passkeys, and policy-driven operations in one place.
-            </p>
+          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>&copy; 2025 EdgeCoder, LLC</span></div>
+        </section>
+        <section class="auth-main">
+          <div class="auth-card">
+            <div class="tabs" role="tablist">
+              <button id="tabSignin" class="active" role="tab" aria-selected="true">Sign in</button>
+              <button id="tabSignup" role="tab" aria-selected="false">Create account</button>
+            </div>
+
+            <div class="pane active" id="paneSignin">
+              <h2>Welcome back</h2>
+              <div class="sub">Sign in with your email, a passkey, or single sign-on.</div>
+              <label>Email</label><input id="loginEmail" type="email" placeholder="you@company.com" autocomplete="email" />
+              <label>Password</label><input id="loginPassword" type="password" placeholder="Your password" autocomplete="current-password" />
+              <div class="row" style="margin-top:14px;">
+                <button class="primary" id="loginBtn" style="flex:1;">Sign in</button>
+                <button id="passkeyLoginBtn">${icon("key", 14)} Passkey</button>
+              </div>
+              <div class="row" style="margin-top:10px; justify-content:space-between;"><a class="link-btn" id="forgotLink" href="/portal/reset-password">Forgot password?</a><button class="link-btn" id="resendBtn">Resend verification email</button></div>
+              ${ssoBlock}
+            </div>
+
+            <div class="pane" id="paneSignup">
+              <h2>Create your account</h2>
+              <div class="sub">Enroll nodes, buy or earn credits, and manage your wallet.</div>
+              <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" autocomplete="email" />
+              <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
+              <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
+              <div class="row" style="margin-top:14px;">
+                <button class="primary" id="signupBtn" style="flex:1;">Create account</button>
+              </div>
+              <p class="muted" style="margin-top:12px;">We email a verification link. Nodes you enroll activate once the address is verified.</p>
+            </div>
+
+            <div id="sessionBanner" class="callout session-banner hidden">
+              <h3>Already signed in</h3>
+              <div id="sessionUserLine" class="muted">You already have an active session.</div>
+              <div class="row" style="margin-top:10px;">
+                <button class="primary" id="continueSessionBtn">Continue to dashboard</button>
+                <button id="switchUserBtn">Switch user</button>
+              </div>
+            </div>
           </div>
-          <div class="auth-stack">
-            <div class="card">
-            <h2 style="margin-top:0;">Get started</h2>
-            <p class="muted">Create your account to enroll nodes and manage compute access.</p>
-            <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" />
-            <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" />
-            <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
-            <div class="row">
-              <button class="primary" id="signupBtn">Create account</button>
-            </div>
-            </div>
-            <div class="card">
-            <h2 style="margin-top:0;">Sign in</h2>
-            <label>Email</label><input id="loginEmail" type="email" placeholder="you@company.com" />
-            <label>Password</label><input id="loginPassword" type="password" placeholder="Your password" />
-            <div class="row">
-              <button class="primary" id="loginBtn">Log in</button>
-              <button id="resendBtn">Resend verification</button>
-            </div>
-            <div class="row">
-              <button id="passkeyLoginBtn">Log in with passkey</button>
-            </div>
-            <h3>Single sign-on</h3>
-            <div class="row">
-              <a href="/auth/oauth/google/start"><button>Google</button></a>
-              <a href="/auth/oauth/microsoft/start"><button>Microsoft 365</button></a>
-            </div>
-            </div>
-          </div>
-        </div>
-        <div id="sessionBanner" class="card session-banner hidden">
-          <h3 style="margin-top:0;">Already signed in</h3>
-          <div id="sessionUserLine" class="muted">You already have an active session.</div>
-          <div class="row">
-            <button class="primary" id="continueSessionBtn">Continue to dashboard</button>
-            <button id="switchUserBtn">Switch user</button>
-          </div>
-        </div>
+        </section>
       </div>
       <div id="toast" class="card hidden"></div>
       <script>
@@ -178,9 +127,24 @@ app.get("/portal", async (_req, reply) => {
         function showToast(message, isError = false) {
           toast.textContent = message;
           toast.classList.remove("hidden");
-          toast.style.borderColor = isError ? "#ef4444" : "#22c55e";
-          setTimeout(() => toast.classList.add("hidden"), 5000);
+          toast.style.borderLeftColor = isError ? "var(--danger)" : "var(--ok)";
+          clearTimeout(toast._t);
+          toast._t = setTimeout(() => toast.classList.add("hidden"), 5000);
         }
+        (function tabs() {
+          const map = { tabSignin: "paneSignin", tabSignup: "paneSignup" };
+          for (const id of Object.keys(map)) {
+            document.getElementById(id).addEventListener("click", () => {
+              for (const [tab, pane] of Object.entries(map)) {
+                const on = tab === id;
+                document.getElementById(tab).classList.toggle("active", on);
+                document.getElementById(tab).setAttribute("aria-selected", on ? "true" : "false");
+                document.getElementById(pane).classList.toggle("active", on);
+              }
+            });
+          }
+          if (location.hash === "#signup") document.getElementById("tabSignup").click();
+        })();
         function b64urlToArrayBuffer(base64url) {
           const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
           const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
@@ -242,7 +206,8 @@ app.get("/portal", async (_req, reply) => {
             });
             window.location.href = "/portal/dashboard";
           } catch (err) {
-            showToast("Login failed: " + String(err.message || err), true);
+            const code = String(err.message || err);
+            showToast(code === "invalid_credentials" ? 'Wrong email or password. To reset it, use \u201cForgot password?\u201d below.' : "Login failed: " + code, true);
           }
         });
         document.getElementById("resendBtn").addEventListener("click", async () => {

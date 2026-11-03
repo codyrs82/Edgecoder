@@ -1,0 +1,42 @@
+# lnd configuration for the EdgeCoder infrastructure node bundle.
+# scripts/infra-bootstrap.sh substitutes the double-underscore placeholders from deploy/infra/.env and
+# writes deploy/infra/generated/lnd.conf (mode 600: it carries the bitcoind RPC password).
+# Edit this template, then re-run the bootstrap; do not edit the generated file.
+
+[Application Options]
+alias=__LND_ALIAS__
+listen=0.0.0.0:9735
+rpclisten=0.0.0.0:10009
+restlisten=0.0.0.0:8080
+# The coordinator reaches REST as https://lnd:8080; put that name in the TLS cert.
+tlsextradomain=lnd
+tlsautorefresh=true
+# Non-interactive unlock on every start (file is a compose secret, created by the bootstrap).
+# allow-create lets lnd start before the wallet exists so the bootstrap can call initwallet.
+wallet-unlock-password-file=/run/secrets/lnd_wallet_password
+wallet-unlock-allow-create=true
+# Rendered as `externalip=<LND_EXTERNAL_IP>` when set, otherwise left empty.
+__LND_EXTERNALIP_LINE__
+accept-keysend=true
+maxpendingchannels=5
+minchansize=20000
+debuglevel=info
+maxlogfiles=3
+maxlogfilesize=20
+
+[Bitcoin]
+bitcoin.__LND_NETWORK__=1
+bitcoin.node=bitcoind
+
+[Bitcoind]
+bitcoind.rpchost=bitcoind:8332
+bitcoind.rpcuser=__BITCOIND_RPC_USER__
+bitcoind.rpcpass=__BITCOIND_RPC_PASSWORD__
+bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+
+[protocol]
+protocol.wumbo-channels=true
+
+[db]
+db.bolt.auto-compact=true

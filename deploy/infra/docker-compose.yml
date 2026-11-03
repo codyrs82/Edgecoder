@@ -1,0 +1,241 @@
+# EdgeCoder infrastructure node bundle (architecture step 5).
+# One operator-run stack that hosts the network's infrastructure and earns from the fee pool:
+#   bitcoind (Bitcoin Knots)  checkpoint anchoring backend, chain source for lnd and electrs
+#   lnd                       Lightning node the coordinator pays and gets paid through
+#   electrs   (profile indexer, optional)  Electrum index, +0.5 fee-pool weight
+#   postgres                  coordinator database
+#   edgecoder                 all-in-one coordinator image built from deploy/docker/Dockerfile.server
+# Values come from deploy/infra/.env (written by scripts/infra-bootstrap.sh from .env.example);
+# bitcoin.conf and lnd.conf are rendered by the same script into deploy/infra/generated/.
+# Everything runs as uid 1000 so the coordinator (user `node`) can read lnd's admin macaroon
+# from the read-only lnd volume. Only P2P ports and the coordinator are reachable from outside.
+# docs/infra-node.md has requirements, payouts and the exact commands.
+
+name: edgecoder-infra
+
+x-uid: &uid "1000:1000"
+x-restart: &restart unless-stopped
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "5" }
+
+services:
+  # Named volumes are created root-owned; give them to uid 1000 once (top level only, so a
+  # multi-hundred-GB chain is not re-walked at every start).
+  volume-init:
+    image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
+    user: "0:0"
+    command: ["sh", "-c", "chown 1000:1000 /vol/bitcoin /vol/lnd /vol/electrs /vol/edgecoder && chmod 700 /vol/bitcoin /vol/lnd"]
+    volumes:
+      - bitcoin_data:/vol/bitcoin
+      - lnd_data:/vol/lnd
+      - electrs_db:/vol/electrs
+      - edgecoder_data:/vol/edgecoder
+    restart: "no"
+    logging: *logging
+
+  bitcoind:
+    image: btcpayserver/bitcoinknots:29.3.knots20260210@sha256:ff6b196d4e4c7cd3d84036d3110c3a5134e7e9eb686d0b343ea11183ddac2024
+    user: *uid
+    # Bypass the image entrypoint (it wants root to chown): bitcoind reads the rendered conf.
+    entrypoint: ["bitcoind"]
+    command: ["-conf=/etc/bitcoin/bitcoin.conf", "-datadir=/data", "-printtoconsole"]
+    volumes:
+      - bitcoin_data:/data
+      - ./generated/bitcoin.conf:/etc/bitcoin/bitcoin.conf:ro
+    ports:
+      # P2P only. RPC (8332) and ZMQ (28332/28333) stay on the compose network.
+      - "${BITCOIN_P2P_PORT}:${BITCOIN_P2P_PORT}"
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-conf=/etc/bitcoin/bitcoin.conf", "-datadir=/data", "getblockchaininfo"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    stop_grace_period: 10m
+    restart: *restart
+    logging: *logging
+    networks: [infra]
+
+  lnd:
+    image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+    user: *uid
+    command:
+      - lnd
+      - --lnddir=/data/lnd
+      - --configfile=/etc/lnd/lnd.conf
+    environment:
+      HOME: /data/lnd
+    volumes:
+      - lnd_data:/data/lnd
+      - ./generated/lnd.conf:/etc/lnd/lnd.conf:ro
+    secrets:
+      - lnd_wallet_password
+    ports:
+      - "9735:9735"
+      # REST for the bootstrap script (wallet init) and lncli from the host; keep on 127.0.0.1.
+      - "${LND_REST_BIND}:8080"
+    healthcheck:
+      # `lncli state` needs only the TLS cert, so it passes while the wallet is still locked.
+      test: ["CMD", "lncli", "--lnddir=/data/lnd", "--network=${LND_NETWORK}", "state"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      bitcoind:
+        condition: service_started
+    stop_grace_period: 2m
+    restart: *restart
+    logging: *logging
+    networks: [infra]
+
+  electrs:
+    image: getumbrel/electrs:v0.10.10@sha256:c991fd3d8b19614fa7309525e8ccb6c0a87464f8bf6bd4dff1479b493f7308f2
+    profiles: ["indexer"]
+    user: *uid
+    command:
+      - --network=${BITCOIN_NETWORK}
+      - --db-dir=/data
+      - --daemon-dir=/bitcoin
+      - --daemon-rpc-addr=bitcoind:8332
+      - --daemon-p2p-addr=bitcoind:${BITCOIN_P2P_PORT}
+      - --auth=${BITCOIND_RPC_USER}:${BITCOIND_RPC_PASSWORD}
+      - --electrum-rpc-addr=0.0.0.0:50001
+      - --log-filters=INFO
+    volumes:
+      - electrs_db:/data
+      - bitcoin_data:/bitcoin:ro
+    ports:
+      - "${ELECTRS_BIND}:50001"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50001' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      bitcoind:
+        condition: service_healthy
+    restart: *restart
+    logging: *logging
+    networks: [infra]
+
+  postgres:
+    image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: *restart
+    logging: *logging
+    networks: [infra]
+
+  edgecoder:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.server
+    image: edgecoder-infra/edgecoder:local
+    # The wrapper waits for lnd's TLS cert and admin macaroon, exports LND_MACAROON_HEX, then
+    # execs the command. /bin/sh so a lost exec bit on the bind mount cannot break startup.
+    entrypoint: ["/usr/bin/tini", "--", "/bin/sh", "/edgecoder-entrypoint.sh"]
+    command: ["node", "dist/index.js"]
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      EDGE_RUNTIME_MODE: all-in-one
+      NETWORK_MODE: public_mesh
+      # Infrastructure host, not a compute agent: the worker process stays off.
+      DISABLE_SELF_AGENT: "1"
+      HOME: /data/edgecoder
+      COORDINATOR_PEER_CACHE_FILE: /data/edgecoder/coordinator-peer-cache.json
+      COORDINATOR_PUBLIC_URL: ${COORDINATOR_PUBLIC_URL}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Bitcoin anchoring straight to the local node (src/economy/bitcoin-rpc.ts).
+      BITCOIN_NETWORK: ${BITCOIN_NETWORK}
+      BITCOIN_ANCHOR_PROVIDER: bitcoind
+      BITCOIND_RPC_URL: http://bitcoind:8332
+      BITCOIND_RPC_USER: ${BITCOIND_RPC_USER}
+      BITCOIND_RPC_PASSWORD: ${BITCOIND_RPC_PASSWORD}
+      BITCOIND_WALLET_NAME: ${BITCOIND_WALLET_NAME}
+      # Lightning via lnd REST (src/economy/lightning.ts). LND_MACAROON_HEX is set by the wrapper;
+      # NODE_EXTRA_CA_CERTS trusts lnd's self-signed cert (SAN "lnd" from tlsextradomain).
+      LIGHTNING_PROVIDER: lnd
+      LND_REST_URL: https://lnd:8080
+      LND_NETWORK: ${LND_NETWORK}
+      LND_MACAROON_PATH: /lnd/data/chain/bitcoin/${LND_NETWORK}/admin.macaroon
+      LND_TLS_CERT_PATH: /lnd/tls.cert
+      NODE_EXTRA_CA_CERTS: /lnd/tls.cert
+      ECONOMY_PAYMENTS_ENABLED: ${ECONOMY_PAYMENTS_ENABLED}
+      # Secrets and mesh membership.
+      MESH_AUTH_TOKEN: ${MESH_AUTH_TOKEN}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN}
+      INFERENCE_AUTH_TOKEN: ${INFERENCE_AUTH_TOKEN}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
+      PORTAL_SERVICE_URL: ${PORTAL_SERVICE_URL}
+      PORTAL_SERVICE_TOKEN: ${PORTAL_SERVICE_TOKEN}
+      COORDINATOR_REGISTRATION_TOKEN: ${COORDINATOR_REGISTRATION_TOKEN}
+      COORDINATOR_BOOTSTRAP_URLS: ${COORDINATOR_BOOTSTRAP_URLS}
+      # Fee-pool heartbeat (POST /economy/hosts/heartbeat, self-sent by the coordinator).
+      INFRA_HOST_ACCOUNT_ID: ${INFRA_HOST_ACCOUNT_ID}
+      INFRA_HOST_LIGHTNING_ADDRESS: ${INFRA_HOST_LIGHTNING_ADDRESS}
+      INFRA_HOST_SERVICES: ${INFRA_HOST_SERVICES}
+    volumes:
+      - edgecoder_data:/data/edgecoder
+      - lnd_data:/lnd:ro
+      - ./edgecoder-entrypoint.sh:/edgecoder-entrypoint.sh:ro
+    ports:
+      - "4301:4301"
+      - "127.0.0.1:4302:4302"
+      - "127.0.0.1:4303:4303"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4301/health/runtime').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      bitcoind:
+        condition: service_started
+      lnd:
+        condition: service_started
+    restart: *restart
+    logging: *logging
+    networks: [infra]
+
+secrets:
+  # Created by scripts/infra-bootstrap.sh (mode 600). lnd auto-unlocks from it on every start.
+  lnd_wallet_password:
+    file: ./secrets/lnd-wallet-password
+
+volumes:
+  bitcoin_data:
+  lnd_data:
+  electrs_db:
+  postgres_data:
+  edgecoder_data:
+
+networks:
+  infra:
+    # Fixed subnet so bitcoin.conf's rpcallowip can name it.
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

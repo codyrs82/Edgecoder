@@ -140,11 +140,19 @@ export class OllamaLocalProvider implements ModelProvider {
       body: JSON.stringify({
         model: this.model,
         prompt: req.prompt,
-        stream: false
+        stream: false,
+        // Agents plan and write code from explicit prompts; a thinking model's reasoning pass made
+        // each call ~17x slower (qwen3.5:9b: 41 s vs 2.4 s). OLLAMA_THINK=1 turns it back on.
+        think: process.env.OLLAMA_THINK === "1"
       })
     });
 
-    const payload = (await response.body.json()) as { response?: string };
+    const payload = (await response.body.json().catch(() => ({}))) as { response?: string; error?: string };
+    // Ollama answers a missing model or a bad request with an error body; returning "" made the
+    // worker run empty code and report success with no output.
+    if (response.statusCode >= 400 || payload.error) {
+      throw new Error(`ollama (${this.model}): ${payload.error ?? `HTTP ${response.statusCode}`}`);
+    }
     return {
       text: payload.response ?? "",
       provider: this.kind

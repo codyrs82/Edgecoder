@@ -9,6 +9,7 @@ import {
   PORTAL_KEY,
   coordinatorUrl,
   defaultEndpoints,
+  portalResetPasswordUrl,
   portalSignupUrl,
   portalUrl,
   resetEndpoints,
@@ -42,6 +43,16 @@ describe("desktop endpoints (#35)", () => {
     expect(portalUrl(mem({ [PORTAL_KEY]: "http://127.0.0.1:4310" }), {})).toBe("http://127.0.0.1:4310");
     // The dead pre-#35 default saved in the legacy field doesn't override the new default.
     expect(coordinatorUrl(mem({ [LEGACY_SEED_KEY]: "https://" + "edgecoder-seed" + ".fly.dev/" }), {})).toBe(FALLBACK_COORDINATOR_URL);
+  });
+
+  it("ignores saved overrides that point at retired raw Fly origins (origin lock)", () => {
+    // A Portal URL saved before the Cloudflare origin lock would make sign-in fail with origin_locked.
+    expect(portalUrl(mem({ [PORTAL_KEY]: "https://edgecoder-portal" + ".fly.dev/" }), {})).toBe(FALLBACK_PORTAL_URL);
+    expect(portalSignupUrl(mem({ [PORTAL_KEY]: "https://edgecoder-portal" + ".fly.dev/portal" }), {})).toBe(`${FALLBACK_PORTAL_URL}/portal`);
+    expect(coordinatorUrl(mem({ [COORDINATOR_KEY]: "https://edgecoder-seed-eu" + ".fly.dev" }), {})).toBe(FALLBACK_COORDINATOR_URL);
+    expect(FALLBACK_COORDINATOR_URL).toBe("https://coordinator.edgecoder.io");
+    // Anything else (self-hosted, local) still wins.
+    expect(portalUrl(mem({ [PORTAL_KEY]: "https://portal.example" }), {})).toBe("https://portal.example");
   });
 
   it("rejects invalid schemes and ignores invalid stored values", () => {
@@ -86,5 +97,11 @@ describe("portalSignupUrl (#26 sign-up button)", () => {
   it("uses the portal override or the default, without a double slash", () => {
     expect(portalSignupUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal");
     expect(portalSignupUrl(mem())).toMatch(/^https:\/\/[^/]+(\/[^/]+)*\/portal$/);
+  });
+});
+
+describe("portalResetPasswordUrl (Forgot password? link)", () => {
+  it("points at /portal/reset-password on the configured portal", () => {
+    expect(portalResetPasswordUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal/reset-password");
   });
 });

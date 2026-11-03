@@ -1,0 +1,6 @@
+[Unit]
+Description=Fake docker daemon (container test)
+[Service]
+ExecStart=/bin/sleep infinity
+[Install]
+WantedBy=multi-user.target

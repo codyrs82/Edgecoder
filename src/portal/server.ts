@@ -9,6 +9,7 @@ import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import { registerPortalPages } from "./pages/index.js";
 import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
+import { coordinatorPricingSource } from "./public-pricing.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -20,6 +21,8 @@ import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
+import { registerMarketRoutes } from "./routes/market.js";
+import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
@@ -59,8 +62,8 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity } from "./security.js";
-import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
+import { edgeModeFrom, parseOriginList, registerPortalSecurity } from "./security.js";
+import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
@@ -89,6 +92,10 @@ await registerPortalSecurity(app, {
   trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
   connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
   enforceCsp: process.env.PORTAL_CSP_ENFORCE === "1",
+  // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
+  edge: edgeModeFrom(process.env.PORTAL_EDGE),
+  originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
+  serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
 });
 
 const store = PortalStore.fromEnv();
@@ -187,7 +194,6 @@ const COORDINATOR_ADMIN_EMAILS = new Set(
 export type ProviderName = "google" | "microsoft" | "github";
 const IOS_OAUTH_CALLBACK_PREFIX = C.IOS_OAUTH_CALLBACK_PREFIX;
 const MOBILE_OAUTH_TOKEN_TTL_MS = C.MOBILE_OAUTH_TOKEN_TTL_MS;
-const oauthNativeRedirectByState = new Map<string, string>();
 const mobileOauthSessionTokens = new Map<string, { userId: string; expiresAtMs: number }>();
 
 type OauthProviderConfig = {
@@ -267,21 +273,22 @@ function normalizeNativeOauthRedirect(value: string | undefined): string | null 
   }
 }
 
-function issueMobileOauthSessionToken(userId: string): string {
+async function issueMobileOauthSessionToken(userId: string): Promise<string> { // in Postgres: any instance can redeem it
   const token = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
-  mobileOauthSessionTokens.set(token, {
-    userId,
-    expiresAtMs: Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS
-  });
+  const expiresAtMs = Date.now() + MOBILE_OAUTH_TOKEN_TTL_MS;
+  if (store) await store.issueMobileOauthToken(sha256Hex(token), userId, expiresAtMs);
+  else mobileOauthSessionTokens.set(token, { userId, expiresAtMs });
   return token;
 }
 
-function consumeMobileOauthSessionToken(token: string): { userId: string } | null {
+async function consumeMobileOauthSessionToken(token: string): Promise<{ userId: string } | null> {
+  if (store) {
+    const userId = await store.consumeMobileOauthToken(sha256Hex(token));
+    return userId ? { userId } : null;
+  }
   const record = mobileOauthSessionTokens.get(token);
-  if (!record) return null;
   mobileOauthSessionTokens.delete(token);
-  if (record.expiresAtMs <= Date.now()) return null;
-  return { userId: record.userId };
+  return record && record.expiresAtMs > Date.now() ? { userId: record.userId } : null;
 }
 
 function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -289,7 +296,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail } = createPortalMailer(
+const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -926,47 +933,41 @@ app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
 
-const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword };
+const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
 const passkeyRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse };
 export type PasskeyRoutesDeps = typeof passkeyRouteDeps;
 registerPasskeyRoutes(app, passkeyRouteDeps);
-
 const walletRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_SEND_MFA_TTL_MS, ensureCreditAccountForUser, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, setupWalletSeedForUser, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse };
 export type WalletRoutesDeps = typeof walletRouteDeps;
 registerWalletRoutes(app, walletRouteDeps);
-
 const accountRouteDeps = { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
-
 const coordinatorOpsRouteDeps = { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store };
 export type CoordinatorOpsRoutesDeps = typeof coordinatorOpsRouteDeps;
 registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 
-// ---------------------------------------------------------------------------
 // Chat API — conversations CRUD + streaming chat
-// ---------------------------------------------------------------------------
-
 registerConversationRoutes(app, { store, getCurrentUser });
 
 const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 
-// ---------------------------------------------------------------------------
 // Reviews API — Cloud Review Diff UI for handshake escalations
-// ---------------------------------------------------------------------------
-
 const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
 
+const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser };
+export type MarketRoutesDeps = typeof marketRouteDeps;
+registerMarketRoutes(app, marketRouteDeps); registerPayoutRoutes(app, marketRouteDeps);
 
-// #16: HTML pages live in src/portal/pages/.
-registerPortalPages(app);
+// #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
+registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
 const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
@@ -975,7 +976,7 @@ await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
 }); // end /internal plugin (#40)
 
-registerEscalationRoutes(app, { getCurrentUser });
+registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
 
 // DNS staleness sweep (src/portal/dns-sweep.ts).
 startDnsStaleSweep(store);

@@ -1,0 +1,6 @@
+# Check out text files with LF on every OS: tests compare file contents byte for byte (Dockerfiles,
+# the generated model catalog), and Windows runners default to converting LF to CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

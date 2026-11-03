@@ -3,6 +3,36 @@
 
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import type { WorkReceipt } from "../receipts/receipt.js";
+import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
+import type { RateEpoch } from "../economy/rate-oracle.js";
+import type { Reservation } from "../economy/reservations.js";
+import type { UsageRecord } from "../economy/usage.js";
+import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
+import type { NonceStore } from "../security/nonce-verifier.js";
+import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import type { PayoutPauseState } from "../economy/payout-safeguards.js";
+import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
+
+function rowToPayout(row: Record<string, unknown>): PayoutRecord {
+  return {
+    payoutId: String(row.payout_id),
+    accountId: String(row.account_id),
+    coordinatorId: String(row.coordinator_id),
+    kind: row.kind as PayoutRecord["kind"],
+    bolt11: String(row.bolt11),
+    paymentHash: String(row.payment_hash),
+    amountMsat: Number(row.amount_msat),
+    feeMsat: Number(row.fee_msat ?? 0),
+    maxFeeMsat: Number(row.max_fee_msat ?? 0),
+    status: row.status as PayoutRecord["status"],
+    preimage: (row.preimage as string | null) ?? undefined,
+    error: (row.error as string | null) ?? undefined,
+    destination: (row.destination as string | null) ?? undefined,
+    createdAtMs: Number(row.created_at_ms),
+    settledAtMs: row.settled_at_ms === null || row.settled_at_ms === undefined ? undefined : Number(row.settled_at_ms)
+  };
+}
 import {
   AccountMembership,
   AgentOwnership,
@@ -29,7 +59,9 @@ import {
   Subtask,
   SubtaskResult,
   CreditTransaction,
-  WalletAccount
+  WalletAccount,
+  InfrastructureHost,
+  PayoutRecord
 } from "../common/types.js";
 
 /**
@@ -44,6 +76,14 @@ export const CREDIT_LOCK_NAMESPACE = 0x45430001;
  */
 export const SCHEMA_LOCK_NAMESPACE = 0x45430000;
 export const SCHEMA_LOCK_KEY = 1;
+/** Fee-pool distribution: one coordinator at a time across every instance on this database. */
+export const FEE_POOL_LOCK_NAMESPACE = 0x45430002;
+export const FEE_POOL_LOCK_KEY = 1;
+/** Payout reservations: one at a time, so the global 24 h cap and node capacity are checked exactly. */
+export const PAYOUT_LOCK_NAMESPACE = 0x45430003;
+export const PAYOUT_GLOBAL_LOCK_KEY = 0;
+/** What a payout row has or may still move: pending rows count at their fee cap. */
+const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fee_msat, max_fee_msat) ELSE fee_msat END`;
 
 export const SCHEMA_SQL = `
 SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});
@@ -247,6 +287,117 @@ CREATE TABLE IF NOT EXISTS price_epochs (
   created_at_ms BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rate_epochs (
+  epoch_id TEXT PRIMARY KEY,
+  created_at_ms BIGINT NOT NULL,
+  btc_usd DOUBLE PRECISION NOT NULL,
+  usd_per_cpu_hour DOUBLE PRECISION NOT NULL,
+  usd_per_gpu_hour DOUBLE PRECISION NOT NULL,
+  sats_per_cpu_hour DOUBLE PRECISION NOT NULL,
+  sats_per_gpu_hour DOUBLE PRECISION NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  markup_bps INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  payload_json JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_epochs_created ON rate_epochs (created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS payouts (
+  payout_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  bolt11 TEXT NOT NULL,
+  payment_hash TEXT NOT NULL UNIQUE,
+  amount_msat BIGINT NOT NULL,
+  fee_msat BIGINT NOT NULL DEFAULT 0,
+  max_fee_msat BIGINT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  preimage TEXT,
+  error TEXT,
+  destination TEXT,
+  created_at_ms BIGINT NOT NULL,
+  settled_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_payouts_account ON payouts (account_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_payouts_created ON payouts (created_at_ms DESC);
+-- Payout kill switch and other shared payout controls (one row per key; both seeds read it).
+CREATE TABLE IF NOT EXISTS payout_controls (
+  control_key TEXT PRIMARY KEY,
+  value_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS infrastructure_hosts (
+  host_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  coordinator_url TEXT,
+  region TEXT,
+  services_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  lightning_address TEXT,
+  first_seen_ms BIGINT NOT NULL,
+  last_seen_ms BIGINT NOT NULL,
+  heartbeats_in_window INTEGER NOT NULL DEFAULT 0
+);
+-- Pentest (host weight self-reported): declared vs attested services, rate-limited uptime counting.
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS declared_services_json JSONB;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS attested_at_ms BIGINT;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS last_counted_ms BIGINT;
+ALTER TABLE infrastructure_hosts ADD COLUMN IF NOT EXISTS lightning_node_id TEXT;
+
+CREATE TABLE IF NOT EXISTS market_ticks (
+  at_ms BIGINT NOT NULL,
+  compute_class TEXT NOT NULL,
+  reference_msat BIGINT NOT NULL,
+  best_ask_msat BIGINT,
+  best_bid_msat BIGINT,
+  mid_msat BIGINT NOT NULL,
+  clearing_msat BIGINT NOT NULL,
+  agents INTEGER NOT NULL DEFAULT 0,
+  open_tasks INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (compute_class, at_ms)
+);
+CREATE TABLE IF NOT EXISTS market_trades (
+  subtask_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  credits DOUBLE PRECISION,
+  at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_trades_class_at ON market_trades (compute_class, at_ms DESC);
+CREATE TABLE IF NOT EXISTS market_orders (
+  account_id TEXT NOT NULL,
+  side TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  PRIMARY KEY (account_id, side)
+);
+-- Hardware verification (src/swarm/hardware-verification.ts): one self-contained JSON record per
+-- agent (claimed vs granted tier, last challenge measurement, rolling evidence score), publishable as is.
+CREATE TABLE IF NOT EXISTS hardware_verifications (
+  agent_id TEXT PRIMARY KEY,
+  record_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+-- Usage (src/economy/usage.ts): one record per settled request, for the usage page.
+CREATE TABLE IF NOT EXISTS usage_records (
+  usage_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  at_ms BIGINT NOT NULL,
+  record_json JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_records_account_at ON usage_records (account_id, at_ms);
+-- Reserved capacity leases (src/economy/reservations.ts): one JSON record per lease.
+CREATE TABLE IF NOT EXISTS compute_reservations (
+  reservation_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  record_json JSONB NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS coordinator_fee_events (
   event_id TEXT PRIMARY KEY,
   coordinator_id TEXT NOT NULL,
@@ -423,6 +574,8 @@ BEGIN
 END $$;
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
+-- Sats value locked on credit rows (earn: payable msat at accrual, at the market/oracle rate of that moment).
+ALTER TABLE credit_transactions ADD COLUMN IF NOT EXISTS msat BIGINT;
 -- Unique indexes are created only when no duplicate rows exist, so migrate() can never
 -- fail on legacy data; otherwise a WARNING is logged and the duplicates must be cleaned up.
 DO $$
@@ -447,6 +600,53 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
+-- Signed work receipts (architecture step 2): replicated between coordinators, batched into
+-- Merkle epochs whose roots are anchored on Bitcoin. receipt_json keeps the full signed
+-- receipt (PEM keys and both signatures); the columns are for indexing.
+CREATE TABLE IF NOT EXISTS work_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  seq BIGSERIAL,
+  task_id TEXT NOT NULL,
+  subtask_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  compute_class TEXT NOT NULL,
+  credits DOUBLE PRECISION NOT NULL,
+  msat BIGINT NOT NULL,
+  msat_per_credit BIGINT NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  finished_at_ms BIGINT NOT NULL,
+  result_hash TEXT NOT NULL,
+  receipt_json JSONB NOT NULL,
+  epoch_id TEXT,
+  stored_at_ms BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_receipts_seq ON work_receipts (seq);
+CREATE INDEX IF NOT EXISTS idx_work_receipts_open ON work_receipts (coordinator_id, finished_at_ms) WHERE epoch_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_work_receipts_epoch ON work_receipts (epoch_id);
+CREATE TABLE IF NOT EXISTS receipt_epochs (
+  epoch_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  from_ms BIGINT NOT NULL,
+  to_ms BIGINT NOT NULL,
+  count INTEGER NOT NULL,
+  merkle_root TEXT NOT NULL,
+  previous_root TEXT,
+  signature TEXT NOT NULL,
+  closed_at_ms BIGINT NOT NULL,
+  anchor_tx_ref TEXT,
+  anchor_network TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_receipt_epochs_coordinator ON receipt_epochs (coordinator_id, to_ms DESC, closed_at_ms DESC);
+
+-- Signed agent request nonces (replay protection), shared by every coordinator on this database.
+-- The primary key is the atomic replay check; rows are pruned after expires_at_ms.
+CREATE TABLE IF NOT EXISTS request_nonces (
+  nonce TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  expires_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_request_nonces_expiry ON request_nonces (expires_at_ms);
 `;
 
 /** Balance and "enough to cover $2" computed in SQL on NUMERIC, so no float comparison (#108). */
@@ -466,6 +666,16 @@ export class PostgresStore {
 
   async migrate(): Promise<void> {
     await this.pool.query(SCHEMA_SQL);
+  }
+
+  /** Work receipts and Merkle epochs (src/receipts) on the same pool. */
+  receiptStore(): PostgresReceiptStore {
+    return new PostgresReceiptStore(this.pool);
+  }
+
+  /** Request-signing nonces (src/security/nonce-verifier.ts) on the same pool. */
+  nonceStore(): PostgresNonceStore {
+    return new PostgresNonceStore(this.pool);
   }
 
   async close(): Promise<void> {
@@ -813,11 +1023,55 @@ export class PostgresStore {
   async persistCreditTransaction(tx: CreditTransaction): Promise<void> {
     await this.pool.query(
       `INSERT INTO credit_transactions (
-         tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (tx_id) DO NOTHING`,
-      [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
+      [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs, tx.msat ?? null]
     );
+  }
+
+  /** Several credit rows in one transaction (fee-pool distribution: pool spend + host earns). */
+  async recordCreditTransactions(rows: CreditTransaction[]): Promise<void> {
+    if (rows.length === 0) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const tx of rows) {
+        await client.query(
+          `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (tx_id) DO NOTHING`,
+          [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs, tx.msat ?? null]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Lightning address (user@domain or LNURL) used for automatic payouts of an account. */
+  async setLightningAddress(accountId: string, lightningAddress: string | null, network: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO wallet_accounts (account_id, wallet_type, network, payout_address, created_at_ms)
+       VALUES ($1, 'lightning', $3, $2, $4)
+       ON CONFLICT (account_id) DO UPDATE SET payout_address = EXCLUDED.payout_address`,
+      [accountId, lightningAddress, network, Date.now()]
+    );
+  }
+
+  /** msat moved out of an account by spend rows (the fee pool's past distributions). */
+  async distributedMsat(accountId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'spend'`, [accountId]);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /** Sats (msat) earned by an account, as locked on its earn rows. */
+  async earnedMsat(accountId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [accountId]);
+    return Number(r.rows[0]?.msat ?? 0);
   }
 
   /**
@@ -928,18 +1182,21 @@ export class PostgresStore {
     }));
   }
 
-  async creditContributionStats(accountId: string): Promise<{ earned: number; spent: number }> {
+  /** Inputs to the contribute-first policy: compute earnings, submit spend, and sats-purchased credits. */
+  async creditContributionStats(accountId: string): Promise<{ earned: number; spent: number; purchased: number }> {
     const result = await this.pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'compute_contribution' THEN credits ELSE 0 END), 0) AS earned,
-         COALESCE(SUM(CASE WHEN tx_type = 'spend' AND reason = 'task_submit' THEN credits ELSE 0 END), 0) AS spent
+         COALESCE(SUM(CASE WHEN tx_type = 'spend' AND reason = 'task_submit' THEN credits ELSE 0 END), 0) AS spent,
+         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason LIKE 'credit_purchase:%' THEN credits ELSE 0 END), 0) AS purchased
        FROM credit_transactions
        WHERE account_id = $1`,
       [accountId]
     );
     return {
       earned: Number(result.rows[0]?.earned ?? 0),
-      spent: Number(result.rows[0]?.spent ?? 0)
+      spent: Number(result.rows[0]?.spent ?? 0),
+      purchased: Number(result.rows[0]?.purchased ?? 0)
     };
   }
 
@@ -986,7 +1243,8 @@ export class PostgresStore {
       reliabilityScore: number;
       weightedContribution: number;
     },
-    tx: CreditTransaction
+    tx: CreditTransaction,
+    feeTx?: CreditTransaction
   ): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -1016,12 +1274,15 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return false;
       }
-      await client.query(
-        `INSERT INTO credit_transactions (
-           tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [tx.txId, tx.accountId, tx.type, tx.credits, tx.reason, tx.relatedTaskId ?? null, tx.timestampMs]
-      );
+      for (const row of [tx, ...(feeTx ? [feeTx] : [])]) {
+        if (row.credits <= 0) continue;
+        await client.query(
+          `INSERT INTO credit_transactions (
+             tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [row.txId, row.accountId, row.type, row.credits, row.reason, row.relatedTaskId ?? null, row.timestampMs, row.msat ?? null]
+        );
+      }
       await client.query("COMMIT");
       return true;
     } catch (error) {
@@ -2059,6 +2320,404 @@ export class PostgresStore {
     );
   }
 
+  /** Daily rate oracle epochs (sats per CPU/GPU hour from market data). Full epoch kept as JSON. */
+  async upsertRateEpoch(epoch: RateEpoch): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO rate_epochs (
+         epoch_id, created_at_ms, btc_usd, usd_per_cpu_hour, usd_per_gpu_hour, sats_per_cpu_hour,
+         sats_per_gpu_hour, msat_per_credit, markup_bps, status, payload_json
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (epoch_id) DO NOTHING`,
+      [
+        epoch.epochId,
+        epoch.createdAtMs,
+        epoch.btcUsd,
+        epoch.usdPerCpuHour,
+        epoch.usdPerGpuHour,
+        epoch.satsPerCpuHour,
+        epoch.satsPerGpuHour,
+        epoch.msatPerCredit,
+        epoch.markupBps,
+        epoch.status,
+        JSON.stringify(epoch)
+      ]
+    );
+  }
+
+  async latestRateEpoch(): Promise<RateEpoch | null> {
+    const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT 1`);
+    const row = result.rows[0];
+    return row ? (row.payload_json as RateEpoch) : null;
+  }
+
+  async listRateEpochs(limit = 30): Promise<RateEpoch[]> {
+    const result = await this.pool.query(`SELECT payload_json FROM rate_epochs ORDER BY created_at_ms DESC LIMIT $1`, [limit]);
+    return result.rows.map((r) => r.payload_json as RateEpoch);
+  }
+
+  // ── Payouts ──
+  /** Sats (msat) the node received from settled purchases (gross; the fee share is credited to the fee pool separately). */
+  async receivedPurchaseMsat(): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(amount_sats), 0) AS sats FROM payment_intents WHERE status = 'settled'`);
+    return Number(r.rows[0]?.sats ?? 0) * 1000;
+  }
+
+  async payoutsTotalMsat(filter: { accountId?: string; statuses: Array<PayoutRecord["status"]> }): Promise<number> {
+    const params: unknown[] = [filter.statuses];
+    let where = `status = ANY($1)`;
+    if (filter.accountId) {
+      params.push(filter.accountId);
+      where += ` AND account_id = $2`;
+    }
+    const r = await this.pool.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE ${where}`, params);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /**
+   * Reserve a payout atomically: under a per-account advisory lock, recheck payable
+   * (earned − paid/pending) and the coordinator's capacity, then insert the pending row.
+   * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
+   */
+  async reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Global first, then per account (fixed order, no deadlock). The global lock makes the capacity
+      // and 24 h cap sums exact across concurrent requests and coordinators sharing this database.
+      await client.query("SELECT pg_advisory_xact_lock($1, $2)", [PAYOUT_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`payout:${payout.accountId}`]);
+      const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
+      const spent = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
+      const payable = Number(earned.rows[0]?.msat ?? 0) - Number(spent.rows[0]?.msat ?? 0);
+      if (payout.amountMsat > payable) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "insufficient_payable", payableMsat: Math.max(0, payable) };
+      }
+      const all = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE status IN ('paid','pending')`);
+      if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(Number(all.rows[0]?.msat ?? 0))) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "coordinator_capacity" };
+      }
+      if (limits) {
+        const w = await client.query(
+          `SELECT COALESCE(SUM(${OUTFLOW_SQL}) FILTER (WHERE account_id = $2), 0) AS account_msat, COALESCE(SUM(${OUTFLOW_SQL}), 0) AS global_msat
+           FROM payouts WHERE status IN ('paid','pending') AND created_at_ms >= $1`,
+          [limits.sinceMs, payout.accountId]
+        );
+        const violation = limits.check({ accountWindowMsat: Number(w.rows[0]?.account_msat ?? 0), globalWindowMsat: Number(w.rows[0]?.global_msat ?? 0) });
+        if (violation) {
+          await client.query("ROLLBACK");
+          return { ok: false, code: violation.code, violation };
+        }
+      }
+      const ins = await client.query(
+        `INSERT INTO payouts (payout_id, account_id, coordinator_id, kind, bolt11, payment_hash, amount_msat, fee_msat, max_fee_msat, status, destination, created_at_ms)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,'pending',$9,$10) ON CONFLICT (payment_hash) DO NOTHING RETURNING payout_id`,
+        [payout.payoutId, payout.accountId, payout.coordinatorId, payout.kind, payout.bolt11, payout.paymentHash, payout.amountMsat, payout.maxFeeMsat, payout.destination ?? null, payout.createdAtMs]
+      );
+      if ((ins.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "duplicate_invoice" };
+      }
+      await client.query("COMMIT");
+      return { ok: true };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void> {
+    if (outcome.status === "paid") {
+      await this.pool.query(`UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending'`, [
+        payoutId,
+        Math.max(0, Math.floor(outcome.feeMsat)),
+        outcome.preimage ?? null,
+        Date.now()
+      ]);
+    } else {
+      await this.pool.query(`UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending'`, [payoutId, outcome.error.slice(0, 500), Date.now()]);
+    }
+  }
+
+  async listPayouts(accountId: string, limit = 50): Promise<PayoutRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE account_id = $1 ORDER BY created_at_ms DESC LIMIT $2`, [accountId, limit]);
+    return r.rows.map(rowToPayout);
+  }
+
+  // ── Payout safeguards: kill switch, fee-pool lock, reconciliation reads ──
+  async getPayoutPause(): Promise<PayoutPauseState | null> {
+    const r = await this.pool.query(`SELECT value_json FROM payout_controls WHERE control_key = 'pause'`);
+    return (r.rows[0]?.value_json as PayoutPauseState | undefined) ?? null;
+  }
+
+  async setPayoutPause(state: PayoutPauseState): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ('pause', $1, $2)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [JSON.stringify(state), Date.now()]
+    );
+  }
+
+  /**
+   * Session advisory lock on a dedicated connection; try-lock, so a second coordinator returns at
+   * once instead of queueing a duplicate run. Released in finally (and by Postgres if the connection dies).
+   */
+  async withFeePoolLock<T>(fn: () => Promise<T>): Promise<FeePoolLockResult<T>> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const r = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [FEE_POOL_LOCK_NAMESPACE, FEE_POOL_LOCK_KEY]);
+      held = r.rows[0]?.got === true;
+      if (!held) return { acquired: false };
+      return { acquired: true, value: await fn() };
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, $2)", [FEE_POOL_LOCK_NAMESPACE, FEE_POOL_LOCK_KEY]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  async lastPoolDistributionMs(accountId: string): Promise<number | null> {
+    const r = await this.pool.query(
+      `SELECT MAX(timestamp_ms) AS ts FROM credit_transactions WHERE account_id = $1 AND tx_type = 'spend' AND reason LIKE 'fee_pool_distribution%'`,
+      [accountId]
+    );
+    const ts = r.rows[0]?.ts;
+    return ts === null || ts === undefined ? null : Number(ts);
+  }
+
+  async payoutsByPaymentHash(hashes: string[]): Promise<Map<string, PayoutRecord>> {
+    const out = new Map<string, PayoutRecord>();
+    if (hashes.length === 0) return out;
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE payment_hash = ANY($1)`, [hashes.map((h) => h.toLowerCase())]);
+    for (const row of r.rows) out.set(String(row.payment_hash).toLowerCase(), rowToPayout(row));
+    return out;
+  }
+
+  async payoutsOutflowMsat(): Promise<number> {
+    const r = await this.pool.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE status IN ('paid','pending')`);
+    return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /** Σ earn msat − Σ spend msat (pool distributions) − paid/pending payouts: sats the ledger still owes. */
+  async liabilitiesMsat(): Promise<number> {
+    const r = await this.pool.query(
+      `SELECT (SELECT COALESCE(SUM(CASE WHEN tx_type = 'earn' THEN msat ELSE -msat END), 0) FROM credit_transactions WHERE msat IS NOT NULL)
+            - (SELECT COALESCE(SUM(amount_msat + fee_msat), 0) FROM payouts WHERE status IN ('paid','pending')) AS msat`
+    );
+    return Math.max(0, Number(r.rows[0]?.msat ?? 0));
+  }
+
+  async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM payouts WHERE status = 'pending' ORDER BY created_at_ms ASC LIMIT $1`, [limit]);
+    return r.rows.map(rowToPayout);
+  }
+
+  /** Accounts that registered a Lightning address (wallet payout_address or infrastructure host) for automatic payouts. */
+  async listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>> {
+    const r = await this.pool.query(
+      `SELECT account_id, payout_address AS addr FROM wallet_accounts WHERE payout_address IS NOT NULL AND (payout_address LIKE '%@%' OR payout_address LIKE 'https://%')
+       UNION SELECT account_id, lightning_address AS addr FROM infrastructure_hosts WHERE lightning_address IS NOT NULL`
+    );
+    return r.rows.map((row) => ({ accountId: row.account_id, lightningAddress: row.addr }));
+  }
+
+  // ── Infrastructure hosts ──
+  async upsertInfrastructureHost(host: InfrastructureHost): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO infrastructure_hosts (host_id, account_id, coordinator_url, region, services_json, lightning_address, first_seen_ms, last_seen_ms, heartbeats_in_window)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (host_id) DO UPDATE SET
+         account_id = EXCLUDED.account_id,
+         coordinator_url = COALESCE(EXCLUDED.coordinator_url, infrastructure_hosts.coordinator_url),
+         region = COALESCE(EXCLUDED.region, infrastructure_hosts.region),
+         services_json = EXCLUDED.services_json,
+         lightning_address = COALESCE(EXCLUDED.lightning_address, infrastructure_hosts.lightning_address),
+         last_seen_ms = GREATEST(EXCLUDED.last_seen_ms, infrastructure_hosts.last_seen_ms)`,
+      [host.hostId, host.accountId, host.coordinatorUrl ?? null, host.region ?? null, JSON.stringify(host.services), host.lightningAddress ?? null, host.firstSeenMs, host.lastSeenMs, host.heartbeatsInWindow]
+    );
+  }
+
+  async recordHostHeartbeat(hostId: string, nowMs: number): Promise<void> {
+    await this.pool.query(`UPDATE infrastructure_hosts SET last_seen_ms = GREATEST(last_seen_ms, $2), heartbeats_in_window = heartbeats_in_window + 1 WHERE host_id = $1`, [hostId, nowMs]);
+  }
+
+  /**
+   * One heartbeat, atomically: upsert the host with its attested services and add one to the
+   * window only if the last counted heartbeat is at least `minCountIntervalMs` old (the row lock
+   * of ON CONFLICT serialises concurrent heartbeats, including from two seeds on this database).
+   */
+  async recordAttestedHostHeartbeat(host: InfrastructureHost, nowMs: number, minCountIntervalMs: number): Promise<{ counted: boolean; heartbeatsInWindow: number }> {
+    const r = await this.pool.query(
+      `INSERT INTO infrastructure_hosts (host_id, account_id, coordinator_url, region, services_json, lightning_address, first_seen_ms, last_seen_ms,
+         heartbeats_in_window, declared_services_json, attested_at_ms, last_counted_ms, lightning_node_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$7,1,$8,$9,$7,$10)
+       ON CONFLICT (host_id) DO UPDATE SET
+         account_id = EXCLUDED.account_id,
+         coordinator_url = COALESCE(EXCLUDED.coordinator_url, infrastructure_hosts.coordinator_url),
+         region = COALESCE(EXCLUDED.region, infrastructure_hosts.region),
+         services_json = EXCLUDED.services_json,
+         declared_services_json = EXCLUDED.declared_services_json,
+         attested_at_ms = COALESCE(EXCLUDED.attested_at_ms, infrastructure_hosts.attested_at_ms),
+         lightning_address = COALESCE(EXCLUDED.lightning_address, infrastructure_hosts.lightning_address),
+         lightning_node_id = COALESCE(EXCLUDED.lightning_node_id, infrastructure_hosts.lightning_node_id),
+         last_seen_ms = GREATEST(EXCLUDED.last_seen_ms, infrastructure_hosts.last_seen_ms),
+         heartbeats_in_window = infrastructure_hosts.heartbeats_in_window
+           + CASE WHEN infrastructure_hosts.last_counted_ms IS NULL OR EXCLUDED.last_seen_ms - infrastructure_hosts.last_counted_ms >= $11 THEN 1 ELSE 0 END,
+         last_counted_ms = CASE WHEN infrastructure_hosts.last_counted_ms IS NULL OR EXCLUDED.last_seen_ms - infrastructure_hosts.last_counted_ms >= $11
+           THEN EXCLUDED.last_seen_ms ELSE infrastructure_hosts.last_counted_ms END
+       RETURNING heartbeats_in_window, last_counted_ms`,
+      [
+        host.hostId,
+        host.accountId,
+        host.coordinatorUrl ?? null,
+        host.region ?? null,
+        JSON.stringify(host.services),
+        host.lightningAddress ?? null,
+        nowMs,
+        JSON.stringify(host.declaredServices ?? host.services),
+        host.attestedAtMs ?? null,
+        host.lightningNodeId ?? null,
+        minCountIntervalMs
+      ]
+    );
+    const row = r.rows[0] ?? {};
+    return { counted: Number(row.last_counted_ms) === nowMs, heartbeatsInWindow: Number(row.heartbeats_in_window ?? 0) };
+  }
+
+  async resetHostHeartbeatWindow(): Promise<void> {
+    await this.pool.query(`UPDATE infrastructure_hosts SET heartbeats_in_window = 0`);
+  }
+
+  async listInfrastructureHosts(): Promise<InfrastructureHost[]> {
+    const r = await this.pool.query(`SELECT * FROM infrastructure_hosts ORDER BY first_seen_ms ASC`);
+    return r.rows.map((row) => ({
+      hostId: row.host_id,
+      accountId: row.account_id,
+      coordinatorUrl: row.coordinator_url ?? undefined,
+      region: row.region ?? undefined,
+      services: Array.isArray(row.services_json) ? row.services_json : [],
+      declaredServices: Array.isArray(row.declared_services_json) ? row.declared_services_json : undefined,
+      attestedAtMs: row.attested_at_ms != null ? Number(row.attested_at_ms) : undefined,
+      lightningNodeId: row.lightning_node_id ?? undefined,
+      lightningAddress: row.lightning_address ?? undefined,
+      firstSeenMs: Number(row.first_seen_ms),
+      lastSeenMs: Number(row.last_seen_ms),
+      lastCountedMs: row.last_counted_ms != null ? Number(row.last_counted_ms) : undefined,
+      heartbeatsInWindow: Number(row.heartbeats_in_window)
+    }));
+  }
+
+  // ── Compute market history ──
+  async persistMarketTick(t: MarketTick): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_ticks (at_ms, compute_class, reference_msat, best_ask_msat, best_bid_msat, mid_msat, clearing_msat, agents, open_tasks)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (compute_class, at_ms) DO NOTHING`,
+      [t.atMs, t.computeClass, t.referenceMsat, t.bestAskMsat ?? null, t.bestBidMsat ?? null, t.midMsat, t.clearingMsat, t.agents, t.openTasks]
+    );
+  }
+
+  /** Rows under legacy class ids are mapped (and merged per minute) onto the current classes at read time; see market-history.ts. */
+  async listMarketTicks(limitPerClass = 10_080): Promise<MarketTick[]> {
+    const r = await this.pool.query(
+      `SELECT * FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY compute_class ORDER BY at_ms DESC) AS rn FROM market_ticks
+       ) x WHERE rn <= $1 ORDER BY at_ms ASC`,
+      [limitPerClass]
+    );
+    return normalizeLegacyTicks(r.rows.map((row) => ({
+      atMs: Number(row.at_ms),
+      computeClass: row.compute_class,
+      referenceMsat: Number(row.reference_msat),
+      bestAskMsat: row.best_ask_msat === null ? undefined : Number(row.best_ask_msat),
+      bestBidMsat: row.best_bid_msat === null ? undefined : Number(row.best_bid_msat),
+      midMsat: Number(row.mid_msat),
+      clearingMsat: Number(row.clearing_msat),
+      agents: Number(row.agents),
+      openTasks: Number(row.open_tasks)
+    })));
+  }
+
+  async persistMarketTrade(t: MarketTrade): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_trades (subtask_id, task_id, agent_id, compute_class, msat_per_credit, credits, at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (subtask_id) DO UPDATE SET credits = COALESCE(EXCLUDED.credits, market_trades.credits)`,
+      [t.subtaskId, t.taskId, t.agentId, t.computeClass, t.msatPerCredit, t.credits ?? null, t.atMs]
+    );
+  }
+
+  async listMarketTrades(limit = 5_000): Promise<MarketTrade[]> {
+    const r = await this.pool.query(`SELECT * FROM market_trades ORDER BY at_ms DESC LIMIT $1`, [limit]);
+    return normalizeLegacyTrades(r.rows.reverse().map((row) => ({
+      subtaskId: row.subtask_id,
+      taskId: row.task_id,
+      agentId: row.agent_id,
+      computeClass: row.compute_class,
+      msatPerCredit: Number(row.msat_per_credit),
+      credits: row.credits === null ? undefined : Number(row.credits),
+      atMs: Number(row.at_ms)
+    })));
+  }
+
+  async upsertMarketOrder(o: MarketOrder): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_orders (account_id, side, compute_class, msat_per_credit, updated_at_ms) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (account_id, side) DO UPDATE SET compute_class = EXCLUDED.compute_class, msat_per_credit = EXCLUDED.msat_per_credit, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [o.accountId, o.side, o.computeClass, o.msatPerCredit, o.updatedAtMs]
+    );
+  }
+
+  async listMarketOrders(): Promise<MarketOrder[]> {
+    const r = await this.pool.query(`SELECT * FROM market_orders`);
+    return r.rows
+      .map((row) => normalizeLegacyOrder({ accountId: row.account_id, side: row.side, computeClass: row.compute_class, msatPerCredit: Number(row.msat_per_credit), updatedAtMs: Number(row.updated_at_ms) }))
+      .filter((o): o is MarketOrder => o !== undefined);
+  }
+
+  // ── Hardware verification ──
+  async upsertHardwareVerification(r: HardwareVerificationRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO hardware_verifications (agent_id, record_json, updated_at_ms) VALUES ($1,$2,$3)
+       ON CONFLICT (agent_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE hardware_verifications.updated_at_ms <= EXCLUDED.updated_at_ms`,
+      [r.agentId, JSON.stringify(r), r.updatedAtMs]
+    );
+  }
+
+  async listHardwareVerifications(limit = 100_000): Promise<HardwareVerificationRecord[]> {
+    const r = await this.pool.query(`SELECT record_json FROM hardware_verifications ORDER BY updated_at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as HardwareVerificationRecord);
+  }
+
+  // ── Reserved capacity ──
+  async upsertReservation(r: Reservation): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO compute_reservations (reservation_id, account_id, record_json, updated_at_ms) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (reservation_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [r.id, r.accountId, JSON.stringify(r), Date.now()]
+    );
+  }
+
+  async insertUsage(r: UsageRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO usage_records (usage_id, account_id, at_ms, record_json) VALUES ($1,$2,$3,$4) ON CONFLICT (usage_id) DO UPDATE SET record_json = EXCLUDED.record_json`,
+      [r.id, r.accountId, r.atMs, JSON.stringify(r)]
+    );
+  }
+
+  async listUsage(accountId: string, sinceMs: number, limit = 20_000): Promise<UsageRecord[]> {
+    const r = await this.pool.query(`SELECT record_json FROM usage_records WHERE account_id = $1 AND at_ms >= $2 ORDER BY at_ms DESC LIMIT $3`, [accountId, sinceMs, limit]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as UsageRecord);
+  }
+
+  /** Active leases and those ended in the last week. */
+  async listReservations(): Promise<Reservation[]> {
+    const r = await this.pool.query(`SELECT record_json FROM compute_reservations WHERE updated_at_ms > $1`, [Date.now() - 7 * 24 * 3_600_000]);
+    return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as Reservation);
+  }
+
   async latestPriceEpoch(resourceClass: "cpu" | "gpu"): Promise<PriceEpochRecord | null> {
     const result = await this.pool.query(
       `SELECT epoch_id, coordinator_id, resource_class, price_per_compute_unit_sats, supply_index,
@@ -2208,3 +2867,174 @@ export class PostgresStore {
   }
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Work receipts + Merkle epochs (architecture step 2)                */
+/* ------------------------------------------------------------------ */
+
+const RECEIPT_EPOCH_COLUMNS =
+  "epoch_id, coordinator_id, from_ms, to_ms, count, merkle_root, previous_root, signature, closed_at_ms, anchor_tx_ref, anchor_network";
+
+export class PostgresReceiptStore implements ReceiptStore {
+  constructor(private readonly pool: Pool) {}
+
+  private static receiptFromRow(row: Record<string, any>): WorkReceipt {
+    const json = row.receipt_json;
+    return (typeof json === "string" ? JSON.parse(json) : json) as WorkReceipt;
+  }
+
+  private static epochFromRow(row: Record<string, any>): ReceiptEpoch {
+    return {
+      epochId: row.epoch_id,
+      coordinatorId: row.coordinator_id,
+      fromMs: Number(row.from_ms),
+      toMs: Number(row.to_ms),
+      count: Number(row.count),
+      merkleRoot: row.merkle_root,
+      previousRoot: row.previous_root ?? null,
+      signature: row.signature,
+      closedAtMs: Number(row.closed_at_ms),
+      anchorTxRef: row.anchor_tx_ref ?? undefined,
+      anchorNetwork: row.anchor_network ?? undefined
+    };
+  }
+
+  async append(receipt: WorkReceipt): Promise<boolean> {
+    const result = await this.pool.query(
+      `INSERT INTO work_receipts (
+         receipt_id, task_id, subtask_id, agent_id, coordinator_id, compute_class, credits, msat, msat_per_credit,
+         started_at_ms, finished_at_ms, result_hash, receipt_json, epoch_id, stored_at_ms
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULL,$14)
+       ON CONFLICT (receipt_id) DO NOTHING`,
+      [
+        receipt.receiptId,
+        receipt.taskId,
+        receipt.subtaskId,
+        receipt.agentId,
+        receipt.coordinatorId,
+        receipt.computeClass,
+        receipt.credits,
+        receipt.msat,
+        receipt.msatPerCredit,
+        receipt.startedAtMs,
+        receipt.finishedAtMs,
+        receipt.resultHash,
+        JSON.stringify(receipt),
+        Date.now()
+      ]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async get(receiptId: string): Promise<WorkReceipt | null> {
+    const result = await this.pool.query(`SELECT receipt_json FROM work_receipts WHERE receipt_id = $1`, [receiptId]);
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.receiptFromRow(row) : null;
+  }
+
+  async listSince(cursor: string | null, limit?: number): Promise<ReceiptPage> {
+    const after = parseCursor(cursor);
+    const result = await this.pool.query(
+      `SELECT seq, receipt_json FROM work_receipts WHERE seq > $1 ORDER BY seq ASC LIMIT $2`,
+      [after, clampLimit(limit)]
+    );
+    const receipts = result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+    const last = result.rows.length > 0 ? String(result.rows[result.rows.length - 1].seq) : String(after);
+    return { receipts, nextCursor: last };
+  }
+
+  async listUnassigned(coordinatorId: string, untilMs: number, limit?: number): Promise<WorkReceipt[]> {
+    const result = await this.pool.query(
+      `SELECT receipt_json FROM work_receipts
+       WHERE coordinator_id = $1 AND epoch_id IS NULL AND finished_at_ms < $2
+       ORDER BY seq ASC LIMIT $3`,
+      [coordinatorId, untilMs, clampLimit(limit, 10_000)]
+    );
+    return result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+  }
+
+  async listByEpoch(epochId: string): Promise<WorkReceipt[]> {
+    const result = await this.pool.query(
+      `SELECT receipt_json FROM work_receipts WHERE epoch_id = $1 ORDER BY seq ASC`,
+      [epochId]
+    );
+    return result.rows.map((row) => PostgresReceiptStore.receiptFromRow(row));
+  }
+
+  async epochIdForReceipt(receiptId: string): Promise<string | null> {
+    const result = await this.pool.query(`SELECT epoch_id FROM work_receipts WHERE receipt_id = $1`, [receiptId]);
+    return result.rows[0]?.epoch_id ?? null;
+  }
+
+  async latestEpoch(coordinatorId: string): Promise<ReceiptEpoch | null> {
+    const result = await this.pool.query(
+      `SELECT ${RECEIPT_EPOCH_COLUMNS} FROM receipt_epochs WHERE coordinator_id = $1
+       ORDER BY to_ms DESC, closed_at_ms DESC LIMIT 1`,
+      [coordinatorId]
+    );
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.epochFromRow(row) : null;
+  }
+
+  async getEpoch(epochId: string): Promise<ReceiptEpoch | null> {
+    const result = await this.pool.query(`SELECT ${RECEIPT_EPOCH_COLUMNS} FROM receipt_epochs WHERE epoch_id = $1`, [epochId]);
+    const row = result.rows[0];
+    return row ? PostgresReceiptStore.epochFromRow(row) : null;
+  }
+
+  async persistEpoch(epoch: ReceiptEpoch, receiptIds?: string[]): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO receipt_epochs (${RECEIPT_EPOCH_COLUMNS})
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (epoch_id) DO UPDATE SET
+         anchor_tx_ref = COALESCE(EXCLUDED.anchor_tx_ref, receipt_epochs.anchor_tx_ref),
+         anchor_network = COALESCE(EXCLUDED.anchor_network, receipt_epochs.anchor_network)`,
+      [
+        epoch.epochId,
+        epoch.coordinatorId,
+        epoch.fromMs,
+        epoch.toMs,
+        epoch.count,
+        epoch.merkleRoot,
+        epoch.previousRoot ?? null,
+        epoch.signature,
+        epoch.closedAtMs,
+        epoch.anchorTxRef ?? null,
+        epoch.anchorNetwork ?? null
+      ]
+    );
+    if (receiptIds && receiptIds.length > 0) {
+      await this.pool.query(`UPDATE work_receipts SET epoch_id = $1 WHERE receipt_id = ANY($2::text[])`, [epoch.epochId, receiptIds]);
+    }
+  }
+}
+
+/** Durable, cross-instance replay protection for signed agent requests (`request_nonces`). */
+export class PostgresNonceStore implements NonceStore {
+  constructor(private readonly pool: Pool) {}
+
+  async exists(nonce: string): Promise<boolean> {
+    const r = await this.pool.query(`SELECT 1 FROM request_nonces WHERE nonce = $1 AND expires_at_ms >= $2`, [nonce, Date.now()]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async insert(nonce: string, sourceId: string, expiresAtMs: number): Promise<void> {
+    await this.insertIfAbsent(nonce, sourceId, expiresAtMs);
+  }
+
+  /** One statement: a fresh nonce inserts (or takes over an expired row); a live duplicate does not. */
+  async insertIfAbsent(nonce: string, sourceId: string, expiresAtMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO request_nonces (nonce, source_id, expires_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (nonce) DO UPDATE SET source_id = EXCLUDED.source_id, expires_at_ms = EXCLUDED.expires_at_ms
+         WHERE request_nonces.expires_at_ms < $4
+       RETURNING nonce`,
+      [nonce, sourceId, expiresAtMs, Date.now()]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async prune(): Promise<void> {
+    await this.pool.query(`DELETE FROM request_nonces WHERE expires_at_ms < $1`, [Date.now()]);
+  }
+}

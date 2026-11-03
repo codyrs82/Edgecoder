@@ -64,7 +64,7 @@ describe("coordinator config (#15)", () => {
 
   it("rejects NaN, bad flags and bad enums", () => {
     expect(() =>
-      loadConfig("coordinator", coordinatorConfigSchema, { ANCHOR_INTERVAL_MS: "2h", ROBOT_QUEUE_ENABLED: "maybe", BITCOIN_NETWORK: "regtest" })
+      loadConfig("coordinator", coordinatorConfigSchema, { ANCHOR_INTERVAL_MS: "2h", ROBOT_QUEUE_ENABLED: "maybe", BITCOIN_NETWORK: "mainnet" })
     ).toThrow(/ANCHOR_INTERVAL_MS[\s\S]*ROBOT_QUEUE_ENABLED[\s\S]*BITCOIN_NETWORK/);
   });
 });

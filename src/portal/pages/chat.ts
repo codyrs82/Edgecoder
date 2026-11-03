@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
+import { icon } from "./design-system.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
@@ -11,7 +12,7 @@ app.get("/portal/chat", async (_req, reply) => {
     <style>
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
-      .chat-layout { display:flex; height:calc(100vh - 52px); }
+      .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
       .conv-sidebar {
         width:280px; min-width:260px; border-right:1px solid var(--card-border);
         background:var(--bg-soft); display:flex; flex-direction:column; padding:14px;
@@ -19,13 +20,11 @@ app.get("/portal/chat", async (_req, reply) => {
       .conv-sidebar h3 { margin:0 0 8px 0; font-size:14px; }
       .new-chat-btn {
         display:flex; align-items:center; justify-content:center; gap:6px;
-        width:100%; padding:10px 14px; margin-bottom:12px;
-        border-radius:var(--radius-md); font-size:13px; font-weight:600;
-        background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border:1px solid rgba(193,120,80,0.75); color:white;
-        cursor:pointer; transition:all var(--transition-fast);
+        width:100%; padding:9px 14px; margin-bottom:12px;
+        border-radius:var(--radius-sm); font-size:13px; font-weight:600;
+        background:var(--brand); border:1px solid var(--brand); color:#111; cursor:pointer;
       }
-      .new-chat-btn:hover { filter:brightness(1.1); box-shadow:0 2px 12px rgba(193,120,80,0.3); transform:translateY(-1px); }
+      .new-chat-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
       .conv-item {
         position:relative; padding:10px 30px 10px 12px; border-radius:var(--radius-sm); cursor:pointer;
         margin:2px 0; font-size:13px; white-space:nowrap; overflow:hidden;
@@ -41,11 +40,11 @@ app.get("/portal/chat", async (_req, reply) => {
       .conv-item:hover .conv-delete { opacity:0.6; }
       .conv-delete:hover { opacity:1 !important; color:#e74c3c; }
       .conv-item:hover { background:var(--bg-surface); color:var(--text); }
-      .conv-item.active { background:var(--bg-surface); color:var(--brand); border-color:rgba(193,120,80,0.2); }
+      .conv-item.active { background:var(--brand-soft); color:var(--brand-2); border-color:var(--brand-border); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
       .chat-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
       .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
-      .chat-msg { padding:18px 0; line-height:1.7; font-size:15px; animation:fadeSlideIn 0.3s ease both; }
+      .chat-msg { padding:18px 0; line-height:1.7; font-size:15px; }
       .chat-msg + .chat-msg { border-top:1px solid var(--card-border); }
       .chat-msg .msg-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
       .chat-msg .msg-role {
@@ -95,75 +94,75 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-input-area { border-top:1px solid var(--card-border); background:var(--bg); }
       .chat-input-wrap { max-width:768px; margin:0 auto; padding:14px 24px 18px; }
       .chat-input-row {
-        display:flex; gap:8px; align-items:flex-end;
+        display:flex; flex-direction:column; gap:4px;
         background:var(--bg-input); border:1px solid var(--card-border);
-        border-radius:var(--radius-md); padding:6px 6px 6px 14px;
+        border-radius:var(--radius-lg); padding:10px 10px 8px 14px;
         transition:border-color var(--transition-fast), box-shadow var(--transition-fast);
       }
-      .chat-input-row:focus-within {
-        border-color:var(--brand); box-shadow:0 0 0 2px rgba(193,120,80,0.15);
-      }
+      .chat-input-row:focus-within { border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
       .chat-input-row textarea {
-        flex:1; resize:none; max-height:200px; border:none; padding:6px 0;
+        width:100%; resize:none; max-height:200px; border:none; padding:2px 0; min-height:0;
         background:transparent; font-family:inherit; font-size:15px;
         color:var(--text); outline:none; line-height:1.5;
       }
       .chat-input-row textarea:focus { box-shadow:none; }
+      .chat-input-tools { display:flex; align-items:center; justify-content:space-between; gap:8px; }
       .chat-send-btn {
-        padding:8px 18px; border-radius:var(--radius-sm);
-        background:linear-gradient(140deg, var(--brand), var(--brand-2));
-        border:none; color:white; font-size:13px; font-weight:600;
-        cursor:pointer; transition:all var(--transition-fast);
-        white-space:nowrap;
+        padding:7px 16px; border-radius:var(--radius-sm); min-height:30px;
+        background:var(--brand); border:1px solid var(--brand); color:#111; font-size:13px; font-weight:600;
+        cursor:pointer; white-space:nowrap;
       }
-      .chat-send-btn:hover { filter:brightness(1.1); box-shadow:0 2px 8px rgba(193,120,80,0.3); }
+      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
       .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
-      /* ── Model picker ── */
-      .model-picker-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
-      .model-picker-wrap { position:relative; }
+      /* ── Compute picker (where the chat runs), like the model picker in Claude or Cursor ── */
+      .model-picker-wrap { position:relative; min-width:0; }
       .model-trigger {
-        display:flex; align-items:center; gap:4px;
-        padding:4px 10px; border:1px solid var(--card-border);
-        background:var(--bg-input); color:var(--text-secondary);
-        border-radius:var(--radius-sm); font-size:12px;
-        cursor:pointer; transition:all 0.15s;
+        display:inline-flex; align-items:center; gap:6px; max-width:100%; min-height:28px;
+        padding:4px 8px; border:1px solid transparent; background:transparent; color:var(--text-secondary);
+        border-radius:var(--radius-sm); font-size:12.5px; font-weight:500; cursor:pointer;
       }
-      .model-trigger:hover { border-color:var(--brand); color:var(--text); }
-      .model-trigger .running-dot { width:6px; height:6px; border-radius:50%; background:var(--brand); display:inline-block; }
-      .model-trigger svg { transition:transform 0.15s; }
-      .model-trigger.open svg { transform:rotate(180deg); }
+      .model-trigger:hover, .model-trigger.open { background:var(--bg-elevated); color:var(--text); border-color:transparent; }
+      .model-trigger #modelLabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .model-trigger .chev { transition:transform 0.15s; flex:none; }
+      .model-trigger.open .chev { transform:rotate(180deg); }
       .model-dropdown {
-        position:absolute; bottom:calc(100% + 4px); left:0;
-        min-width:260px; max-height:320px; overflow-y:auto;
-        background:var(--bg-surface); border:1px solid var(--card-border);
-        border-radius:var(--radius-md); box-shadow:0 -4px 20px rgba(0,0,0,0.4);
-        z-index:100; padding:4px;
+        position:absolute; bottom:calc(100% + 8px); left:-6px; width:min(380px, 86vw);
+        background:var(--bg-surface); border:1px solid var(--border-strong);
+        border-radius:var(--radius-md); box-shadow:0 -6px 28px rgba(0,0,0,0.45);
+        z-index:100; padding:6px; display:flex; flex-direction:column;
       }
+      .model-dropdown input { min-height:30px; padding:6px 10px; font-size:12.5px; margin-bottom:4px; }
+      .model-options { max-height:340px; overflow-y:auto; }
       .model-dropdown .section-label {
-        padding:8px 10px 4px; font-size:11px; color:var(--muted);
-        text-transform:uppercase; letter-spacing:0.5px;
+        padding:8px 10px 4px; font-size:11px; color:var(--muted); font-weight:600;
+        text-transform:uppercase; letter-spacing:0.06em;
       }
       .model-option {
-        display:flex; flex-direction:column; gap:1px; width:100%;
-        padding:8px 10px; border:none; background:none;
+        display:flex; align-items:center; gap:8px; width:100%; min-height:0;
+        padding:7px 10px; border:none; background:none; justify-content:flex-start;
         color:var(--text); cursor:pointer; border-radius:var(--radius-sm);
-        text-align:left; font-size:13px; transition:background 0.1s;
+        text-align:left; font-size:13px; font-weight:400; white-space:normal;
       }
-      .model-option:hover { background:rgba(255,255,255,0.05); }
-      .model-option.active { border-left:2px solid var(--brand); padding-left:8px; }
-      .model-option .opt-name { display:flex; align-items:center; gap:6px; }
-      .model-option .opt-meta { font-size:11px; color:var(--muted); }
+      .model-option:hover, .model-option.kb { background:var(--bg-elevated); }
+      .model-option .opt-text { display:flex; flex-direction:column; gap:1px; min-width:0; flex:1; }
+      .model-option .opt-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .model-option .opt-meta { font-size:11.5px; color:var(--muted); }
+      .model-option .opt-check { flex:none; width:14px; color:var(--brand); visibility:hidden; }
+      .model-option[aria-selected="true"] .opt-check { visibility:visible; }
+      .model-empty { padding:12px 10px; font-size:12px; color:var(--muted); text-align:center; }
+      .msg-meta { margin-top:8px; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+      .msg-error { color:var(--danger); }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
       @media (max-width:680px) {
         .conv-sidebar { display:none; }
-        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:52px; bottom:0; width:85vw; box-shadow:4px 0 20px rgba(0,0,0,0.3); }
+        .conv-sidebar.mobile-show { display:flex; position:absolute; z-index:40; left:0; top:var(--topbar-h); bottom:0; width:85vw; box-shadow:var(--shadow-2); }
       }
     </style>
     <div class="chat-layout">
       <!-- Left: Conversation sidebar -->
       <div class="conv-sidebar" id="convSidebar">
-        <button class="new-chat-btn" id="newChatBtn">&#10010; New Conversation</button>
+        <button class="new-chat-btn" id="newChatBtn">${icon("plus", 14)} New conversation</button>
         <input id="convSearch" type="text" placeholder="Search conversations..." style="margin-bottom:10px; font-size:12px;" />
         <div id="convList" style="flex:1; overflow-y:auto;"></div>
       </div>
@@ -172,7 +171,7 @@ app.get("/portal/chat", async (_req, reply) => {
         <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
             <div style="padding:60px 0; text-align:center;">
-              <div style="font-size:36px; margin-bottom:12px;">&#9993;</div>
+              <div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div>
               <h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2>
               <div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
             </div>
@@ -185,18 +184,21 @@ app.get("/portal/chat", async (_req, reply) => {
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
-            <div class="model-picker-row">
-              <div class="model-picker-wrap" id="modelPickerWrap">
-                <button class="model-trigger" id="modelTrigger">
-                  <span id="modelLabel">Auto</span>
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-                </button>
-                <div class="model-dropdown hidden" id="modelDropdown"></div>
-              </div>
-            </div>
             <div class="chat-input-row">
-              <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..."></textarea>
-              <button class="chat-send-btn" id="sendBtn">Send</button>
+              <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..." aria-label="Message"></textarea>
+              <div class="chat-input-tools">
+                <div class="model-picker-wrap" id="modelPickerWrap">
+                  <button type="button" class="model-trigger" id="modelTrigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="modelDropdown" title="Where this chat runs">
+                    ${icon("cpu", 14)}<span id="modelLabel">Auto</span>
+                    <svg class="chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  <div class="model-dropdown hidden" id="modelDropdown">
+                    <input id="computeSearch" type="search" placeholder="Search models" aria-label="Search compute" autocomplete="off" />
+                    <div class="model-options" id="modelOptions" role="listbox" aria-label="Compute"></div>
+                  </div>
+                </div>
+                <button class="chat-send-btn" id="sendBtn">Send</button>
+              </div>
             </div>
             <div class="muted" style="font-size:10px; margin-top:6px; text-align:center;">Enter to send, Shift+Enter for newline</div>
           </div>
@@ -209,9 +211,12 @@ app.get("/portal/chat", async (_req, reply) => {
     var conversations = [];
     var abortController = null;
     var isStreaming = false;
-    var selectedModel = null;
+    var selectedModel = null;      // default path only: a model on the coordinator (no compute)
+    var selectedCompute = null;    // { target, model, computeClass?, reservationId?, label } or null for the default path
     var modelPickerOpen = false;
     var portalModels = { local: [], swarm: [] };
+    var computeOptions = [];
+    var COMPUTE_KEY = "edgecoder.chat.compute.";
 
     function escapeHtml(s) {
       return String(s)
@@ -270,7 +275,7 @@ app.get("/portal/chat", async (_req, reply) => {
       for (var i = 0; i < filtered.length; i++) {
         var c = filtered[i];
         var cls = "conv-item" + (c.conversationId === activeConvId ? " active" : "");
-        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&#128465;</button></div>";
+        html += "<div class=\\"" + cls + "\\" data-id=\\"" + escapeHtml(c.conversationId) + "\\">" + escapeHtml(c.title || "New chat") + "<button class=\\"conv-delete\\" data-delete-id=\\"" + escapeHtml(c.conversationId) + "\\" title=\\"Delete\\">&times;</button></div>";
       }
       if (filtered.length === 0) {
         html = "<div class=\\"muted\\" style=\\"padding:8px; font-size:12px;\\">No conversations yet</div>";
@@ -282,7 +287,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var container = document.getElementById("chatMessages");
       var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="font-size:36px; margin-bottom:12px;">&#9993;</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
+        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
         return;
       }
       var html = "";
@@ -291,7 +296,8 @@ app.get("/portal/chat", async (_req, reply) => {
         var role = m.role === "user" ? "user" : "assistant";
         var label = m.role === "user" ? "You" : "EdgeCoder";
         var timeStr = m.createdAt || m.timestamp ? formatMsgTime(m.createdAt || m.timestamp) : "";
-        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div></div>";
+        var cost = role === "assistant" && Number(m.creditsSpent) > 0 ? "<div class=\\"msg-meta\\">" + formatCSats(m.creditsSpent) + "</div>" : "";
+        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div>" + cost + "</div>";
       }
       container.innerHTML = html;
       scrollParent.scrollTop = scrollParent.scrollHeight;
@@ -323,6 +329,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var conv = conversations.find(function(c) { return c.conversationId === convId; });
       var titleEl = document.getElementById("chatTitle");
       if (titleEl) titleEl.textContent = (conv && conv.title) || "New chat";
+      restoreCompute(convId);
       await loadMessages(convId);
     }
 
@@ -369,6 +376,7 @@ app.get("/portal/chat", async (_req, reply) => {
           var newId = res.conversationId || (res.conversation && res.conversation.conversationId);
           if (newId) {
             activeConvId = newId;
+            saveCompute();
             await loadConversations();
             renderConversations();
           }
@@ -411,7 +419,9 @@ app.get("/portal/chat", async (_req, reply) => {
 
       try {
         var chatBody = { conversationId: activeConvId, message: text };
-        if (selectedModel) chatBody.model = selectedModel;
+        var computeUsed = selectedCompute;
+        if (computeUsed) chatBody.compute = { target: computeUsed.target, model: computeUsed.model, computeClass: computeUsed.computeClass, reservationId: computeUsed.reservationId };
+        else if (selectedModel) chatBody.model = selectedModel;
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -422,7 +432,10 @@ app.get("/portal/chat", async (_req, reply) => {
 
         if (!response.ok) {
           var errBody = await response.text();
-          throw new Error("Chat request failed: " + response.status + " " + errBody);
+          var errMsg = errBody;
+          try { var ej = JSON.parse(errBody); errMsg = ej.error || errBody; } catch (e) {}
+          if (response.status === 402) errMsg += " Buy cSats on the Wallet page.";
+          throw new Error(errMsg || ("Chat request failed: " + response.status));
         }
 
         var reader = response.body.getReader();
@@ -450,6 +463,19 @@ app.get("/portal/chat", async (_req, reply) => {
                 warnBanner.textContent = parsed.warning;
                 assistantBubble.insertBefore(warnBanner, assistantBody);
               }
+              if (parsed.error) {
+                var errLine = document.createElement("div");
+                errLine.className = "msg-meta msg-error";
+                errLine.textContent = parsed.error;
+                assistantBubble.appendChild(errLine);
+              }
+              if (parsed.done) {
+                var meta = document.createElement("div");
+                meta.className = "msg-meta";
+                meta.textContent = [typeof parsed.cSatsSpent === "number" ? formatCSats(parsed.cSatsSpent) : "", parsed.compute || ""].filter(Boolean).join(" \u00B7 ");
+                if (meta.textContent) assistantBubble.appendChild(meta);
+                if (typeof parsed.cSatsSpent === "number" && parsed.cSatsSpent > 0) loadTopTicker();
+              }
               if (parsed.content) {
                 fullContent += parsed.content;
                 tokenCount++;
@@ -468,7 +494,7 @@ app.get("/portal/chat", async (_req, reply) => {
         if (err.name !== "AbortError") {
           showToast("Chat error: " + String(err.message || err), true);
           if (!fullContent) {
-            assistantBubble.innerHTML = "<span style=\\"color:var(--danger);\\">Error: " + escapeHtml(String(err.message || err)) + "</span>";
+            assistantBody.innerHTML = "<span class=\\"msg-error\\">" + escapeHtml(String(err.message || err)) + "</span>";
           }
         }
       }
@@ -497,105 +523,143 @@ app.get("/portal/chat", async (_req, reply) => {
       }
     }
 
-    // ── Model picker ──
+    // ── Compute picker: where the chat runs (network model + class, a reservation, your machines, or the default) ──
+    function formatCSats(n) {
+      var v = Number(n);
+      return v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 0 : v >= 1 ? 2 : 4 }) + " cSats";
+    }
+
     function displayModelName(name) {
       if (!name) return "Auto";
       var parts = name.split(":");
       var tag = (parts[1] || "").split("-")[0];
       return tag ? parts[0] + ":" + tag : parts[0];
     }
-
+    function currentLabel() {
+      if (selectedCompute) return selectedCompute.label || selectedCompute.model;
+      return selectedModel ? "EdgeCoder · " + displayModelName(selectedModel) : "Auto";
+    }
     function updateModelLabel() {
-      document.getElementById("modelLabel").textContent = displayModelName(selectedModel);
+      document.getElementById("modelLabel").textContent = currentLabel();
     }
-
-    function renderModelDropdown() {
-      var html = '<button class="model-option' + (!selectedModel ? ' active' : '') + '" data-model="">';
-      html += '<span class="opt-name">Auto</span>';
-      html += '<span class="opt-meta">Best available route</span></button>';
-
-      if (portalModels.local && portalModels.local.length > 0) {
-        html += '<div class="section-label">Local Models</div>';
-        for (var i = 0; i < portalModels.local.length; i++) {
-          var m = portalModels.local[i];
-          var isActive = selectedModel === m.name;
-          html += '<button class="model-option' + (isActive ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">';
-          html += '<span class="opt-name">' + escapeHtml(displayModelName(m.name));
-          if (m.running) html += ' <span class="running-dot" style="width:6px;height:6px;border-radius:50%;background:var(--brand);display:inline-block;"></span>';
-          html += '</span>';
-          var meta = [];
-          if (m.parameterSize) meta.push(m.parameterSize);
-          if (m.quantization) meta.push(m.quantization);
-          meta.push("Free");
-          html += '<span class="opt-meta">' + meta.join(" \\u00B7 ") + '</span></button>';
-        }
-      }
-
-      if (portalModels.swarm && portalModels.swarm.length > 0) {
-        html += '<div class="section-label">Swarm Network</div>';
-        for (var j = 0; j < portalModels.swarm.length; j++) {
-          var s = portalModels.swarm[j];
-          var isSwarmActive = selectedModel === s.model;
-          var disabled = s.agentCount === 0;
-          html += '<button class="model-option' + (isSwarmActive ? ' active' : '') + '"' + (disabled ? ' disabled style="opacity:0.4;cursor:default;"' : '') + ' data-model="' + escapeHtml(s.model) + '">';
-          html += '<span class="opt-name">' + escapeHtml(displayModelName(s.model)) + '</span>';
-          html += '<span class="opt-meta">' + s.agentCount + ' agent' + (s.agentCount === 1 ? '' : 's') + '</span></button>';
-        }
-      }
-
-      if ((!portalModels.local || portalModels.local.length === 0) && (!portalModels.swarm || portalModels.swarm.length === 0)) {
-        html += '<div class="opt-meta" style="padding:12px 10px; text-align:center;">No models discovered</div>';
-      }
-
-      document.getElementById("modelDropdown").innerHTML = html;
+    function computeKey(c) {
+      return c ? [c.target, c.model, c.computeClass || "", c.reservationId || ""].join("|") : (selectedModel ? "default|" + selectedModel : "auto");
     }
-
-    async function refreshModels() {
+    function saveCompute() {
+      var v = selectedCompute ? JSON.stringify(selectedCompute) : (selectedModel ? JSON.stringify({ defaultModel: selectedModel }) : "");
       try {
-        portalModels = await api("/portal/api/models");
-      } catch {
-        portalModels = { local: [], swarm: [] };
-      }
-      renderModelDropdown();
+        if (activeConvId) { if (v) localStorage.setItem(COMPUTE_KEY + activeConvId, v); else localStorage.removeItem(COMPUTE_KEY + activeConvId); }
+        if (v) localStorage.setItem(COMPUTE_KEY + "last", v); else localStorage.removeItem(COMPUTE_KEY + "last");
+      } catch (e) {}
     }
-
-    function toggleModelPicker() {
-      modelPickerOpen = !modelPickerOpen;
-      var dropdown = document.getElementById("modelDropdown");
+    function restoreCompute(convId) {
+      var raw = null;
+      try { raw = localStorage.getItem(COMPUTE_KEY + convId) || localStorage.getItem(COMPUTE_KEY + "last"); } catch (e) {}
+      selectedCompute = null; selectedModel = null;
+      if (raw) {
+        try {
+          var v = JSON.parse(raw);
+          if (v && v.defaultModel) selectedModel = String(v.defaultModel);
+          else if (v && v.target && v.model) selectedCompute = v;
+        } catch (e) {}
+      }
+      updateModelLabel();
+    }
+    function optionHtml(key, name, meta, selected) {
+      return '<button type="button" role="option" tabindex="-1" class="model-option" data-key="' + escapeHtml(key) + '" aria-selected="' + (selected ? "true" : "false") + '">' +
+        '<svg class="opt-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>' +
+        '<span class="opt-text"><span class="opt-name">' + escapeHtml(name) + '</span>' + (meta ? '<span class="opt-meta">' + escapeHtml(meta) + '</span>' : '') + '</span></button>';
+    }
+    var optionByKey = {};
+    function renderModelDropdown() {
+      var q = (document.getElementById("computeSearch").value || "").trim().toLowerCase();
+      var match = function(t) { return !q || String(t).toLowerCase().indexOf(q) !== -1; };
+      var cur = computeKey(selectedCompute);
+      var groups = { reserved: [], network: [], mine: [] };
+      optionByKey = {};
+      for (var i = 0; i < computeOptions.length; i++) {
+        var o = computeOptions[i];
+        var key = computeKey(o.compute);
+        optionByKey[key] = { compute: Object.assign({}, o.compute, { label: o.label }) };
+        if (match(o.label + " " + o.detail) && groups[o.group]) groups[o.group].push(optionHtml(key, o.label, o.detail, key === cur));
+      }
+      var dflt = [];
+      if (match("auto default edgecoder")) dflt.push(optionHtml("auto", "Auto", "EdgeCoder's default route", cur === "auto"));
+      optionByKey["auto"] = { compute: null, model: null };
+      for (var j = 0; j < (portalModels.local || []).length; j++) {
+        var m = portalModels.local[j];
+        var k = "default|" + m.name;
+        optionByKey[k] = { compute: null, model: m.name };
+        var meta = [m.parameterSize, m.quantization, "Free"].filter(Boolean).join(" · ");
+        if (match("edgecoder " + m.name)) dflt.push(optionHtml(k, "EdgeCoder · " + displayModelName(m.name), meta, cur === k));
+      }
+      var html = "";
+      if (groups.reserved.length) html += '<div class="section-label">Reserved</div>' + groups.reserved.join("");
+      if (groups.network.length) html += '<div class="section-label">Network · billed in cSats</div>' + groups.network.join("");
+      if (groups.mine.length) html += '<div class="section-label">My machines · free</div>' + groups.mine.join("");
+      if (dflt.length) html += '<div class="section-label">Default</div>' + dflt.join("");
+      if (!html) html = '<div class="model-empty">' + (q ? "Nothing matches." : "No compute discovered.") + '</div>';
+      document.getElementById("modelOptions").innerHTML = html;
+    }
+    async function refreshModels() {
+      var results = await Promise.all([
+        api("/portal/api/compute/options").catch(function() { return { options: [] }; }),
+        api("/portal/api/models").catch(function() { return { local: [], swarm: [] }; })
+      ]);
+      computeOptions = results[0].options || [];
+      portalModels = results[1] || { local: [], swarm: [] };
+      if (modelPickerOpen) renderModelDropdown();
+    }
+    function optionButtons() { return Array.prototype.slice.call(document.querySelectorAll("#modelOptions .model-option")); }
+    function openModelPicker() {
+      modelPickerOpen = true;
+      document.getElementById("modelDropdown").classList.remove("hidden");
       var trigger = document.getElementById("modelTrigger");
-      if (modelPickerOpen) {
-        dropdown.classList.remove("hidden");
-        trigger.classList.add("open");
-        refreshModels();
-      } else {
-        dropdown.classList.add("hidden");
-        trigger.classList.remove("open");
-      }
+      trigger.classList.add("open"); trigger.setAttribute("aria-expanded", "true");
+      var search = document.getElementById("computeSearch");
+      search.value = "";
+      renderModelDropdown();
+      search.focus();
+      refreshModels();
     }
-
-    function closeModelPicker() {
+    function closeModelPicker(restoreFocus) {
+      if (!modelPickerOpen) return;
       modelPickerOpen = false;
       document.getElementById("modelDropdown").classList.add("hidden");
-      document.getElementById("modelTrigger").classList.remove("open");
+      var trigger = document.getElementById("modelTrigger");
+      trigger.classList.remove("open"); trigger.setAttribute("aria-expanded", "false");
+      if (restoreFocus) trigger.focus();
     }
-
+    function chooseOption(key) {
+      var o = optionByKey[key];
+      if (!o) return;
+      selectedCompute = o.compute || null;
+      selectedModel = o.compute ? null : (o.model || null);
+      updateModelLabel();
+      saveCompute();
+      closeModelPicker(false);
+      document.getElementById("chatInput").focus();
+    }
     document.getElementById("modelTrigger").addEventListener("click", function(e) {
       e.stopPropagation();
-      toggleModelPicker();
+      if (modelPickerOpen) closeModelPicker(true); else openModelPicker();
     });
-
-    document.getElementById("modelDropdown").addEventListener("click", function(e) {
+    document.getElementById("computeSearch").addEventListener("input", renderModelDropdown);
+    document.getElementById("modelDropdown").addEventListener("keydown", function(e) {
+      var list = optionButtons();
+      var i = list.indexOf(document.activeElement);
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeModelPicker(true); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); if (list.length) list[Math.min(i + 1, list.length - 1)].focus(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); if (i <= 0) document.getElementById("computeSearch").focus(); else list[i - 1].focus(); }
+      else if (e.key === "Enter" && document.activeElement && document.activeElement.id === "computeSearch") { e.preventDefault(); if (list.length) chooseOption(list[0].dataset.key); }
+      else if (e.key === "Tab") { closeModelPicker(false); }
+    });
+    document.getElementById("modelOptions").addEventListener("click", function(e) {
       var opt = e.target.closest(".model-option");
-      if (!opt || opt.disabled) return;
-      selectedModel = opt.dataset.model || null;
-      updateModelLabel();
-      closeModelPicker();
+      if (opt) chooseOption(opt.dataset.key);
     });
-
     document.addEventListener("click", function(e) {
-      if (modelPickerOpen && !document.getElementById("modelPickerWrap").contains(e.target)) {
-        closeModelPicker();
-      }
+      if (modelPickerOpen && !document.getElementById("modelPickerWrap").contains(e.target)) closeModelPicker(false);
     });
 
     // Event listeners
@@ -634,6 +698,8 @@ app.get("/portal/chat", async (_req, reply) => {
     // Init
     (async function() {
       await requireAuth();
+      restoreCompute("last");
+      refreshModels();
       await loadConversations();
       if (conversations.length > 0) {
         await selectConversation(conversations[0].conversationId);
@@ -648,7 +714,7 @@ app.get("/portal/chat", async (_req, reply) => {
     title: "EdgeCoder Portal | Chat",
     activeTab: "chat",
     heading: "Chat",
-    subtitle: "AI assistant powered by the EdgeCoder swarm network.",
+    subtitle: "Chat on the EdgeCoder network: pick where it runs below the message box.",
     content,
     script
   }));

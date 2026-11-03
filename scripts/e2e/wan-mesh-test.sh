@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEED_URL="${SEED_URL:-https://edgecoder-seed.fly.dev}"
+SEED_URL="${SEED_URL:-https://coordinator.edgecoder.io}"
 LOCAL_AGENT_URL="${LOCAL_AGENT_URL:-http://localhost:4301}"
 MESH_TOKEN="${MESH_TOKEN:-}"
 

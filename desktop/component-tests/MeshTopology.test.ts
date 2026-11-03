@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   getMeshReputation: vi.fn(),
   getIdentity: vi.fn(),
   isRemoteMode: vi.fn(() => false),
+  computeOverview: vi.fn(),
 }));
 vi.mock("../src/lib/api", () => ({ ...api, backendReady: Promise.resolve() }));
 
@@ -16,6 +17,17 @@ const peer = (id: string) => ({ peerId: id, publicKeyPem: "PEM", coordinatorUrl:
 beforeEach(() => {
   api.getMeshPeers.mockResolvedValue({ peers: [peer("peer-aaaa"), peer("peer-bbbb"), peer("peer-cccc")] });
   api.getMeshReputation.mockResolvedValue({ peers: [{ peerId: "peer-aaaa", score: 91 }] });
+  api.computeOverview.mockResolvedValue({
+    connected: true,
+    account: {
+      accountId: "acct-1", cSats: 10, earnedSats: 0, recent: [], networkAgents: 4,
+      coordinator: { peerId: "coord-1", url: "https://coordinator.example" },
+      machines: [
+        { agentId: "studio", online: true, lastSeenMs: 0, computeClass: "apple", tier: "apple.m.hi", activeModel: null, models: ["qwen3.5:9b"], reservedUntilMs: null },
+        { agentId: "macbook", online: false, lastSeenMs: 0, computeClass: "apple", tier: null, activeModel: null, models: [], reservedUntilMs: null },
+      ],
+    },
+  });
   api.getIdentity.mockResolvedValue({ peerId: "self-node", publicKeyPem: "SELFPEM", coordinatorUrl: "https://coord.example", networkMode: "public_mesh" });
 });
 afterEach(() => cleanup());
@@ -79,5 +91,15 @@ describe("MeshTopology graph", () => {
     await fireEvent.click(all[1]);
     await fireEvent.click(all[2]);
     expect(all.filter((n) => n.getAttribute("aria-pressed") === "true")).toEqual([all[2]]);
+  });
+
+  it("shows your machines and the coordinator they meet through, without a LAN", async () => {
+    render(MeshTopology);
+    const list = await screen.findByRole("region", { name: /your machines/i });
+    expect(within(list).getByText("studio")).toBeTruthy();
+    expect(within(list).getByText(/apple · apple.m.hi · online/)).toBeTruthy();
+    expect(within(list).getByText(/macbook/)).toBeTruthy();
+    expect(within(list).getByText(/coordinator.example/)).toBeTruthy();
+    expect(screen.getByText(/4 machines online/)).toBeTruthy();
   });
 });

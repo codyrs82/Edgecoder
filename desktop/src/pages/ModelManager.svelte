@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     getModelList,
+    getModelCatalog,
     getOllamaTags,
     getOllamaPs,
     pullModelStream,
@@ -39,6 +40,8 @@
   let error = $state<string | null>(null);
 
   let modelList = $state<ModelInfo[]>([]);
+  // Served catalog (GET /model/catalog) when the inference service answers, else the bundled copy.
+  let catalog = $state<CatalogModel[]>(MODEL_CATALOG);
   let ollamaTags = $state<OllamaModel[]>([]);
   let runningModels = $state<OllamaRunningModel[]>([]);
 
@@ -49,6 +52,8 @@
   let pullStatus = $state("");
   let pullCompleted = $state(0);
   let pullTotal = $state(0);
+  /** Last failed pull, shown under that model's Install button as well as at the top. */
+  let pullError = $state<{ modelId: string; message: string } | null>(null);
 
   // ---- Delete confirmation state ----
   let confirmDeleteId = $state<string | null>(null);
@@ -115,7 +120,7 @@
     const activeModel = modelList.find((m) => m.active)?.modelId ?? "";
     const runningNames = runningModels.map((r) => r.name);
     const tagNames = ollamaTags.map((t) => t.name);
-    return MODEL_CATALOG.map((cm) => ({
+    return catalog.map((cm) => ({
       ...cm,
       installed: tagNames.some((t) => tagMatchesCatalog(t, cm.modelId)),
       active: activeModel ? tagMatchesCatalog(activeModel, cm.modelId) : false,
@@ -132,7 +137,7 @@
 
   // ---- Non-catalog installed models (shown in separate table) ----
   let nonCatalogModels = $derived(
-    models.filter((m) => !MODEL_CATALOG.some((cm) => tagMatchesCatalog(m.modelId, cm.modelId)))
+    models.filter((m) => !catalog.some((cm) => tagMatchesCatalog(m.modelId, cm.modelId)))
   );
 
   let pullPercent = $derived(
@@ -165,6 +170,13 @@
     }
 
     noLocalAgent = false;
+    // Catalog refresh is best-effort: an older inference service without /model/catalog, or a
+    // network error, leaves the bundled list in place.
+    getModelCatalog()
+      .then((served) => {
+        if (Array.isArray(served?.models) && served.models.length > 0) catalog = served.models;
+      })
+      .catch(() => undefined);
     try {
       const [list, tags, ps] = await Promise.all([
         getModelList(),
@@ -217,6 +229,7 @@
     pullCompleted = 0;
     pullTotal = 0;
     error = null;
+    pullError = null;
 
     try {
       const stream = await pullModelStream(name);
@@ -234,8 +247,15 @@
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          let msg: { status?: string; completed?: number; total?: number; error?: string };
           try {
-            const msg = JSON.parse(line);
+            msg = JSON.parse(line);
+          } catch {
+            continue; // Ignore malformed NDJSON lines
+          }
+          // Ollama reports a refused pull (unknown model, Ollama too old for it) inside the stream.
+          if (msg.error) throw new Error(`Ollama: ${msg.error}`);
+          {
             pullStatus = msg.status ?? "";
 
             if (
@@ -250,8 +270,6 @@
             if (msg.status === "success") {
               pullStatus = "success";
             }
-          } catch {
-            // Ignore malformed NDJSON lines
           }
         }
       }
@@ -259,7 +277,11 @@
       pullTarget = "";
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Pull failed";
+      // fetch() rejects with a TypeError when nothing answers on the Ollama port.
+      error = e instanceof TypeError
+        ? "Couldn't reach Ollama on this computer. EdgeCoder starts it when the app opens; restart EdgeCoder (details in ~/.edgecoder/ollama.log), then try again."
+        : e instanceof Error ? e.message : "Pull failed";
+      pullError = { modelId: name, message: error };
     } finally {
       pulling = false;
       pullingModelId = null;
@@ -310,7 +332,8 @@
 
   {#if noLocalAgent}
     <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to manage models.</div>
-  {:else if error}
+  {/if}
+  {#if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
 
@@ -397,6 +420,11 @@
                 >
                   {pullingModelId === model.modelId ? "Installing..." : "Install"}
                 </button>
+                {#if pullingModelId === model.modelId}
+                  <span class="row-pull-status">{pullStatus}{pullTotal > 0 ? ` ${pullPercent}%` : ""}</span>
+                {:else if pullError?.modelId === model.modelId}
+                  <span class="row-pull-error">{pullError.message}</span>
+                {/if}
               {/if}
             </div>
           </div>
@@ -964,5 +992,14 @@
     border-radius: 8px;
     margin-bottom: 1rem;
     font-size: 0.9rem;
+  }
+  .row-pull-status {
+    font-size: 0.8rem;
+    color: var(--text-muted, #9aa0a6);
+  }
+  .row-pull-error {
+    font-size: 0.8rem;
+    color: var(--danger, #e5484d);
+    max-width: 28rem;
   }
 </style>

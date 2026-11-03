@@ -1,4 +1,24 @@
-# Dependency audit (#13)
+# Dependency audit
+
+## Current status (2026-11-02)
+
+`npm audit --package-lock-only` on `main`:
+
+| Lockfile | Critical | High | Moderate | Low |
+|---|---|---|---|---|
+| `package-lock.json` | 0 | 0 | 0 | 0 |
+| `desktop/package-lock.json` | 0 | 0 | 0 | 3 |
+| `extensions/vscode/package-lock.json` | 0 | 0 | 0 | 0 |
+
+No high or critical advisory is open, so no upgrade was needed. The earlier dompurify, lodash-es,
+vite and qs advisories are fixed in the lockfiles (see the tables below). The three lows in
+`desktop/` are one advisory, deepmerge `mergeObject()` prototype poisoning, reached through
+`@sveltejs/vite-plugin-svelte` -> `vite-plugin-svelte-inspector`. npm reports no fix, and it is a
+dev-server dependency that is not in the built app.
+
+The rest of this page is the original audit (#13): what changed and why.
+
+## Original audit (#13)
 
 Generated from `npm audit --json` on each lockfile, before (base `ci/31-scale-nonroot`) and after this change. Every version change below is either a direct `npm audit fix` result or one of the explicit bumps listed here. After the change, no lockfile has a high or critical advisory. CI enforces this with `npm ci --ignore-scripts` and `npm audit --audit-level=high` per lockfile (the `dependency-audit` job).
 
@@ -21,7 +41,7 @@ vitepress 1.6.4 is built for vite 5, so running it on vite 6 (the override) is a
 
 `@abandonware/noble` and `bleno` stay `optionalDependencies` (they are unmaintained, with no fixed release). Their vulnerable build chain is patched through the overrides above. If they fail to compile, `npm ci` skips them, and `src/mesh/ble/noble-ble-transport.ts` loads them dynamically.
 
-Remaining (low only): root: katex/mermaid (fix would need mermaid 10, a downgrade). desktop: deepmerge via vite-plugin-svelte-inspector. vscode: 3 moderate (`@azure/identity`, `@azure/msal-node`, `uuid` through vsce).
+Remaining at the time of #13 (low only): root: katex/mermaid. desktop: deepmerge via vite-plugin-svelte-inspector. vscode: 3 moderate (`@azure/identity`, `@azure/msal-node`, `uuid` through vsce). Of these only the desktop deepmerge low is still open (see "Current status").
 
 The `dependency-audit` job is deliberately strict: an advisory published after merge turns unrelated PRs red until it is fixed, and Dependabot security PRs usually fix it. If that becomes noisy, make the audit step `continue-on-error` and rely on Dependabot.
 

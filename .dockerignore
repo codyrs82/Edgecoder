@@ -11,3 +11,6 @@ test-results
 *.dmg
 ios
 *.md
+
+# local Fly bootstrap output (generated secrets)
+.fly-bootstrap/

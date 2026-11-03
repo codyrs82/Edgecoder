@@ -15,22 +15,22 @@ describe("Monaco theme from tokens (#25)", () => {
 
   it("pins the 7 core editor colors to the current token values in both modes", () => {
     expect(monacoThemeData(tokens, "dark").colors).toMatchObject({
-      "editor.background": "#262624",
-      "editor.foreground": "#f7f5f0",
-      "editorLineNumber.foreground": "#b7b3ac",
-      "editorLineNumber.activeForeground": "#bbb4a8",
-      "editor.selectionBackground": "#5a4a3a",
-      "editor.lineHighlightBackground": "#2f2f2d",
-      "editorCursor.foreground": "#d8ab92"
+      "editor.background": "#0f1318",
+      "editor.foreground": "#e8ecf1",
+      "editorLineNumber.foreground": "#8b96a4",
+      "editorLineNumber.activeForeground": "#aab3c0",
+      "editor.selectionBackground": "#2a2114",
+      "editor.lineHighlightBackground": "#12161c",
+      "editorCursor.foreground": "#f7931a"
     });
     expect(monacoThemeData(tokens, "light").colors).toMatchObject({
       "editor.background": "#ffffff",
-      "editor.foreground": "#1f1f1d",
-      "editorLineNumber.foreground": "#6b665c",
-      "editorLineNumber.activeForeground": "#57524a",
-      "editor.selectionBackground": "#f0d9c8",
-      "editor.lineHighlightBackground": "#f7f5f0",
-      "editorCursor.foreground": "#9a542f"
+      "editor.foreground": "#10151c",
+      "editorLineNumber.foreground": "#596470",
+      "editorLineNumber.activeForeground": "#46505e",
+      "editor.selectionBackground": "#fce4c4",
+      "editor.lineHighlightBackground": "#f3f5f8",
+      "editorCursor.foreground": "#8a4f08"
     });
   });
 

@@ -28,11 +28,38 @@ Consolidated reference for all environment controls. The primary config file on 
 | `COORDINATOR_URL` | `https://coordinator.edgecoder.io` | URL of the coordinator this agent connects to. |
 | `COORDINATOR_REGISTRATION_TOKEN` | _(from Nodes page)_ | Required for EDGE_RUNTIME_MODE=coordinator. |
 | `COORDINATOR_PUBLIC_URL` | `https://coordinator.edgecoder.io` | Coordinator's publicly-reachable URL (used by coordinator itself). |
-| `COORDINATOR_DISCOVERY_URL` | `https://control.edgecoder.io/network/coordinators` | Control-plane endpoint for coordinator autodiscovery. |
+| `COORDINATOR_DISCOVERY_URL` | `$CONTROL_PLANE_URL/network/coordinators` | Control-plane endpoint for coordinator autodiscovery. |
 | `COORDINATOR_DISCOVERY_URLS` | `https://edgecoder-seed-eu.fly.dev` | Portal: comma-separated coordinator URLs, tried in order. The first healthy one (`/health/runtime`) is cached for 60 s. Takes precedence over `COORDINATOR_DISCOVERY_URL` (#35). |
 | `COORDINATOR_BOOTSTRAP_URLS` | `https://coordinator.edgecoder.io` | Comma-separated fallback list. |
 | `COORDINATOR_HTTP_TIMEOUT_MS` | `15000` | HTTP timeout for coordinator API calls (ms). |
 | `COORDINATOR_POST_RETRIES` | `2` | Retry count for coordinator POST requests on transient failure. |
+
+## Economy, payouts and receipts (coordinator)
+
+| Variable | Default | Description |
+|---|---|---|
+| `RATE_ORACLE_ENABLED` | `true` | Enable the BTC/USD rate oracle (median of sources, daily clamp). Set `false` to freeze class reference pricing. |
+| `RATE_RECALIBRATION_MS` | `86400000` | How often the rate oracle recalibrates its per-class reference rates (ms; min 60000). |
+| `MARKET_DEFAULT_BID_PREMIUM_BPS` | `1000` | Default order-book bid premium over the oracle reference, in basis points. |
+| `NETWORK_FEE_BPS` | `500` | Network fee skimmed into the fee pool on each settled trade, in basis points. |
+| `HOST_HEARTBEAT_MS` | `60000` | Interval at which a host reports its uptime/services heartbeat (ms; min 1000). |
+| `INFRA_HOST_REPORT_URLS` | _(unset)_ | Comma-separated coordinator URLs whose fee pool this host also reports to; each heartbeat is signed with `COORDINATOR_PRIVATE_KEY_PEM` and must come from a peer the receiver's mesh admitted. |
+| `INFRA_HOST_LIGHTNING_NODE_ID` | _(unset)_ | This host's Lightning node id (`lncli getinfo` → `identity_pubkey`); a remote coordinator attests the `lightning` service by a BOLT 8 handshake against it on port 9735. |
+| `INFRA_HOST_ELECTRS_ENDPOINT` | `electrs:50001` | Where this coordinator checks its own electrs (Electrum `server.version`) before counting the `electrs` service. |
+| `HOST_ATTEST_ALLOW_PRIVATE` | _(unset)_ | `1` lets service probes of remote hosts target private/loopback addresses (local test networks only). |
+| `FEE_POOL_DISTRIBUTION_MS` | `86400000` | Interval for distributing the network fee pool to hosts by uptime × services (ms; min 60000). |
+| `PAYOUT_AUTO_INTERVAL_MS` | `21600000` | Interval for the LNURL auto-payout sweep (ms; min 60000). |
+| `RECEIPT_EPOCH_MS` | `3600000` | Length of a signed-work-receipt Merkle epoch before it is sealed and anchored (ms). |
+| `RECEIPT_REPLICATION_MS` | `60000` | How often sealed receipt epochs are replicated to peers (ms). |
+| `PAYOUT_MAX_SINGLE_SATS` | mainnet `100000`, else `0` | Largest single payout incl. its routing-fee cap, in sats; `0` = no cap. Over-limit payouts are rejected and logged as `payout_limit_exceeded`. |
+| `PAYOUT_MAX_ACCOUNT_DAILY_SATS` | mainnet `500000`, else `0` | Paid + pending payouts per account over a rolling 24 h (pending at their fee cap), in sats; `0` = no cap. |
+| `PAYOUT_MAX_GLOBAL_DAILY_SATS` | mainnet `2000000`, else `0` | Paid + pending payouts from this coordinator's database over a rolling 24 h, in sats; `0` = no cap. |
+| `PAYOUTS_PAUSED` | _(unset)_ | `1` halts withdrawals, auto payouts and fee-pool distribution on this instance; cannot be lifted over the API. Purchases keep working. The shared flag is toggled with `POST /admin/payouts/pause`. |
+| `PAYOUT_RECONCILE_MS` | `600000` | How often the ledger is reconciled against the Lightning node's balances and payments (ms; min 60000; `0` = timer off). A mismatch pauses payouts. |
+| `PAYOUT_RECONCILE_TOLERANCE_SATS` | `1000` | Slack per reconciliation check, in sats. |
+| `PAYOUT_RECONCILE_LOOKBACK_MS` | `86400000` | How far back the first reconciliation after a start reads node payments (ms). |
+| `PAYOUT_ALERT_WEBHOOK_URL` | _(unset)_ | POSTed a JSON summary (counts, amounts, payment hashes; no secrets) when reconciliation alerts or trips. |
+| `MOCK_LIGHTNING_BALANCE_SATS` | `0` | Dev only: starting balance of the mock Lightning wallet. |
 
 ## Model provider
 
@@ -56,7 +83,11 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PORTAL_SERVICE_TOKEN` | Internal service token for portal ↔ coordinator/control-plane calls. |
 | `ENABLE_DEBUG_ROUTES` | Set `1` to register coordinator `/debug/*` routes (dev/e2e only; never registered in production). |
 | `PORTAL_ALLOW_OPEN_INTERNAL` | Set `1` (non-production only) to leave portal `/internal/*` open when `PORTAL_SERVICE_TOKEN` is unset; otherwise those routes return 503. |
-| `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-timestamp-ms`, `x-nonce`, `x-body-sha256`, `x-signature`); the declared body hash must match the raw request bytes. The TS worker and the iOS app (#64, `RequestSigner.swift`, Keychain-held key registered via `publicKeyPem` in `/register`) both sign this way; shared vectors live in `tests/security/fixtures/request-signing-vectors.json`. Set `false` only for local dev with legacy unsigned agents. |
+| `REQUIRE_SIGNED_AGENT_REQUESTS` | Default `true`, always `true` in production. Agent `/heartbeat`, `/pull` and `/result` must carry signed request headers (`x-agent-id`, `x-timestamp-ms`, `x-nonce`, `x-body-sha256`, `x-signature`). The TS worker and the iOS app (#64, `RequestSigner.swift`, Keychain-held key registered via `publicKeyPem` in `/register`) both sign this way; shared vectors live in `tests/security/fixtures/request-signing-vectors.json`. Set `false` only for local dev with legacy unsigned agents. A signed request's `x-body-sha256` must be the sha256 of the exact body bytes received. `/benchmark/response` is signed-only whatever this is set to. Nonces are kept in Postgres (`request_nonces`) when `DATABASE_URL` is set, so replays are refused across restarts and seeds. |
+| `MESH_WS_REQUIRE_SIGNED` | Default `false`. `true` refuses `/mesh/ws` connections without a signed bind (`x-mesh-ws-ts` + `x-mesh-ws-signature` from the peer's registered key). Unsigned binds (older agents) never replace an authenticated connection, and every message must come from the bound peer either way. |
+| `EDGECODER_TRUST_MODE` | Agent: `tofu` (default), `strict` or `open`. How the agent trusts coordinator keys (docs/receipts-and-trust.md); switch-over to `strict` in docs/going-to-mainnet.md. `strict` with no keys listed refuses to start. |
+| `TRUSTED_COORDINATOR_KEYS` | Agent: comma-separated `peerId:fingerprint` (sha256 of the SPKI DER; `GET /identity` → `trustEntry`). Older PEM-text fingerprints are still accepted. |
+| `EDGECODER_TRUST_FILE` | Agent: trust file path (default `<config dir>/trusted-coordinators`); one `peerId:fingerprint` per line; tofu appends first-seen keys. |
 
 ## Result verification (#50, #106)
 
@@ -134,6 +165,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | An http(s) URL. |
 | `OLLAMA_MODEL` | `qwen3.5:9b` | The model that is active at startup. |
 | `OLLAMA_COORDINATOR_MODEL` | `qwen3.5:9b` (decompose and reflect); falls back to `OLLAMA_MODEL` for chat | The model used for coordinator prompts. |
+| `DECOMPOSE_MODEL_TIMEOUT_MS` | `10000` | Cap on the model call that splits a submitted prompt into subtasks; past it the task runs as one subtask. `0` skips the model. |
 
 ## IDE provider server (port 4304)
 
@@ -272,8 +304,9 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `ANCHOR_INTERVAL_MS` | integer ≥ 1 | `7200000` |
 | `STATS_LEDGER_SYNC_INTERVAL_MS` | integer ≥ 1 | `10000` |
 | `STATS_ANCHOR_INTERVAL_MS` | integer ≥ 1 | `600000` |
-| `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `30` |
+| `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
+| `AUTO_BLACKLIST_TTL_MS` | integer ≥ 0 | `3600000` |
 | `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |
 | `SECURITY_MAX_SKEW_MS` | integer ≥ 1 | `120000` |
 | `TUNNEL_IDLE_TTL_MS` | integer ≥ 1 | `90000` |

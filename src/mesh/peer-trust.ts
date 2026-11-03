@@ -1,7 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash } from "node:crypto";
+import { fingerprintMatches } from "../security/key-fingerprint.js";
 import { signPayload, verifyPayload } from "./peer.js";
 
 /*
@@ -18,10 +19,8 @@ export type PeerAllowlist = Map<string, string>;
 
 export const PEER_SIGNATURE_MAX_SKEW_MS = 5 * 60_000;
 
-export function publicKeyFingerprint(publicKeyPem: string): string {
-  const der = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" });
-  return createHash("sha256").update(der).digest("hex");
-}
+// The one fingerprint function (sha256 of SPKI DER), shared with agent pins and discovery.
+export { publicKeyFingerprint } from "../security/key-fingerprint.js";
 
 /**
  * `MESH_PEER_ALLOWLIST=coord-a:<sha256hex>@https://a.example,coord-b:<sha256hex>`
@@ -91,11 +90,7 @@ export function canonicalPeerUrl(raw: string | undefined): string | null {
 export function isAllowlistedKey(allowlist: PeerAllowlist, peerId: string, publicKeyPem: string): boolean {
   const want = allowlist.get(peerId);
   if (!want) return false;
-  try {
-    return publicKeyFingerprint(publicKeyPem) === want;
-  } catch {
-    return false;
-  }
+  return fingerprintMatches(want, publicKeyPem);
 }
 
 // ---- registration proof of possession ----

@@ -61,7 +61,7 @@ export interface AgentRegistration {
 export interface Subtask {
   id: string;
   taskId: string;
-  kind: "micro_loop" | "single_step";
+  kind: "micro_loop" | "single_step" | "inference";
   language: Language;
   input: string;
   timeoutMs: number;
@@ -101,6 +101,20 @@ export interface TaskProjectMeta {
   tenantId?: string;
   resourceClass: ResourceClass;
   priority: number;
+  /** Compute class the requester wants: cpu | apple | gpu | gpu.dc, or "any" (legacy ids are mapped on the way in). */
+  computeClass?: string;
+  /** Requester's maximum price in msat per credit; an agent may claim only if its ask is at or below it. */
+  maxBidMsatPerCredit?: number;
+  /** Capability constraints: only an agent with at least this much discrete GPU VRAM (GB) may claim. */
+  minVramGb?: number;
+  /** Capability constraints: only an agent with at least this much system / unified memory (GB) may claim. */
+  minMemoryGb?: number;
+  /** Only an agent whose rolling reliability score (0..1) is at least this may claim. */
+  minReliability?: number;
+  /** Run only on an agent owned by this account (your own machines; not billed). */
+  onlyAccountId?: string;
+  /** Run on the agent this reserved-capacity lease holds (src/economy/reservations.ts; the lease pays). */
+  reservationId?: string;
 }
 
 export interface MeshPeerIdentity {
@@ -168,6 +182,10 @@ export interface QueueEventRecord {
     | "node_approval"
     | "node_validation"
     | "earnings_accrual"
+    | "network_fee"
+    | "payout_settled"
+    | "fee_pool_distribution"
+    | "payouts_pause_changed"
     | "stats_checkpoint_proposal"
     | "stats_checkpoint_signature"
     | "stats_checkpoint_commit";
@@ -204,6 +222,14 @@ export interface ComputeContributionReport {
   success: boolean;
   qualityScore: number;
   timestampMs: number;
+  /** Parameter count (billions) of the model that served the task; sizes the credit rate (0/undefined = plain code execution). */
+  modelParamSizeB?: number;
+  /**
+   * Credits per measured second of the agent's hardware tier (src/economy/compute-classes.ts).
+   * Set by the coordinator; replaces the cpu/gpu base rate so credits × the class's flat price per
+   * credit is the tier's hour price. Undefined (BLE mesh, older callers) keeps the base rate.
+   */
+  hardwareWeight?: number;
 }
 
 export interface CreditTransaction {
@@ -214,6 +240,60 @@ export interface CreditTransaction {
   reason: string;
   timestampMs: number;
   relatedTaskId?: string;
+  /**
+   * Sats value (millisatoshi) locked when the row was written: for earn rows the payable
+   * amount at the rate-oracle quote of that moment, for purchase rows the net sats paid.
+   * Payouts are made against the sum of earn msat, never against credits × today's price.
+   */
+  msat?: number;
+}
+
+/** A Lightning payment from the coordinator's node to an account's wallet (worker or infrastructure host). */
+export interface PayoutRecord {
+  payoutId: string;
+  accountId: string;
+  coordinatorId: string;
+  kind: "withdraw" | "auto";
+  bolt11: string;
+  /** Hex payment hash from the invoice; unique, so a retried withdrawal can't pay twice. */
+  paymentHash: string;
+  amountMsat: number;
+  feeMsat: number;
+  maxFeeMsat: number;
+  status: "pending" | "paid" | "failed";
+  preimage?: string;
+  error?: string;
+  /** Lightning address or LNURL the auto payout used, if any. */
+  destination?: string;
+  createdAtMs: number;
+  settledAtMs?: number;
+}
+
+/** A node hosting EdgeCoder infrastructure (coordinator, optionally a Bitcoin/Lightning node), paid from the network fee pool. */
+export interface InfrastructureHost {
+  hostId: string;
+  /** Credit account that receives fee-pool distributions (defaults to host:<hostId>). */
+  accountId: string;
+  coordinatorUrl?: string;
+  region?: string;
+  /**
+   * Services that count in the weight: the declared ones the receiving coordinator attested
+   * (src/economy/host-attestation.ts). coordinator, bitcoind, lightning, electrs.
+   */
+  services: string[];
+  /** What the host declared in its heartbeat, attested or not (display / diagnostics). */
+  declaredServices?: string[];
+  /** When `services` was last attested. */
+  attestedAtMs?: number;
+  /** Lightning node id the host declared (needed to attest the lightning service). */
+  lightningNodeId?: string;
+  lightningAddress?: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  /** Last heartbeat that counted toward uptime (at most one per heartbeat interval). */
+  lastCountedMs?: number;
+  /** Heartbeats observed in the current distribution window. */
+  heartbeatsInWindow: number;
 }
 
 export interface CreditAccount {
@@ -281,7 +361,7 @@ export interface AgentRolloutState {
   error?: string;
 }
 
-export type BitcoinNetwork = "bitcoin" | "testnet" | "signet";
+export type BitcoinNetwork = "bitcoin" | "testnet" | "signet" | "regtest";
 export type WalletType = "lightning" | "onchain";
 
 export interface WalletAccount {

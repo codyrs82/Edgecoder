@@ -1,7 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { sign, verify, randomUUID } from "node:crypto";
+import { createHash, sign, verify, randomUUID } from "node:crypto";
+import type { FastifyInstance } from "fastify";
 
 export interface SignRequestParams {
   method: string;
@@ -29,6 +30,12 @@ export interface VerifyParams {
   headers: SignedHeaders;
   publicKeyPem: string;
   maxSkewMs: number;
+  /**
+   * The exact bytes received (Fastify raw body). When given, `x-body-sha256` must equal
+   * sha256(rawBody), so a captured signature cannot be replayed with a different body.
+   * An absent body hashes as the empty string.
+   */
+  rawBody?: string | Buffer | null;
 }
 
 export interface VerifyResult {
@@ -36,6 +43,11 @@ export interface VerifyResult {
   agentId?: string;
   nonce?: string;
   reason?: string;
+}
+
+/** sha256 hex of the exact request body bytes; the value agents send as `x-body-sha256`. */
+export function hashRequestBody(raw: string | Buffer | null | undefined): string {
+  return createHash("sha256").update(raw ?? "").digest("hex");
 }
 
 /**
@@ -95,5 +107,28 @@ export function verifySignedRequest(params: VerifyParams): VerifyResult {
     return { valid: false, reason: "invalid_signature" };
   }
 
+  // The signature covers the declared hash; bind that hash to the body actually received.
+  if (params.rawBody !== undefined && hashRequestBody(params.rawBody) !== bodyHash.toLowerCase()) {
+    return { valid: false, agentId, reason: "body_hash_mismatch" };
+  }
+
   return { valid: true, agentId, nonce };
+}
+
+/**
+ * Keep the exact JSON request bytes on `req.rawBody` so signed bodies are verified against what
+ * was sent, not a re-serialization. Parsing itself stays Fastify's default (safe) JSON parser.
+ */
+export function installRawBodyCapture(app: FastifyInstance): void {
+  const defaultJsonParser = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    (req as unknown as { rawBody?: string }).rawBody = body as string;
+    defaultJsonParser(req, body as string, done);
+  });
+}
+
+/** Raw body captured by installRawBodyCapture; "" when the request had none. */
+export function rawBodyOf(req: unknown): string {
+  return (req as { rawBody?: string }).rawBody ?? "";
 }

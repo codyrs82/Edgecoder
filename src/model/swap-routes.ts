@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { swapModel, getModelStatus, listModels, pullModel } from "./swap.js";
 import { PullTracker } from "./pull-tracker.js";
+import { CATEGORY_LABELS, MODEL_CATALOG, MODEL_CATALOG_VERSION } from "./catalog.js";
 
 /** Ollama model names: `name[:tag]`, optionally `namespace/name`; no segment starts with ".". */
 const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._\-]*(\/(?!\.)[A-Za-z0-9._\-]+)*(:[A-Za-z0-9._\-]+)?$/;
@@ -44,6 +45,11 @@ export function buildModelSwapRoutes(
   app.get("/model/list", async (_req, reply) => {
     const result = await listModels(state.activeModel);
     return reply.send(result);
+  });
+
+  /** Curated install catalog (see src/model/catalog.ts). Read-only; the desktop app refreshes its bundled copy from here. */
+  app.get("/model/catalog", async (_req, reply) => {
+    return reply.send({ version: MODEL_CATALOG_VERSION, categories: CATEGORY_LABELS, models: MODEL_CATALOG });
   });
 
   // #37: the desktop Model Manager's "pull" button. Starts the download only; /model/swap switches.

@@ -118,7 +118,7 @@
   async function refreshCoreData() {
     await backendReady;
     const agentStatus = await localAgentStatus();
-    agentPortError = agentStatus === "port_occupied" ? (agentStatusMessage(agentStatus) ?? "") : "";
+    agentPortError = agentStatusMessage(agentStatus) ?? "";
     if (isRemoteMode()) {
       noLocalAgent = true;
       loading = false;

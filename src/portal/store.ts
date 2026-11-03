@@ -55,6 +55,10 @@ export type PortalMessage = {
   createdAtMs: number;
 };
 
+/** Agent accounts have no email; the NOT NULL UNIQUE column holds `agent-<userId>@agents.invalid` (RFC 2606, never delivered). */
+export const AGENT_EMAIL_DOMAIN = "agents.invalid";
+export const isAgentPlaceholderEmail = (email: string | undefined | null) => (email ?? "").toLowerCase().endsWith(`@${AGENT_EMAIL_DOMAIN}`);
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS portal_users (
   user_id TEXT PRIMARY KEY,
@@ -228,6 +232,36 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS ui_theme TEXT NOT NULL DEFAULT 'warm'`);
     await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS device_id TEXT`);
+    // Native-app OAuth hand-off lives in Postgres: Cloudflare spreads one sign-in across portal instances.
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS native_redirect TEXT`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_mobile_oauth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
+    );
+    // API keys for the hosted model endpoint (/v1): only a hash is kept.
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_api_keys (
+         key_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+         created_at_ms BIGINT NOT NULL, last_used_ms BIGINT, revoked_at_ms BIGINT)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_api_keys_user_idx ON portal_api_keys (user_id)`);
+    // AI agents sign up with a public key instead of an email (routes/agents.ts).
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS account_kind TEXT NOT NULL DEFAULT 'person'`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_agent_identities (
+         key_type TEXT NOT NULL, public_key TEXT NOT NULL, user_id TEXT NOT NULL UNIQUE, created_at_ms BIGINT NOT NULL,
+         PRIMARY KEY (key_type, public_key))`
+    );
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_agent_challenges (
+         nonce_hash TEXT PRIMARY KEY, key_type TEXT NOT NULL, public_key TEXT NOT NULL, expires_at_ms BIGINT NOT NULL)`
+    );
+    // Password reset links: only the SHA-256 of the token is kept; single use, short expiry.
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_password_resets (
+         token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL,
+         used_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_password_resets_user_idx ON portal_password_resets (user_id)`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -351,6 +385,111 @@ export class PortalStore {
     await this.pool.query(`UPDATE portal_users SET ui_theme = $2 WHERE user_id = $1`, [userId, theme]);
   }
 
+  async setDisplayName(userId: string, displayName: string | null): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET display_name = $2 WHERE user_id = $1`, [userId, displayName]);
+  }
+
+  // ── API keys (hosted /v1 endpoint) ──
+  async createApiKey(k: { keyId: string; userId: string; name: string; keyHash: string; prefix: string }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_api_keys (key_id, user_id, name, key_hash, prefix, created_at_ms) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [k.keyId, k.userId, k.name, k.keyHash, k.prefix, Date.now()]
+    );
+  }
+
+  async listApiKeys(userId: string): Promise<Array<{ keyId: string; name: string; prefix: string; createdAtMs: number; lastUsedMs?: number }>> {
+    const r = await this.pool.query(
+      `SELECT key_id, name, prefix, created_at_ms, last_used_ms FROM portal_api_keys WHERE user_id = $1 AND revoked_at_ms IS NULL ORDER BY created_at_ms DESC`,
+      [userId]
+    );
+    return r.rows.map((row) => ({ keyId: row.key_id, name: row.name, prefix: row.prefix, createdAtMs: Number(row.created_at_ms), ...(row.last_used_ms ? { lastUsedMs: Number(row.last_used_ms) } : {}) }));
+  }
+
+  async countApiKeys(userId: string): Promise<number> {
+    const r = await this.pool.query(`SELECT count(*)::int AS n FROM portal_api_keys WHERE user_id = $1 AND revoked_at_ms IS NULL`, [userId]);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
+  async revokeApiKey(userId: string, keyId: string): Promise<boolean> {
+    const r = await this.pool.query(`UPDATE portal_api_keys SET revoked_at_ms = $3 WHERE key_id = $1 AND user_id = $2 AND revoked_at_ms IS NULL`, [keyId, userId, Date.now()]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** The owner of a live key (and marks it used, at most once a minute). */
+  async userForApiKeyHash(keyHash: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT key_id, user_id, last_used_ms FROM portal_api_keys WHERE key_hash = $1 AND revoked_at_ms IS NULL`, [keyHash]);
+    const row = r.rows[0];
+    if (!row) return null;
+    const now = Date.now();
+    if (!row.last_used_ms || now - Number(row.last_used_ms) > 60_000) await this.pool.query(`UPDATE portal_api_keys SET last_used_ms = $2 WHERE key_id = $1`, [row.key_id, now]);
+    return row.user_id as string;
+  }
+
+  /** Revokes every live API key of a user (an agent rotating its key); returns how many. */
+  async revokeAllApiKeys(userId: string): Promise<number> {
+    const r = await this.pool.query(`UPDATE portal_api_keys SET revoked_at_ms = $2 WHERE user_id = $1 AND revoked_at_ms IS NULL`, [userId, Date.now()]);
+    return r.rowCount ?? 0;
+  }
+
+  // ── AI agent accounts (public-key signup) ──
+
+  /** Stores a signup challenge (only a hash of the nonce) and drops long-expired ones. */
+  async createAgentChallenge(c: { nonceHash: string; keyType: string; publicKey: string; expiresAtMs: number }): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_agent_challenges WHERE expires_at_ms < $1`, [Date.now() - 3_600_000]);
+    await this.pool.query(`INSERT INTO portal_agent_challenges (nonce_hash, key_type, public_key, expires_at_ms) VALUES ($1,$2,$3,$4)`, [
+      c.nonceHash,
+      c.keyType,
+      c.publicKey,
+      c.expiresAtMs,
+    ]);
+  }
+
+  /** Takes a challenge out (single use: a second call for the same nonce returns null). Expiry is checked by the caller. */
+  async consumeAgentChallenge(nonceHash: string): Promise<{ keyType: string; publicKey: string; expiresAtMs: number } | null> {
+    const r = await this.pool.query(`DELETE FROM portal_agent_challenges WHERE nonce_hash = $1 RETURNING key_type, public_key, expires_at_ms`, [nonceHash]);
+    const row = r.rows[0];
+    return row ? { keyType: row.key_type, publicKey: row.public_key, expiresAtMs: Number(row.expires_at_ms) } : null;
+  }
+
+  async userForAgentKey(keyType: string, publicKey: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT user_id FROM portal_agent_identities WHERE key_type = $1 AND public_key = $2`, [keyType, publicKey]);
+    return (r.rows[0]?.user_id as string | undefined) ?? null;
+  }
+
+  /**
+   * A portal user for an agent: no password, no deliverable email (a reserved `.invalid`
+   * placeholder keeps the email column's NOT NULL UNIQUE), never email-verified, kind "agent".
+   * Returns the owning user id (an existing one when the key raced another signup).
+   */
+  async createAgentAccount(a: { userId: string; keyType: string; publicKey: string; displayName?: string }): Promise<string> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const now = Date.now();
+      const claimed = await client.query(
+        `INSERT INTO portal_agent_identities (key_type, public_key, user_id, created_at_ms) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (key_type, public_key) DO NOTHING RETURNING user_id`,
+        [a.keyType, a.publicKey, a.userId, now]
+      );
+      if (!claimed.rows[0]) {
+        await client.query("ROLLBACK");
+        return (await this.userForAgentKey(a.keyType, a.publicKey)) as string;
+      }
+      await client.query(
+        `INSERT INTO portal_users (user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms, account_kind)
+         VALUES ($1,$2,false,'warm',NULL,$3,$4,NULL,'agent')`,
+        [a.userId, `agent-${a.userId}@${AGENT_EMAIL_DOMAIN}`, a.displayName ?? null, now]
+      );
+      await client.query("COMMIT");
+      return a.userId;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async setUserRole(userId: string, role: "user" | "admin"): Promise<void> {
     await this.pool.query(`UPDATE portal_users SET role = $2 WHERE user_id = $1`, [userId, role]);
   }
@@ -463,6 +602,60 @@ export class PortalStore {
     return { userId: row.user_id };
   }
 
+  /** New reset token for a user; any older unused token for that user is invalidated in the same statement. */
+  async createPasswordReset(input: { tokenHash: string; userId: string; expiresAtMs: number }): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(`DELETE FROM portal_password_resets WHERE expires_at_ms < $1`, [now - 24 * 60 * 60 * 1000]);
+    await this.pool.query(
+      `WITH invalidated AS (
+         UPDATE portal_password_resets SET used_at_ms = $4 WHERE user_id = $2 AND used_at_ms IS NULL
+       )
+       INSERT INTO portal_password_resets (token_hash, user_id, expires_at_ms, used_at_ms, created_at_ms)
+       VALUES ($1, $2, $3, NULL, $4)`,
+      [input.tokenHash, input.userId, input.expiresAtMs, now]
+    );
+  }
+
+  /** Redeem a reset token: the conditional UPDATE ... RETURNING makes it single use across instances. */
+  async consumePasswordReset(tokenHash: string): Promise<{ userId: string } | null> {
+    const now = Date.now();
+    const result = await this.pool.query(
+      `UPDATE portal_password_resets SET used_at_ms = $2
+       WHERE token_hash = $1 AND used_at_ms IS NULL AND expires_at_ms > $2
+       RETURNING user_id`,
+      [tokenHash, now]
+    );
+    const row = result.rows[0];
+    return row ? { userId: row.user_id } : null;
+  }
+
+  /** Mark every outstanding reset token for a user as used. */
+  async invalidatePasswordResets(userId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE portal_password_resets SET used_at_ms = $2 WHERE user_id = $1 AND used_at_ms IS NULL`,
+      [userId, Date.now()]
+    );
+  }
+
+  /** Reset links issued to a user since `sinceMs` (per-email rate limit). */
+  async countRecentPasswordResets(userId: string, sinceMs: number): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM portal_password_resets WHERE user_id = $1 AND created_at_ms >= $2`,
+      [userId, sinceMs]
+    );
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
+  async setUserPassword(userId: string, passwordHash: string): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET password_hash = $2 WHERE user_id = $1`, [userId, passwordHash]);
+  }
+
+  /** Sign a user out everywhere (sessions and pending native-app OAuth codes). */
+  async deleteSessionsForUser(userId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_sessions WHERE user_id = $1`, [userId]);
+    await this.pool.query(`DELETE FROM portal_mobile_oauth_tokens WHERE user_id = $1`, [userId]);
+  }
+
   async createSession(input: {
     sessionId: string;
     userId: string;
@@ -502,25 +695,45 @@ export class PortalStore {
     provider: "google" | "apple" | "microsoft" | "github";
     redirectUri: string;
     expiresAtMs: number;
+    /** Deep link to hand the session back to a native app (desktop/iOS), if the flow started there. */
+    nativeRedirect?: string;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now()]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri`,
+       RETURNING provider, redirect_uri, native_redirect`,
       [stateId, now]
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { provider: row.provider, redirectUri: row.redirect_uri };
+    return { provider: row.provider, redirectUri: row.redirect_uri, ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}) };
+  }
+
+  /** One-time code a native app redeems for a session after OAuth (stored hashed, single use). */
+  async issueMobileOauthToken(tokenHash: string, userId: string, expiresAtMs: number): Promise<void> {
+    await this.pool.query(`DELETE FROM portal_mobile_oauth_tokens WHERE expires_at_ms <= $1`, [Date.now()]);
+    await this.pool.query(
+      `INSERT INTO portal_mobile_oauth_tokens (token_hash, user_id, expires_at_ms) VALUES ($1,$2,$3)`,
+      [tokenHash, userId, expiresAtMs]
+    );
+  }
+
+  /** Redeem a mobile OAuth code; the DELETE ... RETURNING makes it single-use across instances. */
+  async consumeMobileOauthToken(tokenHash: string): Promise<string | null> {
+    const result = await this.pool.query(
+      `DELETE FROM portal_mobile_oauth_tokens WHERE token_hash = $1 AND expires_at_ms > $2 RETURNING user_id`,
+      [tokenHash, Date.now()]
+    );
+    return result.rows[0]?.user_id ?? null;
   }
 
   async upsertNodeEnrollment(input: {
@@ -531,7 +744,7 @@ export class PortalStore {
     ownerEmail: string;
     registrationTokenHash: string;
     emailVerified: boolean;
-  }): Promise<NodeEnrollment> {
+  }): Promise<NodeEnrollment | null> {
     const now = Date.now();
     const normalizedDeviceId = input.deviceId?.trim().toLowerCase() || undefined;
     let targetNodeId = input.nodeId;
@@ -558,6 +771,8 @@ export class PortalStore {
           ELSE FALSE
         END,
         updated_at_ms = EXCLUDED.updated_at_ms
+      -- Re-enrolling (token rotation) is the owner's alone; another user gets no row back.
+      WHERE portal_node_enrollments.owner_user_id = EXCLUDED.owner_user_id
       RETURNING
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
@@ -575,7 +790,7 @@ export class PortalStore {
       ]
     );
     const row = result.rows[0];
-    return this.mapNodeRow(row);
+    return row ? this.mapNodeRow(row) : null;
   }
 
   async getNodeEnrollment(nodeId: string): Promise<NodeEnrollment | null> {
@@ -1193,6 +1408,12 @@ export class PortalStore {
       createdAtMs: Number(r.created_at_ms),
       updatedAtMs: Number(r.updated_at_ms)
     }));
+  }
+
+  /** The user_id that owns a conversation, or null if it does not exist. Used for authz checks. */
+  async getConversationOwner(conversationId: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT user_id FROM portal_conversations WHERE conversation_id = $1`, [conversationId]);
+    return r.rows[0]?.user_id ?? null;
   }
 
   async getConversationMessages(conversationId: string): Promise<PortalMessage[]> {

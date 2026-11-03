@@ -160,7 +160,7 @@ const SESSION_TOKEN_KEY = "edgecoder_session_token";
 function saveSessionToken(token: string): void {
   try { localStorage.setItem(SESSION_TOKEN_KEY, token); } catch {}
 }
-function loadSessionToken(): string | null {
+export function loadSessionToken(): string | null {
   try { return localStorage.getItem(SESSION_TOKEN_KEY); } catch { return null; }
 }
 export function clearSessionToken(): void {
@@ -171,7 +171,14 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-const OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
+// The desktop shell may run its own Ollama on another loopback port (see lib/local-compute.ts);
+// dev builds keep the Vite proxy.
+let OLLAMA_BASE = import.meta.env.DEV ? "/ollama" : "http://localhost:11434";
+
+/** Point model management at the Ollama the shell set up (prod only; validated by the caller). */
+export function setOllamaBase(base: string): void {
+  if (!import.meta.env.DEV) OLLAMA_BASE = base;
+}
 
 // ---------------------------------------------------------------------------
 // Local agent token (for inference/admin auth)
@@ -313,6 +320,14 @@ export const swapModel = async (model: string) =>
 
 export const pullModel = async (model: string) =>
   post<unknown>(INFERENCE_BASE, "/model/pull", { model }, await inferenceHeaders());
+
+/** Curated install catalog served by the inference service (falls back to the bundled copy in lib/models.ts). */
+export const getModelCatalog = async () =>
+  get<{ version: string; categories: Record<string, string>; models: import("./models").CatalogModel[] }>(
+    INFERENCE_BASE,
+    "/model/catalog",
+    await inferenceHeaders(),
+  );
 
 // ---------------------------------------------------------------------------
 // Pull progress — try coordinator first, fall back to inference service
@@ -964,8 +979,29 @@ export async function ideSendToolApproval(id: string, approved: boolean): Promis
 }
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "done";
   [key: string]: unknown;
+}
+
+/**
+ * A model id from the compute picker as the IDE chat takes it: "network/m@gpu", "mine/m" and
+ * "reserved/<id>/m" run off this computer (billed in cSats on the network), anything else here.
+ */
+export function computeFields(id?: string): { model?: string; compute?: { target: "mine" | "network" | "reserved" | "auto"; computeClass?: string; reservationId?: string } } {
+  if (!id) return {};
+  if (id === "auto") return { compute: { target: "auto" } };
+  if (id.startsWith("mine/")) return { model: id.slice(5), compute: { target: "mine" } };
+  const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
+  if (reserved) return { model: reserved[2], compute: { target: "reserved", reservationId: reserved[1] } };
+  if (id.startsWith("network/")) {
+    const rest = id.slice(8);
+    const at = rest.lastIndexOf("@");
+    const cls = at > 0 ? rest.slice(at + 1) : "";
+    return ["cpu", "apple", "gpu", "gpu.dc"].includes(cls)
+      ? { model: rest.slice(0, at), compute: { target: "network", computeClass: cls } }
+      : { model: rest, compute: { target: "network", computeClass: "any" } };
+  }
+  return { model: id };
 }
 
 export async function streamIdeChat(
@@ -975,6 +1011,8 @@ export async function streamIdeChat(
   signal?: AbortSignal,
   requestedModel?: string,
   githubToken?: string | null,
+  /** "edits": file edits apply without asking (undoable from the reply's changes card). */
+  autoApprove: "none" | "edits" = "none",
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -982,8 +1020,9 @@ export async function streamIdeChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages,
-      model: requestedModel,
+      ...computeFields(requestedModel),
       projectRoot,
+      autoApprove,
       ...(githubToken ? { githubToken } : {}),
     }),
     signal,
@@ -1019,3 +1058,347 @@ export async function streamIdeChat(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Project files (:4304 /v1/ide/fs/*), confined to the open project by the server
+// ---------------------------------------------------------------------------
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size?: number;
+}
+
+export interface FsFile {
+  path: string;
+  content: string;
+  mtimeMs: number;
+  size: number;
+}
+
+/** A failed file operation; `code` is the server's (conflict, exists, not_found, binary, too_large, ...). */
+export class FsError extends Error {
+  constructor(readonly code: string, message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function fsCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+  const res = await ideFetch(`${ideBase()}${path}`, {
+    method,
+    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+  if (!res.ok) throw new FsError(data.error ?? "error", data.message ?? `${path}: ${res.status}`, res.status);
+  return data as T;
+}
+
+const q = (p: string) => encodeURIComponent(p);
+
+export const fsList = (path = "") => fsCall<{ entries: FsEntry[] }>("GET", `/v1/ide/fs/list?path=${q(path)}`).then((r) => r.entries);
+export const fsRead = (path: string) => fsCall<FsFile>("GET", `/v1/ide/fs/read?path=${q(path)}`);
+export const fsWrite = (path: string, content: string, baseMtimeMs?: number) =>
+  fsCall<{ path: string; mtimeMs: number }>("POST", "/v1/ide/fs/write", { path, content, baseMtimeMs });
+export const fsCreate = (path: string, kind: "file" | "dir") => fsCall<FsEntry>("POST", "/v1/ide/fs/create", { path, kind });
+export const fsRename = (from: string, to: string) => fsCall<{ from: string; to: string }>("POST", "/v1/ide/fs/rename", { from, to });
+export const fsDelete = (path: string) => fsCall<{ ok: true }>("POST", "/v1/ide/fs/delete", { path });
+export const fsStat = (paths: string[]) => fsCall<{ mtimes: Record<string, number | null> }>("POST", "/v1/ide/fs/stat", { paths }).then((r) => r.mtimes);
+export const fsGitStatus = () => fsCall<{ branch: string | null; files: Record<string, string> }>("GET", "/v1/ide/fs/git-status");
+
+// Agent turn checkpoints (:4304 /v1/ide/checkpoints): what a turn changed, and undo.
+export interface FileChange {
+  path: string;
+  before: string | null;
+  after: string | null;
+}
+export const ideTurnChanges = (turnId: string) =>
+  fsCall<{ turnId: string; changes: FileChange[] }>("GET", `/v1/ide/checkpoints/${q(turnId)}`).then((r) => r.changes);
+export const ideRevertTurn = (turnId: string, paths?: string[]) =>
+  fsCall<{ ok: true; reverted: string[] }>("POST", `/v1/ide/checkpoints/${q(turnId)}/revert`, paths ? { paths } : {}).then((r) => r.reverted);
+
+/** Inline edit (Cmd+K): the replacement for the selection, from the local model. */
+export const ideInlineEdit = (body: { path: string; language: string; prefix: string; selection: string; suffix: string; instruction: string; model?: string }) =>
+  fsCall<{ model: string; replacement: string }>("POST", "/v1/ide/inline-edit", body).then((r) => r.replacement);
+
+/** Fuzzy project path search (@-mentions, quick open). */
+export const fsFind = (q: string, limit = 20) =>
+  fsCall<{ matches: Array<{ path: string; kind: "file" | "dir" }> }>("GET", `/v1/ide/fs/find?q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.matches);
+
+export type CompletionResponse =
+  | { completion: string; model: string }
+  | { completion: ""; model: string; reason: "model_missing" | "unsupported" | "error"; message: string };
+
+/** Tab autocomplete at the cursor (fill-in-the-middle). Aborting cancels the model call. */
+export async function ideComplete(prefix: string, suffix: string, signal?: AbortSignal, model?: string): Promise<CompletionResponse> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prefix, suffix, ...(model ? { model } : {}) }),
+    signal,
+  });
+  return (await res.json()) as CompletionResponse;
+}
+
+// Codebase index (:4304 /v1/ide/index/*): search the project by meaning.
+export interface IndexStatus {
+  state: "none" | "building" | "ready" | "error";
+  files: number;
+  chunks: number;
+  indexedAtMs?: number;
+  progress?: { done: number; total: number };
+  error?: string;
+  model: string;
+}
+export interface SearchHit {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+export const indexStatus = () => fsCall<IndexStatus>("GET", "/v1/ide/index/status");
+export const indexBuild = () => fsCall<IndexStatus>("POST", "/v1/ide/index/build", {});
+export const indexSearch = (query: string, k = 8) => fsCall<{ hits: SearchHit[] }>("POST", "/v1/ide/index/search", { query, k }).then((r) => r.hits);
+
+// Source control (:4304 /v1/ide/git/*)
+export interface GitFile {
+  path: string;
+  status: string;
+  from?: string;
+}
+export interface GitState {
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: GitFile[];
+  unstaged: GitFile[];
+  branches: string[];
+}
+export const gitState = () => fsCall<GitState | { notARepo: true }>("GET", "/v1/ide/git/state");
+export const gitHeadContent = (path: string) =>
+  fsCall<{ content: string | null }>("GET", `/v1/ide/git/head-content?path=${encodeURIComponent(path)}`).then((r) => r.content);
+export const gitStage = (paths: string[]) => fsCall("POST", "/v1/ide/git/stage", { paths });
+export const gitUnstage = (paths: string[]) => fsCall("POST", "/v1/ide/git/unstage", { paths });
+export const gitDiscard = (paths: string[]) => fsCall("POST", "/v1/ide/git/discard", { paths });
+export const gitCommit = (message: string, all = false) => fsCall<{ commit: string }>("POST", "/v1/ide/git/commit", { message, all }).then((r) => r.commit);
+export const gitCheckout = (branch: string, create = false) => fsCall("POST", "/v1/ide/git/checkout", { branch, create });
+export const gitPull = () => fsCall<{ output: string }>("POST", "/v1/ide/git/pull").then((r) => r.output);
+export const gitPush = () => fsCall<{ output: string }>("POST", "/v1/ide/git/push").then((r) => r.output);
+
+// Background jobs on the network (:4304 /v1/ide/network/tasks)
+export interface NetworkTask {
+  id: string;
+  prompt: string;
+  language: "python" | "javascript";
+  state: "running" | "done" | "failed" | "timed_out";
+  submittedAtMs: number;
+  finishedAtMs?: number;
+  output?: string;
+  error?: string;
+  creditsSpent?: number;
+}
+export const networkSubmit = (prompt: string, language: "python" | "javascript" = "python") =>
+  fsCall<NetworkTask>("POST", "/v1/ide/network/tasks", { prompt, language });
+export const networkTasks = () => fsCall<{ tasks: NetworkTask[] }>("GET", "/v1/ide/network/tasks").then((r) => r.tasks);
+
+// Problems from the project's own checkers (:4304 /v1/ide/diagnostics)
+export interface Diagnostic {
+  path: string;
+  line: number;
+  column: number;
+  endLine?: number;
+  endColumn?: number;
+  severity: "error" | "warning" | "info";
+  message: string;
+  source: string;
+}
+export const ideDiagnostics = (paths: string[]) =>
+  fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[] }>("POST", "/v1/ide/diagnostics", { paths });
+
+/** Create ~/EdgeCoder Projects/<name> (a git repo) and make it the open project. */
+export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
+/** Preview URL of a project file (default index.html) on the IDE server's preview origin. */
+export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/ide/preview?path=${encodeURIComponent(path)}`).then((r) => r.url);
+
+// Compute: cSats balance, prices per class, network models, buying cSats (:4304 /v1/ide/compute*)
+export interface ComputeOverview {
+  connected: boolean;
+  /** This computer's agent (so "My machines" can leave it out). */
+  selfAgentId?: string;
+  reason?: string;
+  account?: {
+    accountId: string;
+    cSats: number;
+    earnedSats: number;
+    recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }>;
+    machines?: Machine[];
+    networkAgents?: number;
+    coordinator?: { peerId: string; url: string };
+  };
+  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
+  /** Network models; model calls are priced per token (cSats per million tokens in / out). */
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
+  /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
+  steering?: CoordinatorSteering | null;
+}
+export interface CoordinatorSteering {
+  url: string;
+  source: "registry" | "fallback";
+  peerId?: string;
+  region?: string;
+  latencyMs?: number;
+  /** Why the fallback URL is in use ("" for a registry pick). */
+  reason: string;
+  decidedAtMs: number;
+}
+export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
+export const computeBuy = (amountSats: number) =>
+  fsCall<{ intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number }>("POST", "/v1/ide/compute/buy", { amountSats });
+export const computeIntent = (intentId: string) => fsCall<{ intentId: string; status: string; cSats: number }>("POST", "/v1/ide/compute/intent", { intentId });
+/** The key external tools use for http://localhost:4304/v1 (this computer's IDE token). */
+export const ideApiKey = () => getIdeToken();
+export const IDE_API_BASE = "http://localhost:4304/v1";
+
+/** One of your machines as the coordinator sees it. */
+export interface Machine {
+  agentId: string;
+  online: boolean;
+  lastSeenMs: number;
+  computeClass: string;
+  tier: string | null;
+  activeModel: string | null;
+  models: string[];
+  reservedUntilMs: number | null;
+  /** Hardware verification: the tier claimed, the tier paid after the coordinator's challenge, and evidence from real work. */
+  verification?: { status: string; claimedTier: string; grantedTier: string; reason: string | null; lastPassAtMs: number | null; score: number | null; tokensPerSec: number | null };
+}
+
+// Connect to compute: one local port per connection (:4304 /v1/ide/connections)
+export type ConnectionTarget = "local" | "mine" | "network" | "reserved" | "auto";
+export interface Connection {
+  id: string;
+  name: string;
+  port: number;
+  key: string;
+  target: ConnectionTarget;
+  model: string;
+  computeClass?: string;
+  reservationId?: string;
+  maxCSatsPerSecond?: number;
+  budgetCSats?: number;
+  spentCSats: number;
+  enabled: boolean;
+  createdAtMs: number;
+  url: string;
+  listening: boolean;
+  error?: string;
+}
+export type ConnectionInput = Pick<Connection, "name" | "target" | "model"> & Partial<Pick<Connection, "computeClass" | "reservationId" | "maxCSatsPerSecond" | "budgetCSats" | "port" | "enabled">>;
+export const listConnections = () => fsCall<{ connections: Connection[]; localModels: string[]; networkConnected: boolean; nextPort: number }>("GET", "/v1/ide/connections");
+export const createConnection = (c: ConnectionInput) => fsCall<{ connection: Connection }>("POST", "/v1/ide/connections", c).then((r) => r.connection);
+export const updateConnection = (id: string, patch: Partial<ConnectionInput> & { rotateKey?: boolean; resetSpent?: boolean }) =>
+  fsCall<{ connection: Connection }>("PATCH", `/v1/ide/connections/${encodeURIComponent(id)}`, patch).then((r) => r.connection);
+export const deleteConnection = (id: string) => fsCall<{ ok: boolean }>("DELETE", `/v1/ide/connections/${encodeURIComponent(id)}`);
+
+// Reserved capacity: hold a machine of a class for a while, paid up front in cSats
+export interface Reservation {
+  id: string;
+  computeClass: string;
+  tier?: string;
+  model?: string;
+  agentId: string;
+  startMs: number;
+  endMs: number;
+  status: "active" | "ended";
+  endReason?: string;
+  cSatsPerSecond: number;
+  prepaidCSats: number;
+  usedCSats?: number;
+  refundCSats?: number;
+  models: string[];
+}
+export interface ReservationOptions {
+  reservations: Reservation[];
+  options: Record<string, { available: number; cSatsPerSecond?: number; tiers: string[]; models: string[] }>;
+  minMinutes: number;
+  maxMinutes: number;
+}
+export const listReservations = () => fsCall<ReservationOptions>("GET", "/v1/ide/reservations");
+export const createReservation = (r: { computeClass: string; minutes: number; model?: string }) =>
+  fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations", r).then((x) => x.reservation);
+export const cancelReservation = (reservationId: string) => fsCall<{ reservation: Reservation }>("POST", "/v1/ide/reservations/cancel", { reservationId }).then((x) => x.reservation);
+
+// Usage: what you ran, where, and what it cost (coordinator usage records, via :4304 /v1/ide/usage)
+export interface UsageRecord {
+  id: string;
+  atMs: number;
+  kind: "inference" | "job" | "reservation";
+  placement: "network" | "mine" | "reserved";
+  model?: string;
+  computeClass?: string;
+  agentId?: string;
+  source?: string;
+  ok: boolean;
+  durationMs: number;
+  costMsat: number;
+  promptTokens?: number;
+  outputTokens?: number;
+}
+export interface UsageSlice { key: string; requests: number; cSats: number; seconds: number; promptTokens: number; outputTokens: number }
+export interface UsageSummary {
+  sinceMs: number;
+  totals: { requests: number; cSats: number; seconds: number; failed: number; promptTokens: number; outputTokens: number };
+  byDay: Array<{ day: string; requests: number; cSats: number }>;
+  byModel: UsageSlice[];
+  byClass: UsageSlice[];
+  bySource: UsageSlice[];
+  byPlacement: UsageSlice[];
+  records: UsageRecord[];
+}
+export const getUsage = (days: number) => fsCall<UsageSummary>("GET", `/v1/ide/usage?days=${days}`);
+
+/** A page on the web portal (opens in the browser). */
+export const portalWebUrl = (path = "") => `${portalBase()}${path}`;
+
+/** Save your display name (portal account). */
+export async function updateProfile(displayName: string): Promise<void> {
+  const res = await fetch(`${portalBase()}/me/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    credentials: "include",
+    body: JSON.stringify({ displayName }),
+  });
+  if (!res.ok) throw new Error(res.status === 400 ? "Use plain text for your name." : `Could not save (${res.status})`);
+}
+
+/** Readable text for an error from the compute routes. */
+export function computeErrorText(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? "";
+  const known: Record<string, string> = {
+    insufficient_credits: "Not enough cSats. Buy more on Plan & usage.",
+    no_agent_available: "No machine of that class is free right now. Try another class or later.",
+    not_enrolled: "This computer isn't connected to the network yet. Sign in and let the agent start.",
+    unknown_reservation: "That reservation no longer exists.",
+  };
+  return known[code] ?? (err as Error)?.message ?? String(err);
+}
+
+// Persistent bots (:4304 /v1/ide/bots): named agents that own a job in a project folder
+import type { Bot, BotInput, BotMessage, BotRun } from "./bots";
+const botPath = (id: string, rest = "") => `/v1/ide/bots/${encodeURIComponent(id)}${rest}`;
+export const listBots = () => fsCall<{ bots: Bot[] }>("GET", "/v1/ide/bots").then((r) => r.bots);
+export const getBot = (id: string) => fsCall<{ bot: Bot; memory: string }>("GET", botPath(id));
+export const createBot = (b: BotInput) => fsCall<{ bot: Bot }>("POST", "/v1/ide/bots", b).then((r) => r.bot);
+export const updateBot = (id: string, patch: Partial<BotInput> & { memory?: string }) => fsCall<{ bot: Bot }>("PATCH", botPath(id), patch).then((r) => r.bot);
+export const deleteBot = (id: string) => fsCall<{ ok: boolean }>("DELETE", botPath(id));
+export const runBot = (id: string) => fsCall<{ started: boolean; runId?: string; bot: Bot }>("POST", botPath(id, "/run"), {});
+export const cancelBotRun = (id: string) => fsCall<{ cancelled: boolean }>("POST", botPath(id, "/cancel"), {});
+export const botMessages = (id: string) => fsCall<{ messages: BotMessage[] }>("GET", botPath(id, "/messages")).then((r) => r.messages);
+export const sendBotMessage = (id: string, content: string) => fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content });
+export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
+export const approveBotCall = (id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
+/** The server's message for a failed bot call (its `error` field). */
+export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));

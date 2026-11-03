@@ -85,8 +85,77 @@ export function parseRecordPayload(record: { payloadJson?: string }): Record<str
   }
 }
 
+export interface ContributionStats {
+  /** Credits earned by compute (reason compute_contribution). */
+  earned: number;
+  /** Credits spent on task submission (reason task_submit). */
+  spent: number;
+  /** Credits bought with sats (reason credit_purchase:<intentId>). */
+  purchased: number;
+}
+
+export type ContributionPolicyDecision = { ok: true; reason: "burst_balance" | "ratio_ok" | "nothing_spent" } | { ok: false; reason: string };
+
+/**
+ * Contribute-first policy for POST /submit. An account may submit when it holds at least
+ * `burstCredits`, or when (earned + purchased) / spent >= `minRatio`.
+ *
+ * Purchased credits count as "earned": someone who pays sats for credits has paid for the
+ * compute they consume, so a pure consumer (never contributes compute) can keep submitting
+ * as long as purchases keep pace with spend. Before this, only compute_contribution counted,
+ * so a buyer below the burst threshold who had ever submitted got contribute_first_required.
+ */
+export function contributionPolicyDecision(
+  stats: ContributionStats,
+  balance: number,
+  cfg: { burstCredits: number; minRatio: number }
+): ContributionPolicyDecision {
+  if (balance >= cfg.burstCredits) return { ok: true, reason: "burst_balance" };
+  if (stats.spent <= 0) return { ok: true, reason: "nothing_spent" };
+  const effectiveEarned = Math.max(0, stats.earned) + Math.max(0, stats.purchased);
+  const ratio = effectiveEarned / stats.spent;
+  if (ratio < cfg.minRatio) {
+    return {
+      ok: false,
+      reason:
+        `contribute_first_policy: earned=${stats.earned.toFixed(3)} purchased=${stats.purchased.toFixed(3)} ` +
+        `spent=${stats.spent.toFixed(3)} ratio=${ratio.toFixed(3)} min=${cfg.minRatio}`
+    };
+  }
+  return { ok: true, reason: "ratio_ok" };
+}
+
 export function computeIntentFee(amountSats: number, feeBps: number): { feeSats: number; netSats: number } {
   const feeSats = Math.floor((amountSats * feeBps) / 10000);
   const netSats = Math.max(0, amountSats - feeSats);
   return { feeSats, netSats };
+}
+
+/**
+ * Whose credits a POST /submit spends. The shared mesh token says nothing about the caller's
+ * account, so naming one takes the portal service token (the portal binds it from the session),
+ * a request signed by a registered agent (it spends its owner's account, linked at registration,
+ * or its own id when unowned), or a loopback caller (the desktop app's own coordinator).
+ * Anyone else may only submit anonymously.
+ */
+export function submitterAccountDecision(input: {
+  requested: string;
+  portalService: boolean;
+  signature: { agentId: string } | "rejected" | null;
+  ownerAccountId?: string;
+  loopback: boolean;
+}): { accountId: string } | { status: number; error: string } {
+  const { requested } = input;
+  if (input.portalService) return { accountId: requested };
+  if (input.signature === "rejected") return { status: 401, error: "invalid_signature" };
+  if (input.signature) {
+    const owner = input.ownerAccountId ?? input.signature.agentId;
+    if (requested === "anonymous") return { accountId: "anonymous" };
+    if (requested !== owner && requested !== input.signature.agentId) {
+      return { status: 403, error: "submitter_account_mismatch" };
+    }
+    return { accountId: owner };
+  }
+  if (requested === "anonymous" || input.loopback) return { accountId: requested };
+  return { status: 403, error: "submitter_signature_required" };
 }

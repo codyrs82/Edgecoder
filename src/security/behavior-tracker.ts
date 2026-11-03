@@ -64,6 +64,9 @@ interface TaskClaimEvent extends TimestampedEvent {}
 interface HeartbeatEvent extends TimestampedEvent {}
 
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+/** BHV008 counts registrations over 10 minutes, not the hour-long window: a healthy worker
+ *  refreshes every 4 minutes (15 an hour), which the hour window read as a storm. */
+export const REGISTRATION_STORM_WINDOW_MS = 10 * 60 * 1000;
 const OUTPUT_HASH_RING_SIZE = 20;
 
 export class AgentBehaviorTracker {
@@ -126,6 +129,11 @@ export class AgentBehaviorTracker {
     entry.heartbeats.push({ timestampMs: nowMs });
   }
 
+  /** Forget an agent's history (an admin lifted its blacklist). */
+  reset(agentId: string): void {
+    this.agents.delete(agentId);
+  }
+
   recordRegistration(agentId: string, nowMs: number = Date.now()): void {
     const entry = this.getOrCreate(agentId);
     entry.registrations = this.pruneWindow(entry.registrations, nowMs);
@@ -169,14 +177,18 @@ export class AgentBehaviorTracker {
     const totalTasks = tasks.length;
     const successCount = tasks.filter(t => t.ok).length;
     const successRate = totalTasks > 0 ? successCount / totalTasks : 1;
-    const emptyOutputCount = tasks.filter(t => t.outputLength === 0).length;
+    // The forgery signals (empty, identical or impossibly fast results) look only at results the
+    // agent reported as successful: a failed result earns nothing, and an agent whose model is
+    // broken fails fast with empty output, which is not fraud.
+    const okTasks = tasks.filter(t => t.ok);
+    const emptyOutputCount = okTasks.filter(t => t.outputLength === 0).length;
 
     // Identical output detection: count max consecutive identical hashes
     let identicalOutputCount = 0;
-    if (tasks.length >= 2) {
+    if (okTasks.length >= 2) {
       let consecutiveRun = 1;
-      for (let i = 1; i < tasks.length; i++) {
-        if (tasks[i].outputHash === tasks[i - 1].outputHash) {
+      for (let i = 1; i < okTasks.length; i++) {
+        if (okTasks[i].outputHash === okTasks[i - 1].outputHash) {
           consecutiveRun++;
           identicalOutputCount = Math.max(identicalOutputCount, consecutiveRun);
         } else {
@@ -198,13 +210,13 @@ export class AgentBehaviorTracker {
       : 0;
     const minDurationMs = durations.length > 0 ? Math.min(...durations) : 0;
     const durationStdDev = computeStdDev(durations, avgDurationMs);
-    const suspiciouslyFastCount = tasks.filter(t => t.durationMs < 500).length;
+    const suspiciouslyFastCount = okTasks.filter(t => t.durationMs < 500).length;
 
     // Protocol
     const signatureFailureCount = entry.protocolEvents.filter(e => e.type === "signature_failure").length;
     const replayAttemptCount = entry.protocolEvents.filter(e => e.type === "replay_attempt").length;
     const rateLimitHitCount = entry.protocolEvents.filter(e => e.type === "rate_limit_hit").length;
-    const registrationCount = entry.registrations.length;
+    const registrationCount = entry.registrations.filter(e => e.timestampMs >= nowMs - REGISTRATION_STORM_WINDOW_MS).length;
 
     // Resource
     const taskClaimCount = entry.taskClaims.length;

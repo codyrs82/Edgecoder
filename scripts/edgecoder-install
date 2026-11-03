@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Thin launcher for the shared installer (src/install/cli.ts). Same options on every platform.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec node "$HERE/dist/install/cli.js" "$@"

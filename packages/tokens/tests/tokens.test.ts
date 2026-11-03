@@ -27,10 +27,10 @@ describe("@edgecoder/tokens (#23)", () => {
   });
 
   it("keeps the existing desktop variable names and dark values", () => {
-    expect(tokens.color["bg-base"].dark).toBe("#2f2f2d");
-    // #29: lightened from #c17850 so accent text reaches 4.5:1 on every dark background.
-    expect(tokens.color.accent.dark).toBe("#d8ab92");
-    expect(tokens.color["text-primary"].dark).toBe("#f7f5f0");
+    expect(tokens.color["bg-base"].dark).toBe("#12161c");
+    // Bitcoin-orange brand accent (matches the portal design system); still 4.5:1 on every dark bg.
+    expect(tokens.color.accent.dark).toBe("#f7931a");
+    expect(tokens.color["text-primary"].dark).toBe("#e8ecf1");
     for (const alias of ["bg", "bg-soft", "card-border", "text", "muted", "brand", "brand-2", "ok", "warn", "danger"]) {
       expect(tokens.aliases[alias], alias).toBeTruthy();
     }

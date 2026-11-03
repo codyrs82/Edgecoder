@@ -16,9 +16,12 @@ import {
   pkceVerifier
 } from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
+import { isAgentPlaceholderEmail } from "../store.js";
+import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthNativeRedirectByState, oauthProviders, parseCookies, readCookie, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, ensureStarterWalletForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+  registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
   app.get("/auth/capabilities", async () => {
@@ -44,11 +47,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     const body = z
       .object({
         email: z.string().email(),
-        password: z.string().min(8).max(256),
+        password: passwordSchema,
         displayName: z.string().min(2).max(100).optional()
       })
       .parse(req.body);
     const email = normalizeEmail(body.email);
+    if (isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "email_not_allowed" });
     const existing = await store.getUserByEmail(email);
     if (existing) return reply.code(409).send({ error: "email_already_registered" });
 
@@ -125,7 +129,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ email: z.string().email() }).parse(req.body);
     const user = await store.getUserByEmail(normalizeEmail(body.email));
-    if (!user) return reply.send({ ok: true });
+    // Agent accounts have no deliverable email.
+    if (!user || isAgentPlaceholderEmail(user.email)) return reply.send({ ok: true });
     if (user.emailVerified) return reply.send({ ok: true, alreadyVerified: true });
     const verifyToken = randomUUID();
     await store.createEmailVerification({
@@ -161,14 +166,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     const nativeRedirect = normalizeNativeOauthRedirect(query.appRedirect);
     const state = randomUUID();
     const callbackUrl = `${PORTAL_PUBLIC_URL}/auth/oauth/${params.provider}/callback`;
-    if (nativeRedirect) {
-      oauthNativeRedirectByState.set(state, nativeRedirect);
-    }
     await store.createOauthState({
       stateId: state,
       provider: params.provider,
       redirectUri: callbackUrl,
-      expiresAtMs: Date.now() + 10 * 60 * 1000
+      expiresAtMs: Date.now() + 10 * 60 * 1000,
+      ...(nativeRedirect ? { nativeRedirect } : {})
     });
     const authorize = new URL(provider.authorizeUrl);
     authorize.searchParams.set("client_id", provider.clientId);
@@ -218,11 +221,9 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     // exact __Host- name only (readCookie would also accept an unprefixed, spoofable cookie)
     const stateCookie = cookies[oauthStateCookieName(providerName)];
     if (!state || state.provider !== providerName || !oauthStateCookieMatches(oauthStateHmacKey, stateCookie, providerName, stateId)) {
-      oauthNativeRedirectByState.delete(stateId);
       return reply.code(403).send({ error: "oauth_state_invalid" });
     }
-    const nativeRedirect = oauthNativeRedirectByState.get(stateId);
-    if (nativeRedirect) oauthNativeRedirectByState.delete(stateId);
+    const nativeRedirect = state.nativeRedirect;
 
     const tokenExchangeHeaders: Record<string, string> = {
       "content-type": "application/x-www-form-urlencoded",
@@ -307,7 +308,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     }
 
     if (!subject) return reply.code(400).send({ error: "oauth_subject_missing" });
-    if (!email) return reply.code(400).send({ error: "oauth_email_missing" });
+    if (!email || isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "oauth_email_missing" });
 
     email = normalizeEmail(email);
     const linked = await portalStore.findOauthIdentity(providerName, subject);
@@ -348,7 +349,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
 
     await createSessionForUser(user.userId, reply);
     if (nativeRedirect) {
-      const mobileToken = issueMobileOauthSessionToken(user.userId);
+      const mobileToken = await issueMobileOauthSessionToken(user.userId);
       const redirect = new URL(nativeRedirect);
       redirect.searchParams.set("status", "ok");
       redirect.searchParams.set("provider", providerName);
@@ -401,7 +402,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     reply.header("Access-Control-Allow-Credentials", "true");
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ token: z.string().min(24) }).parse(req.body);
-    const resolved = consumeMobileOauthSessionToken(body.token);
+    const resolved = await consumeMobileOauthSessionToken(body.token);
     if (!resolved) return reply.code(400).send({ error: "oauth_mobile_token_invalid" });
     const user = await store.getUserById(resolved.userId);
     if (!user) return reply.code(400).send({ error: "user_not_found" });

@@ -3,7 +3,7 @@ primary_region = "cdg"
 
 [processes]
   # #9: the agent image entrypoint starts Ollama in the background.
-  app = "node dist/index.js"
+  app = "node dist/cli/edgecoder.js all-in-one"
 
 [build]
   dockerfile = "../docker/Dockerfile.agent"
@@ -13,14 +13,31 @@ primary_region = "cdg"
   # #5: services bind 127.0.0.1 unless HOST is set. Required secrets are listed in #5 / env docs.
   HOST = "0.0.0.0"
   # #43: production requires LIGHTNING_PROVIDER=lnd|cln (+ LND_*/CLN_* via fly secrets).
-  # Payments stay off until a Lightning node is configured; flip to "true" with those secrets set.
-  ECONOMY_PAYMENTS_ENABLED = "false"
+  # Regtest phase: payouts run against the test Lightning hub (deploy/lnd-test) over Fly 6PN.
+  # LND_MACAROON_HEX and LND_TLS_CERT_BASE64 are Fly secrets (deploy/lnd-test/connect-seeds.sh).
+  # Before mainnet follow docs/going-to-mainnet.md: this URL, the secrets and BITCOIN_NETWORK all change.
+  ECONOMY_PAYMENTS_ENABLED = "true"
+  LIGHTNING_PROVIDER = "lnd"
+  LND_REST_URL = "https://hub.process.edgecoder-lnd-test.internal:8080"
+  BITCOIN_NETWORK = "regtest"
+  PAYOUT_MAX_SINGLE_SATS = "100000"
+  PAYOUT_MAX_ACCOUNT_DAILY_SATS = "500000"
+  PAYOUT_MAX_GLOBAL_DAILY_SATS = "2000000"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
-  COORDINATOR_PUBLIC_URL = "https://edgecoder-seed-eu.fly.dev"
+  COORDINATOR_PUBLIC_URL = "https://coordinator-eu.edgecoder.io"
   LOCAL_MODEL_PROVIDER = "ollama-local"
   OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen2.5:7b"
+  OLLAMA_MODEL = "qwen3.5:4b" # 8 GB machine: 4B fits beside Node; the 16 GB US seed runs qwen3.5:9b
+  # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
+  # check (SANDBOX_MODE=docker) and would just log errors. Seeds are coordinator + Ollama
+  # chat only; compute comes from enrolled agents. Same setting as fly.seed-node.toml.
+  DISABLE_SELF_AGENT = "1"
+  # Every agent build since 1.4.7 signs its /mesh/ws bind; unsigned binds are refused.
+  MESH_WS_REQUIRE_SIGNED = "true"
+  # Fee-pool payouts for this seed's infrastructure go to the Lightning node it pays out from.
+  # Regtest: the edgecoder-lnd-test hub. Changes with LND_REST_URL at mainnet (docs/going-to-mainnet.md).
+  INFRA_HOST_LIGHTNING_NODE_ID = "03787c6d8d1b0a4b2abb79f4ba18cf89e333f59911cc84c69e06132b78c3f19878"
 
 [http_service]
   internal_port = 4301

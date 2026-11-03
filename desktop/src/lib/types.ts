@@ -138,7 +138,19 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  /** Agent turn checkpoint id and the files that turn wrote (review / undo). */
+  turnId?: string;
+  changedFiles?: string[];
+  /** A background job sent to the network from this message (its card shows progress and output). */
+  networkTaskId?: string;
   toolEvents?: ToolEvent[];
+  /** What the reply cost and where it ran ("Network GPU · qwen3.5:9b", 0.42 cSats). */
+  usage?: ReplyUsage;
+}
+
+export interface ReplyUsage {
+  cSats: number;
+  where?: string;
 }
 
 export interface Conversation {

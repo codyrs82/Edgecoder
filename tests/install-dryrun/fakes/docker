@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fake docker CLI: `docker info` succeeds so the installer picks SANDBOX_MODE=docker without a daemon.
+case "$1" in
+  info) echo "27.3.1"; exit 0;;
+  version) echo "27.3.1"; exit 0;;
+  *) echo "fake docker: $*" >&2; exit 0;;
+esac

@@ -1,7 +1,11 @@
 <script lang="ts">
+  import { applyAgentEvent, markApproval } from "../lib/agent-events";
+  import { expandMentions } from "../lib/mentions";
+  import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
-  import ModelPicker from "../components/ModelPicker.svelte";
+  import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
+  import { get } from "svelte/store";
   import {
     streamChat,
     streamPortalChat,
@@ -22,13 +26,18 @@
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
   } from "../lib/chat-store";
-  import type { Conversation, ToolEvent } from "../lib/types";
+  import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
   interface Props {
     onOpenInEditor?: (code: string, language: string) => void;
     projectRoot?: string | null;
+    /** Told when a reply starts and stops streaming (the page's input shows Stop meanwhile). */
+    onStreamingChange?: (streaming: boolean) => void;
+    /** Open a project file in the editor tab (from an agent reply's changes card). */
+    onOpenPath?: (path: string) => void;
+    onPreview?: (path: string) => void;
   }
-  let { onOpenInEditor, projectRoot = null }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview }: Props = $props();
 
   let conversation: Conversation = $state(createConversation("chat"));
   let streamingContent = $state("");
@@ -43,6 +52,9 @@
 
   /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
+  let streamingTurnId: string | undefined = $state(undefined);
+  let streamingUsage: ReplyUsage | undefined = $state(undefined);
+  let streamingChanged: string[] = $state([]);
 
   /** Cached GitHub token for IDE agent remote operations */
   let cachedGitHubToken: string | null = $state(null);
@@ -122,17 +134,15 @@
 
   function handleToolApproval(id: string, approved: boolean) {
     ideSendToolApproval(id, approved);
-    const evt = streamingToolEvents.find(e => e.id === id);
-    if (evt) {
-      evt.approval_status = approved ? "approved" : "rejected";
-      streamingToolEvents = [...streamingToolEvents];
-    }
+    streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
   export async function sendMessage(text: string) {
     if (isStreaming) return;
 
     addMessage(conversation, "user", text);
+    // Where this chat ran last (the sidebar's laptop / server / cloud icon).
+    conversation.selectedModel = get(computeChoice);
     conversation = conversation; // trigger reactivity
 
     isStreaming = true;
@@ -148,67 +158,32 @@
           role: m.role,
           content: m.content,
         }));
+        const attached = await expandMentions(text);
+        if (attached) apiMessages[apiMessages.length - 1] = { role: "user", content: `${attached}\n\n${text}` };
         streamingToolEvents = [];
+        streamingTurnId = undefined;
+        streamingUsage = undefined;
+        streamingChanged = [];
 
         await streamIdeChat(
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
-            switch (event.type) {
-              case "text":
-                streamingContent += event.content as string;
-                scrollToBottom();
-                break;
-              case "status":
-                break;
-              case "tool_call":
-                streamingToolEvents = [...streamingToolEvents, {
-                  type: "tool_call",
-                  id: event.id as string,
-                  tool: event.tool as string,
-                  args: event.args as Record<string, unknown>,
-                  requires_approval: event.requires_approval as boolean,
-                  approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
-                }];
-                scrollToBottom();
-                break;
-              case "tool_result": {
-                const idx = streamingToolEvents.findIndex(e => e.id === event.id);
-                if (idx >= 0) {
-                  streamingToolEvents[idx] = {
-                    ...streamingToolEvents[idx],
-                    result: event.result as string | undefined,
-                    error: event.error as string | undefined,
-                  };
-                  streamingToolEvents = [...streamingToolEvents];
-                }
-                break;
-              }
-              case "shell_output":
-                streamingToolEvents = [...streamingToolEvents, {
-                  type: "shell_output",
-                  id: event.id as string,
-                  stdout: event.stdout as string,
-                  stderr: event.stderr as string,
-                  exit_code: event.exit_code as number,
-                }];
-                scrollToBottom();
-                break;
-              case "plan":
-                streamingToolEvents = [...streamingToolEvents, {
-                  type: "plan",
-                  steps: event.steps as ToolEvent["steps"],
-                  plan_status: event.status as string,
-                }];
-                scrollToBottom();
-                break;
-              case "done":
-                break;
-            }
+            const next = applyAgentEvent(
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
+              event,
+            ).turn;
+            if (next.text !== streamingContent) streamingContent = next.text;
+            if (next.toolEvents !== streamingToolEvents) streamingToolEvents = next.toolEvents;
+            streamingTurnId = next.turnId;
+            streamingUsage = next.usage;
+            if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
+            if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
           abortController.signal,
-          conversation.selectedModel,
+          get(computeChoice),
           cachedGitHubToken,
+          autoApplyEdits(projectRoot) ? "edits" : "none",
         );
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
@@ -244,18 +219,12 @@
           (progress) => {
             streamProgress = progress;
           },
-          conversation.selectedModel,
+          get(computeChoice),
         );
       }
 
       addMessage(conversation, "assistant", streamingContent);
-      // Attach tool events to the last assistant message if any
-      if (streamingToolEvents.length > 0) {
-        const lastMsg = conversation.messages[conversation.messages.length - 1];
-        if (lastMsg) {
-          lastMsg.toolEvents = [...streamingToolEvents];
-        }
-      }
+      attachTurn();
       conversation = conversation;
       await saveConversation(conversation);
       localStorage.setItem("edgecoder-last-chat-id", conversation.id);
@@ -274,7 +243,15 @@
         ).catch(() => {});
       }
     } catch (err) {
-      if ((err as Error).name !== "AbortError") {
+      if ((err as Error).name === "AbortError") {
+        // Stopped: keep what arrived so far.
+        if (streamingContent || streamingToolEvents.length > 0) {
+          addMessage(conversation, "assistant", `${streamingContent}\n\n_(stopped)_`);
+          attachTurn();
+          conversation = conversation;
+          await saveConversation(conversation);
+        }
+      } else {
         addMessage(conversation, "assistant", `Error: ${(err as Error).message}`);
         conversation = conversation;
       }
@@ -286,6 +263,34 @@
       abortController = null;
     }
   }
+
+  /** Attach the streamed tool events and the turn's file changes to the last assistant message. */
+  function attachTurn() {
+    const lastMsg = conversation.messages[conversation.messages.length - 1];
+    if (!lastMsg) return;
+    if (streamingToolEvents.length > 0) lastMsg.toolEvents = [...streamingToolEvents];
+    const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
+    if (usage) lastMsg.usage = usage;
+    if (streamingTurnId && streamingChanged.length > 0) {
+      lastMsg.turnId = streamingTurnId;
+      lastMsg.changedFiles = [...streamingChanged];
+    }
+  }
+
+  /** A note in the conversation from the app itself (e.g. that a project was created). */
+  export function addNote(text: string) {
+    addMessage(conversation, "assistant", text);
+    conversation = conversation;
+  }
+
+  /** Stop the reply that is streaming (the partial reply is kept). */
+  export function stop() {
+    abortController?.abort();
+  }
+
+  $effect(() => {
+    onStreamingChange?.(isStreaming);
+  });
 
   function scrollToBottom() {
     if (scrollContainer) {
@@ -338,10 +343,6 @@
 
 <div class="chat-view" bind:this={scrollContainer}>
   <div class="chat-header">
-    <ModelPicker
-      selectedModel={conversation.selectedModel}
-      onSelect={(model) => { conversation.selectedModel = model; conversation = conversation; }}
-    />
     {#if usePortalChat}
       <span class="portal-badge" title="Chat synced with portal server">
         <span class="portal-dot"></span>
@@ -382,7 +383,7 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
         <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
