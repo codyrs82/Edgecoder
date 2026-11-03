@@ -187,9 +187,10 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     }
 
     if (!coordinatorRes) {
+      // Upstream error text stays in the log; the client gets a fixed error.
+      console.warn(`[portal] chat: all ${coordinatorUrls.length} coordinators failed: ${lastError.slice(0, 500)}`);
       return reply.code(502).send({
         error: "all_coordinators_failed",
-        detail: lastError,
         triedCount: coordinatorUrls.length,
       });
     }

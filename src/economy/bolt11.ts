@@ -22,6 +22,8 @@ export interface DecodedBolt11 {
   /** Seconds after timestamp; BOLT11 default 3600. */
   expirySeconds: number;
   description?: string;
+  /** Hex sha256 the invoice commits to instead of a description (tag h); LNURL-pay uses it for the metadata. */
+  descriptionHash?: string;
   payeePubkey?: string;
 }
 
@@ -105,6 +107,7 @@ export function decodeBolt11(invoice: string): DecodedBolt11 {
   let paymentHash: string | undefined;
   let expirySeconds = 3600;
   let description: string | undefined;
+  let descriptionHash: string | undefined;
   let payeePubkey: string | undefined;
   let i = 0;
   while (i + 3 <= tagged.length) {
@@ -123,6 +126,9 @@ export function decodeBolt11(invoice: string): DecodedBolt11 {
       case 13: // d: description
         description = words5ToBytes(data, Math.floor((len * 5) / 8)).toString("utf8");
         break;
+      case 23: // h: description hash, 52 words
+        if (len === 52) descriptionHash = words5ToBytes(data, 32).toString("hex");
+        break;
       case 19: // n: payee pubkey, 53 words
         if (len === 53) payeePubkey = words5ToBytes(data, 33).toString("hex");
         break;
@@ -131,7 +137,7 @@ export function decodeBolt11(invoice: string): DecodedBolt11 {
     }
   }
   if (!paymentHash) throw new Error("bolt11_missing_payment_hash");
-  return { networkPrefix, network, amountMsat, paymentHash, timestamp, expirySeconds, description, payeePubkey };
+  return { networkPrefix, network, amountMsat, paymentHash, timestamp, expirySeconds, description, descriptionHash, payeePubkey };
 }
 
 export function bolt11IsExpired(decoded: DecodedBolt11, nowMs: number = Date.now(), safetyMarginSeconds = 60): boolean {

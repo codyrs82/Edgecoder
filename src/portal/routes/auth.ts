@@ -19,6 +19,7 @@ import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
 import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
 import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
@@ -158,7 +159,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
 
   // Shared by sign-in (/start) and connect-from-Settings (/connect): for a connect the state row
   // carries the signed-in user, and the callback checks that the same session finishes it.
-  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string }) {
+  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string }) {
     const portalStore = store!;
     const provider = oauthProviders[providerName];
     if (!provider.clientId || !provider.clientSecret) {
@@ -172,7 +173,9 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       redirectUri: callbackUrl,
       expiresAtMs: Date.now() + 10 * 60 * 1000,
       ...(opts.nativeRedirect ? { nativeRedirect: opts.nativeRedirect } : {}),
-      ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {})
+      ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {}),
+      // Only meaningful for a hand-off to a native app.
+      ...(opts.nativeRedirect && opts.appChallenge ? { appChallenge: opts.appChallenge } : {})
     });
     const authorize = new URL(provider.authorizeUrl);
     authorize.searchParams.set("client_id", provider.clientId);
@@ -195,8 +198,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   app.get("/auth/oauth/:provider/start", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
-    const query = z.object({ appRedirect: z.string().optional() }).parse(req.query);
-    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect) });
+    const query = z.object({ appRedirect: z.string().optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
+    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge });
   });
 
   /** Connect a provider to the signed-in account, from Settings. A POST (origin-checked), so other sites can't start it. */
@@ -356,7 +359,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
 
     await createSessionForUser(user.userId, reply);
     if (nativeRedirect) {
-      const mobileToken = await issueMobileOauthSessionToken(user.userId);
+      const mobileToken = await issueMobileOauthSessionToken(user.userId, state.appChallenge);
       const redirect = new URL(nativeRedirect);
       redirect.searchParams.set("status", "ok");
       redirect.searchParams.set("provider", providerName);
@@ -408,9 +411,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     reply.header("Access-Control-Allow-Origin", "tauri://localhost");
     reply.header("Access-Control-Allow-Credentials", "true");
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const body = z.object({ token: z.string().min(24) }).parse(req.body);
+    const body = z.object({ token: z.string().min(24), verifier: z.string().regex(APP_VERIFIER_RE).optional() }).parse(req.body);
     const resolved = await consumeMobileOauthSessionToken(body.token);
     if (!resolved) return reply.code(400).send({ error: "oauth_mobile_token_invalid" });
+    // A token from a sign-in the app started is bound to its verifier. An app that sends a verifier
+    // only accepts a token bound to it, so a token from someone else's sign-in is refused.
+    if (!appVerifierMatches(resolved.appChallenge, body.verifier)) return reply.code(400).send({ error: "oauth_mobile_token_invalid" });
     const user = await store.getUserById(resolved.userId);
     if (!user) return reply.code(400).send({ error: "user_not_found" });
     // Create a session so subsequent portal API calls are authenticated

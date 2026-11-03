@@ -139,6 +139,7 @@ export async function requestLnurlInvoice(
     callback?: string;
     minSendable?: number;
     maxSendable?: number;
+    metadata?: unknown;
     status?: string;
     reason?: string;
   };
@@ -146,6 +147,8 @@ export async function requestLnurlInvoice(
   if (meta?.tag !== "payRequest" || typeof meta.callback !== "string" || !/^https:\/\//i.test(meta.callback)) throw new Error("lnurl_not_pay_request");
   if (typeof meta.minSendable === "number" && amountMsat < meta.minSendable) throw new Error(`lnurl_below_min:${meta.minSendable}`);
   if (typeof meta.maxSendable === "number" && amountMsat > meta.maxSendable) throw new Error(`lnurl_above_max:${meta.maxSendable}`);
+  // LUD-06: the invoice must commit to the metadata (description_hash = sha256(metadata)).
+  if (typeof meta.metadata !== "string" || meta.metadata.length === 0) throw new Error("lnurl_missing_metadata");
   const cb = new URL(meta.callback);
   cb.searchParams.set("amount", String(amountMsat));
   const inv = (await fetcher(cb.toString())) as { pr?: string; status?: string; reason?: string };
@@ -153,6 +156,8 @@ export async function requestLnurlInvoice(
   const decoded = decodeBolt11(inv.pr);
   if (decoded.network !== network) throw new Error(`lnurl_wrong_network:${decoded.network}`);
   if (decoded.amountMsat !== amountMsat) throw new Error(`lnurl_amount_mismatch:${decoded.amountMsat}`);
+  const metadataHash = createHash("sha256").update(meta.metadata, "utf8").digest("hex");
+  if (decoded.descriptionHash !== metadataHash) throw new Error("lnurl_description_hash_mismatch");
   return { bolt11: inv.pr, decoded };
 }
 

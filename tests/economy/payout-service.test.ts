@@ -90,11 +90,13 @@ describe("auto payouts over LNURL-pay", () => {
     const preimage = randomBytes(32).toString("hex");
     const hash = createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex");
     const seen: string[] = [];
+    const metadata = JSON.stringify([["text/plain", "Pay cody"], ["text/identifier", "cody@example.com"]]);
+    const descriptionHashHex = createHash("sha256").update(metadata).digest("hex");
     const fetcher = async (url: string): Promise<unknown> => {
       seen.push(url);
-      if (url.endsWith("/.well-known/lnurlp/cody")) return { tag: "payRequest", callback: "https://example.com/lnurlp/cody/cb", minSendable: 1_000, maxSendable: 1e11 };
+      if (url.endsWith("/.well-known/lnurlp/cody")) return { tag: "payRequest", callback: "https://example.com/lnurlp/cody/cb", minSendable: 1_000, maxSendable: 1e11, metadata };
       const amount = Number(new URL(url).searchParams.get("amount"));
-      return { pr: encodeTestBolt11({ network: "tbs", amountMsat: amount, paymentHashHex: hash }) };
+      return { pr: encodeTestBolt11({ network: "tbs", amountMsat: amount, paymentHashHex: hash, descriptionHashHex }) };
     };
     const got = await requestLnurlInvoice("cody@example.com", 5_000_000, fetcher, "signet");
     expect(got.decoded.amountMsat).toBe(5_000_000);
@@ -117,6 +119,25 @@ describe("auto payouts over LNURL-pay", () => {
     small.autoAccounts.set("acct", "cody@example.com");
     const svc2 = new PayoutService({ store: small, provider: provider(() => ({ status: "succeeded" })), policy, coordinatorId: "c", feePoolAccountId: "pool", fetcher });
     expect(await svc2.runAutoPayouts()).toEqual([]);
+  });
+});
+
+describe("LNURL-pay description hash", () => {
+  const metadata = JSON.stringify([["text/plain", "Pay cody"]]);
+  const hashOf = (s: string) => createHash("sha256").update(s).digest("hex");
+  const server = (opts: { metadata?: string; descriptionHashHex?: string }) => async (url: string): Promise<unknown> => {
+    if (url.endsWith("/.well-known/lnurlp/cody")) return { tag: "payRequest", callback: "https://example.com/cb", minSendable: 1_000, maxSendable: 1e11, ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}) };
+    const amount = Number(new URL(url).searchParams.get("amount"));
+    return { pr: encodeTestBolt11({ network: "tbs", amountMsat: amount, paymentHashHex: "ab".repeat(32), descriptionHashHex: opts.descriptionHashHex }) };
+  };
+  it("accepts an invoice that commits to sha256(metadata)", async () => {
+    const got = await requestLnurlInvoice("cody@example.com", 5_000_000, server({ metadata, descriptionHashHex: hashOf(metadata) }), "signet");
+    expect(got.decoded.descriptionHash).toBe(hashOf(metadata));
+  });
+  it("refuses an invoice with another description hash, none, or a pay request without metadata", async () => {
+    await expect(requestLnurlInvoice("cody@example.com", 5_000_000, server({ metadata, descriptionHashHex: hashOf("other") }), "signet")).rejects.toThrow(/lnurl_description_hash_mismatch/);
+    await expect(requestLnurlInvoice("cody@example.com", 5_000_000, server({ metadata }), "signet")).rejects.toThrow(/lnurl_description_hash_mismatch/);
+    await expect(requestLnurlInvoice("cody@example.com", 5_000_000, server({ descriptionHashHex: hashOf(metadata) }), "signet")).rejects.toThrow(/lnurl_missing_metadata/);
   });
 });
 

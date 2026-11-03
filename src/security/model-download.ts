@@ -132,7 +132,7 @@ export async function assertPublicHttps(url: string, resolveHost = defaultResolv
 
 // Default dispatcher: re-checks the address actually connected to, so DNS rebinding between
 // the pre-check and the connect can't reach a private host.
-const guardedAgent = new Agent({
+export const guardedAgent = new Agent({
   connect: {
     lookup(hostname, options, cb) {
       dnsLookup(hostname, { ...options, all: true }, (err, addrs: LookupAddress[]) => {

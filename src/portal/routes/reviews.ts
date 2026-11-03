@@ -6,12 +6,22 @@ import { request } from "undici";
 import { z } from "zod";
 import type { ReviewRoutesDeps } from "../server.js";
 
-/** #16: Review queue API (/portal/api/reviews). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store }: ReviewRoutesDeps): void {
+/**
+ * Review queue API (/portal/api/reviews). Escalations are not scoped per user (the coordinator's
+ * list holds every task's code and context, and a decision resolves the task), so every route is
+ * operator-only, like /portal/api/escalations. Upstream errors are logged, not returned.
+ */
+export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, buildAccessContext, discoverCoordinatorUrlsForPortal, getCurrentUser, store }: ReviewRoutesDeps): void {
+  async function requireOperator(req: unknown, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): Promise<boolean> {
+    const user = await getCurrentUser(req as any);
+    if (!user) { reply.code(401).send({ error: "not_authenticated" }); return false; }
+    if (!(await buildAccessContext(user)).isSystemAdmin) { reply.code(403).send({ error: "operator_only" }); return false; }
+    return true;
+  }
+
   app.get("/portal/api/reviews", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!(await requireOperator(req, reply))) return;
 
     const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
     if (coordinatorUrls.length === 0) {
@@ -56,8 +66,7 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
 
   app.get("/portal/api/reviews/:taskId", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!(await requireOperator(req, reply))) return;
 
     const { taskId } = req.params as { taskId: string };
     const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
@@ -105,17 +114,18 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
           errorHistory: payload.request?.errorHistory ?? []
         });
       }
-      const errBody = await res.body.text();
-      return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+      const errBody = await res.body.text().catch(() => "");
+      console.warn(`[portal] reviews: coordinator returned ${res.statusCode}: ${errBody.slice(0, 500)}`);
+      return reply.code(502).send({ error: "coordinator_error" });
     } catch (err) {
-      return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+      console.warn(`[portal] reviews: coordinator request failed: ${String(err)}`);
+      return reply.code(502).send({ error: "coordinator_request_failed" });
     }
   });
 
   app.post("/portal/api/reviews/:taskId/decision", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!(await requireOperator(req, reply))) return;
 
     const { taskId } = req.params as { taskId: string };
     const body = z.object({
@@ -148,13 +158,15 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
         bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
       });
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        const payload = await res.body.json();
-        return reply.send({ ok: true, detail: payload });
+        await res.body.dump();
+        return reply.send({ ok: true });
       }
-      const errBody = await res.body.text();
-      return reply.code(502).send({ error: "coordinator_error", detail: errBody });
+      const errBody = await res.body.text().catch(() => "");
+      console.warn(`[portal] reviews: coordinator returned ${res.statusCode}: ${errBody.slice(0, 500)}`);
+      return reply.code(502).send({ error: "coordinator_error" });
     } catch (err) {
-      return reply.code(502).send({ error: "coordinator_request_failed", detail: String(err) });
+      console.warn(`[portal] reviews: coordinator request failed: ${String(err)}`);
+      return reply.code(502).send({ error: "coordinator_request_failed" });
     }
   });
 }

@@ -60,6 +60,8 @@ export interface EncodeOpts {
   timestamp?: number;
   expirySeconds?: number;
   description?: string;
+  /** Hex sha256 for the h tag. */
+  descriptionHashHex?: string;
 }
 
 /** Amount suffix: pick the largest multiplier that represents amountMsat exactly. */
@@ -78,6 +80,7 @@ export function encodeTestBolt11(opts: EncodeOpts): string {
     ...tag(1, bytesToWords(Buffer.from(opts.paymentHashHex, "hex"))),
     ...tag(6, minWords(opts.expirySeconds ?? 3600)),
     ...(opts.description ? tag(13, bytesToWords(Buffer.from(opts.description, "utf8"))) : []),
+    ...(opts.descriptionHashHex ? tag(23, bytesToWords(Buffer.from(opts.descriptionHashHex, "hex"))) : []),
     ...new Array(104).fill(0) // dummy 65-byte signature
   ];
   const checksum = polymod([...hrpExpand(hrp), ...words, 0, 0, 0, 0, 0, 0]) ^ 1;
