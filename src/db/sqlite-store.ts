@@ -58,6 +58,9 @@ export interface BLECreditLedgerRow {
   synced: number;
   requesterSig: string;
   providerSig: string;
+  /** #63: signed into the v3 canonical bytes; '' on rows written before the columns existed. */
+  requesterAccountId: string;
+  providerAccountId: string;
 }
 
 export interface OutboundTaskRow {
@@ -157,6 +160,9 @@ export class SQLiteStore {
     // Idempotent migration: add signature columns to ble_credit_ledger
     try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN requester_sig TEXT NOT NULL DEFAULT ''"); } catch {}
     try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN provider_sig TEXT NOT NULL DEFAULT ''"); } catch {}
+    // #63: the v3 signatures cover both reward accounts, so the ledger must keep them.
+    try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN requester_account_id TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { this.db.exec("ALTER TABLE ble_credit_ledger ADD COLUMN provider_account_id TEXT NOT NULL DEFAULT ''"); } catch {}
   }
 
   close(): void {
@@ -435,14 +441,16 @@ export class SQLiteStore {
     cpuSeconds: number,
     taskHash: string,
     requesterSig = "",
-    providerSig = ""
+    providerSig = "",
+    requesterAccountId = "",
+    providerAccountId = ""
   ): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO ble_credit_ledger (tx_id, requester_id, provider_id, credits, cpu_seconds, task_hash, requester_sig, provider_sig)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT OR REPLACE INTO ble_credit_ledger (tx_id, requester_id, provider_id, credits, cpu_seconds, task_hash, requester_sig, provider_sig, requester_account_id, provider_account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(txId, requesterId, providerId, credits, cpuSeconds, taskHash, requesterSig, providerSig);
+      .run(txId, requesterId, providerId, credits, cpuSeconds, taskHash, requesterSig, providerSig, requesterAccountId, providerAccountId);
   }
 
   listUnsyncedBLECredits(limit = 50): BLECreditLedgerRow[] {
@@ -451,7 +459,8 @@ export class SQLiteStore {
         `SELECT tx_id as txId, requester_id as requesterId, provider_id as providerId,
                 credits, cpu_seconds as cpuSeconds, task_hash as taskHash,
                 created_at as createdAt, synced,
-                requester_sig as requesterSig, provider_sig as providerSig
+                requester_sig as requesterSig, provider_sig as providerSig,
+                requester_account_id as requesterAccountId, provider_account_id as providerAccountId
          FROM ble_credit_ledger WHERE synced = 0 ORDER BY created_at ASC LIMIT ?`
       )
       .all(limit) as BLECreditLedgerRow[];

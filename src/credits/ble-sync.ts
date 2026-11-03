@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { BLECreditTransaction } from "../common/types.js";
 import { verifyPayload } from "../mesh/peer.js";
 import type { CreditEngine } from "./engine.js";
+import { BleTxFieldError, bleTxV3CanonicalBytes, bleTxV3FieldsFromWire, exactMillis, verifyBleTxV3 } from "./ble-tx-v3.js";
 
 /**
  * #41: /credits/ble-sync settlement logic, kept free of coordinator globals so it
@@ -55,8 +56,8 @@ export function isBleSyncAuthorized(
 export type BleSyncTx = BLECreditTransaction;
 
 /**
- * Canonical v2 payload. BOTH requester and provider sign exactly this string, so
- * credits, txId and the requester account are covered by both signatures.
+ * Legacy v2 payload (JSON with float credits). Superseded by the canonical v3 bytes in
+ * ./ble-tx-v3.ts (#63); only honoured with BLE_SYNC_ALLOW_V1=1 outside production.
  */
 export function bleTxSignedPayloadV2(tx: Pick<
   BLECreditTransaction,
@@ -88,6 +89,7 @@ export function bleSyncAllowV1(env: NodeJS.ProcessEnv = process.env): boolean {
 
 export type BleSkipReason =
   | "signature_required"
+  | "invalid_field"
   | "invalid_signature"
   | "account_mismatch"
   | "duplicate"
@@ -103,27 +105,45 @@ export interface BleSyncDeps {
   allowV1?: boolean;
 }
 
+/**
+ * #63: both signatures must verify over the canonical v3 bytes (./ble-tx-v3.ts). `invalid_field`:
+ * a string field contains "\n", or credits / cpuSeconds are not exact milli-unit amounts, so the
+ * transaction cannot be the one that was signed. Legacy v2/v1 JSON payloads only with allowV1.
+ */
 export function verifyBleTxSignatures(
   tx: BleSyncTx,
   requesterPem: string | undefined,
   providerPem: string | undefined,
   allowV1 = false
-): "ok" | "signature_required" | "invalid_signature" {
+): "ok" | "signature_required" | "invalid_signature" | "invalid_field" {
   if (!requesterPem || !providerPem || !tx.requesterSignature || !tx.providerSignature) {
     return "signature_required";
   }
-  const v2 = bleTxSignedPayloadV2(tx);
-  if (verifyPayload(v2, tx.requesterSignature, requesterPem) && verifyPayload(v2, tx.providerSignature, providerPem)) {
-    return "ok";
+  const fields = bleTxV3FieldsFromWire(tx);
+  let bytes: Buffer | null = null;
+  try {
+    if (fields) bytes = bleTxV3CanonicalBytes(fields);
+  } catch (err) {
+    if (!(err instanceof BleTxFieldError)) throw err;
   }
-  if (
-    allowV1 &&
-    verifyPayload(v1RequesterPayload(tx), tx.requesterSignature, requesterPem) &&
-    verifyPayload(v1ProviderPayload(tx), tx.providerSignature, providerPem)
-  ) {
-    return "ok";
+  if (bytes && fields) {
+    if (verifyBleTxV3(fields, tx.requesterSignature, requesterPem) && verifyBleTxV3(fields, tx.providerSignature, providerPem)) {
+      return "ok";
+    }
   }
-  return "invalid_signature";
+  if (allowV1) {
+    const v2 = bleTxSignedPayloadV2(tx);
+    if (verifyPayload(v2, tx.requesterSignature, requesterPem) && verifyPayload(v2, tx.providerSignature, providerPem)) {
+      return "ok";
+    }
+    if (
+      verifyPayload(v1RequesterPayload(tx), tx.requesterSignature, requesterPem) &&
+      verifyPayload(v1ProviderPayload(tx), tx.providerSignature, providerPem)
+    ) {
+      return "ok";
+    }
+  }
+  return bytes ? "invalid_signature" : "invalid_field";
 }
 
 export async function applyBleSyncBatch(
@@ -149,7 +169,15 @@ export async function applyBleSyncBatch(
       continue;
     }
     const providerAccountId = await deps.rewardAccountForAgent(tx.providerId);
-    const result = await deps.transfer(tx, requesterAccountId, providerAccountId);
+    // #63: the provider signed the account it is paid into; pay nowhere else.
+    if (tx.providerAccountId !== providerAccountId) {
+      skipped.push({ txId: tx.txId, reason: "account_mismatch" });
+      continue;
+    }
+    // Settle the exact signed amount (creditMillis / 1000), never a float that merely rounds to it.
+    const creditMillis = exactMillis(tx.credits);
+    const settled = creditMillis === null ? tx : { ...tx, credits: creditMillis / 1000 };
+    const result = await deps.transfer(settled, requesterAccountId, providerAccountId);
     if (result === "applied") applied.push(tx.txId);
     else skipped.push({ txId: tx.txId, reason: result });
   }

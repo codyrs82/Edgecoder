@@ -6,6 +6,9 @@ import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
 import { baseRatePerSecond } from "../../../src/credits/pricing.js";
+import { serveWithCosign, requesterOptions, keysFor } from "./helpers/cosign.js";
+import { ledgerRowToTransaction, settledBleTxIds } from "../../../src/mesh/ble/offline-ledger.js";
+import { bleTxV3FieldsFromWire, verifyBleTxV3 } from "../../../src/credits/ble-tx-v3.js";
 
 describe("BLE sync endpoint schema", () => {
   it("validates a well-formed transaction batch", () => {
@@ -152,7 +155,7 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(laptopTransport, "laptop", async (req) => ({
       requestId: req.requestId,
       providerId: "laptop",
       status: "completed" as const,
@@ -161,7 +164,7 @@ describe("BLE credit settlement full pipeline", () => {
       providerSignature: "sig",
     }));
 
-    const mesh = new BLEMeshManager("phone", "phone-account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone-account", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -186,8 +189,11 @@ describe("BLE credit settlement full pipeline", () => {
     // 3. Simulate flush: read unsynced from SQLite
     const unsynced = store.listUnsyncedBLECredits(50);
     expect(unsynced).toHaveLength(1);
-    expect(unsynced[0].requesterSig).toBe("req-sig");
-    expect(unsynced[0].providerSig).toBe("sig");
+    // #63: the ledger holds the co-signed v3 signatures, not the request/response ones
+    expect(unsynced[0].requesterSig).not.toBe("req-sig");
+    expect(unsynced[0].providerSig).not.toBe("sig");
+    expect(unsynced[0].requesterAccountId).toBe("phone-account");
+    expect(unsynced[0].providerAccountId).toBe("laptop");
 
     // 4. Simulate coordinator settlement with CreditEngine
     const engine = new CreditEngine();
@@ -227,7 +233,7 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "phone",
     });
-    tinyTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(tinyTransport, "tiny", async (req) => ({
       requestId: req.requestId,
       providerId: "tiny",
       status: "completed" as const,
@@ -236,7 +242,7 @@ describe("BLE credit settlement full pipeline", () => {
       providerSignature: "",
     }));
 
-    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -277,7 +283,7 @@ describe("BLE credit settlement full pipeline", () => {
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(laptopTransport, "laptop", async (req) => ({
       requestId: req.requestId,
       providerId: "laptop",
       status: "completed" as const,
@@ -286,7 +292,7 @@ describe("BLE credit settlement full pipeline", () => {
       providerSignature: "prov-sig-123",
     }));
 
-    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -303,24 +309,30 @@ describe("BLE credit settlement full pipeline", () => {
     expect(rows).toHaveLength(1);
 
     // Map to BLECreditTransaction shape (same as worker-runner flushOfflineLedger)
-    const transactions = rows.map(row => ({
-      txId: row.txId,
-      requesterId: row.requesterId,
-      providerId: row.providerId,
-      requesterAccountId: row.requesterId,
-      providerAccountId: row.providerId,
-      credits: row.credits,
-      cpuSeconds: row.cpuSeconds,
-      taskHash: row.taskHash,
-      timestamp: row.createdAt * 1000,
-      requesterSignature: row.requesterSig,
-      providerSignature: row.providerSig,
-    }));
-
-    expect(transactions[0].requesterSignature).toBe("req-sig-456");
-    expect(transactions[0].providerSignature).toBe("prov-sig-123");
+    const transactions = rows.map(ledgerRowToTransaction);
+    const fields = bleTxV3FieldsFromWire(transactions[0])!;
+    expect(fields).not.toBeNull();
+    expect(verifyBleTxV3(fields, transactions[0].requesterSignature, keysFor("phone").publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields, transactions[0].providerSignature, keysFor("laptop").publicKeyPem)).toBe(true);
     expect(transactions[0].taskHash).toBe(
       createHash("sha256").update("test sigs").digest("hex")
     );
+  });
+});
+
+describe("settledBleTxIds (#63 flush bookkeeping)", () => {
+  it("stops retrying applied, duplicate and permanently invalid txs only", () => {
+    expect(settledBleTxIds({
+      applied: ["a"],
+      skipped: [
+        { txId: "d", reason: "duplicate" },
+        { txId: "s", reason: "invalid_signature" },
+        { txId: "f", reason: "invalid_field" },
+        { txId: "r", reason: "signature_required" },
+        { txId: "i", reason: "insufficient" },
+        { txId: "m", reason: "account_mismatch" },
+      ],
+    })).toEqual(["a", "d", "s", "f"]);
+    expect(settledBleTxIds(undefined)).toEqual([]);
   });
 });

@@ -5,6 +5,8 @@ import {
   BLETransport,
   BLEAdvertisement,
   TaskRequestHandler,
+  CosignRequestHandler,
+  cosignUnavailable,
 } from "./ble-transport.js";
 import {
   BLE_SERVICE_UUID,
@@ -16,6 +18,7 @@ import {
   BLETaskRequest,
   BLETaskResponse,
 } from "./protocol.js";
+import type { BLECosignRequest, BLECosignResponse } from "../../common/types.js";
 
 /**
  * Real BLE transport using @abandonware/noble (central/scanning)
@@ -29,6 +32,7 @@ export class NobleBLETransport implements BLETransport {
   private advertisement: BLEAdvertisement | null = null;
   private scanning = false;
   private handler: TaskRequestHandler | null = null;
+  private cosignHandler: CosignRequestHandler | null = null;
   private peers = new Map<string, BLEPeerEntry>();
   private noble: any = null;
   private bleno: any = null;
@@ -243,36 +247,49 @@ export class NobleBLETransport implements BLETransport {
     });
   }
 
-  /** Handle an incoming task request written to our GATT characteristic by a remote peer. */
+  /**
+   * Handle a message written to our task-request characteristic by a remote peer: a task request,
+   * or (#63) a `type: "cosign"` request for our signature over the final credit transaction.
+   */
   private async handleIncomingTaskRequest(data: Buffer): Promise<void> {
-    if (!this.handler) {
-      console.warn("[BLE] received task request but no handler registered");
-      return;
-    }
     try {
-      const request: BLETaskRequest = JSON.parse(data.toString("utf8"));
+      const message = JSON.parse(data.toString("utf8"));
+      if (message?.type === "cosign") {
+        const request = message as BLECosignRequest;
+        const response = this.cosignHandler
+          ? await this.cosignHandler(request)
+          : cosignUnavailable(request, "no_cosign_handler");
+        console.log(`[BLE] co-sign ${request.requestId}: ${response.status}${response.reason ? ` (${response.reason})` : ""}`);
+        this.notifyResponse(response);
+        return;
+      }
+      if (!this.handler) {
+        console.warn("[BLE] received task request but no handler registered");
+        return;
+      }
+      const request = message as BLETaskRequest;
       console.log(
         `[BLE] incoming task request ${request.requestId} from ${request.requesterId}`
       );
       const response = await this.handler(request);
       console.log(`[BLE] task ${request.requestId} completed: ${response.status}`);
-
-      if (this.taskResponseNotify) {
-        const responseData = Buffer.from(JSON.stringify(response));
-        // Chunk with 4-byte length prefix, matching iOS chunking protocol
-        const header = Buffer.alloc(4);
-        header.writeUInt32BE(responseData.length, 0);
-        const firstChunk = Buffer.concat([header, responseData]);
-        this.taskResponseNotify(firstChunk);
-        console.log(
-          `[BLE] sent task response via notify (${responseData.length} bytes, with 4-byte header)`
-        );
-      } else {
-        console.warn("[BLE] no subscriber for task response notify");
-      }
+      this.notifyResponse(response);
     } catch (e) {
       console.error("[BLE] error handling incoming task request:", e);
     }
+  }
+
+  /** Send a response on the task-response notify characteristic (4-byte length prefix, like iOS). */
+  private notifyResponse(response: unknown): void {
+    if (!this.taskResponseNotify) {
+      console.warn("[BLE] no subscriber for task response notify");
+      return;
+    }
+    const responseData = Buffer.from(JSON.stringify(response));
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(responseData.length, 0);
+    this.taskResponseNotify(Buffer.concat([header, responseData]));
+    console.log(`[BLE] sent response via notify (${responseData.length} bytes, with 4-byte header)`);
   }
 
   stopAdvertising(): void {
@@ -323,6 +340,17 @@ export class NobleBLETransport implements BLETransport {
     this.handler = handler;
   }
 
+  onCosignRequest(handler: CosignRequestHandler): void {
+    this.cosignHandler = handler;
+  }
+
+  /** #63: write the final transaction to the provider and wait for its co-sign answer. */
+  async sendCosignRequest(peerId: string, request: BLECosignRequest): Promise<BLECosignResponse> {
+    const fail = () => cosignUnavailable(request);
+    const response = await this.exchange<BLECosignResponse>(peerId, request, `co-sign ${request.requestId}`, fail);
+    return response?.type === "cosign_result" ? response : fail();
+  }
+
   /**
    * Send a task request to a discovered BLE peer.
    * Stops scanning to avoid connection races, connects to the peer's peripheral,
@@ -333,18 +361,6 @@ export class NobleBLETransport implements BLETransport {
     peerId: string,
     request: BLETaskRequest
   ): Promise<BLETaskResponse> {
-    const peripheral = this.peripheralsByAgentId.get(peerId);
-    if (!peripheral) {
-      console.warn(`[BLE] sendTaskRequest: no peripheral found for ${peerId}`);
-      return {
-        requestId: request.requestId,
-        providerId: peerId,
-        status: "failed",
-        cpuSeconds: 0,
-        providerSignature: "",
-      };
-    }
-
     const fail = (): BLETaskResponse => ({
       requestId: request.requestId,
       providerId: peerId,
@@ -352,6 +368,24 @@ export class NobleBLETransport implements BLETransport {
       cpuSeconds: 0,
       providerSignature: "",
     });
+    return this.exchange<BLETaskResponse>(peerId, request, `task ${request.requestId}`, fail);
+  }
+
+  /**
+   * One request/response round trip with a peer: connect, subscribe to BLE_CHAR_TASK_RESPONSE,
+   * write `payload` (JSON) to BLE_CHAR_TASK_REQUEST, and resolve with the parsed notify reply.
+   */
+  private async exchange<T>(
+    peerId: string,
+    payload: unknown,
+    label: string,
+    fail: () => T
+  ): Promise<T> {
+    const peripheral = this.peripheralsByAgentId.get(peerId);
+    if (!peripheral) {
+      console.warn(`[BLE] ${label}: no peripheral found for ${peerId}`);
+      return fail();
+    }
 
     // Stop scanning to prevent discovery connect/disconnect cycles from
     // interfering with the task connection. Noble discovery callbacks
@@ -359,7 +393,7 @@ export class NobleBLETransport implements BLETransport {
     // our task connection.
     const wasScanning = this.scanning;
     if (wasScanning && this.noble) {
-      console.log(`[BLE] pausing scan for task ${request.requestId}`);
+      console.log(`[BLE] pausing scan for ${label}`);
       this.noble.stopScanning();
     }
 
@@ -376,14 +410,14 @@ export class NobleBLETransport implements BLETransport {
       } catch {}
     }
 
-    return new Promise<BLETaskResponse>((resolve) => {
+    return new Promise<T>((resolve) => {
       let resolved = false;
       const cleanup = () => {
         if (resolved) return;
         resolved = true;
         // Resume scanning after task completes
         if (wasScanning && this.noble) {
-          console.log(`[BLE] resuming scan after task ${request.requestId}`);
+          console.log(`[BLE] resuming scan after ${label}`);
           this.doStartScanning();
         }
       };
@@ -406,7 +440,7 @@ export class NobleBLETransport implements BLETransport {
       };
       peripheral.once("disconnect", onDisconnect);
 
-      console.log(`[BLE] connecting to peer ${peerId} for task ${request.requestId} (state: ${peripheral.state})...`);
+      console.log(`[BLE] connecting to peer ${peerId} for ${label} (state: ${peripheral.state})...`);
 
       peripheral.connect((err: Error | null) => {
         if (err) {
@@ -488,14 +522,16 @@ export class NobleBLETransport implements BLETransport {
               let receivedBytes = 0;
 
               const processComplete = (fullData: Buffer) => {
+                // A later exchange on this peripheral (e.g. the #63 co-sign step) must not be seen here.
+                taskRespChar.removeListener("data", onData);
                 clearTimeout(timeout);
                 peripheral.removeListener("disconnect", onDisconnect);
                 try {
-                  const response: BLETaskResponse = JSON.parse(
+                  const response = JSON.parse(
                     fullData.toString("utf8")
-                  );
+                  ) as T;
                   console.log(
-                    `[BLE] received task response from ${peerId}: ${response.status} (${fullData.length} bytes)`
+                    `[BLE] received response for ${label} from ${peerId} (${fullData.length} bytes)`
                   );
                   peripheral.disconnect();
                   cleanup();
@@ -509,15 +545,15 @@ export class NobleBLETransport implements BLETransport {
               };
 
               // Listen for the response notify (chunked)
-              taskRespChar.on("data", (data: Buffer) => {
+              const onData = (data: Buffer) => {
                 if (expectedLength < 0) {
                   // First chunk: read 4-byte length header
                   expectedLength =
                     (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-                  const payload = data.subarray(4);
-                  chunks.push(payload);
-                  receivedBytes += payload.length;
-                  console.log(`[BLE] response chunk 1: ${payload.length} bytes (expecting ${expectedLength} total)`);
+                  const body = data.subarray(4);
+                  chunks.push(body);
+                  receivedBytes += body.length;
+                  console.log(`[BLE] response chunk 1: ${body.length} bytes (expecting ${expectedLength} total)`);
                 } else {
                   // Continuation chunk
                   chunks.push(data);
@@ -528,10 +564,11 @@ export class NobleBLETransport implements BLETransport {
                 if (receivedBytes >= expectedLength) {
                   processComplete(Buffer.concat(chunks));
                 }
-              });
+              };
+              taskRespChar.on("data", onData);
 
               // Write the task request
-              const requestData = Buffer.from(JSON.stringify(request));
+              const requestData = Buffer.from(JSON.stringify(payload));
               console.log(
                 `[BLE] writing task request to ${peerId} (${requestData.length} bytes)...`
               );
