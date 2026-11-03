@@ -805,7 +805,10 @@ async function loop(): Promise<void> {
         }
       });
 
-      console.log(`[agent:${AGENT_ID}] BLE mesh transport initialized`);
+      // Say what actually works: the transport "initializes" even when its native parts are missing.
+      const caps = bleTransport?.capabilities();
+      if (caps && !caps.scanning && !caps.advertising) console.warn(`[agent:${AGENT_ID}] BLE mesh unavailable: Bluetooth native modules are missing from this install`);
+      else console.log(`[agent:${AGENT_ID}] BLE mesh transport initialized${caps ? ` (scanning ${caps.scanning ? "on" : "off"}, advertising ${caps.advertising ? "on" : "off"})` : ""}`);
     } catch (e) {
       console.warn(`[agent:${AGENT_ID}] BLE mesh init failed (non-fatal): ${String(e)}`);
       bleTransport = null;

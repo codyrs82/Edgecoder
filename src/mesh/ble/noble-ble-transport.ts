@@ -40,6 +40,11 @@ export class NobleBLETransport implements BLETransport {
 
   constructor(private readonly localId: string) {}
 
+  /** Which halves loaded: scanning (noble) and advertising (bleno). Both false means no BLE at all. */
+  capabilities(): { scanning: boolean; advertising: boolean } {
+    return { scanning: !!this.noble, advertising: !!this.bleno };
+  }
+
   async init(): Promise<void> {
     try {
       const nobleModule = await import("@anthropic-ai/noble" as string).catch(
