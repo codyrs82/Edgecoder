@@ -1,4 +1,9 @@
-# Economy math: credits, sats, tokens
+# Economy math: cSats, sats, tokens
+
+> **Bitcoin settlement is being redesigned.** Today value sits with the coordinator between a
+> purchase and a payout (custodial). The target, pay-per-use settlement in sats over Lightning, is
+> proposed in PR #195 (`docs/design/bitcoin-settlement.md` once merged). This page describes what
+> the code does now.
 
 This is the arithmetic the coordinator actually runs today, with the source of each formula,
 worked examples, and the places where the numbers or the wiring do not hold up. Design
@@ -8,84 +13,111 @@ Three units appear in the code and they are not interchangeable:
 
 | Unit | What it is | Where it lives |
 |---|---|---|
-| **credit** | Off-chain unit of compute. Earned by executing subtasks, spent by submitting tasks, bought with sats. | `credit_transactions` (Postgres) or the in-memory `CreditEngine` |
-| **sat** | Bitcoin, paid through Lightning for credits, and spent on OP_RETURN anchoring fees. | Lightning node, `payment_intents`, `bitcoin_anchor_records` |
+| **cSat** | Prepaid compute balance. **1 cSat = 1 sat**; amounts are carried as msat and stored at 3 decimals (`msatToCSats` in `src/economy/job-pricing.ts`). Bought with sats, spent on model calls, jobs and reservations, earned by running them. The code still calls ledger rows "credits". | `credit_transactions` (Postgres) or the in-memory `CreditEngine` |
+| **sat** | Bitcoin, paid through Lightning for cSats, paid out to contributors, and spent on OP_RETURN anchoring fees. | Lightning node, `payment_intents`, `bitcoin_anchor_records` |
 | **token** | Issuance accounting unit from the daily pool. Recorded, not yet credited or paid out. | `issuance_epochs`, `issuance_allocations`, `issuance_payout_events` |
 
-## 1. Earning credits (compute)
+A "credit" below, in the order book and the oracle, is a **unit of work**: one second on a
+compute class's base tier. Its price is quoted in msat per credit.
 
-`src/credits/pricing.ts` `contributionCredits`, called from the coordinator's `/result` handler
-(`accrueResultCredits`).
+## 1. What things cost
+
+All formulas are in `src/economy/job-pricing.ts`; the coordinator applies them when a result is
+accepted (`accrueResultCredits` in `src/swarm/coordinator.ts`). What the requester pays is what the
+agent earns, minus the network fee (`NETWORK_FEE_BPS`, default 500 = 5 %), which goes to the fee
+pool (section 5). Failed work is not charged and earns nothing.
+
+### Model calls: per token, by model size
 
 ```
-credits = seconds × weight(tier) × modelSize × quality × loadMultiplier(load)
+price(paramsB)  = TOKEN_PRICE_USD_PER_M row for the model's size (USD per million tokens, input / output)
+tokenUsd        = (promptTokens × input + outputTokens × output) / 1,000,000
+floorUsd        = POWER_FLOOR_USD_PER_HOUR[class] × max(1, tierWeight) × seconds / 3600
+cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat = usd / btcUsd × 1e8 × 1000
+```
+
+| Model size | Input USD / M tokens | Output USD / M tokens |
+|---|---|---|
+| ≤ 2B | 0.01 | 0.03 |
+| ≤ 4B | 0.02 | 0.05 |
+| ≤ 9B | 0.04 | 0.10 |
+| ≤ 16B | 0.07 | 0.20 |
+| ≤ 35B | 0.12 | 0.35 |
+| ≤ 80B | 0.30 | 0.80 |
+| larger | 0.60 | 1.50 |
+
+The prices are set below typical hosted prices for open models of the same size. The power floor
+(`cpu` $0.005/h, `apple` $0.01/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
+tier weight) means a machine's owner never earns less than the electricity the seconds cost.
+`btcUsd` is the live rate oracle's BTC price (below), with a 100,000 USD fallback before the first
+epoch. Model size comes from the model name (`paramsB` in `src/inference-api/auto-route.ts`). When
+an agent reports no token counts the call falls back to the per-second price. The basis used
+(`tokens`, `power_floor` or `per_second`) is recorded on the earnings ledger record.
+`cSatsPerMTokens` gives the per-million-token price in cSats that the apps show.
+
+Example at 100,000 USD/BTC: a 9B model reads 2,000 tokens and writes 500.
+`tokenUsd = (2000 × 0.04 + 500 × 0.10) / 1e6 = 0.00013 USD` = 130 msat = **0.13 cSats**. If it ran
+for 10 s on a base-tier `gpu`, the floor is `0.05 × 10 / 3600 = 0.000139 USD` = 0.139 cSats, so the
+floor applies and the call costs 0.139 cSats.
+
+### Code jobs: per second
+
+```
+perCredit (msat) = clampToBand(matched price, class reference)   # band 0.25x .. 4x the class reference
+rate (msat/s)    = perCredit × tierWeight
+cost (msat)      = seconds × rate
 ```
 
 - `seconds` is **server-measured**: `creditedDurationMs = min(reported, now − claimedAt, subtask.timeoutMs)`
   (`src/swarm/result-integrity.ts`). An agent cannot report more time than the coordinator observed.
-- `weight(tier)` = credits per measured second of the agent's hardware tier inside its compute
-  class (1 on each class's base tier; see "Compute classes" below). Callers without a tier (the
-  BLE mesh path) fall back to `baseRate` = 1.0 credit/s (cpu) or 4.0 credit/s (gpu).
-- `modelSize` = 1.0 (≤3B / plain code) … 4.0 (>35B).
-- `quality` = 1.0 for an accepted result, clamped to [0.5, 1.5]. Nothing sets it to anything else today.
-- `loadMultiplier` from `queued / activeAgents`: 0.8 (≤ 0.5), 1.0 (≤ 1), 1.25 (≤ 2), 1.6 (> 2); 1.6 when no agents.
-- **Failed results earn 0** (#38). Rounded to 3 decimals. Idempotent per subtask via the report id.
+- The matched price is the trade agreed in the order book at claim time (section 2); the band
+  stops a self-dealing ask/bid from moving the sats value (audit econ#2).
+- At submit the coordinator sets aside the worst case for one subtask (`reserveMsat`: its time
+  limit at the top of the band on the class's fastest tier, lowered to the requester's bid ceiling
+  when set) as a `task_reserve` row, tops it up once the task is split, and refunds the unused part
+  when the task finishes (`task_submit_refund:<task>`). Not enough balance returns 402
+  `insufficient_credits`.
+- Work on your own machines is not charged.
 
-Example: a 12.4 s CPU subtask on a standard CPU with 3 queued tasks and 4 agents (pressure
-0.75 → 1.0) earns `12.4 × 1.0 × 1.0 × 1.0 = 12.400` credits; the same run on a 24 GB GPU (weight
-3.5) earns 43.4 GPU credits.
+### Reservations: per second, paid up front
 
-Submitting a task costs a flat **1 credit** (`spendCredits(…, 1, "task_submit")`), refunded once if
-the task fails permanently (#160). The cost does not depend on the model, prompt size or
-duration. `modelCostCredits(paramSizeB)` and `modelSeedCredits(...)` exist in `pricing.ts` but
-nothing calls them.
+A reservation holds one agent of a class for 5 minutes to 24 hours (`src/economy/reservations.ts`).
+It costs `minutes × 60 × rate`, with `rate` the class reference times the agent's tier weight,
+paid in full when it is made. When it ends, early or on time, the unused time is refunded
+(`reservation_refund:<id>`) and the agent's owner is paid for the time held, minus the network fee.
 
-## 2. Buying credits (sats → credits)
+## 2. Buying cSats (sats → cSats)
 
 `POST /economy/payments/intents` (coordinator):
 
 ```
-feeSats      = floor(amountSats × COORDINATOR_FEE_BPS / 10000)      # default 150 bps = 1.5 %
-netSats      = amountSats − feeSats
-satsPerCredit = rate oracle (see below) × load multiplier, locked at intent creation
-quotedCredits = round3(netSats / satsPerCredit)
+feeSats  = floor(amountSats × COORDINATOR_FEE_BPS / 10000)      # default 150 bps = 1.5 %
+cSats    = amountSats − feeSats
 ```
 
-Example: 10,000 sats → fee 150, net 9,850, at 0.00667 sats/credit → **1,477,500 credits** (about 410 CPU-hours).
+Example: 10,000 sats → fee 150 → **9,850 cSats**.
 
-Credits are granted only when the Lightning node reports the invoice settled
+cSats are granted only when the Lightning node reports the invoice settled
 (`src/economy/payment-settlement.ts`, #42): LND by `r_hash` with preimage, amount and state checks;
-CLN by `payment_hash` with the same checks (hardened in this change). The grant row is
-`credit_purchase:<intentId>`, unique per intent.
-
-`satsPerCredit` comes from `computeDynamicPricePerComputeUnitSats` (`src/economy/pricing.ts`):
-
-```
-scarcity   = max(1, queued + activeAgents) / max(1, capacity)
-multiplier = clamp(0.65 + 0.35 × scarcity, 0.35, 4.0)
-price      = max(1, round(base × multiplier))        # base 30 sats (cpu), 120 sats (gpu)
-```
-
-This multiplier (0.65 idle floor, 4.0 cap) is applied on top of the oracle's market rate. The 30/120-sat
-bases survive only as the legacy fallback when the oracle has never produced an epoch.
+CLN by `payment_hash` with the same checks. The grant row is `credit_purchase:<intentId>`, unique
+per intent.
 
 ### Price level: market-anchored, recalibrated daily
 
-`satsPerCredit` is no longer a 30-sat constant. `src/economy/rate-oracle.ts` recalibrates it
-(default daily, `RATE_RECALIBRATION_MS`) from two verifiable inputs:
+`src/economy/rate-oracle.ts` sets the class reference prices (msat per credit) and the BTC price
+used for per-token pricing. It recalibrates (default daily, `RATE_RECALIBRATION_MS`) from two
+verifiable inputs:
 
 ```
 btcUsd          = median of agreeing spot quotes (Coinbase, Kraken, Bitstamp, mempool.space;
                   quotes > RATE_MAX_SOURCE_SPREAD_PCT from the median are dropped; >= RATE_MIN_SOURCES must remain)
-usdPerCpuHour   = median of RATE_COMPUTE_SOURCES_JSON (cpu) if configured, else COMPUTE_REFERENCE_USD_PER_VCPU_HOUR (0.02)
-satsPerCpuHour  = usdPerCpuHour / btcUsd × 1e8 × (1 + RATE_NETWORK_MARKUP_BPS / 10000)
-satsPerCredit   = satsPerCpuHour / 3600 × loadMultiplier        # loadMultiplier 0.65..4.0 from queue depth vs capacity
+usdPerHour      = per-class reference (table below), or a live source tagged with that class
+satsPerHour     = usdPerHour / btcUsd × 1e8 × (1 + RATE_NETWORK_MARKUP_BPS / 10000)
+satsPerCredit   = satsPerHour / 3600
 ```
 
-Worked example at 100,000 USD/BTC with the defaults: 0.02 USD/h → 20 sats/h → +20 % → **24 sats
-per CPU-hour**, 0.00667 sats (7 msat) per credit at balanced load. A 10,000-sat purchase (net
-9,850) buys about 1.48 million credits, i.e. 410 CPU-hours. Compare the previous constant: 30 sats
-per CPU-**second**, 108,000 sats per hour, 4,500× higher.
+Worked example at 100,000 USD/BTC with the defaults: cpu at $0.02/h → 20 sats/h → +20 % → 24 sats
+per CPU-hour, about 6.7 msat per credit (CPU-second).
 
 Guards: a fresh epoch may move at most `RATE_MAX_DAILY_MOVE_PCT` (25 %) from the previous one and the
 unclamped value is recorded; if sources fail the previous epoch is carried and flagged; quotes
@@ -96,9 +128,6 @@ Why not hashprice: hashprice (sats per TH/s per day) is Bitcoin mining revenue a
 difficulty and block fees, not the cost of a CPU-second. The oracle computes it from mempool.space
 chain data (144 × (subsidy + 24 h average fees) / network TH) and stores it on each epoch as a
 signal for operators, but it never enters the compute price.
-
-Open point: the quote and every intent still use the **CPU** rate even when the buyer intends GPU
-work; a per-resource-class purchase is a follow-up.
 
 ### Compute classes, model size, and the order book
 
@@ -143,9 +172,8 @@ dynamic:
    (`HARDWARE_TIER_MIN_JSON`) need calibrating on the fleet. The per-agent record, including the
    rolling `evidence.score` that a bid's `minReliability` checks, is on
    `GET /economy/hardware/verifications`.
-2. **Model profile** (`src/credits/pricing.ts`). The per-second rate is multiplied by the size of
-   the model that served the task (≤3B 1.0, ≤10B 1.5, ≤35B 2.5, >35B 4.0) and the sats value by
-   its modality (vision +25 %, thinking +10 %), from the catalog's capability labels.
+2. **Model size.** Per-second prices do not depend on the model. Model size enters through the
+   per-token price of model calls (section 1).
 3. **Market** (`src/economy/order-book.ts`). Every agent posts an ask in msat per credit on its
    class (default: the oracle reference, which it then tracks; `AGENT_ASK_MSAT_PER_CREDIT` fixes
    it). Every task carries a bid (`maxBidMsatPerCredit`, default reference × 1.10). At claim time
@@ -155,9 +183,9 @@ dynamic:
    on `GET /economy/market/book`; class definitions with current rates on
    `GET /economy/market/classes`.
 
-Repricing on a market swing therefore happens three ways: the daily oracle moves every
-tracking ask and every default bid; the scarcity multiplier moves quotes with queue depth; and
-agents with fixed asks either become the cheapest or stop matching, which is the signal that
+Repricing on a market swing therefore happens two ways: the daily oracle moves every
+tracking ask and every default bid (and the BTC price behind per-token prices); and agents with
+fixed asks either become the cheapest or stop matching, which is the signal that
 makes them reprice.
 
 ## 3. Contribute-first policy (who may submit)
@@ -320,12 +348,14 @@ Each ledger checkpoint is an OP_RETURN transaction. Guards (`src/economy/anchori
 
 | Path | State |
 |---|---|
-| Earn credits for compute | Working; server-measured; failed work earns 0 |
-| Spend credits to submit | Working; flat 1 credit per task |
-| Buy credits with Lightning (LND) | Working against a node; fail-closed settlement; not deployable on Fly until a node exists (`ECONOMY_PAYMENTS_ENABLED=false`) |
-| Buy credits with Lightning (CLN) | Hardened in this change; needs a regtest run before trusting it with money |
-| Contribute-first gate for buyers | Fixed in this change |
-| Price discovery | Daily oracle (verified live: 4 exchanges agree) × compute class × model size, with a per-class ask/bid order book matched at claim time |
+| Earn for compute | Working; per token for model calls (with power floor), per second for code jobs and reservations; server-measured; failed work earns 0 |
+| Pay for compute | Working; worst case set aside at submit, settled to the actual cost, unused part refunded |
+| Reservations | Working; prepaid, unused time refunded |
+| Buy cSats with Lightning (LND) | Working against a node; fail-closed settlement (`ECONOMY_PAYMENTS_ENABLED=false` disables it) |
+| Buy cSats with Lightning (CLN) | Hardened; needs a regtest run before trusting it with money |
+| Contribute-first gate for buyers | Working |
+| Price discovery | Daily oracle × compute class, a per-class ask/bid order book matched at claim time, per-token prices by model size at the oracle's BTC price |
 | Token issuance | Records only; tokens redeem for nothing |
 | Sats payouts to contributors | Working: BOLT11 withdrawals and LNURL auto payouts through the node (needs `LIGHTNING_PROVIDER=lnd|cln`); fee pool distributed to infrastructure hosts daily |
 | Ledger anchoring | Working with bitcoind / anchor proxy; mock in dev |
+| Settlement model | Custodial today; pay-per-use bitcoin settlement under design (PR #195) |
