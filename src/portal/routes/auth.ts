@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { desktopOriginOf } from "../../common/desktop-origins.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
@@ -398,8 +399,14 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   });
 
   // CORS preflight for native app token exchange
-  app.options("/auth/oauth/mobile/complete", async (_req, reply) => {
-    reply.header("Access-Control-Allow-Origin", "tauri://localhost");
+  // The app's origin differs per OS (desktop-origins.ts), so echo it when it is one of ours.
+  const allowDesktopOrigin = (req: { headers: Record<string, unknown> }, reply: { header(k: string, v: string): unknown }) => {
+    reply.header("Vary", "Origin");
+    const origin = desktopOriginOf(req.headers.origin as string | undefined);
+    if (origin) reply.header("Access-Control-Allow-Origin", origin);
+  };
+  app.options("/auth/oauth/mobile/complete", async (req, reply) => {
+    allowDesktopOrigin(req as any, reply);
     reply.header("Access-Control-Allow-Credentials", "true");
     reply.header("Access-Control-Allow-Methods", "POST, OPTIONS");
     reply.header("Access-Control-Allow-Headers", "content-type");
@@ -408,7 +415,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   });
 
   app.post("/auth/oauth/mobile/complete", async (req, reply) => {
-    reply.header("Access-Control-Allow-Origin", "tauri://localhost");
+    allowDesktopOrigin(req as any, reply);
     reply.header("Access-Control-Allow-Credentials", "true");
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ token: z.string().min(24), verifier: z.string().regex(APP_VERIFIER_RE).optional() }).parse(req.body);

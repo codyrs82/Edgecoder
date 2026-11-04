@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { portalConfigSchema, portalProductionProblems } from "./config.js";
 import Fastify from "fastify";
@@ -75,7 +76,7 @@ exposeRequestId(app);
 registerMetrics(app, "portal");
 await registerErrorTracking(app, "portal");
 
-const DESKTOP_ORIGINS = ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"];
+const DESKTOP_ORIGINS = [...DESKTOP_APP_ORIGINS];
 await app.register(cors, {
   origin: DESKTOP_ORIGINS,
   credentials: true,

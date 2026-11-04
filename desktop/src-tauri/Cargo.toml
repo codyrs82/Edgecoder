@@ -10,6 +10,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-deep-link = "2"
+# Windows and Linux start a second process for an edgecoder:// link (the OAuth callback); this
+# forwards the link to the running app (deep-link feature) and focuses it instead.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = { version = "2", features = [] }
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }

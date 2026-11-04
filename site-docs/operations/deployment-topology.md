@@ -86,7 +86,7 @@ docker compose up ide-provider
 
 ### Docker
 
-- **Image**: `ghcr.io/codyrs82/Edgecoder:latest`
+- **Image**: not published to a registry yet; build `deploy/docker/Dockerfile.agent` (see docs/packages.md)
 - **Default mode**: `all-in-one` (unified agent)
 - **Includes**: Node.js 22, Ollama support
 
