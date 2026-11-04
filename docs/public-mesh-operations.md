@@ -229,7 +229,7 @@ Model access boundary:
 - Even after email verification, nodes require coordinator approval to become active.
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.
 - Portal UI route: `GET /portal` (signup/login, OAuth starts, verification status, node enrollment, credits/wallet panels).
-- Portal users can select a persisted theme profile (`midnight`, `emerald`, `light`) from the dashboard.
+- Portal users can pick System, Light or Dark (Settings → General, or the theme button in the top bar). The choice is stored in the browser (`localStorage` key `edgecoder-theme`, the same key the desktop app uses) and defaults to Dark.
 
 ## Coordinator Stats Ledger Rollout
 

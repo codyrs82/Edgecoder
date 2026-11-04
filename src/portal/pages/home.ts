@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { siteLabel } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 
@@ -16,11 +17,12 @@ app.get("/portal", async (_req, reply) => {
   const ssoButtons = [googleOn ? `<a href="/auth/oauth/google/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4z"/></svg> Google</button></a>` : "", microsoftOn ? `<a href="/auth/oauth/microsoft/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" fill="#F25022"/><rect x="13" y="2" width="9" height="9" fill="#7FBA00"/><rect x="2" y="13" width="9" height="9" fill="#00A4EF"/><rect x="13" y="13" width="9" height="9" fill="#FFB900"/></svg> Microsoft 365</button></a>` : ""].filter(Boolean).join("");
   const ssoBlock = ssoButtons ? `<div class="or">or continue with</div><div class="sso">${ssoButtons}</div>` : "";
   const html = `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>EdgeCoder Portal | Sign in</title>
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}
@@ -40,6 +42,7 @@ app.get("/portal", async (_req, reply) => {
         .prop span { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
         .auth-foot { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; margin-top: 28px; }
         .auth-foot a { color: var(--muted); } .auth-foot a:hover { color: var(--text); }
+        .auth-foot .theme-toggle { min-height: 0; padding: 0 4px; margin-top: -1px; }
         .auth-main { display: flex; align-items: center; justify-content: center; padding: 36px 24px; }
         .auth-card { width: min(440px, 100%); }
         .tabs { display: flex; border: 1px solid var(--card-border); border-radius: var(--radius-sm); padding: 3px; background: var(--bg-surface); margin-bottom: 18px; }
@@ -73,7 +76,7 @@ app.get("/portal", async (_req, reply) => {
               <div class="prop"><span class="icon">${icon("market", 16)}</span><div><b>An open market for compute</b><span>Agents post asks, tasks carry bids, and every hardware class trades against BTC on the market page.</span></div></div>
             </div>
           </div>
-          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>&copy; 2025 EdgeCoder, LLC</span></div>
+          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>&copy; 2025 EdgeCoder, LLC</span>${themeToggleButton()}</div>
         </section>
         <section class="auth-main">
           <div class="auth-card">

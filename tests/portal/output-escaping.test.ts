@@ -257,7 +257,11 @@ describe("enforced CSP with per-request script nonces", () => {
       expect(nonce, url).toBeTruthy();
       expect(res.body, url).not.toContain(CSP_NONCE);
       const tags = [...res.body.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
-      for (const tag of tags) expect(tag, url).toBe(`<script nonce="${nonce}">`);
+      // #89: plus the same-origin theme script, which needs no nonce under script-src 'self'.
+      for (const tag of tags) {
+        if (/^<script src="\/assets\/theme\.js\?v=[0-9a-f]+">$/.test(tag)) continue;
+        expect(tag, url).toBe(`<script nonce="${nonce}">`);
+      }
       // And each one still parses (the handler rewrites didn't break the page scripts).
       for (const m of res.body.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new vm.Script(m[1]), url).not.toThrow();
       expect(res.body, url).not.toMatch(/<[^>]+\son[a-z]+\s*=/i);

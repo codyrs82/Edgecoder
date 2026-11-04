@@ -20,13 +20,13 @@ const group = (label: string) => `<div class="set-group">${label}</div>`;
 const GENERAL = section(
   "general",
   "General",
-  "How the portal looks on this account.",
+  "How the portal looks in this browser.",
   card(
     settingRow(
       "Theme",
-      "Applies to every page of the portal, on every device you sign in from.",
-      `<select id="themeSelect" aria-label="Theme"><option value="warm">Graphite (default)</option><option value="midnight">Midnight</option><option value="emerald">Evergreen</option></select>`,
-      { keywords: "theme appearance colour color dark" }
+      "Light, dark, or follow your system setting. Saved in this browser, like the desktop app.",
+      `<select id="themeSelect" aria-label="Theme" data-theme-select><option value="system">System</option><option value="light">Light</option><option value="dark">Dark (default)</option></select>`,
+      { keywords: "theme appearance colour color dark light mode" }
     )
   )
 );
@@ -177,7 +177,6 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
       me = await requireAuth();
       revealSettingsAdminTab(me);
       const user = me.user || {};
-      document.getElementById("themeSelect").value = user.uiTheme || "warm";
       document.getElementById("displayNameInput").value = user.displayName || "";
       document.getElementById("profileEmail").textContent = user.email || "";
       document.getElementById("profileEmailBadge").innerHTML = user.emailVerified ? statusBadge("Verified", "ok") : statusBadge("Unverified", "warn");
@@ -204,12 +203,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
         showToast("Could not save: " + String(err.message || err), true);
       }
     });
-    document.getElementById("themeSelect").addEventListener("change", async (e) => {
-      const theme = e.target.value;
-      applyTheme(theme);
-      try { await api("/me/theme", { method: "POST", body: JSON.stringify({ theme }) }); showToast("Theme updated."); }
-      catch (err) { showToast("Could not save theme: " + String(err.message || err), true); }
-    });
+    // #89: /assets/theme.js applies and stores the choice for select[data-theme-select].
 
     /* ── Plan & usage ── */
     function reasonLabel(reason) {

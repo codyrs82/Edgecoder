@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "../routes/password-reset.js";
 import { BASE_CSS, TOKENS_CSS, brandMark } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags } from "../assets.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 
 /**
@@ -14,12 +15,13 @@ import { CSP_NONCE } from "../csp-nonce.js";
 export function registerResetPasswordPage(app: FastifyInstance): void {
   app.get("/portal/reset-password", async (_req, reply) => {
     const html = `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <meta name="referrer" content="no-referrer" />
       <title>EdgeCoder Portal | Reset password</title>
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}

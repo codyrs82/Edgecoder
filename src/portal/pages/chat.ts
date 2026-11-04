@@ -30,9 +30,9 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-msg .msg-body p:last-child { margin-bottom:0; }
       /* ── Code blocks in chat ── */
       .chat-msg pre {
-        position:relative; background:rgba(0,0,0,0.45); padding:14px 16px;
+        position:relative; background:var(--bg-input); padding:14px 16px;
         border-radius:var(--radius-sm); overflow-x:auto; margin:10px 0;
-        border:1px solid rgba(255,255,255,0.06);
+        border:1px solid color-mix(in srgb, var(--text) 6%, transparent);
       }
       .chat-msg code {
         font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
@@ -40,17 +40,17 @@ app.get("/portal/chat", async (_req, reply) => {
       }
       .chat-msg pre code { background:none; padding:0; }
       .chat-msg code:not(pre code) {
-        background:rgba(0,0,0,0.3); padding:2px 6px;
+        background:var(--bg-elevated); padding:2px 6px;
         border-radius:4px; font-size:12px;
       }
       .code-copy-btn {
         position:absolute; top:6px; right:6px;
-        background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.1);
+        background:color-mix(in srgb, var(--text) 8%, transparent); border:1px solid color-mix(in srgb, var(--text) 10%, transparent);
         color:var(--muted); border-radius:4px; padding:3px 8px;
         font-size:10px; cursor:pointer; transition:all var(--transition-fast);
         font-family:inherit;
       }
-      .code-copy-btn:hover { background:rgba(255,255,255,0.15); color:var(--text); }
+      .code-copy-btn:hover { background:color-mix(in srgb, var(--text) 15%, transparent); color:var(--text); }
       /* ── Typing indicator ── */
       .typing-indicator { display:flex; gap:4px; align-items:center; padding:8px 0; }
       .typing-indicator .dot {
@@ -81,10 +81,10 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-input-tools { display:flex; align-items:center; justify-content:space-between; gap:8px; }
       .chat-send-btn {
         padding:7px 16px; border-radius:var(--radius-sm); min-height:30px;
-        background:var(--brand); border:1px solid var(--brand); color:#111; font-size:13px; font-weight:600;
+        background:var(--brand); border:1px solid var(--brand); color:var(--on-accent); font-size:13px; font-weight:600;
         cursor:pointer; white-space:nowrap;
       }
-      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
+      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:var(--on-accent); }
       .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
       /* ── Compute picker (where the chat runs), like the model picker in Claude or Cursor ── */
       .model-picker-wrap { position:relative; min-width:0; }
@@ -410,7 +410,7 @@ app.get("/portal/chat", async (_req, reply) => {
               var parsed = JSON.parse(payload);
               if (parsed.warning) {
                 var warnBanner = document.createElement("div");
-                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);border-radius:6px;margin-bottom:8px;";
+                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:var(--yellow);background:color-mix(in srgb, var(--yellow) 8%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 20%, transparent);border-radius:6px;margin-bottom:8px;";
                 warnBanner.textContent = parsed.warning;
                 assistantBubble.insertBefore(warnBanner, assistantBody);
               }

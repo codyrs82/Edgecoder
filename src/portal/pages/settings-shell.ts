@@ -93,7 +93,7 @@ export const SETTINGS_CSS = `
     .set-control input[type="number"] { width: 110px; }
     .set-value { font-family: var(--font-mono); font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
     .set-big { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-    .set-avatar { width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--brand); color: #111; font-weight: 700; font-size: 17px; text-transform: uppercase; }
+    .set-avatar { width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--brand); color: var(--on-accent); font-weight: 700; font-size: 17px; text-transform: uppercase; }
     .set-row pre { margin: 6px 0 0; padding: 10px 12px; background: var(--bg-input); border: 1px solid var(--card-border); border-radius: var(--radius-sm); font-size: 12px; overflow-x: auto; }
     .set-row table { font-size: 12.5px; }
     .set-empty { color: var(--muted); font-size: 12.5px; padding: 4px 0; }

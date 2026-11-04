@@ -22,7 +22,7 @@
     "dev:worker:ios": "tsx src/swarm/ios-agent.ts",
     "bootstrap:coordinator": "tsx src/bootstrap/coordinator.ts",
     "verify:blacklist-audit": "tsx src/bootstrap/verify-blacklist-audit.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-portal-assets.mjs",
     "build:macos-installer": "bash scripts/macos/build-installer.sh",
     "install:macos-local": "bash scripts/macos/install-local.sh",
     "build:linux-deb": "bash scripts/linux/build-deb.sh",
