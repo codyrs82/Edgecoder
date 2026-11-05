@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { controlPlaneConfigSchema } from "./config.js";
 import Fastify from "fastify";
@@ -25,7 +26,7 @@ exposeRequestId(app);
 registerMetrics(app, "control-plane");
 await registerErrorTracking(app, "control-plane");
 await app.register(cors, {
-  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  origin: [...DESKTOP_APP_ORIGINS],
   credentials: true,
 });
 requireProdEnv("control-plane", ["ADMIN_API_TOKEN"]);

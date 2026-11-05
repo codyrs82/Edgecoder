@@ -67,6 +67,20 @@ describe("/auth/oauth/mobile/complete binds the token to the app's verifier", ()
     app.inject({ method: "POST", url: "/auth/oauth/mobile/complete", payload });
   const token = () => randomBytes(24).toString("hex");
 
+  it("answers CORS for the desktop app's origin on every OS, and no other origin", async () => {
+    const { app } = build();
+    // macOS/Linux WebKit, Windows WebView2 (default http, https with useHttpsScheme).
+    for (const origin of ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]) {
+      const pre = await app.inject({ method: "OPTIONS", url: "/auth/oauth/mobile/complete", headers: { origin } });
+      expect(pre.statusCode).toBe(204);
+      expect(pre.headers["access-control-allow-origin"]).toBe(origin);
+      const res = await app.inject({ method: "POST", url: "/auth/oauth/mobile/complete", headers: { origin }, payload: { token: token() } });
+      expect(res.headers["access-control-allow-origin"]).toBe(origin);
+    }
+    const evil = await app.inject({ method: "OPTIONS", url: "/auth/oauth/mobile/complete", headers: { origin: "https://evil.example" } });
+    expect(evil.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
   it("redeems a bound token with its verifier", async () => {
     const { app, tokens } = build();
     const v = verifier();

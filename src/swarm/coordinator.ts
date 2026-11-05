@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { coordinatorConfigSchema } from "./coordinator-config.js";
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
@@ -236,7 +237,7 @@ await registerErrorTracking(app, "coordinator");
 // are verified against what was sent, not a re-serialization.
 installRawBodyCapture(app);
 await app.register(cors, {
-  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  origin: [...DESKTOP_APP_ORIGINS],
   credentials: true,
 });
 await app.register(websocket);

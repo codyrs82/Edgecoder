@@ -7,6 +7,7 @@
  * and DNS-rebinding (foreign Host) requests.
  */
 
+import { DESKTOP_APP_ORIGINS } from "../../common/desktop-origins.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -82,7 +83,7 @@ export function safeTokenEqual(a: string, b: string): boolean {
 }
 
 /** Desktop (Tauri) webview origins; a web page cannot claim these. Extend with IDE_ALLOWED_ORIGINS. */
-export const DEFAULT_ALLOWED_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+export const DEFAULT_ALLOWED_ORIGINS = DESKTOP_APP_ORIGINS.filter((o) => o.startsWith("tauri://") || o.includes("tauri.localhost"));
 
 export function allowedOrigins(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const extra = (env.IDE_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);

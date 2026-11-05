@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
 import { writeSseHead } from "../common/sse.js";
 import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
@@ -27,7 +28,7 @@ exposeRequestId(app);
 registerMetrics(app, "inference", { path: "/metrics/prometheus" });
 await registerErrorTracking(app, "inference");
 await app.register(cors, {
-  origin: ["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"],
+  origin: [...DESKTOP_APP_ORIGINS],
   credentials: true,
   allowedHeaders: ["Content-Type", "x-inference-token", "Authorization"],
 });
