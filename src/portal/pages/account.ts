@@ -560,12 +560,12 @@ app.get("/portal/settings/install", async (req, reply) => {
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "windows");
 
-  const linuxCard = wizardCard("linux", icon("terminal", 15), "Linux (Debian / Ubuntu)", [
-    `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.deb">Download .deb package</a>
-     <a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_amd64.AppImage" style="background:var(--surface);color:var(--brand);border:1px solid var(--brand);">Download AppImage</a>
-     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
-    `<div class="code-block" id="linux-install"><code>sudo dpkg -i EdgeCoder_amd64.deb</code><button class="copy-btn" data-copy="linux-install">Copy</button></div>`,
-    `Sign in with your EdgeCoder account to connect to the mesh.`
+  // No Linux desktop build is published yet (desktop-release builds macOS and Windows), so the
+  // Linux card offers the one-line agent installer, which is signed and verified (docs/install.md).
+  const linuxCard = wizardCard("linux", icon("terminal", 15), "Linux (Debian / Ubuntu / Fedora)", [
+    `Run the installer. It verifies a signed release, installs Node.js, Ollama and Docker, and starts one agent per GPU:
+     <div class="code-block" id="linux-install"><code>curl -fsSLo install.sh ${portalBase}/install.sh && sudo bash install.sh --token ${tokenDisplay}</code><button class="copy-btn" data-copy="linux-install">Copy</button></div>`,
+    `Check it with <code>sudo edgecoder-install status</code>. The desktop app for Linux is not available yet.`
   ], detectedOS === "linux");
 
   const iosCard = wizardCard("ios", icon("phone", 15), "iOS (iPhone / iPad)", [
@@ -581,17 +581,12 @@ app.get("/portal/settings/install", async (req, reply) => {
     `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
   ], false);
 
-  const dockerCard = wizardCard("docker", icon("box", 15), "Docker", [
-    `<div class="code-block" id="docker-cmd"><code>docker run -d --restart unless-stopped \\
-  --name edgecoder \\
-  -e EDGE_RUNTIME_MODE=worker \\
-  -e AGENT_REGISTRATION_TOKEN=${tokenDisplay} \\
-  ghcr.io/edgecoder-io/edgecoder:latest</code><button class="copy-btn" data-copy="docker-cmd">Copy</button></div>`
-  ], false);
+  // No container image is published to a registry yet, so there is no Docker card. Hosts that want
+  // containers build deploy/docker/Dockerfile.agent themselves (docs/packages.md).
 
   /* ── pick primary vs secondary cards ─────────────────────────────── */
   const allCards: Record<string, string> = {
-    macos: macCard, windows: winCard, linux: linuxCard, ios: iosCard, vscode: vscodeCard, docker: dockerCard
+    macos: macCard, windows: winCard, linux: linuxCard, ios: iosCard, vscode: vscodeCard
   };
   const primaryKey = (detectedOS === "unknown") ? "macos" : detectedOS;
   const primaryCard = allCards[primaryKey];

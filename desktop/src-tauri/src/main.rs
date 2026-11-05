@@ -536,6 +536,16 @@ fn main() {
     let local_token = tokens.inference.clone();
 
     tauri::Builder::default()
+        // Must be registered first. On Windows and Linux an edgecoder:// link (the OAuth callback)
+        // starts a second process: the deep-link feature hands the URL to the running app's
+        // on_open_url and this callback focuses its window, so a second app never opens.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())

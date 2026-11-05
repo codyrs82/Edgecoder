@@ -37,7 +37,19 @@ describe("Settings > Install agent token (was /portal/download)", () => {
     const res = await app.inject({ url: `/portal/settings/install?token=${TOKEN}`, headers: { "user-agent": MAC_UA } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain(`--token ${TOKEN}`);
-    expect(res.body).toContain(`AGENT_REGISTRATION_TOKEN=${TOKEN}`);
+    await app.close();
+  });
+
+  it("links only to things that exist: no unpublished Docker image, no Linux desktop package", async () => {
+    const app = await pagesApp();
+    const linuxUa = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0";
+    const res = await app.inject({ url: `/portal/settings/install?token=${TOKEN}`, headers: { "user-agent": linuxUa } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("ghcr.io");
+    expect(res.body).not.toContain("EdgeCoder_amd64.deb");
+    expect(res.body).not.toContain("EdgeCoder_amd64.AppImage");
+    // The Linux card is the signed one-line installer, with the token filled in.
+    expect(res.body).toMatch(/id="linux-install"><code>curl -fsSLo install\.sh [^<]*\/install\.sh && sudo bash install\.sh --token /);
     await app.close();
   });
 
