@@ -192,7 +192,8 @@ describe("git setup routes", () => {
     const ok = await post("/v1/ide/git/remote", { url: "acme/widgets" });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().url).toBe("https://github.com/acme/widgets.git");
-    expect(git(root, "remote", "get-url", "origin").trim()).toBe("https://github.com/acme/widgets.git");
+    // config --get is the stored URL; `remote get-url` can be rewritten by url.insteadOf.
+    expect(git(root, "config", "--get", "remote.origin.url").trim()).toBe("https://github.com/acme/widgets.git");
   });
 
   it("validates clone requests before running git", async () => {
