@@ -1275,7 +1275,16 @@ export function preparePullRequestArgs(executor: ToolExecutor, tool: ToolName, a
 /** True when the project's origin is on github.com (open_pull_request is offered to chat then). */
 export function hasGitHubOrigin(root: string): boolean {
   try {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    // Prefer the configured URL over `remote get-url`: credential helpers / url.insteadOf
+    // (e.g. Cursor's managed GitHub auth) rewrite get-url to insert x-access-token@, which
+    // would otherwise fail the host check even when origin is github.com.
+    const url = execFileSync("git", hardenedGitArgs(["config", "--get", "remote.origin.url"]), {
+      cwd: root,
+      env: gitExecEnv(),
+      encoding: "utf-8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
     return /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/i.test(url);
   } catch {
     return false;
