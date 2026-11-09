@@ -97,14 +97,37 @@ for (const [net, bits] of [
   ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
   ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 3]
 ] as const) BLOCKED.addSubnet(net, bits, "ipv4");
+// IPv6: unspecified/loopback and the deprecated IPv4-compatible range (::/96), IPv4-translated
+// (::ffff:0:0:0/96), discard (100::/64), Teredo (2001::/32), documentation, 6to4 (2002::/16, which
+// embeds an IPv4 address), ULA, site-local (fec0::/10), link-local, multicast, and both NAT64
+// prefixes (64:ff9b::/96 and the local-use 64:ff9b:1::/48).
 for (const [net, bits] of [
-  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96]
+  ["::", 96], ["::ffff:0:0:0", 96], ["100::", 64], ["2001::", 32], ["2001:db8::", 32], ["2002::", 16],
+  ["fc00::", 7], ["fec0::", 10], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96], ["64:ff9b:1::", 48]
 ] as const) BLOCKED.addSubnet(net, bits, "ipv6");
+
+/** IPv4 address carried by an IPv4-mapped IPv6 address (dotted or hex form), else null. */
+function mappedIpv4(address: string): string | null {
+  const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (dotted) return dotted[1];
+  if (isIP(address) !== 6) return null;
+  let canonical: string;
+  try {
+    canonical = new URL(`http://[${address}]/`).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return null;
+  }
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(canonical);
+  if (!hex) return null;
+  const hi = parseInt(hex[1], 16);
+  const lo = parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
 
 /** True for addresses a model download must never reach. IPv4-mapped IPv6 is checked as IPv4. */
 export function isBlockedAddress(address: string): boolean {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
-  if (mapped) return BLOCKED.check(mapped[1], "ipv4");
+  const mapped = mappedIpv4(address);
+  if (mapped) return BLOCKED.check(mapped, "ipv4");
   const family = isIP(address);
   if (family === 4) return BLOCKED.check(address, "ipv4");
   if (family === 6) return BLOCKED.check(address, "ipv6");
