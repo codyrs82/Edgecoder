@@ -2,6 +2,7 @@
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
+  import ToolArgs from "../components/ToolArgs.svelte";
   import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
@@ -358,7 +359,10 @@
                       {#if c.pr.uncommitted}<div class="pr-ask-note">{c.pr.uncommitted} uncommitted file{c.pr.uncommitted === 1 ? "" : "s"} won't be in the pull request.</div>{/if}
                     </div>
                   {/if}
-                  {#if c.detail}<code class="ask-detail">{c.detail}</code>{/if}
+                  {#if c.call}
+                    <!-- Waiting for an answer: every argument in full (file content, commit files), not a one-line summary. -->
+                    <ToolArgs tool={c.call.tool} args={c.call.args} />
+                  {:else if c.detail}<code class="ask-detail">{c.detail}</code>{/if}
                   {#if c.answer}
                     <div class="ask-answer" class:denied={c.answer === "Denied"}>You: {c.answer}</div>
                   {:else}

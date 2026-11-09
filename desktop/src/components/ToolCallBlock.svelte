@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ToolArgs from "./ToolArgs.svelte";
+
   interface Props {
     id: string;
     tool: string;
@@ -48,6 +50,10 @@
     return "var(--yellow)";
   });
 
+  /** Waiting for the user's Allow / Deny: the whole call is shown, nothing shortened. */
+  let asking = $derived(status === "pending" && requiresApproval);
+
+  // One-line summary for the header of a call that is not waiting for approval.
   let mainArg = $derived.by(() => {
     const keys = ["path", "file_path", "command", "pattern", "query", "url"];
     for (const key of keys) {
@@ -95,14 +101,19 @@
         <span class="dot" style="background: {borderColor}"></span>
       {/if}
       <span class="tool-name">{tool}</span>
-      {#if mainArg}
+      {#if mainArg && !asking}
         <span class="main-arg">{mainArg}</span>
       {/if}
     </span>
     <span class="chevron" class:open={expanded} aria-hidden="true">&#9656;</span>
   </button>
 
-  {#if status === "pending" && requiresApproval}
+  {#if asking}
+    <!-- Everything the user is about to approve, always open: full command, full arguments,
+         the content an edit writes. Never shortened (the header summary is hidden meanwhile). -->
+    <div class="approval-details" data-testid="approval-details">
+      <ToolArgs {tool} {args} />
+    </div>
     <div class="approval-bar">
       <span class="approval-label">Approve this action?</span>
       <div class="approval-actions">
@@ -118,6 +129,9 @@
 
   {#if expanded}
     <div class="body">
+      {#if !asking}
+        <div class="body-args"><ToolArgs {tool} {args} /></div>
+      {/if}
       {#if error}
         <pre class="output error-output">{error}</pre>
       {:else if truncatedResult}
@@ -219,6 +233,14 @@
   }
   .chevron.open {
     transform: rotate(90deg);
+  }
+
+  .approval-details {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .body-args {
+    margin-bottom: 8px;
   }
 
   .approval-bar {
