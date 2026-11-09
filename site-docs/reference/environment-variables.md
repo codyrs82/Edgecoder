@@ -312,6 +312,7 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `STATS_ANCHOR_INTERVAL_MS` | integer ≥ 1 | `600000` |
 | `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
+| `PREAUTH_FAILURE_MAX_PER_IP` | integer ≥ 1 | `120` |
 | `AUTO_BLACKLIST_TTL_MS` | integer ≥ 0 | `3600000` |
 | `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |
 | `SECURITY_MAX_SKEW_MS` | integer ≥ 1 | `120000` |
