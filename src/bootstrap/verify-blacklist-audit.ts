@@ -1,14 +1,14 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { existsSync, readFileSync } from "node:fs";
 import { request } from "undici";
-import { BlacklistRecord } from "../common/types.js";
-import { verifyPayload } from "../mesh/peer.js";
-import { buildBlacklistEventHash } from "../security/blacklist.js";
+import { parseTrustEntries } from "../trust/pinned-keys.js";
+import { EDGECODER_SEED_KEYS } from "../trust/seed-keys.js";
+import { verifyBlacklistAuditChain, type BlacklistAudit } from "./blacklist-audit-chain.js";
 
 type IdentityResponse = { peerId: string; publicKeyPem: string };
 type PeerResponse = { peers: Array<{ peerId: string; publicKeyPem: string }> };
-type AuditResponse = { chainHead: string; events: BlacklistRecord[] };
 
 function fail(message: string): never {
   throw new Error(message);
@@ -22,6 +22,18 @@ async function getJson<T>(url: string, headers: Record<string, string> = {}): Pr
   return (await res.body.json()) as T;
 }
 
+/**
+ * Keys pinned independently of the coordinator being audited: TRUSTED_COORDINATOR_KEYS, the trust
+ * file (EDGECODER_TRUST_FILE) and the edgecoder.io seed keys.
+ */
+function pinnedFingerprints(env: NodeJS.ProcessEnv): Map<string, string> {
+  const pins = parseTrustEntries(EDGECODER_SEED_KEYS.join(","));
+  const file = env.EDGECODER_TRUST_FILE;
+  if (file && existsSync(file)) for (const [peerId, fp] of parseTrustEntries(readFileSync(file, "utf8"))) pins.set(peerId, fp);
+  for (const [peerId, fp] of parseTrustEntries(env.TRUSTED_COORDINATOR_KEYS)) pins.set(peerId, fp);
+  return pins;
+}
+
 async function main(): Promise<void> {
   const controlPlaneUrl = process.env.CONTROL_PLANE_URL ?? "http://127.0.0.1:4303";
   const coordinatorUrl = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
@@ -31,60 +43,24 @@ async function main(): Promise<void> {
   const meshHeaders: Record<string, string> = meshToken ? { "x-mesh-token": meshToken } : {};
 
   const [audit, identity, peers] = await Promise.all([
-    getJson<AuditResponse>(`${controlPlaneUrl}/security/blacklist/audit`, adminHeaders),
+    getJson<BlacklistAudit>(`${controlPlaneUrl}/security/blacklist/audit`, adminHeaders),
     getJson<IdentityResponse>(`${coordinatorUrl}/identity`, meshHeaders),
     getJson<PeerResponse>(`${coordinatorUrl}/mesh/peers`, meshHeaders).catch(() => ({ peers: [] }))
   ]);
 
-  const coordinatorKeyById = new Map<string, string>();
-  coordinatorKeyById.set(identity.peerId, identity.publicKeyPem);
-  for (const peer of peers.peers) {
-    coordinatorKeyById.set(peer.peerId, peer.publicKeyPem);
-  }
+  // Keys as the audited coordinator presents them; each is used only if it matches a pin.
+  const presented = new Map<string, string>();
+  presented.set(identity.peerId, identity.publicKeyPem);
+  for (const peer of peers.peers) if (!presented.has(peer.peerId)) presented.set(peer.peerId, peer.publicKeyPem);
 
-  let previousHash = "BLACKLIST_GENESIS";
-  for (const event of audit.events) {
-    if (event.prevEventHash !== previousHash) {
-      fail(`hash_chain_break event=${event.eventId}`);
-    }
-
-    const expectedHash = buildBlacklistEventHash({
-      eventId: event.eventId,
-      agentId: event.agentId,
-      reasonCode: event.reasonCode,
-      reason: event.reason,
-      evidenceHashSha256: event.evidenceHashSha256,
-      reporterId: event.reporterId,
-      sourceCoordinatorId: event.sourceCoordinatorId,
-      timestampMs: event.timestampMs,
-      expiresAtMs: event.expiresAtMs,
-      prevEventHash: event.prevEventHash,
-      evidenceSignatureVerified: event.evidenceSignatureVerified
-    });
-    if (expectedHash !== event.eventHash) {
-      fail(`event_hash_mismatch event=${event.eventId}`);
-    }
-
-    const coordinatorPublicKey = coordinatorKeyById.get(event.sourceCoordinatorId);
-    if (!coordinatorPublicKey) {
-      fail(`missing_coordinator_key source=${event.sourceCoordinatorId}`);
-    }
-    if (!verifyPayload(event.eventHash, event.coordinatorSignature, coordinatorPublicKey)) {
-      fail(`coordinator_signature_invalid event=${event.eventId}`);
-    }
-    previousHash = event.eventHash;
-  }
-
-  if (audit.chainHead !== previousHash) {
-    fail(`chain_head_mismatch expected=${previousHash} actual=${audit.chainHead}`);
-  }
+  const result = verifyBlacklistAuditChain(audit, presented, pinnedFingerprints(process.env));
 
   console.log(
     JSON.stringify(
       {
         ok: true,
-        eventsVerified: audit.events.length,
-        chainHead: audit.chainHead
+        eventsVerified: result.eventsVerified,
+        chainHead: result.chainHead
       },
       null,
       2

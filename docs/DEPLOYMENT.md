@@ -483,7 +483,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADMIN_API_TOKEN` | | Admin API token for control plane |
+| `ADMIN_API_TOKEN` | | Admin API token for control plane (at least 32 characters when `NODE_ENV=production`; the control plane refuses to start otherwise) |
 | `ALLOWED_ADMIN_IPS` | | Comma-separated IP allowlist for admin |
 | `ALLOWED_UI_IPS` | | Comma-separated IP allowlist for UI |
 | `INFERENCE_AUTH_TOKEN` | | Token for inference service access |

@@ -786,6 +786,13 @@ let previousMetrics = null;
 let firstFetchTime = null;
 let recentRequests = [];
 
+// Model names and details come from Ollama; escape them before they reach innerHTML.
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
 function log(msg) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent = ts + ' | ' + msg + '\\n' + logEl.textContent;
@@ -1045,10 +1052,10 @@ async function fetchSwapHistory() {
       const timeStr = d.toLocaleTimeString();
       html += '<li>' +
         '<span class="swap-time">' + timeStr + '</span>' +
-        '<span class="swap-model">' + entry.from + '</span>' +
+        '<span class="swap-model">' + esc(entry.from) + '</span>' +
         '<span class="swap-arrow">&rarr;</span>' +
-        '<span class="swap-model" style="color:var(--accent);font-weight:500;">' + entry.to + '</span>' +
-        '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + entry.paramSize + 'B</span>' +
+        '<span class="swap-model" style="color:var(--accent);font-weight:500;">' + esc(entry.to) + '</span>' +
+        '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + esc(entry.paramSize) + 'B</span>' +
         '</li>';
     });
     html += '</ul>';
@@ -1077,13 +1084,17 @@ async function fetchModels() {
       .map(m => {
         const isActive = m.active;
         return '<li>' +
-          '<div><span class="model-name">' + m.modelId + '</span>' +
-          '<div class="model-meta">' + m.paramSize + 'B | ' + m.quantization + '</div></div>' +
+          '<div><span class="model-name">' + esc(m.modelId) + '</span>' +
+          '<div class="model-meta">' + esc(m.paramSize) + 'B | ' + esc(m.quantization) + '</div></div>' +
           (isActive
             ? '<span class="active-badge">Active</span>'
-            : '<button class="swap-btn" onclick="swapModel(\\'' + m.modelId + '\\')">Activate</button>') +
+            : '<button class="swap-btn" data-model="' + esc(m.modelId) + '">Activate</button>') +
           '</li>';
       }).join('');
+    list.onclick = function(ev) {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.swap-btn') : null;
+      if (btn) swapModel(btn.getAttribute('data-model'));
+    };
   } catch (e) {
     log('Failed to fetch models: ' + e.message);
   }

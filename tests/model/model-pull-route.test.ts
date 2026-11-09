@@ -77,6 +77,21 @@ describe("POST /model/pull (#37)", () => {
     await app.close();
   });
 
+  it("refuses model names that point at another registry host, on pull and on swap", async () => {
+    const { app, state } = await buildApp();
+    for (const model of ["evil.example.com/x/y:latest", "registry.example:5000/m", "evil.example/m:1", "a/b/c"]) {
+      for (const url of ["/model/pull", "/model/swap"]) {
+        const res = await app.inject({ method: "POST", url, payload: { model } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "model_name_rejected" });
+      }
+    }
+    expect(mockPull).not.toHaveBeenCalled();
+    expect(vi.mocked(swapModule.swapModel)).not.toHaveBeenCalled();
+    expect(state.activeModel).toBe("qwen2.5-coder:1.5b");
+    await app.close();
+  });
+
   it("maps an Ollama failure to 502", async () => {
     const { app } = await buildApp();
     mockPull.mockResolvedValueOnce({ model: "x:1", status: "error", error: "pull_failed" });

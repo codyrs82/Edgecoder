@@ -4,6 +4,9 @@
 import { z } from "zod";
 import { envBool, envUrl } from "../common/config.js";
 
+/** Minimum ADMIN_API_TOKEN length when NODE_ENV=production (same floor as INFERENCE_AUTH_TOKEN). */
+export const ADMIN_PROD_MIN_TOKEN_LENGTH = 32;
+
 /**
  * #15: control-plane (port 4303) configuration, validated once at startup.
  * ADMIN_API_TOKEN is required in every environment (unchanged). ALLOWED_ADMIN_IPS and
@@ -11,6 +14,7 @@ import { envBool, envUrl } from "../common/config.js";
  * site-docs/reference/environment-variables.md.
  */
 export const controlPlaneConfigSchema = z.object({
+  NODE_ENV: z.string().default("development"),
   COORDINATOR_URL: envUrl("http://127.0.0.1:4301"),
   ADMIN_API_TOKEN: z.string({ message: "is required" }),
   COORDINATOR_MESH_TOKEN: z.string().optional(),
@@ -28,6 +32,14 @@ export const controlPlaneConfigSchema = z.object({
   OLLAMA_AUTO_INSTALL: envBool(false),
   OLLAMA_MODEL: z.string().default("qwen3.5:9b"),
   OLLAMA_HOST: envUrl()
+}).superRefine((c, ctx) => {
+  if (c.NODE_ENV === "production" && c.ADMIN_API_TOKEN.length < ADMIN_PROD_MIN_TOKEN_LENGTH) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ADMIN_API_TOKEN"],
+      message: `must be at least ${ADMIN_PROD_MIN_TOKEN_LENGTH} characters in production`
+    });
+  }
 });
 
 export type ControlPlaneConfig = z.infer<typeof controlPlaneConfigSchema>;

@@ -1,11 +1,11 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fingerprintMatches, publicKeyFingerprint } from "../security/key-fingerprint.js";
-import { IDENTITY_CHALLENGE_PATH, newChallengeNonce, normalizeChallengeUrl, verifyIdentityChallenge } from "./identity-challenge.js";
+import { IDENTITY_CHALLENGE_PATH, canonicalCoordinatorUrl, newChallengeNonce, normalizeChallengeUrl, verifyIdentityChallenge } from "./identity-challenge.js";
 
 /*
  * Architecture step 4: pinned-key trust. An agent only works for coordinators whose
@@ -17,7 +17,10 @@ import { IDENTITY_CHALLENGE_PATH, newChallengeNonce, normalizeChallengeUrl, veri
  *                              first-seen keys are appended here
  *   EDGECODER_TRUST_MODE       tofu (default) | strict | open
  *
- *   tofu    first key seen for a peerId is pinned; a later different key is refused
+ *   tofu    first key seen for a peerId is pinned; a later different key is refused. The first
+ *           peerId trusted at a URL is bound to it (<trust file>.bindings.json): a different
+ *           peerId at that URL is refused unless its key is listed (TRUSTED_COORDINATOR_KEYS or
+ *           the signed registry)
  *   strict  only listed keys are trusted; nothing is pinned automatically
  *   open    every key is trusted (mismatches are reported but not enforced)
  */
@@ -30,6 +33,7 @@ export type TrustReason =
   | "pinned_mismatch"
   | "tofu_pinned"
   | "strict_unlisted"
+  | "url_peer_mismatch"
   | "open"
   | "open_mismatch";
 
@@ -43,6 +47,8 @@ export interface TrustDecision {
   pinnedFingerprint?: string;
   /** tofu only: whether the new pin reached the trust file. */
   persisted?: boolean;
+  /** url_peer_mismatch: the peerId this URL is bound to. */
+  boundPeerId?: string;
 }
 
 export const DEFAULT_TRUST_FILE = join(homedir(), ".edgecoder", "trusted-coordinators");
@@ -84,6 +90,11 @@ export interface PinnedKeyStoreOptions {
   entries?: Map<string, string> | string;
   /** Trust file read at construction and, in tofu mode, appended to. */
   pinFile?: string | null;
+  /**
+   * URL -> peerId bindings and the peers that proved their key with the identity challenge.
+   * Default `<pinFile>.bindings.json`; null keeps them in memory only.
+   */
+  bindingFile?: string | null;
   now?: () => number;
 }
 
@@ -94,6 +105,9 @@ export class PinnedKeyStore {
   private readonly pinned = new Map<string, string>();
   private registryEntries = new Map<string, string>();
   private readonly now: () => number;
+  readonly bindingFile: string | null;
+  private readonly urlPeers = new Map<string, string>();
+  private readonly provenPeers = new Set<string>();
 
   constructor(opts: PinnedKeyStoreOptions = {}) {
     this.mode = opts.mode ?? "tofu";
@@ -102,6 +116,71 @@ export class PinnedKeyStore {
     this.now = opts.now ?? Date.now;
     if (this.pinFile && existsSync(this.pinFile)) {
       for (const [peerId, fp] of parseTrustEntries(readFileSync(this.pinFile, "utf8"))) this.pinned.set(peerId, fp);
+    }
+    this.bindingFile = opts.bindingFile === undefined ? (this.pinFile ? `${this.pinFile}.bindings.json` : null) : opts.bindingFile;
+    if (this.bindingFile && existsSync(this.bindingFile)) {
+      try {
+        const raw = JSON.parse(readFileSync(this.bindingFile, "utf8")) as { urls?: unknown; proven?: unknown };
+        if (raw.urls && typeof raw.urls === "object") {
+          for (const [url, peerId] of Object.entries(raw.urls as Record<string, unknown>)) {
+            if (typeof peerId === "string") this.urlPeers.set(url, peerId);
+          }
+        }
+        if (Array.isArray(raw.proven)) for (const p of raw.proven) if (typeof p === "string") this.provenPeers.add(p);
+      } catch {
+        // A corrupt bindings file is ignored (bindings are rebuilt on use), never fatal.
+      }
+    }
+  }
+
+  /** The peerId first trusted at this coordinator URL, if any. */
+  peerForUrl(url: string): string | undefined {
+    const key = canonicalCoordinatorUrl(url);
+    return key ? this.urlPeers.get(key) : undefined;
+  }
+
+  /** Whether this peer has proven its key with the identity challenge before. */
+  hasProvenKey(peerId: string): boolean {
+    return this.provenPeers.has(peerId);
+  }
+
+  /**
+   * tofu: refuse a peerId other than the one bound to this URL, unless its key is explicitly listed
+   * (static entry or signed registry), which rebinds the URL. Returns null when nothing is refused.
+   */
+  checkUrlBinding(url: string, peerId: string, publicKeyPem: string): TrustDecision | null {
+    if (this.mode !== "tofu") return null;
+    const bound = this.peerForUrl(url);
+    if (bound === undefined || bound === peerId) return null;
+    const src = this.knownSource(peerId);
+    if ((src === "static" || src === "registry") && this.wouldTrust(peerId, publicKeyPem)) return null;
+    return { trusted: false, reason: "url_peer_mismatch", mode: this.mode, peerId, fingerprint: fingerprint(publicKeyPem), boundPeerId: bound };
+  }
+
+  /** Record a trusted peer at a URL (first binding wins until rebound by a listed key) and, if proven, the proof. */
+  recordTrusted(url: string, peerId: string, proven: boolean): void {
+    const key = canonicalCoordinatorUrl(url);
+    let changed = false;
+    if (key && this.urlPeers.get(key) !== peerId) {
+      this.urlPeers.set(key, peerId);
+      changed = true;
+    }
+    if (proven && !this.provenPeers.has(peerId)) {
+      this.provenPeers.add(peerId);
+      changed = true;
+    }
+    if (changed) this.persistBindings();
+  }
+
+  private persistBindings(): void {
+    if (!this.bindingFile) return;
+    try {
+      mkdirSync(dirname(this.bindingFile), { recursive: true });
+      const tmp = `${this.bindingFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ urls: Object.fromEntries(this.urlPeers), proven: [...this.provenPeers] }, null, 2), { mode: 0o600 });
+      renameSync(tmp, this.bindingFile);
+    } catch {
+      // In-memory bindings still apply for this process.
     }
   }
 
@@ -256,6 +335,8 @@ export interface TrustCheckOptions {
   timeoutMs?: number;
   /** Default: required in strict mode, optional otherwise. */
   challenge?: ChallengePolicy;
+  /** Key fingerprint the coordinator must present (e.g. a DNS seed's fp=); anything else is refused. */
+  expectedFingerprint?: string;
 }
 
 /** Status codes an older coordinator returns for the challenge route it does not have. */
@@ -303,6 +384,11 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
     if (res.ok) {
       const answer = (await res.json()) as { peerId?: unknown; publicKeyPem?: unknown };
       if (!validIdentity(answer)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+      if (opts.expectedFingerprint && !fingerprintMatches(opts.expectedFingerprint, answer.publicKeyPem)) {
+        return { trusted: false, coordinatorUrl, peerId: answer.peerId, error: "fingerprint_mismatch" };
+      }
+      const urlRefusal = store.checkUrlBinding(base, answer.peerId, answer.publicKeyPem);
+      if (urlRefusal) return { trusted: false, coordinatorUrl, peerId: answer.peerId, decision: urlRefusal, proof: "challenge" };
       // Refusals (mismatch, unlisted) need no proof and must not pin.
       if (!store.wouldTrust(answer.peerId, answer.publicKeyPem)) {
         const decision = store.isTrusted(answer.peerId, answer.publicKeyPem);
@@ -311,6 +397,7 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
       const verified = verifyIdentityChallenge(answer, sent, answer);
       if (!verified.ok) return { trusted: false, coordinatorUrl, peerId: answer.peerId, error: verified.error };
       const decision = store.isTrusted(answer.peerId, answer.publicKeyPem);
+      if (decision.trusted) store.recordTrusted(base, answer.peerId, true);
       return {
         trusted: decision.trusted,
         coordinatorUrl,
@@ -328,7 +415,19 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
     if (!idRes.ok) return { trusted: false, coordinatorUrl, error: `identity_http_${idRes.status}` };
     const body = (await idRes.json()) as { peerId?: unknown; publicKeyPem?: unknown };
     if (!validIdentity(body)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+    if (opts.expectedFingerprint && !fingerprintMatches(opts.expectedFingerprint, body.publicKeyPem)) {
+      return { trusted: false, coordinatorUrl, peerId: body.peerId, error: "fingerprint_mismatch" };
+    }
+    const urlRefusal = store.checkUrlBinding(base, body.peerId, body.publicKeyPem);
+    if (urlRefusal) return { trusted: false, coordinatorUrl, peerId: body.peerId, decision: urlRefusal, proof: "identity_only" };
+    // A coordinator that has answered the challenge before does not lose it: refuse the downgrade
+    // (an impostor replaying the public /identity of a known coordinator).
+    const boundPeer = store.peerForUrl(base);
+    if (store.hasProvenKey(body.peerId) || (boundPeer !== undefined && store.hasProvenKey(boundPeer))) {
+      return { trusted: false, coordinatorUrl, peerId: body.peerId, error: "identity_challenge_downgrade" };
+    }
     const decision = store.isTrusted(body.peerId, body.publicKeyPem);
+    if (decision.trusted) store.recordTrusted(base, body.peerId, false);
     return {
       trusted: decision.trusted,
       coordinatorUrl,
@@ -362,15 +461,18 @@ export class CoordinatorTrustGate {
     this.now = opts.now ?? Date.now;
   }
 
-  async check(coordinatorUrl: string): Promise<CoordinatorTrustCheck> {
+  /** `expectedFingerprint`: the key this URL was discovered with (DNS fp=); a different key is refused. */
+  async check(coordinatorUrl: string, expect: { expectedFingerprint?: string } = {}): Promise<CoordinatorTrustCheck> {
     const key = normalizeChallengeUrl(coordinatorUrl);
     const hit = this.verified.get(key);
-    if (hit !== undefined && this.now() - hit.at < this.reverifyMs) {
+    const hitMatches =
+      !expect.expectedFingerprint || (hit?.result.publicKeyPem !== undefined && fingerprintMatches(expect.expectedFingerprint, hit.result.publicKeyPem));
+    if (hit !== undefined && hitMatches && this.now() - hit.at < this.reverifyMs) {
       const { warning: _warned, ...cached } = hit.result;
       return { ...cached, coordinatorUrl: key };
     }
     this.verified.delete(key);
-    const result = await checkCoordinatorTrust(key, this.opts);
+    const result = await checkCoordinatorTrust(key, { ...this.opts, ...(expect.expectedFingerprint ? { expectedFingerprint: expect.expectedFingerprint } : {}) });
     if (result.trusted) this.verified.set(key, { at: this.now(), result });
     return result;
   }
@@ -385,6 +487,10 @@ export function describeTrustFailure(check: CoordinatorTrustCheck): string {
   if (check.error === "identity_challenge_unsupported") {
     return "coordinator does not prove possession of its key (no /identity/challenge); refused because the challenge is required (strict mode or EDGECODER_IDENTITY_CHALLENGE=required)";
   }
+  if (check.error === "fingerprint_mismatch") return "coordinator key does not match the fingerprint it was discovered with (fp=): possible impersonation";
+  if (check.error === "identity_challenge_downgrade") {
+    return "coordinator answered the identity challenge before but now offers only the public /identity: possible impersonation";
+  }
   if (check.error?.startsWith("challenge_")) return `coordinator failed the identity challenge (${check.error}): possible impersonation`;
   if (check.error) return `could not verify coordinator identity (${check.error})`;
   const d = check.decision;
@@ -392,6 +498,8 @@ export function describeTrustFailure(check: CoordinatorTrustCheck): string {
   switch (d.reason) {
     case "pinned_mismatch":
       return `key mismatch for ${d.peerId}: pinned ${d.pinnedFingerprint}, presented ${d.fingerprint} (mode=${d.mode})`;
+    case "url_peer_mismatch":
+      return `coordinator URL is bound to ${d.boundPeerId} but presented ${d.peerId} (${d.fingerprint}); list the new key in TRUSTED_COORDINATOR_KEYS if this is intended (mode=${d.mode})`;
     case "strict_unlisted":
       return `coordinator ${d.peerId} (${d.fingerprint}) is not in TRUSTED_COORDINATOR_KEYS (mode=strict)`;
     default:

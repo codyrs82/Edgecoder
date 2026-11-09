@@ -100,6 +100,20 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/**
+ * DNS answers are unauthenticated, so a DNS seed must be https unless it names a loopback host
+ * (local testing); plain http to a remote host would hand the first request to anyone on path.
+ */
+export function acceptableDnsSeedUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "https:") return true;
+    return u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve DNS seeds for every domain. TXT first; SRV only when a domain yields no TXT seeds. */
 export async function resolveDnsSeeds(opts: ResolveDnsOptions = {}): Promise<CoordinatorCandidate[]> {
   const resolver: DnsResolver = opts.resolver ?? dns;
@@ -127,8 +141,8 @@ async function resolveOneDomain(domain: string, resolver: DnsResolver, timeoutMs
     const records = await withTimeout(resolver.resolveTxt(host), timeoutMs, `TXT ${host}`);
     for (const chunks of records) {
       const seed = parseDiscoveryTxt(chunks.join(""));
-      if (!seed) continue;
-      fromTxt.push({ url: seed.url, peerId: seed.peerId, region: seed.region, source: "dns" });
+      if (!seed || !acceptableDnsSeedUrl(seed.url)) continue;
+      fromTxt.push({ url: seed.url, peerId: seed.peerId, region: seed.region, publicKeyFingerprint: seed.publicKeyFingerprint, source: "dns" });
     }
   } catch {
     // NXDOMAIN / ENODATA / timeout: fall through to SRV.
@@ -139,7 +153,7 @@ async function resolveOneDomain(domain: string, resolver: DnsResolver, timeoutMs
     return [...srv]
       .sort((a, b) => a.priority - b.priority || b.weight - a.weight)
       .map((r) => srvToUrl(r))
-      .filter((u): u is string => Boolean(u))
+      .filter((u): u is string => Boolean(u) && acceptableDnsSeedUrl(u as string))
       .map((url) => ({ url, source: "dns" as const }));
   } catch {
     return [];

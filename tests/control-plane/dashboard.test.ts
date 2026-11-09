@@ -266,3 +266,36 @@ describe("GET /admin/api/dashboard-data -- dashboard data", () => {
     expect(body.uptimeSeconds).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("admin dashboard token handling", () => {
+  function loadGetAdminToken(html: string, href: string) {
+    const src = /var ADMIN_TOKEN_STORAGE_KEY[\s\S]*?\nfunction getAdminToken\(\) \{[\s\S]*?\n\}/.exec(html)?.[0];
+    expect(src).toBeTruthy();
+    const url = new URL(href);
+    const store = new Map<string, string>();
+    const replaced: string[] = [];
+    const fakeWindow = {
+      location: { search: url.search, hash: url.hash, pathname: url.pathname },
+      history: { replaceState: (_s: unknown, _t: string, u: string) => replaced.push(u) },
+      sessionStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) }
+    };
+    const getAdminToken = new Function("window", `${src}; return getAdminToken;`)(fakeWindow) as () => string;
+    return { getAdminToken, store, replaced, fakeWindow };
+  }
+
+  test("moves a token from the URL into sessionStorage and strips it from the address bar", async () => {
+    const res = await app.inject({ method: "GET", url: "/admin/dashboard", headers: adminHeaders() });
+    const fromFragment = loadGetAdminToken(res.body, "https://cp.example/admin/dashboard#token=abc123");
+    expect(fromFragment.getAdminToken()).toBe("abc123");
+    expect(fromFragment.replaced).toEqual(["/admin/dashboard"]);
+    expect([...fromFragment.store.values()]).toEqual(["abc123"]);
+
+    const fromQuery = loadGetAdminToken(res.body, "https://cp.example/admin/dashboard?token=old&tab=x");
+    expect(fromQuery.getAdminToken()).toBe("old");
+    expect(fromQuery.replaced).toEqual(["/admin/dashboard?tab=x"]);
+
+    // Later calls (after the URL was cleaned) read it from sessionStorage.
+    fromQuery.fakeWindow.location.search = "?tab=x";
+    expect(fromQuery.getAdminToken()).toBe("old");
+  });
+});

@@ -14,6 +14,12 @@ const ALLOWED_MODEL_SOURCES = [
   "https://huggingface.co/"
 ];
 
+/**
+ * Format and source check only: there is no key infrastructure for LocalModelManifest, so
+ * `signature` is NOT cryptographically verified here. Nothing downloads from these manifests (they
+ * are stored and shown to admins); anything that does must verify a signed manifest with
+ * src/security/manifest-verifier.ts (Ed25519 against pinned keys) instead.
+ */
 export function verifyManifest(manifest: LocalModelManifest): ManifestVerification {
   const sourceAllowed = ALLOWED_MODEL_SOURCES.some((prefix) =>
     manifest.sourceUrl.startsWith(prefix)

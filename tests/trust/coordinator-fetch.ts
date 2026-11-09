@@ -22,6 +22,8 @@ export function coordinatorFetch(
     status?: number;
     /** Advertise signed responses (responseSigning: 1) like current coordinators. */
     responseSigning?: boolean;
+    /** The coordinator's COORDINATOR_PUBLIC_URL (default: the URL it was addressed at). */
+    publicUrl?: string;
   } = {}
 ): IdentityFetch & { calls: string[] } {
   const calls: string[] = [];
@@ -31,9 +33,10 @@ export function coordinatorFetch(
     if (url.endsWith("/identity/challenge")) {
       if (opts.challenge === false) return { ok: false, status: 404, json: async () => ({ error: "not_found" }) };
       const signer = opts.signWith ?? keys;
+      const publicUrl = opts.publicUrl ?? url.slice(0, -"/identity/challenge".length);
       const answer =
         opts.challengeBody ??
-        { ...answerIdentityChallenge(JSON.parse(init?.body ?? "{}"), { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, privateKeyPem: signer.privateKeyPem, publicUrl: "https://coord.example" }), publicKeyPem: keys.publicKeyPem, ...(opts.responseSigning ? { responseSigning: 1 } : {}) };
+        { ...answerIdentityChallenge(JSON.parse(init?.body ?? "{}"), { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, privateKeyPem: signer.privateKeyPem, publicUrl }), publicKeyPem: keys.publicKeyPem, ...(opts.responseSigning ? { responseSigning: 1 } : {}) };
       return { ok: status < 300, status, json: async () => answer };
     }
     return { ok: status < 300, status, json: async () => opts.identityBody ?? { peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, ...(opts.responseSigning ? { responseSigning: 1 } : {}) } };

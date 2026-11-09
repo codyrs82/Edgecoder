@@ -3,6 +3,7 @@
 
 import { request } from "undici";
 import { EscalationRequest, EscalationResult } from "./types.js";
+import { upstreamPathSegment } from "../control-plane/path-segment.js";
 
 const REDACT_PATTERNS = [
   /AKIA[0-9A-Z]{16}/g,
@@ -50,7 +51,9 @@ export async function pollEscalationResult(
   taskId: string,
   meshToken: string
 ): Promise<EscalationResult> {
-  const res = await request(`${coordinatorUrl}/escalate/${taskId}`, {
+  const taskSeg = upstreamPathSegment(taskId);
+  if (!taskSeg) throw new Error("invalid_task_id");
+  const res = await request(`${coordinatorUrl}/escalate/${taskSeg}`, {
     method: "GET",
     headers: meshToken ? { "x-mesh-token": meshToken } : {}
   });

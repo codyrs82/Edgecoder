@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { createVerify } from "node:crypto";
+import { verify as cryptoVerify } from "node:crypto";
 import { type ReleaseManifest, type ReleaseManifestSigned } from "./release-integrity.js";
 import { getActiveReleaseKeys } from "./release-keys.js";
 
@@ -25,6 +25,11 @@ export interface VerificationResult {
 
 /**
  * Verify an agent's binary integrity claim.
+ *
+ * Advisory only: the release signature and distTreeHash are public (published with the release),
+ * so any client can present a valid pair without running that build. The format carries no
+ * per-session challenge, so a presented claim cannot be bound to the agent (no replay protection);
+ * "verified" means "claims a release signed by a trusted key", not attestation.
  */
 export function verifyBinaryIntegrity(
   payload: BinaryIntegrityPayload,
@@ -42,12 +47,16 @@ export function verifyBinaryIntegrity(
     return { status: "unverified", details: "manifest_not_cached" };
   }
 
-  const manifestJson = JSON.stringify({
+  const fields = {
     version: manifest.version,
     artifacts: manifest.artifacts,
     distTreeHash: manifest.distTreeHash,
     timestamp: manifest.timestamp,
-  });
+  };
+  // The signer (scripts/sign-release.sh) signs jq's output, which is indented by 2 spaces; the
+  // compact form is accepted too.
+  const signedForms = [JSON.stringify(fields), JSON.stringify(fields, null, 2)].map((s) => Buffer.from(s));
+  const signature = Buffer.from(payload.releaseSignature, "base64");
 
   const activeKeys = getActiveReleaseKeys(nowMs);
   if (activeKeys.length === 0) {
@@ -55,11 +64,11 @@ export function verifyBinaryIntegrity(
   }
 
   let signatureValid = false;
+  // Ed25519 has no separate digest: crypto.verify with a null algorithm (createVerify("Ed25519")
+  // throws "Invalid digest", so no signature could ever verify).
   for (const key of activeKeys) {
     try {
-      const verifier = createVerify("Ed25519");
-      verifier.update(manifestJson);
-      if (verifier.verify(key.publicKeyPem, payload.releaseSignature, "base64")) {
+      if (signedForms.some((data) => cryptoVerify(null, data, key.publicKeyPem, signature))) {
         signatureValid = true;
         break;
       }

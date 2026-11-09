@@ -8,6 +8,7 @@
 import { resolveDnsSeeds, discoveryDomainsFromEnv, type DnsResolver } from "./dns.js";
 import { fetchNostrAnnouncements, nostrRelaysFromEnv, type WsConnect } from "./nostr.js";
 import { applyStickiness, createCoordinatorSelector, rankCoordinators, type CoordinatorSelector, type FetchLike, type RankedCoordinator, type SelectorOptions } from "./selector.js";
+import { fingerprintMatches } from "../security/key-fingerprint.js";
 import { candidateFromAnnouncement, mergeCandidates, normalizeCoordinatorUrl, parseAnnouncement, pinMatchesKey, verifyAnnouncement, type CoordinatorCandidate } from "./types.js";
 
 export * from "./types.js";
@@ -35,7 +36,11 @@ export interface DiscoverOptions {
   allowUnpinnedNostr?: boolean;
   /** The coordinator currently in use; always included as a candidate. */
   currentUrl?: string;
-  /** Ask each discovered coordinator for /discovery/peers (one hop). Default true. */
+  /**
+   * Ask each discovered coordinator for /discovery/peers (one hop). Default true. Those lists
+   * relay self-signed announcements, so they pass the same gate as Nostr: kept only with
+   * allowUnpinnedNostr or when acceptNostrCandidate accepts them (a pinned or trusted key).
+   */
   expandPeers?: boolean;
   /** Cap on the merged candidate list (default 32). */
   maxCandidates?: number;
@@ -116,11 +121,17 @@ export async function discoverCoordinators(opts: DiscoverOptions = {}): Promise<
   const [fromDns, fromNostr] = await Promise.all([dnsPromise, nostrPromise]);
 
   let merged = mergeCandidates(current, statics, fromDns, fromNostr);
-  if (opts.expandPeers !== false && merged.length > 0) {
+  const peerFilter = opts.allowUnpinnedNostr === true ? undefined : opts.acceptNostrCandidate;
+  const peersEnabled = opts.allowUnpinnedNostr === true || peerFilter !== undefined;
+  if (opts.expandPeers !== false && peersEnabled && merged.length > 0) {
     const seeds = merged.filter((c) => c.source !== "nostr").slice(0, 8);
-    const peerLists = await Promise.all(seeds.map((c) => fetchPeerAnnouncements(c.url, fetchImpl, timeoutMs, now)));
+    const peerLists = await Promise.all(
+      seeds.map((c) => fetchPeerAnnouncements(c.url, fetchImpl, timeoutMs, now).then((list) => list.filter((p) => !peerFilter || peerFilter(p))))
+    );
     merged = mergeCandidates(merged, ...peerLists);
   }
+  // A DNS seed's fp= pin must match the key the coordinator announces (when one is known).
+  merged = merged.filter((c) => !c.publicKeyFingerprint || !c.publicKeyPem || fingerprintMatches(c.publicKeyFingerprint, c.publicKeyPem));
   return merged.slice(0, opts.maxCandidates ?? 32);
 }
 
@@ -164,6 +175,8 @@ export interface EnvDiscoveryOptions {
   connect?: WsConnect;
   now?: () => number;
   acceptCandidate?: (c: CoordinatorCandidate) => boolean;
+  /** Trust decision for discovered candidates (see SelectorOptions.verifyCandidate). */
+  verifyCandidate?: (c: CoordinatorCandidate) => boolean | Promise<boolean>;
 }
 
 /**
@@ -207,7 +220,8 @@ export function selectOptionsFromEnv(o: EnvDiscoveryOptions = {}): SelectOptions
     resolver: o.resolver,
     connect: o.connect,
     now: o.now,
-    acceptCandidate: o.acceptCandidate
+    acceptCandidate: o.acceptCandidate,
+    verifyCandidate: o.verifyCandidate
   };
 }
 

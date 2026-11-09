@@ -131,7 +131,13 @@ describe("download helpers (#148)", () => {
     (a) => expect(isBlockedAddress(a)).toBe(true)
   );
 
-  it.each(["93.184.216.34", "2606:4700::1111", "::ffff:8.8.8.8"])("isBlockedAddress(%s) is false", (a) => expect(isBlockedAddress(a)).toBe(false));
+  it.each(["93.184.216.34", "2606:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808", "2001:4860:4860::8888"])("isBlockedAddress(%s) is false", (a) => expect(isBlockedAddress(a)).toBe(false));
+
+  // IPv6 forms that embed or route to internal IPv4 addresses.
+  it.each(["::7f00:1", "fec0::1", "2002:7f00:1::", "64:ff9b:1::a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:7f00:1", "::ffff:a9fe:a9fe", "2001:0:4136:e378::1", "100::1"])(
+    "isBlockedAddress(%s) is true (IPv6 range embedding IPv4)",
+    (a) => expect(isBlockedAddress(a)).toBe(true)
+  );
 
   it("assertPublicHttps rejects http, private literals, and names that resolve privately", async () => {
     await expect(assertPublicHttps("http://example.org/x", publicDns)).rejects.toThrow("hop_not_https");

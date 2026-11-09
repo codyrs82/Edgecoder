@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createPeerKeys, signPayload } from "../../src/mesh/peer.js";
 import { buildBlacklistEventHash } from "../../src/security/blacklist.js";
+import { publicKeyFingerprint } from "../../src/security/key-fingerprint.js";
 import type { BlacklistRecord } from "../../src/common/types.js";
 
 // ---------------------------------------------------------------------------
@@ -89,12 +90,21 @@ function jsonBody<T>(data: T) {
   return { json: () => Promise.resolve(data) };
 }
 
-/** Configure mockRequest to return the right JSON for each URL pattern. */
+/**
+ * Configure mockRequest to return the right JSON for each URL pattern. The operator's
+ * TRUSTED_COORDINATOR_KEYS pins every key the coordinator presents unless `pins` overrides it.
+ */
 function setupHttpResponses(responses: {
   audit: { chainHead: string; events: BlacklistRecord[] };
   identity: { peerId: string; publicKeyPem: string };
   peers?: { peers: Array<{ peerId: string; publicKeyPem: string }> };
+  pins?: string;
 }) {
+  const presented = [responses.identity, ...(responses.peers?.peers ?? [])];
+  setEnv({
+    EDGECODER_TRUST_FILE: undefined,
+    TRUSTED_COORDINATOR_KEYS: responses.pins ?? presented.map((k) => `${k.peerId}:${publicKeyFingerprint(k.publicKeyPem)}`).join(",")
+  });
   mockRequest.mockImplementation((url: string) => {
     if (typeof url === "string" && url.includes("/security/blacklist/audit")) {
       return Promise.resolve({ statusCode: 200, body: jsonBody(responses.audit) });
@@ -250,6 +260,33 @@ describe("verify-blacklist-audit", () => {
 
   // ---- Audit verification fail scenarios ----
 
+  it("fails when the signing key is not pinned independently of the audited coordinator", async () => {
+    const coord = createPeerKeys("coord-unpinned");
+    const event = makeBlacklistEvent({ prevEventHash: "BLACKLIST_GENESIS", coordinatorId: coord.peerId, coordinatorPrivateKey: coord.privateKeyPem });
+    setupHttpResponses({
+      audit: { chainHead: event.eventHash, events: [event] },
+      identity: { peerId: coord.peerId, publicKeyPem: coord.publicKeyPem },
+      pins: ""
+    });
+    await runVerifier();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(JSON.parse(consoleErrorSpy.mock.calls[0][0]).error).toContain("untrusted_coordinator");
+  });
+
+  it("fails when the coordinator presents a key other than the pinned one (rewritten chain)", async () => {
+    const real = createPeerKeys("coord-real");
+    const forger = createPeerKeys("coord-real");
+    const event = makeBlacklistEvent({ prevEventHash: "BLACKLIST_GENESIS", coordinatorId: real.peerId, coordinatorPrivateKey: forger.privateKeyPem });
+    setupHttpResponses({
+      audit: { chainHead: event.eventHash, events: [event] },
+      identity: { peerId: real.peerId, publicKeyPem: forger.publicKeyPem },
+      pins: `${real.peerId}:${publicKeyFingerprint(real.publicKeyPem)}`
+    });
+    await runVerifier();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(JSON.parse(consoleErrorSpy.mock.calls[0][0]).error).toContain("coordinator_key_not_pinned");
+  });
+
   it("fails on hash chain break (prevEventHash mismatch)", async () => {
     const coord = createPeerKeys("coord-1");
     const first = makeBlacklistEvent({
@@ -314,7 +351,9 @@ describe("verify-blacklist-audit", () => {
     setupHttpResponses({
       audit: { chainHead: event.eventHash, events: [event] },
       identity: { peerId: coord.peerId, publicKeyPem: coord.publicKeyPem },
-      peers: { peers: [] }
+      peers: { peers: [] },
+      // Pinned by the operator, but the coordinator does not present the key.
+      pins: `${unknownCoord.peerId}:${publicKeyFingerprint(unknownCoord.publicKeyPem)}`
     });
 
     await runVerifier();
@@ -437,6 +476,7 @@ describe("verify-blacklist-audit", () => {
       coordinatorPrivateKey: coord.privateKeyPem
     });
 
+    setEnv({ EDGECODER_TRUST_FILE: undefined, TRUSTED_COORDINATOR_KEYS: `${coord.peerId}:${publicKeyFingerprint(coord.publicKeyPem)}` });
     // /mesh/peers returns error — the source code catches and defaults to { peers: [] }
     mockRequest.mockImplementation((url: string) => {
       if (typeof url === "string" && url.includes("/security/blacklist/audit")) {

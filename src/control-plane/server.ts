@@ -20,6 +20,7 @@ import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { buildAdminDashboardRoutes } from "./dashboard.js";
 import { safeTokenEqual } from "../common/crypto-utils.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
+import { upstreamPathSegment } from "./path-segment.js";
 
 const app = Fastify({ ...serviceLoggerOptions("control-plane") });
 exposeRequestId(app);
@@ -430,8 +431,29 @@ app.get("/network/summary", async (req, reply) => {
   }
 });
 
+// Public on purpose (agents and coordinators bootstrap from it before they hold a token; it lists
+// only public coordinator URLs and peerIds). The upstream mesh-token lookups behind it are cached,
+// so unauthenticated callers cannot drive coordinator requests at will.
+const COORDINATOR_DISCOVERY_CACHE_MS = 30_000;
+let coordinatorDiscoveryCache: { at: number; value: Promise<Awaited<ReturnType<typeof collectCoordinatorDiscovery>>> } | null = null;
+function cachedCoordinatorDiscovery(): Promise<Awaited<ReturnType<typeof collectCoordinatorDiscovery>>> {
+  const now = Date.now();
+  if (coordinatorDiscoveryCache && now - coordinatorDiscoveryCache.at < COORDINATOR_DISCOVERY_CACHE_MS) return coordinatorDiscoveryCache.value;
+  const value = collectCoordinatorDiscovery();
+  coordinatorDiscoveryCache = { at: now, value };
+  value.catch(() => {
+    if (coordinatorDiscoveryCache?.value === value) coordinatorDiscoveryCache = null;
+  });
+  return value;
+}
+
+/** Drop the cached /network/coordinators result (tests, or after a mesh change). */
+export function resetCoordinatorDiscoveryCache(): void {
+  coordinatorDiscoveryCache = null;
+}
+
 app.get("/network/coordinators", async () => {
-  const discovery = await collectCoordinatorDiscovery();
+  const discovery = await cachedCoordinatorDiscovery();
   return {
     generatedAt: Date.now(),
     count: discovery.coordinators.length,
@@ -708,8 +730,10 @@ app.post("/orchestration/install-model", async (req, reply) => {
   }
 
   if (!body.agentId) return reply.code(400).send({ error: "agentId_required_for_agent_target" });
+  const agentSeg = upstreamPathSegment(body.agentId);
+  if (!agentSeg) return reply.code(400).send({ error: "invalid_agentId" });
   try {
-    const res = await request(`${coordinatorUrl}/orchestration/agents/${body.agentId}/ollama-install`, {
+    const res = await request(`${coordinatorUrl}/orchestration/agents/${agentSeg}/ollama-install`, {
       method: "POST",
       headers: coordinatorAdminHeaders(true),
       body: JSON.stringify({
@@ -1005,8 +1029,10 @@ app.get("/economy/issuance/history", async (req, reply) => {
 app.get("/economy/credits/:accountId/quote", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   const params = z.object({ accountId: z.string() }).parse(req.params);
+  const accountSeg = upstreamPathSegment(params.accountId);
+  if (!accountSeg) return reply.code(400).send({ error: "invalid_accountId" });
   try {
-    const res = await request(`${coordinatorUrl}/economy/credits/${params.accountId}/quote`, {
+    const res = await request(`${coordinatorUrl}/economy/credits/${accountSeg}/quote`, {
       method: "GET",
       headers: coordinatorMeshHeaders()
     });
@@ -1124,8 +1150,10 @@ app.post("/economy/payments/intents", async (req, reply) => {
 app.get("/economy/payments/intents/:intentId", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
   const params = z.object({ intentId: z.string() }).parse(req.params);
+  const intentSeg = upstreamPathSegment(params.intentId);
+  if (!intentSeg) return reply.code(400).send({ error: "invalid_intentId" });
   try {
-    const res = await request(`${coordinatorUrl}/economy/payments/intents/${params.intentId}`, {
+    const res = await request(`${coordinatorUrl}/economy/payments/intents/${intentSeg}`, {
       method: "GET",
       headers: coordinatorMeshHeaders()
     });
@@ -1140,8 +1168,10 @@ app.post("/economy/payments/intents/:intentId/confirm", async (req, reply) => {
   const params = z.object({ intentId: z.string() }).parse(req.params);
   // #42: the coordinator ignores caller txRef and asks the Lightning node; it requires the admin token.
   z.object({ txRef: z.string().optional() }).passthrough().parse(req.body ?? {});
+  const intentSeg = upstreamPathSegment(params.intentId);
+  if (!intentSeg) return reply.code(400).send({ error: "invalid_intentId" });
   try {
-    const res = await request(`${coordinatorUrl}/economy/payments/intents/${params.intentId}/confirm`, {
+    const res = await request(`${coordinatorUrl}/economy/payments/intents/${intentSeg}/confirm`, {
       method: "POST",
       headers: { ...coordinatorMeshHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify({})
@@ -1195,8 +1225,10 @@ app.post("/economy/treasury/policies/:policyId/activate", async (req, reply) => 
   if (!authorizeAdmin(req as any, reply)) return;
   const params = z.object({ policyId: z.string() }).parse(req.params);
   const body = z.object({ requestedBy: z.string().default("admin-api") }).parse(req.body);
+  const policySeg = upstreamPathSegment(params.policyId);
+  if (!policySeg) return reply.code(400).send({ error: "invalid_policyId" });
   try {
-    const res = await request(`${coordinatorUrl}/economy/treasury/policies/${params.policyId}/activate`, {
+    const res = await request(`${coordinatorUrl}/economy/treasury/policies/${policySeg}/activate`, {
       method: "POST",
       headers: coordinatorAdminHeaders(true),
       body: JSON.stringify(body)
@@ -1242,7 +1274,8 @@ app.post("/bootstrap/coordinator", async (_req, reply) => {
       modelBootstrap: provider === "ollama-local" && autoInstall ? "ollama_ready" : "skipped"
     });
   } catch (error) {
-    return reply.code(500).send({ ok: false, error: String(error) });
+    app.log.error({ error: String(error) }, "bootstrap_coordinator_failed");
+    return reply.code(500).send({ ok: false, error: "bootstrap_failed" });
   }
 });
 
@@ -1497,8 +1530,10 @@ app.post("/agents/:agentId/approval", async (req, reply) => {
   if (!PORTAL_SERVICE_URL) return reply.code(503).send({ error: "portal_service_not_configured" });
   const params = z.object({ agentId: z.string() }).parse(req.params);
   const body = z.object({ approved: z.boolean() }).parse(req.body);
+  const agentSeg = upstreamPathSegment(params.agentId);
+  if (!agentSeg) return reply.code(400).send({ error: "invalid_agentId" });
   try {
-    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${params.agentId}/approval`, {
+    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${agentSeg}/approval`, {
       method: "POST",
       headers: { ...portalHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify({ approved: body.approved })
@@ -1515,8 +1550,10 @@ app.post("/coordinators/:coordinatorId/approval", async (req, reply) => {
   if (!PORTAL_SERVICE_URL) return reply.code(503).send({ error: "portal_service_not_configured" });
   const params = z.object({ coordinatorId: z.string() }).parse(req.params);
   const body = z.object({ approved: z.boolean() }).parse(req.body);
+  const coordinatorSeg = upstreamPathSegment(params.coordinatorId);
+  if (!coordinatorSeg) return reply.code(400).send({ error: "invalid_coordinatorId" });
   try {
-    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${params.coordinatorId}/approval`, {
+    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/${coordinatorSeg}/approval`, {
       method: "POST",
       headers: { ...portalHeaders(true), "x-admin-token": ADMIN_API_TOKEN },
       body: JSON.stringify({ approved: body.approved })

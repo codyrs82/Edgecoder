@@ -131,6 +131,31 @@ describe("discoverCoordinators", () => {
 });
 
 describe("selectCoordinator", () => {
+  it("drops peer-relayed announcements unless their key is pinned or unpinned discovery is opted into", async () => {
+    const base = { staticUrls: ["https://static.example"], domain: false as const, relays: false as const, now: () => NOW };
+    const plain = await discoverCoordinators({ ...base, fetch: fakeFetch().fetch });
+    expect(plain.map((c) => c.source)).toEqual(["static"]);
+    const pinned = await discoverCoordinators({ ...base, fetch: fakeFetch().fetch, acceptNostrCandidate: (c) => c.publicKeyPem === peerCoord.publicKeyPem });
+    expect(pinned.map((c) => c.url)).toEqual(["https://static.example", "https://peer.example"]);
+    const rejected = await discoverCoordinators({ ...base, fetch: fakeFetch().fetch, acceptNostrCandidate: () => false });
+    expect(rejected.map((c) => c.source)).toEqual(["static"]);
+    const optIn = await discoverCoordinators({ ...base, fetch: fakeFetch().fetch, allowUnpinnedNostr: true });
+    expect(optIn.map((c) => c.source)).toEqual(["static", "peer"]);
+    // selectCoordinator applies the key-pin filter to peer candidates too.
+    const viaSelect = await selectCoordinator({ ...base, fetch: fakeFetch().fetch, pinnedKeys: ["ff".repeat(32)] });
+    expect(viaSelect?.url).toBe("https://static.example");
+  });
+
+  it("drops a candidate whose announced key contradicts its DNS fp= pin", async () => {
+    const dnsPinned: DnsResolver = {
+      resolveTxt: async () => [[`v=ec1 url=https://peer.example fp=${"00".repeat(32)}`]],
+      resolveSrv: async () => []
+    };
+    const found = await discoverCoordinators({ staticUrls: ["https://static.example"], domain: "example.org", relays: false, resolver: dnsPinned, fetch: fakeFetch().fetch, now: () => NOW, allowUnpinnedNostr: true });
+    // static.example relays peer.example's announcement, whose key is not the fp= pin.
+    expect(found.map((c) => c.url)).toEqual(["https://static.example"]);
+  });
+
   it("discovers, ranks and applies stickiness", async () => {
     const f = fakeFetch();
     const picked = await selectCoordinator({ staticUrls: ["https://static.example"], domain: "example.org", relays: false, resolver, fetch: f.fetch, now: () => Date.now(), expandPeers: true });
