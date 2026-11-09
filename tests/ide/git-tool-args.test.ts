@@ -41,6 +41,22 @@ describe("git tool arguments", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it("fetch, push and pull accept only configured remote names, not URLs or paths", async () => {
+    const root = repo();
+    const other = repo();
+    realExecFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"], { cwd: other });
+    realExecFileSync("git", ["remote", "add", "upstream", other], { cwd: root });
+    const t = new ToolExecutor(root);
+    for (const remote of [other, "../" + other.split("/").pop(), `file://${other}`, "https://example.invalid/x", "ssh://h/x", "git://h/x", "h:x", "nope"]) {
+      expect((await t.execute("git_fetch", { remote })).error, remote).toMatch(/not a remote name|unknown remote/);
+      expect((await t.execute("git_push", { remote })).error, remote).toMatch(/not a remote name|unknown remote/);
+      expect((await t.execute("git_pull", { remote })).error, remote).toMatch(/not a remote name|unknown remote/);
+    }
+    expect(() => realExecFileSync("git", ["rev-parse", "-q", "--verify", "FETCH_HEAD"], { cwd: root, stdio: "ignore" })).toThrow();
+    // A configured remote works (its URL is the user's choice).
+    expect((await t.execute("git_fetch", { remote: "upstream" })).error).toBeUndefined();
+  });
+
   it("validates and clamps helper inputs", () => {
     expect(rejectGitOptionArgs({ ref: "main" })).toBeNull();
     expect(rejectGitOptionArgs({ ref: "" })).toBeNull();
@@ -55,6 +71,7 @@ describe("git tool arguments", () => {
     const root = repo();
     execCalls.length = 0;
     const token = "ghp_secret_token_value_123";
+    realExecFileSync("git", ["remote", "add", "origin", join(root, "no-such-remote")], { cwd: root });
     await new ToolExecutor(root, token).execute("git_fetch", { remote: "origin" });
     const call = execCalls.find((c) => c.args.includes("fetch"));
     expect(call).toBeDefined();

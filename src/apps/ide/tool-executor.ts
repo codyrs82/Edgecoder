@@ -949,9 +949,28 @@ export class ToolExecutor {
   // git_fetch
   // -----------------------------------------------------------------------
 
+  /**
+   * The model names a remote; git would also take a URL or a path in that position (another
+   * repository on disk, or any host). Only remotes the user configured in this repository pass.
+   */
+  private checkConfiguredRemote(remote: string): ToolResult | null {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/.test(remote) || remote.includes("..") || remote.includes("//")) {
+      return { error: `invalid remote: "${remote.slice(0, 80)}" is not a remote name (URLs and paths aren't accepted)` };
+    }
+    let names: string[];
+    try {
+      names = execFileSync("git", hardenedGitArgs(["remote"]), { env: gitExecEnv(), cwd: this.root, encoding: "utf-8", timeout: 10_000 })
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "git remote failed" };
+    }
+    if (!names.includes(remote)) return { error: `unknown remote "${remote}"; configured remotes: ${names.join(", ") || "(none)"}` };
+    return null;
+  }
+
   private gitFetch(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
-    const bad = rejectGitOptionArgs({ remote });
+    const bad = rejectGitOptionArgs({ remote }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
     try {
       const out = this.execGitAuth(["fetch", "--end-of-options", remote]);
@@ -969,7 +988,7 @@ export class ToolExecutor {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
     const setUpstream = args.setUpstream === true;
-    const bad = rejectGitOptionArgs({ remote, branch });
+    const bad = rejectGitOptionArgs({ remote, branch }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
 
     const gitArgs = ["push"];
@@ -992,7 +1011,7 @@ export class ToolExecutor {
   private gitPull(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
-    const bad = rejectGitOptionArgs({ remote, branch });
+    const bad = rejectGitOptionArgs({ remote, branch }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
 
     const gitArgs = ["pull", "--end-of-options", remote];
