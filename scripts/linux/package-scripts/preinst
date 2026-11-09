@@ -2,6 +2,34 @@
 
 set -euo pipefail
 
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -c '%u %a' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
+NODE_BIN=""
+for candidate in "$(command -v node 2>/dev/null || true)" /usr/bin/node /usr/local/bin/node; do
+  if [[ -n "$candidate" && -x "$candidate" ]] && root_controlled "$candidate"; then NODE_BIN="$candidate"; break; fi
+done
+if [[ -z "$NODE_BIN" ]]; then
+  echo "EdgeCoder requires Node.js 22+ installed where only root can change it (e.g. /usr/bin/node"
+  echo "from your distribution or NodeSource); a node under a user's home (nvm) is not run as root."
+  exit 1
+fi
+
 if ! command -v node >/dev/null 2>&1; then
   echo "EdgeCoder requires Node.js 22+ to be installed first."
   echo "Install Node.js and try again:"

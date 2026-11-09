@@ -38,14 +38,29 @@ install_pinned_ollama() {
   rm -rf "$tmp"
 }
 
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -c '%u %a' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
 ollama_bin() {
   local candidate
-  if candidate="$(command -v ollama 2>/dev/null)"; then
-    printf "%s\n" "$candidate"
-    return 0
-  fi
-  for candidate in /usr/local/bin/ollama /usr/bin/ollama; do
-    if [[ -x "$candidate" ]]; then
+  for candidate in "$(command -v ollama 2>/dev/null || true)" /usr/local/bin/ollama /usr/bin/ollama; do
+    # As root, only an ollama that root alone can change.
+    if [[ -n "$candidate" && -x "$candidate" ]] && { [[ "$(id -u)" -ne 0 ]] || root_controlled "$candidate"; }; then
       printf "%s\n" "$candidate"
       return 0
     fi
@@ -104,8 +119,13 @@ for i in $(seq 1 15); do
   if [[ $i -eq 1 ]]; then
     echo "Waiting for Ollama to be ready..."
     # If systemd didn't start it, try starting directly as a fallback
+    # Never as root: as the ollama service account when there is one.
     if ! curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-      "$ollama_path" serve >/dev/null 2>&1 &
+      if [[ "$(id -u)" -ne 0 ]]; then
+        "$ollama_path" serve >/dev/null 2>&1 &
+      elif id -u ollama >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+        runuser -u ollama -- "$ollama_path" serve >/dev/null 2>&1 &
+      fi
     fi
   fi
   sleep 1

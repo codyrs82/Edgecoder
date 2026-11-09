@@ -131,7 +131,7 @@
                         Description="EdgeCoder distributed AI coding agent runtime daemon"
                         Type="ownProcess"
                         Start="auto"
-                        Account="LocalSystem"
+                        Account="NT AUTHORITY\LocalService"
                         ErrorControl="normal"
                         Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[BinFolder]edgecoder-service.ps1&quot;" />
 

@@ -31,7 +31,7 @@ services:
       - INFERENCE_AUTH_TOKEN=${INFERENCE_AUTH_TOKEN:-scale-test-placeholder-inference-token}
       - ECONOMY_PAYMENTS_ENABLED=${ECONOMY_PAYMENTS_ENABLED:-false}
     ports:
-      - "4301:4301"
+      - "127.0.0.1:4301:4301"
     depends_on:
       - postgres
     healthcheck:

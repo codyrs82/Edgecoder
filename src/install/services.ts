@@ -247,9 +247,20 @@ export function launchdAgentPlist(p: ServicePaths, inst: AgentInstance): string 
 }
 
 // ───────────────────────────── Windows (scheduled tasks) ─────────────────────────────
+/**
+ * cmd.exe parses the wrapper line by line, expands %VAR% even inside quotes and ends a quoted
+ * string at the next `"`, so a value carrying any of those (or a line break) is refused, not escaped.
+ */
 function cmdWrapper(env: Record<string, string>, exe: string, args: string[], cwd: string, log: string): string {
+  for (const [what, v] of [["working directory", cwd], ["program", exe], ["log path", log], ...args.map((a) => ["argument", a])] as const) {
+    if (/[\r\n\0"%]/.test(v)) throw new Error(`.cmd wrapper: ${what} ${JSON.stringify(v)} contains a quote, '%' or a line break`);
+  }
   const lines = ["@echo off", `cd /d "${cwd}"`];
-  for (const [k, v] of Object.entries(env)) lines.push(`set "${k}=${v}"`);
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`.cmd wrapper: invalid variable name ${JSON.stringify(k)}`);
+    if (/[\r\n\0"%&|^<>!]/.test(v)) throw new Error(`.cmd wrapper: ${k} must not contain line breaks or any of " % & | ^ < > !`);
+    lines.push(`set "${k}=${v}"`);
+  }
   lines.push(`"${exe}" ${args.map((a) => `"${a}"`).join(" ")} >> "${log}" 2>&1`);
   return lines.join("\r\n") + "\r\n";
 }
@@ -280,7 +291,9 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
   if (platform === "linux") {
     if (run("id", ["-u", p.user]).code !== 0) run("useradd", ["--system", "--create-home", "--home-dir", p.stateDir, "--shell", "/usr/sbin/nologin", p.user]);
     // Models and logs only. /etc/edgecoder stays root's (lockConfigDir); agent HOMEs are systemd StateDirectory.
-    run("chown", ["-R", `${p.user}:${p.user}`, p.modelsDir, p.logDir]);
+    // The directories only, not -R: their contents are the service user's own files, and a recursive
+    // chown as root would also hand over any root-owned file the service user hard-linked in there.
+    run("chown", [`${p.user}:${p.user}`, p.modelsDir, p.logDir]);
     // The docker group is root-equivalent on the host: the price of the container sandbox (docs/install.md).
     if (plan.sandboxMode === "docker") run("usermod", ["-aG", "docker", p.user]);
   } else if (platform === "darwin") {
@@ -304,7 +317,9 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
       run("dscl", [".", "-create", `/Users/${u}`, "Password", "*"]);
       run("dscl", [".", "-create", `/Users/${u}`, "IsHidden", "1"]);
     }
-    run("chown", ["-R", `${u}:${u}`, p.modelsDir, p.logDir]);
+    // Not -R: macOS has no protected_hardlinks, so a hard link to a root file placed here by the
+    // service account would be chowned to it.
+    run("chown", [`${u}:${u}`, p.modelsDir, p.logDir]);
     for (const inst of plan.instances) run("install", ["-d", "-o", u, "-g", u, "-m", "0750", agentHome(p, inst)]);
   } else if (platform === "win32") {
     // The user's own tasks write models, logs and state; everything else under ProgramData\EdgeCoder is admin-only.
@@ -315,13 +330,53 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
 /** Env files (registration and mesh tokens) and the Windows .cmd wrappers: root/Administrators only. */
 export function lockConfigDir(p: ServicePaths, platform: NodeJS.Platform, run: Run): void {
   if (platform === "win32") {
-    // No inheritance from ProgramData, where every user may create files. Administrators and SYSTEM
-    // full, the task user read (it runs the wrappers).
+    // Administrators own it (an owner can always rewrite the ACL). No inheritance from ProgramData,
+    // where every user may create files: Administrators and SYSTEM full, the task user read (it
+    // runs the wrappers). Then every direct child drops its explicit ACEs and inherits exactly
+    // that. Not /T: the task user may create junctions under its writable models/logs/state dirs,
+    // and an elevated recursive icacls would follow them.
+    run("icacls", [`"${p.configDir}"`, "/setowner", "*S-1-5-32-544", "/C"]);
     run("icacls", [`"${p.configDir}"`, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", `"${p.user}:(OI)(CI)RX"`]);
+    run("icacls", [`"${p.configDir}\\*"`, "/reset", "/C", "/L"]);
     return;
   }
   run("chown", ["-R", `root:${platform === "darwin" ? "wheel" : "root"}`, p.configDir]);
   run("chmod", ["0755", p.configDir]);
+}
+
+/**
+ * Windows: ProgramData lets every user create folders, and a folder's creator stays its owner, so
+ * a standard user could pre-create C:\ProgramData\EdgeCoder (or a subdir) before an admin installs
+ * and keep the right to rewrite its ACL after lockConfigDir. Before anything is written, each of
+ * the dirs that already exists must be a plain directory (not a junction or symlink) owned by
+ * Administrators, SYSTEM or the installing account itself. Returns the problems (empty = fine);
+ * fails closed when the check cannot run.
+ */
+export function windowsDirOwnerProblems(p: ServicePaths, run: Run): string[] {
+  const dirs = [p.configDir, p.modelsDir, p.logDir, p.stateDir];
+  const bad = dirs.filter((d) => /['"%\r\n]/.test(d));
+  if (bad.length) return bad.map((d) => `refusing a config path with quotes, '%' or line breaks: ${d}`);
+  // One line, no characters cmd.exe treats specially inside double quotes (run() goes through cmd on win32).
+  const script =
+    "$ErrorActionPreference='Stop'; " +
+    "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; " +
+    `foreach($d in @(${dirs.map((d) => `'${d}'`).join(",")})) { ` +
+    "if (Test-Path -LiteralPath $d) { " +
+    "if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { Write-Output ('REPARSE '+$d) } " +
+    "else { $o=(Get-Acl -LiteralPath $d).GetOwner([Security.Principal.SecurityIdentifier]).Value; " +
+    "if ($o -ne 'S-1-5-32-544' -and $o -ne 'S-1-5-18' -and $o -ne $me) { Write-Output ('OWNER '+$o+' '+$d) } } } }; " +
+    "Write-Output 'CHECKED'";
+  const r = run("powershell", ["-NoProfile", "-NonInteractive", "-Command", `"${script}"`]);
+  const lines = r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (r.code !== 0 || !lines.includes("CHECKED")) return [`could not check the owner of ${p.configDir} (${r.stderr.trim() || `exit ${r.code}`}); refusing to write secrets there`];
+  const problems: string[] = [];
+  for (const l of lines) {
+    const owner = /^OWNER (\S+) (.+)$/.exec(l);
+    if (owner) problems.push(`${owner[2]} already exists and is owned by ${owner[1]}, not Administrators or SYSTEM; another user may have created it. Inspect it, remove it, and re-run the installer`);
+    const reparse = /^REPARSE (.+)$/.exec(l);
+    if (reparse) problems.push(`${reparse[1]} is a junction or symbolic link; remove it and re-run the installer`);
+  }
+  return problems;
 }
 
 // ───────────────────────────── apply / remove ─────────────────────────────
@@ -342,9 +397,11 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
     if (dryRun) return { code: 0, stdout: "", stderr: "" };
     return host.run(cmd, args);
   };
+  // Lock the config dir before any secret lands in it, then grant the service account its own
+  // dirs (on Windows those sit inside the config dir, so after the lock resets their ACLs).
+  lockConfigDir(p, host.platform, run);
   prepareAccount(plan, p, host.platform, run);
   for (const inst of plan.instances) write(envFilePath(p, inst), renderEnvFile(inst.env), 0o600);
-  lockConfigDir(p, host.platform, run);
 
   if (host.platform === "linux") {
     for (const inst of plan.instances) {

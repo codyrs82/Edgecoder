@@ -11,6 +11,26 @@ OLLAMA_VERSION=0.40.7
 OLLAMA_ASSET="ollama-darwin.tgz"
 OLLAMA_SHA256="6c8b378e423a4c959b586c0bb62865d20ae057e817f1a8ee10abcc44bde6abab"
 OLLAMA_DIR="/opt/edgecoder/ollama"
+SERVICE_USER="_edgecoder"
+MODELS_DIR="/var/lib/edgecoder/ollama"
+
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -f '%u %Lp' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
 
 install_pinned_ollama() {
   local tmp got
@@ -44,8 +64,29 @@ ollama_bin() {
   return 1
 }
 
+run_ollama() { "$ollama_path" "$@"; }
+
 # --- Install Ollama binary ---
-if ollama_path="$(ollama_bin)"; then
+if [[ "$(id -u)" -eq 0 ]]; then
+  # As root (the .pkg postinstall), never run an ollama another user can replace (Homebrew,
+  # /Applications/Ollama.app): use only the pinned, root-owned copy, which the
+  # io.edgecoder.ollama daemon also runs. Serve and pull as the service account, not root.
+  ollama_path="$OLLAMA_DIR/ollama"
+  if ! { [[ -x "$ollama_path" ]] && root_controlled "$ollama_path"; }; then
+    command -v curl >/dev/null 2>&1 || { echo "curl is required to install Ollama automatically."; exit 0; }
+    echo "Installing Ollama $OLLAMA_VERSION from the pinned release archive..."
+    if ! install_pinned_ollama || ! root_controlled "$ollama_path"; then
+      echo "Warning: automatic Ollama install did not complete."
+      exit 0
+    fi
+  fi
+  echo "Ollama at: $ollama_path"
+  if ! dscl . -read "/Users/$SERVICE_USER" UniqueID >/dev/null 2>&1; then
+    echo "Service account $SERVICE_USER missing; the model will be pulled on first use."
+    exit 0
+  fi
+  run_ollama() { /usr/bin/sudo -u "$SERVICE_USER" /usr/bin/env HOME="$MODELS_DIR" OLLAMA_MODELS="$MODELS_DIR" "$ollama_path" "$@"; }
+elif ollama_path="$(ollama_bin)"; then
   echo "Ollama already installed at: $ollama_path"
 else
   if ! command -v curl >/dev/null 2>&1; then
@@ -77,13 +118,13 @@ for i in $(seq 1 15); do
   if [[ $i -eq 1 ]]; then
     echo "Waiting for Ollama to be ready..."
     # Start ollama serve in background if not already running
-    "$ollama_path" serve >/dev/null 2>&1 &
+    run_ollama serve >/dev/null 2>&1 &
   fi
   sleep 1
 done
 
 if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  if "$ollama_path" pull "$DEFAULT_MODEL"; then
+  if run_ollama pull "$DEFAULT_MODEL"; then
     echo "Model $DEFAULT_MODEL pulled successfully."
   else
     echo "Warning: could not pull $DEFAULT_MODEL. It will be pulled on first use."

@@ -2,44 +2,41 @@
 
 set -euo pipefail
 
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -f '%u %Lp' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
+# Only a node that root alone can change: this runs as root.
 resolve_node_bin() {
   local candidate
-
-  if candidate="$(command -v node 2>/dev/null)"; then
-    printf "%s\n" "$candidate"
-    return 0
-  fi
-
-  # Common Homebrew and manual install paths.
-  for candidate in \
-    "/opt/homebrew/bin/node" \
-    "/usr/local/bin/node" \
-    "/opt/local/bin/node"; do
-    if [[ -x "$candidate" ]]; then
+  for candidate in /opt/edgecoder/node/bin/node /usr/local/bin/node /opt/local/bin/node; do
+    if [[ -x "$candidate" ]] && root_controlled "$candidate"; then
       printf "%s\n" "$candidate"
       return 0
     fi
   done
-
-  # Try nvm installs from the invoking user.
-  if [[ -n "${SUDO_USER:-}" ]]; then
-    local nvm_root="/Users/${SUDO_USER}/.nvm/versions/node"
-    if [[ -d "$nvm_root" ]]; then
-      candidate="$(ls -1d "$nvm_root"/v*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)"
-      if [[ -n "$candidate" && -x "$candidate" ]]; then
-        printf "%s\n" "$candidate"
-        return 0
-      fi
-    fi
-  fi
-
   return 1
 }
 
 NODE_BIN="$(resolve_node_bin || true)"
 if [[ -z "${NODE_BIN}" ]]; then
-  echo "EdgeCoder installer requires Node.js 22+."
-  echo "Install Node.js in a system-visible path (or Homebrew) and retry."
+  echo "EdgeCoder installer requires Node.js 22+ installed where only root can change it"
+  echo "(the nodejs.org installer, or /opt/edgecoder/node from install.sh). A Homebrew or nvm"
+  echo "node is owned by a user account and is not run as root."
   exit 1
 fi
 

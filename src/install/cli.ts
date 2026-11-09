@@ -11,10 +11,10 @@ import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFile
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
-import { helpText, parseInstallArgs, parseTokensFile, type InstallOptions } from "./options.js";
+import { helpText, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
-import { applyPlan, defaultPaths, removeServices, serviceStatus, type Host, type ServicePaths } from "./services.js";
+import { applyPlan, defaultPaths, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
   try {
@@ -38,18 +38,38 @@ function findOllama(platform: NodeJS.Platform): string | undefined {
   return candidates.find((c) => existsSync(c));
 }
 
+/**
+ * Replace, never write through: the old file (or a symlink planted in its place) is removed and a
+ * new one is created exclusively with its final mode, so a secret never sits at the umask default
+ * and on Windows the file inherits the locked directory's ACL.
+ */
+export function writeFileFresh(path: string, content: string, mode?: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  rmSync(path, { force: true });
+  writeFileSync(path, content, { encoding: "utf8", flag: "wx", ...(mode !== undefined ? { mode } : {}) });
+  if (mode !== undefined && process.platform !== "win32") chmodSync(path, mode);
+}
+
+/** One cmd.exe argument: quoted unless plain or already quoted (run() goes through cmd on win32). */
+export function cmdQuote(arg: string): string {
+  if (/[%\r\n]/.test(arg) || /^[^"]*"[^"]*$/.test(arg)) throw new Error(`refusing to pass ${JSON.stringify(arg)} through cmd.exe`);
+  if (/^"[^"]*"$/.test(arg) || /^[A-Za-z0-9_.:\\/=+*-]+$/.test(arg)) return arg;
+  if (arg.includes('"')) throw new Error(`refusing to pass ${JSON.stringify(arg)} through cmd.exe`);
+  return `"${arg}"`;
+}
+
 const realHost: Host = {
   platform: process.platform,
-  writeFile(path, content, mode) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content, "utf8");
-    if (mode !== undefined && process.platform !== "win32") chmodSync(path, mode);
-  },
+  writeFile: writeFileFresh,
   removeFile(path) {
     try { unlinkSync(path); } catch { /* already gone */ }
   },
   run(cmd, args) {
-    const r = spawnSync(cmd, args, { encoding: "utf8", shell: process.platform === "win32" });
+    // win32 goes through cmd.exe (icacls/schtasks take pre-quoted args); quote the rest, such as
+    // an ollama path under a profile with a space in it.
+    const r = process.platform === "win32"
+      ? spawnSync(cmdQuote(cmd), args.map(cmdQuote), { encoding: "utf8", shell: true })
+      : spawnSync(cmd, args, { encoding: "utf8" });
     return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   },
   exists: (path) => existsSync(path)
@@ -144,6 +164,8 @@ export async function enrollNodes(opts: InstallOptions, instances: AgentInstance
       if (res.status < 200 || res.status >= 300) throw new Error(`portal returned HTTP ${res.status}`);
       const body = (await res.json()) as { registrationToken?: string };
       if (!body.registrationToken) throw new Error("response had no registrationToken");
+      // It is written into the service env file and .cmd wrapper: refuse anything but token characters.
+      if (typeof body.registrationToken !== "string" || !TOKEN_PATTERN.test(body.registrationToken)) throw new Error("response registrationToken has an invalid format");
       opts.tokens[inst.agentId] = body.registrationToken;
       enrolled.push(inst.agentId);
     } catch (e) {
@@ -178,6 +200,19 @@ export function pullModels(host: Host, ollamaBin: string, instances: AgentInstan
   return failed;
 }
 
+const SECRET_ENV = ["AGENT_REGISTRATION_TOKEN", "MESH_AUTH_TOKEN"];
+
+/** The plan for --json output, token values replaced so logs and CI captures do not keep them. */
+export function redactPlan(plan: InstallPlan): InstallPlan {
+  return {
+    ...plan,
+    instances: plan.instances.map((i) => ({
+      ...i,
+      env: Object.fromEntries(Object.entries(i.env).map(([k, v]) => [k, SECRET_ENV.includes(k) && v ? "<redacted>" : v]))
+    }))
+  };
+}
+
 function describeHardware(hw: HostHardware): string {
   const lines = [`Host ${hw.hostname}: ${hw.platform}/${hw.arch}, ${hw.cpuCores} cores (${hw.cpuModel}), ${hw.ramGb} GB RAM${hw.unifiedMemory ? " (unified)" : ""}`];
   if (hw.gpus.length === 0) lines.push("GPUs: none detected (CPU class)");
@@ -209,6 +244,13 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 0;
   }
   if (opts.tokensFile) Object.assign(opts.tokens, parseTokensFile(readFileSync(opts.tokensFile, "utf8")));
+  if (opts.command === "plan" || opts.command === "apply") {
+    const errors = validateInstallOptions(opts);
+    if (errors.length) {
+      for (const e of errors) console.error(`error: ${e}`);
+      return 2;
+    }
+  }
 
   const here = dirname(fileURLToPath(import.meta.url));
   const appDir = opts.appDir ?? resolve(here, "..", "..");
@@ -242,7 +284,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
   if (opts.command === "plan") {
-    console.log(opts.json ? JSON.stringify({ hardware: hw, plan, paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
+    console.log(opts.json ? JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
     return 0;
   }
 
@@ -271,7 +313,27 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.error(`the services run as the installing user, but this is running as "${p.user || "unknown"}"; run edgecoder-install from an elevated prompt of the account the agents should run as`);
     return 1;
   }
-  if (!opts.dryRun) for (const dir of [p.configDir, p.modelsDir, p.logDir, p.stateDir]) mkdirSync(dir, { recursive: true });
+  if (!opts.dryRun) {
+    const dirs = [p.configDir, p.modelsDir, p.logDir, p.stateDir];
+    if (host.platform === "win32") {
+      // A pre-created ProgramData\EdgeCoder keeps its creator as owner: refuse it, then create and
+      // lock the config dir before its subdirs or any secret exist, and check again after.
+      const run = (cmd: string, args: string[]) => host.run(cmd, args);
+      const before = windowsDirOwnerProblems(p, run);
+      if (before.length === 0) {
+        mkdirSync(p.configDir, { recursive: true });
+        lockConfigDir(p, host.platform, run);
+        for (const dir of dirs) mkdirSync(dir, { recursive: true });
+      }
+      const problems = before.length ? before : windowsDirOwnerProblems(p, run);
+      if (problems.length) {
+        for (const msg of problems) console.error(`error: ${msg}`);
+        return 1;
+      }
+    } else {
+      for (const dir of dirs) mkdirSync(dir, { recursive: true });
+    }
+  }
   // Services never run binaries a non-root user can replace (Linux/macOS; Windows runs as the user).
   const staged = secureBinaries(binFs, host.platform, p, { dryRun: opts.dryRun, ollama: !!binFs.stat(p.ollamaBin) });
   for (const s of staged.plans) if (s.copy && !opts.json) console.log(`${opts.dryRun ? "would copy" : "copied"} ${s.kind} ${s.copy.from} -> ${s.copy.to} (root-owned; ${s.reason})`);
@@ -283,7 +345,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const result = applyPlan(plan, host, p, opts.dryRun);
   if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
   if (opts.json) {
-    console.log(JSON.stringify({ hardware: hw, plan, paths: p, result }, null, 2));
+    console.log(JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p, result }, null, 2));
   } else {
     console.log(`${describeHardware(hw)}\n${describePlan(plan, p)}`);
     console.log(`${opts.dryRun ? "Would write" : "Wrote"} ${result.files.length} files; services: ${result.services.join(", ")}`);

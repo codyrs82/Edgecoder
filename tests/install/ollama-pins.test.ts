@@ -28,6 +28,17 @@ describe("Ollama pins stay in sync (src/install/ollama-pins.ts is the source of 
     expect(sh).toContain(`OLLAMA_SHA256="${OLLAMA_ASSETS.darwin.sha256}"`);
   });
 
+  it("the Windows MSI script pins the same version and win-x64 checksum, and runs no unverified installer", () => {
+    const ps = read("scripts/windows/payload/bin/edgecoder-install-ollama.ps1");
+    expect(ps).toContain(`$OllamaVersion   = '${OLLAMA_VERSION}'`);
+    expect(ps).toContain(`$OllamaZip       = '${OLLAMA_ASSETS["win-x64"].name}'`);
+    expect(ps).toContain(`$OllamaSha256    = '${OLLAMA_ASSETS["win-x64"].sha256}'`);
+    expect(ps).toMatch(/Get-FileHash -Algorithm SHA256/);
+    expect(ps).not.toMatch(/OllamaSetup\.exe|ollama\.com\/download\/OllamaSetup/);
+    // The hash check comes before the archive is unpacked.
+    expect(ps.indexOf("$got -ne $OllamaSha256")).toBeLessThan(ps.indexOf("Expand-Archive"));
+  });
+
   it("deploy/install.sh pins the same release", () => {
     const sh = read("deploy/install.sh");
     const m = sh.match(/^OLLAMA_VERSION=(\S+)$/m);

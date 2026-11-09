@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# Files this script creates (env file, backups, temp files) start private.
+umask 077
 
 ENV_FILE="/etc/edgecoder/edgecoder.env"
 ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
@@ -92,15 +94,30 @@ fi
 #   edgecoder-configure.sh configure --token TOKEN   (alias from CLI wrapper)
 # ---------------------------------------------------------------------------
 
-# Helper: upsert KEY=VALUE in a file. If the key exists (commented or not),
-# replace the line; otherwise append.  NOTE: macOS sed needs -i ''.
+# Values land in an env file that edgecoder-runtime.sh sources as shell and systemd/launchd read:
+# only plain token, URL and model characters, so a value can never become a command or a new line.
+safe_env_value() {
+  local re='^[A-Za-z0-9._~+/=:@,-]*$'
+  [[ "$1" =~ $re ]]
+}
+
+# Helper: upsert KEY=VALUE in a file. If the key exists (commented or not), replace the line;
+# otherwise append. awk takes the value from the environment, so it is never parsed as a program.
 write_or_update_env() {
-  local file="$1" key="$2" value="$3"
-  if grep -qE "^#?${key}=" "$file" 2>/dev/null; then
-    sed -i '' "s|^#*${key}=.*|${key}=${value}|" "$file"
-  else
-    printf '%s=%s\n' "$key" "$value" >> "$file"
+  local file="$1" key="$2" value="$3" tmp
+  if ! safe_env_value "$value"; then
+    echo "Error: the value for $key may only contain letters, digits and . _ ~ + / = : @ , -" >&2
+    exit 1
   fi
+  tmp="$(mktemp "${file}.XXXXXX")"
+  K="$key" V="$value" awk '
+    BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"]; done = 0 }
+    { line = $0; sub(/^#+/, "", line) }
+    !done && index(line, k "=") == 1 { print k "=" v; done = 1; next }
+    { print }
+    END { if (!done) print k "=" v }
+  ' "$file" > "$tmp"
+  mv -f "$tmp" "$file"
 }
 
 _resolve_token_arg() {
@@ -288,7 +305,17 @@ echo "   - higher (e.g. 30000+): calmer network behavior, slower peer-direct uti
 echo "   20000 is a balanced default for most deployments."
 PEER_OFFER_COOLDOWN_MS="$(prompt_text "PEER_OFFER_COOLDOWN_MS" "20000")"
 
+for _var in EDGE_RUNTIME_MODE AGENT_ID AGENT_OS AGENT_MODE AGENT_CLIENT_TYPE AGENT_REGISTRATION_TOKEN COORDINATOR_URL \
+  MESH_AUTH_TOKEN COORDINATOR_MESH_TOKEN LOCAL_MODEL_PROVIDER OLLAMA_AUTO_INSTALL OLLAMA_MODEL OLLAMA_HOST \
+  MAX_CONCURRENT_TASKS PEER_OFFER_COOLDOWN_MS; do
+  if ! safe_env_value "${!_var}"; then
+    echo "Error: $_var may only contain letters, digits and . _ ~ + / = : @ , -" >&2
+    exit 1
+  fi
+done
+
 mkdir -p /etc/edgecoder
+rm -f "$ENV_FILE"
 cat >"$ENV_FILE" <<EOF
 EDGE_RUNTIME_MODE=$EDGE_RUNTIME_MODE
 AGENT_ID=$AGENT_ID
