@@ -228,7 +228,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   app.get("/auth/oauth/:provider/start", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
-    const query = z.object({ appRedirect: z.string().optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
+    // A native app's redirect is a short fixed deep link; the length cap keeps state rows small.
+    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
     return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge });
   });
 

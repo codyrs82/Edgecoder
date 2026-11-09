@@ -300,6 +300,12 @@ export class PortalStore {
          used_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
     );
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_password_resets_user_idx ON portal_password_resets (user_id)`);
+    // Expired sign-in rows are deleted as new ones are written (pruneExpired below).
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_sessions_expires_idx ON portal_sessions (expires_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_oauth_states_expires_idx ON portal_oauth_states (expires_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_passkey_challenges_expires_idx ON portal_passkey_challenges (expires_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_email_verifications_expires_idx ON portal_email_verifications (expires_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_email_verifications_user_idx ON portal_email_verifications (user_id, created_at_ms)`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -717,12 +723,25 @@ export class PortalStore {
     return { userId: row.user_id };
   }
 
+  /**
+   * Delete rows of a short-lived sign-in table whose expiry passed more than `graceMs` ago.
+   * Called whenever a new row is written, so unauthenticated starts cannot grow the table forever.
+   */
+  private async pruneExpired(
+    table: "portal_sessions" | "portal_oauth_states" | "portal_passkey_challenges" | "portal_email_verifications",
+    graceMs = 0
+  ): Promise<void> {
+    await this.pool.query(`DELETE FROM ${table} WHERE expires_at_ms < $1`, [Date.now() - graceMs]);
+  }
+
   async createEmailVerification(input: {
     tokenId: string;
     userId: string;
     tokenHash: string;
     expiresAtMs: number;
   }): Promise<void> {
+    // Kept a day past expiry so the per-account resend count (last hour) still sees them.
+    await this.pruneExpired("portal_email_verifications", 24 * 60 * 60 * 1000);
     await this.pool.query(
       `INSERT INTO portal_email_verifications (
         token_id, user_id, token_hash, expires_at_ms, created_at_ms
@@ -827,6 +846,7 @@ export class PortalStore {
     tokenHash: string;
     expiresAtMs: number;
   }): Promise<void> {
+    await this.pruneExpired("portal_sessions");
     await this.pool.query(
       `INSERT INTO portal_sessions (session_id, user_id, token_hash, expires_at_ms, created_at_ms)
        VALUES ($1,$2,$3,$4,$5)`,
@@ -867,6 +887,7 @@ export class PortalStore {
     /** Native flows: base64url sha256 of a verifier the app keeps; the mobile token is bound to it. */
     appChallenge?: string;
   }): Promise<void> {
+    await this.pruneExpired("portal_oauth_states");
     await this.pool.query(
       `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -1446,6 +1467,7 @@ export class PortalStore {
     flowType: "registration" | "authentication";
     expiresAtMs: number;
   }): Promise<void> {
+    await this.pruneExpired("portal_passkey_challenges");
     await this.pool.query(
       `INSERT INTO portal_passkey_challenges (
         challenge_id, user_id, email, challenge, flow_type, expires_at_ms, created_at_ms

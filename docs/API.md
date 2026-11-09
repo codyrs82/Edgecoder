@@ -357,7 +357,7 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `GET` | `/auth/verify-email` | The emailed link: shows a confirmation page and changes nothing | none |
 | `POST` | `/auth/verify-email` | Confirm the address: body `{ token, password? }`. Succeeds only with the account's own session (cookie or Bearer) or its password (`401 verify_password_required`, or `verify_sign_in_required` for an account without a password). On success the account's earlier sessions, API keys and passkeys are revoked (and, on a password account, linked providers and the GitHub token), and a new session is returned as `{ ok, sessionToken }`. Someone who did not create the account uses Forgot password instead. | none |
 | `POST` | `/auth/resend-verification` | Resend verification email | session |
-| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft) | none |
+| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft, github). `appRedirect` is at most 512 characters. Rate limited with the other sign-in routes (10 per minute per IP). | none |
 | `GET` | `/auth/oauth/:provider/callback` | OAuth callback (GET) | none |
 | `POST` | `/auth/oauth/:provider/callback` | OAuth callback (POST) | none |
 | `POST` | `/auth/oauth/mobile/complete` | Complete native-app OAuth: `{ token, verifier? }`; a token from a start with `appChallenge` (base64url sha256 of `verifier`) needs that verifier | none |
