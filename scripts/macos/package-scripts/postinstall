@@ -42,6 +42,24 @@ ensure_service_user() {
 }
 ensure_service_user
 
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -f '%u %Lp' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
 mkdir -p "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
 chmod 755 "$LOG_DIR"
@@ -68,10 +86,20 @@ echo "  sudo $CONFIG_WIZARD"
 # `sudo edgecoder-install apply --token <agent-id>=<token>`.
 # edgecoder-install copies a node a user can replace (Homebrew) to a root-owned dir, or refuses one
 # that links user-writable libraries; the nodejs.org build in /opt/edgecoder/node is used as is.
-NODE_BIN="$(ls /opt/edgecoder/node/bin/node 2>/dev/null || command -v node || ls /opt/homebrew/bin/node /usr/local/bin/node 2>/dev/null | head -n1 || true)"
+# This runs as root: only a node that root alone can change (preinstall checked the same).
+NODE_BIN=""
+for candidate in /opt/edgecoder/node/bin/node /usr/local/bin/node /opt/local/bin/node; do
+  if [[ -x "$candidate" ]] && root_controlled "$candidate"; then NODE_BIN="$candidate"; break; fi
+done
 if [[ -n "$NODE_BIN" ]]; then
-  printf '#!/bin/sh\nexec "%s" /opt/edgecoder/app/dist/install/cli.js "$@"\n' "$NODE_BIN" > /usr/local/bin/edgecoder-install
-  chmod 755 /usr/local/bin/edgecoder-install
+  # The wrapper is later run with sudo: write it only where root alone can change it (Homebrew
+  # makes /usr/local/bin user-writable on Intel Macs), else under /opt/edgecoder/bin.
+  WRAPPER_DIR=/opt/edgecoder/bin
+  if [[ -d /usr/local/bin ]] && root_controlled /usr/local/bin; then WRAPPER_DIR=/usr/local/bin; fi
+  rm -f "$WRAPPER_DIR/edgecoder-install"
+  printf '#!/bin/sh\nexec "%s" /opt/edgecoder/app/dist/install/cli.js "$@"\n' "$NODE_BIN" > "$WRAPPER_DIR/edgecoder-install"
+  chmod 755 "$WRAPPER_DIR/edgecoder-install"
+  [[ "$WRAPPER_DIR" == /usr/local/bin ]] || echo "edgecoder-install is at $WRAPPER_DIR/edgecoder-install (/usr/local/bin is not root-only)."
   "$NODE_BIN" /opt/edgecoder/app/dist/install/cli.js apply --from-package --app-dir /opt/edgecoder/app --node-bin "$NODE_BIN" || true
 fi
 

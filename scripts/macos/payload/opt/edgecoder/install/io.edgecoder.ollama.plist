@@ -13,7 +13,7 @@
 
     <key>ProgramArguments</key>
     <array>
-      <string>/usr/local/bin/ollama</string>
+      <string>/opt/edgecoder/ollama/ollama</string>
       <string>serve</string>
     </array>
 

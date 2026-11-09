@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# Files this script creates (env file, backups, temp files) start private.
+umask 077
 
 ENV_FILE="/etc/edgecoder/edgecoder.env"
 ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
@@ -36,15 +38,30 @@ fi
 #   edgecoder-configure.sh configure --token TOKEN   (alias from CLI wrapper)
 # ---------------------------------------------------------------------------
 
-# Helper: upsert KEY=VALUE in a file. If the key exists (commented or not),
-# replace the line; otherwise append.  NOTE: Linux sed uses -i (no empty arg).
+# Values land in an env file that edgecoder-runtime.sh sources as shell and systemd/launchd read:
+# only plain token, URL and model characters, so a value can never become a command or a new line.
+safe_env_value() {
+  local re='^[A-Za-z0-9._~+/=:@,-]*$'
+  [[ "$1" =~ $re ]]
+}
+
+# Helper: upsert KEY=VALUE in a file. If the key exists (commented or not), replace the line;
+# otherwise append. awk takes the value from the environment, so it is never parsed as a program.
 write_or_update_env() {
-  local file="$1" key="$2" value="$3"
-  if grep -qE "^#?${key}=" "$file" 2>/dev/null; then
-    sed -i "s|^#*${key}=.*|${key}=${value}|" "$file"
-  else
-    printf '%s=%s\n' "$key" "$value" >> "$file"
+  local file="$1" key="$2" value="$3" tmp
+  if ! safe_env_value "$value"; then
+    echo "Error: the value for $key may only contain letters, digits and . _ ~ + / = : @ , -" >&2
+    exit 1
   fi
+  tmp="$(mktemp "${file}.XXXXXX")"
+  K="$key" V="$value" awk '
+    BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"]; done = 0 }
+    { line = $0; sub(/^#+/, "", line) }
+    !done && index(line, k "=") == 1 { print k "=" v; done = 1; next }
+    { print }
+    END { if (!done) print k "=" v }
+  ' "$file" > "$tmp"
+  mv -f "$tmp" "$file"
 }
 
 _resolve_token_arg() {
