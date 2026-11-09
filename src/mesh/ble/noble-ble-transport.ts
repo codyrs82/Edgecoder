@@ -16,6 +16,7 @@ import {
   BLETaskRequest,
   BLETaskResponse,
 } from "./protocol.js";
+import { BleResponseAssembler } from "./ble-response-assembler.js";
 
 /**
  * Real BLE transport using @abandonware/noble (central/scanning)
@@ -483,9 +484,9 @@ export class NobleBLETransport implements BLETransport {
 
               // Chunked response reassembly: first notify has 4-byte big-endian
               // length prefix, followed by data. Subsequent notifies are continuations.
-              let expectedLength = -1;
-              let chunks: Buffer[] = [];
-              let receivedBytes = 0;
+              // The announced length and the buffered bytes are capped (ble-response-assembler.ts).
+              const assembler = new BleResponseAssembler();
+              let settledResponse = false;
 
               const processComplete = (fullData: Buffer) => {
                 clearTimeout(timeout);
@@ -510,24 +511,23 @@ export class NobleBLETransport implements BLETransport {
 
               // Listen for the response notify (chunked)
               taskRespChar.on("data", (data: Buffer) => {
-                if (expectedLength < 0) {
-                  // First chunk: read 4-byte length header
-                  expectedLength =
-                    (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-                  const payload = data.subarray(4);
-                  chunks.push(payload);
-                  receivedBytes += payload.length;
-                  console.log(`[BLE] response chunk 1: ${payload.length} bytes (expecting ${expectedLength} total)`);
-                } else {
-                  // Continuation chunk
-                  chunks.push(data);
-                  receivedBytes += data.length;
-                  console.log(`[BLE] response chunk +${data.length} bytes (${receivedBytes}/${expectedLength})`);
+                if (settledResponse) return;
+                const step = assembler.push(data);
+                if (step.state === "pending") {
+                  console.log(`[BLE] response chunk +${data.length} bytes (${assembler.received}/${assembler.expected})`);
+                  return;
                 }
-
-                if (receivedBytes >= expectedLength) {
-                  processComplete(Buffer.concat(chunks));
+                settledResponse = true;
+                if (step.state === "complete") {
+                  processComplete(step.data);
+                  return;
                 }
+                console.warn(`[BLE] dropping task response from ${peerId}: ${step.reason}`);
+                clearTimeout(timeout);
+                peripheral.removeListener("disconnect", onDisconnect);
+                peripheral.disconnect();
+                cleanup();
+                resolve(fail());
               });
 
               // Write the task request
