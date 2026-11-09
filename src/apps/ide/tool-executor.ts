@@ -184,15 +184,19 @@ function isGitDirSegment(seg: string): boolean {
 
 /**
  * Files that need the user's explicit approval for every agent write (never auto-approved):
- * git reads them for submodule URLs and filter/diff drivers, and hook runners or the shell
- * execute what they name.
+ * git reads them for submodule URLs and filter/diff drivers, hook runners or the shell
+ * execute what they name, and diagnostics' `cargo check` runs build scripts and toolchains.
  */
 const APPROVAL_FILES = new Set([
   ".gitmodules", ".gitattributes", ".envrc", ".pre-commit-config.yaml",
   "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml", ".lefthookrc",
+  "build.rs", "cargo.toml", "rust-toolchain", "rust-toolchain.toml",
 ]);
-/** Directories whose contents are executed by tooling (git hook managers, editor task runners). */
-const APPROVAL_DIRS = new Set([".husky", ".githooks", ".vscode"]);
+/**
+ * Directories whose contents are executed by tooling (git hook managers, editor task runners,
+ * cargo config, and node_modules, whose .bin/tsc diagnostics runs).
+ */
+const APPROVAL_DIRS = new Set([".husky", ".githooks", ".vscode", ".cargo", "node_modules"]);
 
 export type ProtectedPathKind = "git_dir" | "needs_approval";
 

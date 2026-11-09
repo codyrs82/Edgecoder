@@ -6,10 +6,15 @@
  * TypeScript/JavaScript: the project's tsc (needs a tsconfig.json; whole-project, so results
  * cover every file). Python: ruff when installed, else a syntax check. Rust: cargo check.
  * Lighter than language servers, and it reports what the project's own build would.
+ *
+ * tsc (the project's node_modules/.bin) and cargo (build scripts, proc macros) run code that
+ * comes with the project, so they only run for a folder the user trusted (workspace-trust.ts).
+ * Python checks run for any folder: ruff and `python3 -I -m py_compile` don't execute it.
  */
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export interface Diagnostic {
@@ -28,12 +33,24 @@ export interface CheckResult {
   byPath: Record<string, Diagnostic[]>;
   /** Checkers that ran, e.g. ["tsc"]. */
   checkers: string[];
+  /** Checkers skipped because the folder isn't trusted, e.g. ["tsc"]. */
+  untrusted?: string[];
+}
+
+/** Server secrets a checker has no use for (tokens, keys, passwords). */
+const SECRET_ENV = /TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY/i;
+
+function checkerEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { NO_COLOR: "1" };
+  for (const [k, v] of Object.entries(process.env)) if (!SECRET_ENV.test(k)) env[k] = v;
+  env.NO_COLOR = "1";
+  return env;
 }
 
 function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolveRun) => {
     // .cmd shims only run through the shell on Windows.
-    execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1" }, shell: /\.cmd$/i.test(cmd) }, (_err, stdout, stderr) =>
+    execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: checkerEnv(), shell: /\.cmd$/i.test(cmd) }, (_err, stdout, stderr) =>
       resolveRun({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
     );
   });
@@ -112,20 +129,25 @@ function nearest(root: string, from: string, file: string): string | null {
 
 const running = new Map<string, Promise<CheckResult>>();
 
-/** Run the checkers relevant to `relPaths` (deduplicated per project and language). */
-export function checkProject(projectRoot: string, relPaths: string[]): Promise<CheckResult> {
+/**
+ * Run the checkers relevant to `relPaths` (deduplicated per project and language). Checkers that
+ * execute project code run only with `trusted: true` (the caller looks up the user's decision).
+ */
+export function checkProject(projectRoot: string, relPaths: string[], opts: { trusted?: boolean } = {}): Promise<CheckResult> {
   const root = resolve(projectRoot);
-  const key = `${root}\0${[...new Set(relPaths.map((p) => p.split(".").pop()))].sort().join(",")}`;
+  const trusted = opts.trusted === true;
+  const key = `${root}\0${trusted}\0${[...new Set(relPaths.map((p) => p.split(".").pop()))].sort().join(",")}`;
   const existing = running.get(key);
   if (existing) return existing;
-  const job = doCheck(root, relPaths).finally(() => running.delete(key));
+  const job = doCheck(root, relPaths, trusted).finally(() => running.delete(key));
   running.set(key, job);
   return job;
 }
 
-async function doCheck(root: string, relPaths: string[]): Promise<CheckResult> {
+async function doCheck(root: string, relPaths: string[], trusted: boolean): Promise<CheckResult> {
   const byPath: Record<string, Diagnostic[]> = {};
   const checkers: string[] = [];
+  const untrusted: string[] = [];
   const add = (ds: Diagnostic[]) => {
     for (const d of ds) (byPath[d.path] ??= []).push(d);
   };
@@ -138,20 +160,24 @@ async function doCheck(root: string, relPaths: string[]): Promise<CheckResult> {
     // On Windows the runnable shim is tsc.cmd (node_modules/.bin/tsc is a shell script there).
     const bin = process.platform === "win32" ? "node_modules/.bin/tsc.cmd" : "node_modules/.bin/tsc";
     const tsc = dir ? [join(dir, bin), join(root, bin)].find((p) => existsSync(p)) : undefined;
-    if (dir && tsc) {
+    if (dir && tsc && !trusted) untrusted.push("tsc");
+    else if (dir && tsc) {
       const { stdout } = await run(tsc, ["--noEmit", "--pretty", "false", "-p", dir], dir, 180_000);
       add(parseTsc(stdout, root, dir));
       checkers.push("tsc");
     }
   }
   if (py.length) {
-    const ruff = await run("ruff", ["check", "--output-format=json", "--no-fix", ...py.map((p) => resolve(root, p))], root, 60_000);
+    // Outside the project: Windows looks for the executable in the working directory first.
+    const cwd = tmpdir();
+    const ruff = await run("ruff", ["check", "--output-format=json", "--no-fix", ...py.map((p) => resolve(root, p))], cwd, 60_000);
     if (ruff.stdout.trim().startsWith("[")) {
       add(parseRuff(ruff.stdout, root));
       checkers.push("ruff");
     } else {
       for (const p of py) {
-        const r = await run("python3", ["-m", "py_compile", resolve(root, p)], root, 30_000);
+        // -I: isolated, so a py_compile.py or sitecustomize in the project isn't imported.
+        const r = await run("python3", ["-I", "-m", "py_compile", resolve(root, p)], cwd, 30_000);
         add(parsePyCompile(r.stderr, p));
       }
       checkers.push("python");
@@ -159,11 +185,12 @@ async function doCheck(root: string, relPaths: string[]): Promise<CheckResult> {
   }
   if (rs.length) {
     const dir = nearest(root, dirname(resolve(root, rs[0])), "Cargo.toml");
-    if (dir) {
+    if (dir && !trusted) untrusted.push("cargo");
+    else if (dir) {
       const { stderr } = await run("cargo", ["check", "--message-format=short", "--quiet"], dir, 300_000);
       add(parseCargo(stderr, root, dir));
       checkers.push("cargo");
     }
   }
-  return { byPath, checkers };
+  return untrusted.length ? { byPath, checkers, untrusted } : { byPath, checkers };
 }

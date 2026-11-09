@@ -50,6 +50,11 @@ describe("classifyRelativePath", () => {
       expect(classifyRelativePath(p), p).toBe("needs_approval");
     }
   });
+  it("needs approval for build scripts and binaries diagnostics would run", () => {
+    for (const p of ["build.rs", "crate/build.rs", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", "node_modules/.bin/tsc", "node_modules/typescript/lib/tsc.js"]) {
+      expect(classifyRelativePath(p), p).toBe("needs_approval");
+    }
+  });
   it("leaves ordinary files alone", () => {
     for (const p of ["src/index.ts", ".gitignore", ".github/workflows/ci.yml", "git/config", "my.git/x", "husky.txt"]) {
       expect(classifyRelativePath(p), p).toBeNull();
