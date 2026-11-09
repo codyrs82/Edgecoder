@@ -6,7 +6,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       - POSTGRES_DB=${POSTGRES_DB:-edgecoder}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - edgecoder-postgres:/var/lib/postgresql/data
 
@@ -22,9 +22,9 @@ services:
       - OLLAMA_AUTO_INSTALL=false
       - OLLAMA_MODEL=qwen3.5:9b
     ports:
-      - "4301:4301"
-      - "4302:4302"
-      - "4303:4303"
+      - "127.0.0.1:4301:4301"
+      - "127.0.0.1:4302:4302"
+      - "127.0.0.1:4303:4303"
     depends_on:
       postgres:
         condition: service_started
@@ -42,7 +42,7 @@ services:
     environment:
       - SKIP_OLLAMA=true # #9: the IDE provider doesn't use Ollama
     ports:
-      - "4304:4304"
+      - "127.0.0.1:4304:4304"
     depends_on:
       seed-node:
         condition: service_healthy
