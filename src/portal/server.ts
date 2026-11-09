@@ -87,6 +87,8 @@ const store = PortalStore.fromEnv();
 // #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
+  // Per-user chat limits (security.ts CHAT_RATE_LIMIT).
+  rateLimitUserId: async (req) => (await getCurrentUser(req as any))?.userId,
   publicOrigin: (() => {
     try {
       return new URL(process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310").origin;

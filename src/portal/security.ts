@@ -85,6 +85,12 @@ const AUTH_ROUTES: RegExp[] = [
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
 // Withdraw (the code request and the confirm) shares the wallet bucket.
 const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/, /^\/wallet\/payout-destination\/callback\/confirm$/];
+/**
+ * Chat messages and new conversations (each chat turn is stored and sent to a coordinator):
+ * 20 per minute per signed-in user (keyed on the user when known, else the client IP).
+ */
+export const CHAT_RATE_LIMIT = { max: 20, timeWindow: "1 minute" } as const;
+const CHAT_ROUTES: RegExp[] = [/^\/portal\/api\/chat$/, /^\/portal\/api\/conversations$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
@@ -105,6 +111,7 @@ export function rateLimitFor(url: string, method: string | string[] = "POST"): {
   if (methods.includes("PUT") && url === "/wallet/payout-destination") return WALLET_RATE_LIMIT;
   if (methods.includes("POST") && TOPUP_ROUTES.some((r) => r.test(url))) return TOPUP_RATE_LIMIT;
   if (methods.includes("POST") && PASSWORD_RESET_ROUTES.some((r) => r.test(url))) return PASSWORD_RESET_RATE_LIMIT;
+  if (methods.includes("POST") && CHAT_ROUTES.some((r) => r.test(url))) return CHAT_RATE_LIMIT;
   if (AUTH_ROUTES.some((r) => r.test(url))) return AUTH_RATE_LIMIT;
   return undefined;
 }
@@ -170,6 +177,8 @@ export interface PortalSecurityOptions {
   rateLimitStoreOptions?: Omit<PgRateLimitStoreOptions, "log">;
   /** Environment for PORTAL_TRUST_FLY_CLIENT_IP / FLY_APP_NAME (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** The signed-in user's id for a request, if any: per-user rate limits (CHAT_RATE_LIMIT) key on it. */
+  rateLimitUserId?: (req: FastifyRequest) => Promise<string | null | undefined>;
 }
 
 export type RateLimitKeySource = "cf-connecting-ip (origin lock on)" | "fly-client-ip" | "socket address";
@@ -189,11 +198,19 @@ type NonceResponse = ServerResponse & { cspNonce?: string };
  * per-route rate-limit config.
  */
 export async function registerPortalSecurity(app: FastifyInstance, opts: PortalSecurityOptions): Promise<void> {
+  const ipKey = (req: FastifyRequest) => clientIp(req, { ...(opts.env ?? process.env), edge: opts.edge, originLockToken: opts.originLockToken });
+  // Per-user limits key on the signed-in user, so users behind one address do not share a bucket
+  // and one user cannot multiply the limit by holding several sessions.
+  const userKey = async (req: FastifyRequest) => {
+    const userId = opts.rateLimitUserId ? await opts.rateLimitUserId(req).catch(() => null) : null;
+    return userId ? `user:${userId}` : ipKey(req);
+  };
   // Runs before @fastify/rate-limit's own onRoute hook (registered next), so the config is seen.
   app.addHook("onRoute", (route) => {
     const limit = rateLimitFor(route.url ?? route.path ?? "", route.method);
     if (limit && !(route.config as { rateLimit?: unknown } | undefined)?.rateLimit) {
-      route.config = { ...(route.config ?? {}), rateLimit: limit } as typeof route.config;
+      const rateLimit = limit === CHAT_RATE_LIMIT ? { ...limit, keyGenerator: userKey } : limit;
+      route.config = { ...(route.config ?? {}), rateLimit } as typeof route.config;
     }
   });
   if (opts.edge === "cloudflare" && !opts.originLockToken) {

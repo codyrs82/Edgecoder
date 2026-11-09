@@ -1638,12 +1638,15 @@ export class PortalStore {
     return r.rows[0]?.user_id ?? null;
   }
 
-  async getConversationMessages(conversationId: string): Promise<PortalMessage[]> {
+  /** The most recent `limit` messages of a conversation, oldest first. */
+  async getConversationMessages(conversationId: string, limit: number): Promise<PortalMessage[]> {
     const result = await this.pool.query(
-      `SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms
-       FROM portal_messages WHERE conversation_id = $1
-       ORDER BY created_at_ms ASC`,
-      [conversationId]
+      `SELECT * FROM (
+         SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms
+         FROM portal_messages WHERE conversation_id = $1
+         ORDER BY created_at_ms DESC LIMIT $2
+       ) recent ORDER BY created_at_ms ASC`,
+      [conversationId, Math.max(1, Math.floor(limit))]
     );
     return result.rows.map((r) => ({
       messageId: r.message_id,

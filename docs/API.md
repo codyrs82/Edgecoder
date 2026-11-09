@@ -479,11 +479,11 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/conversations` | List conversations | session |
-| `POST` | `/portal/api/conversations` | Create a conversation | session |
-| `GET` | `/portal/api/conversations/:id/messages` | Get messages for a conversation | session |
-| `PATCH` | `/portal/api/conversations/:id` | Update conversation metadata | session |
+| `POST` | `/portal/api/conversations` | Create a conversation: body `{ title? }`, at most 200 characters (`400 invalid_title`). Shares the chat rate limit. | session |
+| `GET` | `/portal/api/conversations/:id/messages` | Get the latest 500 messages of a conversation, oldest first | session |
+| `PATCH` | `/portal/api/conversations/:id` | Rename: body `{ title }`, 1 to 200 characters (`400 invalid_title`) | session |
 | `DELETE` | `/portal/api/conversations/:id` | Delete a conversation | session |
-| `POST` | `/portal/api/chat` | Send a chat message (submits task) | session |
+| `POST` | `/portal/api/chat` | Send a chat message (submits task). `message` is at most 32,000 characters (`413 message_too_long`). Only the latest 40 messages, up to 120,000 characters, are sent as context. Rate limit: 20 per minute per user, shared with creating conversations (`429 rate_limited`). | session |
 
 ### Reviews
 

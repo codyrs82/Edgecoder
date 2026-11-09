@@ -11,6 +11,25 @@ import { networkBackend } from "../../inference-api/backends.js";
 import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
 
+/** Longest chat message accepted, in characters. */
+export const CHAT_MESSAGE_MAX_CHARS = 32_000;
+/** At most this many of the latest messages are sent upstream as context... */
+export const CHAT_HISTORY_MAX_MESSAGES = 40;
+/** ...and no more than this many characters of them (the newest are kept). */
+export const CHAT_HISTORY_MAX_CHARS = 120_000;
+
+/** The newest messages that fit the character budget, oldest first; the newest one is always kept. */
+export function boundChatHistory<T extends { content: string }>(messages: T[], maxChars = CHAT_HISTORY_MAX_CHARS): T[] {
+  const kept: T[] = [];
+  let used = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    used += messages[i].content.length;
+    if (kept.length > 0 && used > maxChars) break;
+    kept.unshift(messages[i]);
+  }
+  return kept;
+}
+
 /** #16: Chat API: model list and streaming chat (/portal/api/models, /portal/api/chat). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesDeps): void {
   const { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store } = deps;
@@ -122,12 +141,15 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     const parsedBody = z.object({
       conversationId: z.string().min(1),
       message: z.string().min(1),
-      model: z.string().optional(),
+      model: z.string().max(200).optional(),
       /** Run on the network for this account (billed in cSats), your own machines, or a lease; omitted: the coordinator's default chat. */
       compute: chatComputeSchema.optional(),
     }).safeParse(req.body);
     if (!parsedBody.success) return reply.code(400).send({ error: "invalid_chat_request" });
     const body = parsedBody.data;
+    if (body.message.length > CHAT_MESSAGE_MAX_CHARS) {
+      return reply.code(413).send({ error: "message_too_long", maxChars: CHAT_MESSAGE_MAX_CHARS });
+    }
 
     // Only the owner may post into (and thereby read back) a conversation (audit auth#1).
     if ((await store.getConversationOwner(body.conversationId)) !== user.userId) {
@@ -143,7 +165,8 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     });
 
     // Build message history from conversation
-    const history = await store.getConversationMessages(body.conversationId);
+    // Only a bounded tail of the conversation is loaded and sent upstream.
+    const history = boundChatHistory(await store.getConversationMessages(body.conversationId, CHAT_HISTORY_MAX_MESSAGES));
     const messages = history.map((m) => ({ role: m.role, content: m.content }));
 
     if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
