@@ -1342,7 +1342,16 @@ export interface Diagnostic {
   source: string;
 }
 export const ideDiagnostics = (paths: string[]) =>
-  fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[] }>("POST", "/v1/ide/diagnostics", { paths });
+  fsCall<{ byPath: Record<string, Diagnostic[]>; checkers: string[]; untrusted?: string[] }>("POST", "/v1/ide/diagnostics", { paths });
+
+/** Whether the open folder may run its own tooling (tsc, cargo). Folders start untrusted. */
+export interface ProjectTrust {
+  projectRoot: string | null;
+  trusted: boolean;
+}
+export const ideProjectTrust = () => fsCall<ProjectTrust>("GET", "/v1/ide/project/trust");
+/** Only ever called from an explicit user choice; nothing trusts a folder automatically. */
+export const ideSetProjectTrust = (trusted: boolean) => fsCall<ProjectTrust>("POST", "/v1/ide/project/trust", { trusted });
 
 /** Create <projects folder>/<name> (a git repo) and make it the open project. */
 export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
