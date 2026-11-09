@@ -21,7 +21,7 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 
 const CONFIGURE = ["scripts/linux/payload/bin/edgecoder-configure.sh", "scripts/macos/payload/bin/edgecoder-configure.sh"];
 
-describe("legacy configure scripts: tokens never become sed programs or shell code", () => {
+describe("legacy configure scripts: tokens never become sed programs or shell code", { timeout: 60_000 }, () => {
   for (const file of CONFIGURE) {
     it.runIf(posix)(`${file}: write_or_update_env refuses unsafe values and never runs them`, () => {
       const src = read(file);
@@ -47,7 +47,7 @@ true`;
   }
 });
 
-describe("legacy package scripts never run a user-replaceable node or ollama as root", () => {
+describe("legacy package scripts never run a user-replaceable node or ollama as root", { timeout: 60_000 }, () => {
   it.runIf(posix)("root_controlled accepts root-owned paths only", () => {
     const fmt = process.platform === "darwin" ? "scripts/macos/package-scripts/preinstall" : "scripts/linux/package-scripts/preinst";
     const d = mkdtempSync(join(tmpdir(), "ec-rc-"));

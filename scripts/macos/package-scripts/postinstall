@@ -61,7 +61,9 @@ root_controlled() {
 }
 
 mkdir -p "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
-chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
+# Not -R: macOS has no protected_hardlinks, so a recursive chown as root would also hand the
+# service account any root-owned file it hard-linked into these directories.
+chown "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$STATE_DIR/runtime" "$STATE_DIR/ollama"
 chmod 755 "$LOG_DIR"
 # The app, scripts and plists stay root's: the service account must not be able to change its own code.
 chown -R root:wheel /opt/edgecoder/app /opt/edgecoder/bin /opt/edgecoder/install

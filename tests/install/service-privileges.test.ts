@@ -98,7 +98,7 @@ describe("macOS: LaunchDaemons run as _edgecoder", () => {
     expect(commands).toContain("dscl . -create /Groups/_edgecoder PrimaryGroupID 302");
     expect(commands).toContain("dscl . -create /Users/_edgecoder UserShell /usr/bin/false");
     expect(commands).toContain("dscl . -create /Users/_edgecoder IsHidden 1");
-    expect(commands).toContain("chown -R _edgecoder:_edgecoder /var/lib/edgecoder/ollama /var/log/edgecoder");
+    expect(commands).toContain("chown _edgecoder:_edgecoder /var/lib/edgecoder/ollama /var/log/edgecoder");
     expect(commands).toContain("install -d -o _edgecoder -g _edgecoder -m 0750 /var/lib/edgecoder/agent-0");
     // Env files (tokens) stay root's.
     expect(commands).toContain("chown -R root:wheel /etc/edgecoder");
@@ -149,7 +149,7 @@ describe("linux: systemd units are unprivileged and sandboxed", () => {
     const { h, commands, files } = host("linux", (cmd) => ({ code: cmd === "id" ? 1 : 0, stdout: "", stderr: "" }));
     applyPlan(plan, h, p, false);
     expect(commands).toContain("useradd --system --create-home --home-dir /var/lib/edgecoder --shell /usr/sbin/nologin edgecoder");
-    expect(commands).toContain("chown -R edgecoder:edgecoder /var/lib/edgecoder/ollama /var/log/edgecoder");
+    expect(commands).toContain("chown edgecoder:edgecoder /var/lib/edgecoder/ollama /var/log/edgecoder");
     expect(commands).toContain("chown -R root:root /etc/edgecoder");
     expect(commands).toContain("usermod -aG docker edgecoder");
     expect(files.get("/etc/edgecoder/agent-0.env")?.mode).toBe(0o600);

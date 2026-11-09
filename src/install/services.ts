@@ -291,7 +291,9 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
   if (platform === "linux") {
     if (run("id", ["-u", p.user]).code !== 0) run("useradd", ["--system", "--create-home", "--home-dir", p.stateDir, "--shell", "/usr/sbin/nologin", p.user]);
     // Models and logs only. /etc/edgecoder stays root's (lockConfigDir); agent HOMEs are systemd StateDirectory.
-    run("chown", ["-R", `${p.user}:${p.user}`, p.modelsDir, p.logDir]);
+    // The directories only, not -R: their contents are the service user's own files, and a recursive
+    // chown as root would also hand over any root-owned file the service user hard-linked in there.
+    run("chown", [`${p.user}:${p.user}`, p.modelsDir, p.logDir]);
     // The docker group is root-equivalent on the host: the price of the container sandbox (docs/install.md).
     if (plan.sandboxMode === "docker") run("usermod", ["-aG", "docker", p.user]);
   } else if (platform === "darwin") {
@@ -315,7 +317,9 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
       run("dscl", [".", "-create", `/Users/${u}`, "Password", "*"]);
       run("dscl", [".", "-create", `/Users/${u}`, "IsHidden", "1"]);
     }
-    run("chown", ["-R", `${u}:${u}`, p.modelsDir, p.logDir]);
+    // Not -R: macOS has no protected_hardlinks, so a hard link to a root file placed here by the
+    // service account would be chowned to it.
+    run("chown", [`${u}:${u}`, p.modelsDir, p.logDir]);
     for (const inst of plan.instances) run("install", ["-d", "-o", u, "-g", u, "-m", "0750", agentHome(p, inst)]);
   } else if (platform === "win32") {
     // The user's own tasks write models, logs and state; everything else under ProgramData\EdgeCoder is admin-only.
