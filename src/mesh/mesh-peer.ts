@@ -30,11 +30,24 @@ export interface PeerTableEntry {
   identity: MeshPeerIdentity;
   role: MeshPeerRole;
   lastSeenMs: number;
+  /**
+   * The entry came from the coordinator this peer bootstrapped from (its /identity, its
+   * /mesh/peers list, its peer_exchange) or from a caller-verified identity. Only trusted
+   * entries are gossip targets, so the mesh token is only sent to URLs the coordinator gave us.
+   */
+  trusted: boolean;
+}
+
+export interface AddPeerOptions {
+  /** See PeerTableEntry.trusted. A trusted add may replace an existing entry. */
+  trusted?: boolean;
 }
 
 export type MessageHandler = (message: MeshMessage) => Promise<void>;
 
 const MAX_PEER_EXCHANGE_ENTRIES = 50;
+/** Cap on entries learned from untrusted sources (/mesh/register-peer, peers' peer_exchange). */
+export const MAX_UNTRUSTED_PEERS = 256;
 
 export class MeshPeer {
   readonly identity: MeshPeerIdentity;
@@ -102,10 +115,11 @@ export class MeshPeer {
         });
         await regRes.body.text().catch(() => undefined);
 
-        // Add seed to our peer table + gossip
+        // Add seed to our peer table + gossip. Seeds are the configured coordinator URLs.
         this.addPeer(
           { peerId: remote.peerId, publicKeyPem: remote.publicKeyPem, coordinatorUrl: seedUrl, networkMode: remote.networkMode },
-          remote.role ?? "coordinator"
+          remote.role ?? "coordinator",
+          { trusted: true }
         );
 
         // Step 3: GET /mesh/peers from seed → learn about entire mesh
@@ -119,7 +133,8 @@ export class MeshPeer {
             const data = (await peersRes.body.json()) as { peers?: Array<MeshPeerIdentity & { role?: MeshPeerRole }> };
             for (const p of data.peers ?? []) {
               if (p.peerId !== this.config.peerId) {
-                this.addPeer(p, p.role ?? "coordinator");
+                // The coordinator's own list (it admits and URL-pins its peers).
+                this.addPeer(p, p.role ?? "coordinator", { trusted: true });
               }
             }
           } else {
@@ -131,7 +146,7 @@ export class MeshPeer {
 
         // Step 4: Register with each newly discovered peer
         for (const entry of this.peerTable.values()) {
-          if (entry.identity.peerId === remote.peerId) continue;
+          if (entry.identity.peerId === remote.peerId || !entry.trusted) continue;
           await this.registerWithPeer(entry.identity).catch(() => undefined);
         }
 
@@ -192,17 +207,27 @@ export class MeshPeer {
 
   private handlePeerExchange(message: MeshMessage): void {
     const payload = message.payload as unknown as PeerExchangePayload;
-    for (const p of payload.peers ?? []) {
-      if (p.peerId === this.config.peerId) continue;
+    // Entries are trusted only when a trusted coordinator sent the list; anything else (another
+    // agent, a self-registered peer) can name arbitrary URLs and must not become a gossip target.
+    const sender = this.peerTable.get(message.fromPeerId);
+    const fromCoordinator = sender?.trusted === true && sender.role === "coordinator";
+    const peers = Array.isArray(payload.peers) ? payload.peers.slice(0, MAX_PEER_EXCHANGE_ENTRIES) : [];
+    for (const p of peers) {
+      if (!p || typeof p.peerId !== "string" || p.peerId === this.config.peerId) continue;
       const existing = this.peerTable.get(p.peerId);
       if (existing) {
-        existing.lastSeenMs = Math.max(existing.lastSeenMs, p.lastSeenMs);
-      } else {
-        this.addPeer(
-          { peerId: p.peerId, publicKeyPem: p.publicKeyPem, coordinatorUrl: p.peerUrl, networkMode: p.networkMode },
-          p.role
-        );
+        // Only the coordinator's view keeps another entry alive.
+        if (fromCoordinator && Number.isFinite(p.lastSeenMs)) {
+          existing.lastSeenMs = Math.max(existing.lastSeenMs, Math.min(p.lastSeenMs, Date.now()));
+        }
+        continue;
       }
+      if (typeof p.publicKeyPem !== "string" || typeof p.peerUrl !== "string") continue;
+      this.addPeer(
+        { peerId: p.peerId, publicKeyPem: p.publicKeyPem, coordinatorUrl: p.peerUrl, networkMode: p.networkMode },
+        p.role,
+        { trusted: fromCoordinator }
+      );
     }
   }
 
@@ -277,14 +302,48 @@ export class MeshPeer {
 
   // ── Peer Table ──
 
-  addPeer(identity: MeshPeerIdentity, role: MeshPeerRole): void {
-    if (identity.peerId === this.config.peerId) return;
+  /**
+   * Add a peer. An untrusted add (the default: /mesh/register-peer, a peer's peer_exchange) never
+   * replaces an existing entry, is recorded as role "agent", is capped at MAX_UNTRUSTED_PEERS and
+   * is not a gossip target: its key only verifies the messages it sends us. Returns false when
+   * the add is refused.
+   */
+  addPeer(identity: MeshPeerIdentity, role: MeshPeerRole, opts: AddPeerOptions = {}): boolean {
+    if (identity.peerId === this.config.peerId) return false;
+    const trusted = opts.trusted === true;
+    const existing = this.peerTable.get(identity.peerId);
+    if (!trusted) {
+      if (existing) {
+        const same =
+          existing.identity.publicKeyPem.trim() === identity.publicKeyPem.trim() &&
+          existing.identity.coordinatorUrl === identity.coordinatorUrl;
+        if (same) existing.lastSeenMs = Date.now();
+        return same;
+      }
+      let untrusted = 0;
+      for (const e of this.peerTable.values()) if (!e.trusted) untrusted++;
+      if (untrusted >= MAX_UNTRUSTED_PEERS) return false;
+    }
     this.peerTable.set(identity.peerId, {
       identity,
-      role,
-      lastSeenMs: Date.now()
+      role: trusted ? role : "agent",
+      lastSeenMs: Date.now(),
+      trusted
     });
-    this.gossip.addPeer(identity);
+    if (trusted) this.gossip.addPeer(identity);
+    return true;
+  }
+
+  /**
+   * Whether an ingested message came from `expected` (e.g. the worker's verified coordinator).
+   * handleIngest checks the signature against the table entry's key, so the sender is `expected`
+   * only when the id matches and the key on file is `expected`'s key: a self-registered entry
+   * squatting the id fails here.
+   */
+  isFromIdentity(message: Pick<MeshMessage, "fromPeerId">, expected: { peerId: string; publicKeyPem: string } | null | undefined): boolean {
+    if (!expected || message.fromPeerId !== expected.peerId) return false;
+    const entry = this.peerTable.get(message.fromPeerId);
+    return entry !== undefined && entry.identity.publicKeyPem.trim() === expected.publicKeyPem.trim();
   }
 
   removePeer(peerId: string): void {

@@ -87,11 +87,16 @@ export class MeshHttpServer {
       if (!this.requireMeshToken(req as any)) {
         return reply.code(401).send({ error: "mesh_unauthorized" });
       }
-      const body = peerSchema.parse(req.body);
-      meshPeer.addPeer(
+      const parsed = peerSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid_peer" });
+      const body = parsed.data;
+      // Untrusted add: it cannot replace an existing entry (the coordinator's included), is not a
+      // gossip target, and is capped (MeshPeer.addPeer).
+      const added = meshPeer.addPeer(
         { peerId: body.peerId, publicKeyPem: body.publicKeyPem, coordinatorUrl: body.coordinatorUrl, networkMode: body.networkMode },
         body.role ?? "agent"
       );
+      if (!added) return reply.code(409).send({ error: "peer_refused" });
       return { ok: true, peerCount: meshPeer.peerCount() };
     });
 
