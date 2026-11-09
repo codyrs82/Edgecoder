@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 import UIKit
 
 enum SwarmRuntimeState: String {
@@ -96,8 +97,8 @@ final class SwarmRuntimeController: ObservableObject {
         } else {
             agentId = Self.defaultIosAgentId()
         }
-        registrationToken = UserDefaults.standard.string(forKey: DefaultsKey.registrationToken) ?? ""
-        meshToken = UserDefaults.standard.string(forKey: DefaultsKey.meshToken) ?? ""
+        registrationToken = RuntimeSecretStore.load(DefaultsKey.registrationToken)
+        meshToken = RuntimeSecretStore.load(DefaultsKey.meshToken)
         if let value = UserDefaults.standard.string(forKey: DefaultsKey.coordinatorURL), !value.isEmpty {
             // Migrate away from defunct coordinator URLs that no longer resolve.
             let defunct = [
@@ -212,27 +213,6 @@ final class SwarmRuntimeController: ObservableObject {
         bleMeshManager.taskHandler = { prompt in
             await mgr.generate(prompt: prompt, maxTokens: 512)
         }
-
-        // One-time BLE outbound task test: wait for peer discovery, then send a task to Mac
-        Task { [weak self] in
-            guard let self else { return }
-            // Wait for peer discovery (up to 30s)
-            for _ in 0..<30 {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if !self.bleMeshManager.discoveredPeers.isEmpty { break }
-            }
-            guard let macPeer = self.bleMeshManager.discoveredPeers.first else {
-                self.appendEvent("[BLE-TEST] no BLE peers discovered, skipping outbound test")
-                return
-            }
-            self.appendEvent("[BLE-TEST] sending task to \(macPeer.agentId) over BLE...")
-            let result = await self.bleMeshManager.sendTask(
-                toAgentId: macPeer.agentId,
-                prompt: "Write a Python function called fibonacci(n) that returns a list of the first n Fibonacci numbers. Include a docstring.",
-                tag: "test"
-            )
-            self.appendEvent("[BLE-TEST] response from \(macPeer.agentId): ok=\(result.ok), output=\(result.output.prefix(150))")
-        }
     }
 
     func pause() {
@@ -325,8 +305,8 @@ final class SwarmRuntimeController: ObservableObject {
 
     func persistRuntimeSettings() {
         UserDefaults.standard.set(agentId, forKey: DefaultsKey.agentId)
-        UserDefaults.standard.set(registrationToken, forKey: DefaultsKey.registrationToken)
-        UserDefaults.standard.set(meshToken, forKey: DefaultsKey.meshToken)
+        RuntimeSecretStore.save(registrationToken, for: DefaultsKey.registrationToken)
+        RuntimeSecretStore.save(meshToken, for: DefaultsKey.meshToken)
         UserDefaults.standard.set(selectedCoordinatorURL, forKey: DefaultsKey.coordinatorURL)
         UserDefaults.standard.set(runOnlyWhileCharging, forKey: DefaultsKey.runOnlyWhileCharging)
         UserDefaults.standard.set(diagnosticsUploadEnabled, forKey: DefaultsKey.diagnosticsUploadEnabled)
@@ -679,5 +659,54 @@ final class SwarmRuntimeController: ObservableObject {
             "modelState": modelManager.state.rawValue
         ]
         _ = try? await postCoordinator(path: "/agent/diagnostics", payload: payload)
+    }
+}
+
+/// The registration and mesh tokens are bearer secrets: they live in the Keychain
+/// (AfterFirstUnlockThisDeviceOnly, so background heartbeats can read them and backups never carry
+/// them), not in UserDefaults. A value an older build left in UserDefaults is moved on first read.
+private enum RuntimeSecretStore {
+    private static let service = "io.edgecoder.ios.runtime-tokens"
+
+    static func load(_ key: String) -> String {
+        var query = baseQuery(key)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+           let data = item as? Data,
+           let value = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.removeObject(forKey: key)
+            return value
+        }
+        let legacy = UserDefaults.standard.string(forKey: key) ?? ""
+        if !legacy.isEmpty { save(legacy, for: key) }
+        return legacy
+    }
+
+    /// Stores `value` (an empty value deletes it); the UserDefaults copy is removed once the Keychain has it.
+    static func save(_ value: String, for key: String) {
+        guard !value.isEmpty else {
+            SecItemDelete(baseQuery(key) as CFDictionary)
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        let data = Data(value.utf8)
+        var add = baseQuery(key)
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        var status = SecItemAdd(add as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            status = SecItemUpdate(baseQuery(key) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        }
+        if status == errSecSuccess { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    private static func baseQuery(_ key: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+        ]
     }
 }
