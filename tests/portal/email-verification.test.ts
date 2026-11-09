@@ -63,6 +63,7 @@ function build() {
     deleteOauthLinksForUser: vi.fn(async (id: string) => dropUser(links, id, (v) => v)),
     deleteGitHubToken: vi.fn(async (id: string) => void githubTokens.delete(id))
   };
+  const verifyPasswordSpy = vi.fn(verifyPassword);
   const app = Fastify();
   registerAuthRoutes(app, {
     store,
@@ -75,7 +76,7 @@ function build() {
     decodeJwtPayload,
     sha256Hex,
     hashPassword,
-    verifyPassword,
+    verifyPassword: verifyPasswordSpy,
     clearCookies: () => [],
     ensureCreditAccountForUser: async () => {},
     sendVerificationEmail: async (email: string, token: string) => void sent.push(`${email} ${token}`),
@@ -106,7 +107,7 @@ function build() {
     verifications.set(sha256Hex(token), { userId: "u1", consumed: false, createdAtMs: Date.now() });
     return token;
   };
-  return { app, users, sessions, apiKeys, passkeys, links, githubTokens, verifications, sent, seed };
+  return { app, users, sessions, apiKeys, passkeys, links, githubTokens, verifications, sent, seed, verifyPasswordSpy };
 }
 
 describe("email verification link", () => {
@@ -203,5 +204,42 @@ describe("verification rate limit", () => {
   it("POST /auth/verify-email (password check) is in the per-IP auth bucket", async () => {
     const { rateLimitFor, AUTH_RATE_LIMIT } = await import("../../src/portal/security.js");
     expect(rateLimitFor("/auth/verify-email", "POST")).toEqual(AUTH_RATE_LIMIT);
+  });
+});
+
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
+describe("resend verification and login do not reveal accounts", () => {
+  it("answers the same for an unknown, an unverified and a verified address", async () => {
+    const ctx = build();
+    ctx.users.set("v", { userId: "v", email: "verified@example.test", emailVerified: true, role: "user" });
+    ctx.users.set("n", { userId: "n", email: "pending@example.test", emailVerified: false, role: "user" });
+    const bodies = [];
+    for (const email of ["nobody@example.test", "verified@example.test", "pending@example.test"]) {
+      const res = await ctx.app.inject({ method: "POST", url: "/auth/resend-verification", payload: { email } });
+      expect(res.statusCode).toBe(200);
+      bodies.push(res.body);
+    }
+    expect(new Set(bodies).size).toBe(1);
+    await settle();
+    expect(ctx.sent.map((x) => x.split(" ")[0])).toEqual(["pending@example.test"]);
+  });
+
+  it("caps verification emails per account", async () => {
+    const ctx = build();
+    ctx.users.set("n", { userId: "n", email: "pending@example.test", emailVerified: false, role: "user" });
+    for (let i = 0; i < 10; i++) {
+      await ctx.app.inject({ method: "POST", url: "/auth/resend-verification", payload: { email: "pending@example.test" } });
+      await settle();
+    }
+    const { EMAIL_VERIFY_MAX_PER_WINDOW } = await import("../../src/portal/routes/auth.js");
+    expect(ctx.sent).toHaveLength(EMAIL_VERIFY_MAX_PER_WINDOW);
+  });
+
+  it("login runs a password check even when the account does not exist", async () => {
+    const ctx = build();
+    const res = await ctx.app.inject({ method: "POST", url: "/auth/login", payload: { email: "nobody@example.test", password: "whatever-1" } });
+    expect(res.statusCode).toBe(401);
+    expect(ctx.verifyPasswordSpy).toHaveBeenCalledTimes(1);
   });
 });

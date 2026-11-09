@@ -23,11 +23,23 @@ import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from
 import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 
+/** Verification emails per account per window (signup's own email counts); on top of the per-IP route limit. */
+export const EMAIL_VERIFY_MAX_PER_WINDOW = 4;
+export const EMAIL_VERIFY_WINDOW_MS = 60 * 60 * 1000;
+/** The only answer /auth/resend-verification gives, whatever the state of the address. */
+export const RESEND_VERIFICATION_RESPONSE = {
+  ok: true,
+  message: "If an unverified account exists for that email, we sent it a verification link."
+} as const;
+
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
+  // Login checks a password against this when the account is missing or has no password, so the
+  // response takes as long as a real check and does not reveal which accounts exist.
+  let dummyPasswordHash: string | undefined;
   app.get("/auth/capabilities", async () => {
     const oauthGoogleConfigured = Boolean(oauthProviders.google.clientId && oauthProviders.google.clientSecret);
     const oauthMicrosoftConfigured = Boolean(oauthProviders.microsoft.clientId && oauthProviders.microsoft.clientSecret);
@@ -90,7 +102,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ email: z.string().email(), password: z.string().min(1) }).parse(req.body);
     const user = await store.getUserByEmail(normalizeEmail(body.email));
-    if (!user || !user.passwordHash || !verifyPassword(body.password, user.passwordHash)) {
+    if (!user || !user.passwordHash) {
+      dummyPasswordHash ??= hashPassword(randomUUID());
+      verifyPassword(body.password, dummyPasswordHash);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    if (!verifyPassword(body.password, user.passwordHash)) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
@@ -157,22 +174,28 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     return reply.send({ ok: true, sessionToken });
   });
 
-  app.post("/auth/resend-verification", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const body = z.object({ email: z.string().email() }).parse(req.body);
-    const user = await store.getUserByEmail(normalizeEmail(body.email));
+  async function handleResend(email: string): Promise<void> {
+    const user = await store!.getUserByEmail(email);
     // Agent accounts have no deliverable email.
-    if (!user || isAgentPlaceholderEmail(user.email)) return reply.send({ ok: true });
-    if (user.emailVerified) return reply.send({ ok: true, alreadyVerified: true });
+    if (!user || user.emailVerified || isAgentPlaceholderEmail(user.email)) return;
+    if ((await store!.countRecentEmailVerifications(user.userId, Date.now() - EMAIL_VERIFY_WINDOW_MS)) >= EMAIL_VERIFY_MAX_PER_WINDOW) return;
     const verifyToken = randomUUID();
-    await store.createEmailVerification({
+    await store!.createEmailVerification({
       tokenId: randomUUID(),
       userId: user.userId,
       tokenHash: sha256Hex(verifyToken),
       expiresAtMs: Date.now() + EMAIL_VERIFY_TTL_MS
     });
     await sendVerificationEmail(user.email, verifyToken);
-    return reply.send({ ok: true });
+  }
+
+  app.post("/auth/resend-verification", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const body = z.object({ email: z.string().email() }).parse(req.body);
+    // Same answer, and same timing (not awaited), whether the address has an account, is already
+    // verified or has reached its per-account limit.
+    handleResend(normalizeEmail(body.email)).catch((err) => req.log.error({ err }, "verification resend failed"));
+    return reply.send(RESEND_VERIFICATION_RESPONSE);
   });
 
   app.get("/auth/oauth/apple/start", async (_req, reply) => {
