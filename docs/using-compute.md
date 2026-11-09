@@ -136,7 +136,7 @@ The hosted endpoint serves the same OpenAI and Anthropic routes and suits server
 
 `GET /v1/models` lists what's available. With the same key, `GET /v1/account` returns your balance and recent usage, `GET /v1/account/usage?days=N` the usage records, and `/v1/account/reservations` lists, creates and cancels reservations.
 
-On the desktop, `http://localhost:4304/v1` with this computer's key (under "Other ways in") reaches every model on one address, chosen by the same model names plus local model tags.
+On the desktop, `http://127.0.0.1:4304/v1` with this computer's key (under "Other ways in") reaches every model on one address, chosen by the same model names plus local model tags.
 
 ## Persistent bots
 
