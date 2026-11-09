@@ -8,7 +8,8 @@
  * project file into a foreign page). GET only, no directory listings, project files only.
  */
 
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { ProjectFs } from "./project-fs.js";
@@ -51,13 +52,34 @@ export function createPreviewServer(projectRoot: () => string | null, key = rand
       res.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
       res.end(body);
     };
+    // A throw here would be uncaught and end the whole IDE server process.
+    try {
+      handle(req, res, send);
+    } catch {
+      if (!res.headersSent) send(400, "bad request");
+      else res.destroy();
+    }
+  });
+
+  const handle = (req: IncomingMessage, res: ServerResponse, send: (status: number, body: string) => void) => {
     if (req.method !== "GET" && req.method !== "HEAD") return send(405, "method not allowed");
-    const url = new URL(req.url ?? "/", "http://preview");
+    // Loopback Host only (DNS rebinding), and the key before anything parses the URL.
+    const port = (server.address() as AddressInfo | null)?.port;
+    const host = (req.headers.host ?? "").toLowerCase();
+    if (!port || !["127.0.0.1", "localhost", "[::1]"].some((h) => host === `${h}:${port}`)) return send(403, "forbidden");
     const prefix = `/p/${key}/`;
+    if (!(req.url ?? "").startsWith(prefix)) return send(404, "not found");
+    let url: URL;
+    let rel: string;
+    try {
+      url = new URL(req.url ?? "/", "http://preview");
+      rel = decodeURIComponent(url.pathname.slice(prefix.length));
+    } catch {
+      return send(400, "bad request");
+    }
     if (!url.pathname.startsWith(prefix)) return send(404, "not found");
     const root = projectRoot();
     if (!root) return send(409, "no project open");
-    let rel = decodeURIComponent(url.pathname.slice(prefix.length));
     if (rel === "" || rel.endsWith("/")) rel += "index.html";
     const fs = new ProjectFs(root);
     let abs: string;
@@ -82,7 +104,7 @@ export function createPreviewServer(projectRoot: () => string | null, key = rand
       "content-security-policy": "frame-ancestors tauri://localhost http://tauri.localhost http://localhost:1420 http://localhost:1499",
     });
     res.end(req.method === "HEAD" ? undefined : body);
-  });
+  };
   return {
     server,
     key,
