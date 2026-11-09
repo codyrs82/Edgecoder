@@ -30,6 +30,8 @@ export class RobotQueue {
   }): RobotAgent {
     if (!input.payoutAddress) throw new Error("payout_address_required");
     const existing = this.agents.get(input.agentId);
+    // Registration is not signed (mesh token only), so it may not redirect an existing agent's payouts.
+    if (existing && existing.payoutAddress !== input.payoutAddress) throw new Error("payout_address_locked");
     const agent: RobotAgent = {
       agentId: input.agentId,
       payoutAddress: input.payoutAddress,
