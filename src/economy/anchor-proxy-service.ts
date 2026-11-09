@@ -5,6 +5,7 @@ import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
 import { buildAnchorProxyApp } from "./anchor-proxy-app.js";
+import { rpcHostForLog } from "./anchor-proxy-health.js";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
@@ -60,7 +61,7 @@ await registerErrorTracking(app, "anchor-proxy");
 
 app.listen({ port: PORT, host: LISTEN_HOST }).then((address) => {
   console.log(`[anchor-proxy] listening on ${address}`);
-  console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${BITCOIND_RPC_URL} wallet=${BITCOIND_WALLET_NAME}`);
+  console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${rpcHostForLog(BITCOIND_RPC_URL)} wallet=${BITCOIND_WALLET_NAME}`);
 }).catch((err) => {
   console.error("Failed to start anchor proxy:", err);
   process.exit(1);

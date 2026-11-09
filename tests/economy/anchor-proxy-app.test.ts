@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildAnchorProxyApp, type AnchorProxyOptions } from "../../src/economy/anchor-proxy-app.js";
 
@@ -74,5 +75,15 @@ describe("anchor proxy reconciliation routes (#103/#116)", () => {
     expect((await a.inject({ ...routes[2], headers: AUTH })).statusCode).toBe(429);
     t = 60_001;
     expect((await a.inject({ ...routes[2], headers: AUTH })).statusCode).toBe(200);
+  });
+});
+
+describe("anchor proxy startup log", () => {
+  it("logs the bitcoind RPC host only, never the raw URL (which may carry user:pass)", () => {
+    const src = readFileSync(new URL("../../src/economy/anchor-proxy-service.ts", import.meta.url), "utf8");
+    const startup = src.split("\n").filter((l) => l.includes("console.log") && l.includes("rpc="));
+    expect(startup).toHaveLength(1);
+    expect(startup[0]).toContain("rpc=${rpcHostForLog(BITCOIND_RPC_URL)}");
+    expect(src).not.toMatch(/\$\{BITCOIND_RPC_URL\}/);
   });
 });

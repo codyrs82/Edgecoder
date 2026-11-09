@@ -45,6 +45,25 @@ export interface PayInvoiceResult {
   error?: string;
 }
 
+/**
+ * Whether a failed payInvoice result is a failure the node reported as final, so the payout can
+ * be marked failed and its balance freed. Anything else (transport errors, HTTP errors that a
+ * proxy may have produced, unreadable bodies, a CLN `pay` that is still pending, LND saying the
+ * hash is already paid or in flight) is unconfirmed: the HTLC may still settle, so the payout
+ * stays pending until the node's record of that payment hash says otherwise.
+ */
+export function payFailureIsFinal(error: string | undefined): boolean {
+  if (!error) return false;
+  // Refused before anything was sent (kill switch in front of the provider).
+  if (error === "payouts_paused") return true;
+  // LND SendPaymentSync answered 2xx with payment_error: the payment attempt is over, except when
+  // the error says an earlier payment of this hash succeeded or is still in flight.
+  if (error.startsWith("lnd_pay_error:")) return !/already paid|in transition|in.flight|already exists/i.test(error);
+  // Core Lightning answered 2xx with status "failed".
+  if (error === "cln_pay_status:failed") return true;
+  return false;
+}
+
 export interface LightningProvider {
   createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult>;
   /**

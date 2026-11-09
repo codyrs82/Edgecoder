@@ -35,7 +35,7 @@ describe("validatePayoutRequest", () => {
 
 describe("PayoutService.withdraw", () => {
   function setup(earned: number, received: number, pay: (i: PayInvoiceInput) => PayInvoiceResult) {
-    const store = new MemoryPayoutStore(() => earned);
+    const store = new MemoryPayoutStore(() => earned, () => earned / 1000);
     store.received = received;
     const paid: string[] = [];
     const svc = new PayoutService({ store, provider: provider(pay), policy, coordinatorId: "coord", feePoolAccountId: "network:fee_pool", onPaid: async (p) => { paid.push(p.payoutId); } });
@@ -72,7 +72,7 @@ describe("PayoutService.withdraw", () => {
     const t = setup(10_000_000, 100_000_000, () => ({ status: "failed", error: "lnd_pay_transport:timeout" }));
     expect(await t.svc.withdraw("acct", b.bolt11)).toMatchObject({ ok: false, code: "payout_unconfirmed" });
     expect([...t.store.payouts.values()][0].status).toBe("pending");
-    expect((await t.svc.balance("acct")).payableMsat).toBe(10_000_000 - 2_000_000 - 0); // pending counts against payable
+    expect((await t.svc.balance("acct")).payableMsat).toBe(10_000_000 - 2_000_000 - 20_000); // pending counts against payable at its fee cap (the credit debit)
   });
 
   it("a preimage that does not match the invoice is not accepted as paid", async () => {
@@ -102,7 +102,7 @@ describe("auto payouts over LNURL-pay", () => {
     expect(got.decoded.amountMsat).toBe(5_000_000);
     await expect(requestLnurlInvoice("cody@example.com", 5_000_000, fetcher, "bitcoin")).rejects.toThrow(/wrong_network/);
 
-    const store = new MemoryPayoutStore(() => 50_000_000); // 50k sats earned
+    const store = new MemoryPayoutStore(() => 50_000_000, () => 50_000); // 50k sats earned
     store.received = 1_000_000_000;
     store.autoAccounts.set("acct", "cody@example.com");
     const svc = new PayoutService({ store, provider: provider(() => ({ status: "succeeded", preimage, feeMsat: 100 })), policy, coordinatorId: "c", feePoolAccountId: "pool", fetcher });
@@ -115,7 +115,7 @@ describe("auto payouts over LNURL-pay", () => {
     // amount leaves room for the fee cap: (50,000,000 / 1.01) - 10,000 msat floor
     expect(p.amountMsat).toBe(Math.floor(50_000_000 / 1.01) - 10_000);
     // below the auto minimum nothing is paid
-    const small = new MemoryPayoutStore(() => 1_000_000);
+    const small = new MemoryPayoutStore(() => 1_000_000, () => 1_000);
     small.autoAccounts.set("acct", "cody@example.com");
     const svc2 = new PayoutService({ store: small, provider: provider(() => ({ status: "succeeded" })), policy, coordinatorId: "c", feePoolAccountId: "pool", fetcher });
     expect(await svc2.runAutoPayouts()).toEqual([]);
@@ -169,7 +169,9 @@ describe("fee pool distribution to infrastructure hosts", () => {
     const r = await svc.distributeFeePool(100);
     expect(r.distributedMsat).toBe(999_999); // floors: 333,333 + 666,666
     expect(await store.earnedMsat("host:b")).toBe(666_666);
-    expect(await store.creditBalance("pool")).toBeCloseTo(10 - 9.99999, 4);
+    // Hosts get cSats equal to the sats paid (1 cSat = 1 sat) so they can withdraw them; the pool may go below zero in cSats.
+    expect(await store.creditBalance("host:b")).toBeCloseTo(666.666, 6);
+    expect(await store.creditBalance("pool")).toBeCloseTo(10 - 999.999, 6);
     expect([...store.hosts.values()].every((h) => h.heartbeatsInWindow === 0)).toBe(true);
     // Nothing left to distribute on the next run.
     expect((await svc.distributeFeePool(100)).distributedMsat).toBe(0);

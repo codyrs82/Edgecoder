@@ -291,7 +291,7 @@ export function probeElectrum(host: string, port: number, timeoutMs?: number): P
 /*  Coordinator identity                                               */
 /* ------------------------------------------------------------------ */
 
-export type IdentityFetcher = (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+export type IdentityFetcher = (url: string, init: { signal: AbortSignal; redirect: "manual" }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 /** The host's /identity must name `hostId` with the key its heartbeat was signed with. */
 export async function probeCoordinatorIdentity(
@@ -302,7 +302,8 @@ export async function probeCoordinatorIdentity(
   timeoutMs = DEFAULT_PROBE_TIMEOUT_MS
 ): Promise<ProbeResult> {
   try {
-    const res = await fetcher(`${coordinatorUrl.replace(/\/+$/, "")}/identity`, { signal: AbortSignal.timeout(timeoutMs) });
+    // No redirects: the URL was checked when the host was admitted, a redirect target was not.
+    const res = await fetcher(`${coordinatorUrl.replace(/\/+$/, "")}/identity`, { signal: AbortSignal.timeout(timeoutMs), redirect: "manual" });
     if (!res.ok) return { ok: false, detail: `identity_http_${res.status}` };
     const body = (await res.json()) as { peerId?: unknown; publicKeyPem?: unknown };
     if (body?.peerId !== hostId || typeof body.publicKeyPem !== "string") return { ok: false, detail: "identity_peer_mismatch" };

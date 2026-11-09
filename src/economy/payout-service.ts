@@ -3,15 +3,21 @@
 
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../common/types.js";
-import type { LightningProvider } from "./lightning.js";
+import { payFailureIsFinal, type LightningProvider } from "./lightning.js";
 import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
 import type { ReconcileLedger } from "./payout-reconcile.js";
 import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck } from "./lnurl-callback-pin.js";
 import {
+  creditsToMsat,
   distributeFeePool,
-  payableMsat,
+  msatToCredits,
   payoutCapacityMsat,
+  payoutDebitTxId,
+  payoutFeeExcessTxId,
+  payoutRefundTxId,
+  payoutSettlementRefundMsat,
   preimageMatches,
+  withdrawableMsat,
   requestLnurlInvoice,
   resolveLnurlCallback,
   validatePayoutRequest,
@@ -79,7 +85,15 @@ export class MemoryPayoutStore implements PayoutStore {
   readonly autoAccounts = new Map<string, string>();
   readonly rows: CreditTransaction[] = [];
   received = 0;
-  constructor(private readonly earned: (accountId: string) => number) {}
+  private reserving: Promise<unknown> = Promise.resolve();
+  /**
+   * `earned`: msat earned outside this store's rows. `credits`: credit balance held outside them
+   * (added to the rows' balance); a subclass may override creditBalance instead.
+   */
+  constructor(
+    private readonly earned: (accountId: string) => number,
+    private readonly credits: (accountId: string) => number = () => 0
+  ) {}
   async earnedMsat(accountId: string): Promise<number> {
     return this.earned(accountId) + this.rows.filter((r) => r.accountId === accountId && r.type === "earn").reduce((s, r) => s + (r.msat ?? 0), 0);
   }
@@ -93,10 +107,17 @@ export class MemoryPayoutStore implements PayoutStore {
   }
   private pause: PayoutPauseState | null = null;
   private poolLock = false;
-  async reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+  /** One reservation at a time in this process (the reads below are async). */
+  reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+    const run = this.reserving.then(() => this.reserveLocked(payout, capacityMsat, limits));
+    this.reserving = run.catch(() => undefined);
+    return run;
+  }
+  private async reserveLocked(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
     if ([...this.payouts.values()].some((p) => p.paymentHash === payout.paymentHash)) return { ok: false as const, code: "duplicate_invoice" as const };
-    const payable = payableMsat(await this.earnedMsat(payout.accountId), await this.payoutsTotalMsat({ accountId: payout.accountId, statuses: ["paid", "pending"] }));
-    if (payout.amountMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
+    const accountOut = [...this.payouts.values()].filter((p) => p.accountId === payout.accountId && (p.status === "paid" || p.status === "pending")).reduce((s, p) => s + rowOutflowMsat(p), 0);
+    const payable = withdrawableMsat(await this.earnedMsat(payout.accountId), accountOut, await this.creditBalance(payout.accountId));
+    if (payout.amountMsat + payout.maxFeeMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
     if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(await this.payoutsTotalMsat({ statuses: ["paid", "pending"] }))) return { ok: false as const, code: "coordinator_capacity" as const };
     if (limits) {
       // Synchronous from here to the insert, so concurrent in-process reservations cannot both pass.
@@ -108,13 +129,23 @@ export class MemoryPayoutStore implements PayoutStore {
       if (violation) return { ok: false as const, code: violation.code, violation };
     }
     this.payouts.set(payout.payoutId, { ...payout, status: "pending" });
+    const debit = payoutDebitTxId(payout.payoutId);
+    this.rows.push({ txId: debit, accountId: payout.accountId, type: "spend", credits: msatToCredits(payout.amountMsat + payout.maxFeeMsat), reason: debit, timestampMs: payout.createdAtMs });
     return { ok: true as const };
   }
   async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }) {
     const p = this.payouts.get(payoutId);
     if (!p || p.status !== "pending") return;
-    if (outcome.status === "paid") Object.assign(p, { status: "paid", feeMsat: outcome.feeMsat, preimage: outcome.preimage, settledAtMs: Date.now() });
-    else Object.assign(p, { status: "failed", error: outcome.error, settledAtMs: Date.now() });
+    const now = Date.now();
+    if (outcome.status === "paid") Object.assign(p, { status: "paid", feeMsat: Math.max(0, Math.floor(outcome.feeMsat)), preimage: outcome.preimage, settledAtMs: now });
+    else Object.assign(p, { status: "failed", error: outcome.error, settledAtMs: now });
+    const debit = this.rows.find((r) => r.txId === payoutDebitTxId(payoutId));
+    if (!debit) return;
+    const back = payoutSettlementRefundMsat(creditsToMsat(debit.credits), outcome.status === "paid" ? { status: "paid", amountMsat: p.amountMsat, feeMsat: p.feeMsat } : { status: "failed" });
+    if (back === 0) return;
+    const txId = back > 0 ? payoutRefundTxId(payoutId) : payoutFeeExcessTxId(payoutId);
+    if (this.rows.some((r) => r.txId === txId)) return;
+    this.rows.push({ txId, accountId: p.accountId, type: back > 0 ? "earn" : "spend", credits: msatToCredits(Math.abs(back)), reason: txId, timestampMs: now });
   }
   async listPayouts(accountId: string, limit = 50) {
     return [...this.payouts.values()].filter((p) => p.accountId === accountId).sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, limit);
@@ -132,7 +163,7 @@ export class MemoryPayoutStore implements PayoutStore {
     this.rows.push(...rows);
   }
   async creditBalance(accountId: string) {
-    return this.rows.filter((r) => r.accountId === accountId).reduce((s, r) => s + (r.type === "spend" ? -r.credits : r.credits), 0);
+    return this.credits(accountId) + this.rows.filter((r) => r.accountId === accountId).reduce((s, r) => s + (r.type === "spend" ? -r.credits : r.credits), 0);
   }
   async distributedMsat(accountId: string) {
     return this.rows.filter((r) => r.accountId === accountId && r.type === "spend").reduce((s, r) => s + (r.msat ?? 0), 0);
@@ -220,18 +251,20 @@ export class PayoutService {
   constructor(private readonly d: PayoutServiceDeps) {}
 
   async balance(accountId: string): Promise<{ earnedMsat: number; paidMsat: number; pendingMsat: number; payableMsat: number; capacityMsat: number }> {
-    const [earned, paid, pending, received, allOut] = await Promise.all([
+    const [earned, paid, pending, received, allOut, credits] = await Promise.all([
       this.d.store.earnedMsat(accountId),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["paid"] }),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["pending"] }),
       this.d.store.receivedPurchaseMsat(),
-      this.d.store.payoutsTotalMsat({ statuses: ["paid", "pending"] })
+      this.d.store.payoutsTotalMsat({ statuses: ["paid", "pending"] }),
+      this.d.store.creditBalance(accountId)
     ]);
     return {
       earnedMsat: earned,
       paidMsat: paid,
       pendingMsat: pending,
-      payableMsat: payableMsat(earned, paid + pending),
+      // Never more than the credit balance: earnings already spent as cSats are not withdrawable.
+      payableMsat: withdrawableMsat(earned, paid + pending, credits),
       capacityMsat: payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy)
     };
   }
@@ -284,11 +317,16 @@ export class PayoutService {
       }
       const res = await this.d.provider.payInvoice({ bolt11, maxFeeSats: Math.ceil(v.maxFeeMsat / 1000), timeoutSeconds: 60 });
       if (res.status !== "succeeded") {
-        // Transport errors may leave an in-flight HTLC; the row stays pending for reconciliation.
-        const transport = /transport/.test(res.error ?? "");
-        if (!transport) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
-        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, transport }, "payout_failed");
-        return { ok: false, code: transport ? "payout_unconfirmed" : "payout_failed", detail: res.error };
+        // Only a failure the node reported as final frees the balance. Anything else may leave an
+        // HTLC in flight, so the row (and its credit debit) stays pending for reconciliation.
+        const final = payFailureIsFinal(res.error);
+        if (final) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
+        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, final }, "payout_failed");
+        return { ok: false, code: final ? "payout_failed" : "payout_unconfirmed", detail: res.error };
+      }
+      if (res.paymentHash && res.paymentHash.toLowerCase() !== payout.paymentHash.toLowerCase()) {
+        this.d.log?.warn({ payoutId: payout.payoutId, nodePaymentHash: res.paymentHash }, "payout_hash_mismatch");
+        return { ok: false, code: "payout_unconfirmed", detail: "node paid a different payment hash than the invoice's; left pending for reconciliation" };
       }
       if (res.preimage && !preimageMatches(payout.paymentHash, res.preimage)) {
         this.d.log?.warn({ payoutId: payout.payoutId }, "payout_preimage_mismatch");
@@ -408,20 +446,22 @@ export class PayoutService {
 
   private async distributeFeePoolLocked(expectedHeartbeats: number): Promise<FeePoolDistribution> {
     const now = this.d.now ?? Date.now;
-    const [poolCredits, poolMsat] = await Promise.all([this.d.store.creditBalance(this.d.feePoolAccountId), this.d.store.earnedMsat(this.d.feePoolAccountId)]);
+    const poolMsat = await this.d.store.earnedMsat(this.d.feePoolAccountId);
     const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);
     const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut);
     const hosts = await this.d.store.listInfrastructureHosts();
     const shares = distributeFeePool(availableMsat, hosts, expectedHeartbeats);
     const totalMsat = shares.reduce((s, h) => s + h.msat, 0);
     if (shares.length === 0 || totalMsat <= 0) return { distributedMsat: 0, hosts: [] };
-    // Purchase fees arrive as sats without credits; accrual fees carry both. Credits follow the sats pro rata.
-    const creditsPerMsat = poolCredits > 0 ? poolCredits / Math.max(1, availableMsat) : 0;
+    // Hosts get cSats equal to the sats they are paid (1 cSat = 1 sat). Withdrawals are capped at the
+    // credit balance, so a host paid sats without matching cSats could not withdraw them. Purchase
+    // fees reach the pool as sats without cSats, so the pool's own cSat balance may go below zero;
+    // its sats (earn msat − spend msat) stay the measure of what it holds.
     const ts = now();
     const rows: CreditTransaction[] = [];
-    rows.push({ txId: randomUUID(), accountId: this.d.feePoolAccountId, type: "spend", credits: Number((totalMsat * creditsPerMsat).toFixed(6)), reason: `fee_pool_distribution:${ts}`, timestampMs: ts, msat: totalMsat });
+    rows.push({ txId: randomUUID(), accountId: this.d.feePoolAccountId, type: "spend", credits: msatToCredits(totalMsat), reason: `fee_pool_distribution:${ts}`, timestampMs: ts, msat: totalMsat });
     for (const h of shares) {
-      rows.push({ txId: randomUUID(), accountId: h.accountId, type: "earn", credits: Number((h.msat * creditsPerMsat).toFixed(6)), reason: `fee_pool_distribution:${ts}:${h.hostId}`, timestampMs: ts, msat: h.msat });
+      rows.push({ txId: randomUUID(), accountId: h.accountId, type: "earn", credits: msatToCredits(h.msat), reason: `fee_pool_distribution:${ts}:${h.hostId}`, timestampMs: ts, msat: h.msat });
     }
     await this.d.store.recordCreditTransactions(rows);
     await this.d.store.resetHostHeartbeatWindow();

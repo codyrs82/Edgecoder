@@ -19,6 +19,8 @@ import type { LightningProvider, NodeBalances, NodePayment } from "./lightning.j
  *   liability_shortfall  ledger liabilities (earned, not yet paid) exceed node holdings. Expected
  *                      while purchases lag accrual (payout capacity already caps payouts at
  *                      received sats), so this alerts only.                                  -> alert
+ *   solvency           cSats outstanding exceed sats received - paid out + admin grants (+ the
+ *                      PAYOUT_SOLVENCY_ALLOWANCE_SATS allowance).                             -> pause
  * A node that cannot be read (HTTP error, malformed body) is an error result: alerted, not paused
  * (it cannot pay either), and the baseline is kept for the next run.
  */
@@ -31,6 +33,17 @@ export interface ReconcileLedger {
   receivedPurchaseMsat(): Promise<number>;
   /** Earned but not yet paid out, across all accounts; undefined when the store cannot total it. */
   liabilitiesMsat?(): Promise<number | undefined>;
+  /**
+   * Solvency inputs: every account's credit balance (sats owed, as cSats or withdrawable; the fee
+   * pool at its undistributed sats) and the cSats an admin granted without sats behind them
+   * (faucet). Undefined when the store cannot total them.
+   */
+  solvencyMsat?(): Promise<SolvencyInputs | undefined>;
+}
+
+export interface SolvencyInputs {
+  outstandingMsat: number;
+  grantedMsat: number;
 }
 
 export interface PayoutReconcileConfig {
@@ -38,6 +51,8 @@ export interface PayoutReconcileConfig {
   toleranceSats: number;
   /** First run looks back this far for node payments. */
   lookbackMs: number;
+  /** Known solvency gap tolerated on top of toleranceSats (a historical gap awaiting a data fix). */
+  solvencyAllowanceSats?: number;
 }
 
 export function payoutReconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): PayoutReconcileConfig {
@@ -53,11 +68,12 @@ export function payoutReconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.en
     intervalMs: num("PAYOUT_RECONCILE_MS", 600_000, 60_000),
     toleranceSats: num("PAYOUT_RECONCILE_TOLERANCE_SATS", 1_000),
     // How far back the first run after a start reads node payments (later runs continue from the previous one).
-    lookbackMs: num("PAYOUT_RECONCILE_LOOKBACK_MS", 86_400_000, 60_000)
+    lookbackMs: num("PAYOUT_RECONCILE_LOOKBACK_MS", 86_400_000, 60_000),
+    solvencyAllowanceSats: num("PAYOUT_SOLVENCY_ALLOWANCE_SATS", 0)
   };
 }
 
-export type ReconcileCheckName = "unknown_payments" | "ledger_freed" | "paid_mismatch" | "balance_drop" | "liability_shortfall";
+export type ReconcileCheckName = "unknown_payments" | "ledger_freed" | "paid_mismatch" | "balance_drop" | "liability_shortfall" | "solvency";
 
 export interface ReconcileCheck {
   name: ReconcileCheckName;
@@ -81,7 +97,7 @@ export interface ReconcileResult {
   status: "ok" | "alert" | "tripped" | "error" | "unsupported";
   checks: ReconcileCheck[];
   node?: { totalSats: number; onchainSats: number; channelLocalSats: number; channelPendingSats: number; payments: number; truncated: boolean };
-  ledger?: { outflowMsat: number; receivedMsat: number; liabilitiesMsat?: number };
+  ledger?: { outflowMsat: number; receivedMsat: number; liabilitiesMsat?: number; outstandingMsat?: number; grantedMsat?: number; solvencyGapMsat?: number };
   error?: string;
 }
 
@@ -94,6 +110,8 @@ export function evaluateReconciliation(input: {
   outflowMsat: number;
   receivedMsat: number;
   liabilitiesMsat?: number;
+  solvency?: SolvencyInputs;
+  solvencyAllowanceSats?: number;
   previous?: ReconcileSnapshot | null;
   toleranceSats: number;
 }): { checks: ReconcileCheck[]; snapshot: ReconcileSnapshot } {
@@ -165,6 +183,26 @@ export function evaluateReconciliation(input: {
     });
   }
 
+  // Ledger solvency: cSats outstanding (every account's balance, which caps what it can withdraw;
+  // the fee pool at its undistributed sats) against the sats the node took in minus what has or
+  // may have left, plus admin grants (faucet), which have no sats behind them by design. Every
+  // ledger move keeps this balanced (a spend held for a running lease or task only lowers the
+  // outstanding side until it is paid on), so a gap means more is owed than ever came in: pause.
+  // The allowance absorbs a known historical gap (payouts made before withdrawals debited credits)
+  // until the owner corrects the data.
+  if (input.solvency) {
+    const backingMsat = input.receivedMsat - input.outflowMsat + input.solvency.grantedMsat;
+    const gap = input.solvency.outstandingMsat - backingMsat;
+    const allowance = (input.solvencyAllowanceSats ?? 0) * 1000;
+    checks.push({
+      name: "solvency",
+      ok: gap <= tol + allowance,
+      pauses: true,
+      detail: `cSats outstanding ${input.solvency.outstandingMsat} msat; received - paid out + granted = ${backingMsat} msat${allowance ? ` (allowance ${allowance} msat)` : ""}`,
+      msat: Math.max(0, gap)
+    });
+  }
+
   return { checks, snapshot: { atMs: input.nowMs, nodeTotalMsat, outflowMsat: input.outflowMsat, receivedMsat: input.receivedMsat } };
 }
 
@@ -232,13 +270,14 @@ export class PayoutReconciler {
       if (!balances.supported || !list.supported) {
         return this.finish({ atMs: now, status: "unsupported", checks: [], error: !balances.supported ? balances.reason : !list.supported ? list.reason : undefined });
       }
-      const [ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat] = await Promise.all([
+      const [ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency] = await Promise.all([
         this.d.ledger.payoutsByPaymentHash([...new Set(list.payments.map((x) => x.paymentHash))]),
         this.d.ledger.payoutsOutflowMsat(),
         this.d.ledger.receivedPurchaseMsat(),
-        this.d.ledger.liabilitiesMsat ? this.d.ledger.liabilitiesMsat() : Promise.resolve(undefined)
+        this.d.ledger.liabilitiesMsat ? this.d.ledger.liabilitiesMsat() : Promise.resolve(undefined),
+        this.d.ledger.solvencyMsat ? this.d.ledger.solvencyMsat() : Promise.resolve(undefined)
       ]);
-      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, previous: this.previous, toleranceSats: this.d.config.toleranceSats });
+      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, previous: this.previous, toleranceSats: this.d.config.toleranceSats });
       this.previous = snapshot;
       const tripped = checks.some((c) => !c.ok && c.pauses);
       result = {
@@ -253,7 +292,7 @@ export class PayoutReconciler {
           payments: list.payments.length,
           truncated: list.truncated
         },
-        ledger: { outflowMsat, receivedMsat, liabilitiesMsat }
+        ledger: { outflowMsat, receivedMsat, liabilitiesMsat, outstandingMsat: solvency?.outstandingMsat, grantedMsat: solvency?.grantedMsat, solvencyGapMsat: solvency ? solvency.outstandingMsat - (receivedMsat - outflowMsat + solvency.grantedMsat) : undefined }
       };
     } catch (err) {
       result = { atMs: now, status: "error", checks: [], error: err instanceof Error ? err.message : String(err) };

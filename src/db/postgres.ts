@@ -11,6 +11,8 @@ import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import type { SolvencyInputs } from "../economy/payout-reconcile.js";
+import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
 import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
@@ -2536,8 +2538,9 @@ export class PostgresStore {
   }
 
   /**
-   * Reserve a payout atomically: under a per-account advisory lock, recheck payable
-   * (earned − paid/pending) and the coordinator's capacity, then insert the pending row.
+   * Reserve a payout atomically: under the payout locks and the account's credit lock, recheck
+   * payable (earned − paid/pending, capped at the credit balance) against amount + fee cap and the
+   * coordinator's capacity, then insert the pending row and its credit debit together.
    * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
    */
   async reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
@@ -2548,10 +2551,15 @@ export class PostgresStore {
       // and 24 h cap sums exact across concurrent requests and coordinators sharing this database.
       await client.query("SELECT pg_advisory_xact_lock($1, $2)", [PAYOUT_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY]);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`payout:${payout.accountId}`]);
+      // The account's credit lock last (debitCredits and applyBleTransfer take only this one), so a
+      // spend cannot slip between the balance read below and the payout's debit row.
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, payout.accountId]);
       const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
-      const spent = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
-      const payable = Number(earned.rows[0]?.msat ?? 0) - Number(spent.rows[0]?.msat ?? 0);
-      if (payout.amountMsat > payable) {
+      const spent = await client.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
+      const bal = await client.query(BALANCE_CHECK_SQL, [payout.accountId, "0"]);
+      const payable = withdrawableMsat(Number(earned.rows[0]?.msat ?? 0), Number(spent.rows[0]?.msat ?? 0), Number(bal.rows[0]?.balance ?? 0));
+      // Amount and the routing-fee cap both come out of payable, as the debit row below takes both.
+      if (payout.amountMsat + payout.maxFeeMsat > payable) {
         await client.query("ROLLBACK");
         return { ok: false, code: "insufficient_payable", payableMsat: Math.max(0, payable) };
       }
@@ -2581,6 +2589,14 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return { ok: false, code: "duplicate_invoice" };
       }
+      // The withdrawal consumes the credit balance (amount + fee cap) in the same transaction;
+      // settlePayout gives back what the payout did not use. msat stays NULL: the payouts row is
+      // already what lowers earned-minus-paid, so the sats are not counted out twice.
+      await client.query(
+        `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, timestamp_ms)
+         VALUES ($1,$2,'spend',$3,$4,$5)`,
+        [payoutDebitTxId(payout.payoutId), payout.accountId, msatToCredits(payout.amountMsat + payout.maxFeeMsat), payoutDebitTxId(payout.payoutId), payout.createdAtMs]
+      );
       await client.query("COMMIT");
       return { ok: true };
     } catch (err) {
@@ -2591,16 +2607,53 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * Settle a pending payout and, in the same transaction, give back the part of its reservation
+   * debit it did not use (all of it on failure, the unused fee cap when paid). Only a row that is
+   * still pending changes, and the adjustment rows have fixed tx ids, so a repeat is a no-op.
+   * Rows reserved before payouts debited credits have no debit row and get no adjustment.
+   */
   async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void> {
-    if (outcome.status === "paid") {
-      await this.pool.query(`UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending'`, [
-        payoutId,
-        Math.max(0, Math.floor(outcome.feeMsat)),
-        outcome.preimage ?? null,
-        Date.now()
-      ]);
-    } else {
-      await this.pool.query(`UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending'`, [payoutId, outcome.error.slice(0, 500), Date.now()]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const now = Date.now();
+      const feeMsat = outcome.status === "paid" ? Math.max(0, Math.floor(outcome.feeMsat)) : 0;
+      const upd =
+        outcome.status === "paid"
+          ? await client.query(
+              `UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending' RETURNING account_id, amount_msat`,
+              [payoutId, feeMsat, outcome.preimage ?? null, now]
+            )
+          : await client.query(
+              `UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending' RETURNING account_id, amount_msat`,
+              [payoutId, outcome.error.slice(0, 500), now]
+            );
+      const row = upd.rows[0];
+      if (row) {
+        const debit = await client.query(`SELECT credits FROM credit_transactions WHERE tx_id = $1 AND tx_type = 'spend'`, [payoutDebitTxId(payoutId)]);
+        if (debit.rows[0]) {
+          const debitMsat = creditsToMsat(Number(debit.rows[0].credits));
+          const back = payoutSettlementRefundMsat(
+            debitMsat,
+            outcome.status === "paid" ? { status: "paid", amountMsat: Number(row.amount_msat), feeMsat } : { status: "failed" }
+          );
+          if (back !== 0) {
+            const txId = back > 0 ? payoutRefundTxId(payoutId) : payoutFeeExcessTxId(payoutId);
+            await client.query(
+              `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, timestamp_ms)
+               VALUES ($1,$2,$3,$4,$1,$5) ON CONFLICT (tx_id) DO NOTHING`,
+              [txId, row.account_id, back > 0 ? "earn" : "spend", msatToCredits(Math.abs(back)), now]
+            );
+          }
+        }
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
     }
   }
 
@@ -2670,6 +2723,28 @@ export class PostgresStore {
             - (SELECT COALESCE(SUM(amount_msat + fee_msat), 0) FROM payouts WHERE status IN ('paid','pending')) AS msat`
     );
     return Math.max(0, Number(r.rows[0]?.msat ?? 0));
+  }
+
+  /**
+   * Solvency inputs for reconciliation: Σ credit balances of every account except the fee pool
+   * (cSats as msat; a withdrawal's debit already sits in them) plus the pool's undistributed sats
+   * (purchase fees reach it as sats with no cSats), and the cSats admins granted (faucet).
+   * `feePoolAccountId` is NETWORK_FEE_POOL_ACCOUNT in src/credits/store.ts.
+   */
+  async solvencyMsat(feePoolAccountId = "network:fee_pool"): Promise<SolvencyInputs> {
+    const r = await this.pool.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN account_id <> $1 THEN (CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END) ELSE 0 END), 0) * 1000 AS accounts_msat,
+         COALESCE(SUM(CASE WHEN account_id = $1 THEN (CASE WHEN tx_type = 'spend' THEN -COALESCE(msat, 0) ELSE COALESCE(msat, 0) END) ELSE 0 END), 0) AS pool_msat,
+         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'faucet' THEN credits ELSE 0 END), 0) * 1000 AS granted_msat
+       FROM credit_transactions`,
+      [feePoolAccountId]
+    );
+    const row = r.rows[0] ?? {};
+    return {
+      outstandingMsat: Math.round(Number(row.accounts_msat ?? 0)) + Math.max(0, Math.round(Number(row.pool_msat ?? 0))),
+      grantedMsat: Math.round(Number(row.granted_msat ?? 0))
+    };
   }
 
   async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {

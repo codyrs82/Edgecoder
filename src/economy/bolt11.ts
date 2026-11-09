@@ -68,6 +68,9 @@ function wordsToInt(words: number[]): number {
 
 const MULTIPLIER_MSAT: Record<string, number> = { m: 1e8, u: 1e5, n: 1e2, p: 1e-1 }; // × value → msat (1 BTC = 1e11 msat)
 
+/** Tagged fields that may appear once: p (1), x (6), s (16), n (19), h (23). */
+const SINGLE_FIELDS = new Set([1, 6, 16, 19, 23]);
+
 export function decodeBolt11(invoice: string): DecodedBolt11 {
   const raw = invoice.trim();
   const lower = raw.toLowerCase();
@@ -110,12 +113,19 @@ export function decodeBolt11(invoice: string): DecodedBolt11 {
   let descriptionHash: string | undefined;
   let payeePubkey: string | undefined;
   let i = 0;
+  const seen = new Set<number>();
   while (i + 3 <= tagged.length) {
     const type = tagged[i];
     const len = tagged[i + 1] * 32 + tagged[i + 2];
     const data = tagged.slice(i + 3, i + 3 + len);
     if (data.length < len) throw new Error("bolt11_truncated_field");
     i += 3 + len;
+    // Decoders disagree on which copy of a repeated field wins (first or last), so an invoice
+    // could commit the ledger to one payment hash while the node pays another. Refuse them.
+    if (SINGLE_FIELDS.has(type)) {
+      if (seen.has(type)) throw new Error("bolt11_repeated_field");
+      seen.add(type);
+    }
     switch (type) {
       case 1: // p: payment hash, 52 words
         if (len === 52) paymentHash = words5ToBytes(data, 32).toString("hex");
