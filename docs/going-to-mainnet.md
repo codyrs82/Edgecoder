@@ -35,6 +35,8 @@ caps, fee-pool lock) only need checking once. Mechanics are in
       admin token is compromised; it cannot be lifted over the API.
 - [ ] Reconciliation runs: `GET /admin/payouts/reconciliation` shows a recent `status: "ok"` (not
       `unsupported` or `error`). `PAYOUT_RECONCILE_TOLERANCE_SATS` fits your routing-fee noise.
+      The `solvency` check passes with `PAYOUT_SOLVENCY_ALLOWANCE_SATS` at 0 (a gap left by payouts
+      made before withdrawals debited cSats is corrected in the data, not carried into mainnet).
 - [ ] `PAYOUT_ALERT_WEBHOOK_URL` points at an alerting channel someone watches; trigger one alert
       on a staging coordinator to see it arrive.
 - [ ] Runbook for a trip: payouts stay paused until an admin resumes. Read the failed checks,

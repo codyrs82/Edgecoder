@@ -241,17 +241,34 @@ Every `earn` row carries the sats it was worth when earned (`msat`, locked at th
 
 ```
 earned(account)   = Σ msat of the account's earn rows
-payable(account)  = earned − Σ (amount + fee) of its paid and pending payouts
+payable(account)  = min( earned − Σ (amount + fee) of its paid payouts − Σ (amount + fee cap) of pending ones,
+                         credit balance(account) in msat )
 capacity(node)    = receivedPurchaseSats × (1 − PAYOUT_RESERVE_BPS/10000) − Σ all paid/pending
-withdraw(bolt11)  : amount ≤ payable, amount + maxFee ≤ capacity, invoice network = BITCOIN_NETWORK,
+withdraw(bolt11)  : amount + maxFee ≤ payable, amount + maxFee ≤ capacity, invoice network = BITCOIN_NETWORK,
                     amount ≥ PAYOUT_MIN_SATS, maxFee = max(PAYOUT_MAX_FEE_BPS × amount, PAYOUT_MIN_FEE_FLOOR_SATS)
 ```
 
-A withdrawal reserves a pending row under a per-account lock (Postgres advisory lock; the
-payment hash is unique so an invoice is never paid twice), pays it through the coordinator's
-Lightning node (`LightningProvider.payInvoice`, LND or CLN), and settles the row only when the
-returned preimage hashes to the invoice's payment hash. A definite node failure frees the
-balance; an ambiguous transport failure leaves the row pending for reconciliation.
+Earned sats are also spendable cSats, so one earning can leave the ledger only once: either
+withdrawn or spent. A withdrawal therefore consumes the credit balance, and payable is capped at
+that balance, so cSats spent (on a reservation, a job, a model call) stop being withdrawable.
+Purchased cSats raise the balance but not `earned`, so they are spendable but never withdrawable.
+
+A withdrawal reserves a pending row under the payout locks and the account's credit lock
+(Postgres advisory locks; the payment hash is unique so an invoice is never paid twice) and, in
+the same transaction, writes a `spend` row `payout:<payoutId>` for amount + fee cap (no msat: the
+payouts row is what lowers `earned − paid`). It then pays through the coordinator's Lightning node
+(`LightningProvider.payInvoice`, LND or CLN) and settles the row only when the returned preimage
+hashes to the invoice's payment hash. Settlement gives back what the debit did not use in the
+same transaction: an `earn` row `payout_refund:<payoutId>` (no msat) for the whole debit when the
+payout failed, or for the unused fee cap when it was paid (a fee above the cap, which the node
+should never charge, is a further `spend` row `payout_fee_excess:<payoutId>`). Only a row still
+pending changes and the row ids are fixed, so a repeated settlement changes nothing. A definite
+node failure frees the balance; an ambiguous transport failure leaves the row pending (and the
+debit in place) for reconciliation.
+
+Payouts reserved before this rule existed have no debit row and get no adjustment. Their sats
+are still counted in `earned − paid`, but the cSats they paid out are still in the balance; see
+`solvency` below.
 
 Automatic payouts: an account with a Lightning address (`POST /economy/payouts/address`, or an
 infrastructure host's `INFRA_HOST_LIGHTNING_ADDRESS`) is paid every `PAYOUT_AUTO_INTERVAL_MS`
@@ -288,6 +305,17 @@ Three guards sit in front of every payment out of the node (`src/economy/payout-
   | `paid_mismatch` | node amount + fee ≠ ledger amount + fee for paid payouts | pause |
   | `balance_drop` | node total fell more than purchases in − payouts out since the last run | pause |
   | `liability_shortfall` | earned-but-unpaid sats exceed what the node holds | alert only |
+  | `solvency` | cSats outstanding exceed sats received − paid/pending out + faucet grants, by more than tolerance + `PAYOUT_SOLVENCY_ALLOWANCE_SATS` (default 0) | pause |
+
+  `solvency` is a ledger-only invariant (Postgres only). Outstanding = Σ credit balance of every
+  account except the fee pool, plus the pool's undistributed sats (purchase fees reach it as sats
+  without cSats); payable never exceeds a balance, so it is not added again. Every ledger move
+  keeps the two sides equal: a purchase adds the same sats to both, a spend moves cSats to the
+  provider and the pool (or holds them while a lease or task runs, which only lowers the
+  outstanding side), a withdrawal moves its debit from cSats to payouts. Admin faucet grants are
+  counted as backing because they are minted on purpose. A gap therefore means more is owed than
+  ever came in, and payouts pause. The allowance exists for a known historical gap (cSats still
+  held for payouts made before withdrawals debited them) until that is corrected in the data.
 
   A trip pauses payouts through the kill switch (source `reconciliation`, until an admin resumes),
   logs `payout_reconciliation_mismatch`, and POSTs a JSON summary to `PAYOUT_ALERT_WEBHOOK_URL`
@@ -315,8 +343,9 @@ weight_h  = uptime_h × (coordinator 1.0 + bitcoind 1.0 + lightning 1.0 + electr
 share_h   = available_pool_msat × weight_h / Σ weight
 ```
 
-Each share becomes an `earn` row on the host's account (msat, plus credits pro rata when the
-pool holds any), the pool gets a matching `spend`, the ledger records `fee_pool_distribution`,
+Each share becomes an `earn` row on the host's account (msat, plus the same amount in cSats so the
+host can withdraw it; purchase fees arrive without cSats, so the pool's own cSat balance can go
+below zero while its sats stay the measure of what it holds), the pool gets a matching `spend`, the ledger records `fee_pool_distribution`,
 and the heartbeat window resets. Hosts withdraw like anyone else.
 
 Distribution holds a Postgres session advisory lock (`pg_try_advisory_lock`; in memory, an

@@ -28,7 +28,7 @@ function lnurlServer() {
 
 function setup(pins: CallbackPinStore = new MemoryCallbackPinStore()) {
   const earned: Record<string, number> = { [ACCT]: 50_000_000 };
-  const store = new MemoryPayoutStore((a) => earned[a] ?? 0);
+  const store = new MemoryPayoutStore((a) => earned[a] ?? 0, (a) => (earned[a] ?? 0) / 1000);
   store.received = 10_000_000_000;
   store.autoAccounts.set(ACCT, ADDR);
   const paid: PayInvoiceInput[] = [];

@@ -8,7 +8,9 @@ import { bolt11IsExpired, decodeBolt11, type DecodedBolt11 } from "./bolt11.js";
 /**
  * Sats payouts: the rules that turn an account's earned msat into a Lightning payment.
  *
- * Payable balance = Σ earn msat (locked at accrual) − Σ payouts that are paid or still pending.
+ * Payable balance = Σ earn msat (locked at accrual) − Σ payouts that are paid or still pending,
+ * capped at the account's credit balance (withdrawableMsat). A payout debits the credit balance
+ * by amount + routing-fee cap when it is reserved and gives back what it did not use at settlement.
  * A payout is either a `withdraw` (the account posts a BOLT11 invoice for its own wallet) or
  * `auto` (the account registered a Lightning address; the coordinator fetches an invoice over
  * LNURL-pay each tick and pays it). Both go through validatePayoutRequest and the coordinator's
@@ -61,6 +63,55 @@ export function payableMsat(earnedMsat: number, paidOrPendingMsat: number): numb
   return Math.max(0, Math.floor(earnedMsat) - Math.floor(paidOrPendingMsat));
 }
 
+/** A credit balance (cSats, 1 cSat = 1 sat, up to 6 decimals) as whole msat, rounded down; negative counts as 0. */
+export function creditsToMsat(credits: number): number {
+  if (!Number.isFinite(credits) || credits <= 0) return 0;
+  return Math.floor(Math.round(credits * 1_000_000) / 1000);
+}
+
+/** msat as cSats (1 cSat = 1 sat). Whole msat fit the ledger's 6 decimals exactly. */
+export function msatToCredits(msat: number): number {
+  return Number((Math.round(msat) / 1000).toFixed(6));
+}
+
+/**
+ * What an account may withdraw: earned sats not yet paid out, never more than its credit balance.
+ * Earnings are also spendable cSats. A withdrawal debits the credit balance and a spend lowers it,
+ * so capping by the balance keeps one sat from leaving twice (once paid out, once spent as cSats
+ * that become someone else's earnings). Purchased cSats raise the balance but not the earned sats,
+ * so they stay non-withdrawable.
+ */
+export function withdrawableMsat(earnedMsat: number, paidOrPendingMsat: number, creditBalance: number): number {
+  return Math.min(payableMsat(earnedMsat, paidOrPendingMsat), creditsToMsat(creditBalance));
+}
+
+/** Spend row written with the reservation: amount + routing-fee cap, taken from the credit balance. */
+export function payoutDebitTxId(payoutId: string): string {
+  return `payout:${payoutId}`;
+}
+
+/** Earn row (no msat) giving back the unused part of the reservation debit when the payout settles. */
+export function payoutRefundTxId(payoutId: string): string {
+  return `payout_refund:${payoutId}`;
+}
+
+/** Spend row (no msat) for routing fee the node charged above the cap the debit covered. */
+export function payoutFeeExcessTxId(payoutId: string): string {
+  return `payout_fee_excess:${payoutId}`;
+}
+
+/**
+ * msat the reservation debit gives back at settlement: all of it when the payout failed, the
+ * unused fee cap when it was paid. Negative when the node charged more than the debit covered.
+ */
+export function payoutSettlementRefundMsat(
+  debitMsat: number,
+  outcome: { status: "paid"; amountMsat: number; feeMsat: number } | { status: "failed" }
+): number {
+  if (outcome.status === "failed") return debitMsat;
+  return debitMsat - (outcome.amountMsat + Math.max(0, Math.floor(outcome.feeMsat)));
+}
+
 export function maxFeeMsatFor(amountMsat: number, policy: PayoutPolicy): number {
   return Math.max(policy.minFeeFloorSats * 1000, Math.ceil((amountMsat * policy.maxFeeBps) / 10_000));
 }
@@ -97,8 +148,11 @@ export function validatePayoutRequest(
   if (decoded.amountMsat === undefined) return { ok: false, code: "amountless_invoice" };
   const amountMsat = decoded.amountMsat;
   if (amountMsat < policy.minPayoutSats * 1000) return { ok: false, code: "below_minimum", detail: `${amountMsat} msat < ${policy.minPayoutSats} sats` };
-  if (amountMsat > input.payableMsat) return { ok: false, code: "insufficient_payable", detail: `${amountMsat} msat > payable ${input.payableMsat}` };
   const maxFeeMsat = maxFeeMsatFor(amountMsat, policy);
+  // The routing fee comes out of the account too, so the fee cap must fit inside payable.
+  if (amountMsat + maxFeeMsat > input.payableMsat) {
+    return { ok: false, code: "insufficient_payable", detail: `${amountMsat} msat + fee cap ${maxFeeMsat} msat > payable ${input.payableMsat}` };
+  }
   if (amountMsat + maxFeeMsat > input.capacityMsat) return { ok: false, code: "coordinator_capacity", detail: `node can pay out at most ${input.capacityMsat} msat right now` };
   return { ok: true, decoded, amountMsat, maxFeeMsat };
 }
