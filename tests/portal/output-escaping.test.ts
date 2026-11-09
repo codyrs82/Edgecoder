@@ -289,3 +289,20 @@ describe("enforced CSP with per-request script nonces", () => {
     await app.close();
   });
 });
+
+describe("Settings > Nodes / Admin data attributes", () => {
+  it("encodeAttr also encodes the single quote that delimits the attribute, and round-trips", async () => {
+    const app = await pagesApp();
+    for (const url of ["/portal/settings/nodes", "/portal/settings/admin"]) {
+      const body = (await app.inject({ url })).body;
+      const src = body.match(/function encodeAttr\(v\) \{[^\n]*\}/)?.[0];
+      expect(src, url).toBeDefined();
+      const ctx = vm.createContext({});
+      vm.runInContext(src!, ctx);
+      const out = vm.runInContext(`encodeAttr(${JSON.stringify(EVIL)})`, ctx) as string;
+      expect(out).not.toMatch(/['"<>\s]/);
+      expect(decodeURIComponent(out)).toBe(EVIL);
+    }
+    await app.close();
+  });
+});

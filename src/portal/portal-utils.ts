@@ -58,9 +58,14 @@ export function clearCookies(name: string): string[] {
   return out;
 }
 
-/** Read a cookie by logical name, accepting the `__Host-` name and (for one release) the legacy name. */
+/**
+ * Read a cookie by logical name, under the name it is written with (cookieName). When cookies are
+ * secure only `__Host-<name>` is read: an unprefixed cookie can be set by any subdomain (with
+ * Domain=), so accepting it would let a sibling host plant a session. The pre-#10 unprefixed
+ * fallback is gone; sessions it carried expired (7-day TTL) after the __Host- release.
+ */
 export function readCookie(cookies: Record<string, string>, name: string): string | undefined {
-  return cookies[`__Host-${name}`] ?? cookies[name];
+  return cookies[cookieName(name)];
 }
 
 export function hashPassword(password: string): string {

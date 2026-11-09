@@ -341,8 +341,31 @@ describe("OAuth sign-in links only by a provider-verified email", () => {
       ctx.addUser({ userId: "carol", email: "carol@example.test", emailVerified: false, passwordHash: "x" });
       ctx.sessions.set("carol-session", "carol");
       microsoft("carol@example.test", "oid-carol", "tid-carol");
-      await connect(ctx, "microsoft", "carol-session");
+      const res = await connect(ctx, "microsoft", "carol-session");
       expect(ctx.users.get("carol")!.emailVerified).toBe(false);
+      // An unverified account gains no sign-in method that does not prove its address.
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain("Verify your email address");
+      expect(ctx.links.size).toBe(0);
+    });
+
+    it("an unverified account can connect a provider that proves its address (and is verified)", async () => {
+      ctx.addUser({ userId: "dave", email: "dave@example.test", emailVerified: false, passwordHash: "x" });
+      ctx.sessions.set("dave-session", "dave");
+      google("dave@example.test", true, "g-dave");
+      const res = await connect(ctx, "google", "dave-session");
+      expect(res.statusCode).toBe(302);
+      expect(ctx.links.get("google|g-dave")?.userId).toBe("dave");
+      expect(ctx.users.get("dave")!.emailVerified).toBe(true);
+    });
+
+    it("an unverified account cannot connect GitHub with another address (no token is stored)", async () => {
+      ctx.addUser({ userId: "erin", email: "erin@example.test", emailVerified: false, passwordHash: "x" });
+      ctx.sessions.set("erin-session", "erin");
+      github([{ email: "someone-else@example.test", primary: true, verified: true }]);
+      const res = await connect(ctx, "github", "erin-session");
+      expect(res.statusCode).toBe(403);
+      expect(ctx.githubTokens.has("erin")).toBe(false);
     });
   });
 });

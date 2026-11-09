@@ -29,6 +29,20 @@ describe("passkey registration names the account", () => {
     expect(u.displayName).toBe("Cody Smith (cody@example.com)");
   });
 
+  it("refuses to register a passkey on an account whose email is not verified", async () => {
+    const app = Fastify();
+    registerPasskeyRoutes(app, {
+      getCurrentUser: async () => ({ userId: "u3", email: "x@example.com", emailVerified: false }),
+      store: { listPasskeysByUserId: async () => [], createPasskeyChallenge: async () => undefined },
+    } as any);
+    for (const url of ["/auth/passkey/register/options", "/auth/passkey/register/verify"]) {
+      const res = await app.inject({ method: "POST", url, payload: { challengeId: "c".repeat(12), response: {} } });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("email_not_verified");
+    }
+    await app.close();
+  });
+
   it("falls back to the email when there is no display name", async () => {
     const u = await registrationUser({ userId: "u2", email: "agent@example.com", displayName: "  " });
     expect(u.displayName).toBe("agent@example.com");

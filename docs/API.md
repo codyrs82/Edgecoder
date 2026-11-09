@@ -353,10 +353,11 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `GET` | `/auth/capabilities` | Auth capabilities (passkey, SSO providers) | none |
 | `POST` | `/auth/signup` | Email/password signup | none |
 | `POST` | `/auth/login` | Email/password login | none |
-| `POST` | `/auth/logout` | End session | session |
-| `GET` | `/auth/verify-email` | Verify email via token | none |
-| `POST` | `/auth/resend-verification` | Resend verification email | session |
-| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft) | none |
+| `POST` | `/auth/logout` | End the session presented by cookie and/or `Authorization: Bearer` (both are revoked server-side) | session |
+| `GET` | `/auth/verify-email` | The emailed link: shows a confirmation page and changes nothing | none |
+| `POST` | `/auth/verify-email` | Confirm the address: body `{ token, password? }`. Succeeds only with the account's own session (cookie or Bearer) or its password (`401 verify_password_required`, or `verify_sign_in_required` for an account without a password). On success the account's earlier sessions, API keys and passkeys are revoked (and, on a password account, linked providers and the GitHub token), and a new session is returned as `{ ok, sessionToken }`. Someone who did not create the account uses Forgot password instead. | none |
+| `POST` | `/auth/resend-verification` | Resend the verification email: body `{ email }`. Always answers `{ ok, message }` the same way (unknown, verified or capped addresses included); at most 4 verification emails per account per hour. | none |
+| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft, github). `appRedirect` is at most 512 characters. Rate limited with the other sign-in routes (10 per minute per IP). | none |
 | `GET` | `/auth/oauth/:provider/callback` | OAuth callback (GET) | none |
 | `POST` | `/auth/oauth/:provider/callback` | OAuth callback (POST) | none |
 | `POST` | `/auth/oauth/mobile/complete` | Complete native-app OAuth: `{ token, verifier? }`; a token from a start with `appChallenge` (base64url sha256 of `verifier`) needs that verifier | none |
@@ -384,7 +385,7 @@ Both routes share a rate limit of 5 requests per 15 minutes per client IP. Both 
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/auth/passkey/register/options` | Generate passkey registration options | session |
+| `POST` | `/auth/passkey/register/options` | Generate passkey registration options (`403 email_not_verified` until the email is verified) | session |
 | `POST` | `/auth/passkey/register/verify` | Verify passkey registration response | session |
 | `POST` | `/auth/passkey/login/options` | Generate passkey authentication options | none |
 | `POST` | `/auth/passkey/login/verify` | Verify passkey authentication response | none |
@@ -404,7 +405,7 @@ Keys for the [Hosted API](#hosted-api-portal-port-4310). Keys start with `eck_`;
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/keys` | List your API keys (metadata only, never the key) | session |
-| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`). | session |
+| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`); `403 email_not_verified` until the account's email is verified. | session |
 | `DELETE` | `/portal/api/keys/:keyId` | Revoke a key (`404 unknown_key` if it is not yours) | session |
 
 ### Agent Signup
@@ -478,11 +479,11 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/conversations` | List conversations | session |
-| `POST` | `/portal/api/conversations` | Create a conversation | session |
-| `GET` | `/portal/api/conversations/:id/messages` | Get messages for a conversation | session |
-| `PATCH` | `/portal/api/conversations/:id` | Update conversation metadata | session |
+| `POST` | `/portal/api/conversations` | Create a conversation: body `{ title? }`, at most 200 characters (`400 invalid_title`). Shares the chat rate limit. | session |
+| `GET` | `/portal/api/conversations/:id/messages` | Get the latest 500 messages of a conversation, oldest first | session |
+| `PATCH` | `/portal/api/conversations/:id` | Rename: body `{ title }`, 1 to 200 characters (`400 invalid_title`) | session |
 | `DELETE` | `/portal/api/conversations/:id` | Delete a conversation | session |
-| `POST` | `/portal/api/chat` | Send a chat message (submits task) | session |
+| `POST` | `/portal/api/chat` | Send a chat message (submits task). `message` is at most 32,000 characters (`413 message_too_long`). Only the latest 40 messages, up to 120,000 characters, are sent as context. Rate limit: 20 per minute per user, shared with creating conversations (`429 rate_limited`). | session |
 
 ### Reviews
 

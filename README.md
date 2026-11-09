@@ -311,7 +311,7 @@ This section was merged in from the old `README.dev.md` (#21). See [CONTRIBUTING
 - `GET /portal` -- portal frontend
 - `POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`
 - `GET /auth/oauth/:provider/start` for `google`, `microsoft`, `github`
-- `GET /auth/verify-email`, `POST /auth/resend-verification`
+- `GET /auth/verify-email` (confirmation page) + `POST /auth/verify-email` (needs the account's session or password), `POST /auth/resend-verification`
 - `POST /auth/passkey/register/options` + `/verify`, `POST /auth/passkey/login/options` + `/verify`
 - `POST /nodes/enroll`, `GET /dashboard/summary`, `POST /me/theme`
 - `GET /ios/dashboard`; `GET`/`PUT /wallet/payout-destination`
