@@ -145,13 +145,15 @@ describe("session cookie hardening (#10)", () => {
     expect(cookieName("x")).toBe("__Host-x");
   });
 
-  it("dev keeps the plain name; reader accepts both; logout clears both", () => {
+  it("dev keeps the plain name; production reads only __Host- (a subdomain-set plain cookie is ignored); logout clears both", () => {
     process.env.NODE_ENV = "development";
     delete process.env.PORTAL_COOKIE_SECURE;
     expect(encodeCookie("s", "v", 1).startsWith("s=v;")).toBe(true);
-    expect(readCookie({ "__Host-s": "new" }, "s")).toBe("new");
-    expect(readCookie({ s: "old" }, "s")).toBe("old");
+    expect(readCookie({ s: "dev" }, "s")).toBe("dev");
     process.env.NODE_ENV = "production";
+    expect(readCookie({ "__Host-s": "new" }, "s")).toBe("new");
+    expect(readCookie({ s: "planted" }, "s")).toBeUndefined();
+    expect(readCookie({ s: "planted", "__Host-s": "new" }, "s")).toBe("new");
     const cleared = clearCookies("s");
     expect(cleared).toHaveLength(2);
     expect(cleared[0]).toMatch(/^__Host-s=;/);

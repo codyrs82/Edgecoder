@@ -141,7 +141,7 @@ describe("email verification link", () => {
     const token = ctx.seed();
     ctx.users.set("u2", { userId: "u2", email: "other@example.test", emailVerified: true, role: "user" });
     ctx.sessions.set("other-session", "u2");
-    const res = await ctx.app.inject({ method: "POST", url: "/auth/verify-email", headers: { cookie: "__Host-edgecoder_portal_session=other-session" }, payload: { token } });
+    const res = await ctx.app.inject({ method: "POST", url: "/auth/verify-email", headers: { cookie: "edgecoder_portal_session=other-session" }, payload: { token } });
     expect(res.statusCode).toBe(401);
     expect(ctx.users.get("u1")!.emailVerified).toBe(false);
   });

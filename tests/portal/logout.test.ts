@@ -34,7 +34,7 @@ describe("POST /auth/logout", () => {
 
   it("revokes the cookie session, and both when both are sent", async () => {
     const { app, sessions } = build();
-    await app.inject({ method: "POST", url: "/auth/logout", headers: { cookie: "__Host-edgecoder_portal_session=cookie-session", authorization: "Bearer bearer-session" } });
+    await app.inject({ method: "POST", url: "/auth/logout", headers: { cookie: "edgecoder_portal_session=cookie-session", authorization: "Bearer bearer-session" } });
     expect([...sessions]).toEqual(["other-session"]);
   });
 
