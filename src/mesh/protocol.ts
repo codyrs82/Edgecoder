@@ -5,10 +5,29 @@ import { randomUUID } from "node:crypto";
 import { MeshMessage, MeshMessageType } from "../common/types.js";
 import { canonicalizeMessage, signPayload, verifyPayload } from "./peer.js";
 
-const SEEN_CACHE_LIMIT = 5_000;
+/** A message is never valid for longer than this, whatever ttlMs the sender chose. */
+export const MAX_MESSAGE_TTL_MS = 5 * 60_000;
+/** How far in the future issuedAtMs may be (clock skew). */
+export const MAX_MESSAGE_FUTURE_SKEW_MS = 60_000;
+/**
+ * Hard cap on remembered message ids. Ids are kept until their message expires (at most
+ * MAX_MESSAGE_TTL_MS + skew), never evicted early, so a replay inside the validity window is always
+ * caught; when the cache is full of unexpired ids, new messages are refused instead.
+ */
+export const SEEN_CACHE_LIMIT = 50_000;
 
 export class MeshProtocol {
-  private readonly seenIds = new Set<string>();
+  /** message id -> time after which the message is expired anyway. */
+  private readonly seenIds = new Map<string, number>();
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly seenLimit = SEEN_CACHE_LIMIT
+  ) {}
+
+  private pruneSeen(nowMs: number): void {
+    for (const [id, until] of this.seenIds) if (until < nowMs) this.seenIds.delete(id);
+  }
 
   createMessage(
     type: MeshMessageType,
@@ -21,7 +40,7 @@ export class MeshProtocol {
       id: randomUUID(),
       type,
       fromPeerId,
-      issuedAtMs: Date.now(),
+      issuedAtMs: this.now(),
       ttlMs,
       payload
     };
@@ -33,8 +52,14 @@ export class MeshProtocol {
     if (this.seenIds.has(message.id)) {
       return { ok: false, reason: "duplicate_message" };
     }
-    const expired = Date.now() > message.issuedAtMs + message.ttlMs;
-    if (expired) return { ok: false, reason: "message_expired" };
+    const nowMs = this.now();
+    if (!Number.isFinite(message.issuedAtMs) || !Number.isFinite(message.ttlMs) || message.ttlMs < 0) {
+      return { ok: false, reason: "message_expired" };
+    }
+    if (message.issuedAtMs > nowMs + MAX_MESSAGE_FUTURE_SKEW_MS) return { ok: false, reason: "message_from_future" };
+    // The sender's ttlMs is honoured only up to MAX_MESSAGE_TTL_MS.
+    const expiresAtMs = message.issuedAtMs + Math.min(message.ttlMs, MAX_MESSAGE_TTL_MS);
+    if (nowMs > expiresAtMs) return { ok: false, reason: "message_expired" };
     const valid = verifyPayload(
       canonicalizeMessage({
         id: message.id,
@@ -49,11 +74,11 @@ export class MeshProtocol {
     );
     if (!valid) return { ok: false, reason: "invalid_signature" };
 
-    this.seenIds.add(message.id);
-    if (this.seenIds.size > SEEN_CACHE_LIMIT) {
-      const [first] = this.seenIds;
-      if (first) this.seenIds.delete(first);
+    if (this.seenIds.size >= this.seenLimit) {
+      this.pruneSeen(nowMs);
+      if (this.seenIds.size >= this.seenLimit) return { ok: false, reason: "replay_cache_full" };
     }
+    this.seenIds.set(message.id, expiresAtMs);
     return { ok: true };
   }
 }
