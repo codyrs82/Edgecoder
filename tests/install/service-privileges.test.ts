@@ -4,7 +4,7 @@ import { secureBinaries } from "../../src/install/cli.js";
 import { detectHardware, type Probe } from "../../src/install/hardware.js";
 import { parseInstallArgs } from "../../src/install/options.js";
 import { planInstall } from "../../src/install/plan.js";
-import { applyPlan, defaultPaths, launchdAgentPlist, launchdOllamaPlist, MAC_SERVICE_USER, pickMacServiceId, systemdAgentUnit, systemdOllamaUnit, type Host } from "../../src/install/services.js";
+import { applyPlan, defaultPaths, launchdAgentPlist, launchdOllamaPlist, MAC_SERVICE_USER, pickMacServiceId, systemdAgentUnit, systemdOllamaUnit, windowsDirOwnerProblems, type Host } from "../../src/install/services.js";
 
 const TWO_GPUS: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n1, NVIDIA RTX 6000 Ada Generation, 49140\n" : null);
 const opts = parseInstallArgs(["apply", "--token", "t"]);
@@ -177,6 +177,48 @@ describe("windows: tasks run as the installing user, never SYSTEM", () => {
     }
     expect(commands).toContain('icacls "C:\\ProgramData\\EdgeCoder" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F "WINBOX\\alice:(OI)(CI)RX"');
     expect(commands).toContain('icacls "C:\\ProgramData\\EdgeCoder\\ollama" /grant "WINBOX\\alice:(OI)(CI)M"');
+  });
+
+  it("takes ownership and locks the config dir before granting subdirs or writing any secret", () => {
+    const events: string[] = [];
+    const h: Host = {
+      platform: "win32",
+      writeFile: (path) => { events.push(`write ${path}`); },
+      removeFile: () => undefined,
+      run: (cmd, args) => { events.push([cmd, ...args].join(" ")); return { code: 0, stdout: "", stderr: "" }; },
+      exists: () => false
+    };
+    applyPlan(plan, h, p, false);
+    const setOwner = events.indexOf('icacls "C:\\ProgramData\\EdgeCoder" /setowner *S-1-5-32-544 /C');
+    const lock = events.indexOf('icacls "C:\\ProgramData\\EdgeCoder" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F "WINBOX\\alice:(OI)(CI)RX"');
+    const resetChildren = events.indexOf('icacls "C:\\ProgramData\\EdgeCoder\\*" /reset /C /L');
+    const grant = events.indexOf('icacls "C:\\ProgramData\\EdgeCoder\\ollama" /grant "WINBOX\\alice:(OI)(CI)M"');
+    const firstWrite = events.findIndex((e) => e.startsWith("write "));
+    expect(setOwner).toBe(0);
+    expect(lock).toBe(1);
+    expect(resetChildren).toBe(2);
+    expect(grant).toBeGreaterThan(resetChildren);
+    expect(firstWrite).toBeGreaterThan(grant);
+    expect(events[firstWrite]).toBe("write C:\\ProgramData\\EdgeCoder\\agent-0.env");
+    // Never a recursive icacls: the task user can plant junctions in its writable subdirs.
+    expect(events.filter((e) => e.startsWith("icacls") && / \/T\b/.test(e))).toEqual([]);
+  });
+
+  it("refuses a pre-existing config dir owned by another user, a junction, or an unverifiable one", () => {
+    const answer = (stdout: string, code = 0) => () => ({ code, stdout, stderr: "" });
+    const run = (r: () => { code: number; stdout: string; stderr: string }) => { const seen: string[][] = []; return { seen, fn: (cmd: string, args: string[]) => { seen.push([cmd, ...args]); return r(); } }; };
+    const ok = run(answer("CHECKED\r\n"));
+    expect(windowsDirOwnerProblems(p, ok.fn)).toEqual([]);
+    expect(ok.seen[0][0]).toBe("powershell");
+    const script = ok.seen[0][ok.seen[0].length - 1];
+    expect(script).toContain("'C:\\ProgramData\\EdgeCoder','C:\\ProgramData\\EdgeCoder\\ollama','C:\\ProgramData\\EdgeCoder\\logs','C:\\ProgramData\\EdgeCoder\\state'");
+    expect(script).toContain("GetOwner([Security.Principal.SecurityIdentifier])");
+    expect(script).not.toMatch(/[&|<>^%]/); // passes through cmd.exe
+    expect(windowsDirOwnerProblems(p, run(answer("OWNER S-1-5-21-1-2-3-1001 C:\\ProgramData\\EdgeCoder\r\nCHECKED\r\n")).fn)[0]).toMatch(/owned by S-1-5-21-1-2-3-1001/);
+    expect(windowsDirOwnerProblems(p, run(answer("REPARSE C:\\ProgramData\\EdgeCoder\\logs\r\nCHECKED\r\n")).fn)[0]).toMatch(/junction/);
+    expect(windowsDirOwnerProblems(p, run(answer("", 1)).fn)[0]).toMatch(/could not check/);
+    expect(windowsDirOwnerProblems(p, run(answer("")).fn)[0]).toMatch(/could not check/);
+    expect(windowsDirOwnerProblems({ ...p, configDir: "C:\\Program'Data" }, run(answer("CHECKED")).fn)[0]).toMatch(/refusing/);
   });
 });
 

@@ -326,13 +326,53 @@ export function prepareAccount(plan: InstallPlan, p: ServicePaths, platform: Nod
 /** Env files (registration and mesh tokens) and the Windows .cmd wrappers: root/Administrators only. */
 export function lockConfigDir(p: ServicePaths, platform: NodeJS.Platform, run: Run): void {
   if (platform === "win32") {
-    // No inheritance from ProgramData, where every user may create files. Administrators and SYSTEM
-    // full, the task user read (it runs the wrappers).
+    // Administrators own it (an owner can always rewrite the ACL). No inheritance from ProgramData,
+    // where every user may create files: Administrators and SYSTEM full, the task user read (it
+    // runs the wrappers). Then every direct child drops its explicit ACEs and inherits exactly
+    // that. Not /T: the task user may create junctions under its writable models/logs/state dirs,
+    // and an elevated recursive icacls would follow them.
+    run("icacls", [`"${p.configDir}"`, "/setowner", "*S-1-5-32-544", "/C"]);
     run("icacls", [`"${p.configDir}"`, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", `"${p.user}:(OI)(CI)RX"`]);
+    run("icacls", [`"${p.configDir}\\*"`, "/reset", "/C", "/L"]);
     return;
   }
   run("chown", ["-R", `root:${platform === "darwin" ? "wheel" : "root"}`, p.configDir]);
   run("chmod", ["0755", p.configDir]);
+}
+
+/**
+ * Windows: ProgramData lets every user create folders, and a folder's creator stays its owner, so
+ * a standard user could pre-create C:\ProgramData\EdgeCoder (or a subdir) before an admin installs
+ * and keep the right to rewrite its ACL after lockConfigDir. Before anything is written, each of
+ * the dirs that already exists must be a plain directory (not a junction or symlink) owned by
+ * Administrators, SYSTEM or the installing account itself. Returns the problems (empty = fine);
+ * fails closed when the check cannot run.
+ */
+export function windowsDirOwnerProblems(p: ServicePaths, run: Run): string[] {
+  const dirs = [p.configDir, p.modelsDir, p.logDir, p.stateDir];
+  const bad = dirs.filter((d) => /['"%\r\n]/.test(d));
+  if (bad.length) return bad.map((d) => `refusing a config path with quotes, '%' or line breaks: ${d}`);
+  // One line, no characters cmd.exe treats specially inside double quotes (run() goes through cmd on win32).
+  const script =
+    "$ErrorActionPreference='Stop'; " +
+    "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; " +
+    `foreach($d in @(${dirs.map((d) => `'${d}'`).join(",")})) { ` +
+    "if (Test-Path -LiteralPath $d) { " +
+    "if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { Write-Output ('REPARSE '+$d) } " +
+    "else { $o=(Get-Acl -LiteralPath $d).GetOwner([Security.Principal.SecurityIdentifier]).Value; " +
+    "if ($o -ne 'S-1-5-32-544' -and $o -ne 'S-1-5-18' -and $o -ne $me) { Write-Output ('OWNER '+$o+' '+$d) } } } }; " +
+    "Write-Output 'CHECKED'";
+  const r = run("powershell", ["-NoProfile", "-NonInteractive", "-Command", `"${script}"`]);
+  const lines = r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (r.code !== 0 || !lines.includes("CHECKED")) return [`could not check the owner of ${p.configDir} (${r.stderr.trim() || `exit ${r.code}`}); refusing to write secrets there`];
+  const problems: string[] = [];
+  for (const l of lines) {
+    const owner = /^OWNER (\S+) (.+)$/.exec(l);
+    if (owner) problems.push(`${owner[2]} already exists and is owned by ${owner[1]}, not Administrators or SYSTEM; another user may have created it. Inspect it, remove it, and re-run the installer`);
+    const reparse = /^REPARSE (.+)$/.exec(l);
+    if (reparse) problems.push(`${reparse[1]} is a junction or symbolic link; remove it and re-run the installer`);
+  }
+  return problems;
 }
 
 // ───────────────────────────── apply / remove ─────────────────────────────
@@ -353,9 +393,11 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
     if (dryRun) return { code: 0, stdout: "", stderr: "" };
     return host.run(cmd, args);
   };
+  // Lock the config dir before any secret lands in it, then grant the service account its own
+  // dirs (on Windows those sit inside the config dir, so after the lock resets their ACLs).
+  lockConfigDir(p, host.platform, run);
   prepareAccount(plan, p, host.platform, run);
   for (const inst of plan.instances) write(envFilePath(p, inst), renderEnvFile(inst.env), 0o600);
-  lockConfigDir(p, host.platform, run);
 
   if (host.platform === "linux") {
     for (const inst of plan.instances) {

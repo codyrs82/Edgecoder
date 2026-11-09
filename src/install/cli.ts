@@ -14,7 +14,7 @@ import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
 import { helpText, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
-import { applyPlan, defaultPaths, removeServices, serviceStatus, type Host, type ServicePaths } from "./services.js";
+import { applyPlan, defaultPaths, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
   try {
@@ -280,7 +280,27 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.error(`the services run as the installing user, but this is running as "${p.user || "unknown"}"; run edgecoder-install from an elevated prompt of the account the agents should run as`);
     return 1;
   }
-  if (!opts.dryRun) for (const dir of [p.configDir, p.modelsDir, p.logDir, p.stateDir]) mkdirSync(dir, { recursive: true });
+  if (!opts.dryRun) {
+    const dirs = [p.configDir, p.modelsDir, p.logDir, p.stateDir];
+    if (host.platform === "win32") {
+      // A pre-created ProgramData\EdgeCoder keeps its creator as owner: refuse it, then create and
+      // lock the config dir before its subdirs or any secret exist, and check again after.
+      const run = (cmd: string, args: string[]) => host.run(cmd, args);
+      const before = windowsDirOwnerProblems(p, run);
+      if (before.length === 0) {
+        mkdirSync(p.configDir, { recursive: true });
+        lockConfigDir(p, host.platform, run);
+        for (const dir of dirs) mkdirSync(dir, { recursive: true });
+      }
+      const problems = before.length ? before : windowsDirOwnerProblems(p, run);
+      if (problems.length) {
+        for (const msg of problems) console.error(`error: ${msg}`);
+        return 1;
+      }
+    } else {
+      for (const dir of dirs) mkdirSync(dir, { recursive: true });
+    }
+  }
   // Services never run binaries a non-root user can replace (Linux/macOS; Windows runs as the user).
   const staged = secureBinaries(binFs, host.platform, p, { dryRun: opts.dryRun, ollama: !!binFs.stat(p.ollamaBin) });
   for (const s of staged.plans) if (s.copy && !opts.json) console.log(`${opts.dryRun ? "would copy" : "copied"} ${s.kind} ${s.copy.from} -> ${s.copy.to} (root-owned; ${s.reason})`);
