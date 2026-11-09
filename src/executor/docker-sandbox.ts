@@ -185,7 +185,9 @@ export function buildDockerArgs(
   const networkAccess = options?.networkAccess ?? false;
   const readOnly = options?.readOnly ?? true;
 
-  const args: string[] = ["run", "--rm"];
+  // The sandbox images are built locally and never published: without --pull=never, a missing
+  // image makes `docker run` fetch whatever a registry serves under that name.
+  const args: string[] = ["run", "--rm", "--pull=never"];
   if (options?.name) args.push(`--name=${options.name}`);
 
   if (!networkAccess) {
@@ -196,6 +198,8 @@ export function buildDockerArgs(
   }
 
   args.push(`--memory=${memoryMB}m`);
+  // Equal to --memory: no swap on top of the memory limit.
+  args.push(`--memory-swap=${memoryMB}m`);
   args.push(`--cpus=${(cpuPercent / 100).toFixed(2)}`);
   args.push("--pids-limit=50");
   // #45: least-privilege container.

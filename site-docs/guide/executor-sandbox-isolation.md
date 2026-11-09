@@ -63,7 +63,7 @@ The regex deny-list and the AST checks (`src/executor/subset.ts`, `ast-javascrip
 
 `buildDockerArgs()` always adds these flags:
 
-`--network=none` (unless policy allows), `--read-only`, `--memory`, `--cpus`, `--pids-limit=50`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user=65534:65534`, `--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `--ulimit=nofile=256:256`
+`--pull=never`, `--network=none` (unless policy allows), `--read-only`, `--memory`, `--memory-swap` (equal to `--memory`), `--cpus`, `--pids-limit=50`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user=65534:65534`, `--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `--ulimit=nofile=256:256`
 
 It also adds `--security-opt=seccomp=$SANDBOX_SECCOMP_PROFILE` when that variable is set.
 
