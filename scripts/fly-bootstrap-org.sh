@@ -191,9 +191,19 @@ SEED_SECRETS=(
 if [ "$WITH_ANCHOR" = 1 ]; then
   SEED_SECRETS+=("BITCOIN_ANCHOR_PROVIDER=anchor-proxy" "ANCHOR_PROXY_URL=${ANCHOR_URL}" "ANCHOR_PROXY_TOKEN=${ANCHOR_PROXY_TOKEN}")
 fi
+# Secrets go to flyctl on stdin (`fly secrets import`), never as arguments: argv is visible to
+# every local user. printf is a builtin, so the values do not reach any argv either.
+fly_stage_secrets() { # app NAME=value...
+  local app="$1"; shift
+  local kv
+  for kv in "$@"; do
+    case "$kv" in *$'\n'*|*$'\r'*) echo "secret ${kv%%=*} must be a single line" >&2; exit 1 ;; esac
+  done
+  printf '%s\n' "$@" | fly secrets import -a "$app" --stage
+}
 # Each seed bootstraps its mesh from the other one.
-fly secrets set -a "$SEED"    --stage "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_EU_URL}"
-fly secrets set -a "$SEED_EU" --stage "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_URL}"
+fly_stage_secrets "$SEED"    "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_EU_URL}"
+fly_stage_secrets "$SEED_EU" "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_URL}"
 
 PORTAL_SECRETS=(
   "PORTAL_SERVICE_TOKEN=${PORTAL_SERVICE_TOKEN}"
@@ -206,10 +216,10 @@ PORTAL_SECRETS=(
 for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET SYSTEM_ADMIN_EMAILS PORTAL_EDGE PORTAL_ORIGIN_LOCK_TOKEN; do
   [ -n "${!v:-}" ] && PORTAL_SECRETS+=("$v=${!v}")
 done
-fly secrets set -a "$PORTAL" --stage "${PORTAL_SECRETS[@]}"
+fly_stage_secrets "$PORTAL" "${PORTAL_SECRETS[@]}"
 
 if [ "$WITH_ANCHOR" = 1 ]; then
-  fly secrets set -a "$ANCHOR" --stage \
+  fly_stage_secrets "$ANCHOR" \
     "ANCHOR_PROXY_TOKEN=${ANCHOR_PROXY_TOKEN}" \
     "BITCOIND_RPC_URL=${BITCOIND_RPC_URL}" "BITCOIND_RPC_USER=${BITCOIND_RPC_USER}" \
     "BITCOIND_RPC_PASSWORD=${BITCOIND_RPC_PASSWORD}" "BITCOIND_WALLET_NAME=${BITCOIND_WALLET_NAME:-}"
