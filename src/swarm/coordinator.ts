@@ -11,7 +11,7 @@ import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
-import { createHash, createPrivateKey, createPublicKey, randomInt, randomUUID } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -7779,7 +7779,10 @@ admin.get("/admin/dashboard", async (req, reply) => {
     maxConcurrentTasks: info.maxConcurrentTasks,
     modelCatalog: info.localModelCatalog
   }));
-  return reply.type("text/html").send(adminDashboardHtml(status, agentList));
+  // Agent fields are agent-supplied: the page renders them as text, and only its own script may run.
+  const nonce = randomBytes(16).toString("base64");
+  reply.header("content-security-policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+  return reply.type("text/html").send(adminDashboardHtml(status, agentList, nonce));
 });
 
 admin.get("/admin/dashboard/api/overview", async (req, reply) => {
@@ -7838,7 +7841,7 @@ admin.get("/admin/agents/:agentId/behavior", async (req, reply) => {
 });
 });
 
-function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>): string {
+function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>, nonce: string): string {
   const agentRows = agentList.map((a) =>
     `<tr><td>${esc(a.agentId)}</td><td>${esc(a.os ?? "-")}</td><td>${esc(a.provider ?? "-")}</td><td>${esc((a.modelCatalog ?? []).join(", ") || "-")}</td><td>${a.maxConcurrentTasks ?? 0}</td></tr>`
   ).join("");
@@ -7888,7 +7891,7 @@ function adminDashboardHtml(status: { queued: number; agents: number; results: n
     </table>
   </div>
 </div>
-<script>
+<script nonce="${nonce}">
 // #40 review: the admin token is sent only in the x-admin-token header, never in the URL.
 const TOKEN_KEY = "edgecoder_admin_token";
 let token = sessionStorage.getItem(TOKEN_KEY) || "";
@@ -7907,14 +7910,24 @@ async function refresh() {
     document.getElementById("v-uptime").textContent = d.uptimeSeconds + "s";
     document.getElementById("v-mem").textContent = d.memoryMB + " MB";
     document.getElementById("v-peers").textContent = d.meshPeers;
+    // Agent fields are agent-supplied: set as text, never parsed as HTML.
     const body = document.getElementById("agent-body");
-    if (d.agents.length === 0) {
-      body.innerHTML = "<tr><td colspan='5'>No agents connected.</td></tr>";
-    } else {
-      body.innerHTML = d.agents.map(function(a) {
-        return "<tr><td>" + (a.agentId||"-") + "</td><td>" + (a.os||"-") + "</td><td>" + (a.provider||"-") + "</td><td>" + ((a.modelCatalog||[]).join(", ")||"-") + "</td><td>" + (a.maxConcurrentTasks||0) + "</td></tr>";
-      }).join("");
-    }
+    const row = function(cells, colspan) {
+      const tr = document.createElement("tr");
+      cells.forEach(function(text) {
+        const td = document.createElement("td");
+        if (colspan) td.colSpan = colspan;
+        td.textContent = String(text);
+        tr.appendChild(td);
+      });
+      return tr;
+    };
+    const rows = d.agents.length === 0
+      ? [row(["No agents connected."], 5)]
+      : d.agents.map(function(a) {
+          return row([a.agentId || "-", a.os || "-", a.provider || "-", (a.modelCatalog || []).join(", ") || "-", a.maxConcurrentTasks || 0]);
+        });
+    body.replaceChildren.apply(body, rows);
   } catch(e) { console.error("refresh failed", e); }
 }
 setInterval(refresh, 10000);

@@ -206,3 +206,22 @@ describe("coordinator-to-coordinator registration needs an allowlisted signed ke
     expect((await post("/mesh/register-peer", body)).statusCode).toBe(200);
   });
 });
+
+describe("admin dashboard", () => {
+  test("agent-supplied fields are never parsed as HTML, and only the page's own script runs", async () => {
+    const evil = createPeerKeys("agent-scope-evil");
+    const payload = JSON.stringify({ os: "<b>os</b>", version: "1", mode: "swarm-only", agentId: evil.peerId, registrationToken: VALID_TOKEN, publicKeyPem: evil.publicKeyPem, installedModels: ["<img src=x onerror=alert(1)>"] });
+    const signed = signRequest({ method: "POST", path: "/register", bodyHash: hashRequestBody(payload), privateKeyPem: evil.privateKeyPem, agentId: evil.peerId }) as unknown as Record<string, string>;
+    expect((await app.inject({ method: "POST", url: "/register", remoteAddress: REMOTE, headers: { "content-type": "application/json", ...signed }, payload })).statusCode).toBe(200);
+    const res = await app.inject({ method: "GET", url: "/admin/dashboard", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH, "x-admin-token": ADMIN } });
+    expect(res.statusCode).toBe(200);
+    const csp = String(res.headers["content-security-policy"] ?? "");
+    const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(res.body).toContain(`<script nonce="${nonce}">`);
+    expect(res.body).not.toContain("<img src=x");
+    expect(res.body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    // The refresh builds rows with textContent, not innerHTML.
+    expect(res.body).not.toContain("innerHTML");
+  });
+});
