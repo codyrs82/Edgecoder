@@ -335,6 +335,8 @@ export interface TrustCheckOptions {
   timeoutMs?: number;
   /** Default: required in strict mode, optional otherwise. */
   challenge?: ChallengePolicy;
+  /** Key fingerprint the coordinator must present (e.g. a DNS seed's fp=); anything else is refused. */
+  expectedFingerprint?: string;
 }
 
 /** Status codes an older coordinator returns for the challenge route it does not have. */
@@ -382,6 +384,9 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
     if (res.ok) {
       const answer = (await res.json()) as { peerId?: unknown; publicKeyPem?: unknown };
       if (!validIdentity(answer)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+      if (opts.expectedFingerprint && !fingerprintMatches(opts.expectedFingerprint, answer.publicKeyPem)) {
+        return { trusted: false, coordinatorUrl, peerId: answer.peerId, error: "fingerprint_mismatch" };
+      }
       const urlRefusal = store.checkUrlBinding(base, answer.peerId, answer.publicKeyPem);
       if (urlRefusal) return { trusted: false, coordinatorUrl, peerId: answer.peerId, decision: urlRefusal, proof: "challenge" };
       // Refusals (mismatch, unlisted) need no proof and must not pin.
@@ -410,6 +415,9 @@ export async function checkCoordinatorTrust(coordinatorUrl: string, opts: TrustC
     if (!idRes.ok) return { trusted: false, coordinatorUrl, error: `identity_http_${idRes.status}` };
     const body = (await idRes.json()) as { peerId?: unknown; publicKeyPem?: unknown };
     if (!validIdentity(body)) return { trusted: false, coordinatorUrl, error: "identity_malformed" };
+    if (opts.expectedFingerprint && !fingerprintMatches(opts.expectedFingerprint, body.publicKeyPem)) {
+      return { trusted: false, coordinatorUrl, peerId: body.peerId, error: "fingerprint_mismatch" };
+    }
     const urlRefusal = store.checkUrlBinding(base, body.peerId, body.publicKeyPem);
     if (urlRefusal) return { trusted: false, coordinatorUrl, peerId: body.peerId, decision: urlRefusal, proof: "identity_only" };
     // A coordinator that has answered the challenge before does not lose it: refuse the downgrade
@@ -453,15 +461,18 @@ export class CoordinatorTrustGate {
     this.now = opts.now ?? Date.now;
   }
 
-  async check(coordinatorUrl: string): Promise<CoordinatorTrustCheck> {
+  /** `expectedFingerprint`: the key this URL was discovered with (DNS fp=); a different key is refused. */
+  async check(coordinatorUrl: string, expect: { expectedFingerprint?: string } = {}): Promise<CoordinatorTrustCheck> {
     const key = normalizeChallengeUrl(coordinatorUrl);
     const hit = this.verified.get(key);
-    if (hit !== undefined && this.now() - hit.at < this.reverifyMs) {
+    const hitMatches =
+      !expect.expectedFingerprint || (hit?.result.publicKeyPem !== undefined && fingerprintMatches(expect.expectedFingerprint, hit.result.publicKeyPem));
+    if (hit !== undefined && hitMatches && this.now() - hit.at < this.reverifyMs) {
       const { warning: _warned, ...cached } = hit.result;
       return { ...cached, coordinatorUrl: key };
     }
     this.verified.delete(key);
-    const result = await checkCoordinatorTrust(key, this.opts);
+    const result = await checkCoordinatorTrust(key, { ...this.opts, ...(expect.expectedFingerprint ? { expectedFingerprint: expect.expectedFingerprint } : {}) });
     if (result.trusted) this.verified.set(key, { at: this.now(), result });
     return result;
   }
@@ -476,6 +487,7 @@ export function describeTrustFailure(check: CoordinatorTrustCheck): string {
   if (check.error === "identity_challenge_unsupported") {
     return "coordinator does not prove possession of its key (no /identity/challenge); refused because the challenge is required (strict mode or EDGECODER_IDENTITY_CHALLENGE=required)";
   }
+  if (check.error === "fingerprint_mismatch") return "coordinator key does not match the fingerprint it was discovered with (fp=): possible impersonation";
   if (check.error === "identity_challenge_downgrade") {
     return "coordinator answered the identity challenge before but now offers only the public /identity: possible impersonation";
   }

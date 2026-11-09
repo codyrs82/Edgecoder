@@ -31,6 +31,8 @@ export interface CoordinatorCandidate {
   url: string;
   peerId?: string;
   publicKeyPem?: string;
+  /** Expected key fingerprint (sha256 hex of the SPKI DER) from a DNS seed's `fp=`. */
+  publicKeyFingerprint?: string;
   region?: string;
   source: CandidateSource;
   announcement?: CoordinatorAnnouncement;
@@ -157,6 +159,7 @@ export function mergeCandidates(...lists: CoordinatorCandidate[][]): Coordinator
       }
       existing.peerId ??= raw.peerId;
       existing.publicKeyPem ??= raw.publicKeyPem;
+      existing.publicKeyFingerprint ??= raw.publicKeyFingerprint;
       existing.region ??= raw.region;
       if (!existing.announcement && raw.announcement) existing.announcement = raw.announcement;
       else if (existing.announcement && raw.announcement && raw.announcement.announcedAtMs > existing.announcement.announcedAtMs) {

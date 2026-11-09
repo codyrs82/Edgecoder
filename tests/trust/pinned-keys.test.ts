@@ -197,6 +197,24 @@ describe("checkCoordinatorTrust / CoordinatorTrustGate", () => {
   });
 });
 
+describe("expected fingerprint (DNS fp=)", () => {
+  it("refuses a coordinator whose key does not match the fingerprint it was discovered with", async () => {
+    const store = new PinnedKeyStore({ mode: "tofu", pinFile: null });
+    const wrong = await checkCoordinatorTrust("https://dns.test", { store, fetch: coordinatorFetch(coordB), expectedFingerprint: fpA });
+    expect(wrong).toMatchObject({ trusted: false, error: "fingerprint_mismatch" });
+    expect(store.knownFingerprint(coordB.peerId)).toBeUndefined();
+    expect(describeTrustFailure(wrong)).toContain("fp=");
+    expect((await checkCoordinatorTrust("https://dns.test", { store, fetch: coordinatorFetch(coordA), expectedFingerprint: fpA })).trusted).toBe(true);
+  });
+
+  it("the gate re-verifies a cached URL when an expected fingerprint does not match the cached key", async () => {
+    const store = new PinnedKeyStore({ mode: "open", pinFile: null });
+    const gate = new CoordinatorTrustGate({ store, fetch: coordinatorFetch(coordB) });
+    expect((await gate.check("https://dns.test")).trusted).toBe(true);
+    expect((await gate.check("https://dns.test", { expectedFingerprint: fpA })).trusted).toBe(false);
+  });
+});
+
 describe("tofu URL binding and challenge downgrade", () => {
   it("refuses a new peerId at a URL already bound to another coordinator, across restarts", async () => {
     const store = new PinnedKeyStore({ mode: "tofu", pinFile });

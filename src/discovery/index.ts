@@ -8,6 +8,7 @@
 import { resolveDnsSeeds, discoveryDomainsFromEnv, type DnsResolver } from "./dns.js";
 import { fetchNostrAnnouncements, nostrRelaysFromEnv, type WsConnect } from "./nostr.js";
 import { applyStickiness, createCoordinatorSelector, rankCoordinators, type CoordinatorSelector, type FetchLike, type RankedCoordinator, type SelectorOptions } from "./selector.js";
+import { fingerprintMatches } from "../security/key-fingerprint.js";
 import { candidateFromAnnouncement, mergeCandidates, normalizeCoordinatorUrl, parseAnnouncement, pinMatchesKey, verifyAnnouncement, type CoordinatorCandidate } from "./types.js";
 
 export * from "./types.js";
@@ -129,6 +130,8 @@ export async function discoverCoordinators(opts: DiscoverOptions = {}): Promise<
     );
     merged = mergeCandidates(merged, ...peerLists);
   }
+  // A DNS seed's fp= pin must match the key the coordinator announces (when one is known).
+  merged = merged.filter((c) => !c.publicKeyFingerprint || !c.publicKeyPem || fingerprintMatches(c.publicKeyFingerprint, c.publicKeyPem));
   return merged.slice(0, opts.maxCandidates ?? 32);
 }
 

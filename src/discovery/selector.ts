@@ -56,6 +56,8 @@ export interface SelectorOptions {
 export interface RankedCoordinator {
   url: string;
   peerId?: string;
+  /** Expected key fingerprint (DNS `fp=`); pass it to the trust check (expectedFingerprint). */
+  publicKeyFingerprint?: string;
   region?: string;
   source: CandidateSource;
   healthy: boolean;
@@ -212,6 +214,7 @@ export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoo
     return {
       url: c.url,
       peerId: c.peerId,
+      publicKeyFingerprint: c.publicKeyFingerprint,
       region: c.region,
       source: c.source,
       healthy: p.healthy,

@@ -70,9 +70,14 @@ _edgecoder._tcp.edgecoder.io.  300  IN  TXT  "v=ec1 url=https://coord-ord.edgeco
 _edgecoder._tcp.edgecoder.io.  300  IN  TXT  "v=ec1 url=https://coord-fra.edgecoder.io region=fra peer=coord-9f8e7d6c5b4a"
 ```
 
-Fields: `v=ec1` (required), `url=` (required, http/https), `region=`, `peer=` (the coordinator's
-peerId, shown in its `/identity` and `/discovery/announcement`), optional `fp=<sha256 hex of the
-public key PEM>` for pinning. Unknown keys are ignored; TXT chunks are joined before parsing.
+Fields: `v=ec1` (required), `url=` (required; https, or http only for a loopback host), `region=`,
+`peer=` (the coordinator's peerId, shown in its `/identity` and `/discovery/announcement`),
+optional `fp=<sha256 hex of the SPKI DER, the fingerprint /identity reports>` for pinning. Unknown
+keys are ignored; TXT chunks are joined before parsing. DNS answers are unauthenticated, so the
+`fp=` pin travels with the candidate (`publicKeyFingerprint` on the candidate and the ranked
+result): a candidate whose announced key contradicts it is dropped, and the trust check refuses a
+coordinator presenting another key when given it (`checkCoordinatorTrust(url, { expectedFingerprint })`
+or `CoordinatorTrustGate.check(url, { expectedFingerprint })`).
 
 SRV fallback, used only when a domain has no parseable TXT record:
 
@@ -82,7 +87,7 @@ _edgecoder._tcp.edgecoder.io.  300  IN  SRV  10 5 8443 coord-fra.edgecoder.io.
 ```
 
 Records are ordered by priority (ascending) then weight (descending); port 443 maps to `https://host`,
-port 80 to `http://host`, anything else to `https://host:port`.
+anything else to `https://host:port`. Port 80 (plain http) records are ignored.
 
 With GoDaddy-managed zones (`src/portal/dns-manager.ts` manages the `coord-*` A records) add the
 TXT records in the same zone; they are independent of the per-coordinator A records.
