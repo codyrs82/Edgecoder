@@ -431,8 +431,29 @@ app.get("/network/summary", async (req, reply) => {
   }
 });
 
+// Public on purpose (agents and coordinators bootstrap from it before they hold a token; it lists
+// only public coordinator URLs and peerIds). The upstream mesh-token lookups behind it are cached,
+// so unauthenticated callers cannot drive coordinator requests at will.
+const COORDINATOR_DISCOVERY_CACHE_MS = 30_000;
+let coordinatorDiscoveryCache: { at: number; value: Promise<Awaited<ReturnType<typeof collectCoordinatorDiscovery>>> } | null = null;
+function cachedCoordinatorDiscovery(): Promise<Awaited<ReturnType<typeof collectCoordinatorDiscovery>>> {
+  const now = Date.now();
+  if (coordinatorDiscoveryCache && now - coordinatorDiscoveryCache.at < COORDINATOR_DISCOVERY_CACHE_MS) return coordinatorDiscoveryCache.value;
+  const value = collectCoordinatorDiscovery();
+  coordinatorDiscoveryCache = { at: now, value };
+  value.catch(() => {
+    if (coordinatorDiscoveryCache?.value === value) coordinatorDiscoveryCache = null;
+  });
+  return value;
+}
+
+/** Drop the cached /network/coordinators result (tests, or after a mesh change). */
+export function resetCoordinatorDiscoveryCache(): void {
+  coordinatorDiscoveryCache = null;
+}
+
 app.get("/network/coordinators", async () => {
-  const discovery = await collectCoordinatorDiscovery();
+  const discovery = await cachedCoordinatorDiscovery();
   return {
     generatedAt: Date.now(),
     count: discovery.coordinators.length,
@@ -1253,7 +1274,8 @@ app.post("/bootstrap/coordinator", async (_req, reply) => {
       modelBootstrap: provider === "ollama-local" && autoInstall ? "ollama_ready" : "skipped"
     });
   } catch (error) {
-    return reply.code(500).send({ ok: false, error: String(error) });
+    app.log.error({ error: String(error) }, "bootstrap_coordinator_failed");
+    return reply.code(500).send({ ok: false, error: "bootstrap_failed" });
   }
 });
 

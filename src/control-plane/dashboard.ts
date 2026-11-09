@@ -738,9 +738,27 @@ function updateLastUpdated() {
   if (el) el.textContent = 'Last updated: ' + diff + 's ago';
 }
 
+// The admin token is kept in sessionStorage. A token passed in the URL (#token=..., or the older
+// ?token=...) is moved there and removed from the address bar, so it does not stay in browser
+// history; prefer the #fragment form, which browsers never send to the server or proxies.
+var ADMIN_TOKEN_STORAGE_KEY = 'edgecoder.adminToken';
 function getAdminToken() {
-  var params = new URLSearchParams(window.location.search);
-  return params.get('token') || '';
+  var fromUrl = '';
+  try {
+    var hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    var query = new URLSearchParams(window.location.search);
+    fromUrl = hash.get('token') || query.get('token') || '';
+    if (fromUrl) {
+      query.delete('token');
+      hash.delete('token');
+      var qs = query.toString();
+      var hs = hash.toString();
+      window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + (hs ? '#' + hs : ''));
+      try { window.sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, fromUrl); } catch (e) {}
+      return fromUrl;
+    }
+  } catch (e) {}
+  try { return window.sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ''; } catch (e) { return ''; }
 }
 
 function apiHeaders() {

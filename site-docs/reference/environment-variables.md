@@ -251,7 +251,7 @@ Each service reads its environment once at startup through a zod schema. An inva
 | inference | `src/inference/config.ts` | `INFERENCE_AUTH_TOKEN` at least 32 characters |
 | portal | `src/portal/config.ts` | `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY`, `DOCS_SITE_URL` required; `CONTROL_PLANE_URL` or `COORDINATOR_DISCOVERY_URLS`; `CONTROL_PLANE_ADMIN_TOKEN` when `CONTROL_PLANE_URL` is set; https for `PORTAL_PUBLIC_URL`, `DOCS_SITE_URL` and passkey origins |
 | coordinator | `src/swarm/coordinator-config.ts` | unchanged (`requireProdEnv`) |
-| control-plane | `src/control-plane/config.ts` | `ADMIN_API_TOKEN` required in every environment |
+| control-plane | `src/control-plane/config.ts` | `ADMIN_API_TOKEN` required in every environment; at least 32 characters when `NODE_ENV=production` |
 
 ### Portal: other validated settings
 

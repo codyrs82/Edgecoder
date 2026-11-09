@@ -246,7 +246,7 @@ Protected by `ADMIN_API_TOKEN` (via `x-admin-token` header or `Authorization: Be
 | `GET` | `/network/mode` | Current network mode | admin |
 | `POST` | `/network/mode` | Set network mode (public_mesh / enterprise_overlay) | admin |
 | `GET` | `/network/summary` | Network status (capacity, jobs, pricing) | admin |
-| `GET` | `/network/coordinators` | Coordinator discovery (known coordinators) | admin |
+| `GET` | `/network/coordinators` | Coordinator discovery (known coordinator URLs and peerIds; result cached 30 s) | none (public bootstrap) |
 | `GET` | `/mesh/peers` | Mesh peer listing (via coordinator) | admin |
 | `GET` | `/deployment/plan` | Current deployment plan | admin |
 
