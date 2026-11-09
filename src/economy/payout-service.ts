@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../common/types.js";
-import type { LightningProvider } from "./lightning.js";
+import { payFailureIsFinal, type LightningProvider } from "./lightning.js";
 import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
 import type { ReconcileLedger } from "./payout-reconcile.js";
 import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck } from "./lnurl-callback-pin.js";
@@ -317,11 +317,16 @@ export class PayoutService {
       }
       const res = await this.d.provider.payInvoice({ bolt11, maxFeeSats: Math.ceil(v.maxFeeMsat / 1000), timeoutSeconds: 60 });
       if (res.status !== "succeeded") {
-        // Transport errors may leave an in-flight HTLC; the row stays pending for reconciliation.
-        const transport = /transport/.test(res.error ?? "");
-        if (!transport) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
-        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, transport }, "payout_failed");
-        return { ok: false, code: transport ? "payout_unconfirmed" : "payout_failed", detail: res.error };
+        // Only a failure the node reported as final frees the balance. Anything else may leave an
+        // HTLC in flight, so the row (and its credit debit) stays pending for reconciliation.
+        const final = payFailureIsFinal(res.error);
+        if (final) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
+        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, final }, "payout_failed");
+        return { ok: false, code: final ? "payout_failed" : "payout_unconfirmed", detail: res.error };
+      }
+      if (res.paymentHash && res.paymentHash.toLowerCase() !== payout.paymentHash.toLowerCase()) {
+        this.d.log?.warn({ payoutId: payout.payoutId, nodePaymentHash: res.paymentHash }, "payout_hash_mismatch");
+        return { ok: false, code: "payout_unconfirmed", detail: "node paid a different payment hash than the invoice's; left pending for reconciliation" };
       }
       if (res.preimage && !preimageMatches(payout.paymentHash, res.preimage)) {
         this.d.log?.warn({ payoutId: payout.payoutId }, "payout_preimage_mismatch");

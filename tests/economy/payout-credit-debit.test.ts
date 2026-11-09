@@ -81,7 +81,7 @@ describe("withdrawals consume the credit balance (memory store)", () => {
   });
 
   it("a failed payout gives the whole debit back, once", async () => {
-    const { store, svc } = setup(() => ({ status: "failed", error: "lnd_pay_failed:FAILURE_REASON_NO_ROUTE" }));
+    const { store, svc } = setup(() => ({ status: "failed", error: "lnd_pay_error:FAILURE_REASON_NO_ROUTE" }));
     await store.recordCreditTransactions([earn("a", 10_000)]);
     const r = await svc.withdraw("a", invoice(2_000_000).bolt11);
     expect(r).toMatchObject({ ok: false, code: "payout_failed" });

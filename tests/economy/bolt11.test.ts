@@ -56,3 +56,21 @@ describe("decodeBolt11 (BOLT 11 vectors)", () => {
     expect(bolt11IsExpired(d, (d.timestamp + 61) * 1000, 0)).toBe(true);
   });
 });
+
+describe("repeated single-use fields", () => {
+  const hash = "11".repeat(32);
+  const other = Buffer.from("22".repeat(32), "hex");
+  it("refuses a second p, h, s, n or x field; accepts one of each", () => {
+    for (const type of [1, 23, 16, 19, 6]) {
+      const payload = type === 19 ? Buffer.alloc(33, 2) : type === 6 ? Buffer.from([1, 0]) : other;
+      const once = encodeTestBolt11({ network: "bcrt", amountMsat: 2_000_000, paymentHashHex: hash, extraTags: type === 1 || type === 6 ? [] : [[type, payload]] });
+      expect(decodeBolt11(once).paymentHash).toBe(hash);
+      const twice = encodeTestBolt11({ network: "bcrt", amountMsat: 2_000_000, paymentHashHex: hash, extraTags: type === 1 || type === 6 ? [[type, payload]] : [[type, payload], [type, payload]] });
+      expect(() => decodeBolt11(twice)).toThrow("bolt11_repeated_field");
+    }
+  });
+  it("a second payment hash cannot replace the first", () => {
+    const inv = encodeTestBolt11({ network: "bcrt", amountMsat: 2_000_000, paymentHashHex: hash, extraTags: [[1, other]] });
+    expect(() => decodeBolt11(inv)).toThrow("bolt11_repeated_field");
+  });
+});
