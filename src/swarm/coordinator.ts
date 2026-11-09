@@ -32,6 +32,7 @@ import {
   computeIntentFee,
   contributionPolicyDecision,
   submitterAccountDecision,
+  PreAuthFailureCounter,
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
@@ -466,6 +467,8 @@ const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
 const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
 const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
 const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
+/** Signed requests that failed before the signer was proven, per client address. */
+const preAuthFailures = new PreAuthFailureCounter(CC.PREAUTH_FAILURE_MAX_PER_IP, AGENT_RATE_LIMIT_WINDOW_MS);
 // Replay protection: Postgres when configured, so nonces survive restarts and are shared by every
 // coordinator on the database (a replay to the other seed is caught); in memory otherwise.
 const nonceStore: NonceStore = pgStore
@@ -1453,42 +1456,35 @@ async function verifyAgentRequest(
   // signed-only whatever the policy (an unsigned caller could otherwise speak for any agent).
   if (!signed) return unsignedRequestDecision({ requireSignedPolicy: REQUIRE_SIGNED_AGENT_REQUESTS, ...opts });
 
+  // The claimed id is not proven until the signature verifies: nothing before that is counted
+  // against the agent (anyone can name it), only against the address the request came from.
   const agentId = signed["x-agent-id"];
 
   // 1. Skip rate limiting for loopback (embedded worker is trusted)
   const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST);
-
-  // 2. Rate limit (cheapest check first) — skip for loopback
-  if (!isLoopback && !agentRateLimiter.check(agentId)) {
+  const clientIp = extractClientIp(headers, sourceIp, CLIENT_IP_TRUST) ?? "unknown";
+  const rejectUnproven = (event: SecurityEventType, reason: string, countFailure = true): "rejected" => {
+    if (!isLoopback && countFailure) preAuthFailures.record(clientIp);
     securityLog.log({
-      level: securityLog.severity("auth_rate_limit_hit"),
-      event: "auth_rate_limit_hit",
-      source: { type: "agent", id: agentId },
-      details: { route: routePath },
+      level: securityLog.severity(event),
+      event,
+      source: { type: "system", id: "unauthenticated", ip: clientIp },
+      details: { reason, route: routePath, claimedAgentId: agentId },
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
     return "rejected";
-  }
+  };
 
-  // 3. Look up agent public key — don't count as rate limit hit if key missing
-  //    (agent needs to re-register, not a security threat)
+  // 2. An address sending many unverifiable requests is turned away before any checking.
+  if (!isLoopback && preAuthFailures.blocked(clientIp)) return rejectUnproven("auth_rate_limit_hit", "too_many_failed_signatures");
+
+  // 3. Look up agent public key (a missing key means the agent needs to re-register, e.g. after a
+  //    coordinator restart: not counted as a failure)
   const cap = agentCapabilities.get(agentId);
-  if (!cap?.publicKeyPem) {
-    agentRateLimiter.reset(agentId);
-    securityLog.log({
-      level: securityLog.severity("invalid_signature"),
-      event: "invalid_signature",
-      source: { type: "agent", id: agentId },
-      details: { reason: "no_public_key", route: routePath },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    return "rejected";
-  }
+  if (!cap?.publicKeyPem) return rejectUnproven("invalid_signature", "no_public_key", false);
 
-  // 3. Verify signature
+  // 4. Verify signature
   const sigResult = verifySignedRequest({
     method: "POST",
     path: routePath,
@@ -1501,22 +1497,38 @@ async function verifyAgentRequest(
   });
 
   if (!sigResult.valid) {
-    // A valid signature over a different body is a captured request being replayed with a new payload.
-    const replayLike = sigResult.reason === "timestamp_skew" || sigResult.reason === "body_hash_mismatch";
-    const eventType: SecurityEventType = replayLike ? "replay_attempt" : "invalid_signature";
+    // Only a body mismatch comes after the signature checked out (a signed request replayed with a
+    // new payload): that one is the agent's key. Skew and bad signatures prove nothing about who sent them.
+    if (sigResult.reason !== "body_hash_mismatch") {
+      return rejectUnproven(sigResult.reason === "timestamp_skew" ? "replay_attempt" : "invalid_signature", sigResult.reason ?? "invalid_signature");
+    }
     securityLog.log({
-      level: securityLog.severity(eventType),
-      event: eventType,
-      source: { type: "agent", id: agentId },
+      level: securityLog.severity("replay_attempt"),
+      event: "replay_attempt",
+      source: { type: "agent", id: agentId, ip: clientIp },
       details: { reason: sigResult.reason, route: routePath },
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, replayLike ? "replay_attempt" : "signature_failure");
+    behaviorTracker.recordProtocolViolation(agentId, "replay_attempt");
     return "rejected";
   }
 
-  // 4. Nonce replay detection
+  // 5. Per-agent rate limit, now that the request is the agent's own — skip for loopback
+  if (!isLoopback && !agentRateLimiter.check(agentId)) {
+    securityLog.log({
+      level: securityLog.severity("auth_rate_limit_hit"),
+      event: "auth_rate_limit_hit",
+      source: { type: "agent", id: agentId, ip: clientIp },
+      details: { route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
+    return "rejected";
+  }
+
+  // 6. Nonce replay detection
   const nonceResult = await verifyNonce(nonceStore, {
     nonce: sigResult.nonce!,
     sourceId: agentId,

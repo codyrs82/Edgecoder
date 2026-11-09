@@ -218,3 +218,32 @@ export function submitterAccountDecision(input: {
   if (requested === "anonymous" || input.loopback) return { accountId: requested };
   return { status: 403, error: "submitter_signature_required" };
 }
+
+/**
+ * Failed signed requests per client address in a fixed window. Failures before the signer is
+ * proven belong to the address they came from, never to the agent id the request claimed.
+ */
+export class PreAuthFailureCounter {
+  private readonly windows = new Map<string, { startMs: number; count: number }>();
+  constructor(private readonly max: number, private readonly windowMs: number, private readonly maxKeys = 50_000) {}
+
+  record(key: string, nowMs = Date.now()): void {
+    const w = this.windows.get(key);
+    if (w && nowMs - w.startMs < this.windowMs) {
+      w.count++;
+      return;
+    }
+    if (!w && this.windows.size >= this.maxKeys) this.prune(nowMs);
+    if (!w && this.windows.size >= this.maxKeys) this.windows.delete(this.windows.keys().next().value as string);
+    this.windows.set(key, { startMs: nowMs, count: 1 });
+  }
+
+  blocked(key: string, nowMs = Date.now()): boolean {
+    const w = this.windows.get(key);
+    return Boolean(w && nowMs - w.startMs < this.windowMs && w.count >= this.max);
+  }
+
+  private prune(nowMs: number): void {
+    for (const [k, w] of this.windows) if (nowMs - w.startMs >= this.windowMs) this.windows.delete(k);
+  }
+}
