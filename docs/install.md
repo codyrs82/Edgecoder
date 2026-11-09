@@ -179,6 +179,11 @@ the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repe
 `--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
 rewrites the env files and restarts the services; nothing else changes.
 
+Tokens (`--token`, `--tokens-file`, `--mesh-token` and the ones the portal returns to `--enroll`)
+may only contain `A-Z a-z 0-9 . _ ~ + / = -`, and `--portal-url` / `--coordinator-url` must be
+`https://` (plain `http://` is accepted only for `localhost`, `127.x.x.x` and `[::1]`). `plan` and
+`apply` refuse anything else before they change the host.
+
 To do it in one run, create a portal API key (edgecoder.io → Settings → API keys, it starts
 with `eck_`) and pass it as `--enroll <api-key>`, or better, in the `EDGECODER_API_KEY`
 environment variable so it stays out of shell history and process listings. The installer

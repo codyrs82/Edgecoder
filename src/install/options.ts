@@ -172,6 +172,46 @@ export function parseTokensFile(text: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Registration and mesh tokens end up in a systemd EnvironmentFile and a Windows .cmd wrapper, so
+ * they are limited to URL-safe and base64 characters (what the portal and coordinator issue).
+ */
+export const TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]{1,1024}$/;
+const TOKEN_CHARS = "A-Z a-z 0-9 . _ ~ + / = -";
+
+export function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
+}
+
+/** https, or http to this machine only: the enrol API key and the tokens travel over it. */
+export function checkServiceUrl(name: string, value: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return `${name} is not a valid URL: ${JSON.stringify(value)}`;
+  }
+  if (/[\s"'%$`\\]/.test(value)) return `${name} contains characters not allowed in a service URL`;
+  if (u.protocol === "https:") return undefined;
+  if (u.protocol === "http:" && isLoopbackHost(u.hostname)) return undefined;
+  return `${name} must use https (http is accepted only for localhost): ${value}`;
+}
+
+/** Problems with the URLs and tokens that are written into the service env files; empty when all are safe. */
+export function validateInstallOptions(o: InstallOptions): string[] {
+  const errors: string[] = [];
+  for (const [name, url] of [["--coordinator-url", o.coordinatorUrl], ["--portal-url", o.portalUrl]] as const) {
+    const err = checkServiceUrl(name, url);
+    if (err) errors.push(err);
+  }
+  if (o.meshToken !== undefined && !TOKEN_PATTERN.test(o.meshToken)) errors.push(`--mesh-token may only contain ${TOKEN_CHARS}`);
+  for (const [id, tok] of Object.entries(o.tokens)) {
+    if (!TOKEN_PATTERN.test(tok)) errors.push(`registration token${id === "*" ? "" : ` for ${id}`} may only contain ${TOKEN_CHARS}`);
+  }
+  return errors;
+}
+
 export function helpText(): string {
   const lines = ["edgecoder-install <command> [options]", "", "Commands:"];
   for (const c of INSTALL_COMMANDS) lines.push(`  ${c.name.padEnd(10)} ${c.description}`);

@@ -11,7 +11,7 @@ import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFile
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
-import { helpText, parseInstallArgs, parseTokensFile, type InstallOptions } from "./options.js";
+import { helpText, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
 import { applyPlan, defaultPaths, removeServices, serviceStatus, type Host, type ServicePaths } from "./services.js";
@@ -144,6 +144,8 @@ export async function enrollNodes(opts: InstallOptions, instances: AgentInstance
       if (res.status < 200 || res.status >= 300) throw new Error(`portal returned HTTP ${res.status}`);
       const body = (await res.json()) as { registrationToken?: string };
       if (!body.registrationToken) throw new Error("response had no registrationToken");
+      // It is written into the service env file and .cmd wrapper: refuse anything but token characters.
+      if (typeof body.registrationToken !== "string" || !TOKEN_PATTERN.test(body.registrationToken)) throw new Error("response registrationToken has an invalid format");
       opts.tokens[inst.agentId] = body.registrationToken;
       enrolled.push(inst.agentId);
     } catch (e) {
@@ -209,6 +211,13 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 0;
   }
   if (opts.tokensFile) Object.assign(opts.tokens, parseTokensFile(readFileSync(opts.tokensFile, "utf8")));
+  if (opts.command === "plan" || opts.command === "apply") {
+    const errors = validateInstallOptions(opts);
+    if (errors.length) {
+      for (const e of errors) console.error(`error: ${e}`);
+      return 2;
+    }
+  }
 
   const here = dirname(fileURLToPath(import.meta.url));
   const appDir = opts.appDir ?? resolve(here, "..", "..");

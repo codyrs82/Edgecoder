@@ -247,9 +247,20 @@ export function launchdAgentPlist(p: ServicePaths, inst: AgentInstance): string 
 }
 
 // ───────────────────────────── Windows (scheduled tasks) ─────────────────────────────
+/**
+ * cmd.exe parses the wrapper line by line, expands %VAR% even inside quotes and ends a quoted
+ * string at the next `"`, so a value carrying any of those (or a line break) is refused, not escaped.
+ */
 function cmdWrapper(env: Record<string, string>, exe: string, args: string[], cwd: string, log: string): string {
+  for (const [what, v] of [["working directory", cwd], ["program", exe], ["log path", log], ...args.map((a) => ["argument", a])] as const) {
+    if (/[\r\n\0"%]/.test(v)) throw new Error(`.cmd wrapper: ${what} ${JSON.stringify(v)} contains a quote, '%' or a line break`);
+  }
   const lines = ["@echo off", `cd /d "${cwd}"`];
-  for (const [k, v] of Object.entries(env)) lines.push(`set "${k}=${v}"`);
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`.cmd wrapper: invalid variable name ${JSON.stringify(k)}`);
+    if (/[\r\n\0"%&|^<>!]/.test(v)) throw new Error(`.cmd wrapper: ${k} must not contain line breaks or any of " % & | ^ < > !`);
+    lines.push(`set "${k}=${v}"`);
+  }
   lines.push(`"${exe}" ${args.map((a) => `"${a}"`).join(" ")} >> "${log}" 2>&1`);
   return lines.join("\r\n") + "\r\n";
 }
