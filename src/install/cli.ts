@@ -38,18 +38,38 @@ function findOllama(platform: NodeJS.Platform): string | undefined {
   return candidates.find((c) => existsSync(c));
 }
 
+/**
+ * Replace, never write through: the old file (or a symlink planted in its place) is removed and a
+ * new one is created exclusively with its final mode, so a secret never sits at the umask default
+ * and on Windows the file inherits the locked directory's ACL.
+ */
+export function writeFileFresh(path: string, content: string, mode?: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  rmSync(path, { force: true });
+  writeFileSync(path, content, { encoding: "utf8", flag: "wx", ...(mode !== undefined ? { mode } : {}) });
+  if (mode !== undefined && process.platform !== "win32") chmodSync(path, mode);
+}
+
+/** One cmd.exe argument: quoted unless plain or already quoted (run() goes through cmd on win32). */
+export function cmdQuote(arg: string): string {
+  if (/[%\r\n]/.test(arg) || /^[^"]*"[^"]*$/.test(arg)) throw new Error(`refusing to pass ${JSON.stringify(arg)} through cmd.exe`);
+  if (/^"[^"]*"$/.test(arg) || /^[A-Za-z0-9_.:\\/=+*-]+$/.test(arg)) return arg;
+  if (arg.includes('"')) throw new Error(`refusing to pass ${JSON.stringify(arg)} through cmd.exe`);
+  return `"${arg}"`;
+}
+
 const realHost: Host = {
   platform: process.platform,
-  writeFile(path, content, mode) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content, "utf8");
-    if (mode !== undefined && process.platform !== "win32") chmodSync(path, mode);
-  },
+  writeFile: writeFileFresh,
   removeFile(path) {
     try { unlinkSync(path); } catch { /* already gone */ }
   },
   run(cmd, args) {
-    const r = spawnSync(cmd, args, { encoding: "utf8", shell: process.platform === "win32" });
+    // win32 goes through cmd.exe (icacls/schtasks take pre-quoted args); quote the rest, such as
+    // an ollama path under a profile with a space in it.
+    const r = process.platform === "win32"
+      ? spawnSync(cmdQuote(cmd), args.map(cmdQuote), { encoding: "utf8", shell: true })
+      : spawnSync(cmd, args, { encoding: "utf8" });
     return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   },
   exists: (path) => existsSync(path)
@@ -180,6 +200,19 @@ export function pullModels(host: Host, ollamaBin: string, instances: AgentInstan
   return failed;
 }
 
+const SECRET_ENV = ["AGENT_REGISTRATION_TOKEN", "MESH_AUTH_TOKEN"];
+
+/** The plan for --json output, token values replaced so logs and CI captures do not keep them. */
+export function redactPlan(plan: InstallPlan): InstallPlan {
+  return {
+    ...plan,
+    instances: plan.instances.map((i) => ({
+      ...i,
+      env: Object.fromEntries(Object.entries(i.env).map(([k, v]) => [k, SECRET_ENV.includes(k) && v ? "<redacted>" : v]))
+    }))
+  };
+}
+
 function describeHardware(hw: HostHardware): string {
   const lines = [`Host ${hw.hostname}: ${hw.platform}/${hw.arch}, ${hw.cpuCores} cores (${hw.cpuModel}), ${hw.ramGb} GB RAM${hw.unifiedMemory ? " (unified)" : ""}`];
   if (hw.gpus.length === 0) lines.push("GPUs: none detected (CPU class)");
@@ -251,7 +284,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
   if (opts.command === "plan") {
-    console.log(opts.json ? JSON.stringify({ hardware: hw, plan, paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
+    console.log(opts.json ? JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
     return 0;
   }
 
@@ -312,7 +345,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const result = applyPlan(plan, host, p, opts.dryRun);
   if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
   if (opts.json) {
-    console.log(JSON.stringify({ hardware: hw, plan, paths: p, result }, null, 2));
+    console.log(JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p, result }, null, 2));
   } else {
     console.log(`${describeHardware(hw)}\n${describePlan(plan, p)}`);
     console.log(`${opts.dryRun ? "Would write" : "Wrote"} ${result.files.length} files; services: ${result.services.join(", ")}`);

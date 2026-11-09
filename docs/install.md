@@ -190,6 +190,11 @@ may only contain `A-Z a-z 0-9 . _ ~ + / = -`, and `--portal-url` / `--coordinato
 `https://` (plain `http://` is accepted only for `localhost`, `127.x.x.x` and `[::1]`). `plan` and
 `apply` refuse anything else before they change the host.
 
+Command-line arguments are visible to every local user in the process list. Prefer
+`--tokens-file` (mode 0600) or the `EDGECODER_REGISTRATION_TOKEN` / `EDGECODER_MESH_TOKEN`
+environment variables over `--token` / `--mesh-token` on shared machines. `--json` output shows
+token values as `<redacted>`.
+
 To do it in one run, create a portal API key (edgecoder.io → Settings → API keys, it starts
 with `eck_`) and pass it as `--enroll <api-key>`, or better, in the `EDGECODER_API_KEY`
 environment variable so it stays out of shell history and process listings. The installer
