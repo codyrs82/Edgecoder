@@ -15,6 +15,7 @@ use serde::Serialize;
 
 mod agent_guard;
 mod agent_settings;
+mod ide_guard;
 mod local_compute;
 mod navigation;
 mod network_enrollment;
@@ -241,10 +242,25 @@ fn ide_token_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".edgecoder").join("ide-token"))
 }
 
-/// Read the IDE provider token so the webview can call the IDE server (:4304).
+/// Read the IDE provider token so the webview can call the IDE server (127.0.0.1:4304).
 /// The file is the single source of truth; the desktop never generates or logs it.
+/// It is handed out only while the agent on :4301 is the one this app spawned (the provider is
+/// its child), and on macOS only when every listener on :4304 is a child of that agent.
 #[tauri::command]
-fn get_ide_token() -> Result<String, String> {
+fn get_ide_token(
+    control: tauri::State<'_, AgentControl>,
+    process: tauri::State<'_, AgentProcess>,
+) -> Result<String, String> {
+    let agent_pid = {
+        let mut slot = process.0.lock().map_err(|_| "agent state unavailable".to_string())?;
+        let alive = child_alive(&mut slot);
+        // Same ownership rule as the inference token: refuse unless :4301 is our live agent.
+        control.guard.token_for_webview("", alive)?;
+        slot.as_ref().map(|c| c.id()).ok_or_else(|| "not_started: the local agent is not running".to_string())?
+    };
+    if let Some(listeners) = ide_guard::ide_listeners() {
+        ide_guard::listeners_owned_by(&listeners, agent_pid)?;
+    }
     let path = ide_token_path().ok_or_else(|| "home directory not found".to_string())?;
     let raw = fs::read_to_string(&path)
         .map_err(|_| "IDE token not found; start the IDE provider server once to create ~/.edgecoder/ide-token".to_string())?;

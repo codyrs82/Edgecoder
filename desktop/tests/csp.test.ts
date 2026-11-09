@@ -45,7 +45,14 @@ describe("desktop CSP (#11)", () => {
     }
     expect(connect).toContain("ipc:");
     expect(connect).toContain("https://edgecoder.io");
-    for (const h of ["127.0.0.1", "localhost"]) for (const p of [4301, 4302, 4304]) expect(connect).toContain(`ws://${h}:${p}`);
+    // The local services bind 127.0.0.1 only; tokens go there by address, never to a name that
+    // may resolve to another listener (::1).
+    for (const p of [4301, 4302, 4304]) {
+      expect(connect).toContain(`http://127.0.0.1:${p}`);
+      expect(connect).toContain(`ws://127.0.0.1:${p}`);
+      expect(connect).not.toContain(`http://localhost:${p}`);
+      expect(connect).not.toContain(`ws://localhost:${p}`);
+    }
   });
 
   it("devCsp keeps the dev conveniences", () => {

@@ -60,7 +60,7 @@ async function tryLocalHealth(): Promise<boolean> {
   // #72: never treat an unverified :4301 listener as our agent.
   if (!localAgentUsable(await localAgentStatus())) return false;
   try {
-    const res = await fetch("http://localhost:4301/health/runtime", {
+    const res = await fetch("http://127.0.0.1:4301/health/runtime", {
       signal: AbortSignal.timeout(2000),
     });
     console.log("[api] tryLocalHealth:", res.ok, res.status);
@@ -301,7 +301,7 @@ export async function testMeshToken(token: string): Promise<boolean> {
 
 const INFERENCE_BASE = import.meta.env.DEV
   ? "/inference"
-  : "http://localhost:4302";
+  : "http://127.0.0.1:4302";
 
 export const getInferenceHealth = async () =>
   get<{ ok: boolean }>(INFERENCE_BASE, "/health", await inferenceHeaders());
@@ -835,7 +835,7 @@ async function ideHeaders(): Promise<Record<string, string>> {
 }
 
 function ideBase(): string {
-  return import.meta.env.DEV ? "/chat" : "http://localhost:4304";
+  return import.meta.env.DEV ? "/chat" : "http://127.0.0.1:4304";
 }
 
 function isUnauthorized(e: unknown): boolean {
@@ -870,7 +870,7 @@ async function withIdeRetry<T>(call: (headers: Record<string, string>) => Promis
 
 function chatBase(): string {
   if (import.meta.env.DEV) return "/chat";
-  return useRemote ? `${portalBase()}/portal/api` : "http://localhost:4304";
+  return useRemote ? `${portalBase()}/portal/api` : "http://127.0.0.1:4304";
 }
 
 export interface StreamRouteInfo {
@@ -1384,9 +1384,9 @@ export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/com
 export const computeBuy = (amountSats: number) =>
   fsCall<{ intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number }>("POST", "/v1/ide/compute/buy", { amountSats });
 export const computeIntent = (intentId: string) => fsCall<{ intentId: string; status: string; cSats: number }>("POST", "/v1/ide/compute/intent", { intentId });
-/** The key external tools use for http://localhost:4304/v1 (this computer's IDE token). */
+/** The key external tools use for http://127.0.0.1:4304/v1 (this computer's IDE token). */
 export const ideApiKey = () => getIdeToken();
-export const IDE_API_BASE = "http://localhost:4304/v1";
+export const IDE_API_BASE = "http://127.0.0.1:4304/v1";
 
 /** One of your machines as the coordinator sees it. */
 export interface Machine {
