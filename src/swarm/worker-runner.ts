@@ -24,7 +24,7 @@ import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
-import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
+import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
@@ -979,15 +979,17 @@ async function loop(): Promise<void> {
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
-        // Admission: no mesh token here means no remote BLE work at all; otherwise the requester
-        // must advertise the same token hash, within size and rate limits. BLE adverts carry no
-        // public key, so requesterSignature cannot be verified against an identity.
-        const requesterPeer = bleTransport!.discoveredPeers().find(p => p.agentId === req.requesterId);
+        // Admission: no mesh token here means no remote BLE work at all; otherwise the request must
+        // carry a proof keyed with the mesh token (the advertised hash is public, not a
+        // credential), within size and rate limits. See src/mesh/ble/ble-request-guard.ts.
+        const proof = req as typeof req & { requesterProof?: unknown; requesterIssuedAtMs?: unknown };
         const admission = bleGuard.admit({
-          ownTokenHash: computeMeshTokenHash(),
-          requesterTokenHash: requesterPeer?.meshTokenHash,
+          ownMeshToken: meshAuthToken,
+          requestId: String(req.requestId ?? ""),
           requesterId: String(req.requesterId ?? ""),
-          task: req.task
+          task: req.task,
+          requesterProof: proof.requesterProof,
+          requesterIssuedAtMs: proof.requesterIssuedAtMs
         });
         if (!admission.ok) {
           console.warn(`[BLE] rejecting task from ${req.requesterId}: ${admission.reason}`);
@@ -1642,6 +1644,8 @@ async function loop(): Promise<void> {
               task: task.prompt,
               language: task.language as Language,
               requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(task.prompt) }), keys.privateKeyPem),
+              // Admission proof keyed with the mesh token (providers no longer accept the public hash).
+              ...bleRequestProof(meshAuthToken, { requestId: task.id, requesterId: AGENT_ID, task: task.prompt }),
             };
             try {
               const resp = await bleMesh.routeTask(bleReq, 0);
@@ -1698,12 +1702,14 @@ async function loop(): Promise<void> {
               try {
                 console.log(`[BLE-TEST] sending test task to ${peer.agentId} over BLE...`);
                 const testTask = "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.";
+                const testRequestId = `ble-test-${Date.now()}`;
                 const testReq = {
-                  requestId: `ble-test-${Date.now()}`,
+                  requestId: testRequestId,
                   requesterId: AGENT_ID,
                   task: testTask,
                   language: "python" as const,
                   requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(testTask) }), keys.privateKeyPem),
+                  ...bleRequestProof(meshAuthToken, { requestId: testRequestId, requesterId: AGENT_ID, task: testTask }),
                 };
                 const resp = await bleTransport!.sendTaskRequest(peer.agentId, testReq);
                 console.log(`[BLE-TEST] response from ${peer.agentId}: status=${resp.status}, output=${(resp.output ?? "").substring(0, 200)}`);
