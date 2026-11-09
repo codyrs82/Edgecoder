@@ -36,7 +36,11 @@ param(
     [string]$Command,
 
     [Parameter()]
-    [string]$Token
+    [string]$Token,
+
+    # A file holding the token (first line), so it is not on the command line.
+    [Parameter()]
+    [string]$TokenFile
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +51,11 @@ Set-StrictMode -Version Latest
 if ($args.Count -gt 0 -and ($args[0] -eq 'install' -or $args[0] -eq 'detect' -or $args[0] -eq 'plan' -or $args[0] -eq 'apply' -or $args[0] -eq 'status' -or $args[0] -eq 'remove')) {
     $cli = Join-Path $env:ProgramFiles 'EdgeCoder\app\dist\install\cli.js'
     $rest = if ($args[0] -eq 'install') { $args[1..($args.Count - 1)] } else { $args }
-    & node $cli @rest
+    # Elevated: never `node` from PATH, which may resolve to a binary a standard user can replace.
+    $node = @((Join-Path $env:ProgramFiles 'EdgeCoder\node\node.exe'), (Join-Path $env:ProgramFiles 'nodejs\node.exe')) |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $node) { Write-Error 'Node.js not found in Program Files; run install.ps1 or install Node.js 22+ from nodejs.org.'; exit 1 }
+    & $node $cli @rest
     exit $LASTEXITCODE
 }
 $ErrorActionPreference = 'Stop'
@@ -85,29 +93,13 @@ function Invoke-OllamaInstall {
 function Set-FirewallRules {
     <#
     .SYNOPSIS
-        Create Windows Firewall rules for EdgeCoder ports (4301-4310).
+        Remove the inbound 'EdgeCoder Runtime' rule (TCP 4301-4310) older versions created.
+        The worker only makes outbound connections, so no inbound port is opened.
     #>
     $ruleName = 'EdgeCoder Runtime'
-    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-
-    if ($existing) {
-        Write-Host "Firewall rule '$ruleName' already exists. Updating..."
+    if (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue) {
         Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-    }
-
-    try {
-        New-NetFirewallRule -DisplayName $ruleName `
-            -Direction Inbound `
-            -Action Allow `
-            -Protocol TCP `
-            -LocalPort 4301-4310 `
-            -Profile Domain,Private `
-            -Description 'Allow EdgeCoder runtime ports (coordinator, inference, control-plane, mesh)' `
-            -ErrorAction Stop | Out-Null
-
-        Write-Host "Firewall rule created: $ruleName (TCP 4301-4310, Domain+Private profiles)"
-    } catch {
-        Write-Host "Warning: could not create firewall rule: $_"
+        Write-Host "Removed inbound firewall rule '$ruleName' (no longer needed)."
     }
 }
 
@@ -138,17 +130,19 @@ function Register-WindowsService {
         Register EdgeCoder as a Windows service using sc.exe.
         Falls back to NSSM if sc.exe registration is not suitable.
     #>
+    # The service runs as LocalService, never LocalSystem: it only needs to read its config and
+    # make outbound connections.
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($null -ne $svc) {
-        Write-Host "Windows service '$ServiceName' is already registered (status: $($svc.Status))."
+        Write-Host "Windows service '$ServiceName' is already registered (status: $($svc.Status)); running it as LocalService."
+        & sc.exe config $ServiceName obj= 'NT AUTHORITY\LocalService' password= '""' | Out-Null
         return
     }
 
     $runtimeScript = Join-Path $PSScriptRoot 'edgecoder-runtime.ps1'
-    $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue)?.Source
-    if (-not $pwsh) {
-        $pwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue)?.Source
-    }
+    $pwshCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if (-not $pwshCmd) { $pwshCmd = Get-Command pwsh.exe -ErrorAction SilentlyContinue }
+    $pwsh = if ($pwshCmd) { $pwshCmd.Source } else { $null }
 
     if (-not $pwsh) {
         Write-Host 'Warning: could not locate PowerShell binary to register service.'
@@ -162,6 +156,7 @@ function Register-WindowsService {
             & $nssm.Source install $ServiceName $pwsh "-ExecutionPolicy Bypass -File `"$runtimeScript`""
             & $nssm.Source set $ServiceName Description 'EdgeCoder Runtime Service'
             & $nssm.Source set $ServiceName Start SERVICE_AUTO_START
+            & $nssm.Source set $ServiceName ObjectName 'NT AUTHORITY\LocalService'
             Write-Host "Windows service '$ServiceName' registered via NSSM."
             return
         } catch {
@@ -172,7 +167,7 @@ function Register-WindowsService {
     # Fallback: sc.exe with a wrapper
     try {
         $binPath = "`"$pwsh`" -ExecutionPolicy Bypass -File `"$runtimeScript`""
-        & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "EdgeCoder Runtime"
+        & sc.exe create $ServiceName binPath= $binPath start= auto obj= 'NT AUTHORITY\LocalService' DisplayName= "EdgeCoder Runtime"
         Write-Host "Windows service '$ServiceName' registered via sc.exe."
         Write-Host 'Note: sc.exe services using PowerShell scripts may need NSSM for production use.'
     } catch {
@@ -215,15 +210,16 @@ function Write-OrUpdateEnv {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Value
     )
 
+    if ($Value -match "[`r`n]") { throw "$Key must be a single line" }
     $line = "${Key}=${Value}"
 
-    if (-not (Test-Path $File)) {
+    if (-not (Test-Path -LiteralPath $File)) {
         # File does not exist yet; create with this single line.
-        Set-Content -Path $File -Value $line -Encoding UTF8
+        Set-Content -LiteralPath $File -Value $line -Encoding UTF8
         return
     }
 
-    $content = Get-Content -Path $File -Encoding UTF8
+    $content = Get-Content -LiteralPath $File -Encoding UTF8
     $pattern = "^#?${Key}="
     $replaced = $false
     $newContent = @()
@@ -241,7 +237,42 @@ function Write-OrUpdateEnv {
         $newContent += $line
     }
 
-    Set-Content -Path $File -Value $newContent -Encoding UTF8
+    # A new file, moved over the old one: it carries the config dir's ACL, not the old file's.
+    $tmp = "$File.tmp.$([Guid]::NewGuid().ToString('N'))"
+    Set-Content -LiteralPath $tmp -Value $newContent -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $File -Force
+}
+
+function Protect-EnvDir {
+    <#
+    .SYNOPSIS
+        Create C:\ProgramData\EdgeCoder owned by Administrators with an explicit ACL, before any
+        token is written. ProgramData lets every user create folders and files and keep owning
+        them, so a pre-existing folder or env file owned by anyone but Administrators, SYSTEM or
+        this account is refused instead of reused.
+    #>
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @('S-1-5-32-544', 'S-1-5-18', $me)
+    foreach ($p in @($EnvDir, $EnvFile)) {
+        if (Test-Path -LiteralPath $p) {
+            $item = Get-Item -LiteralPath $p -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$p is a junction or symbolic link; remove it and re-run." }
+            $owner = (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($trusted -notcontains $owner) { throw "$p already exists and is owned by $owner, not Administrators or SYSTEM; another user may have created it. Inspect it, remove it, and re-run." }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $EnvDir)) { New-Item -ItemType Directory -Path $EnvDir | Out-Null }
+    # Owner Administrators; no inheritance; Administrators and SYSTEM full, LocalService (the
+    # service account) read.
+    $acl = Get-Acl -LiteralPath $EnvDir
+    $acl.SetSecurityDescriptorSddlForm('O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;LS)')
+    Set-Acl -LiteralPath $EnvDir -AclObject $acl
+    # Existing files (env file, backups) drop any explicit ACEs and inherit exactly that.
+    Get-ChildItem -LiteralPath $EnvDir -Force -File | ForEach-Object {
+        $f = Get-Acl -LiteralPath $_.FullName
+        $f.SetSecurityDescriptorSddlForm('O:BAG:SYD:AI')
+        Set-Acl -LiteralPath $_.FullName -AclObject $f
+    }
 }
 
 function Invoke-TokenQuickConnect {
@@ -262,10 +293,13 @@ function Invoke-TokenQuickConnect {
         exit 1
     }
 
-    # 1. Ensure config directory exists
-    if (-not (Test-Path $EnvDir)) {
-        New-Item -ItemType Directory -Path $EnvDir -Force | Out-Null
+    if ($TokenValue -notmatch '^[A-Za-z0-9._~+/=-]{1,1024}$') {
+        Write-Error 'Error: the token may only contain letters, digits and . _ ~ + / = -'
+        exit 1
     }
+
+    # 1. Create and lock the config directory before anything is written to it
+    Protect-EnvDir
 
     # 2. Back up existing config
     if (Test-Path $EnvFile) {
@@ -387,7 +421,10 @@ if ($Command -eq '--help' -or $Command -eq 'help') {
     exit 0
 }
 
-# Handle --token (with or without "configure" sub-command)
+# Handle -TokenFile / --token (with or without "configure" sub-command)
+if (-not [string]::IsNullOrWhiteSpace($TokenFile)) {
+    $Token = (Get-Content -LiteralPath $TokenFile -TotalCount 1).Trim()
+}
 if (-not [string]::IsNullOrWhiteSpace($Token)) {
     Invoke-TokenQuickConnect -TokenValue $Token
     exit 0

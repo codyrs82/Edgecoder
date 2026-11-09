@@ -6,9 +6,12 @@
 .DESCRIPTION
     Best-effort script that:
     1. Checks whether Ollama is already installed (Program Files + PATH).
-    2. Downloads and runs the Ollama installer if not present.
-    3. Starts the Ollama service / process.
-    4. Pulls the default coding model.
+    2. If not present, downloads the official release zip of a pinned version, checks its
+       SHA-256 (the same pin as src/install/ollama-pins.ts and deploy/install.ps1) and unpacks
+       it into Program Files\Ollama. Nothing unverified is ever run.
+    3. Starts the Ollama process and pulls the default coding model, but only when not
+       elevated: an elevated run (the MSI runs this as SYSTEM) installs the binary and stops,
+       so Ollama never serves as SYSTEM or an administrator.
 
     The script never causes the parent installer to fail; all errors are
     caught and reported as warnings.
@@ -23,8 +26,13 @@ $ErrorActionPreference = 'Continue'
 
 $DefaultModel   = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'qwen3.5:9b' }
 $OllamaExeName  = 'ollama.exe'
-$InstallerUrl    = 'https://ollama.com/download/OllamaSetup.exe'
-$InstallerPath   = Join-Path $env:TEMP 'OllamaSetup.exe'
+# Pinned release (source of truth: src/install/ollama-pins.ts, win-x64).
+$OllamaVersion   = '0.40.7'
+$OllamaZip       = 'ollama-windows-amd64.zip'
+$OllamaSha256    = 'e6527768c53e85ec4596495fb0f035ef07f437b4b591ebc3581684699a4668f4'
+$OllamaUrl       = "https://github.com/ollama/ollama/releases/download/v$OllamaVersion/$OllamaZip"
+$OllamaDir       = Join-Path $env:ProgramFiles 'Ollama'
+$IsElevated      = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $OllamaEndpoint  = 'http://127.0.0.1:11434/api/tags'
 
 # ---------------------------------------------------------------------------
@@ -36,6 +44,14 @@ function Find-Ollama {
     .SYNOPSIS
         Locate the ollama.exe binary. Returns $null if not found.
     #>
+
+    # Elevated, only the admin-only Program Files copy: PATH and the user profile hold binaries a
+    # standard user can replace.
+    if ($IsElevated) {
+        $pf = Join-Path $OllamaDir $OllamaExeName
+        if (Test-Path -LiteralPath $pf) { return $pf }
+        return $null
+    }
 
     # 1. Check PATH
     $onPath = Get-Command $OllamaExeName -ErrorAction SilentlyContinue
@@ -90,30 +106,29 @@ try {
     if ($ollamaPath) {
         Write-Host "Ollama already installed at: $ollamaPath"
     } else {
-        Write-Host "Downloading Ollama installer from $InstallerUrl ..."
-        try {
-            # Use BITS or Invoke-WebRequest
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath -UseBasicParsing -ErrorAction Stop
-        } catch {
-            Write-Host "Warning: could not download Ollama installer: $_"
-            Write-Host "Install Ollama manually from https://ollama.com/download"
+        Write-Host "Installing Ollama $OllamaVersion (official release zip, pinned SHA-256) into $OllamaDir ..."
+        if (-not $IsElevated) {
+            Write-Host "Installing into $OllamaDir needs an elevated prompt; install Ollama manually from https://github.com/ollama/ollama/releases"
             exit 0
         }
-
-        Write-Host 'Running Ollama installer (silent)...'
+        # A fresh, randomly named directory: nothing another user planted is read, and the zip is
+        # only unpacked after its hash matches.
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('edgecoder-ollama-' + [Guid]::NewGuid().ToString('N'))
         try {
-            $proc = Start-Process -FilePath $InstallerPath -ArgumentList '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES' `
-                                  -Wait -PassThru -ErrorAction Stop
-            if ($proc.ExitCode -ne 0) {
-                Write-Host "Warning: Ollama installer exited with code $($proc.ExitCode)."
-            }
+            New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+            $zip = Join-Path $tmp $OllamaZip
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $OllamaUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
+            $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+            if ($got -ne $OllamaSha256) { throw "checksum mismatch for $OllamaZip (expected $OllamaSha256, got $got); not installing it" }
+            New-Item -ItemType Directory -Force -Path $OllamaDir -ErrorAction Stop | Out-Null
+            Expand-Archive -LiteralPath $zip -DestinationPath $OllamaDir -Force -ErrorAction Stop
         } catch {
-            Write-Host "Warning: Ollama installer failed: $_"
-            Write-Host "Install Ollama manually from https://ollama.com/download"
+            Write-Host "Warning: could not install Ollama: $_"
+            Write-Host 'Install Ollama manually from https://github.com/ollama/ollama/releases'
             exit 0
         } finally {
-            Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         # Refresh PATH for this session so we can find the newly installed binary
@@ -131,6 +146,11 @@ try {
     }
 
     # --- Start Ollama -------------------------------------------------------
+    if ($IsElevated) {
+        # Never serve as SYSTEM/administrator. edgecoder-install runs Ollama per user at logon.
+        Write-Host 'Ollama is installed. It runs as the user (edgecoder-install apply); the model is pulled on first use.'
+        exit 0
+    }
     # Try the Windows service first, then fall back to starting the process
     $svc = Get-Service -Name 'ollama' -ErrorAction SilentlyContinue
     if ($svc) {
