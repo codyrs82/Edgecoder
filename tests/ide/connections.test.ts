@@ -31,6 +31,27 @@ describe("connections", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).connections).toHaveLength(2);
   });
 
+  it("refuses web origins and non-loopback Hosts, and /health names nothing", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "conn-")), "connections.json");
+    mgr = new ConnectionManager({ ollamaHost: "http://127.0.0.1:9", file });
+    const a = await mgr.create({ name: "Secret name", target: "local", model: "secret-model", port: 4395 });
+    const auth = { authorization: `Bearer ${a.key}` };
+    const web = await request("http://127.0.0.1:4395/v1/models", { headers: { ...auth, origin: "https://evil.example" } });
+    expect(web.statusCode).toBe(403);
+    await web.body.text();
+    const rebound = await request("http://127.0.0.1:4395/v1/models", { headers: { ...auth, host: "evil.example:4395" } });
+    expect(rebound.statusCode).toBe(403);
+    await rebound.body.text();
+    const localhost = await request("http://127.0.0.1:4395/v1/models", { headers: { ...auth, host: "localhost:4395" } });
+    expect(localhost.statusCode).toBe(200);
+    await localhost.body.text();
+    const health = await request("http://127.0.0.1:4395/health");
+    expect(await health.body.json()).toEqual({ ok: true });
+    const prefix = await request("http://127.0.0.1:4395/v1/models", { headers: { authorization: `Bearer ${a.key.slice(0, -1)}` } });
+    expect(prefix.statusCode).toBe(401);
+    await prefix.body.text();
+  });
+
   it("refuses a port another connection or EdgeCoder uses, and network targets without an agent", async () => {
     const file = join(mkdtempSync(join(tmpdir(), "conn-")), "connections.json");
     mgr = new ConnectionManager({ ollamaHost: "http://127.0.0.1:9", file });

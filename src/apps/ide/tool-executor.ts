@@ -41,6 +41,9 @@ const GIT_READONLY_SUBCOMMANDS = new Set([
   "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote",
 ]);
 const SHELL_METACHAR = /[;&|`<>\n\r]|\$\(/;
+/** Control characters other than tab and newline, and zero-width / bidi formatting characters. */
+// eslint-disable-next-line no-control-regex
+const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0]/;
 /** Interpreter flags that evaluate inline code. */
 const INLINE_EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c", "-i", "--interactive", "-r", "--require", "--import", "--loader", "-m"]);
 const INTERPRETERS = /^(node|python\d*(\.\d+)?|deno|bun|ruby|perl|php)$/;
@@ -184,15 +187,19 @@ function isGitDirSegment(seg: string): boolean {
 
 /**
  * Files that need the user's explicit approval for every agent write (never auto-approved):
- * git reads them for submodule URLs and filter/diff drivers, and hook runners or the shell
- * execute what they name.
+ * git reads them for submodule URLs and filter/diff drivers, hook runners or the shell
+ * execute what they name, and diagnostics' `cargo check` runs build scripts and toolchains.
  */
 const APPROVAL_FILES = new Set([
   ".gitmodules", ".gitattributes", ".envrc", ".pre-commit-config.yaml",
   "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml", ".lefthookrc",
+  "build.rs", "cargo.toml", "rust-toolchain", "rust-toolchain.toml",
 ]);
-/** Directories whose contents are executed by tooling (git hook managers, editor task runners). */
-const APPROVAL_DIRS = new Set([".husky", ".githooks", ".vscode"]);
+/**
+ * Directories whose contents are executed by tooling (git hook managers, editor task runners,
+ * cargo config, and node_modules, whose .bin/tsc diagnostics runs).
+ */
+const APPROVAL_DIRS = new Set([".husky", ".githooks", ".vscode", ".cargo", "node_modules"]);
 
 export type ProtectedPathKind = "git_dir" | "needs_approval";
 
@@ -292,6 +299,8 @@ export function evaluateShellCommand(
   const approved = opts.approved === true;
   const trimmed = command.trim();
   if (!trimmed) return { allowed: false, reason: "empty command" };
+  // The approval card must show what runs: no characters that hide or reorder text when displayed.
+  if (HIDDEN_CHARS.test(command)) return { allowed: false, reason: "command contains control or invisible characters" };
   if (SHELL_METACHAR.test(trimmed)) {
     if (!approved) return { allowed: false, reason: "shell metacharacters require explicit approval" };
     return { allowed: true, argv: [], useShell: true };
@@ -700,7 +709,9 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private async runShell(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
-    const command = String(args.command ?? "");
+    // Exactly the string the approval card showed; no coercion of arrays or objects.
+    if (typeof args.command !== "string") return { error: "run_shell rejected: command must be a string" };
+    const command = args.command;
     const timeout =
       typeof args.timeout === "number" ? args.timeout : 30_000;
 
@@ -715,9 +726,10 @@ export class ToolExecutor {
       // needs shell syntax (pipes, &&, …) is run through sh -c.
       // git run by the agent (directly or from a script) gets the IDE's git hardening.
       const [cmd, cmdArgs] = decision.useShell
-        ? ["sh", ["-c", command]]
+        // /bin/sh, not a PATH lookup that a relative PATH entry could resolve inside the project.
+        ? [process.platform === "win32" ? "sh" : "/bin/sh", ["-c", command]]
         : decision.argv[0] === "git"
-          ? ["git", hardenedGitArgs(decision.argv.slice(1))]
+          ? ["git", hardenedGitArgs(decision.argv.slice(1), this.root)]
           : [decision.argv[0], decision.argv.slice(1)];
       let proc: ReturnType<typeof spawn>;
       try {
@@ -778,7 +790,7 @@ export class ToolExecutor {
 
   private gitStatus(): ToolResult {
     try {
-      const out = execFileSync("git", hardenedGitArgs(["status", "--porcelain"]), {
+      const out = execFileSync("git", hardenedGitArgs(["status", "--porcelain"], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -807,7 +819,7 @@ export class ToolExecutor {
     if (filePath) gitArgs.push("--", filePath);
 
     try {
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -835,7 +847,7 @@ export class ToolExecutor {
     if (ref) gitArgs.push(ref, "--");
 
     try {
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -864,7 +876,7 @@ export class ToolExecutor {
     try {
       // Stage files — split on whitespace to pass as separate arguments
       const fileList = files.split(/\s+/).filter(Boolean);
-      execFileSync("git", hardenedGitArgs(["add", "--", ...fileList]), {
+      execFileSync("git", hardenedGitArgs(["add", "--", ...fileList], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -872,7 +884,7 @@ export class ToolExecutor {
       });
 
       // Commit — execFileSync passes message as argument, no shell interpolation
-      const out = execFileSync("git", hardenedGitArgs(["commit", "-m", message]), {
+      const out = execFileSync("git", hardenedGitArgs(["commit", "-m", message], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -899,7 +911,7 @@ export class ToolExecutor {
     try {
       if (!name) {
         // List branches
-        const out = execFileSync("git", hardenedGitArgs(["branch"]), {
+        const out = execFileSync("git", hardenedGitArgs(["branch"], this.root), {
         env: gitExecEnv(),
           cwd: this.root,
           encoding: "utf-8",
@@ -912,7 +924,7 @@ export class ToolExecutor {
         ? ["checkout", "-b", name]
         : ["checkout", name, "--"];
 
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -933,7 +945,7 @@ export class ToolExecutor {
   private execGitAuth(gitArgs: string[], timeoutMs = 60_000): string {
     // The token reaches git through the environment (a credential helper that reads it from an env
     // var), never through argv, where other local users can see it.
-    return execFileSync("git", hardenedGitArgs(gitArgs), {
+    return execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
       env: this.githubToken ? githubTokenCredentialEnv(this.githubToken) : gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
@@ -945,9 +957,28 @@ export class ToolExecutor {
   // git_fetch
   // -----------------------------------------------------------------------
 
+  /**
+   * The model names a remote; git would also take a URL or a path in that position (another
+   * repository on disk, or any host). Only remotes the user configured in this repository pass.
+   */
+  private checkConfiguredRemote(remote: string): ToolResult | null {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/.test(remote) || remote.includes("..") || remote.includes("//")) {
+      return { error: `invalid remote: "${remote.slice(0, 80)}" is not a remote name (URLs and paths aren't accepted)` };
+    }
+    let names: string[];
+    try {
+      names = execFileSync("git", hardenedGitArgs(["remote"], this.root), { env: gitExecEnv(), cwd: this.root, encoding: "utf-8", timeout: 10_000 })
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "git remote failed" };
+    }
+    if (!names.includes(remote)) return { error: `unknown remote "${remote}"; configured remotes: ${names.join(", ") || "(none)"}` };
+    return null;
+  }
+
   private gitFetch(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
-    const bad = rejectGitOptionArgs({ remote });
+    const bad = rejectGitOptionArgs({ remote }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
     try {
       const out = this.execGitAuth(["fetch", "--end-of-options", remote]);
@@ -965,7 +996,7 @@ export class ToolExecutor {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
     const setUpstream = args.setUpstream === true;
-    const bad = rejectGitOptionArgs({ remote, branch });
+    const bad = rejectGitOptionArgs({ remote, branch }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
 
     const gitArgs = ["push"];
@@ -988,7 +1019,7 @@ export class ToolExecutor {
   private gitPull(args: Record<string, unknown>): ToolResult {
     const remote = typeof args.remote === "string" ? args.remote : "origin";
     const branch = typeof args.branch === "string" ? args.branch : "";
-    const bad = rejectGitOptionArgs({ remote, branch });
+    const bad = rejectGitOptionArgs({ remote, branch }) ?? this.checkConfiguredRemote(remote);
     if (bad) return bad;
 
     const gitArgs = ["pull", "--end-of-options", remote];
@@ -1007,7 +1038,7 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private getGitHubRepo(): { owner: string; repo: string } {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), {
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"], this.root), {
         env: gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
@@ -1065,7 +1096,7 @@ export class ToolExecutor {
     let head = typeof args.head === "string" ? args.head : "";
 
     if (!head) {
-      head = execFileSync("git", hardenedGitArgs(["rev-parse", "--abbrev-ref", "HEAD"]), {
+      head = execFileSync("git", hardenedGitArgs(["rev-parse", "--abbrev-ref", "HEAD"], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -1138,7 +1169,7 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private git(args: string[], timeoutMs = 15_000): string {
-    return execFileSync("git", hardenedGitArgs(args), {
+    return execFileSync("git", hardenedGitArgs(args, this.root), {
       env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0" }),
       cwd: this.root,
       encoding: "utf-8",
@@ -1275,7 +1306,7 @@ export function preparePullRequestArgs(executor: ToolExecutor, tool: ToolName, a
 /** True when the project's origin is on github.com (open_pull_request is offered to chat then). */
 export function hasGitHubOrigin(root: string): boolean {
   try {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"], root), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
     return /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/i.test(url);
   } catch {
     return false;

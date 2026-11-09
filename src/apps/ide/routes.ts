@@ -19,6 +19,8 @@ export const IDE_ROUTES = [
   { method: "GET", path: "/model/pull/progress", auth: true },
   { method: "GET", path: "/v1/ide/project", auth: true },
   { method: "POST", path: "/v1/ide/project", auth: true },
+  { method: "GET", path: "/v1/ide/project/trust", auth: true },
+  { method: "POST", path: "/v1/ide/project/trust", auth: true },
   { method: "POST", path: "/v1/ide/tool-approval", auth: true },
   { method: "POST", path: "/v1/ide/chat", auth: true },
   { method: "GET", path: "/v1/ide/fs/list", auth: true },

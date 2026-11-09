@@ -105,6 +105,16 @@ describe("run_shell policy (#4)", () => {
     expect(evaluateShellCommand("npm test && echo ok", { approved: true })).toMatchObject({ allowed: true, useShell: true });
   });
 
+  it("refuses, even approved, commands whose displayed text could differ from what runs", async () => {
+    for (const cmd of ["echo ok\r rm -rf ~", "echo \u202egnp.exe", "echo a\u200b; rm x", "echo \u001b[2Kok", "ls\u2028rm x"]) {
+      expect(evaluateShellCommand(cmd, { approved: true }).allowed, JSON.stringify(cmd)).toBe(false);
+    }
+    expect(evaluateShellCommand("printf 'a\tb\n' | cat", { approved: true }).allowed).toBe(true);
+    const exec = new ToolExecutor(mkdtempSync(join(tmpdir(), "ide-shell-arg-")));
+    const r = await exec.execute("run_shell", { command: ["echo hi", "echo there"] }, { approved: true });
+    expect(r.error).toMatch(/must be a string/);
+  });
+
   it("parseArgv handles quotes", () => {
     expect(parseArgv(`rg "hello world" src`)).toEqual(["rg", "hello world", "src"]);
     expect(parseArgv(`echo ''`)).toEqual(["echo", ""]);

@@ -58,7 +58,7 @@ export class GitOps {
     return new Promise((resolve, reject) => {
       const child = execFile(
         "git",
-        hardenedGitArgs(args),
+        hardenedGitArgs(args, this.root),
         { cwd: this.root, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0" }) },
         (err, stdout, stderr) => {
           if (err) reject(new GitError((stderr || err.message).trim()));

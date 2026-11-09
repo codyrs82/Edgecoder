@@ -345,7 +345,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     parameters: {
       remote: {
         type: "string",
-        description: "Remote name to fetch from. Defaults to 'origin'.",
+        description: "Name of a configured remote to fetch from (URLs and paths are refused). Defaults to 'origin'.",
       },
     },
   },
@@ -356,7 +356,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     parameters: {
       remote: {
         type: "string",
-        description: "Remote name. Defaults to 'origin'.",
+        description: "Name of a configured remote (URLs and paths are refused). Defaults to 'origin'.",
       },
       branch: {
         type: "string",
@@ -375,7 +375,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     parameters: {
       remote: {
         type: "string",
-        description: "Remote name. Defaults to 'origin'.",
+        description: "Name of a configured remote (URLs and paths are refused). Defaults to 'origin'.",
       },
       branch: {
         type: "string",

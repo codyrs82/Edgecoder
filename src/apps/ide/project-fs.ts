@@ -240,7 +240,7 @@ export class ProjectFs {
   gitStatus(): { branch: string | null; files: Record<string, string> } | null {
     let raw: string;
     try {
-      raw = execFileSync("git", hardenedGitArgs(["status", "--porcelain=v1", "-b", "-z", "--untracked-files=all"]), {
+      raw = execFileSync("git", hardenedGitArgs(["status", "--porcelain=v1", "-b", "-z", "--untracked-files=all"], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf8",
