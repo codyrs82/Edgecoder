@@ -40,13 +40,14 @@ describe("robot agent registration", () => {
     ).toThrow("payout_address_required");
   });
 
-  test("updates agent on re-registration", () => {
+  test("updates agent on re-registration, but never its payout address", () => {
     const q = makeQueue();
     q.registerAgent({ agentId: "r1", payoutAddress: "tb1qa", capabilities: ["gps"], robotKind: "rover" });
-    q.registerAgent({ agentId: "r1", payoutAddress: "tb1qb", capabilities: ["camera"], robotKind: "drone" });
-    const agent = q.getAgent("r1");
-    expect(agent!.payoutAddress).toBe("tb1qb");
-    expect(agent!.robotKind).toBe("drone");
+    q.registerAgent({ agentId: "r1", payoutAddress: "tb1qa", capabilities: ["camera"], robotKind: "drone" });
+    expect(q.getAgent("r1")!.robotKind).toBe("drone");
+    // Registration is not signed: it cannot redirect an existing agent's payouts.
+    expect(() => q.registerAgent({ agentId: "r1", payoutAddress: "tb1qb", capabilities: ["camera"], robotKind: "drone" })).toThrow("payout_address_locked");
+    expect(q.getAgent("r1")!.payoutAddress).toBe("tb1qa");
   });
 
   test("heartbeat updates lastSeenMs", () => {

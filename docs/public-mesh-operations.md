@@ -53,7 +53,7 @@ Control-plane discovery API:
 - `POST /mesh/register-peer` - bootstrap peer discovery.
 - `POST /mesh/ingest` - signed gossip ingress.
 - `GET /features` - mode flags (`public_mesh`, `enterprise_overlay`).
-- `GET /capacity` - total capacity, connected agents, mode counts, and tunnel count (includes per-agent `powerPolicy` decision).
+- `GET /capacity` - total capacity, connected agents, mode counts, and tunnel count (includes per-agent `powerPolicy` decision; owner email and network location are not included).
 - `GET /agent-mesh/peers/:agentId` - peer candidates for reverse-tunnel links.
 - `POST /agent-mesh/connect` - create secure reverse-tunnel token.
 - `POST /agent-mesh/accept` - accept reverse-tunnel invite.

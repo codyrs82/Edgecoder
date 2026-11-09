@@ -11,7 +11,7 @@ import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
-import { createHash, createPrivateKey, createPublicKey, randomInt, randomUUID } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -32,6 +32,8 @@ import {
   computeIntentFee,
   contributionPolicyDecision,
   submitterAccountDecision,
+  PreAuthFailureCounter,
+  mayRelayOverWs,
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
@@ -96,7 +98,7 @@ import { finalizeStatsCheckpoint, statsCheckpointPeriodMs, statsFinalityState } 
 import { DuplicateDebitError, NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { clampToBand, cSatsPerMTokens, inferenceCostMsat, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
 import { paramsB } from "../inference-api/auto-route.js";
-import { InferenceStreams } from "./inference-streams.js";
+import { InferenceStreams, boundTokenCounts } from "./inference-streams.js";
 import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
@@ -281,6 +283,13 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
+/**
+ * Most (msat) an agent here may earn for a subtask a peer coordinator offered: the worst case a
+ * coordinator sets aside for one subtask (what the origin charges its requester for a subtask run
+ * elsewhere). The requester is charged there, so this is the payer's limit.
+ */
+const peerOfferBudgetMsat = new Map<string, number>();
+const PEER_OFFER_BUDGET_MAX_ENTRIES = 20_000;
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 /**
  * What a task's requester was charged: cSats set aside at submit (reservedMsat, the worst case),
@@ -459,6 +468,8 @@ const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
 const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
 const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
 const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
+/** Signed requests that failed before the signer was proven, per client address. */
+const preAuthFailures = new PreAuthFailureCounter(CC.PREAUTH_FAILURE_MAX_PER_IP, AGENT_RATE_LIMIT_WINDOW_MS);
 // Replay protection: Postgres when configured, so nonces survive restarts and are shared by every
 // coordinator on the database (a replay to the other seed is caught); in memory otherwise.
 const nonceStore: NonceStore = pgStore
@@ -1446,42 +1457,35 @@ async function verifyAgentRequest(
   // signed-only whatever the policy (an unsigned caller could otherwise speak for any agent).
   if (!signed) return unsignedRequestDecision({ requireSignedPolicy: REQUIRE_SIGNED_AGENT_REQUESTS, ...opts });
 
+  // The claimed id is not proven until the signature verifies: nothing before that is counted
+  // against the agent (anyone can name it), only against the address the request came from.
   const agentId = signed["x-agent-id"];
 
   // 1. Skip rate limiting for loopback (embedded worker is trusted)
   const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST);
-
-  // 2. Rate limit (cheapest check first) — skip for loopback
-  if (!isLoopback && !agentRateLimiter.check(agentId)) {
+  const clientIp = extractClientIp(headers, sourceIp, CLIENT_IP_TRUST) ?? "unknown";
+  const rejectUnproven = (event: SecurityEventType, reason: string, countFailure = true): "rejected" => {
+    if (!isLoopback && countFailure) preAuthFailures.record(clientIp);
     securityLog.log({
-      level: securityLog.severity("auth_rate_limit_hit"),
-      event: "auth_rate_limit_hit",
-      source: { type: "agent", id: agentId },
-      details: { route: routePath },
+      level: securityLog.severity(event),
+      event,
+      source: { type: "system", id: "unauthenticated", ip: clientIp },
+      details: { reason, route: routePath, claimedAgentId: agentId },
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
     return "rejected";
-  }
+  };
 
-  // 3. Look up agent public key — don't count as rate limit hit if key missing
-  //    (agent needs to re-register, not a security threat)
+  // 2. An address sending many unverifiable requests is turned away before any checking.
+  if (!isLoopback && preAuthFailures.blocked(clientIp)) return rejectUnproven("auth_rate_limit_hit", "too_many_failed_signatures");
+
+  // 3. Look up agent public key (a missing key means the agent needs to re-register, e.g. after a
+  //    coordinator restart: not counted as a failure)
   const cap = agentCapabilities.get(agentId);
-  if (!cap?.publicKeyPem) {
-    agentRateLimiter.reset(agentId);
-    securityLog.log({
-      level: securityLog.severity("invalid_signature"),
-      event: "invalid_signature",
-      source: { type: "agent", id: agentId },
-      details: { reason: "no_public_key", route: routePath },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    return "rejected";
-  }
+  if (!cap?.publicKeyPem) return rejectUnproven("invalid_signature", "no_public_key", false);
 
-  // 3. Verify signature
+  // 4. Verify signature
   const sigResult = verifySignedRequest({
     method: "POST",
     path: routePath,
@@ -1494,22 +1498,38 @@ async function verifyAgentRequest(
   });
 
   if (!sigResult.valid) {
-    // A valid signature over a different body is a captured request being replayed with a new payload.
-    const replayLike = sigResult.reason === "timestamp_skew" || sigResult.reason === "body_hash_mismatch";
-    const eventType: SecurityEventType = replayLike ? "replay_attempt" : "invalid_signature";
+    // Only a body mismatch comes after the signature checked out (a signed request replayed with a
+    // new payload): that one is the agent's key. Skew and bad signatures prove nothing about who sent them.
+    if (sigResult.reason !== "body_hash_mismatch") {
+      return rejectUnproven(sigResult.reason === "timestamp_skew" ? "replay_attempt" : "invalid_signature", sigResult.reason ?? "invalid_signature");
+    }
     securityLog.log({
-      level: securityLog.severity(eventType),
-      event: eventType,
-      source: { type: "agent", id: agentId },
+      level: securityLog.severity("replay_attempt"),
+      event: "replay_attempt",
+      source: { type: "agent", id: agentId, ip: clientIp },
       details: { reason: sigResult.reason, route: routePath },
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, replayLike ? "replay_attempt" : "signature_failure");
+    behaviorTracker.recordProtocolViolation(agentId, "replay_attempt");
     return "rejected";
   }
 
-  // 4. Nonce replay detection
+  // 5. Per-agent rate limit, now that the request is the agent's own — skip for loopback
+  if (!isLoopback && !agentRateLimiter.check(agentId)) {
+    securityLog.log({
+      level: securityLog.severity("auth_rate_limit_hit"),
+      event: "auth_rate_limit_hit",
+      source: { type: "agent", id: agentId, ip: clientIp },
+      details: { route: routePath },
+      action: "reject_request",
+      coordinatorId: identity.peerId,
+    });
+    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
+    return "rejected";
+  }
+
+  // 6. Nonce replay detection
   const nonceResult = await verifyNonce(nonceStore, {
     nonce: sigResult.nonce!,
     sourceId: agentId,
@@ -1633,7 +1653,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/"))
   ) {
     return;
   }
@@ -3190,6 +3210,7 @@ app.post("/submit", async (req, reply) => {
   const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId);
   if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
   body.submitterAccountId = submitter.accountId;
+  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
   if (body.submitterAccountId !== "anonymous") {
     const policy = await enforceContributionFirstPolicy(body.submitterAccountId);
     if (!policy.ok) {
@@ -3401,6 +3422,11 @@ app.post("/pull", async (req, reply) => {
     return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
   }
   const capability = agentCapabilities.get(body.agentId);
+  // Verified-only policy: /register stores the agent before its integrity check refuses it, so the
+  // check is enforced where work is handed out too.
+  if (REQUIRE_VERIFIED_AGENTS && (capability as { verificationStatus?: string } | undefined)?.verificationStatus !== "verified") {
+    return reply.code(403).send({ error: "binary_integrity_required" });
+  }
   let powerDecisionForPull: ReturnType<typeof evaluateAgentPowerPolicy> | undefined;
   if (capability) {
     powerDecisionForPull = evaluateAgentPowerPolicy({
@@ -3616,29 +3642,36 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
           perSecondCostMsat,
         })
       : { costMsat: perSecondCostMsat, basis: "per_second" as const };
-  const costMsat = priced.costMsat;
+  // What is paid is what the requester is charged: taken out of what was set aside for the task
+  // (never more), before the store is awaited, so results settling together cannot both spend it.
+  // Work nobody set anything aside for (an anonymous task) earns nothing.
+  const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat);
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
-  const accrued = await accruePricedJob(
-    {
-      reportId: resultReportId(r.subtaskId),
-      agentId: rewardAccountId,
-      sourceAgentId: r.agentId,
-      taskId,
-      resourceClass: subtask.projectMeta.resourceClass,
-      cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
-      gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
-      success: r.ok,
-      qualityScore: r.ok ? 1.0 : 0.6,
-      timestampMs: Date.now(),
-      modelParamSizeB,
-      hardwareWeight
-    },
-    { agentMsat, feeMsat }
-  );
-  // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
+  let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
+  try {
+    accrued = await accruePricedJob(
+      {
+        reportId: resultReportId(r.subtaskId),
+        agentId: rewardAccountId,
+        sourceAgentId: r.agentId,
+        taskId,
+        resourceClass: subtask.projectMeta.resourceClass,
+        cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
+        gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
+        success: r.ok,
+        qualityScore: r.ok ? 1.0 : 0.6,
+        timestampMs: Date.now(),
+        modelParamSizeB,
+        hardwareWeight
+      },
+      { agentMsat, feeMsat }
+    );
+  } finally {
+    // Nothing was paid (already recorded, #44, or the store failed): the task is not charged for it.
+    if (!accrued) returnTaskBudget(taskId, costMsat);
+  }
   if (accrued) {
-    addTaskCost(taskId, costMsat);
     // Market volume stays in credits of work (base-tier seconds).
     marketHistory.settleTrade(r.subtaskId, Number(((durationMs / 1000) * hardwareWeight).toFixed(6)));
     const earningsRecord = ordering.append({
@@ -3861,9 +3894,59 @@ function addTaskCost(taskId: string, costMsat: number): void {
   if (billing && !billing.refunded) billing.costMsat = Math.min(billing.reservedMsat, billing.costMsat + Math.max(0, costMsat));
 }
 
+/**
+ * Charge a finished subtask to whoever pays for it and return how much of `wantMsat` that covers,
+ * which is all the agent may earn for it:
+ * - a subtask offered by a peer coordinator: up to what that coordinator set aside for it;
+ * - a task billed here: up to what its requester set aside and has not yet used;
+ * - anything else has no payer (an anonymous task) and covers nothing.
+ */
+function takeTaskBudget(taskId: string, subtaskId: string, wantMsat: number): number {
+  const want = Number.isFinite(wantMsat) ? Math.max(0, wantMsat) : 0;
+  const offered = peerOfferBudgetMsat.get(subtaskId);
+  if (offered !== undefined) {
+    peerOfferBudgetMsat.delete(subtaskId);
+    return Math.min(want, offered);
+  }
+  const billing = taskBilling.get(taskId);
+  if (!billing || billing.refunded) return 0;
+  const take = Math.min(want, Math.max(0, billing.reservedMsat - billing.costMsat));
+  billing.costMsat += take;
+  return take;
+}
+
+/**
+ * A task id is one requester's billing key until its task settles: a second submission under an id
+ * that is still billed, queued or held would replace or add to someone else's bill.
+ */
+function taskIdInUse(taskId: string): boolean {
+  return taskBilling.has(taskId) || usagePending.has(taskId) || queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0;
+}
+
+/** Undo takeTaskBudget when nothing was paid after all. */
+function returnTaskBudget(taskId: string, msat: number): void {
+  const billing = taskBilling.get(taskId);
+  if (billing && !billing.refunded) billing.costMsat = Math.max(0, billing.costMsat - Math.max(0, msat));
+}
+
+/** Results being paid, per task: the task is not settled (its unused reserve returned) under them. */
+const accrualsInFlight = new Map<string, number>();
+function holdSettlement(taskId: string): () => void {
+  accrualsInFlight.set(taskId, (accrualsInFlight.get(taskId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const n = (accrualsInFlight.get(taskId) ?? 1) - 1;
+    if (n > 0) accrualsInFlight.set(taskId, n);
+    else accrualsInFlight.delete(taskId);
+  };
+}
+
 /** Once a task has no open subtasks: return what was set aside but not used. */
 async function settleTaskIfDone(taskId: string): Promise<void> {
   if (!taskBilling.has(taskId)) return;
+  if (accrualsInFlight.has(taskId)) return;
   if (queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0) return;
   await refundTaskSubmit(taskId);
 }
@@ -4046,21 +4129,28 @@ app.post("/result", async (req, reply) => {
     return reply.send({ ok: true, held: true });
   }
 
-  await publishResult(body);
-  inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
-  // ── Dependency tracking: store output and release dependent subtasks ──
-  releaseDependents(body.subtaskId, body.output ?? "");
-  // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
-  if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
+  // The result is visible to the requester's stream read from here on, and that read settles the
+  // task: it must not return the reserve before this result's cost has been taken from it.
+  const releaseSettlement = holdSettlement(body.taskId);
+  try {
+    await publishResult(body);
+    inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
+    // ── Dependency tracking: store output and release dependent subtasks ──
+    releaseDependents(body.subtaskId, body.output ?? "");
+    // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
+    if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
 
-  if (subtask) {
-    await accrueResultCredits({
-      subtaskId: body.subtaskId,
-      agentId: body.agentId,
-      ok: body.ok,
-      output: body.output ?? "",
-      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
-    });
+    if (subtask) {
+      await accrueResultCredits({
+        subtaskId: body.subtaskId,
+        agentId: body.agentId,
+        ok: body.ok,
+        output: body.output ?? "",
+        meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+      });
+    }
+  } finally {
+    releaseSettlement();
   }
   await settleTaskIfDone(body.taskId);
   return reply.send({ ok: true });
@@ -4168,6 +4258,9 @@ const reserveSchema = z.object({
   model: z.string().min(1).max(200).optional(),
   minVramGb: z.number().min(0).max(1024).optional(),
 });
+
+/** Agents a lease is being made for right now (between choosing the agent and recording the lease). */
+const reservingAgents = new Set<string>();
 
 /** Agents that could be reserved now for an account: online, of the class, not held, not its own. */
 async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
@@ -4282,29 +4375,36 @@ app.post("/account/reservations", async (req, reply) => {
   const caller = await callerAccount(req, "/account/reservations", body.accountId);
   if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
   const accountId = caller.accountId;
-  const [agent] = await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb);
+  // The agent is taken (synchronously, after the awaits that listed it) before the debit is awaited,
+  // so two leases made at once cannot both get it.
+  const agent = (await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb)).find((a) => !reservingAgents.has(a.agentId) && !reservations.isHeld(a.agentId, Date.now()));
   if (!agent) return reply.code(409).send({ error: "no_agent_available", computeClass: body.computeClass });
-  const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
-  const prepaid = reservationPriceMsat(body.minutes, rate);
-  const id = `res-${randomUUID()}`;
+  reservingAgents.add(agent.agentId);
   try {
-    await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
-    req.log.error({ err }, "reservation_debit_failed");
-    return reply.code(500).send({ error: "credit_debit_failed" });
+    const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
+    const prepaid = reservationPriceMsat(body.minutes, rate);
+    const id = `res-${randomUUID()}`;
+    try {
+      await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
+      req.log.error({ err }, "reservation_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
+    }
+    const now = Date.now();
+    const r: Reservation = {
+      id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
+      creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
+      ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
+    };
+    reservations.add(r);
+    await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
+    app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
+    return reply.send({ reservation: publicReservation(r) });
+  } finally {
+    reservingAgents.delete(agent.agentId);
   }
-  const now = Date.now();
-  const r: Reservation = {
-    id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
-    creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
-    ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
-  };
-  reservations.add(r);
-  await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
-  app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
-  return reply.send({ reservation: publicReservation(r) });
 });
 
 /** End a lease early; the unused time is refunded. */
@@ -4373,6 +4473,7 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
   } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
     return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
   }
+  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
   const billed = !reservationId && !onlyAccountId;
   const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
   const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
@@ -4410,7 +4511,7 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
       ...(reservationId ? { reservationId } : {}),
     },
   });
-  inferenceStreams.open(subtask.id);
+  inferenceStreams.open(subtask.id, body.taskId);
   app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
   return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
 });
@@ -4422,19 +4523,23 @@ app.post("/inference/chunks", async (req, reply) => {
     .object({
       subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(),
       toolCalls: z.array(z.unknown()).max(64).optional(),
-      // Token counts from the model, with the last piece (for the usage page; not billed on).
+      // Token counts from the model, with the last piece. The call is priced on them
+      // (accrueResultCredits), so they are bounded below and never cost more than was set aside.
       promptTokens: z.number().int().min(0).max(10_000_000).optional(),
       outputTokens: z.number().int().min(0).max(10_000_000).optional(),
     })
     .parse(req.body);
-  if (queue.getClaim(body.subtaskId)?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
+  const claim = queue.getClaim(body.subtaskId);
+  if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
   const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
-  if (body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
-    const claimTask = queue.getClaim(body.subtaskId)?.subtask.taskId;
-    const u = claimTask ? usagePending.get(claimTask) : undefined;
+  // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
+  // nothing), set rather than added, and kept within what the request and the reply could hold.
+  if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+    const u = usagePending.get(claim.subtask.taskId);
     if (u) {
-      u.promptTokens = (u.promptTokens ?? 0) + (body.promptTokens ?? 0);
-      u.outputTokens = (u.outputTokens ?? 0) + (body.outputTokens ?? 0);
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
+      u.promptTokens = bounded.promptTokens;
+      u.outputTokens = bounded.outputTokens;
     }
   }
   return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -4446,11 +4551,13 @@ app.post("/inference/stream", async (req, reply) => {
   const billing = taskBilling.get(body.taskId);
   const reader = await resolveSubmitterAccount(req as any, billing?.accountId ?? "", "/inference/stream");
   if ("error" in reader || !billing || reader.accountId !== billing.accountId) return reply.code(403).send({ error: "not_requester" });
+  // The subtask must be one of this task's: owning a task gives no read of another's stream.
+  if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
   const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
   if (!r) return reply.code(404).send({ error: "unknown_stream" });
   // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
   let result = r.done ? queue.getResult(body.subtaskId) : undefined;
-  for (let i = 0; r.done && !result && i < 40; i++) {
+  for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {
     await new Promise((res) => setTimeout(res, 100));
     result = queue.getResult(body.subtaskId);
   }
@@ -4571,9 +4678,11 @@ app.get("/capacity", async () => {
     const orch = agentOrchestration.get(agentId);
     const recentDiagnostics = diagnosticsByAgentId.get(agentId) ?? [];
     const lastDiagnostic = recentDiagnostics.at(-1);
+    // Owner email and network location are personal data: never in this mesh-token read.
+    const { ownerEmail: _email, sourceIp: _ip, countryCode: _cc, vpnDetected: _vpn, ...publicInfo } = info;
     return {
       agentId,
-      ...info,
+      ...publicInfo,
       connectedPeers: [...info.connectedPeers],
       blacklisted: Boolean(activeBlacklistRecord(agentId)),
       powerPolicy: powerDecision,
@@ -5606,6 +5715,11 @@ async function handleMeshIngest(
       return { ok: false, statusCode: 400, error: "invalid_blacklist_payload" };
     }
     const data = payload.data;
+    // The record is checked against the sender's key, so it must be the sender's own record.
+    if (data.sourceCoordinatorId !== peer.peerId) {
+      peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
+      return { ok: false, statusCode: 403, error: "blacklist_source_mismatch" };
+    }
     const incomingValidation = validateIncomingBlacklistRecord({
       record: data,
       peerPublicKeyPem: peer.publicKeyPem
@@ -5621,7 +5735,8 @@ async function handleMeshIngest(
   }
   if (message.type === "capability_summary") {
     const payload = message.payload as unknown as CapabilitySummaryPayload;
-    if (payload.coordinatorId && payload.timestamp) {
+    // A coordinator speaks for itself only.
+    if (payload.coordinatorId && payload.timestamp && payload.coordinatorId === message.fromPeerId) {
       federatedCapabilities.set(payload.coordinatorId, payload);
       app.log.info({ from: payload.coordinatorId, agents: payload.agentCount }, "capability_summary_received");
     }
@@ -5725,6 +5840,11 @@ async function handleMeshIngest(
     if (d.originCoordinatorId === identity.peerId) {
       return { ok: true, skipped: "own_task" };
     }
+    // An offer comes from its origin, a known peer: results go back to that peer's pinned URL,
+    // never to a URL named in the payload.
+    if (!peer || d.originCoordinatorId !== message.fromPeerId) {
+      return { ok: false, statusCode: 403, error: "offer_origin_mismatch" };
+    }
     // Only accept if we have alive agents (heartbeat in last 30s)
     const aliveAgents = [...agentCapabilities.values()].filter(
       a => a.lastSeenMs > Date.now() - 30_000
@@ -5734,13 +5854,16 @@ async function handleMeshIngest(
     }
     // Enqueue locally (dedup by subtaskId handled in queue)
     queue.enqueueSubtask({ ...d, id: d.subtaskId });
-    // Track origin for result forwarding — prefer the actual reachable peer
-    // URL from the mesh over the self-reported URL in the payload (which may
-    // be an unreachable custom domain).
-    const originPeer = mesh.listPeers().find(p => p.peerId === d.originCoordinatorId);
+    // The origin charges its requester at most its worst case for one subtask (perSubtaskReserveMsat):
+    // that is all an agent here may earn for running it.
+    if (!peerOfferBudgetMsat.has(d.subtaskId)) {
+      if (peerOfferBudgetMsat.size >= PEER_OFFER_BUDGET_MAX_ENTRIES) peerOfferBudgetMsat.delete(peerOfferBudgetMsat.keys().next().value as string);
+      peerOfferBudgetMsat.set(d.subtaskId, subtaskReserveMsat(d.projectMeta.resourceClass, "any", SUBTASK_RESERVE_TIMEOUT_MS));
+    }
+    // Track origin for result forwarding: the origin peer's URL from the peer table.
     taskOriginMap.set(d.subtaskId, {
       coordinatorId: d.originCoordinatorId,
-      coordinatorUrl: originPeer?.coordinatorUrl ?? d.originCoordinatorUrl,
+      coordinatorUrl: peer.coordinatorUrl,
     });
     // Broadcast task_claim so origin coordinator knows we're handling it
     const claimMsg = protocol.createMessage(
@@ -5875,6 +5998,7 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
   for (const peerId of wsConnected) {
     if (peerId === message.fromPeerId) continue; // don't echo back to sender
     if (peerId === identity.peerId) continue;     // don't send to self
+    if (!mayRelayOverWs(message.type, meshWsBindings.get(peerId)?.authenticated === true)) continue;
     try {
       const ws = (mesh as any).wsPeers?.get(peerId);
       if (ws && ws.readyState === 1) {
@@ -5928,6 +6052,20 @@ app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
       coordinatorId: identity.peerId
     });
     socket.close(4003, reason);
+    return;
+  }
+  // Gossip to a peer coordinator (task offers included) goes down its socket: an unsigned bind may
+  // not take a coordinator's id.
+  if (!bind.authenticated && mesh.listPeers().some((p) => p.peerId === peerId)) {
+    securityLog.log({
+      level: securityLog.severity("agent_trust_violation"),
+      event: "agent_trust_violation",
+      source: { type: "agent", id: peerId, ip: req.ip },
+      details: { route: "/mesh/ws", reason: "unsigned_bind_for_coordinator_peer" },
+      action: "reject_connection",
+      coordinatorId: identity.peerId
+    });
+    socket.close(4003, "signature_required");
     return;
   }
   const previous = meshWsBindings.get(peerId);
@@ -6110,6 +6248,8 @@ app.get("/stats/projections/summary", async (req, reply) => {
       ownerEmail: z.string().email().optional()
     })
     .parse(req.query);
+  // Owner email and network location are for the portal: a mesh-token caller gets the nodes without them.
+  if (!portalAuthorized) query.ownerEmail = undefined;
   const projectionQueryTimeoutMs = 3_000;
   const timeoutReject = (label: string) =>
     new Promise<never>((_, reject) =>
@@ -6183,7 +6323,9 @@ app.get("/stats/projections/summary", async (req, reply) => {
         }
       : null,
     finality,
-    nodes: [...mergedByNodeId.values()],
+    nodes: portalAuthorized
+      ? [...mergedByNodeId.values()]
+      : [...mergedByNodeId.values()].map(({ ownerEmail: _email, sourceIp: _ip, countryCode: _cc, vpnDetected: _vpn, ...node }) => node),
     earnings: earnings ?? []
   };
 });
@@ -6250,9 +6392,13 @@ app.get("/agent-mesh/direct-work/audit", async (req, reply) => {
   const limit = z
     .object({ limit: z.coerce.number().int().positive().max(500).default(100) })
     .parse(req.query);
+  // The work's input and result belong to the two agents; other mesh members see the record only.
+  const headerToken = readHeaderValue((req as any).headers ?? {}, "x-admin-token");
+  const admin = Boolean(ADMIN_API_TOKEN && headerToken && safeTokenEqual(headerToken, ADMIN_API_TOKEN));
   const events = [...directWorkById.values()]
     .sort((a, b) => b.createdAtMs - a.createdAtMs)
-    .slice(0, limit.limit);
+    .slice(0, limit.limit)
+    .map((w) => (admin ? w : { ...w, input: undefined, result: undefined }));
   return { events };
 });
 
@@ -7019,8 +7165,10 @@ async function tryMeshPeerChat(
 
   for (const peerUrl of chatPeerUrls) {
     try {
+      // The mesh token only: peers already hold it, and it is what /portal/chat accepts from them. The
+      // portal service token names any account and must never leave this coordinator.
       const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
-      if (PORTAL_SERVICE_TOKEN) fwdHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      if (MESH_AUTH_TOKEN) fwdHeaders["x-mesh-token"] = MESH_AUTH_TOKEN;
       const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
         method: "POST",
         headers: fwdHeaders,
@@ -7341,6 +7489,12 @@ app.post("/escalate/:taskId/result", async (req, reply) => {
 
   const existing = escalationStore.get(params.taskId);
   if (!existing) return reply.code(404).send({ error: "escalation_not_found" });
+  if (resultBody.taskId !== params.taskId) return reply.code(400).send({ error: "task_id_mismatch" });
+  // The resolver reports once; a settled result is changed only by the portal (a reviewer's decision).
+  const settled = existing.status === "completed" || existing.status === "failed";
+  if (settled && !hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>)) {
+    return reply.code(409).send({ error: "escalation_already_settled", status: existing.status });
+  }
 
   escalationStore.set(params.taskId, {
     ...resultBody,
@@ -7682,7 +7836,10 @@ admin.get("/admin/dashboard", async (req, reply) => {
     maxConcurrentTasks: info.maxConcurrentTasks,
     modelCatalog: info.localModelCatalog
   }));
-  return reply.type("text/html").send(adminDashboardHtml(status, agentList));
+  // Agent fields are agent-supplied: the page renders them as text, and only its own script may run.
+  const nonce = randomBytes(16).toString("base64");
+  reply.header("content-security-policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+  return reply.type("text/html").send(adminDashboardHtml(status, agentList, nonce));
 });
 
 admin.get("/admin/dashboard/api/overview", async (req, reply) => {
@@ -7741,7 +7898,7 @@ admin.get("/admin/agents/:agentId/behavior", async (req, reply) => {
 });
 });
 
-function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>): string {
+function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>, nonce: string): string {
   const agentRows = agentList.map((a) =>
     `<tr><td>${esc(a.agentId)}</td><td>${esc(a.os ?? "-")}</td><td>${esc(a.provider ?? "-")}</td><td>${esc((a.modelCatalog ?? []).join(", ") || "-")}</td><td>${a.maxConcurrentTasks ?? 0}</td></tr>`
   ).join("");
@@ -7791,7 +7948,7 @@ function adminDashboardHtml(status: { queued: number; agents: number; results: n
     </table>
   </div>
 </div>
-<script>
+<script nonce="${nonce}">
 // #40 review: the admin token is sent only in the x-admin-token header, never in the URL.
 const TOKEN_KEY = "edgecoder_admin_token";
 let token = sessionStorage.getItem(TOKEN_KEY) || "";
@@ -7810,14 +7967,24 @@ async function refresh() {
     document.getElementById("v-uptime").textContent = d.uptimeSeconds + "s";
     document.getElementById("v-mem").textContent = d.memoryMB + " MB";
     document.getElementById("v-peers").textContent = d.meshPeers;
+    // Agent fields are agent-supplied: set as text, never parsed as HTML.
     const body = document.getElementById("agent-body");
-    if (d.agents.length === 0) {
-      body.innerHTML = "<tr><td colspan='5'>No agents connected.</td></tr>";
-    } else {
-      body.innerHTML = d.agents.map(function(a) {
-        return "<tr><td>" + (a.agentId||"-") + "</td><td>" + (a.os||"-") + "</td><td>" + (a.provider||"-") + "</td><td>" + ((a.modelCatalog||[]).join(", ")||"-") + "</td><td>" + (a.maxConcurrentTasks||0) + "</td></tr>";
-      }).join("");
-    }
+    const row = function(cells, colspan) {
+      const tr = document.createElement("tr");
+      cells.forEach(function(text) {
+        const td = document.createElement("td");
+        if (colspan) td.colSpan = colspan;
+        td.textContent = String(text);
+        tr.appendChild(td);
+      });
+      return tr;
+    };
+    const rows = d.agents.length === 0
+      ? [row(["No agents connected."], 5)]
+      : d.agents.map(function(a) {
+          return row([a.agentId || "-", a.os || "-", a.provider || "-", (a.modelCatalog || []).join(", ") || "-", a.maxConcurrentTasks || 0]);
+        });
+    body.replaceChildren.apply(body, rows);
   } catch(e) { console.error("refresh failed", e); }
 }
 setInterval(refresh, 10000);

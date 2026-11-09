@@ -51,7 +51,10 @@ The prices are set below typical hosted prices for open models of the same size.
 tier weight) means a machine's owner never earns less than the electricity the seconds cost.
 `btcUsd` is the live rate oracle's BTC price (below), with a 100,000 USD fallback before the first
 epoch. Model size comes from the model name (`paramsB` in `src/inference-api/auto-route.ts`). When
-an agent reports no token counts the call falls back to the per-second price. The basis used
+an agent reports no token counts the call falls back to the per-second price. Token counts are
+taken once, from the final streamed piece the coordinator accepts, and are capped at what the
+request and the accepted reply could hold (one token per byte, plus a small allowance for the chat
+template and end-of-turn tokens; `boundTokenCounts` in `src/swarm/inference-streams.ts`). The basis used
 (`tokens`, `power_floor` or `per_second`) is recorded on the earnings ledger record.
 `cSatsPerMTokens` gives the per-million-token price in cSats that the apps show.
 
@@ -78,6 +81,12 @@ cost (msat)      = seconds × rate
   when the task finishes (`task_submit_refund:<task>`). Not enough balance returns 402
   `insufficient_credits`.
 - Work on your own machines is not charged.
+- An agent never earns more than the requester is charged: each result's cost is taken from what
+  the task set aside and not yet used, and pays only that much. Work with nothing set aside (an
+  anonymous `/submit`) earns nothing. A subtask a peer coordinator offered earns at most the worst
+  case for one subtask, which is what the origin charges its requester for it.
+- A task id belongs to one requester until its task settles: `/submit` and `/inference/submit`
+  answer 409 `duplicate_task` for an id that is still billed, queued or held.
 
 ### Reservations: per second, paid up front
 

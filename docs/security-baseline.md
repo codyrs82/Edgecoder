@@ -46,3 +46,23 @@ pass `src/portal/coordinator-url-policy.ts`.
 
 Not yet covered by this split: `/agent/diagnostics` (POST), `/escalate*`, `/portal/chat`,
 anonymous `/submit` and the feature-flagged `/robot/*` routes still accept the mesh token alone.
+Within those limits:
+
+- Anonymous `/submit` work earns nothing: an agent is paid only out of what a requester set aside.
+- `/escalate/:taskId/result` takes one report from the resolver; once an escalation is settled only
+  the portal service token (a reviewer's decision) can change it. `/escalate/*` also accepts the
+  portal service token, which the portal's review pages send.
+- `/portal/chat` failover to a peer coordinator sends the mesh token, never the portal service token.
+- `/robot/agents/register` cannot change an existing robot agent's payout address.
+
+Mesh-token reads leave out personal data: `/capacity` and `/stats/projections/summary` omit owner
+email, source IP, country and VPN flag (the portal token still gets them on the summary), and
+`/agent-mesh/direct-work/audit` omits each job's input and result unless `x-admin-token` is sent.
+
+`/mesh/ws` relays task offers (which carry task input) only to connections bound with a signed bind;
+an unsigned bind may not take the id of a registered peer coordinator.
+
+Signed agent requests whose signature does not verify are counted against the client address
+(`PREAUTH_FAILURE_MAX_PER_IP`), never against the agent id they name; only a request proven to come
+from the agent's key (a body mismatch on a valid signature, a nonce replay, its rate limit) counts
+toward that agent's behaviour checks.

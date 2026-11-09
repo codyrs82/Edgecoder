@@ -594,8 +594,9 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_RATE_LIMIT_MAX` | `30` | Max requests per agent per window |
+| `AGENT_RATE_LIMIT_MAX` | `300` | Max signed requests per agent per window (counted only once the signature verifies) |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window |
+| `PREAUTH_FAILURE_MAX_PER_IP` | `120` | Signed requests per client address per window whose signature fails (bad signature, clock skew); past it the address is refused for the rest of the window. Such failures are never counted against the agent id the request names. Behind a reverse proxy other than Fly, set `COORDINATOR_TRUST_PROXY` so the client address is known |
 | `SECURITY_NONCE_TTL_MS` | `300000` | Nonce TTL for signed requests |
 | `SECURITY_MAX_SKEW_MS` | `120000` | Max clock skew for signed requests |
 

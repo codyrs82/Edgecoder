@@ -53,6 +53,9 @@ export const coordinatorConfigSchema = z.object({
   // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
   AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
+  // Signed requests per client address per window whose signature fails before the signer is proven
+  // (bad signature, clock skew). Past it the address is refused until the window passes.
+  PREAUTH_FAILURE_MAX_PER_IP: envInt(120, { min: 1 }),
   // Behavioural auto-blacklists expire: they are usually a misbehaving client build, not an attacker,
   // and a permanent one leaves a legitimate machine with no way back. 0 makes them permanent.
   AUTO_BLACKLIST_TTL_MS: envInt(3600000, { min: 0 }),

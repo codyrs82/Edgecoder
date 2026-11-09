@@ -4,6 +4,8 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { publicKeyFingerprint, signRegistration } from "../../src/mesh/peer-trust.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
+import { mayRelayOverWs } from "../../src/swarm/coordinator-utils.js";
+import { MeshProtocol } from "../../src/mesh/protocol.js";
 
 /*
  * The shared mesh token is a transport gate only (real coordinator app, Fastify inject):
@@ -204,5 +206,106 @@ describe("coordinator-to-coordinator registration needs an allowlisted signed ke
   test("an allowlisted key with a valid signature is admitted", async () => {
     const body = { ...fields(peerKey), ...signRegistration(fields(peerKey), peerKey.privateKeyPem) };
     expect((await post("/mesh/register-peer", body)).statusCode).toBe(200);
+  });
+});
+
+describe("admin dashboard", () => {
+  test("agent-supplied fields are never parsed as HTML, and only the page's own script runs", async () => {
+    const evil = createPeerKeys("agent-scope-evil");
+    const payload = JSON.stringify({ os: "<b>os</b>", version: "1", mode: "swarm-only", agentId: evil.peerId, registrationToken: VALID_TOKEN, publicKeyPem: evil.publicKeyPem, installedModels: ["<img src=x onerror=alert(1)>"] });
+    const signed = signRequest({ method: "POST", path: "/register", bodyHash: hashRequestBody(payload), privateKeyPem: evil.privateKeyPem, agentId: evil.peerId }) as unknown as Record<string, string>;
+    expect((await app.inject({ method: "POST", url: "/register", remoteAddress: REMOTE, headers: { "content-type": "application/json", ...signed }, payload })).statusCode).toBe(200);
+    const res = await app.inject({ method: "GET", url: "/admin/dashboard", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH, "x-admin-token": ADMIN } });
+    expect(res.statusCode).toBe(200);
+    const csp = String(res.headers["content-security-policy"] ?? "");
+    const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(res.body).toContain(`<script nonce="${nonce}">`);
+    expect(res.body).not.toContain("<img src=x");
+    expect(res.body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    // The refresh builds rows with textContent, not innerHTML.
+    expect(res.body).not.toContain("innerHTML");
+  });
+});
+
+describe("/mesh/ws binding", () => {
+  const closeCode = (ws: any) =>
+    new Promise<number | null>((resolve) => {
+      const t = setTimeout(() => resolve(null), 300);
+      ws.on("close", (code: number) => {
+        clearTimeout(t);
+        resolve(code);
+      });
+    });
+
+  test("an unsigned bind cannot take a peer coordinator's id (gossip to it goes down that socket)", async () => {
+    const body = { peerId: peerKey.peerId, publicKeyPem: peerKey.publicKeyPem, coordinatorUrl: "https://peer.invalid", networkMode: "public_mesh" as const, role: "coordinator" as const };
+    expect((await post("/mesh/register-peer", { ...body, ...signRegistration(body, peerKey.privateKeyPem) })).statusCode).toBe(200);
+    const ws = await app.injectWS(`/mesh/ws?peerId=${peerKey.peerId}`, { headers: { "x-mesh-token": MESH } });
+    expect(await closeCode(ws)).toBe(4003);
+  });
+
+  test("an unsigned bind for an agent id still connects (older agents)", async () => {
+    const ws = await app.injectWS("/mesh/ws?peerId=agent-scope-unsigned", { headers: { "x-mesh-token": MESH } });
+    expect(await closeCode(ws)).toBeNull();
+    ws.terminate();
+  });
+
+  test("task offers are relayed only to signed binds", () => {
+    expect(mayRelayOverWs("task_offer", false)).toBe(false);
+    expect(mayRelayOverWs("task_offer", true)).toBe(true);
+    expect(mayRelayOverWs("capability_summary", false)).toBe(true);
+  });
+});
+
+describe("escalation results", () => {
+  test("a settled result is changed only by the portal (a reviewer's decision)", async () => {
+    const taskId = `esc-${Date.now()}`;
+    await post("/escalate", { taskId, agentId: "agent-scope-a", task: "fix it", failedCode: "x", errorHistory: [], language: "python", iterationsAttempted: 1 });
+    const first = await app.inject({ method: "GET", url: `/escalate/${taskId}`, remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
+    if (!["completed", "failed"].includes(first.json().status)) {
+      // Still with the resolver: its one report settles it.
+      expect((await post(`/escalate/${taskId}/result`, { taskId, status: "completed", improvedCode: "ok()" })).statusCode).toBe(200);
+    }
+    const overwrite = await post(`/escalate/${taskId}/result`, { taskId, status: "completed", improvedCode: "evil()", explanation: "trust me" });
+    expect(overwrite.statusCode).toBe(409);
+    const review = await app.inject({
+      method: "POST",
+      url: `/escalate/${taskId}/result`,
+      remoteAddress: REMOTE,
+      headers: { "content-type": "application/json", "x-portal-service-token": PORTAL },
+      payload: JSON.stringify({ taskId, status: "completed", explanation: "User decision: approve" }),
+    });
+    expect(review.statusCode).toBe(200);
+  });
+});
+
+describe("peer gossip speaks for its sender only", () => {
+  const protocol = new MeshProtocol();
+  const ingest = (type: Parameters<MeshProtocol["createMessage"]>[0], payload: Record<string, unknown>) =>
+    post("/mesh/ingest", protocol.createMessage(type, peerKey.peerId, payload, peerKey.privateKeyPem));
+
+  beforeAll(async () => {
+    const body = { peerId: peerKey.peerId, publicKeyPem: peerKey.publicKeyPem, coordinatorUrl: "https://peer.invalid", networkMode: "public_mesh" as const, role: "coordinator" as const };
+    expect((await post("/mesh/register-peer", { ...body, ...signRegistration(body, peerKey.privateKeyPem) })).statusCode).toBe(200);
+  });
+
+  test("a task offer naming another origin is refused (results never go to a payload URL)", async () => {
+    const res = await ingest("task_offer", {
+      subtaskId: "st-offer-1", taskId: "t-offer-1", kind: "single_step", language: "python", input: "print(1)", timeoutMs: 1000, snapshotRef: "commit:x",
+      projectMeta: { projectId: "p", resourceClass: "cpu", priority: 1 },
+      originCoordinatorId: "coord-someone-else", originCoordinatorUrl: "http://169.254.169.254",
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("offer_origin_mismatch");
+  });
+
+  test("a blacklist record from another coordinator is refused", async () => {
+    const res = await ingest("blacklist_update", {
+      eventId: "e1", agentId: "agent-scope-a", reasonCode: "abuse_spam", reason: "x", evidenceHashSha256: "0".repeat(64), reporterId: "r",
+      evidenceSignatureVerified: false, sourceCoordinatorId: "coord-someone-else", reportedBy: "r", timestampMs: Date.now(), prevEventHash: "0", eventHash: "0", coordinatorSignature: "x",
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("blacklist_source_mismatch");
   });
 });
