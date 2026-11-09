@@ -196,3 +196,44 @@ describe("checkCoordinatorTrust / CoordinatorTrustGate", () => {
     expect(fetch.calls).toHaveLength(3);
   });
 });
+
+describe("tofu URL binding and challenge downgrade", () => {
+  it("refuses a new peerId at a URL already bound to another coordinator, across restarts", async () => {
+    const store = new PinnedKeyStore({ mode: "tofu", pinFile });
+    expect(await checkCoordinatorTrust("http://10.0.0.5:4301", { store, fetch: coordinatorFetch(coordA) })).toMatchObject({ trusted: true, decision: { reason: "tofu_pinned" } });
+    // An impostor at the same URL with its own fresh identity.
+    const impostor = await checkCoordinatorTrust("http://10.0.0.5:4301/", { store, fetch: coordinatorFetch(coordB) });
+    expect(impostor).toMatchObject({ trusted: false, decision: { reason: "url_peer_mismatch", boundPeerId: coordA.peerId } });
+    expect(describeTrustFailure(impostor)).toContain("bound to coord-a");
+    expect(store.knownFingerprint(coordB.peerId)).toBeUndefined(); // nothing pinned for it
+
+    // The binding survives a restart (bindings file next to the trust file).
+    const reloaded = new PinnedKeyStore({ mode: "tofu", pinFile });
+    expect((await checkCoordinatorTrust("http://10.0.0.5:4301", { store: reloaded, fetch: coordinatorFetch(coordB) })).trusted).toBe(false);
+    // The bound coordinator itself, and another coordinator at another URL, are still trusted.
+    expect((await checkCoordinatorTrust("http://10.0.0.5:4301", { store: reloaded, fetch: coordinatorFetch(coordA) })).trusted).toBe(true);
+    expect((await checkCoordinatorTrust("http://10.0.0.6:4301", { store: reloaded, fetch: coordinatorFetch(coordB) })).trusted).toBe(true);
+  });
+
+  it("an explicitly listed key may take over a bound URL", async () => {
+    const store = new PinnedKeyStore({ mode: "tofu", pinFile: null, entries: new Map([[coordB.peerId, fingerprint(coordB.publicKeyPem)]]) });
+    expect((await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordA) })).trusted).toBe(true);
+    expect((await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordB) })).trusted).toBe(true);
+    expect(store.peerForUrl("http://coord.test")).toBe(coordB.peerId);
+  });
+
+  it("refuses to fall back to the public /identity for a coordinator that answered the challenge before", async () => {
+    const store = new PinnedKeyStore({ mode: "tofu", pinFile: null });
+    expect((await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordA) })).proof).toBe("challenge");
+    // An impostor answers 404 to the challenge and replays coord-a's public identity.
+    const downgraded = await checkCoordinatorTrust("http://coord.test", { store, fetch: coordinatorFetch(coordA, { challenge: false }) });
+    expect(downgraded).toMatchObject({ trusted: false, error: "identity_challenge_downgrade" });
+    expect(describeTrustFailure(downgraded)).toContain("possible impersonation");
+    // Same replay at a different URL: refused too (the peer is known to support the challenge).
+    expect((await checkCoordinatorTrust("http://other.test", { store, fetch: coordinatorFetch(coordA, { challenge: false }) })).trusted).toBe(false);
+    // An older coordinator that never had the route keeps working with the warning.
+    const legacy = await checkCoordinatorTrust("http://legacy.test", { store, fetch: coordinatorFetch(coordB, { challenge: false }) });
+    expect(legacy).toMatchObject({ trusted: true, proof: "identity_only" });
+    expect((await checkCoordinatorTrust("http://legacy.test", { store, fetch: coordinatorFetch(coordB, { challenge: false }) })).trusted).toBe(true);
+  });
+});
