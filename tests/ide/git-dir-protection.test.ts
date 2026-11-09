@@ -2,11 +2,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToolExecutor, classifyRelativePath, protectedToolPath } from "../../src/apps/ide/tool-executor.js";
 import { ProjectFs } from "../../src/apps/ide/project-fs.js";
 import { GitOps } from "../../src/apps/ide/git-ops.js";
-import { hardenedGitArgs, hardenedGitEnv } from "../../src/apps/ide/git-safe.js";
+import { hardenedGitArgs, hardenedGitEnv, repoConfigOverrides } from "../../src/apps/ide/git-safe.js";
 import { makeToolRunner } from "../../src/apps/ide/agent-loop.js";
 
 const made: string[] = [];
@@ -202,6 +202,88 @@ describe.skipIf(!hasGit || !posix)("IDE git calls ignore repository fsmonitor an
     made.push(root);
     execFileSync("git", ["init", "-q", "--bare", root]);
     expect(() => execFileSync("git", hardenedGitArgs(["rev-parse", "--git-dir"]), { cwd: root, stdio: "pipe" })).toThrow();
+  });
+});
+
+describe.skipIf(!hasGit || !posix)("IDE git calls ignore commands named in the repository's config", () => {
+  const prevGlobal = process.env.GIT_CONFIG_GLOBAL;
+  beforeAll(() => {
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  });
+  afterAll(() => {
+    if (prevGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = prevGlobal;
+  });
+
+  /** A committed repo whose .git/config names a marker-writing command for every driver kind. */
+  function plant(): { root: string; marker: string } {
+    const root = repo();
+    const marker = join(root, "..", `${root.split("/").pop()}-cfg-ran`);
+    made.push(marker);
+    const upstream = mkdtempSync(join(tmpdir(), "ec-up-"));
+    made.push(upstream);
+    execFileSync("git", ["init", "-q", "--bare", upstream]);
+    execFileSync("git", ["add", "a.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
+    writeFileSync(join(root, ".gitattributes"), "*.txt filter=x diff=x merge=x\n");
+    const run = `touch '${marker}'`;
+    const cfg: Array<[string, string]> = [
+      ["filter.x.clean", `${run}; cat`], ["filter.x.smudge", `${run}; cat`], ["filter.x.required", "true"],
+      ["diff.x.textconv", `sh -c "${run}" ; cat`], ["diff.x.command", run], ["diff.external", run], ["merge.x.driver", run],
+      ["gpg.program", run], ["core.sshCommand", run], ["core.pager", run], ["core.editor", run],
+      ["credential.helper", `!${run}`], ["remote.origin.url", upstream], ["remote.origin.uploadpack", `${run}; git-upload-pack`],
+      ["remote.origin.receivepack", `${run}; git-receive-pack`],
+    ];
+    for (const [k, v] of cfg) execFileSync("git", ["config", k, v], { cwd: root });
+    return { root, marker };
+  }
+
+  it("the planted filter runs for plain git status (control)", () => {
+    const { root, marker } = plant();
+    writeFileSync(join(root, "a.txt"), "a\n");
+    execFileSync("git", ["status", "--porcelain"], { cwd: root, stdio: "ignore" });
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("status polls, diff, log, fetch, push and commit don't run them", async () => {
+    const { root, marker } = plant();
+    writeFileSync(join(root, "a.txt"), "a\nb\n");
+    expect(new ProjectFs(root).gitStatus()?.files["a.txt"]).toBe("M");
+    expect(existsSync(marker), "ProjectFs.gitStatus").toBe(false);
+    const ops = new GitOps(root);
+    expect(await ops.state()).not.toBeNull();
+    expect(existsSync(marker), "GitOps.state").toBe(false);
+    const exec = new ToolExecutor(root);
+    expect((await exec.execute("git_status", {})).result).toContain("a.txt");
+    const diff = await exec.execute("git_diff", {});
+    expect(diff.error).toBeUndefined();
+    expect(diff.result).toContain("+b");
+    expect(existsSync(marker), "git_diff").toBe(false);
+    await exec.execute("git_log", { count: 1 });
+    expect(existsSync(marker), "git_log").toBe(false);
+    await exec.execute("git_fetch", { remote: "origin" });
+    expect(existsSync(marker), "git_fetch").toBe(false);
+    await exec.execute("git_push", { remote: "origin", branch: "main" }, { approved: true });
+    expect(existsSync(marker), "git_push").toBe(false);
+    await exec.execute("git_commit", { message: "two", files: "a.txt" }, { approved: true });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("re-applies the user's global value after the inert one, and refuses keys -c can't express", () => {
+    const entries = [
+      { scope: "global", key: "credential.helper", value: "osxkeychain" },
+      { scope: "local", key: "credential.helper", value: "!evil" },
+      { scope: "local", key: "filter.lfs.clean", value: "git-lfs clean -- %f" },
+      { scope: "local", key: "submodule.s.update", value: "!evil" },
+      { scope: "local", key: "core.gitproxy", value: "evil" },
+      { scope: "global", key: "diff.external", value: "mydiff" },
+    ];
+    expect(repoConfigOverrides(entries)).toEqual([
+      ["credential.helper", ""], ["credential.helper", "osxkeychain"],
+      ["submodule.s.update", "none"],
+      ["protocol.git.allow", "never"],
+    ]);
+    expect(() => repoConfigOverrides([{ scope: "local", key: "filter.a=b.clean", value: "evil" }])).toThrow(/can't neutralise/);
   });
 });
 

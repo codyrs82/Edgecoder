@@ -96,7 +96,7 @@ const providers = new ProviderRegistry();
 function projectHeadCommit(): string | undefined {
   if (!activeProjectRoot) return undefined;
   try {
-    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"]), {
+    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"], activeProjectRoot), {
         env: gitExecEnv(),
       encoding: "utf8",
       timeout: 3_000,

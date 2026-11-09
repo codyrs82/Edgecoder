@@ -126,7 +126,7 @@ type Progress = (line: string) => void;
 
 function git(args: string[], opts: { cwd?: string; timeoutMs?: number; onProgress?: Progress } = {}): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("git", hardenedGitArgs(args), {
+    const child = spawn("git", hardenedGitArgs(args, opts.cwd), {
       cwd: opts.cwd,
       env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GIT_ASKPASS: "", SSH_ASKPASS: "" }),
       stdio: ["ignore", "pipe", "pipe"],

@@ -782,7 +782,7 @@ export class ToolExecutor {
 
   private gitStatus(): ToolResult {
     try {
-      const out = execFileSync("git", hardenedGitArgs(["status", "--porcelain"]), {
+      const out = execFileSync("git", hardenedGitArgs(["status", "--porcelain"], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -811,7 +811,7 @@ export class ToolExecutor {
     if (filePath) gitArgs.push("--", filePath);
 
     try {
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -839,7 +839,7 @@ export class ToolExecutor {
     if (ref) gitArgs.push(ref, "--");
 
     try {
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -868,7 +868,7 @@ export class ToolExecutor {
     try {
       // Stage files — split on whitespace to pass as separate arguments
       const fileList = files.split(/\s+/).filter(Boolean);
-      execFileSync("git", hardenedGitArgs(["add", "--", ...fileList]), {
+      execFileSync("git", hardenedGitArgs(["add", "--", ...fileList], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -876,7 +876,7 @@ export class ToolExecutor {
       });
 
       // Commit — execFileSync passes message as argument, no shell interpolation
-      const out = execFileSync("git", hardenedGitArgs(["commit", "-m", message]), {
+      const out = execFileSync("git", hardenedGitArgs(["commit", "-m", message], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -903,7 +903,7 @@ export class ToolExecutor {
     try {
       if (!name) {
         // List branches
-        const out = execFileSync("git", hardenedGitArgs(["branch"]), {
+        const out = execFileSync("git", hardenedGitArgs(["branch"], this.root), {
         env: gitExecEnv(),
           cwd: this.root,
           encoding: "utf-8",
@@ -916,7 +916,7 @@ export class ToolExecutor {
         ? ["checkout", "-b", name]
         : ["checkout", name, "--"];
 
-      const out = execFileSync("git", hardenedGitArgs(gitArgs), {
+      const out = execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -937,7 +937,7 @@ export class ToolExecutor {
   private execGitAuth(gitArgs: string[], timeoutMs = 60_000): string {
     // The token reaches git through the environment (a credential helper that reads it from an env
     // var), never through argv, where other local users can see it.
-    return execFileSync("git", hardenedGitArgs(gitArgs), {
+    return execFileSync("git", hardenedGitArgs(gitArgs, this.root), {
       env: this.githubToken ? githubTokenCredentialEnv(this.githubToken) : gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
@@ -959,7 +959,7 @@ export class ToolExecutor {
     }
     let names: string[];
     try {
-      names = execFileSync("git", hardenedGitArgs(["remote"]), { env: gitExecEnv(), cwd: this.root, encoding: "utf-8", timeout: 10_000 })
+      names = execFileSync("git", hardenedGitArgs(["remote"], this.root), { env: gitExecEnv(), cwd: this.root, encoding: "utf-8", timeout: 10_000 })
         .split("\n").map((s) => s.trim()).filter(Boolean);
     } catch (err) {
       return { error: err instanceof Error ? err.message : "git remote failed" };
@@ -1030,7 +1030,7 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private getGitHubRepo(): { owner: string; repo: string } {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), {
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"], this.root), {
         env: gitExecEnv(),
       cwd: this.root,
       encoding: "utf-8",
@@ -1088,7 +1088,7 @@ export class ToolExecutor {
     let head = typeof args.head === "string" ? args.head : "";
 
     if (!head) {
-      head = execFileSync("git", hardenedGitArgs(["rev-parse", "--abbrev-ref", "HEAD"]), {
+      head = execFileSync("git", hardenedGitArgs(["rev-parse", "--abbrev-ref", "HEAD"], this.root), {
         env: gitExecEnv(),
         cwd: this.root,
         encoding: "utf-8",
@@ -1161,7 +1161,7 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private git(args: string[], timeoutMs = 15_000): string {
-    return execFileSync("git", hardenedGitArgs(args), {
+    return execFileSync("git", hardenedGitArgs(args, this.root), {
       env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0" }),
       cwd: this.root,
       encoding: "utf-8",
@@ -1298,7 +1298,7 @@ export function preparePullRequestArgs(executor: ToolExecutor, tool: ToolName, a
 /** True when the project's origin is on github.com (open_pull_request is offered to chat then). */
 export function hasGitHubOrigin(root: string): boolean {
   try {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"]), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"], root), { cwd: root, env: gitExecEnv(), encoding: "utf-8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
     return /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/i.test(url);
   } catch {
     return false;
