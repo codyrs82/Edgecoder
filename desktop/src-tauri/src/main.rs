@@ -16,6 +16,7 @@ use serde::Serialize;
 mod agent_guard;
 mod agent_settings;
 mod local_compute;
+mod navigation;
 mod network_enrollment;
 mod terminal;
 mod token;
@@ -546,6 +547,8 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        // Model output in chat must never replace the app with a remote page.
+        .plugin(navigation::guard())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())

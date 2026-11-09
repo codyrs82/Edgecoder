@@ -757,7 +757,8 @@
             <button title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}>×</button>
           </div>
           {#key previewNonce}
-            <iframe class="preview-frame" title="Preview" src={previewUrl}></iframe>
+            <!-- Project content: it may run scripts, but never navigate or take over the app window. -->
+            <iframe class="preview-frame" title="Preview" src={previewUrl} sandbox="allow-scripts allow-forms allow-same-origin allow-modals"></iframe>
           {/key}
         </div>
       {/if}

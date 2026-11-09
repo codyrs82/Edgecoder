@@ -25,6 +25,12 @@ describe("desktop CSP (#11)", () => {
     expect(String(sec.csp["default-src"])).toBe("'self'");
   });
 
+  it("no <base>, plugin objects or form posts from injected markup", () => {
+    expect(sec.csp["base-uri"]).toBe("'none'");
+    expect(sec.csp["form-action"]).toBe("'none'");
+    expect(sec.csp["object-src"]).toBe("'none'");
+  });
+
   it("no directive allows unsafe-eval or the Vite dev server in production", () => {
     for (const [k, v] of Object.entries(sec.csp)) {
       expect(String(v), k).not.toContain("'unsafe-eval'");
