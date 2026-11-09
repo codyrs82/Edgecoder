@@ -47,7 +47,7 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
   `;
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
-    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
+    function encodeAttr(v) { return encodeURIComponent(String(v || "")).replace(/'/g, "%27"); }
     // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
     // below is user- or agent-supplied and goes through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
@@ -189,7 +189,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
   `;
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
-    function encodeAttr(v) { return encodeURIComponent(String(v || "")); }
+    function encodeAttr(v) { return encodeURIComponent(String(v || "")).replace(/'/g, "%27"); }
     // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
     // below is user- or agent-supplied and goes through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
