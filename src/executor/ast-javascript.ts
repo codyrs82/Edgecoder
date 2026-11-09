@@ -29,12 +29,30 @@ const BLOCKED_GLOBALS = new Set([
   "process", "require", "globalThis", "eval", "Function", "Proxy", "Reflect"
 ]);
 
+/**
+ * Hardening, not a boundary: names that reach the Function constructor or the prototype chain.
+ * Rejected as an identifier (`x.constructor`) and as a whole string literal (`x["constructor"]`).
+ * A computed key built at runtime (`x["con" + "structor"]`) still passes; that is why local code
+ * runs in the Docker sandbox (src/executor/run.ts) and remote code never runs on the host.
+ */
+const BLOCKED_PROPERTIES = new Set([
+  "constructor", "prototype", "__proto__", "__defineGetter__", "__defineSetter__",
+  "__lookupGetter__", "__lookupSetter__"
+]);
+
+function blockedName(name: unknown): string | undefined {
+  if (typeof name !== "string") return undefined;
+  return BLOCKED_GLOBALS.has(name) || BLOCKED_PROPERTIES.has(name) ? name : undefined;
+}
+
 // Walk an acorn AST node recursively, yielding every node
 function* walkAst(node: acorn.Node & Record<string, unknown>): Generator<acorn.Node & Record<string, unknown>> {
   if (!node || typeof node !== "object") return;
   yield node;
 
-  const skipKeys = new Set(["type", "start", "end", "name", "raw", "value", "computed", "method",
+  // "value" is not skipped: a Property's value is a node (`{ a: process }`). Literal and
+  // TemplateElement values are not nodes and are filtered out by the `"type" in child` checks.
+  const skipKeys = new Set(["type", "start", "end", "name", "raw", "computed", "method",
     "shorthand", "kind", "operator", "prefix", "sourceType", "optional", "async", "generator",
     "tail", "delegate", "regex", "bigint", "loc", "range"]);
 
@@ -79,6 +97,19 @@ export function validateJavaScriptAst(code: string): AstValidationResult {
       if (name && BLOCKED_GLOBALS.has(name)) {
         return { safe: false, reason: `Blocked global: ${name}` };
       }
+      if (name && BLOCKED_PROPERTIES.has(name)) {
+        return { safe: false, reason: `Blocked property: ${name}` };
+      }
+    }
+
+    // The same names as string keys: x["constructor"], x[`process`].
+    const literal = nodeType === "Literal"
+      ? blockedName((node as { value?: unknown }).value)
+      : nodeType === "TemplateElement"
+        ? blockedName((node as { value?: { cooked?: unknown } }).value?.cooked)
+        : undefined;
+    if (literal) {
+      return { safe: false, reason: `Blocked string key: ${literal}` };
     }
 
     // Check for blocked call targets

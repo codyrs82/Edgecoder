@@ -26,7 +26,8 @@ const ALLOWED_NODE_TYPES = new Set([
 const BLOCKED_BUILTINS = new Set([
   "open", "exec", "eval", "compile", "__import__", "globals",
   "locals", "getattr", "setattr", "delattr", "vars", "dir",
-  "input", "breakpoint", "memoryview", "bytearray"
+  "input", "breakpoint", "memoryview", "bytearray",
+  "__builtins__", "__loader__", "__spec__"
 ]);
 
 const AST_WALKER_SCRIPT = `
@@ -43,6 +44,13 @@ nodes = []
 calls = []
 for node in ast.walk(tree):
     nodes.append(type(node).__name__)
+    # Dunder attributes (__class__, __subclasses__, __globals__, __self__ ...) walk the object
+    # graph back to modules; reported as a pseudo node type, which is never allowed.
+    if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+        nodes.append("DunderAttribute:" + node.attr)
+    # Every loaded name, not only direct callees, so an alias (f = eval) is caught too.
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        calls.append(node.id)
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name):
             calls.append(node.func.id)

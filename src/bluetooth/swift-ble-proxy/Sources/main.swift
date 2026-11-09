@@ -313,7 +313,8 @@ final class HTTPServer {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        // Loopback only: the server has no authentication, so it must not be reachable from the LAN.
+        addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
 
         let bindResult = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {

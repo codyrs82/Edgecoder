@@ -24,7 +24,7 @@ import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
-import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
+import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
@@ -35,6 +35,7 @@ import { localStore } from "../db/local-store.js";
 import { hashRequestBody, signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
 import { MeshPeer } from "../mesh/mesh-peer.js";
+import { MeshTaskQueue } from "../mesh/mesh-task-queue.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
@@ -702,7 +703,7 @@ async function learnCoordinatorPeer(peer: MeshPeer, coordinatorUrl: string, from
     const id = (await res.body.json()) as { peerId?: string; publicKeyPem?: string; networkMode?: string };
     if (id.peerId !== fromPeerId || typeof id.publicKeyPem !== "string") return;
     if (!coordinatorTrustStore.wouldTrust(id.peerId, id.publicKeyPem)) return;
-    peer.addPeer({ peerId: id.peerId, publicKeyPem: id.publicKeyPem, coordinatorUrl, networkMode: id.networkMode === "enterprise_overlay" ? "enterprise_overlay" : "public_mesh" }, "coordinator");
+    peer.addPeer({ peerId: id.peerId, publicKeyPem: id.publicKeyPem, coordinatorUrl, networkMode: id.networkMode === "enterprise_overlay" ? "enterprise_overlay" : "public_mesh" }, "coordinator", { trusted: true });
   } catch {
     // unknown sender stays unknown; its messages are dropped
   }
@@ -747,7 +748,8 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
             peer.gossip.setWebSocketForPeer(message.fromPeerId, ws as any);
             console.log(`[agent:${AGENT_ID}] registered WS for outbound gossip to ${message.fromPeerId}`);
           }
-          if (typeof message.fromPeerId === "string" && !peer.getPeer(message.fromPeerId)) {
+          // Also when the id is held by an untrusted (self-registered) entry: a trusted add replaces it.
+          if (typeof message.fromPeerId === "string" && !peer.getPeer(message.fromPeerId)?.trusted) {
             await learnCoordinatorPeer(peer, coordinatorUrl, message.fromPeerId);
           }
           await peer.handleIngest(message);
@@ -818,8 +820,16 @@ async function loop(): Promise<void> {
   // ── Initialize HTTP mesh peer (BitTorrent-style P2P) ──
   let meshPeer: MeshPeer | null = null;
   let meshServer: MeshHttpServer | null = null;
-  const meshTaskQueue: Array<{ subtask: Subtask; fromPeerId: string }> = [];
-  const meshClaimedTasks = new Set<string>();
+  // Bounded queue and claimed-id memory (src/mesh/mesh-task-queue.ts).
+  const meshTaskQueue = new MeshTaskQueue();
+  /** The identity the coordinator proved in its challenge; null until verified. */
+  const verifiedCoordinatorIdentity = (): { peerId: string; publicKeyPem: string } | null => {
+    try {
+      return coordinator.requireVerifiedIdentity().identity;
+    } catch {
+      return null;
+    }
+  };
   try {
     const localIp = getLocalIpAddress();
     meshPeer = new MeshPeer({
@@ -850,8 +860,14 @@ async function loop(): Promise<void> {
         snapshotRef?: string; projectMeta?: Subtask["projectMeta"];
         originCoordinatorId?: string;
       };
+      // Work is taken only from the coordinator this worker registered with: the sender's id and
+      // the key its signature was checked against must be the identity the coordinator proved.
+      if (!meshPeer!.isFromIdentity(msg, verifiedCoordinatorIdentity())) {
+        console.warn(`[agent:${AGENT_ID}] mesh task_offer ignored: sender ${msg.fromPeerId} is not the verified coordinator`);
+        return;
+      }
       if (!p.subtaskId || !p.taskId || !p.input) return;
-      if (meshClaimedTasks.has(p.subtaskId)) return;
+      if (meshTaskQueue.hasClaimed(p.subtaskId)) return;
       // Same execution policy as pulled work: don't claim what we would refuse to run.
       const offerPolicy = checkSnapshotPolicy({ id: p.subtaskId, kind: (p.kind as Subtask["kind"]) ?? "single_step", snapshotRef: p.snapshotRef }, SNAPSHOT_ENFORCEMENT);
       if (!offerPolicy.run) {
@@ -862,7 +878,7 @@ async function loop(): Promise<void> {
       if (p.originCoordinatorId === AGENT_ID) return;
       // #45 review: a node without a sandbox never drains this queue, so don't fill it.
       if (!SWARM_EXECUTION_ENABLED) return;
-      meshTaskQueue.push({
+      const queued = meshTaskQueue.push({
         subtask: {
           id: p.subtaskId,
           taskId: p.taskId,
@@ -875,22 +891,25 @@ async function loop(): Promise<void> {
         },
         fromPeerId: msg.fromPeerId,
       });
+      if (!queued) {
+        console.warn(`[agent:${AGENT_ID}] mesh task_offer ignored: queue full (${meshTaskQueue.length})`);
+        return;
+      }
       // Broadcast claim
       await meshPeer!.broadcast("task_claim", {
         subtaskId: p.subtaskId,
         claimedByCoordinator: AGENT_ID,
       });
-      meshClaimedTasks.add(p.subtaskId);
       console.log(`[agent:${AGENT_ID}] mesh task_offer queued: ${p.subtaskId}`);
     });
 
     // Handle task_claim: remove tasks claimed by other peers
     meshPeer.on("task_claim", async (msg: MeshMessage) => {
       const p = msg.payload as { subtaskId?: string; claimedByCoordinator?: string };
-      if (p.subtaskId && p.claimedByCoordinator !== AGENT_ID) {
-        const idx = meshTaskQueue.findIndex(t => t.subtask.id === p.subtaskId);
-        if (idx >= 0) {
-          meshTaskQueue.splice(idx, 1);
+      // Only peers the coordinator told us about can cancel queued work.
+      if (!meshPeer!.getPeer(msg.fromPeerId)?.trusted) return;
+      if (typeof p.subtaskId === "string" && p.claimedByCoordinator !== AGENT_ID) {
+        if (meshTaskQueue.remove(p.subtaskId)) {
           console.log(`[agent:${AGENT_ID}] mesh task claimed by ${p.claimedByCoordinator}: ${p.subtaskId}`);
         }
       }
@@ -960,15 +979,17 @@ async function loop(): Promise<void> {
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
-        // Admission: no mesh token here means no remote BLE work at all; otherwise the requester
-        // must advertise the same token hash, within size and rate limits. BLE adverts carry no
-        // public key, so requesterSignature cannot be verified against an identity.
-        const requesterPeer = bleTransport!.discoveredPeers().find(p => p.agentId === req.requesterId);
+        // Admission: no mesh token here means no remote BLE work at all; otherwise the request must
+        // carry a proof keyed with the mesh token (the advertised hash is public, not a
+        // credential), within size and rate limits. See src/mesh/ble/ble-request-guard.ts.
+        const proof = req as typeof req & { requesterProof?: unknown; requesterIssuedAtMs?: unknown };
         const admission = bleGuard.admit({
-          ownTokenHash: computeMeshTokenHash(),
-          requesterTokenHash: requesterPeer?.meshTokenHash,
+          ownMeshToken: meshAuthToken,
+          requestId: String(req.requestId ?? ""),
           requesterId: String(req.requesterId ?? ""),
-          task: req.task
+          task: req.task,
+          requesterProof: proof.requesterProof,
+          requesterIssuedAtMs: proof.requesterIssuedAtMs
         });
         if (!admission.ok) {
           console.warn(`[BLE] rejecting task from ${req.requesterId}: ${admission.reason}`);
@@ -1623,6 +1644,8 @@ async function loop(): Promise<void> {
               task: task.prompt,
               language: task.language as Language,
               requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(task.prompt) }), keys.privateKeyPem),
+              // Admission proof keyed with the mesh token (providers no longer accept the public hash).
+              ...bleRequestProof(meshAuthToken, { requestId: task.id, requesterId: AGENT_ID, task: task.prompt }),
             };
             try {
               const resp = await bleMesh.routeTask(bleReq, 0);
@@ -1679,12 +1702,14 @@ async function loop(): Promise<void> {
               try {
                 console.log(`[BLE-TEST] sending test task to ${peer.agentId} over BLE...`);
                 const testTask = "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.";
+                const testRequestId = `ble-test-${Date.now()}`;
                 const testReq = {
-                  requestId: `ble-test-${Date.now()}`,
+                  requestId: testRequestId,
                   requesterId: AGENT_ID,
                   task: testTask,
                   language: "python" as const,
                   requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(testTask) }), keys.privateKeyPem),
+                  ...bleRequestProof(meshAuthToken, { requestId: testRequestId, requesterId: AGENT_ID, task: testTask }),
                 };
                 const resp = await bleTransport!.sendTaskRequest(peer.agentId, testReq);
                 console.log(`[BLE-TEST] response from ${peer.agentId}: status=${resp.status}, output=${(resp.output ?? "").substring(0, 200)}`);

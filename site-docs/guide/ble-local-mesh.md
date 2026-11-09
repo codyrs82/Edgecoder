@@ -26,6 +26,8 @@ EdgeCoder uses a custom BLE service with these characteristics:
 
 Service UUID: `E0D6EC00-0001-4C3A-9B5E-00ED6EC0DE00`
 
+The mesh token hash in the identity characteristic is public: it tells peers which mesh a node belongs to, and it is not a credential. A provider admits a task request only when it carries `requesterIssuedAtMs` and `requesterProof`, an HMAC-SHA256 keyed with the mesh token itself over the request id, requester id, task hash and issue time (`src/mesh/ble/ble-request-guard.ts`). Proofs older or newer than two minutes are refused, each proof is accepted once, and per-requester and global rate limits apply. Task responses are capped at 1 MiB.
+
 Payloads exceeding the 512-byte MTU are chunked with a 4-byte header (2-byte sequence number + 2-byte total count, big-endian).
 
 ## Cost-Based Routing

@@ -49,7 +49,7 @@ describe("agent retry types", () => {
 describe("InteractiveAgent retry loop", () => {
   it("succeeds on first iteration for simple tasks", async () => {
     const provider = new EdgeCoderLocalProvider();
-    const agent = new InteractiveAgent(provider);
+    const agent = new InteractiveAgent(provider, { sandbox: "host" }); // explicit host opt-in: no Docker in CI
     const result = await agent.run("Print hello world", "python");
     expect(result.ok !== undefined || result.runResult !== undefined).toBe(true);
     expect(result.iterations).toBe(1);
@@ -65,7 +65,7 @@ describe("InteractiveAgent retry loop", () => {
       },
       async health() { return true; }
     };
-    const agent = new InteractiveAgent(badProvider, { maxIterations: 2 });
+    const agent = new InteractiveAgent(badProvider, { maxIterations: 2, sandbox: "host" });
     const result = await agent.run("do something", "python");
     expect(result.escalated).toBe(true);
     expect(result.iterations).toBeGreaterThanOrEqual(1);

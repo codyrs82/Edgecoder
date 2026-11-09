@@ -34,6 +34,12 @@ Examples use placeholders. Replace them with your deployment's hosts:
   - `clientType` on `/register` (for example `openclaw`, `claude-local`, `edgecoder-native`)
   - `os` as any descriptive string (for example `macos`, `linux-arm64`, `windows`)
 - Register peer identities between coordinators with `POST /mesh/register-peer`.
+- Agents run a small mesh server of their own (`src/mesh/mesh-http-server.ts`). A `POST /mesh/register-peer`
+  to an agent cannot replace an existing entry (the coordinator's included), is recorded as role
+  `agent`, is capped at 256 entries, and never becomes a gossip target. An agent gossips, and sends the
+  mesh token, only to its coordinator and the peers that coordinator listed. It queues a `task_offer`
+  only when the message is signed with the key its coordinator proved at verification, and the queue
+  is bounded (32 offers).
 - Monitor peer reputation with `GET /mesh/reputation`.
 - For installer/runtime bootstrap, fetch coordinator candidates from `GET /network/coordinators` on control plane.
 - Full install runbook (self-hosted agents + extra coordinators): `docs/agent-and-coordinator-install.md`.

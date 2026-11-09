@@ -44,7 +44,17 @@ flowchart TD
 Code from anywhere other than the local user always runs in Docker. That covers coordinator `/pull` tasks, mesh gossip, BLE and peer-direct offers.
 
 - `runCode()` defaults to `sandbox: "docker"` and `origin: "remote"`. A remote task asking for host execution gets `ok: false`, `stderr: "sandbox_required_for_remote_task"`, and no process is spawned.
-- Only `InteractiveAgent` (IDE or local CLI) runs on the host, with `origin: "local"`.
+- Remote-origin work never falls back to the host, whatever is configured.
+
+## Local (IDE) runs
+
+`InteractiveAgent` (the IDE provider's `/run` and `/run/local`) runs model-generated code with `origin: "local"`. That code also runs in the Docker sandbox, with the same flags. The images are built on first use if they are missing.
+
+Without Docker, a local run fails with `sandbox_unavailable` unless the operator sets `EDGECODER_UNSAFE_HOST_EXECUTION=1`. With that set, the code runs on the host: JavaScript in `node:vm` and Python as `python3 -c`, both with the user's own privileges and environment. Only set it on a machine where running arbitrary model output as your user is acceptable.
+
+## What the subset validators guarantee
+
+The regex deny-list and the AST checks (`src/executor/subset.ts`, `ast-javascript.ts`, `ast-python.ts`) reject code outside the supported subset. That includes the common escape shapes: `.constructor` and `__proto__` access, dunder attributes such as `__class__` and `__subclasses__`, and references to `eval`, `exec`, `getattr` and similar builtins. They are a filter, not a security boundary. A deny-list over JavaScript or Python source cannot be complete; for example, a property name assembled at runtime is not seen. Isolation comes only from the Docker sandbox.
 - With `SANDBOX_MODE=none` a worker still registers and heartbeats, but it never calls `/pull` and does not run mesh or peer code.
 - The coordinator also rejects `/pull` from agents that report `sandboxMode: "none"` before claiming a task, so nothing is claimed and then requeued.
 - Installer env examples default to `SANDBOX_MODE=docker`. Hosts without Docker simply contribute no swarm compute.
@@ -53,7 +63,7 @@ Code from anywhere other than the local user always runs in Docker. That covers 
 
 `buildDockerArgs()` always adds these flags:
 
-`--network=none` (unless policy allows), `--read-only`, `--memory`, `--cpus`, `--pids-limit=50`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user=65534:65534`, `--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `--ulimit=nofile=256:256`
+`--pull=never`, `--network=none` (unless policy allows), `--read-only`, `--memory`, `--memory-swap` (equal to `--memory`), `--cpus`, `--pids-limit=50`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--user=65534:65534`, `--tmpfs=/tmp:rw,noexec,nosuid,size=64m`, `--ulimit=nofile=256:256`
 
 It also adds `--security-opt=seccomp=$SANDBOX_SECCOMP_PROFILE` when that variable is set.
 
