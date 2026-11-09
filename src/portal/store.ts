@@ -731,6 +731,26 @@ export class PortalStore {
     );
   }
 
+  /** The account an unused, unexpired verification link belongs to, without using the link up. */
+  async findEmailVerification(tokenHash: string): Promise<{ userId: string } | null> {
+    const result = await this.pool.query(
+      `SELECT user_id FROM portal_email_verifications
+       WHERE token_hash = $1 AND consumed_at_ms IS NULL AND expires_at_ms > $2`,
+      [tokenHash, Date.now()]
+    );
+    const row = result.rows[0];
+    return row ? { userId: row.user_id } : null;
+  }
+
+  /** Verification links issued to a user since `sinceMs` (per-account resend cap). */
+  async countRecentEmailVerifications(userId: string, sinceMs: number): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM portal_email_verifications WHERE user_id = $1 AND created_at_ms >= $2`,
+      [userId, sinceMs]
+    );
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
   async consumeEmailVerification(tokenHash: string): Promise<{ userId: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(

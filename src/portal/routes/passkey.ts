@@ -13,6 +13,8 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    // An unverified account holds no long-lived credentials (routes/auth.ts, verify-email).
+    if (user.emailVerified === false) return reply.code(403).send({ error: "email_not_verified" });
     const existing = await store.listPasskeysByUserId(user.userId);
     const webauthnUserId = createHash("sha256").update(user.userId).digest().subarray(0, 16);
     const options = await generateRegistrationOptions({
@@ -49,6 +51,7 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (user.emailVerified === false) return reply.code(403).send({ error: "email_not_verified" });
     const body = z
       .object({
         challengeId: z.string().min(10),

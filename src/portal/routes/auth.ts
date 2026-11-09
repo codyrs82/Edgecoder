@@ -19,7 +19,8 @@ import {
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
 import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
-import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
@@ -108,24 +109,49 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     return reply.send({ ok: true });
   });
 
-  app.get("/auth/verify-email", async (req, reply) => {
+  // The emailed link only opens a confirmation page: a GET (or a mail scanner prefetching it)
+  // changes nothing. The page POSTs the token back, and the address is marked verified only for
+  // someone who already holds the account: its session in this browser, or its password. Someone
+  // who registered another person's address therefore cannot have it verified by that person
+  // clicking the link; the real owner instead uses "Forgot password", which revokes every other
+  // way in (routes/password-reset.ts).
+  app.get("/auth/verify-email", async (_req, reply) => {
+    return reply.header("cache-control", "no-store").type("text/html").send(verifyEmailPage());
+  });
+
+  app.post("/auth/verify-email", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const query = z.object({ token: z.string().min(10) }).parse(req.query);
-    const consumed = await store.consumeEmailVerification(sha256Hex(query.token));
-    if (!consumed) {
-      return reply
-        .code(400)
-        .type("text/html")
-        .send(`<!doctype html><html><body><p>Invalid or expired verification token.</p><p><a href="/portal">Return to portal</a></p></body></html>`);
+    const parsed = z.object({ token: z.string().min(10).max(200), password: z.string().max(PASSWORD_MAX_LENGTH).optional() }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "verify_link_invalid" });
+    const tokenHash = sha256Hex(parsed.data.token);
+    const pending = await store.findEmailVerification(tokenHash);
+    const user = pending ? await store.getUserById(pending.userId) : null;
+    if (!pending || !user) return reply.code(400).send({ error: "verify_link_invalid" });
+    const current = await getCurrentUser(req as any);
+    const password = parsed.data.password;
+    const proven =
+      current?.userId === user.userId ||
+      Boolean(password && user.passwordHash && verifyPassword(password, user.passwordHash));
+    if (!proven) {
+      return reply.code(401).send({ error: user.passwordHash ? "verify_password_required" : "verify_sign_in_required" });
     }
-    await store.markUserEmailVerified(consumed.userId);
-    const user = await store.getUserById(consumed.userId);
-    if (user) await ensureCreditAccountForUser(user);
-    return reply
-      .type("text/html")
-      .send(
-        `<!doctype html><html><body><p>Email verified. Your account and enrolled nodes can now be activated.</p><p><a href="/portal">Open portal dashboard</a></p></body></html>`
-      );
+    if (!(await store.consumeEmailVerification(tokenHash))) return reply.code(400).send({ error: "verify_link_invalid" });
+    if (!user.emailVerified) {
+      // Nothing set up before the address was proven survives: sessions, API keys and passkeys are
+      // revoked, and on a password account linked sign-in providers and the GitHub token too. A
+      // passwordless account keeps its provider link, since that is how the confirmer signed in.
+      await store.deleteSessionsForUser(user.userId);
+      await store.revokeAllApiKeys(user.userId);
+      await store.deletePasskeysForUser(user.userId);
+      if (user.passwordHash) {
+        await store.deleteOauthLinksForUser(user.userId);
+        await store.deleteGitHubToken(user.userId);
+      }
+      await store.markUserEmailVerified(user.userId);
+      await ensureCreditAccountForUser(user);
+    }
+    const sessionToken = await createSessionForUser(user.userId, reply);
+    return reply.send({ ok: true, sessionToken });
   });
 
   app.post("/auth/resend-verification", async (req, reply) => {
@@ -327,6 +353,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       const current = await getCurrentUser(req as any);
       if (!current || current.userId !== state.linkUserId) return refuse(403, "oauth_connect_session_mismatch", oauthErrorMessage("connect_session", providerName));
       if (linked && linked.userId !== current.userId) return refuse(409, "oauth_identity_linked_elsewhere", oauthErrorMessage("already_linked", providerName));
+      // An unverified account gains no sign-in method, except one that proves its address.
+      if (!current.emailVerified && !provesEmailOf(current)) return refuse(403, "email_not_verified", oauthErrorMessage("connect_unverified", providerName));
       await linkTo(current.userId);
       await saveGithubToken(current.userId);
       if (!current.emailVerified && provesEmailOf(current)) {

@@ -354,7 +354,8 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `POST` | `/auth/signup` | Email/password signup | none |
 | `POST` | `/auth/login` | Email/password login | none |
 | `POST` | `/auth/logout` | End session | session |
-| `GET` | `/auth/verify-email` | Verify email via token | none |
+| `GET` | `/auth/verify-email` | The emailed link: shows a confirmation page and changes nothing | none |
+| `POST` | `/auth/verify-email` | Confirm the address: body `{ token, password? }`. Succeeds only with the account's own session (cookie or Bearer) or its password (`401 verify_password_required`, or `verify_sign_in_required` for an account without a password). On success the account's earlier sessions, API keys and passkeys are revoked (and, on a password account, linked providers and the GitHub token), and a new session is returned as `{ ok, sessionToken }`. Someone who did not create the account uses Forgot password instead. | none |
 | `POST` | `/auth/resend-verification` | Resend verification email | session |
 | `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft) | none |
 | `GET` | `/auth/oauth/:provider/callback` | OAuth callback (GET) | none |
@@ -384,7 +385,7 @@ Both routes share a rate limit of 5 requests per 15 minutes per client IP. Both 
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/auth/passkey/register/options` | Generate passkey registration options | session |
+| `POST` | `/auth/passkey/register/options` | Generate passkey registration options (`403 email_not_verified` until the email is verified) | session |
 | `POST` | `/auth/passkey/register/verify` | Verify passkey registration response | session |
 | `POST` | `/auth/passkey/login/options` | Generate passkey authentication options | none |
 | `POST` | `/auth/passkey/login/verify` | Verify passkey authentication response | none |
@@ -404,7 +405,7 @@ Keys for the [Hosted API](#hosted-api-portal-port-4310). Keys start with `eck_`;
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/keys` | List your API keys (metadata only, never the key) | session |
-| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`). | session |
+| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`); `403 email_not_verified` until the account's email is verified. | session |
 | `DELETE` | `/portal/api/keys/:keyId` | Revoke a key (`404 unknown_key` if it is not yours) | session |
 
 ### Agent Signup

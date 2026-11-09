@@ -73,6 +73,7 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/signup$/,
   /^\/auth\/login$/,
   /^\/auth\/resend-verification$/,
+  /^\/auth\/verify-email$/,
   /^\/auth\/passkey\//,
   /^\/auth\/oauth\/[^/]+\/callback$/,
   /^\/auth\/oauth\/mobile\/complete$/,
