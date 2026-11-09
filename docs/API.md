@@ -353,7 +353,7 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `GET` | `/auth/capabilities` | Auth capabilities (passkey, SSO providers) | none |
 | `POST` | `/auth/signup` | Email/password signup | none |
 | `POST` | `/auth/login` | Email/password login | none |
-| `POST` | `/auth/logout` | End session | session |
+| `POST` | `/auth/logout` | End the session presented by cookie and/or `Authorization: Bearer` (both are revoked server-side) | session |
 | `GET` | `/auth/verify-email` | The emailed link: shows a confirmation page and changes nothing | none |
 | `POST` | `/auth/verify-email` | Confirm the address: body `{ token, password? }`. Succeeds only with the account's own session (cookie or Bearer) or its password (`401 verify_password_required`, or `verify_sign_in_required` for an account without a password). On success the account's earlier sessions, API keys and passkeys are revoked (and, on a password account, linked providers and the GitHub token), and a new session is returned as `{ ok, sessionToken }`. Someone who did not create the account uses Forgot password instead. | none |
 | `POST` | `/auth/resend-verification` | Resend verification email | session |

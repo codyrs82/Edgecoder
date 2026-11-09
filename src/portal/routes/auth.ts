@@ -101,9 +101,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   app.post("/auth/logout", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
-    const sessionToken = readCookie(cookies, "edgecoder_portal_session");
-    if (sessionToken) {
-      await store.deleteSessionByTokenHash(sha256Hex(sessionToken));
+    // Both ways a session is presented (getCurrentUser): the browser cookie and the desktop
+    // app's Authorization: Bearer token. Each one sent is ended.
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    const tokens = new Set([readCookie(cookies, "edgecoder_portal_session"), auth.startsWith("Bearer ") ? auth.slice(7) : undefined]);
+    for (const sessionToken of tokens) {
+      if (sessionToken) await store.deleteSessionByTokenHash(sha256Hex(sessionToken));
     }
     reply.header("set-cookie", clearCookies("edgecoder_portal_session"));
     return reply.send({ ok: true });
