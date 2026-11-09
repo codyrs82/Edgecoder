@@ -34,6 +34,36 @@ describe("identity challenge (coordinator proof of key possession)", () => {
     expect(verifyIdentityChallenge({ ...good, issuedAtMs: good.issuedAtMs + 1 }, sent, seed)).toEqual({ ok: false, error: "challenge_bad_signature" });
   });
 
+  it("rejects an answer relayed from a coordinator whose public URL is not the URL addressed", () => {
+    // The agent addressed relay.example; the relay forwarded the body to the real seed, which
+    // signed it (requestedUrl echoes relay.example, coordinatorUrl is the seed's own URL).
+    const sent = { nonce: newChallengeNonce(), url: "https://relay.example" };
+    const relayed = answerIdentityChallenge(sent, self)!;
+    expect(verifyIdentityChallenge(relayed, sent, seed)).toEqual({ ok: false, error: "challenge_coordinator_url_mismatch" });
+  });
+
+  it("compares coordinator URLs canonically and exempts loopback addresses", () => {
+    const sent = { nonce: newChallengeNonce(), url: "HTTPS://Seed.Example:443/" };
+    expect(verifyIdentityChallenge(answerIdentityChallenge(sent, self)!, sent, seed)).toEqual({ ok: true });
+    // The embedded all-in-one worker reaches its own coordinator over loopback.
+    for (const url of ["http://127.0.0.1:4301", "http://localhost:4301"]) {
+      const local = { nonce: newChallengeNonce(), url };
+      expect(verifyIdentityChallenge(answerIdentityChallenge(local, self)!, local, seed)).toEqual({ ok: true });
+    }
+    // A loopback public URL does not vouch for a non-loopback address.
+    const remote = { nonce: newChallengeNonce(), url: "http://10.0.0.5:4301" };
+    const unconfigured = answerIdentityChallenge(remote, { ...self, publicUrl: "http://127.0.0.1:4301" })!;
+    expect(verifyIdentityChallenge(unconfigured, remote, seed)).toEqual({ ok: false, error: "challenge_coordinator_url_mismatch" });
+  });
+
+  it("the agent trust check refuses a relayed challenge even in strict mode", async () => {
+    const store = new PinnedKeyStore({ mode: "strict", entries: entry, pinFile: null });
+    const relay = coordinatorFetch(seed, { publicUrl: "https://seed.example" });
+    const check = await checkCoordinatorTrust("https://relay.example", { store, fetch: relay });
+    expect(check).toMatchObject({ trusted: false, error: "challenge_coordinator_url_mismatch" });
+    expect((await checkCoordinatorTrust("https://seed.example", { store, fetch: relay })).trusted).toBe(true);
+  });
+
   it("the coordinator refuses malformed challenges", () => {
     expect(answerIdentityChallenge({ nonce: "short", url: "https://x" }, self)).toBeNull();
     expect(answerIdentityChallenge({ nonce: newChallengeNonce() }, self)).toBeNull();

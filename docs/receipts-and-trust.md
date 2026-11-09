@@ -116,7 +116,12 @@ Pins written by older builds (sha256 of the PEM text) still match, and are liste
 Before registering with a coordinator URL the worker proves the coordinator holds its key: it
 sends a fresh nonce and the URL it is using to `POST /identity/challenge`, and the coordinator
 signs the nonce, that URL, its own public URL and its peerId with its Ed25519 identity key
-(`src/trust/identity-challenge.ts`). The worker checks the signature against the key, then runs
+(`src/trust/identity-challenge.ts`). The worker checks the signature against the key and that the
+signed public URL is the URL it addressed (scheme, host and port compared canonically), so a host
+that merely relays the challenge to a real coordinator is refused
+(`challenge_coordinator_url_mismatch`). Each coordinator's `COORDINATOR_PUBLIC_URL` must therefore
+be the URL its agents use; loopback addresses (`127.0.0.1`, `localhost`, the embedded all-in-one
+worker) are exempt. It then runs
 the key through the store (`CoordinatorTrustGate`); nothing is pinned until the signature checks
 out. A replayed `/identity` therefore no longer passes. The verification lasts
 `EDGECODER_TRUST_REVERIFY_MS` (default 10 min) and is redone on every URL change (steering,
