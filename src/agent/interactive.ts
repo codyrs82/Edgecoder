@@ -7,8 +7,10 @@ import { ModelProvider } from "../model/providers.js";
 
 export class InteractiveAgent extends AgentBase {
   constructor(provider: ModelProvider, options?: AgentOptions) {
-    // #45: interactive/IDE runs execute the local user's own code on the host.
-    super(provider, { sandbox: "host", origin: "local", ...options });
+    // #45: interactive/IDE runs are the local user's own tasks, but the code is model output, so it
+    // runs in the Docker sandbox. Without Docker, runCode uses the host only when
+    // EDGECODER_UNSAFE_HOST_EXECUTION=1 is set (see unsafeHostExecutionAllowed).
+    super(provider, { sandbox: "docker", origin: "local", ...options });
   }
 
   async run(task: string, language: Language): Promise<AgentExecution> {

@@ -15,7 +15,7 @@ import { validateJavaScriptAst } from "../../src/executor/ast-javascript.js";
 describe("end-to-end: full agent loop", () => {
   it("completes a simple python task through the full loop", async () => {
     const provider = new EdgeCoderLocalProvider();
-    const agent = new InteractiveAgent(provider);
+    const agent = new InteractiveAgent(provider, { sandbox: "host" }); // explicit host opt-in: no Docker in CI
     const result = await agent.run("Print the numbers 1 to 5", "python");
 
     expect(result.iterations).toBeGreaterThanOrEqual(1);
@@ -27,7 +27,7 @@ describe("end-to-end: full agent loop", () => {
 
   it("completes a simple javascript task through the full loop", async () => {
     const provider = new EdgeCoderLocalProvider();
-    const agent = new InteractiveAgent(provider);
+    const agent = new InteractiveAgent(provider, { sandbox: "host" }); // explicit host opt-in: no Docker in CI
     const result = await agent.run("Log hello world", "javascript");
 
     expect(result.iterations).toBeGreaterThanOrEqual(1);
@@ -105,7 +105,7 @@ describe("end-to-end: full agent loop", () => {
       },
       async health() { return true; }
     };
-    const agent = new InteractiveAgent(failingProvider, { maxIterations: 2 });
+    const agent = new InteractiveAgent(failingProvider, { maxIterations: 2, sandbox: "host" });
     const result = await agent.run("impossible task", "python");
 
     expect(result.escalated).toBe(true);

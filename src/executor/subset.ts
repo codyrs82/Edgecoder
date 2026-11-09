@@ -42,7 +42,9 @@ export async function checkSubset(language: Language, code: string): Promise<Sub
     }
   }
 
-  // Authoritative check: AST validation
+  // AST validation. Like the regexes above, this is a filter for code outside the supported
+  // subset, not a security boundary: a deny-list over JS or Python source cannot be complete.
+  // Isolation comes from the Docker sandbox (src/executor/run.ts).
   if (language === "python") {
     const astResult = await validatePythonAst(code);
     if (!astResult.safe) {
