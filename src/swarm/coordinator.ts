@@ -33,6 +33,7 @@ import {
   contributionPolicyDecision,
   submitterAccountDecision,
   PreAuthFailureCounter,
+  mayRelayOverWs,
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
@@ -1652,7 +1653,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool"))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/"))
   ) {
     return;
   }
@@ -3421,6 +3422,11 @@ app.post("/pull", async (req, reply) => {
     return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
   }
   const capability = agentCapabilities.get(body.agentId);
+  // Verified-only policy: /register stores the agent before its integrity check refuses it, so the
+  // check is enforced where work is handed out too.
+  if (REQUIRE_VERIFIED_AGENTS && (capability as { verificationStatus?: string } | undefined)?.verificationStatus !== "verified") {
+    return reply.code(403).send({ error: "binary_integrity_required" });
+  }
   let powerDecisionForPull: ReturnType<typeof evaluateAgentPowerPolicy> | undefined;
   if (capability) {
     powerDecisionForPull = evaluateAgentPowerPolicy({
@@ -4253,6 +4259,9 @@ const reserveSchema = z.object({
   minVramGb: z.number().min(0).max(1024).optional(),
 });
 
+/** Agents a lease is being made for right now (between choosing the agent and recording the lease). */
+const reservingAgents = new Set<string>();
+
 /** Agents that could be reserved now for an account: online, of the class, not held, not its own. */
 async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
   const now = Date.now();
@@ -4366,29 +4375,36 @@ app.post("/account/reservations", async (req, reply) => {
   const caller = await callerAccount(req, "/account/reservations", body.accountId);
   if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
   const accountId = caller.accountId;
-  const [agent] = await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb);
+  // The agent is taken (synchronously, after the awaits that listed it) before the debit is awaited,
+  // so two leases made at once cannot both get it.
+  const agent = (await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb)).find((a) => !reservingAgents.has(a.agentId) && !reservations.isHeld(a.agentId, Date.now()));
   if (!agent) return reply.code(409).send({ error: "no_agent_available", computeClass: body.computeClass });
-  const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
-  const prepaid = reservationPriceMsat(body.minutes, rate);
-  const id = `res-${randomUUID()}`;
+  reservingAgents.add(agent.agentId);
   try {
-    await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
-    req.log.error({ err }, "reservation_debit_failed");
-    return reply.code(500).send({ error: "credit_debit_failed" });
+    const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
+    const prepaid = reservationPriceMsat(body.minutes, rate);
+    const id = `res-${randomUUID()}`;
+    try {
+      await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
+      req.log.error({ err }, "reservation_debit_failed");
+      return reply.code(500).send({ error: "credit_debit_failed" });
+    }
+    const now = Date.now();
+    const r: Reservation = {
+      id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
+      creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
+      ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
+    };
+    reservations.add(r);
+    await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
+    app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
+    return reply.send({ reservation: publicReservation(r) });
+  } finally {
+    reservingAgents.delete(agent.agentId);
   }
-  const now = Date.now();
-  const r: Reservation = {
-    id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
-    creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
-    ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
-  };
-  reservations.add(r);
-  await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
-  app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
-  return reply.send({ reservation: publicReservation(r) });
 });
 
 /** End a lease early; the unused time is refunded. */
@@ -4662,9 +4678,11 @@ app.get("/capacity", async () => {
     const orch = agentOrchestration.get(agentId);
     const recentDiagnostics = diagnosticsByAgentId.get(agentId) ?? [];
     const lastDiagnostic = recentDiagnostics.at(-1);
+    // Owner email and network location are personal data: never in this mesh-token read.
+    const { ownerEmail: _email, sourceIp: _ip, countryCode: _cc, vpnDetected: _vpn, ...publicInfo } = info;
     return {
       agentId,
-      ...info,
+      ...publicInfo,
       connectedPeers: [...info.connectedPeers],
       blacklisted: Boolean(activeBlacklistRecord(agentId)),
       powerPolicy: powerDecision,
@@ -5697,6 +5715,11 @@ async function handleMeshIngest(
       return { ok: false, statusCode: 400, error: "invalid_blacklist_payload" };
     }
     const data = payload.data;
+    // The record is checked against the sender's key, so it must be the sender's own record.
+    if (data.sourceCoordinatorId !== peer.peerId) {
+      peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 10));
+      return { ok: false, statusCode: 403, error: "blacklist_source_mismatch" };
+    }
     const incomingValidation = validateIncomingBlacklistRecord({
       record: data,
       peerPublicKeyPem: peer.publicKeyPem
@@ -5712,7 +5735,8 @@ async function handleMeshIngest(
   }
   if (message.type === "capability_summary") {
     const payload = message.payload as unknown as CapabilitySummaryPayload;
-    if (payload.coordinatorId && payload.timestamp) {
+    // A coordinator speaks for itself only.
+    if (payload.coordinatorId && payload.timestamp && payload.coordinatorId === message.fromPeerId) {
       federatedCapabilities.set(payload.coordinatorId, payload);
       app.log.info({ from: payload.coordinatorId, agents: payload.agentCount }, "capability_summary_received");
     }
@@ -5816,6 +5840,11 @@ async function handleMeshIngest(
     if (d.originCoordinatorId === identity.peerId) {
       return { ok: true, skipped: "own_task" };
     }
+    // An offer comes from its origin, a known peer: results go back to that peer's pinned URL,
+    // never to a URL named in the payload.
+    if (!peer || d.originCoordinatorId !== message.fromPeerId) {
+      return { ok: false, statusCode: 403, error: "offer_origin_mismatch" };
+    }
     // Only accept if we have alive agents (heartbeat in last 30s)
     const aliveAgents = [...agentCapabilities.values()].filter(
       a => a.lastSeenMs > Date.now() - 30_000
@@ -5831,13 +5860,10 @@ async function handleMeshIngest(
       if (peerOfferBudgetMsat.size >= PEER_OFFER_BUDGET_MAX_ENTRIES) peerOfferBudgetMsat.delete(peerOfferBudgetMsat.keys().next().value as string);
       peerOfferBudgetMsat.set(d.subtaskId, subtaskReserveMsat(d.projectMeta.resourceClass, "any", SUBTASK_RESERVE_TIMEOUT_MS));
     }
-    // Track origin for result forwarding — prefer the actual reachable peer
-    // URL from the mesh over the self-reported URL in the payload (which may
-    // be an unreachable custom domain).
-    const originPeer = mesh.listPeers().find(p => p.peerId === d.originCoordinatorId);
+    // Track origin for result forwarding: the origin peer's URL from the peer table.
     taskOriginMap.set(d.subtaskId, {
       coordinatorId: d.originCoordinatorId,
-      coordinatorUrl: originPeer?.coordinatorUrl ?? d.originCoordinatorUrl,
+      coordinatorUrl: peer.coordinatorUrl,
     });
     // Broadcast task_claim so origin coordinator knows we're handling it
     const claimMsg = protocol.createMessage(
@@ -5972,6 +5998,7 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
   for (const peerId of wsConnected) {
     if (peerId === message.fromPeerId) continue; // don't echo back to sender
     if (peerId === identity.peerId) continue;     // don't send to self
+    if (!mayRelayOverWs(message.type, meshWsBindings.get(peerId)?.authenticated === true)) continue;
     try {
       const ws = (mesh as any).wsPeers?.get(peerId);
       if (ws && ws.readyState === 1) {
@@ -6025,6 +6052,20 @@ app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
       coordinatorId: identity.peerId
     });
     socket.close(4003, reason);
+    return;
+  }
+  // Gossip to a peer coordinator (task offers included) goes down its socket: an unsigned bind may
+  // not take a coordinator's id.
+  if (!bind.authenticated && mesh.listPeers().some((p) => p.peerId === peerId)) {
+    securityLog.log({
+      level: securityLog.severity("agent_trust_violation"),
+      event: "agent_trust_violation",
+      source: { type: "agent", id: peerId, ip: req.ip },
+      details: { route: "/mesh/ws", reason: "unsigned_bind_for_coordinator_peer" },
+      action: "reject_connection",
+      coordinatorId: identity.peerId
+    });
+    socket.close(4003, "signature_required");
     return;
   }
   const previous = meshWsBindings.get(peerId);
@@ -6207,6 +6248,8 @@ app.get("/stats/projections/summary", async (req, reply) => {
       ownerEmail: z.string().email().optional()
     })
     .parse(req.query);
+  // Owner email and network location are for the portal: a mesh-token caller gets the nodes without them.
+  if (!portalAuthorized) query.ownerEmail = undefined;
   const projectionQueryTimeoutMs = 3_000;
   const timeoutReject = (label: string) =>
     new Promise<never>((_, reject) =>
@@ -6280,7 +6323,9 @@ app.get("/stats/projections/summary", async (req, reply) => {
         }
       : null,
     finality,
-    nodes: [...mergedByNodeId.values()],
+    nodes: portalAuthorized
+      ? [...mergedByNodeId.values()]
+      : [...mergedByNodeId.values()].map(({ ownerEmail: _email, sourceIp: _ip, countryCode: _cc, vpnDetected: _vpn, ...node }) => node),
     earnings: earnings ?? []
   };
 });
@@ -6347,9 +6392,13 @@ app.get("/agent-mesh/direct-work/audit", async (req, reply) => {
   const limit = z
     .object({ limit: z.coerce.number().int().positive().max(500).default(100) })
     .parse(req.query);
+  // The work's input and result belong to the two agents; other mesh members see the record only.
+  const headerToken = readHeaderValue((req as any).headers ?? {}, "x-admin-token");
+  const admin = Boolean(ADMIN_API_TOKEN && headerToken && safeTokenEqual(headerToken, ADMIN_API_TOKEN));
   const events = [...directWorkById.values()]
     .sort((a, b) => b.createdAtMs - a.createdAtMs)
-    .slice(0, limit.limit);
+    .slice(0, limit.limit)
+    .map((w) => (admin ? w : { ...w, input: undefined, result: undefined }));
   return { events };
 });
 
@@ -7116,8 +7165,10 @@ async function tryMeshPeerChat(
 
   for (const peerUrl of chatPeerUrls) {
     try {
+      // The mesh token only: peers already hold it, and it is what /portal/chat accepts from them. The
+      // portal service token names any account and must never leave this coordinator.
       const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
-      if (PORTAL_SERVICE_TOKEN) fwdHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+      if (MESH_AUTH_TOKEN) fwdHeaders["x-mesh-token"] = MESH_AUTH_TOKEN;
       const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
         method: "POST",
         headers: fwdHeaders,
@@ -7438,6 +7489,12 @@ app.post("/escalate/:taskId/result", async (req, reply) => {
 
   const existing = escalationStore.get(params.taskId);
   if (!existing) return reply.code(404).send({ error: "escalation_not_found" });
+  if (resultBody.taskId !== params.taskId) return reply.code(400).send({ error: "task_id_mismatch" });
+  // The resolver reports once; a settled result is changed only by the portal (a reviewer's decision).
+  const settled = existing.status === "completed" || existing.status === "failed";
+  if (settled && !hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>)) {
+    return reply.code(409).send({ error: "escalation_already_settled", status: existing.status });
+  }
 
   escalationStore.set(params.taskId, {
     ...resultBody,

@@ -247,3 +247,11 @@ export class PreAuthFailureCounter {
     for (const [k, w] of this.windows) if (nowMs - w.startMs >= this.windowMs) this.windows.delete(k);
   }
 }
+
+/**
+ * Whether a gossip message may be pushed down a /mesh/ws connection. Task offers carry the task's
+ * input, so they go only to connections that proved the bound peer's key (a signed bind).
+ */
+export function mayRelayOverWs(messageType: string, authenticatedBinding: boolean): boolean {
+  return authenticatedBinding || messageType !== "task_offer";
+}

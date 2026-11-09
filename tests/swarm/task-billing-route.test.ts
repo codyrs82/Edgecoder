@@ -171,3 +171,13 @@ describe("task ids", () => {
     expect(own.statusCode).toBe(200);
   });
 });
+
+describe("reserved-capacity leases", () => {
+  test("two leases made at once cannot both hold the one agent", async () => {
+    const [a, b] = await Promise.all([
+      post("/account/reservations", { computeClass: "cpu", minutes: 5, model: MODEL }, requester),
+      post("/account/reservations", { computeClass: "cpu", minutes: 5, model: MODEL }, other),
+    ]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+  });
+});
