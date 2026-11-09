@@ -1,0 +1,92 @@
+// Markdown for chat messages. Model output is untrusted: it reaches the DOM through {@html}, so
+// raw HTML in it is shown as text, never parsed as markup (no <style>, forms, iframes, meta
+// refresh, event handlers), every attribute value is escaped, and links and images keep only
+// URLs with an allowed scheme. Links never navigate the app window: MarkdownRenderer opens them
+// in the system browser.
+import { Marked, type Tokens } from "marked";
+
+/** Text made safe for an HTML text node or a quoted attribute value. */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** The URL when a chat link may open it in the system browser (http, https, mailto), else null. */
+export function safeLinkUrl(href: string | null | undefined): string | null {
+  if (!href) return null;
+  let url: URL;
+  try {
+    url = new URL(href.trim());
+  } catch {
+    return null; // relative URLs would resolve against the app origin
+  }
+  return url.protocol === "https:" || url.protocol === "http:" || url.protocol === "mailto:" ? url.href : null;
+}
+
+/** A code fence's language, reduced to characters a language name uses. */
+function langName(lang: string | undefined): string {
+  return (lang ?? "").trim().split(/\s+/)[0].replace(/[^\w+#.-]/g, "").slice(0, 40);
+}
+
+// A plan a model wrote as text (```plan with a JSON step list) reads as a checklist, not JSON.
+function planHtml(text: string): string | null {
+  try {
+    const steps = JSON.parse(text);
+    if (!Array.isArray(steps) || steps.length === 0) return null;
+    const items = steps.map((s: { description?: unknown; status?: unknown }) => {
+      const done = s?.status === "completed";
+      return `<li class="${done ? "done" : ""}"><span class="plan-box">${done ? "✓" : ""}</span>${escapeHtml(String(s?.description ?? ""))}</li>`;
+    });
+    return `<div class="plan-list"><div class="plan-title">Plan</div><ol>${items.join("")}</ol></div>`;
+  } catch {
+    return null;
+  }
+}
+
+const md = new Marked({
+  breaks: true,
+  gfm: true,
+  renderer: {
+    // Raw HTML, block or inline: shown as the text the model wrote.
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      return escapeHtml(text);
+    },
+    link({ href, title, tokens }: Tokens.Link) {
+      const inner = this.parser.parseInline(tokens);
+      const url = safeLinkUrl(href);
+      if (!url) return inner;
+      const t = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<a href="${escapeHtml(url)}" data-external-link${t} rel="noopener noreferrer">${inner}</a>`;
+    },
+    // Images are not fetched (they would load remote content into the app); the alt text and URL
+    // are shown as a link instead.
+    image({ href, title, text }: Tokens.Image) {
+      const url = safeLinkUrl(href);
+      const label = escapeHtml(text || title || href || "image");
+      return url ? `<a href="${escapeHtml(url)}" data-external-link rel="noopener noreferrer">${label}</a>` : label;
+    },
+    code({ text, lang }: Tokens.Code) {
+      const name = langName(lang);
+      if (name === "plan") {
+        const html = planHtml(text);
+        if (html) return html;
+      }
+      return `<div class="code-block-wrapper">
+      <div class="code-block-header">
+        <span class="code-lang">${escapeHtml(name)}</span>
+        <button class="open-in-editor-btn" data-lang="${escapeHtml(name || "plaintext")}">Open in Editor</button>
+      </div>
+      <pre><code class="language-${escapeHtml(name)}">${escapeHtml(text)}</code></pre>
+    </div>`;
+    },
+  },
+});
+
+/** Chat markdown as HTML that is safe to insert into the app. */
+export function renderMarkdown(source: string): string {
+  return md.parse(source, { async: false }) as string;
+}

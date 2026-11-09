@@ -53,6 +53,12 @@ final class BLEMeshManager: NSObject, ObservableObject {
 
     /// Handler called when a remote peer writes a task request over BLE
     nonisolated(unsafe) var taskHandler: BLETaskHandler?
+    /// Any nearby device can write a task request (no pairing or requester authentication yet, see
+    /// #63), so at most one runs at a time, each central waits between requests, and prompts are capped.
+    private var bleTaskInFlight = false
+    private var lastBleTaskAt: [UUID: Date] = [:]
+    private static let bleTaskMinInterval: TimeInterval = 5
+    private static let bleTaskMaxPromptBytes = 16 * 1024
 
     // MARK: - Outbound Task Sending State
 
@@ -257,16 +263,34 @@ final class BLEMeshManager: NSObject, ObservableObject {
             return
         }
 
-        print("[BLE] received task request \(requestId) from \(requesterId): \(task.prefix(60))...")
+        // The prompt is not logged: it is the requester's data.
+        print("[BLE] received task request \(requestId) from \(requesterId) (\(task.utf8.count) bytes)")
 
         guard let handler = taskHandler else {
             print("[BLE] no task handler registered")
             return
         }
+        guard task.utf8.count <= Self.bleTaskMaxPromptBytes else {
+            print("[BLE] task request \(requestId) refused: prompt too large")
+            return
+        }
+        guard !bleTaskInFlight else {
+            print("[BLE] task request \(requestId) refused: another BLE task is running")
+            return
+        }
+        let centralId = central.identifier
+        let now = Date()
+        if let last = lastBleTaskAt[centralId], now.timeIntervalSince(last) < Self.bleTaskMinInterval {
+            print("[BLE] task request \(requestId) refused: too soon after the previous one")
+            return
+        }
+        lastBleTaskAt[centralId] = now
+        bleTaskInFlight = true
 
         bleTasksReceived += 1
 
         Task {
+            defer { bleTaskInFlight = false }
             let result = await handler(task)
 
             let response: [String: Any] = [

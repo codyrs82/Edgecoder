@@ -7,7 +7,7 @@
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import ConnectRepo from "../components/ConnectRepo.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, ideProjectTrust, ideSetProjectTrust, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
   import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
@@ -130,6 +130,39 @@
   let checking = $state(false);
   const CHECKED = /\.((m|c)?[jt]sx?|py|rs)$/;
 
+  // Workspace trust: the project's own checkers (tsc, cargo) run code from the folder, so the IDE
+  // server skips them until the user trusts it. null = not known (older server, no project yet).
+  let projectTrusted = $state<boolean | null>(null);
+  /** The trust notice is showing; "Not now" hides it for this folder until it is opened again. */
+  let trustPrompt = $state(false);
+  let trustDeclined = false;
+  let trustBusy = $state(false);
+
+  async function refreshTrust(root: string) {
+    try {
+      const t = await ideProjectTrust();
+      if (projectRoot !== root || t.projectRoot === null) return;
+      projectTrusted = t.trusted;
+      if (!t.trusted && !trustDeclined) trustPrompt = true;
+    } catch {
+      // older IDE server without trust, or no project yet: nothing to show
+    }
+  }
+
+  async function setTrust(trusted: boolean) {
+    trustBusy = true;
+    try {
+      const t = await ideSetProjectTrust(trusted);
+      projectTrusted = t.trusted;
+      trustPrompt = false;
+      if (t.trusted) void runDiagnostics(files.map((f) => f.path));
+    } catch (e) {
+      showNotice(`Couldn't change folder trust: ${(e as Error).message ?? String(e)}`);
+    } finally {
+      trustBusy = false;
+    }
+  }
+
   /** Run the checkers for these files and show their problems on every open file. */
   async function runDiagnostics(paths: string[]) {
     if (!editorSettings.diagnostics) return;
@@ -138,6 +171,10 @@
     checking = true;
     try {
       const r = await ideDiagnostics(targets);
+      if (r.untrusted?.length) {
+        projectTrusted = false;
+        if (!trustDeclined) trustPrompt = true;
+      }
       // A whole-project checker (tsc) reports every file: the count is the project's, and the
       // checked files' old problems are replaced by this run's.
       const next: Record<string, Diagnostic[]> = { ...problems };
@@ -268,7 +305,13 @@
     const root = projectRoot;
     if (root === loadedRoot) return;
     loadedRoot = root;
-    untrack(() => resetForProject(root));
+    untrack(() => {
+      projectTrusted = null;
+      trustPrompt = false;
+      trustDeclined = false;
+      resetForProject(root);
+      if (root) void refreshTrust(root);
+    });
   });
 
   function resetForProject(root: string | null) {
@@ -711,6 +754,9 @@
             <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
             <label class="check"><input type="checkbox" checked={editorSettings.minimap} onchange={(e) => updateSettings({ minimap: (e.target as HTMLInputElement).checked })} /> Minimap</label>
             <label class="check"><input type="checkbox" checked={editorSettings.diagnostics} onchange={(e) => updateSettings({ diagnostics: (e.target as HTMLInputElement).checked })} /> Check files on open and save</label>
+            {#if projectRoot && projectTrusted !== null}
+              <label class="check" title="Lets this folder's own TypeScript and Rust checkers run. They run code from the folder."><input type="checkbox" checked={projectTrusted} disabled={trustBusy} onchange={(e) => void setTrust((e.target as HTMLInputElement).checked)} /> Trust this folder (run its own checkers)</label>
+            {/if}
             <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
             <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
           </div>
@@ -733,6 +779,15 @@
         </svg>
       </button>
     </div>
+    {#if trustPrompt && projectRoot}
+      <div class="notice" role="status" data-testid="trust-notice">
+        <span>TypeScript/Rust checks are off for this folder because they would run code from it. Trust this folder?</span>
+        <span class="notice-actions">
+          <button disabled={trustBusy} onclick={() => void setTrust(true)}>Trust</button>
+          <button disabled={trustBusy} onclick={() => { trustDeclined = true; trustPrompt = false; }}>Not now</button>
+        </span>
+      </div>
+    {/if}
     {#if notice}
       <div class="notice" class:error={notice.kind === "error"} role="status">
         <span>{notice.text}</span>
@@ -757,7 +812,8 @@
             <button title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}>×</button>
           </div>
           {#key previewNonce}
-            <iframe class="preview-frame" title="Preview" src={previewUrl}></iframe>
+            <!-- Project content: it may run scripts, but never navigate or take over the app window. -->
+            <iframe class="preview-frame" title="Preview" src={previewUrl} sandbox="allow-scripts allow-forms allow-same-origin allow-modals"></iframe>
           {/key}
         </div>
       {/if}
@@ -1063,6 +1119,11 @@
     background: var(--bg-elevated);
     border-bottom: 0.5px solid var(--border);
     color: var(--text-secondary);
+  }
+  .notice-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .notice.error {
     color: var(--danger, #f85149);

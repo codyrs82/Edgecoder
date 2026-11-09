@@ -37,7 +37,8 @@ describe("ask cards", () => {
       "Harry",
     );
     expect(cards).toEqual([
-      { id: "a", question: "Harry wants to run a command", detail: "npm test", answer: null },
+      // Still waiting: the card carries the whole call so every argument is shown in full.
+      { id: "a", question: "Harry wants to run a command", detail: "npm test", call: { tool: "run_shell", args: { command: "npm test" } }, answer: null },
       { id: "b", question: "Harry wants to push", answer: "Allowed" },
       { id: "c", question: "Harry wants to edit a file", detail: "src/a.ts", answer: "Denied" },
     ]);

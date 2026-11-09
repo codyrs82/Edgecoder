@@ -25,6 +25,12 @@ describe("desktop CSP (#11)", () => {
     expect(String(sec.csp["default-src"])).toBe("'self'");
   });
 
+  it("no <base>, plugin objects or form posts from injected markup", () => {
+    expect(sec.csp["base-uri"]).toBe("'none'");
+    expect(sec.csp["form-action"]).toBe("'none'");
+    expect(sec.csp["object-src"]).toBe("'none'");
+  });
+
   it("no directive allows unsafe-eval or the Vite dev server in production", () => {
     for (const [k, v] of Object.entries(sec.csp)) {
       expect(String(v), k).not.toContain("'unsafe-eval'");
@@ -39,7 +45,14 @@ describe("desktop CSP (#11)", () => {
     }
     expect(connect).toContain("ipc:");
     expect(connect).toContain("https://edgecoder.io");
-    for (const h of ["127.0.0.1", "localhost"]) for (const p of [4301, 4302, 4304]) expect(connect).toContain(`ws://${h}:${p}`);
+    // The local services bind 127.0.0.1 only; tokens go there by address, never to a name that
+    // may resolve to another listener (::1).
+    for (const p of [4301, 4302, 4304]) {
+      expect(connect).toContain(`http://127.0.0.1:${p}`);
+      expect(connect).toContain(`ws://127.0.0.1:${p}`);
+      expect(connect).not.toContain(`http://localhost:${p}`);
+      expect(connect).not.toContain(`ws://localhost:${p}`);
+    }
   });
 
   it("devCsp keeps the dev conveniences", () => {

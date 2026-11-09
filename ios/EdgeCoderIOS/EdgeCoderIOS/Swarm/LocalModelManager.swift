@@ -137,6 +137,10 @@ final class LocalModelManager: ObservableObject {
 
     /// Curated catalog of models available for download on iOS.
     /// General-purpose models listed first as recommended defaults.
+    // Each file is pinned to a Hugging Face commit and its SHA-256 (the LFS oid at that commit), and
+    // a download without a checksum is refused: the GGUF is parsed by native code.
+    // Qwen2.5-7B-Instruct has no single-file Q4_K_M upload (only a 2-part split), so it has no
+    // checksum and cannot be downloaded until the entry is changed.
     let availableCatalog: [CatalogModel] = [
         // General-purpose (recommended for chat)
         CatalogModel(
@@ -145,8 +149,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 0.5,
             quantization: "Q4_K_M",
             fileSizeBytes: 397_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
             minMemoryMB: 512
         ),
         CatalogModel(
@@ -155,8 +159,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 1.5,
             quantization: "Q4_K_M",
             fileSizeBytes: 1_050_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
             minMemoryMB: 1024
         ),
         CatalogModel(
@@ -165,8 +169,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 3.0,
             quantization: "Q4_K_M",
             fileSizeBytes: 2_000_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/7dabda4d13d513e3e842b20f0d435c732f172cbe/qwen2.5-3b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
             minMemoryMB: 2048
         ),
         CatalogModel(
@@ -186,8 +190,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 0.5,
             quantization: "Q4_K_M",
             fileSizeBytes: 386_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/ebb2015119c907b064c512bf053e945850b5875f/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32",
             minMemoryMB: 512
         ),
         CatalogModel(
@@ -196,8 +200,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 1.5,
             quantization: "Q4_K_M",
             fileSizeBytes: 986_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046",
             minMemoryMB: 1024
         ),
         CatalogModel(
@@ -206,8 +210,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 3.0,
             quantization: "Q4_K_M",
             fileSizeBytes: 1_900_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/f74adce6aa16316c625447af059dbebe4983757c/qwen2.5-coder-3b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
             minMemoryMB: 2048
         ),
         CatalogModel(
@@ -216,8 +220,8 @@ final class LocalModelManager: ObservableObject {
             paramSize: 7.0,
             quantization: "Q4_K_M",
             fileSizeBytes: 4_680_000_000,
-            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf")!,
-            checksumSha256: "",
+            downloadUrl: URL(string: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/13fb94bfda8c8cf22497dc57b78f391a9acb426a/qwen2.5-coder-7b-instruct-q4_k_m.gguf")!,
+            checksumSha256: "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
             minMemoryMB: 4096
         ),
     ]
@@ -336,15 +340,16 @@ final class LocalModelManager: ObservableObject {
 
         let (tempUrl, _) = try await URLSession.shared.download(from: downloadUrl)
 
-        if !checksumSha256.isEmpty {
-            let fileData = try Data(contentsOf: tempUrl)
-            let computedHash = sha256Hex(data: fileData)
-            guard computedHash == checksumSha256 else {
-                try? FileManager.default.removeItem(at: tempUrl)
-                state = .error
-                statusText = "Checksum mismatch for \(modelId)"
-                throw LocalModelError.checksumMismatch
-            }
+        // Fail closed: an unpinned file is never moved into place or loaded.
+        do {
+            guard !checksumSha256.isEmpty else { throw LocalModelError.checksumMismatch }
+            let computedHash = try Self.sha256Hex(fileAt: tempUrl)
+            guard computedHash == checksumSha256.lowercased() else { throw LocalModelError.checksumMismatch }
+        } catch {
+            try? FileManager.default.removeItem(at: tempUrl)
+            state = .error
+            statusText = "Checksum mismatch for \(modelId)"
+            throw LocalModelError.checksumMismatch
         }
 
         try FileManager.default.moveItem(at: tempUrl, to: destinationUrl)
@@ -446,11 +451,21 @@ final class LocalModelManager: ObservableObject {
 
     // MARK: - SHA-256
 
-    private func sha256Hex(data: Data) -> String {
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes { bytes in
-            _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &hash)
+    /// SHA-256 of a file, read in 1 MiB chunks (model files are several GB; never load them whole).
+    static func sha256Hex(fileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var ctx = CC_SHA256_CTX()
+        CC_SHA256_Init(&ctx)
+        while true {
+            let chunk = try autoreleasepool { try handle.read(upToCount: 1 << 20) ?? Data() }
+            if chunk.isEmpty { break }
+            chunk.withUnsafeBytes { bytes in
+                _ = CC_SHA256_Update(&ctx, bytes.baseAddress, CC_LONG(chunk.count))
+            }
         }
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        CC_SHA256_Final(&hash, &ctx)
         return hash.map { String(format: "%02x", $0) }.joined()
     }
 }

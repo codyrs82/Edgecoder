@@ -153,7 +153,7 @@
     // Double-check agent availability — it may have started after initial detection
     if (isRemoteMode()) {
       try {
-        const res = await fetch("http://localhost:4301/health/runtime", {
+        const res = await fetch("http://127.0.0.1:4301/health/runtime", {
           signal: AbortSignal.timeout(3000),
         });
         if (!res.ok) {
