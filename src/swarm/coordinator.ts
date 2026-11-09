@@ -96,7 +96,7 @@ import { finalizeStatsCheckpoint, statsCheckpointPeriodMs, statsFinalityState } 
 import { DuplicateDebitError, NETWORK_FEE_POOL_ACCOUNT, accruePricedJob, creditEngine, earnedMsat, grantCredits, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, spendCredits } from "../credits/store.js";
 import { clampToBand, cSatsPerMTokens, inferenceCostMsat, jobCostMsat, msatToCSats, ratePerSecondMsat, reserveMsat, splitJobCost } from "../economy/job-pricing.js";
 import { paramsB } from "../inference-api/auto-route.js";
-import { InferenceStreams } from "./inference-streams.js";
+import { InferenceStreams, boundTokenCounts } from "./inference-streams.js";
 import { MemoryPayoutStore, PayoutService, type FeePoolDistribution, type PayoutStore } from "../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
@@ -281,6 +281,13 @@ const MESH_RATE_LIMIT_PER_10S = 50;
 
 /** Tracks origin coordinator for tasks received via mesh gossip, so results can be forwarded back. */
 const taskOriginMap = new Map<string, { coordinatorId: string; coordinatorUrl: string }>();
+/**
+ * Most (msat) an agent here may earn for a subtask a peer coordinator offered: the worst case a
+ * coordinator sets aside for one subtask (what the origin charges its requester for a subtask run
+ * elsewhere). The requester is charged there, so this is the payer's limit.
+ */
+const peerOfferBudgetMsat = new Map<string, number>();
+const PEER_OFFER_BUDGET_MAX_ENTRIES = 20_000;
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 /**
  * What a task's requester was charged: cSats set aside at submit (reservedMsat, the worst case),
@@ -3190,6 +3197,7 @@ app.post("/submit", async (req, reply) => {
   const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId);
   if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
   body.submitterAccountId = submitter.accountId;
+  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
   if (body.submitterAccountId !== "anonymous") {
     const policy = await enforceContributionFirstPolicy(body.submitterAccountId);
     if (!policy.ok) {
@@ -3616,29 +3624,36 @@ async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void
           perSecondCostMsat,
         })
       : { costMsat: perSecondCostMsat, basis: "per_second" as const };
-  const costMsat = priced.costMsat;
+  // What is paid is what the requester is charged: taken out of what was set aside for the task
+  // (never more), before the store is awaited, so results settling together cannot both spend it.
+  // Work nobody set anything aside for (an anonymous task) earns nothing.
+  const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat);
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
-  const accrued = await accruePricedJob(
-    {
-      reportId: resultReportId(r.subtaskId),
-      agentId: rewardAccountId,
-      sourceAgentId: r.agentId,
-      taskId,
-      resourceClass: subtask.projectMeta.resourceClass,
-      cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
-      gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
-      success: r.ok,
-      qualityScore: r.ok ? 1.0 : 0.6,
-      timestampMs: Date.now(),
-      modelParamSizeB,
-      hardwareWeight
-    },
-    { agentMsat, feeMsat }
-  );
-  // Idempotent (#44): a re-posted result for the same subtask accrues nothing.
+  let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
+  try {
+    accrued = await accruePricedJob(
+      {
+        reportId: resultReportId(r.subtaskId),
+        agentId: rewardAccountId,
+        sourceAgentId: r.agentId,
+        taskId,
+        resourceClass: subtask.projectMeta.resourceClass,
+        cpuSeconds: subtask.projectMeta.resourceClass === "cpu" ? durationMs / 1000 : 0,
+        gpuSeconds: subtask.projectMeta.resourceClass === "gpu" ? durationMs / 1000 : 0,
+        success: r.ok,
+        qualityScore: r.ok ? 1.0 : 0.6,
+        timestampMs: Date.now(),
+        modelParamSizeB,
+        hardwareWeight
+      },
+      { agentMsat, feeMsat }
+    );
+  } finally {
+    // Nothing was paid (already recorded, #44, or the store failed): the task is not charged for it.
+    if (!accrued) returnTaskBudget(taskId, costMsat);
+  }
   if (accrued) {
-    addTaskCost(taskId, costMsat);
     // Market volume stays in credits of work (base-tier seconds).
     marketHistory.settleTrade(r.subtaskId, Number(((durationMs / 1000) * hardwareWeight).toFixed(6)));
     const earningsRecord = ordering.append({
@@ -3861,9 +3876,59 @@ function addTaskCost(taskId: string, costMsat: number): void {
   if (billing && !billing.refunded) billing.costMsat = Math.min(billing.reservedMsat, billing.costMsat + Math.max(0, costMsat));
 }
 
+/**
+ * Charge a finished subtask to whoever pays for it and return how much of `wantMsat` that covers,
+ * which is all the agent may earn for it:
+ * - a subtask offered by a peer coordinator: up to what that coordinator set aside for it;
+ * - a task billed here: up to what its requester set aside and has not yet used;
+ * - anything else has no payer (an anonymous task) and covers nothing.
+ */
+function takeTaskBudget(taskId: string, subtaskId: string, wantMsat: number): number {
+  const want = Number.isFinite(wantMsat) ? Math.max(0, wantMsat) : 0;
+  const offered = peerOfferBudgetMsat.get(subtaskId);
+  if (offered !== undefined) {
+    peerOfferBudgetMsat.delete(subtaskId);
+    return Math.min(want, offered);
+  }
+  const billing = taskBilling.get(taskId);
+  if (!billing || billing.refunded) return 0;
+  const take = Math.min(want, Math.max(0, billing.reservedMsat - billing.costMsat));
+  billing.costMsat += take;
+  return take;
+}
+
+/**
+ * A task id is one requester's billing key until its task settles: a second submission under an id
+ * that is still billed, queued or held would replace or add to someone else's bill.
+ */
+function taskIdInUse(taskId: string): boolean {
+  return taskBilling.has(taskId) || usagePending.has(taskId) || queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0;
+}
+
+/** Undo takeTaskBudget when nothing was paid after all. */
+function returnTaskBudget(taskId: string, msat: number): void {
+  const billing = taskBilling.get(taskId);
+  if (billing && !billing.refunded) billing.costMsat = Math.max(0, billing.costMsat - Math.max(0, msat));
+}
+
+/** Results being paid, per task: the task is not settled (its unused reserve returned) under them. */
+const accrualsInFlight = new Map<string, number>();
+function holdSettlement(taskId: string): () => void {
+  accrualsInFlight.set(taskId, (accrualsInFlight.get(taskId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const n = (accrualsInFlight.get(taskId) ?? 1) - 1;
+    if (n > 0) accrualsInFlight.set(taskId, n);
+    else accrualsInFlight.delete(taskId);
+  };
+}
+
 /** Once a task has no open subtasks: return what was set aside but not used. */
 async function settleTaskIfDone(taskId: string): Promise<void> {
   if (!taskBilling.has(taskId)) return;
+  if (accrualsInFlight.has(taskId)) return;
   if (queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0) return;
   await refundTaskSubmit(taskId);
 }
@@ -4046,21 +4111,28 @@ app.post("/result", async (req, reply) => {
     return reply.send({ ok: true, held: true });
   }
 
-  await publishResult(body);
-  inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
-  // ── Dependency tracking: store output and release dependent subtasks ──
-  releaseDependents(body.subtaskId, body.output ?? "");
-  // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
-  if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
+  // The result is visible to the requester's stream read from here on, and that read settles the
+  // task: it must not return the reserve before this result's cost has been taken from it.
+  const releaseSettlement = holdSettlement(body.taskId);
+  try {
+    await publishResult(body);
+    inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
+    // ── Dependency tracking: store output and release dependent subtasks ──
+    releaseDependents(body.subtaskId, body.output ?? "");
+    // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
+    if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
 
-  if (subtask) {
-    await accrueResultCredits({
-      subtaskId: body.subtaskId,
-      agentId: body.agentId,
-      ok: body.ok,
-      output: body.output ?? "",
-      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
-    });
+    if (subtask) {
+      await accrueResultCredits({
+        subtaskId: body.subtaskId,
+        agentId: body.agentId,
+        ok: body.ok,
+        output: body.output ?? "",
+        meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
+      });
+    }
+  } finally {
+    releaseSettlement();
   }
   await settleTaskIfDone(body.taskId);
   return reply.send({ ok: true });
@@ -4373,6 +4445,7 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
   } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
     return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
   }
+  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
   const billed = !reservationId && !onlyAccountId;
   const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
   const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
@@ -4410,7 +4483,7 @@ app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply)
       ...(reservationId ? { reservationId } : {}),
     },
   });
-  inferenceStreams.open(subtask.id);
+  inferenceStreams.open(subtask.id, body.taskId);
   app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
   return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
 });
@@ -4422,19 +4495,23 @@ app.post("/inference/chunks", async (req, reply) => {
     .object({
       subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(),
       toolCalls: z.array(z.unknown()).max(64).optional(),
-      // Token counts from the model, with the last piece (for the usage page; not billed on).
+      // Token counts from the model, with the last piece. The call is priced on them
+      // (accrueResultCredits), so they are bounded below and never cost more than was set aside.
       promptTokens: z.number().int().min(0).max(10_000_000).optional(),
       outputTokens: z.number().int().min(0).max(10_000_000).optional(),
     })
     .parse(req.body);
-  if (queue.getClaim(body.subtaskId)?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
+  const claim = queue.getClaim(body.subtaskId);
+  if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
   const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
-  if (body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
-    const claimTask = queue.getClaim(body.subtaskId)?.subtask.taskId;
-    const u = claimTask ? usagePending.get(claimTask) : undefined;
+  // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
+  // nothing), set rather than added, and kept within what the request and the reply could hold.
+  if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+    const u = usagePending.get(claim.subtask.taskId);
     if (u) {
-      u.promptTokens = (u.promptTokens ?? 0) + (body.promptTokens ?? 0);
-      u.outputTokens = (u.outputTokens ?? 0) + (body.outputTokens ?? 0);
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
+      u.promptTokens = bounded.promptTokens;
+      u.outputTokens = bounded.outputTokens;
     }
   }
   return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -4446,11 +4523,13 @@ app.post("/inference/stream", async (req, reply) => {
   const billing = taskBilling.get(body.taskId);
   const reader = await resolveSubmitterAccount(req as any, billing?.accountId ?? "", "/inference/stream");
   if ("error" in reader || !billing || reader.accountId !== billing.accountId) return reply.code(403).send({ error: "not_requester" });
+  // The subtask must be one of this task's: owning a task gives no read of another's stream.
+  if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
   const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
   if (!r) return reply.code(404).send({ error: "unknown_stream" });
   // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
   let result = r.done ? queue.getResult(body.subtaskId) : undefined;
-  for (let i = 0; r.done && !result && i < 40; i++) {
+  for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {
     await new Promise((res) => setTimeout(res, 100));
     result = queue.getResult(body.subtaskId);
   }
@@ -5734,6 +5813,12 @@ async function handleMeshIngest(
     }
     // Enqueue locally (dedup by subtaskId handled in queue)
     queue.enqueueSubtask({ ...d, id: d.subtaskId });
+    // The origin charges its requester at most its worst case for one subtask (perSubtaskReserveMsat):
+    // that is all an agent here may earn for running it.
+    if (!peerOfferBudgetMsat.has(d.subtaskId)) {
+      if (peerOfferBudgetMsat.size >= PEER_OFFER_BUDGET_MAX_ENTRIES) peerOfferBudgetMsat.delete(peerOfferBudgetMsat.keys().next().value as string);
+      peerOfferBudgetMsat.set(d.subtaskId, subtaskReserveMsat(d.projectMeta.resourceClass, "any", SUBTASK_RESERVE_TIMEOUT_MS));
+    }
     // Track origin for result forwarding — prefer the actual reachable peer
     // URL from the mesh over the self-reported URL in the payload (which may
     // be an unreachable custom domain).
