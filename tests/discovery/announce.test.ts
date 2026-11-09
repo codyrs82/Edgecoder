@@ -84,6 +84,7 @@ describe("startCoordinatorAnnouncer", () => {
         return relays.map((relay) => ({ relay, ok: true }));
       },
       fetchPeers: async () => [peerAnnouncement()],
+      peerKeyPins: [peer.publicKeyPem],
       log: (msg) => logs.push(msg)
     });
     handles.push(announcer);
@@ -108,7 +109,7 @@ describe("startCoordinatorAnnouncer", () => {
       enabled: true,
       relays: ["wss://r1"],
       now: () => NOW,
-      env: {},
+      env: { EDGECODER_NOSTR_ALLOW_UNPINNED: "1" },
       publish: async () => {
         throw new Error("relay exploded");
       },
@@ -118,6 +119,33 @@ describe("startCoordinatorAnnouncer", () => {
     });
     handles.push(announcer);
     await expect(announcer.announceNow()).resolves.toEqual([]);
+  });
+
+  it("learns no peers from Nostr without authors, key pins or an explicit opt-in", async () => {
+    const stranger = createPeerKeys("coord-stranger");
+    const strangerAnn = signAnnouncement({ peerId: stranger.peerId, publicKeyPem: stranger.publicKeyPem, url: "https://evil.example", region: "x", services: ["swarm"], computeClasses: [], version: "1", announcedAtMs: NOW }, stranger.privateKeyPem);
+    let fetched = 0;
+    const base = { identity: self, url: "https://self.example", enabled: true, relays: ["wss://r1"], nostrSecretKeyHex: "33".repeat(32), now: () => NOW, publish: async () => [] };
+    const fetchPeers = async () => {
+      fetched += 1;
+      return [peerAnnouncement(), strangerAnn];
+    };
+    const open = startCoordinatorAnnouncer({ ...base, env: {}, fetchPeers });
+    handles.push(open);
+    await open.announceNow();
+    expect(fetched).toBe(0);
+    expect(open.peers.size()).toBe(0);
+
+    // A key pin admits only the pinned coordinator's announcement.
+    const pinned = startCoordinatorAnnouncer({ ...base, env: { EDGECODER_COORDINATOR_PINS: peer.publicKeyPem.replace(/\n/g, "") }, fetchPeers });
+    handles.push(pinned);
+    await pinned.announceNow();
+    expect(pinned.peers.list().map((p) => p.peerId)).toEqual([peer.peerId]);
+
+    const unpinned = startCoordinatorAnnouncer({ ...base, env: { EDGECODER_NOSTR_ALLOW_UNPINNED: "1" }, fetchPeers });
+    handles.push(unpinned);
+    await unpinned.announceNow();
+    expect(unpinned.peers.size()).toBe(2);
   });
 
   it("reads the enable flag, relays and interval from env when not given", () => {

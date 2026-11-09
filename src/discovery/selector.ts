@@ -32,10 +32,19 @@ export interface SelectorOptions {
   timeoutMs?: number;
   /** Compute class whose market price is scored (default cpu). A legacy id (gpu.c8, ...) is sent as-is; new coordinators map it. */
   computeClass?: string;
-  /** Sent as x-mesh-token to /capacity and /economy/market/book when set. */
+  /**
+   * Sent as x-mesh-token to /capacity and /economy/market/book when set, but only to trusted
+   * candidates: operator-configured ones (source current/static) or ones `verifyCandidate` accepts.
+   */
   meshToken?: string;
-  /** Sent as x-portal-service-token to /economy/market/book when set. */
+  /** Sent as x-portal-service-token to /economy/market/book when set (same rule as meshToken). */
   portalToken?: string;
+  /**
+   * Trust decision for a discovered candidate (source dns/nostr/peer), e.g. the identity challenge
+   * against the trust store. Only candidates it accepts receive the tokens, have their
+   * self-reported load used, and may displace a configured coordinator. Errors count as false.
+   */
+  verifyCandidate?: (c: CoordinatorCandidate) => boolean | Promise<boolean>;
   /** Operator-pinned coordinator public keys (PEM or sha256 fingerprint) or peerIds. */
   pinnedKeys?: string[];
   pinnedPeerIds?: string[];
@@ -56,6 +65,8 @@ export interface RankedCoordinator {
   agents: number | null;
   priceMsatPerCredit: number | null;
   pinned: boolean;
+  /** Operator-configured (current/static) or accepted by verifyCandidate. */
+  trusted: boolean;
   /** 0..1; 0 when unhealthy. */
   score: number;
   components: { latency: number; load: number; price: number; pinned: number };
@@ -145,6 +156,19 @@ export async function probeCoordinator(url: string, opts: Omit<SelectorOptions, 
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 
+/** Sources the operator configured; every other source is unauthenticated until verified. */
+const CONFIGURED_SOURCES: ReadonlySet<CandidateSource> = new Set<CandidateSource>(["current", "static"]);
+
+async function candidateTrusted(c: CoordinatorCandidate, opts: SelectorOptions): Promise<boolean> {
+  if (CONFIGURED_SOURCES.has(c.source)) return true;
+  if (!opts.verifyCandidate) return false;
+  try {
+    return (await opts.verifyCandidate(c)) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Probe every candidate in parallel, score, and return the list sorted best-first. */
 export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoordinator[]> {
   const weights: ScoreWeights = { ...DEFAULT_WEIGHTS, ...opts.weights };
@@ -153,12 +177,17 @@ export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoo
   const pinnedPeers = new Set((opts.pinnedPeerIds ?? []).map((p) => p.trim()).filter(Boolean));
   const pinsConfigured = pins.length > 0 || pinnedPeers.size > 0;
 
-  const probes = await Promise.all(opts.candidates.map((c) => probeCoordinator(c.url, opts)));
+  const trust = await Promise.all(opts.candidates.map((c) => candidateTrusted(c, opts)));
+  // Credentials go only to trusted candidates; an unverified URL is probed anonymously.
+  const probes = await Promise.all(
+    opts.candidates.map((c, i) => probeCoordinator(c.url, trust[i] ? opts : { ...opts, meshToken: undefined, portalToken: undefined }))
+  );
   const healthyPrices = probes.filter((p) => p.healthy && p.priceMsatPerCredit !== null && p.priceMsatPerCredit > 0).map((p) => p.priceMsatPerCredit as number);
   const cheapest = healthyPrices.length > 0 ? Math.min(...healthyPrices) : null;
 
   const ranked = opts.candidates.map((c, i): RankedCoordinator => {
     const p = probes[i];
+    const trusted = trust[i];
     const pinned =
       (c.peerId !== undefined && pinnedPeers.has(c.peerId)) || (c.publicKeyPem !== undefined && pins.some((pin) => pinMatchesKey(pin, c.publicKeyPem as string)));
     const latency = p.latencyMs === null ? 0 : clamp01(1 - p.latencyMs / ceiling);
@@ -166,7 +195,9 @@ export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoo
     // /health/runtime stands in for capacity (each agent runs at least one task).
     const effectiveCapacity = p.capacity !== null ? p.capacity : p.agents;
     let load: number;
-    if (effectiveCapacity !== null && effectiveCapacity > 0) load = clamp01(1 - (p.queued ?? 0) / effectiveCapacity);
+    // An unverified candidate's queue and agent counts are self-reported: score them neutral.
+    if (!trusted) load = 0.5;
+    else if (effectiveCapacity !== null && effectiveCapacity > 0) load = clamp01(1 - (p.queued ?? 0) / effectiveCapacity);
     else if (effectiveCapacity === 0) load = (p.queued ?? 0) > 0 ? 0 : 0.25;
     else load = 0.5; // nothing known: neutral
     let price: number;
@@ -190,6 +221,7 @@ export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoo
       agents: p.agents,
       priceMsatPerCredit: p.priceMsatPerCredit,
       pinned,
+      trusted,
       score,
       components: { latency, load, price, pinned: pinnedScore },
       error: p.error
@@ -201,9 +233,13 @@ export async function rankCoordinators(opts: SelectorOptions): Promise<RankedCoo
 /**
  * Stickiness: keep `currentUrl` while it is healthy unless the best candidate beats it by
  * more than `margin` (fraction, default 0.2 = 20%). Returns null when nothing is healthy.
+ * An untrusted candidate (discovered and not verified) is picked only when no trusted candidate
+ * is healthy, and never displaces a healthy trusted current coordinator.
  */
 export function applyStickiness(ranked: RankedCoordinator[], currentUrl: string | undefined, margin = 0.2): RankedCoordinator | null {
-  const best = ranked.find((r) => r.healthy) ?? null;
+  // Entries built without the trust flag (older callers) count as trusted.
+  const isTrusted = (r: RankedCoordinator) => r.trusted !== false;
+  const best = ranked.find((r) => r.healthy && isTrusted(r)) ?? ranked.find((r) => r.healthy) ?? null;
   if (!best) return null;
   if (!currentUrl) return best;
   const normalized = currentUrl.replace(/\/+$/, "");

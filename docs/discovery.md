@@ -54,6 +54,9 @@ enrich earlier ones (region, key, announcement) but the first source wins.
 4. **Nostr** — verified announcements from the configured relays.
 5. **Peers** — one hop: every static/DNS/current candidate is asked for `/discovery/peers`
    (disabled with `expandPeers: false`; the portal enables it only when DNS or Nostr is on).
+   Peer lists relay self-signed announcements, so they pass the same gate as Nostr: an entry is
+   kept only when its key matches `EDGECODER_COORDINATOR_PINS` (or the strict-mode trust filter),
+   or when `EDGECODER_NOSTR_ALLOW_UNPINNED=1`.
 
 The merged list is capped at 32 candidates.
 
@@ -104,7 +107,10 @@ COORDINATOR_REGION=ord                     # falls back to FLY_REGION, then "unk
 The announcer runs 1 s after startup and then every interval; every relay call has a 5 s timeout
 and failures are logged (`discovery_nostr_*`) and never thrown, so a dead relay cannot block or
 crash the coordinator. On each run it also reads other coordinators' announcements from the
-relays into the `/discovery/peers` store. The Nostr pubkey the coordinator uses is shown on
+relays into the `/discovery/peers` store, but only when it has a way to tell them apart from
+anyone else's: `EDGECODER_NOSTR_AUTHORS` (only those Nostr authors are read),
+`EDGECODER_COORDINATOR_PINS` (only announcements whose key matches a pin are kept), or the explicit
+opt-in `EDGECODER_NOSTR_ALLOW_UNPINNED=1`. With none of these the store stays empty. The Nostr pubkey the coordinator uses is shown on
 `/discovery/announcement` under `nostr.pubkey`.
 
 Consumers (agents, portals) read from the same relays. Because the inner announcement is verified
@@ -124,6 +130,13 @@ Transport: the `ws` package when installed, otherwise Node 22's global `WebSocke
 - `GET /economy/market/book?computeClass=<class>` (needs `x-mesh-token` or
   `x-portal-service-token`) — the class's `clearingMsatPerCredit` (falling back to mid, then
   reference).
+
+The two token-bearing probes go only to **trusted** candidates: operator-configured ones (the
+current URL and static URLs) and discovered ones (DNS, Nostr, peer) that the caller's
+`verifyCandidate` hook accepts (for example the identity challenge against the trust store). Every
+other candidate is probed anonymously, its self-reported queue/agent counts score neutral, and it
+is picked only when no trusted candidate is healthy; it never displaces a healthy trusted current
+coordinator.
 
 Score (0..1; 0 when unhealthy) is a weighted mean of:
 

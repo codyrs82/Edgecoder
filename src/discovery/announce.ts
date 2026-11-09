@@ -7,7 +7,7 @@
 import type { FastifyInstance } from "fastify";
 import type { PeerKeys } from "../mesh/peer.js";
 import { buildAnnouncementEvent, fetchNostrAnnouncements, nostrKeysFromSecret, nostrRelaysFromEnv, publishNostrEvent, type NostrEvent, type NostrKeys, type PublishResult, type WsConnect } from "./nostr.js";
-import { parseAnnouncement, signAnnouncement, verifyAnnouncement, type CoordinatorAnnouncement } from "./types.js";
+import { parseAnnouncement, pinMatchesKey, signAnnouncement, verifyAnnouncement, type CoordinatorAnnouncement } from "./types.js";
 
 export interface AnnouncementStore {
   /** Verify and keep `a` when it is newer than what is stored for its peerId. Returns true when stored. */
@@ -71,6 +71,16 @@ export interface AnnouncerOptions {
   /** Injectable for tests. */
   publish?: (event: NostrEvent, relays: string[]) => Promise<PublishResult[]>;
   fetchPeers?: (relays: string[]) => Promise<CoordinatorAnnouncement[]>;
+  /**
+   * Nostr announcements are self-signed, so anyone can publish one. Peers are learned from the
+   * relays (and republished at /discovery/peers) only from these Nostr authors
+   * (EDGECODER_NOSTR_AUTHORS), with a key matching these pins (EDGECODER_COORDINATOR_PINS, key
+   * fingerprints or PEMs), or when allowUnpinnedPeers is set (EDGECODER_NOSTR_ALLOW_UNPINNED=1).
+   * With none of these, no peers are learned.
+   */
+  nostrAuthors?: string[];
+  peerKeyPins?: string[];
+  allowUnpinnedPeers?: boolean;
   log?: (msg: string, meta?: Record<string, unknown>) => void;
   env?: NodeJS.ProcessEnv;
 }
@@ -128,7 +138,20 @@ export function startCoordinatorAnnouncer(opts: AnnouncerOptions): CoordinatorAn
     );
 
   const publish = opts.publish ?? ((event: NostrEvent, r: string[]) => publishNostrEvent(event, { relays: r, timeoutMs, connect: opts.connect }));
-  const fetchPeers = opts.fetchPeers ?? ((r: string[]) => fetchNostrAnnouncements({ relays: r, timeoutMs, connect: opts.connect, verify: { now } }));
+  const nostrAuthors = (opts.nostrAuthors ?? (env.EDGECODER_NOSTR_AUTHORS ?? "").split(","))
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => /^[0-9a-f]{64}$/.test(s));
+  const peerKeyPins = (opts.peerKeyPins ?? (env.EDGECODER_COORDINATOR_PINS ?? "").split(","))
+    .map((s) => s.trim())
+    .filter((p) => /^[0-9a-f]{64}$/i.test(p) || p.includes("BEGIN"));
+  const allowUnpinnedPeers = opts.allowUnpinnedPeers ?? ["1", "true", "yes"].includes((env.EDGECODER_NOSTR_ALLOW_UNPINNED ?? "").trim().toLowerCase());
+  const learnPeers = nostrAuthors.length > 0 || peerKeyPins.length > 0 || allowUnpinnedPeers;
+  // Authors are enforced by the relay query; without authors, key pins filter what is kept.
+  const peerAllowed = (a: CoordinatorAnnouncement): boolean =>
+    allowUnpinnedPeers || nostrAuthors.length > 0 || peerKeyPins.some((pin) => pinMatchesKey(pin, a.publicKeyPem));
+  const fetchPeers =
+    opts.fetchPeers ??
+    ((r: string[]) => fetchNostrAnnouncements({ relays: r, timeoutMs, connect: opts.connect, authors: nostrAuthors.length > 0 ? nostrAuthors : undefined, verify: { now } }));
 
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
@@ -142,10 +165,11 @@ export function startCoordinatorAnnouncer(opts: AnnouncerOptions): CoordinatorAn
     } catch (err) {
       log("discovery_nostr_publish_failed", { error: String(err) });
     }
+    if (!learnPeers) return results;
     try {
       const found = await fetchPeers(relays);
       let added = 0;
-      for (const a of found) if (peers.upsert(a)) added += 1;
+      for (const a of found) if (peerAllowed(a) && peers.upsert(a)) added += 1;
       log("discovery_nostr_peers", { found: found.length, added, known: peers.size() });
     } catch (err) {
       log("discovery_nostr_fetch_failed", { error: String(err) });
@@ -161,7 +185,7 @@ export function startCoordinatorAnnouncer(opts: AnnouncerOptions): CoordinatorAn
   if (enabled && keys && relays.length > 0) {
     timer = setTimeout(tick, 1000);
     timer.unref?.();
-    log("discovery_nostr_announcer_started", { relays, intervalMs, pubkey: keys.pubkeyHex });
+    log("discovery_nostr_announcer_started", { relays, intervalMs, pubkey: keys.pubkeyHex, learnPeers });
   }
   return {
     self,

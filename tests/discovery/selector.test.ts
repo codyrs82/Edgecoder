@@ -148,6 +148,66 @@ describe("rankCoordinators", () => {
   });
 });
 
+describe("credentials and trust (discovered candidates)", () => {
+  /** Records the token headers each host receives; every host is healthy and idle. */
+  function recordingFetch(reported: Record<string, { queued: number; agents: number }> = {}) {
+    const seen: Array<{ host: string; path: string; mesh?: string; portal?: string }> = [];
+    const fetch: FetchLike = async (url, init) => {
+      const u = new URL(url);
+      seen.push({ host: u.host, path: u.pathname, mesh: init.headers["x-mesh-token"], portal: init.headers["x-portal-service-token"] });
+      if (u.pathname === "/health/runtime") return { status: 200, json: async () => ({ ok: true, coordinator: reported[u.host] ?? { queued: 5, agents: 2 } }) };
+      if (u.pathname === "/capacity") return { status: 200, json: async () => ({ totals: { totalCapacity: 4 } }) };
+      return { status: 200, json: async () => ({ books: [{ computeClass: "cpu", clearingMsatPerCredit: 1000 }] }) };
+    };
+    return { fetch, seen };
+  }
+
+  it("sends the mesh and portal tokens only to configured or verified candidates", async () => {
+    const r = recordingFetch();
+    await rankCoordinators({
+      candidates: [cand("https://configured"), cand("https://dns-a", { source: "dns" }), cand("https://peer-b", { source: "peer" }), cand("https://dns-ok", { source: "dns" })],
+      fetch: r.fetch,
+      meshToken: "mesh-secret",
+      portalToken: "portal-secret",
+      verifyCandidate: async (c) => c.url === "https://dns-ok"
+    });
+    const withToken = [...new Set(r.seen.filter((s) => s.mesh || s.portal).map((s) => s.host))].sort();
+    expect(withToken).toEqual(["configured", "dns-ok"]);
+    // Unverified candidates are still probed, anonymously.
+    expect(r.seen.some((s) => s.host === "dns-a" && s.path === "/health/runtime")).toBe(true);
+  });
+
+  it("sends no token to a discovered candidate without a trust decision, or when it throws", async () => {
+    const r = recordingFetch();
+    const ranked = await rankCoordinators({
+      candidates: [cand("https://n", { source: "nostr" }), cand("https://p", { source: "peer" })],
+      fetch: r.fetch,
+      meshToken: "mesh-secret",
+      verifyCandidate: (c) => {
+        if (c.url === "https://p") throw new Error("challenge failed");
+        return false;
+      }
+    });
+    expect(r.seen.filter((s) => s.mesh || s.portal)).toHaveLength(0);
+    expect(ranked.every((x) => x.trusted === false)).toBe(true);
+  });
+
+  it("does not let an unverified candidate displace a healthy configured coordinator on self-reported load", async () => {
+    const r = recordingFetch({ "evil.example": { queued: 0, agents: 10_000 }, "cur.example": { queued: 3, agents: 1 } });
+    const ranked = await rankCoordinators({
+      candidates: [cand("https://cur.example", { source: "current" }), cand("https://evil.example", { source: "peer" })],
+      fetch: r.fetch
+    });
+    expect(ranked.find((x) => x.url === "https://evil.example")?.components.load).toBe(0.5);
+    expect(applyStickiness(ranked, "https://cur.example")?.url).toBe("https://cur.example");
+    // With no current coordinator, a healthy trusted candidate still wins over an untrusted one.
+    expect(applyStickiness(ranked, undefined)?.url).toBe("https://cur.example");
+    // Only when nothing trusted is healthy may an unverified candidate be picked (the trust gate runs next).
+    const onlyEvil = ranked.map((x) => (x.url === "https://cur.example" ? { ...x, healthy: false, score: 0 } : x));
+    expect(applyStickiness(onlyEvil, "https://cur.example")?.url).toBe("https://evil.example");
+  });
+});
+
 describe("stickiness", () => {
   const ranked = (scores: Record<string, number>) =>
     Object.entries(scores)
