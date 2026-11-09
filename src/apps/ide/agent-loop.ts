@@ -364,6 +364,14 @@ export interface ToolRunnerDeps {
 /** Tools that ask every time, whatever auto-approve settings say. */
 export const ALWAYS_ASK_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["open_pull_request", "git_push", "git_commit"]);
 
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
 export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
   return async (tool, rawArgs) => {
@@ -379,6 +387,8 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
         return `[Error]: ${msg}`;
       }
     }
+    // One immutable copy is shown, approved and executed, so nothing can change it in between.
+    args = deepFreeze(structuredClone(args));
     // #4: run_shell always needs approval unless the local user opted in with IDE_SHELL_AUTO_APPROVE=1
     // (the executor's allowlist/metacharacter policy still applies to auto-approved commands).
     const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";

@@ -41,6 +41,9 @@ const GIT_READONLY_SUBCOMMANDS = new Set([
   "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote",
 ]);
 const SHELL_METACHAR = /[;&|`<>\n\r]|\$\(/;
+/** Control characters other than tab and newline, and zero-width / bidi formatting characters. */
+// eslint-disable-next-line no-control-regex
+const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0]/;
 /** Interpreter flags that evaluate inline code. */
 const INLINE_EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c", "-i", "--interactive", "-r", "--require", "--import", "--loader", "-m"]);
 const INTERPRETERS = /^(node|python\d*(\.\d+)?|deno|bun|ruby|perl|php)$/;
@@ -296,6 +299,8 @@ export function evaluateShellCommand(
   const approved = opts.approved === true;
   const trimmed = command.trim();
   if (!trimmed) return { allowed: false, reason: "empty command" };
+  // The approval card must show what runs: no characters that hide or reorder text when displayed.
+  if (HIDDEN_CHARS.test(command)) return { allowed: false, reason: "command contains control or invisible characters" };
   if (SHELL_METACHAR.test(trimmed)) {
     if (!approved) return { allowed: false, reason: "shell metacharacters require explicit approval" };
     return { allowed: true, argv: [], useShell: true };
@@ -704,7 +709,9 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private async runShell(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
-    const command = String(args.command ?? "");
+    // Exactly the string the approval card showed; no coercion of arrays or objects.
+    if (typeof args.command !== "string") return { error: "run_shell rejected: command must be a string" };
+    const command = args.command;
     const timeout =
       typeof args.timeout === "number" ? args.timeout : 30_000;
 
@@ -719,9 +726,10 @@ export class ToolExecutor {
       // needs shell syntax (pipes, &&, …) is run through sh -c.
       // git run by the agent (directly or from a script) gets the IDE's git hardening.
       const [cmd, cmdArgs] = decision.useShell
-        ? ["sh", ["-c", command]]
+        // /bin/sh, not a PATH lookup that a relative PATH entry could resolve inside the project.
+        ? [process.platform === "win32" ? "sh" : "/bin/sh", ["-c", command]]
         : decision.argv[0] === "git"
-          ? ["git", hardenedGitArgs(decision.argv.slice(1))]
+          ? ["git", hardenedGitArgs(decision.argv.slice(1), this.root)]
           : [decision.argv[0], decision.argv.slice(1)];
       let proc: ReturnType<typeof spawn>;
       try {
