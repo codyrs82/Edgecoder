@@ -396,7 +396,7 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLA
     if (CONTROL_PLANE_URL && CONTROL_PLANE_ADMIN_TOKEN) {
       const pathSegment = body.nodeKind === "agent" ? "agents" : "coordinators";
       try {
-        const res = await request(`${CONTROL_PLANE_URL}/${pathSegment}/${body.nodeId}/approval`, {
+        const res = await request(`${CONTROL_PLANE_URL}/${pathSegment}/${encodeURIComponent(body.nodeId)}/approval`, {
           method: "POST",
           headers: controlPlaneHeaders(true),
           body: JSON.stringify({ approved: body.approved })
