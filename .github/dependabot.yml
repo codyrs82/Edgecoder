@@ -43,5 +43,11 @@ updates:
       - /tests/e2e
     schedule: { interval: weekly }
     labels: [dependencies, docker]
+    # Digest and minor/patch refreshes only. A Node major (e.g. node:26) is a runtime upgrade,
+    # not a base-image refresh: package.json pins engines to ">=22.12 <25", better-sqlite3's
+    # native build fails on it, and tests/repo/docker-digests.test.ts asserts node:22. Do those by hand.
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
     groups:
       base-images: { patterns: ["*"] }
