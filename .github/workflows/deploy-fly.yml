@@ -56,9 +56,9 @@ jobs:
           - { app: portal, config: deploy/fly/fly.portal.toml, smoke: "https://edgecoder-portal.fly.dev/health" }
           - { app: anchor-proxy, config: deploy/fly/fly.anchor-proxy.toml, smoke: "https://edgecoder-anchor-proxy.fly.dev/health" }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.event.workflow_run.head_sha || github.sha }}" }
-      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       - run: flyctl deploy --config ${{ matrix.config }} --remote-only --wait-timeout 600
         env: { FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}" }
       - run: flyctl status --config ${{ matrix.config }}
