@@ -4,7 +4,10 @@ import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { BLETaskRequest, BLETaskResponse } from "../../../src/common/types.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
-import { createPeerKeys, signPayload, verifyPayload } from "../../../src/mesh/peer.js";
+import { serveWithCosign, requesterOptions, keysFor } from "./helpers/cosign.js";
+import { bleTxV3FieldsFromWire, verifyBleTxV3 } from "../../../src/credits/ble-tx-v3.js";
+import { CreditEngine } from "../../../src/credits/engine.js";
+import { applyBleSyncBatch, createInMemoryBleTransfer } from "../../../src/credits/ble-sync.js";
 
 let store: SQLiteStore;
 
@@ -34,7 +37,7 @@ describe("BLE mesh e2e (mock transport)", () => {
     });
 
     // Laptop handles incoming tasks
-    laptopTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(laptopTransport, "macbook", async (req) => ({
       requestId: req.requestId,
       providerId: "macbook",
       status: "completed" as const,
@@ -45,7 +48,7 @@ describe("BLE mesh e2e (mock transport)", () => {
     }));
 
     // Phone goes offline and needs to route a task
-    const phoneMesh = new BLEMeshManager("iphone", "user-account", phoneTransport, store);
+    const phoneMesh = new BLEMeshManager("iphone", "user-account", phoneTransport, store, requesterOptions("iphone"));
     phoneMesh.setOffline(true);
     phoneMesh.refreshPeers();
 
@@ -69,8 +72,9 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].requesterId).toBe("iphone");
     expect(pending[0].providerId).toBe("macbook");
-    // requesterAccountId is derived from requesterId in SQLite-backed ledger
-    expect(pending[0].requesterAccountId).toBe("iphone");
+    // #63: the signed reward accounts are kept in the ledger
+    expect(pending[0].requesterAccountId).toBe("user-account");
+    expect(pending[0].providerAccountId).toBe("macbook");
     expect(pending[0].cpuSeconds).toBe(3.2);
     expect(pending[0].credits).toBeGreaterThan(0);
 
@@ -134,7 +138,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       currentLoad: 0,
       deviceType: "phone"
     });
-    tinyTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(tinyTransport, "tiny-device", async (req) => ({
       requestId: req.requestId,
       providerId: "tiny-device",
       status: "completed" as const,
@@ -144,7 +148,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       providerSignature: "tiny-sig"
     }));
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -415,7 +419,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       cpuSeconds: 0,
       providerSignature: "",
     }));
-    reliableTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(reliableTransport, "reliable", async (req) => ({
       requestId: req.requestId,
       providerId: "reliable",
       status: "completed" as const,
@@ -425,7 +429,7 @@ describe("BLE mesh e2e (mock transport)", () => {
       providerSignature: "rel-sig",
     }));
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
     mesh.refreshPeers();
 
@@ -448,64 +452,64 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(pending[0].cpuSeconds).toBe(2.0);
   });
 
-  it("signed credit flow: signatures propagate through ledger", async () => {
-    const phoneKeys = createPeerKeys("phone");
-    const laptopKeys = createPeerKeys("laptop");
+  it("desktop<->desktop co-signed tx syncs through /credits/ble-sync as applied; any 1-milli tamper is invalid_signature (#63)", async () => {
     const network = new Map<string, MockBLETransport>();
     const phoneTransport = new MockBLETransport("phone", network);
     const laptopTransport = new MockBLETransport("laptop", network);
-
-    const taskText = "compute signed result";
-    const taskHash = createHash("sha256").update(taskText).digest("hex");
-
     laptopTransport.startAdvertising({
       agentId: "laptop",
-      model: "qwen2.5-coder:7b",
-      modelParamSize: 7,
+      model: "qwen2.5-coder:3b",
+      modelParamSize: 3,
       memoryMB: 16384,
       batteryPct: 100,
       currentLoad: 0,
       deviceType: "workstation",
     });
-    laptopTransport.onTaskRequest(async (req) => ({
+    serveWithCosign(laptopTransport, "laptop", async (req) => ({
       requestId: req.requestId,
       providerId: "laptop",
       status: "completed" as const,
       output: "signed-output",
-      cpuSeconds: 2.5,
-      providerSignature: signPayload(
-        JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash }),
-        laptopKeys.privateKeyPem
-      ),
-    }));
+      cpuSeconds: 2.537,
+      providerSignature: "",
+    }), "laptop-owner");
 
-    const mesh = new BLEMeshManager("phone", "account", phoneTransport, store);
+    const mesh = new BLEMeshManager("phone", "phone-owner", phoneTransport, store, requesterOptions("phone"));
     mesh.setOffline(true);
-    mesh.refreshPeers();
+    await mesh.routeTask({ requestId: "signed-req", requesterId: "phone", task: "compute signed result", language: "python", requesterSignature: "" }, 3);
 
-    const reqSig = signPayload(
-      JSON.stringify({ requesterId: "phone", taskHash }),
-      phoneKeys.privateKeyPem
-    );
+    const [tx] = mesh.exportSyncBatch();
+    expect(tx).toBeDefined();
+    // 2537 cpu millis x 0.7 (3B model) = 1775.9 -> 1776 credit millis
+    expect(tx.credits).toBe(1.776);
+    expect(tx.cpuSeconds).toBe(2.537);
+    const fields = bleTxV3FieldsFromWire(tx)!;
+    expect(verifyBleTxV3(fields, tx.requesterSignature, keysFor("phone").publicKeyPem)).toBe(true);
+    expect(verifyBleTxV3(fields, tx.providerSignature, keysFor("laptop").publicKeyPem)).toBe(true);
 
-    await mesh.routeTask({
-      requestId: "signed-req",
-      requesterId: "phone",
-      task: taskText,
-      language: "python",
-      requesterSignature: reqSig,
-    }, 1.5);
-
-    const pending = mesh.pendingTransactions();
-    expect(pending).toHaveLength(1);
-    expect(pending[0].requesterSignature).toBe(reqSig);
-    expect(pending[0].providerSignature).not.toBe("");
-
-    // Verify signatures are cryptographically valid
-    const reqPayload = JSON.stringify({ requesterId: "phone", taskHash });
-    expect(verifyPayload(reqPayload, pending[0].requesterSignature, phoneKeys.publicKeyPem)).toBe(true);
-
-    const provPayload = JSON.stringify({ providerId: "laptop", status: "completed", cpuSeconds: 2.5, taskHash });
-    expect(verifyPayload(provPayload, pending[0].providerSignature, laptopKeys.publicKeyPem)).toBe(true);
+    const accounts: Record<string, string> = { phone: "phone-owner", laptop: "laptop-owner" };
+    const setup = () => {
+      const engine = new CreditEngine();
+      engine.adjust("phone-owner", 10, "seed");
+      return {
+        engine,
+        deps: {
+          getPublicKeyPem: (id: string) => keysFor(id).publicKeyPem,
+          rewardAccountForAgent: async (id: string) => accounts[id] ?? id,
+          transfer: createInMemoryBleTransfer(engine),
+        },
+      };
+    };
+    for (const change of [{ credits: 1.777 }, { credits: 1.775 }, { cpuSeconds: 2.538 }]) {
+      const { engine, deps } = setup();
+      const out = await applyBleSyncBatch([{ ...tx, ...change }], deps);
+      expect(out.skipped).toEqual([{ txId: tx.txId, reason: "invalid_signature" }]);
+      expect(engine.balance("laptop-owner")).toBe(0);
+    }
+    const { engine, deps } = setup();
+    const out = await applyBleSyncBatch([tx], deps);
+    expect(out.applied).toEqual([tx.txId]);
+    expect(engine.balance("laptop-owner")).toBeCloseTo(1.776, 9);
+    expect(engine.balance("phone-owner")).toBeCloseTo(10 - 1.776, 9);
   });
 });

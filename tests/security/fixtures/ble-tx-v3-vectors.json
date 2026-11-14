@@ -1,0 +1,192 @@
+{
+  "description": "#63 BLE credit transaction v3: canonical bytes and Ed25519 signatures. Shared by vitest and the iOS Swift check; regenerate with scripts/gen-ble-tx-v3-vectors.ts.",
+  "domain": "edgecoder-ble-tx-v3",
+  "key": {
+    "privateKeySeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n"
+  },
+  "vectors": [
+    {
+      "name": "basic",
+      "fields": {
+        "txId": "0b6f3d1e-5a8e-4c1f-9f61-2d7c3e9a4b10",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 12345,
+        "creditMillis": 3704
+      },
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a30623666336431652d356138652d346331662d396636312d3264376333653961346231300a6970686f6e652d31413242334334440a616363742d7265717565737465722d30310a6d61632d776f726b65722d370a616363742d70726f76696465722d30320a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a31323334350a33373034",
+      "signatureBase64": "4tcLehncf8jzjJKFHkMehfKo+45oOe3w+3H/Vk657cCPVMk0WN1LcDQUw0sTKBzOmI34JJZAS5kl+TT8YkS4Dw=="
+    },
+    {
+      "name": "one-milli",
+      "fields": {
+        "txId": "tx-one-milli",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      },
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d6f6e652d6d696c6c690a6970686f6e652d31413242334334440a616363742d7265717565737465722d30310a6d61632d776f726b65722d370a616363742d70726f76696465722d30320a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a310a31",
+      "signatureBase64": "h7G8PIO/9YSm1TzcxdmphwwbHPwOX1pY04r6t+c8I30ckrae1H9ZOQucXPBEErz20CLZxubz3hseg/8HTPR+Bg=="
+    },
+    {
+      "name": "zero-cpu",
+      "fields": {
+        "txId": "tx-zero-cpu",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 0,
+        "creditMillis": 1
+      },
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d7a65726f2d6370750a6970686f6e652d31413242334334440a616363742d7265717565737465722d30310a6d61632d776f726b65722d370a616363742d70726f76696465722d30320a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a300a31",
+      "signatureBase64": "Wn9kY5hrmHbQDidzjA99+nt6a99FJHeLStln2x+ltSrQ36dnIiuTG6zGSagUVziXHnf5OJmRB/gGgPulKr11CQ=="
+    },
+    {
+      "name": "unicode-and-empty",
+      "fields": {
+        "txId": "tx-ünïcødé-✓",
+        "requesterId": "agent-日本",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 100000,
+        "creditMillis": 100000
+      },
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782dc3bc6ec3af63c3b864c3a92de29c930a6167656e742de697a5e69cac0a616363742d7265717565737465722d30310a6d61632d776f726b65722d370a0a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a3130303030300a313030303030",
+      "signatureBase64": "hPZFIlSyiN/dec34u1toVLoZGPYYlDV/lH/Km4bVWRUi9Z2rMgQdWd9yKd+/r1XsWRjQEKmodnp77LzAQuH5BA=="
+    },
+    {
+      "name": "large-integers",
+      "fields": {
+        "txId": "tx-large",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 9007199254740991,
+        "creditMillis": 1000000000000
+      },
+      "canonicalHex": "65646765636f6465722d626c652d74782d76330a74782d6c617267650a6970686f6e652d31413242334334440a616363742d7265717565737465722d30310a6d61632d776f726b65722d370a616363742d70726f76696465722d30320a396638366430383138383463376436353961326665616130633535616430313561336266346631623262306238323263643135643663313562306630306130380a393030373139393235343734303939310a31303030303030303030303030",
+      "signatureBase64": "CNr7m/1EamFal6Jz34hJuLvFc5kx695W3safASX3OlBwG0jsGpcy+0SUnOg8Fb2U7zeIeJoGWCIFdmIvuZXuBw=="
+    }
+  ],
+  "invalid": [
+    {
+      "name": "newline-in-txId",
+      "fields": {
+        "txId": "tx\nbad",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      }
+    },
+    {
+      "name": "newline-in-providerAccountId",
+      "fields": {
+        "txId": "0b6f3d1e-5a8e-4c1f-9f61-2d7c3e9a4b10",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct\n",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 1,
+        "creditMillis": 1
+      }
+    },
+    {
+      "name": "negative-creditMillis",
+      "fields": {
+        "txId": "0b6f3d1e-5a8e-4c1f-9f61-2d7c3e9a4b10",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 1,
+        "creditMillis": -1
+      }
+    },
+    {
+      "name": "fractional-cpuMillis",
+      "fields": {
+        "txId": "0b6f3d1e-5a8e-4c1f-9f61-2d7c3e9a4b10",
+        "requesterId": "iphone-1A2B3C4D",
+        "requesterAccountId": "acct-requester-01",
+        "providerId": "mac-worker-7",
+        "providerAccountId": "acct-provider-02",
+        "taskHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "cpuMillis": 1.5,
+        "creditMillis": 1
+      }
+    }
+  ],
+  "creditMillis": [
+    {
+      "cpuMillis": 12345,
+      "modelParamSize": 0,
+      "creditMillis": 3704
+    },
+    {
+      "cpuMillis": 12345,
+      "modelParamSize": 1.5,
+      "creditMillis": 6173
+    },
+    {
+      "cpuMillis": 12345,
+      "modelParamSize": 3,
+      "creditMillis": 8642
+    },
+    {
+      "cpuMillis": 12345,
+      "modelParamSize": 7,
+      "creditMillis": 12345
+    },
+    {
+      "cpuMillis": 1,
+      "modelParamSize": 0,
+      "creditMillis": 0
+    },
+    {
+      "cpuMillis": 5,
+      "modelParamSize": 0,
+      "creditMillis": 2
+    },
+    {
+      "cpuMillis": 15,
+      "modelParamSize": 3,
+      "creditMillis": 11
+    },
+    {
+      "cpuMillis": 999,
+      "modelParamSize": 2,
+      "creditMillis": 500
+    },
+    {
+      "cpuMillis": 0,
+      "modelParamSize": 7,
+      "creditMillis": 0
+    },
+    {
+      "cpuMillis": 3600000,
+      "modelParamSize": 13,
+      "creditMillis": 3600000
+    }
+  ]
+}

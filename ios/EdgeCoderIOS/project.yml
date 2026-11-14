@@ -72,6 +72,8 @@ targets:
     sources:
       - path: EdgeCoderIOSTests
       - path: EdgeCoderIOS/Security/RequestSigner.swift
+      # #63: BLE credit-transaction canonical bytes (BLETxV3) for BLETxV3VectorsTests.
+      - path: EdgeCoderIOS/Mesh/OfflineLedger.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests

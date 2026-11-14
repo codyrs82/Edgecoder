@@ -7,6 +7,7 @@ import {
   modelQualityMultiplier,
 } from "../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../src/mesh/ble/ble-transport.js";
+import { serveWithCosign, requesterOptions } from "../mesh/ble/helpers/cosign.js";
 import { SQLiteStore } from "../../src/db/sqlite-store.js";
 import {
   computeDynamicPricePerComputeUnitSats,
@@ -347,7 +348,7 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const storeA = new SQLiteStore(":memory:");
     const storeB = new SQLiteStore(":memory:");
 
-    const managerA = new BLEMeshManager("agent-A", "account-A", transportA, storeA);
+    const managerA = new BLEMeshManager("agent-A", "account-A", transportA, storeA, requesterOptions("agent-A"));
     const managerB = new BLEMeshManager("agent-B", "account-B", transportB, storeB);
 
     // Set both offline
@@ -368,8 +369,8 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
       deviceType: "laptop",
     });
 
-    // Agent B registers a task handler
-    transportB.onTaskRequest(async (req: BLETaskRequest): Promise<BLETaskResponse> => {
+    // Agent B registers a task handler and co-signs the credit tx (#63)
+    serveWithCosign(transportB, "agent-B", async (req: BLETaskRequest): Promise<BLETaskResponse> => {
       return {
         requestId: req.requestId,
         providerId: "agent-B",
@@ -405,7 +406,7 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const tx = pending[0];
     expect(tx.requesterId).toBe("agent-A");
     expect(tx.providerId).toBe("agent-B");
-    expect(tx.requesterAccountId).toBe("agent-A"); // SQLite-backed ledger maps requesterId → requesterAccountId
+    expect(tx.requesterAccountId).toBe("account-A"); // #63: the signed reward account is kept in the ledger
     expect(tx.providerAccountId).toBe("agent-B");
     expect(tx.cpuSeconds).toBe(5.0);
 
@@ -431,7 +432,7 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
     const transportB = new MockBLETransport("agent-B2", network);
     const storeA2 = new SQLiteStore(":memory:");
 
-    const managerA = new BLEMeshManager("agent-A2", "account-A2", transportA, storeA2);
+    const managerA = new BLEMeshManager("agent-A2", "account-A2", transportA, storeA2, requesterOptions("agent-A2"));
 
     managerA.setOffline(true);
 
@@ -446,7 +447,7 @@ describe("Scenario 4: BLE Offline Credits Flow", () => {
       deviceType: "laptop",
     });
 
-    transportB.onTaskRequest(async (req): Promise<BLETaskResponse> => {
+    serveWithCosign(transportB, "agent-B2", async (req): Promise<BLETaskResponse> => {
       return {
         requestId: req.requestId,
         providerId: "agent-B2",
