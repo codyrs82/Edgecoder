@@ -53,16 +53,16 @@
   }
   .arg-size {
     font-weight: 500;
-    color: var(--yellow, var(--warning, #d29922));
+    color: var(--yellow);
   }
   .arg-value {
     display: block;
     margin: 0;
     padding: 6px 9px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-base);
     color: var(--text-primary);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.5;
     /* Wrap, never clip: no nowrap, no ellipsis. */

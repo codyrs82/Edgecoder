@@ -219,15 +219,15 @@
   .filter-tabs {
     display: flex;
     gap: 0;
-    border: 1px solid var(--border, #1e1e3f);
+    border: 1px solid var(--border);
     border-radius: 6px;
     overflow: hidden;
   }
 
   .tab {
     padding: 0.35rem 0.75rem;
-    background: var(--bg-surface, #1a1a2e);
-    color: var(--text-muted, #94a3b8);
+    background: var(--bg-surface);
+    color: var(--text-muted);
     border: none;
     cursor: pointer;
     font-size: 0.78rem;
@@ -236,7 +236,7 @@
     align-items: center;
     gap: 0.35rem;
     transition: background 0.15s, color 0.15s;
-    border-right: 1px solid var(--border, #1e1e3f);
+    border-right: 1px solid var(--border);
   }
 
   .tab:last-child {
@@ -244,17 +244,16 @@
   }
 
   .tab:hover {
-    background: #1e1e4f;
+    background: var(--bg-elevated);
   }
 
   .tab.active {
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
   }
 
   .tab-count {
     font-size: 0.7rem;
-    opacity: 0.7;
   }
 
   .auto-scroll-toggle {
@@ -262,20 +261,20 @@
     align-items: center;
     gap: 0.4rem;
     font-size: 0.8rem;
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     cursor: pointer;
     margin-left: auto;
   }
 
   .auto-scroll-toggle input {
-    accent-color: var(--accent, #3b82f6);
+    accent-color: var(--accent);
   }
 
   .btn-clear {
     padding: 0.35rem 0.7rem;
     background: transparent;
-    color: var(--text-muted, #94a3b8);
-    border: 1px solid var(--border, #1e1e3f);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
     border-radius: 5px;
     cursor: pointer;
     font-size: 0.78rem;
@@ -284,19 +283,19 @@
   }
 
   .btn-clear:hover {
-    color: var(--red, #f87171);
-    border-color: var(--red, #f87171);
+    color: var(--red);
+    border-color: var(--red);
   }
 
   /* Log container */
   .log-container {
     flex: 1;
     overflow-y: auto;
-    background: var(--bg-base, #0a0a15);
-    border: 1px solid var(--border, #1e1e3f);
-    border-radius: var(--radius-md, 8px);
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     padding: 0.5rem;
-    font-family: var(--font-mono, "SF Mono", "Fira Code", "Cascadia Code", monospace);
+    font-family: var(--font-mono);
     font-size: 0.78rem;
     line-height: 1.7;
     min-height: 300px;
@@ -306,15 +305,14 @@
   .log-container:focus-visible,
   .tab:focus-visible,
   .btn-clear:focus-visible {
-    outline: 2px solid var(--accent, #3b82f6);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 
   .empty {
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     text-align: center;
     padding: 3rem 1rem;
-    opacity: 0.6;
     font-family: inherit;
   }
 
@@ -331,12 +329,11 @@
   }
 
   .log-line:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: color-mix(in srgb, var(--text-primary) 3%, transparent);
   }
 
   .ts {
-    color: var(--text-muted, #94a3b8);
-    opacity: 0.6;
+    color: var(--text-muted);
     flex-shrink: 0;
     min-width: 5.5em;
   }
@@ -352,18 +349,18 @@
   }
 
   .level-info {
-    color: var(--accent, #3b82f6);
-    background: rgba(59, 130, 246, 0.12);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
 
   .level-warn {
-    color: var(--yellow, #fbbf24);
-    background: rgba(251, 191, 36, 0.12);
+    color: var(--yellow);
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
   }
 
   .level-error {
-    color: var(--red, #f87171);
-    background: rgba(248, 113, 113, 0.12);
+    color: var(--red-strong);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 
   .msg {
@@ -385,7 +382,6 @@
 
   .entry-count {
     font-size: 0.75rem;
-    color: var(--text-muted, #94a3b8);
-    opacity: 0.6;
+    color: var(--text-muted);
   }
 </style>

@@ -25,19 +25,19 @@ function injectStyles() {
   if (stylesInjected) return;
   stylesInjected = true;
   const css = `
-  .ec-ie-added { background: rgba(46, 160, 67, 0.18); }
-  .ec-ie-added-gutter { border-left: 3px solid rgba(46, 160, 67, 0.9); }
-  .ec-ie-removed { background: rgba(248, 81, 73, 0.14); color: var(--text-muted, #8b949e); text-decoration: line-through; white-space: pre; overflow: hidden; font-family: inherit; }
-  .ec-ie-removed div { padding-left: 4px; border-left: 3px solid rgba(248, 81, 73, 0.9); }
-  .ec-ie-box { width: max-content; white-space: nowrap; display: flex; gap: 6px; align-items: center; padding: 4px; border-radius: 6px; background: var(--bg-elevated, #1f242c); border: 1px solid var(--accent, #e8963b); box-shadow: 0 4px 16px rgba(0,0,0,.35); font: 12px system-ui, sans-serif; color: var(--text-primary, #e6edf3); z-index: 20; }
+  .ec-ie-added { background: color-mix(in srgb, var(--green) 18%, transparent); }
+  .ec-ie-added-gutter { border-left: 3px solid color-mix(in srgb, var(--green) 90%, transparent); }
+  .ec-ie-removed { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--text-secondary); text-decoration: line-through; white-space: pre; overflow: hidden; font-family: inherit; }
+  .ec-ie-removed div { padding-left: 4px; border-left: 3px solid color-mix(in srgb, var(--red) 90%, transparent); }
+  .ec-ie-box { width: max-content; white-space: nowrap; display: flex; gap: 6px; align-items: center; padding: 4px; border-radius: 6px; background: var(--bg-elevated); border: 1px solid var(--accent); box-shadow: var(--shadow-md); font: 12px system-ui, sans-serif; color: var(--text-primary); z-index: 20; }
   .ec-ie-box input { width: 380px; border: none; outline: none; background: transparent; color: inherit; font: 13px system-ui, sans-serif; padding: 4px 6px; }
-  .ec-ie-box button { border: 1px solid var(--border, #30363d); background: var(--bg-surface, #161b22); color: inherit; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: 12px system-ui, sans-serif; }
-  .ec-ie-box button:hover { border-color: var(--accent, #e8963b); }
-  .ec-ie-box .muted { color: var(--text-muted, #8b949e); }
+  .ec-ie-box button { border: 1px solid var(--border); background: var(--bg-surface); color: inherit; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: 12px system-ui, sans-serif; }
+  .ec-ie-box button:hover { border-color: var(--accent); }
+  .ec-ie-box .muted { color: var(--text-muted); }
   .ec-ie-hunk { width: max-content; white-space: nowrap; display: flex; gap: 4px; margin-left: 16px; }
-  .ec-ie-hunk button { border: 1px solid var(--border, #30363d); background: var(--bg-surface, #161b22); color: var(--text-primary, #e6edf3); border-radius: 4px; padding: 0 6px; cursor: pointer; font: 11px system-ui, sans-serif; line-height: 16px; }
-  .ec-ie-hunk button.ok:hover { border-color: rgba(46,160,67,.9); }
-  .ec-ie-hunk button.no:hover { border-color: rgba(248,81,73,.9); }
+  .ec-ie-hunk button { border: 1px solid var(--border); background: var(--bg-surface); color: var(--text-primary); border-radius: 4px; padding: 0 6px; cursor: pointer; font: 11px system-ui, sans-serif; line-height: 16px; }
+  .ec-ie-hunk button.ok:hover { border-color: color-mix(in srgb, var(--green) 90%, transparent); }
+  .ec-ie-hunk button.no:hover { border-color: color-mix(in srgb, var(--red) 90%, transparent); }
   `;
   const el = document.createElement("style");
   el.textContent = css;

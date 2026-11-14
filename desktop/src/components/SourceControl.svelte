@@ -1,5 +1,6 @@
 <script lang="ts">
   import DiffModal from "./DiffModal.svelte";
+  import Select from "./ui/Select.svelte";
   import { CloudUpload, Download, GitBranch, Github, Link, LoaderCircle } from "@lucide/svelte";
   import {
     gitState, gitHeadContent, gitStage, gitUnstage, gitDiscard, gitCommit, gitCheckout, gitPull, gitPush,
@@ -224,8 +225,7 @@
     });
   }
 
-  async function switchBranch(e: Event) {
-    const b = (e.target as HTMLSelectElement).value;
+  async function switchBranch(b: string) {
     if (b === "__new") {
       newBranch = "";
       return;
@@ -335,11 +335,18 @@
         <input class="branch-input" placeholder="new branch name" bind:value={newBranch}
           onkeydown={(e) => { if (e.key === "Enter") void createBranch(); if (e.key === "Escape") newBranch = null; }} />
       {:else}
-        <select class="branch" value={st.branch ?? ""} disabled={busy} onchange={switchBranch} aria-label="Branch">
-          {#if !st.branch}<option value="">(detached)</option>{/if}
-          {#each st.branches as b (b)}<option value={b}>{b}</option>{/each}
-          <option value="__new">New branch…</option>
-        </select>
+        <Select
+          class="ui-select--sm ui-select--fill"
+          value={st.branch ?? ""}
+          disabled={busy}
+          ariaLabel="Branch"
+          onChange={(b) => void switchBranch(b)}
+          options={[
+            ...(st.branch ? [] : [{ value: "", label: "(detached)" }]),
+            ...st.branches.map((b) => ({ value: b, label: b })),
+            { value: "__new", label: "New branch…" },
+          ]}
+        />
       {/if}
       {#if st.upstream}
         <button disabled={busy} title={st.behind ? `Pull ${st.behind} commit(s)` : "Pull"} onclick={() => run("Pull", gitPull, true)}>↓{st.behind || ""}</button>
@@ -435,7 +442,6 @@
     display: flex;
     gap: 4px;
   }
-  .branch,
   .branch-input {
     flex: 1;
     min-width: 0;
@@ -572,7 +578,7 @@
   }
   .error {
     margin: 2px 0;
-    color: var(--danger, #f85149);
+    color: var(--danger);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -642,14 +648,14 @@
     width: 12px;
     text-align: center;
     font-weight: 600;
-    color: var(--warning, #d29922);
+    color: var(--yellow);
   }
   .status[data-status="U"],
   .status[data-status="A"] {
-    color: var(--success, #3fb950);
+    color: var(--green);
   }
   .status[data-status="D"],
   .status[data-status="C"] {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
 </style>

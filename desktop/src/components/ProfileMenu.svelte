@@ -131,7 +131,7 @@
   .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sub { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
   .pill {
-    padding: 4px 10px; border: none; border-radius: 999px; background: var(--accent); color: var(--on-accent, #111);
+    padding: 4px 10px; border: none; border-radius: 999px; background: var(--accent); color: var(--on-accent);
     font-size: 12px; font-weight: 600; cursor: pointer;
   }
   .gear {
@@ -142,7 +142,7 @@
   .backdrop { position: fixed; inset: 0; z-index: 50; }
   .menu {
     position: absolute; left: 8px; right: 8px; bottom: calc(100% - 4px); z-index: 51; padding: 6px;
-    background: var(--bg-elevated, var(--bg-surface)); border: 0.5px solid var(--border); border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    background: var(--bg-elevated); border: 0.5px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg);
   }
   .menu-head { padding: 6px 10px 8px; }
   .email { font-size: 12px; color: var(--text-secondary); }
@@ -152,6 +152,6 @@
   }
   .menu button:hover, .menu button:focus-visible { background: var(--bg-surface); outline: none; }
   .menu .hint { margin-left: auto; color: var(--text-secondary); font-size: 12px; }
-  .menu .danger { color: var(--danger, #e5484d); }
+  .menu .danger { color: var(--danger); }
   .sep { height: 0.5px; margin: 6px 4px; background: var(--border); }
 </style>

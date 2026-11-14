@@ -476,9 +476,9 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     white-space: nowrap;
   }
   .connect-slot {

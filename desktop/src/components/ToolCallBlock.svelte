@@ -133,9 +133,11 @@
         <div class="body-args"><ToolArgs {tool} {args} /></div>
       {/if}
       {#if error}
-        <pre class="output error-output">{error}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output error-output" tabindex="0" aria-label="Tool error">{error}</pre>
       {:else if truncatedResult}
-        <pre class="output">{truncatedResult}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output" tabindex="0" aria-label="Tool result">{truncatedResult}</pre>
       {:else if status === "executing"}
         <span class="placeholder">Running...</span>
       {:else}
@@ -148,7 +150,7 @@
 <style>
   .tool-call-block {
     border-left: 3px solid var(--accent-secondary);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
@@ -210,14 +212,14 @@
   }
 
   .tool-name {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-weight: 600;
     white-space: nowrap;
   }
 
   .main-arg {
     color: var(--text-muted);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
@@ -263,7 +265,7 @@
 
   .btn {
     padding: 3px 12px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     border: none;
     font-size: 12px;
     font-weight: 500;
@@ -288,7 +290,7 @@
   }
 
   .output {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.5;
     color: var(--text-secondary);

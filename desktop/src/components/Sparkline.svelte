@@ -26,6 +26,6 @@
 
 <style>
   .sparkline { width: 100%; display: block; }
-  .line { stroke: var(--accent, #3b82f6); }
-  .area { fill: var(--accent, #3b82f6); opacity: 0.15; }
+  .line { stroke: var(--accent); }
+  .area { fill: var(--accent); opacity: 0.15; }
 </style>

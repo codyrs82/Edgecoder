@@ -27,11 +27,11 @@
 </div>
 
 <style>
-  .stat-card { background: var(--bg-surface, #1a1a2e); padding: 1.2rem; border-radius: 8px; }
-  .label { display: block; font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.3rem; }
+  .stat-card { background: var(--bg-surface); padding: 1.2rem; border-radius: 8px; }
+  .label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: var(--text-secondary); }
   .value { font-size: 1.6rem; font-weight: 600; }
-  .progress-track { margin-top: 0.6rem; height: 4px; background: #2d2d5f; border-radius: 2px; overflow: hidden; }
-  .progress-fill { height: 100%; background: var(--accent, #3b82f6); border-radius: 2px; transition: width 0.3s ease; }
+  .progress-track { margin-top: 0.6rem; height: 4px; background: var(--border-strong); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s ease; }
   .chart { margin-top: 0.6rem; }
   @media (prefers-reduced-motion: reduce) { .progress-fill { transition: none; } }
 </style>

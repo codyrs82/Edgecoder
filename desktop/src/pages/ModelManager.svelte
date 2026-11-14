@@ -11,6 +11,7 @@
     isRemoteMode,
   } from "../lib/api";
   import { formatBytes, formatParamSize } from "../lib/format";
+  import { scrollRegion } from "../lib/scroll-region";
   import { MODEL_CATALOG, CATEGORY_LABELS, type CatalogModel } from "../lib/models";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
@@ -233,7 +234,8 @@
 
     try {
       const stream = await pullModelStream(name);
-      const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+      // TS's lib types TextDecoderStream's input as BufferSource, which is not assignable to the stream's Uint8Array chunks.
+      const reader = stream.pipeThrough(new TextDecoderStream() as unknown as TransformStream<Uint8Array, string>).getReader();
       let buffer = "";
 
       while (true) {
@@ -436,7 +438,7 @@
     {#if nonCatalogModels.length > 0}
       <section class="models-section">
         <h2 class="section-title">Other Installed Models</h2>
-        <div class="model-table">
+        <div class="model-table" role="group" aria-label="Other installed models" use:scrollRegion>
           <div class="model-header">
             <span class="col-name">Model</span>
             <span class="col-params">Params</span>
@@ -469,7 +471,7 @@
                 {#if model.running && model.vramSize !== null}
                   <span class="vram-value">{formatBytes(model.vramSize)}</span>
                 {:else}
-                  <span class="vram-empty">\u2014</span>
+                  <span class="vram-empty">—</span>
                 {/if}
               </span>
               <span class="col-actions">
@@ -535,14 +537,14 @@
     font-size: 1.5rem;
     font-weight: 700;
     margin: 0 0 1.25rem 0;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .section-title {
     font-size: 1rem;
     font-weight: 600;
     margin: 0 0 0.75rem 0;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-size: 0.8rem;
@@ -558,7 +560,7 @@
     flex-wrap: wrap;
     gap: 0.25rem;
     margin-bottom: 1rem;
-    border-bottom: 1px solid var(--border-color, #2d2d5f);
+    border-bottom: 1px solid var(--border);
     padding-bottom: 0;
   }
 
@@ -567,7 +569,7 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     font-size: 0.85rem;
     font-weight: 500;
     cursor: pointer;
@@ -575,11 +577,11 @@
     margin-bottom: -1px;
   }
   .tab:hover {
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
   .tab.active {
-    color: var(--accent, #3b82f6);
-    border-bottom-color: var(--accent, #3b82f6);
+    color: var(--accent);
+    border-bottom-color: var(--accent);
     font-weight: 600;
   }
 
@@ -591,9 +593,9 @@
   }
 
   .catalog-card {
-    background: var(--bg-surface, #1a1a2e);
-    border: 1px solid var(--border-color, #2d2d5f);
-    border-radius: var(--radius-lg, 10px);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -601,15 +603,15 @@
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   .catalog-card:hover {
-    border-color: var(--border-strong, #3d3d7f);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
   }
   .catalog-card.installed {
-    border-left: 3px solid rgba(34, 197, 94, 0.5);
+    border-left: 3px solid color-mix(in srgb, var(--green) 50%, transparent);
   }
   .catalog-card.active-model {
-    border-left: 3px solid var(--accent, #3b82f6);
-    background: rgba(59, 130, 246, 0.06);
+    border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 
   .card-header {
@@ -621,44 +623,45 @@
   .card-name {
     font-weight: 600;
     font-size: 0.95rem;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .badge-status {
     font-size: 0.6rem;
     font-weight: 700;
     padding: 0.1rem 0.4rem;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     flex-shrink: 0;
   }
 
+  /* Tint and text share a hue: blue text on the accent's tint falls short of 4.5:1 in light. */
   .badge-active-status {
-    background: rgba(59, 130, 246, 0.2);
-    color: #60a5fa;
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
+    color: var(--accent-secondary);
   }
 
   .badge-installed-status {
-    background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+    color: var(--green);
   }
 
   .badge-rec {
     font-size: 0.6rem;
     font-weight: 700;
     padding: 0.1rem 0.4rem;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    background: rgba(245, 158, 11, 0.2);
-    color: #fbbf24;
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
+    color: var(--yellow);
     flex-shrink: 0;
   }
 
   .card-desc {
     font-size: 0.82rem;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     line-height: 1.4;
     margin: 0;
     flex: 1;
@@ -666,15 +669,15 @@
 
   .card-meta {
     font-size: 0.75rem;
-    color: var(--text-muted, #64748b);
-    font-family: monospace;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
     display: flex;
     align-items: center;
     gap: 0.35rem;
   }
 
   .meta-sep {
-    opacity: 0.5;
+    color: var(--text-muted);
   }
 
   .card-actions {
@@ -687,9 +690,9 @@
   .pull-progress-section {
     margin-bottom: 1rem;
     padding: 0.75rem 1rem;
-    background: var(--bg-surface, #1a1a2e);
-    border-radius: var(--radius-lg, 10px);
-    border: 1px solid var(--border-color, #2d2d5f);
+    background: var(--bg-surface);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
   }
 
   .pull-progress {
@@ -699,14 +702,14 @@
   .progress-bar-track {
     width: 100%;
     height: 8px;
-    background: var(--bg-input, #12122a);
+    background: var(--bg-input);
     border-radius: 4px;
     overflow: hidden;
   }
 
   .progress-bar-fill {
     height: 100%;
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
     border-radius: 4px;
     transition: width 0.2s ease-out;
   }
@@ -717,7 +720,7 @@
     align-items: center;
     margin-top: 0.4rem;
     font-size: 0.8rem;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
   }
 
   .progress-status {
@@ -725,35 +728,35 @@
   }
 
   .progress-pct {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-weight: 600;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .progress-bytes {
     font-weight: 400;
-    opacity: 0.7;
+    color: var(--text-secondary);
   }
 
   /* ---- Advanced pull (collapsible) ---- */
   .advanced-pull {
     margin-top: 1.5rem;
     padding: 0.75rem 1rem;
-    background: var(--bg-surface, #1a1a2e);
-    border-radius: var(--radius-lg, 10px);
-    border: 1px solid var(--border-color, #2d2d5f);
+    background: var(--bg-surface);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
   }
 
   .advanced-pull summary {
     cursor: pointer;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     font-size: 0.85rem;
     font-weight: 500;
     user-select: none;
     padding: 0.25rem 0;
   }
   .advanced-pull summary:hover {
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .advanced-pull .pull-row {
@@ -768,17 +771,17 @@
   .pull-input {
     flex: 1;
     padding: 0.55rem 0.75rem;
-    background: var(--bg-input, #12122a);
-    border: 1px solid var(--border-control, #99928b);
+    background: var(--bg-input);
+    border: 1px solid var(--border-control);
     border-radius: 6px;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
     font-family: inherit;
     font-size: 0.9rem;
     outline: none;
     transition: border-color 0.15s;
   }
   .pull-input:focus {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .pull-input:disabled {
     opacity: 0.5;
@@ -792,19 +795,19 @@
 
   .skeleton-container {
     padding: 1rem;
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     border-radius: 10px;
-    border: 1px solid var(--border-color, #2d2d5f);
+    border: 1px solid var(--border);
   }
 
   .model-table {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     border-radius: 10px;
-    border: 1px solid var(--border-color, #2d2d5f);
-    overflow: hidden;
+    border: 1px solid var(--border);
+    overflow-x: auto;
   }
 
   .model-header,
@@ -814,42 +817,44 @@
     align-items: center;
     padding: 0.6rem 1rem;
     gap: 0.5rem;
+    /* Seven columns need this much; in a narrower window the table scrolls sideways. */
+    min-width: 640px;
   }
 
   .model-header {
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-secondary, #94a3b8);
-    background: var(--bg-header, #151530);
+    color: var(--text-secondary);
+    background: var(--bg-surface);
     font-weight: 600;
-    border-bottom: 1px solid var(--border-color, #2d2d5f);
+    border-bottom: 1px solid var(--border);
   }
 
   .model-row {
     font-size: 0.88rem;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
     transition: background 0.15s;
   }
   .model-row:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: color-mix(in srgb, var(--text-primary) 3%, transparent);
   }
 
   .model-row-active {
-    background: rgba(59, 130, 246, 0.08);
-    border-left: 3px solid var(--accent, #3b82f6);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border-left: 3px solid var(--accent);
   }
   .model-row-active:hover {
-    background: rgba(59, 130, 246, 0.12);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
 
   .model-row-running:not(.model-row-active) {
-    background: rgba(34, 197, 94, 0.06);
+    background: color-mix(in srgb, var(--green) 6%, transparent);
   }
 
   /* ---- Cell styles ---- */
   .model-id {
-    font-family: "SF Mono", "Fira Code", monospace;
+    font-family: var(--font-mono);
     font-weight: 600;
     display: flex;
     align-items: center;
@@ -870,37 +875,37 @@
   }
 
   .badge-active {
-    background: rgba(59, 130, 246, 0.2);
-    color: #60a5fa;
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
+    color: var(--accent-secondary);
   }
 
   .badge-running {
-    background: rgba(34, 197, 94, 0.2);
-    color: #4ade80;
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+    color: var(--green);
   }
 
   .quant-tag {
     font-size: 0.78rem;
-    background: var(--bg-tag, #2d2d5f);
+    background: var(--bg-elevated);
     padding: 0.1rem 0.45rem;
     border-radius: 4px;
-    font-family: monospace;
+    font-family: var(--font-mono);
   }
 
   .col-disk,
   .col-vram,
   .col-params {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-size: 0.84rem;
   }
 
   .col-source {
     font-size: 0.82rem;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
   }
 
   .vram-value {
-    color: #4ade80;
+    color: var(--green);
     font-weight: 600;
   }
 
@@ -931,51 +936,51 @@
   }
 
   .btn-primary {
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover, #2563eb);
+    background: var(--accent-hover);
   }
 
   .btn-swap {
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .btn-swap:hover:not(:disabled) {
-    background: var(--accent-hover, #2563eb);
+    background: var(--accent-hover);
   }
 
   .btn-install {
-    background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
-    border: 1px solid rgba(34, 197, 94, 0.3);
+    background: color-mix(in srgb, var(--green) 8%, transparent);
+    color: var(--green);
+    border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
   }
   .btn-install:hover:not(:disabled) {
-    background: rgba(34, 197, 94, 0.25);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
   }
 
   .btn-active-indicator {
-    background: rgba(59, 130, 246, 0.15);
-    color: #60a5fa;
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
+    color: var(--accent-secondary);
     cursor: default;
   }
 
   .btn-delete {
-    background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    color: var(--red-strong);
   }
   .btn-delete:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.3);
+    background: color-mix(in srgb, var(--red) 15%, transparent);
   }
 
   .btn-confirm {
-    background: #dc2626;
-    color: #fff;
+    background: var(--red);
+    color: var(--on-accent);
     animation: pulse-confirm 0.6s ease-in-out infinite alternate;
   }
   .btn-confirm:hover {
-    background: #b91c1c;
+    filter: brightness(0.9);
   }
 
   @keyframes pulse-confirm {
@@ -986,8 +991,8 @@
   .info-banner {
     display: flex;
     align-items: center;
-    background: rgba(59, 130, 246, 0.1);
-    color: var(--accent-secondary, #4a90d9);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
+    color: var(--accent-secondary);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -995,11 +1000,11 @@
   }
   .row-pull-status {
     font-size: 0.8rem;
-    color: var(--text-muted, #9aa0a6);
+    color: var(--text-muted);
   }
   .row-pull-error {
     font-size: 0.8rem;
-    color: var(--danger, #e5484d);
+    color: var(--danger);
     max-width: 28rem;
   }
 </style>

@@ -2,7 +2,7 @@
 
 The design tokens (color, spacing, type and radius) for the desktop app and the portal (#23).
 
-- `src/tokens.json` is the source of truth. Every color has a `light` and a `dark` value.
+- `src/tokens.json` is the source of truth. Every color has a `light` and a `dark` value. Elevation (`--shadow-sm|md|lg`, `--scrim`) is neutral black and the same in both themes. `derived` colours are mixed from two colour tokens in CSS: `--red-strong` is the red for text on a red tint (up to 15%), where plain `--red` falls below 4.5:1.
 - `node packages/tokens/build.mjs` regenerates `dist/tokens.css` (the runtime CSS variables) and `src/theme.css` (the Tailwind v4 `@theme` mapping). Both files are committed. `--check` fails if either is stale, and the unit tests check this too.
 - Theme selection: light is the `:root` default. `<html data-theme="dark">` forces dark. With no `data-theme` set, `prefers-color-scheme` decides.
 - The variable names match the old `App.svelte` `:root` block (`--bg-base`, `--text-primary`, ... plus the portal aliases `--bg`, `--brand`, ...), so existing component CSS keeps working.

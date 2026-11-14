@@ -190,36 +190,36 @@
 </div>
 
 <style>
-  .hint { color: var(--text-secondary, #94a3b8); font-size: 0.85rem; margin: 0 0 1rem; line-height: 1.5; }
+  .hint { color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 1rem; line-height: 1.5; }
   .notice {
     font-size: 0.85rem;
     line-height: 1.5;
     margin: 0 0 1rem;
     padding: 0.6rem 0.8rem;
-    border: 1px solid #facc15;
+    border: 1px solid var(--yellow);
     border-radius: 7px;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
-  .field-label { display: block; margin: 1rem 0 0.35rem; font-size: 0.82rem; color: var(--text-muted, #94a3b8); }
+  .field-label { display: block; margin: 1rem 0 0.35rem; font-size: 0.82rem; color: var(--text-muted); }
   .field-row { display: flex; gap: 0.5rem; }
   .field-row input {
     flex: 1;
     min-width: 0;
     padding: 0.5rem 0.7rem;
     border-radius: 7px;
-    border: 1px solid var(--border, #1e1e3f);
-    background: var(--bg-input, #0f0f23);
-    color: var(--text-primary, #e2e8f0);
-    font-family: "SF Mono", "Fira Code", monospace;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
     font-size: 0.85rem;
   }
-  .field-row input[aria-invalid="true"] { border-color: #f87171; }
-  .field-error { color: #f87171; font-size: 0.85rem; margin: 0.5rem 0 0; }
+  .field-row input[aria-invalid="true"] { border-color: var(--red); }
+  .field-error { color: var(--red); font-size: 0.85rem; margin: 0.5rem 0 0; }
   .wallet { padding: 1.5rem; max-width: 640px; }
-  h1 { font-size: 1.4rem; margin: 0 0 1.5rem; color: var(--text-primary, #e2e8f0); }
+  h1 { font-size: 1.4rem; margin: 0 0 1.5rem; color: var(--text-primary); }
   .section {
-    background: var(--bg-surface, #1a1a2e);
-    border: 1px solid var(--border, #1e1e3f);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     padding: 1.2rem 1.4rem;
     border-radius: 10px;
     margin-bottom: 1.2rem;
@@ -227,7 +227,7 @@
   h2 {
     font-size: 0.92rem;
     margin: 0 0 1rem;
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 600;
@@ -238,14 +238,14 @@
     gap: 0.5rem 1rem;
     font-size: 0.85rem;
   }
-  .info-label { color: var(--text-muted, #94a3b8); padding-top: 0.15rem; }
+  .info-label { color: var(--text-muted); padding-top: 0.15rem; }
   .info-value { word-break: break-all; display: flex; align-items: center; gap: 0.5rem; }
-  .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.8rem; }
-  .muted { color: var(--text-muted, #94a3b8); font-size: 0.85rem; }
+  .mono { font-family: var(--font-mono); font-size: 0.8rem; }
+  .muted { color: var(--text-muted); font-size: 0.85rem; }
   .btn-primary {
     padding: 0.6rem 1.8rem;
-    background: var(--accent, #3b82f6);
-    color: white;
+    background: var(--accent);
+    color: var(--on-accent);
     border: none;
     border-radius: 7px;
     cursor: pointer;
@@ -261,15 +261,15 @@
     justify-content: space-between;
     align-items: center;
     padding: 0.6rem 0;
-    border-bottom: 1px solid var(--border, #1e1e3f);
+    border-bottom: 1px solid var(--border);
     font-size: 0.85rem;
   }
   .tx-row:last-child { border-bottom: none; }
   .tx-info { display: flex; flex-direction: column; gap: 0.2rem; }
   .tx-dest { font-weight: 600; }
-  .tx-note { color: var(--text-muted, #94a3b8); font-size: 0.8rem; }
+  .tx-note { color: var(--text-muted); font-size: 0.8rem; }
   .tx-meta { display: flex; align-items: center; gap: 0.75rem; text-align: right; }
-  .tx-amount { font-weight: 600; font-family: monospace; }
-  .tx-status { font-size: 0.75rem; text-transform: uppercase; color: var(--text-secondary, #94a3b8); }
-  .tx-time { font-size: 0.75rem; color: var(--text-muted, #64748b); }
+  .tx-amount { font-weight: 600; font-family: var(--font-mono); }
+  .tx-status { font-size: 0.75rem; text-transform: uppercase; color: var(--text-secondary); }
+  .tx-time { font-size: 0.75rem; color: var(--text-muted); }
 </style>

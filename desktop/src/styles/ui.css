@@ -1,0 +1,75 @@
+/* #24: styling for the bits-ui primitives in components/ui. They render in portals at the end
+   of <body>, outside any component's scoped styles, so their classes are global and built only
+   from the shared tokens. Layers: dialogs 200, popups (select, popover) 300; toasts above both. */
+
+.ui-dialog-overlay { position: fixed; inset: 0; z-index: 200; background: var(--scrim); }
+/* The palette floats over the editor without dimming it. */
+.ui-dialog-overlay--top { background: transparent; }
+.ui-dialog {
+  position: fixed; z-index: 201; display: flex; flex-direction: column; box-sizing: border-box;
+  background: var(--bg-base); color: var(--text-primary); border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.ui-dialog:focus-visible { outline: none; }
+.ui-dialog--center {
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(var(--ui-dialog-width, 480px), calc(100vw - 32px)); max-height: calc(100vh - 32px);
+}
+.ui-dialog--inset { inset: 5vh 5vw; }
+.ui-dialog--full { inset: 0; border: none; border-radius: 0; box-shadow: none; }
+.ui-dialog--top {
+  top: 12vh; left: 50%; transform: translateX(-50%); width: min(640px, 90vw); max-height: 76vh;
+  background: var(--bg-elevated);
+}
+
+/* The attribute lifts specificity over the page-level `.sp button` rule. */
+.ui-select[data-select-trigger] {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; box-sizing: border-box;
+  min-width: 0; max-width: 100%; padding: 6px 9px; background: var(--bg-base); color: var(--text-primary);
+  border: 0.5px solid var(--border-control); border-radius: var(--radius-md); font: inherit; font-size: 13px;
+  cursor: pointer; text-align: left;
+}
+.ui-select--sm[data-select-trigger] { padding: 3px 6px; font-size: 12px; border-radius: var(--radius-sm); }
+.ui-select--fill[data-select-trigger] { flex: 1; }
+.ui-select[data-placeholder] .ui-select-value { color: var(--text-secondary); }
+.ui-select[data-disabled] { opacity: 0.5; cursor: not-allowed; }
+.ui-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-select svg { flex: none; color: var(--text-secondary); }
+
+.ui-popup {
+  z-index: 300; box-sizing: border-box; background: var(--bg-elevated); color: var(--text-primary);
+  border: 0.5px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+}
+.ui-popup:focus-visible { outline: none; }
+.ui-select-content {
+  min-width: var(--bits-select-anchor-width); max-width: min(420px, calc(100vw - 16px));
+  max-height: min(320px, var(--bits-select-content-available-height)); overflow-y: auto; padding: 4px;
+}
+.ui-select-item, .ui-command-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm);
+  font-size: 13px; color: var(--text-primary); cursor: pointer; user-select: none; outline: none;
+}
+.ui-select-item > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-select-item[data-highlighted], .ui-command-item[data-selected] { background: var(--bg-surface); }
+.ui-select-item[data-disabled], .ui-command-item[aria-disabled="true"] { color: var(--text-muted); cursor: not-allowed; }
+.ui-select-item svg { flex: none; color: var(--accent); }
+
+/* svelte-sonner. Its own palette is switched off (unstyled); these are the app's tokens. */
+/* A modal dialog turns pointer events off on <body>; toasts must stay clickable above it. */
+[data-sonner-toaster] { pointer-events: auto; }
+.ui-toast {
+  display: flex; align-items: flex-start; gap: 10px; box-sizing: border-box; width: var(--width);
+  padding: 10px 12px; background: var(--bg-elevated); color: var(--text-primary);
+  border: 0.5px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.4;
+}
+.ui-toast [data-content] { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ui-toast [data-icon] { flex: none; display: inline-flex; margin-top: 2px; }
+.ui-toast[data-type="error"] [data-icon] { color: var(--red); }
+.ui-toast[data-type="success"] [data-icon] { color: var(--green); }
+.ui-toast[data-type="info"] [data-icon] { color: var(--accent-secondary); }
+.ui-toast [data-close-button] {
+  order: 2; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  padding: 0; border: none; border-radius: var(--radius-sm); background: none; color: var(--text-secondary); cursor: pointer;
+}
+.ui-toast [data-close-button]:hover { color: var(--text-primary); background: var(--bg-surface); }

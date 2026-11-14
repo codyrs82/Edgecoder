@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { X } from "@lucide/svelte";
   import { onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
 
-  let status: UpdateStatus = $state({ state: "idle" });
+  let status = $state<UpdateStatus>({ state: "idle" });
   let dismissed = $state(false);
 
   $effect(() => {
@@ -33,9 +34,7 @@
       <span class="update-text">EdgeCoder v{version} is ready.</span>
       <button class="update-btn" onclick={handleUpdate}>Restart to update</button>
       <button class="dismiss-btn" onclick={handleDismiss} title="Dismiss">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18 6L6 18M6 6l12 12"/>
-        </svg>
+        <X size={14} />
       </button>
     {:else if status.state === "installing"}
       <span class="update-text">Installing update... Restarting shortly.</span>
@@ -49,8 +48,8 @@
     align-items: center;
     gap: 10px;
     padding: 6px 16px;
-    background: rgba(74, 144, 217, 0.12);
-    border-bottom: 1px solid rgba(74, 144, 217, 0.25);
+    background: color-mix(in srgb, var(--accent-secondary) 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent-secondary) 25%, transparent);
     font-size: 0.82rem;
     flex-shrink: 0;
   }
@@ -62,8 +61,8 @@
 
   .update-btn {
     padding: 3px 12px;
-    background: var(--accent-secondary, #4a90d9);
-    color: var(--on-accent, #fff);
+    background: var(--accent-secondary);
+    color: var(--on-accent);
     border: none;
     border-radius: 4px;
     cursor: pointer;

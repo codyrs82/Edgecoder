@@ -50,8 +50,14 @@
       {task.state === "done" ? "Finished on the network" : task.state === "failed" ? "Failed on the network" : "No result after 15 minutes"}
       · {secs(task.submittedAtMs, task.finishedAtMs ?? now)}{#if task.creditsSpent} · {task.creditsSpent} credit{task.creditsSpent === 1 ? "" : "s"}{/if}
     </div>
-    {#if task.output}<pre>{task.output}</pre>{/if}
-    {#if task.error}<pre class="err">{task.error}</pre>{/if}
+    {#if task.output}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <pre tabindex="0" aria-label="Task output">{task.output}</pre>
+    {/if}
+    {#if task.error}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <pre class="err" tabindex="0" aria-label="Task error">{task.error}</pre>
+    {/if}
   {/if}
 </div>
 
@@ -90,13 +96,13 @@
     padding: 8px 10px;
     border-top: 0.5px solid var(--border);
     background: var(--bg-base);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: pre-wrap;
     max-height: 300px;
     overflow: auto;
   }
   pre.err {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
 </style>

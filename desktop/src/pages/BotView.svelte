@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Tabs } from "bits-ui";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
@@ -290,10 +291,16 @@
     </div>
   </header>
 
-  <div class="tabs" role="tablist">
-    <button role="tab" aria-selected={view === "chat"} class:active={view === "chat"} onclick={() => (view = "chat")}><MessageSquare size={13} /> Conversation</button>
-    <button role="tab" aria-selected={view === "history"} class:active={view === "history"} onclick={() => (view = "history")}><History size={13} /> Runs ({runs.length})</button>
-  </div>
+  <!-- #24: bits-ui Tabs; the root is display: contents so the column layout is unchanged. -->
+  <Tabs.Root class="contents" bind:value={view}>
+  <Tabs.List aria-label="Bot views">
+    {#snippet child({ props })}
+      <div {...props} class="tabs">
+        <Tabs.Trigger value="chat"><MessageSquare size={13} /> Conversation</Tabs.Trigger>
+        <Tabs.Trigger value="history"><History size={13} /> Runs ({runs.length})</Tabs.Trigger>
+      </div>
+    {/snippet}
+  </Tabs.List>
 
   {#if error}<div class="error" role="alert">{error}</div>{/if}
 
@@ -316,7 +323,9 @@
   {/if}
 
   {#if view === "chat"}
-    <div class="messages" bind:this={scrollEl}>
+    <Tabs.Content value="chat">
+    {#snippet child({ props })}
+    <div {...props} class="messages" bind:this={scrollEl}>
       {#if messages.length === 0}
         <div class="empty">
           <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={72} decorative />
@@ -388,8 +397,12 @@
         {/if}
       {/each}
     </div>
+    {/snippet}
+    </Tabs.Content>
   {:else}
-    <div class="history">
+    <Tabs.Content value="history">
+    {#snippet child({ props })}
+    <div {...props} class="history">
       {#if runs.length === 0}
         <div class="empty"><p>No runs yet.</p></div>
       {:else}
@@ -416,7 +429,10 @@
         </table>
       {/if}
     </div>
+    {/snippet}
+    </Tabs.Content>
   {/if}
+  </Tabs.Root>
 
   <div class="composer">
     <ChatInput onSend={send} placeholder={busy ? `${bot.name} is working; your message goes next…` : `Message ${bot.name}`} />
@@ -434,12 +450,19 @@
       {#if bot.role}<div class="d-role">{bot.role}</div>{/if}
       <span class="chip {chip.tone}">{chip.text}</span>
     </div>
-    <div class="d-tabs" role="tablist" aria-label="Details">
-      {#each [["details", "Details"], ["memory", "Memory"], ["folder", "Folder"]] as [id, label] (id)}
-        <button role="tab" aria-selected={panelTab === id} class:active={panelTab === id} onclick={() => (panelTab = id as typeof panelTab)}>{label}</button>
-      {/each}
-    </div>
-    <div class="d-body" role="tabpanel">
+    <Tabs.Root class="contents" bind:value={panelTab}>
+    <Tabs.List aria-label="Details">
+      {#snippet child({ props })}
+        <div {...props} class="d-tabs">
+          {#each [["details", "Details"], ["memory", "Memory"], ["folder", "Folder"]] as [id, label] (id)}
+            <Tabs.Trigger value={id}>{label}</Tabs.Trigger>
+          {/each}
+        </div>
+      {/snippet}
+    </Tabs.List>
+    <Tabs.Content value={panelTab}>
+    {#snippet child({ props })}
+    <div {...props} class="d-body">
       {#if panelTab === "details"}
         <div class="d-section">
           <div class="d-label">Routines</div>
@@ -515,7 +538,8 @@
           {#if memory === null}
             <div class="d-sub muted">Loading…</div>
           {:else if memory.trim()}
-            <pre class="memory">{memory}</pre>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <pre class="memory" tabindex="0" aria-label="Bot memory">{memory}</pre>
           {:else}
             <div class="d-sub muted">Nothing yet. It saves notes with its remember tool as it works.</div>
           {/if}
@@ -542,6 +566,9 @@
         </div>
       {/if}
     </div>
+    {/snippet}
+    </Tabs.Content>
+    </Tabs.Root>
   </aside>
  {/if}
 </div>
@@ -588,14 +615,14 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 14px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 14px;
     background: var(--bg-surface);
     margin-bottom: 8px;
   }
   .ask-card.waiting {
-    border-color: color-mix(in srgb, var(--warning, #d29922) 55%, transparent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning, #d29922) 12%, transparent);
+    border-color: color-mix(in srgb, var(--yellow) 55%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow) 12%, transparent);
   }
   .ask-q {
     font-size: 13px;
@@ -607,7 +634,7 @@
     padding: 6px 9px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-word;
@@ -621,7 +648,7 @@
   .ask-choices button {
     padding: 6px 14px;
     border-radius: 999px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12.5px;
@@ -634,7 +661,7 @@
     font-weight: 600;
   }
   .ask-choices button:focus-visible,
-  .d-tabs button:focus-visible,
+  .d-tabs :global(button:focus-visible),
   .details button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
@@ -643,14 +670,14 @@
     align-self: flex-end;
     padding: 4px 12px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--success, #3fb950) 16%, transparent);
-    color: var(--success, #3fb950);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+    color: var(--green);
     font-size: 12px;
     font-weight: 600;
   }
   .ask-answer.denied {
-    background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--red-strong);
   }
   .pr-ask {
     display: flex;
@@ -688,10 +715,10 @@
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
-    border: 0.5px solid color-mix(in srgb, var(--success, #3fb950) 50%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--green) 50%, transparent);
     border-radius: 14px;
-    background: color-mix(in srgb, var(--success, #3fb950) 8%, var(--bg-surface));
-    color: var(--success, #3fb950);
+    background: color-mix(in srgb, var(--green) 8%, var(--bg-surface));
+    color: var(--green);
     margin-bottom: 8px;
   }
   .pr-card-text {
@@ -709,7 +736,7 @@
   .pr-card-sub {
     font-size: 12px;
     color: var(--text-secondary);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -717,7 +744,7 @@
   .pr-card button {
     padding: 5px 12px;
     border-radius: 999px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12px;
@@ -741,7 +768,7 @@
     white-space: nowrap;
   }
   .repo-err {
-    color: var(--danger, #e5484d);
+    color: var(--danger);
   }
   /* --- details panel --- */
   .details {
@@ -750,7 +777,7 @@
     display: flex;
     flex-direction: column;
     border-left: 0.5px solid var(--border);
-    background: var(--bg-deep, var(--bg-base));
+    background: var(--bg-deep);
     overflow-y: auto;
   }
   .d-top {
@@ -809,7 +836,7 @@
     background: var(--bg-base);
     border: 0.5px solid var(--border);
   }
-  .d-tabs button {
+  .d-tabs :global(button) {
     flex: 1;
     padding: 5px 8px;
     border: none;
@@ -819,10 +846,10 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .d-tabs button.active {
+  .d-tabs :global(button[data-state="active"]) {
     background: var(--bg-surface);
     color: var(--text-primary);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-sm);
   }
   .d-body {
     display: flex;
@@ -904,7 +931,7 @@
     border-radius: 999px;
     border: none;
     padding: 0;
-    background: var(--border-strong, #444);
+    background: var(--border-control);
     cursor: pointer;
   }
   .switch::after {
@@ -915,11 +942,11 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: #fff;
+    background: var(--bg-surface);
     transition: transform 0.15s;
   }
   .switch[aria-checked="true"] {
-    background: var(--success, #3fb950);
+    background: var(--green);
   }
   .switch[aria-checked="true"]::after {
     transform: translateX(14px);
@@ -938,7 +965,7 @@
     padding: 10px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     line-height: 1.5;
     white-space: pre-wrap;
@@ -950,7 +977,7 @@
     padding: 8px 10px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     word-break: break-all;
   }
@@ -964,7 +991,7 @@
     align-items: center;
     gap: 6px;
     padding: 5px 10px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
     background: var(--bg-base);
     color: var(--text-primary);
@@ -987,7 +1014,7 @@
       right: 0;
       bottom: 0;
       z-index: 30;
-      box-shadow: -12px 0 32px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--shadow-lg);
     }
   }
   .bot-head {
@@ -1039,14 +1066,14 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .chip.warn {
-    color: var(--warning, #d29922);
-    border-color: color-mix(in srgb, var(--warning, #d29922) 45%, transparent);
-    background: color-mix(in srgb, var(--warning, #d29922) 10%, transparent);
+    color: var(--yellow);
+    border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
+    background: color-mix(in srgb, var(--yellow) 10%, transparent);
   }
   .chip.err {
-    color: var(--danger, #e5484d);
-    border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, transparent);
-    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+    color: var(--red-strong);
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .meta {
     display: flex;
@@ -1054,7 +1081,7 @@
     gap: 6px;
     min-width: 0;
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
   }
@@ -1074,7 +1101,7 @@
   }
   .meta .sep {
     flex-shrink: 0;
-    opacity: 0.6;
+    color: var(--text-muted);
   }
   .meter {
     display: inline-block;
@@ -1100,9 +1127,9 @@
     align-items: center;
     gap: 6px;
     padding: 6px 11px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
-    background: var(--bg-base, var(--bg-surface));
+    background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12.5px;
     cursor: pointer;
@@ -1141,10 +1168,10 @@
     display: flex;
     flex-direction: column;
     padding: 4px;
-    background: var(--bg-elevated, var(--bg-surface));
+    background: var(--bg-elevated);
     border: 0.5px solid var(--border);
     border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-lg);
   }
   .menu button {
     border: none;
@@ -1167,10 +1194,10 @@
     gap: 10px;
     margin: 10px 20px 0;
     padding: 10px 12px;
-    border: 0.5px solid color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 10px;
-    background: color-mix(in srgb, var(--danger, #e5484d) 7%, var(--bg-surface));
-    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger) 7%, var(--bg-surface));
+    color: var(--danger);
     font-size: 12.5px;
   }
   .notice-text {
@@ -1196,9 +1223,9 @@
   }
   .notice-actions button {
     padding: 4px 10px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 7px;
-    background: var(--bg-base, var(--bg-surface));
+    background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12px;
     cursor: pointer;
@@ -1221,14 +1248,14 @@
   }
   .run-note {
     font-size: 11px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
   }
   .tabs {
     display: flex;
     gap: 2px;
     padding: 6px 16px 0;
   }
-  .tabs button {
+  .tabs :global(button) {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1240,7 +1267,7 @@
     font-size: 12.5px;
     cursor: pointer;
   }
-  .tabs button.active {
+  .tabs :global(button[data-state="active"]) {
     background: var(--bg-surface);
     color: var(--text-primary);
   }
@@ -1249,7 +1276,7 @@
     padding: 8px 12px;
     border-radius: 8px;
     font-size: 12.5px;
-    color: var(--danger);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .messages {
@@ -1267,7 +1294,7 @@
   .event {
     text-align: center;
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     padding: 10px 0 4px;
   }
   .empty {

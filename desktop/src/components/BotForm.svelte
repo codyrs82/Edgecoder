@@ -1,6 +1,7 @@
 <script lang="ts">
   import "../styles/settings-page.css";
-  import { focusTrap } from "../lib/focus-trap";
+  import Dialog from "./ui/Dialog.svelte";
+  import Select from "./ui/Select.svelte";
   import { createBot, updateBot, getBot, botErrorText } from "../lib/api";
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
@@ -130,11 +131,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="bf-backdrop" onclick={onClose}></div>
-<div class="bf-dialog" role="dialog" aria-modal="true" aria-label={initial ? `Edit ${initial.name}` : "New bot"} use:focusTrap={{ onEscape: onClose }}>
-  <form class="sp" onsubmit={save}>
-    <h1>{initial ? `Edit ${initial.name}` : "New bot"}</h1>
+<Dialog labelledby="bf-title" width="680px" {onClose}>
+  <form class="sp bf-form" onsubmit={save}>
+    <h1 id="bf-title">{initial ? `Edit ${initial.name}` : "New bot"}</h1>
     <p class="sp-lead">A bot owns a job and keeps its own home folder. It runs on its schedule, when you press Run now, or when you message it, on the compute you choose below.</p>
 
     <div class="sp-group">
@@ -198,9 +197,7 @@
             {#if customSchedule}
               <input type="text" bind:value={schedule} placeholder="every 2 hours" aria-label="Schedule" />
             {:else}
-              <select bind:value={schedule} aria-label="Schedule">
-                {#each SCHEDULE_PRESETS as p (p.value)}<option value={p.value}>{p.label}</option>{/each}
-              </select>
+              <Select bind:value={schedule} ariaLabel="Schedule" options={SCHEDULE_PRESETS} />
             {/if}
             <button type="button" class="ghost small" onclick={() => (customSchedule = !customSchedule)}>{customSchedule ? "Presets" : "Custom"}</button>
           </div>
@@ -217,19 +214,14 @@
         {#each triggers as t, i (i)}
           <div class="sp-row bf-trigger">
             <div class="bf-trigger-fields">
-              <select value={t.kind} aria-label="Trigger {i + 1}" onchange={(e) => {
-                const kind = (e.currentTarget as HTMLSelectElement).value as TriggerKind;
+              <Select value={t.kind} ariaLabel="Trigger {i + 1}" options={TRIGGER_KIND_OPTIONS} onChange={(kind) => {
                 setTrigger(i, kind === "pr" ? { kind, onlyOthers: t.onlyOthers ?? true, scope: undefined } : kind === "ci_failed" ? { kind, scope: t.scope ?? "any", onlyOthers: undefined } : { kind, onlyOthers: undefined, scope: undefined });
-              }}>
-                {#each TRIGGER_KIND_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
-              </select>
+              }} />
               {#if t.kind === "pr"}
                 <label class="bf-check"><input type="checkbox" checked={t.onlyOthers !== false} onchange={(e) => setTrigger(i, { onlyOthers: (e.currentTarget as HTMLInputElement).checked })} /> Only PRs by others</label>
                 <input type="text" class="bf-label" value={t.label ?? ""} placeholder="Any label" maxlength="100" aria-label="Only PRs with this label" oninput={(e) => setTrigger(i, { label: (e.currentTarget as HTMLInputElement).value })} />
               {:else if t.kind === "ci_failed"}
-                <select value={t.scope ?? "any"} aria-label="Where CI failed" onchange={(e) => setTrigger(i, { scope: (e.currentTarget as HTMLSelectElement).value as BotTriggerConfig["scope"] })}>
-                  {#each CI_SCOPE_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
-                </select>
+                <Select value={t.scope ?? "any"} ariaLabel="Where CI failed" options={CI_SCOPE_OPTIONS} onChange={(scope) => setTrigger(i, { scope })} />
               {:else}
                 <input type="text" class="bf-label" value={t.label ?? ""} placeholder="Label, e.g. bug" maxlength="100" required aria-label="Issue label" oninput={(e) => setTrigger(i, { label: (e.currentTarget as HTMLInputElement).value })} />
               {/if}
@@ -308,39 +300,22 @@
       <button type="submit" class="primary" disabled={saving || !name.trim() || !projectRoot.trim()}>{saving ? "Saving…" : initial ? "Save" : "Create bot"}</button>
     </div>
   </form>
-</div>
+</Dialog>
 
 <style>
-  .bf-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.45);
-    z-index: 200;
-  }
-  .bf-dialog {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 201;
-    width: min(680px, calc(100vw - 32px));
-    max-height: calc(100vh - 48px);
-    overflow-y: auto;
-    background: var(--bg-deep);
-    border: 0.5px solid var(--border);
-    border-radius: 14px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-  }
-  .bf-dialog :global(.sp) {
+  /* The dialog shell clips; the form is what scrolls. */
+  .bf-form {
     padding: 24px 24px 20px;
     max-width: none;
+    overflow-y: auto;
+    background: var(--bg-deep);
   }
   textarea {
     width: 100%;
     padding: 8px 10px;
     background: var(--bg-base);
     color: var(--text-primary);
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
     font: inherit;
     font-size: 13px;
@@ -376,7 +351,7 @@
     padding: 0;
     border-radius: 50%;
     border: 2px solid transparent;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   .bf-swatches .bf-swatch[aria-checked="true"] {
     border-color: var(--text-primary);
@@ -429,7 +404,7 @@
     flex-direction: column;
     gap: 3px;
     padding: 10px 12px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 10px;
     background: var(--bg-base);
     cursor: pointer;
@@ -461,7 +436,7 @@
     color: var(--text-secondary);
   }
   .bf-picker {
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
     background: var(--bg-base);
   }
