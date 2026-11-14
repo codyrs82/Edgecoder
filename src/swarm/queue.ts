@@ -74,8 +74,9 @@ export class SwarmQueue {
   /**
    * #51: called once for every subtask failed at the retry cap, whichever caller
    * triggered expiry, so the coordinator can finalize it (fail dependents, refund).
-   * Note: leases, attempts and expired holders are in memory only; a coordinator
-   * restart resets them (tracked as a follow-up alongside #55).
+   * #99: attempts and expired holders are also written to Postgres (queue_tasks.attempts,
+   * queue_expired_holders), so a re-enqueued subtask keeps its retry count after a restart and a
+   * late result from an expired holder is rejected by any coordinator on the same database.
    */
   private leaseFailureListener?: (result: SubtaskResult) => void;
 
@@ -146,9 +147,40 @@ export class SwarmQueue {
     const claimableAfterMs = opts?.claimDelayMs ? Date.now() + opts.claimDelayMs : undefined;
     const excludeAgents = opts?.excludeAgents?.length ? [...opts.excludeAgents] : undefined;
     const excludeAccounts = opts?.excludeAccounts?.length ? [...opts.excludeAccounts] : undefined;
-    this.tasks.push({ subtask: materialized, claimableAfterMs, excludeAgents, excludeAccounts });
-    void this.store?.persistSubtask(materialized).catch(() => undefined);
+    const item: QueueItem = { subtask: materialized, claimableAfterMs, excludeAgents, excludeAccounts };
+    this.tasks.push(item);
+    this.persist(materialized.id, async (store) => {
+      await store.persistSubtask(materialized);
+      this.mergeLeaseState(item, await store.getSubtaskLeaseState(materialized.id));
+    });
     return materialized;
+  }
+
+  /** #99: per-subtask tail of store writes, so a claim and its expiry reach Postgres in order. */
+  private readonly persistTails = new Map<string, Promise<void>>();
+
+  /** Fire-and-forget store write, ordered after earlier writes for the same subtask. */
+  private persist(subtaskId: string, write: (store: PostgresStore) => Promise<unknown>): void {
+    const store = this.store;
+    if (!store) return;
+    const tail = (this.persistTails.get(subtaskId) ?? Promise.resolve())
+      .then(() => write(store))
+      .then(() => undefined, () => undefined);
+    this.persistTails.set(subtaskId, tail);
+    void tail.then(() => {
+      if (this.persistTails.get(subtaskId) === tail) this.persistTails.delete(subtaskId);
+    });
+  }
+
+  /**
+   * #99: fold persisted lease state into a (re-)enqueued item: the retry count never goes down,
+   * and agents whose lease on it expired before a restart stay barred (unless one holds it now).
+   */
+  private mergeLeaseState(item: QueueItem, state: { attempts: number; expiredHolders: string[] }): void {
+    if (state.attempts > (item.attempts ?? 0)) item.attempts = state.attempts;
+    for (const agentId of state.expiredHolders) {
+      if (agentId !== item.claimedBy) this.markExpired(item.subtask.id, agentId);
+    }
   }
 
   /**
@@ -223,7 +255,8 @@ export class SwarmQueue {
     item.attempts = (item.attempts ?? 0) + 1;
     this.expiredHolders.get(item.subtask.id)?.delete(agentId);
     this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
-    void this.store?.markSubtaskClaimed(item.subtask.id, agentId, item.claimedAt).catch(() => undefined);
+    const { claimedAt, attempts } = item;
+    this.persist(item.subtask.id, (store) => store.markSubtaskClaimed(item.subtask.id, agentId, claimedAt, attempts));
     return item.subtask;
   }
 
@@ -242,7 +275,7 @@ export class SwarmQueue {
 
   complete(result: SubtaskResult): void {
     this.results.push(result);
-    void this.store?.persistResult(result).catch(() => undefined);
+    this.persist(result.subtaskId, (store) => store.persistResult(result));
     const index = this.tasks.findIndex((task) => task.subtask.id === result.subtaskId);
     if (index >= 0) {
       const projectId = this.tasks[index].subtask.projectMeta.projectId;
@@ -272,10 +305,13 @@ export class SwarmQueue {
   requeue(subtaskId: string): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);
     if (!item) return false;
+    const wasClaimed = Boolean(item.claimedBy);
     if (item.claimedBy && item.attempts) item.attempts -= 1;
     item.claimedBy = undefined;
     item.claimedAt = undefined;
     item.leaseRenewedAt = undefined;
+    const attempts = item.attempts ?? 0;
+    if (wasClaimed) this.persist(subtaskId, (store) => store.markSubtaskReleased(subtaskId, attempts));
     return true;
   }
 
@@ -318,6 +354,23 @@ export class SwarmQueue {
   }
 
   /**
+   * #99: leaseExpiredFor, plus the expired holders persisted in Postgres (recorded before a restart
+   * or by another coordinator on the same database). The current claimant is never "expired". A
+   * store error falls back to the in-memory answer; the #44 claimant check still runs after this.
+   */
+  async leaseExpiredForDurable(subtaskId: string, agentId: string): Promise<boolean> {
+    if (this.leaseExpiredFor(subtaskId, agentId)) return true;
+    if (!this.store) return false;
+    const current = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (current?.claimedBy === agentId) return false;
+    try {
+      return await this.store.isExpiredLeaseHolder(subtaskId, agentId);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * #51: requeue claims whose lease expired; fail subtasks that hit maxAttempts
    * (recorded as a failed result from the coordinator).
    */
@@ -332,7 +385,14 @@ export class SwarmQueue {
       item.claimedBy = undefined;
       item.claimedAt = undefined;
       item.leaseRenewedAt = undefined;
-      if ((item.attempts ?? 0) >= this.lease.maxAttempts) {
+      const atCap = (item.attempts ?? 0) >= this.lease.maxAttempts;
+      // #99: a subtask failed at the cap is done (its result row clears the holder rows), so only a
+      // requeued one records the expired holder durably.
+      const attempts = item.attempts ?? 0;
+      this.persist(item.subtask.id, (store) =>
+        store.markSubtaskReleased(item.subtask.id, attempts, atCap ? undefined : { agentId: holder, atMs: now })
+      );
+      if (atCap) {
         this.tasks.splice(i, 1);
         const result: SubtaskResult = {
           subtaskId: item.subtask.id,
@@ -344,7 +404,7 @@ export class SwarmQueue {
           durationMs: 0
         };
         this.results.push(result);
-        void this.store?.persistResult(result).catch(() => undefined);
+        this.persist(result.subtaskId, (store) => store.persistResult(result));
         failed.push(item.subtask.id);
         try {
           this.leaseFailureListener?.(result);

@@ -653,7 +653,7 @@ Even for code tasks, generated programs can print differently between honest run
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | | PostgreSQL connection string |
+| `DATABASE_URL` | | PostgreSQL connection string. Required for a coordinator in production (#55) |
 
 ### UI Links
 
