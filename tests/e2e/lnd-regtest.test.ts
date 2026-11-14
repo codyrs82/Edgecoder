@@ -26,8 +26,9 @@ function node(prefix: "ALICE" | "BOB"): LndRestProvider {
 }
 
 /**
- * Pay from bob with routerrpc.SendPaymentV2 (POST /v2/router/send). Not LndRestProvider.payInvoice:
- * that uses SendPaymentSync (POST /v1/channels/transactions), which LND v0.21 removed (404).
+ * Pay from bob with routerrpc.SendPaymentV2 (POST /v2/router/send), called directly here.
+ * LndRestProvider.payInvoice uses the same endpoint since #261 (SendPaymentSync,
+ * POST /v1/channels/transactions, is gone in LND v0.21); this test does not exercise payInvoice.
  * The response is newline-delimited JSON payment updates; the last one has the final status.
  */
 async function payFromBob(bolt11: string): Promise<{ status: string; paymentHash: string; preimage: string; failureReason?: string }> {
