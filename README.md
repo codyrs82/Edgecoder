@@ -409,4 +409,4 @@ tests/            - test suites
 
 ## License
 
-Business Source License 1.1 ([LICENSE](LICENSE)).
+Business Source License 1.1 ([LICENSE](LICENSE)), SPDX `BUSL-1.1`, for everything in this repository: the services, the desktop app, the iOS app, the VS Code extension and the packages under `packages/`. You may copy, modify and run it, except to offer a competing hosted service. On 2030-02-25 each version converts to Apache-2.0. The decision is recorded in [docs/adrs/0003-license-busl-1.1.md](docs/adrs/0003-license-busl-1.1.md).

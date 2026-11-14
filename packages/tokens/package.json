@@ -1,6 +1,7 @@
 {
   "name": "@edgecoder/tokens",
   "version": "0.1.0",
+  "license": "BUSL-1.1",
   "private": true,
   "type": "module",
   "description": "EdgeCoder design tokens (color, spacing, type, radius) shared by desktop and portal (#23).",
