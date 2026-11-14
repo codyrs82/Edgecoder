@@ -10,7 +10,7 @@ import { encodeTestBolt11 } from "./helpers/bolt11-encode.js";
 
 describe("payFailureIsFinal", () => {
   it("is true only for failures the node reported as final, or a payment never sent", () => {
-    for (const e of ["payouts_paused", "lnd_pay_error:unable to find a path to destination", "lnd_pay_error:invoice expired", "cln_pay_status:failed"]) {
+    for (const e of ["payouts_paused", "lnd_pay_error:unable to find a path to destination", "lnd_pay_error:invoice expired", "lnd_pay_failed:FAILURE_REASON_NO_ROUTE", "lnd_pay_failed:FAILURE_REASON_TIMEOUT", "cln_pay_status:failed"]) {
       expect(payFailureIsFinal(e), e).toBe(true);
     }
     for (const e of [
@@ -25,6 +25,12 @@ describe("payFailureIsFinal", () => {
       "cln_pay_status:unknown",
       "cln_pay_status:complete",
       "lnd_pay_no_preimage",
+      "lnd_pay_preimage_mismatch",
+      "lnd_pay_unconfirmed:IN_FLIGHT",
+      "lnd_pay_unconfirmed:no_final_status",
+      "lnd_pay_stream_error:context canceled",
+      "lnd_pay_failed:FAILURE_REASON_NONE",
+      "lnd_pay_failed:unknown",
       "lnd_pay_error:invoice is already paid",
       "lnd_pay_error:payment is in transition",
       "pay_failed",
@@ -53,9 +59,9 @@ describe("provider responses, classified", () => {
   it("LND: a proxy 504 or an unreadable 2xx body stays unconfirmed; payment_error is final", async () => {
     const lnd = new LndRestProvider("https://lnd.test:8080", "mac");
     const pool = agent.get("https://lnd.test:8080");
-    pool.intercept({ path: "/v1/channels/transactions", method: "POST" }).reply(504, "Gateway Timeout");
-    pool.intercept({ path: "/v1/channels/transactions", method: "POST" }).reply(200, "<html>");
-    pool.intercept({ path: "/v1/channels/transactions", method: "POST" }).reply(200, { payment_error: "unable to find a path to destination" });
+    pool.intercept({ path: "/v2/router/send", method: "POST" }).reply(504, "Gateway Timeout");
+    pool.intercept({ path: "/v2/router/send", method: "POST" }).reply(200, "<html>");
+    pool.intercept({ path: "/v2/router/send", method: "POST" }).reply(200, JSON.stringify({ error: { code: 2, message: "unable to find a path to destination" } }) + "\n");
     const results = [await lnd.payInvoice(input), await lnd.payInvoice(input), await lnd.payInvoice(input)];
     expect(results.map((r) => r.status)).toEqual(["failed", "failed", "failed"]);
     expect(results.map((r) => payFailureIsFinal(r.error))).toEqual([false, false, true]);

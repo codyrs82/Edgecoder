@@ -45,6 +45,26 @@ export interface PayInvoiceResult {
   error?: string;
 }
 
+/** lnrpc.PaymentFailureReason values that come with a terminal FAILED status (NONE does not). */
+const LND_FINAL_FAILURE_REASONS = new Set([
+  "FAILURE_REASON_TIMEOUT",
+  "FAILURE_REASON_NO_ROUTE",
+  "FAILURE_REASON_ERROR",
+  "FAILURE_REASON_INCORRECT_PAYMENT_DETAILS",
+  "FAILURE_REASON_INSUFFICIENT_BALANCE",
+  "FAILURE_REASON_CANCELED"
+]);
+
+/** The lnrpc.Payment fields read from a /v2/router/send update. */
+interface LndRouterPayment {
+  payment_hash?: string;
+  payment_preimage?: string;
+  value_msat?: string;
+  fee_msat?: string;
+  status?: string;
+  failure_reason?: string;
+}
+
 /**
  * Whether a failed payInvoice result is a failure the node reported as final, so the payout can
  * be marked failed and its balance freed. Anything else (transport errors, HTTP errors that a
@@ -56,9 +76,11 @@ export function payFailureIsFinal(error: string | undefined): boolean {
   if (!error) return false;
   // Refused before anything was sent (kill switch in front of the provider).
   if (error === "payouts_paused") return true;
-  // LND SendPaymentSync answered 2xx with payment_error: the payment attempt is over, except when
-  // the error says an earlier payment of this hash succeeded or is still in flight.
+  // LND SendPaymentV2 sent an error line before any payment update: the payment was not
+  // dispatched, except when the error says an earlier payment of this hash succeeded or is in flight.
   if (error.startsWith("lnd_pay_error:")) return !/already paid|in transition|in.flight|already exists/i.test(error);
+  // LND SendPaymentV2 reported status FAILED with one of its terminal failure reasons.
+  if (error.startsWith("lnd_pay_failed:")) return LND_FINAL_FAILURE_REASONS.has(error.slice("lnd_pay_failed:".length));
   // Core Lightning answered 2xx with status "failed".
   if (error === "cln_pay_status:failed") return true;
   return false;
@@ -243,12 +265,19 @@ export class LndRestProvider implements LightningProvider {
     };
   }
 
-  /** LND SendPaymentSync: blocks until the payment settles or fails. */
+  /**
+   * LND SendPaymentV2 (`POST /v2/router/send`). The response is newline-delimited JSON, one
+   * `{"result": Payment}` or `{"error": {...}}` per line; with `no_inflight_updates` LND sends
+   * only the final update. Only a final SUCCEEDED with a preimage that hashes to the payment hash
+   * counts as paid; only a final FAILED with a known failure_reason (or an error line before any
+   * payment update) is a final failure. Everything else stays unconfirmed for reconciliation.
+   */
   async payInvoice(input: PayInvoiceInput): Promise<PayInvoiceResult> {
-    const timeoutMs = Math.max(10_000, (input.timeoutSeconds ?? 60) * 1000 + 5_000);
+    const timeoutSeconds = Math.max(1, Math.floor(input.timeoutSeconds ?? 60));
+    const timeoutMs = Math.max(10_000, timeoutSeconds * 1000 + 5_000);
     let res;
     try {
-      res = await request(`${this.baseUrl}/v1/channels/transactions`, {
+      res = await request(`${this.baseUrl}/v2/router/send`, {
         dispatcher: this.dispatcher,
         method: "POST",
         headers: { "content-type": "application/json", "Grpc-Metadata-macaroon": this.macaroonHex },
@@ -256,36 +285,101 @@ export class LndRestProvider implements LightningProvider {
         bodyTimeout: timeoutMs,
         body: JSON.stringify({
           payment_request: input.bolt11,
-          fee_limit: { fixed: String(Math.max(0, Math.floor(input.maxFeeSats))) },
+          timeout_seconds: timeoutSeconds,
+          fee_limit_msat: String(Math.max(0, Math.floor(input.maxFeeSats)) * 1000),
           ...(input.amountMsat !== undefined ? { amt_msat: String(input.amountMsat) } : {}),
-          allow_self_payment: false
+          allow_self_payment: false,
+          no_inflight_updates: true
         })
       });
     } catch (err) {
       // Transport failure: the payment may be in flight. The caller must reconcile by
-      // payment hash (lookupPayment) before retrying; never assume failed.
+      // payment hash before retrying; never assume failed.
       return { status: "failed", error: `lnd_pay_transport:${err instanceof Error ? err.message : String(err)}` };
     }
-    const body = (await res.body.json().catch(() => ({}))) as {
-      payment_error?: string;
-      payment_preimage?: string;
-      payment_hash?: string;
-      payment_route?: { total_fees_msat?: string; total_amt_msat?: string };
-      message?: string;
-    };
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      return { status: "failed", error: `lnd_pay_http_${res.statusCode}:${body.message ?? ""}` };
+      const text = await res.body.text().catch(() => "");
+      let message = "";
+      try {
+        const parsed = JSON.parse(text.split("\n")[0] ?? "") as { message?: string; error?: { message?: string } };
+        message = parsed.message ?? parsed.error?.message ?? "";
+      } catch {
+        /* non-JSON error page */
+      }
+      return { status: "failed", error: `lnd_pay_http_${res.statusCode}:${message}` };
     }
-    if (body.payment_error) return { status: "failed", error: `lnd_pay_error:${body.payment_error}` };
-    const preimage = lndBytesToHex(body.payment_preimage, 32);
-    if (!preimage || /^0+$/.test(preimage)) return { status: "failed", error: "lnd_pay_no_preimage" };
-    return {
-      status: "succeeded",
-      paymentHash: lndBytesToHex(body.payment_hash, 32),
-      preimage,
-      feeMsat: Number(body.payment_route?.total_fees_msat ?? 0),
-      amountMsat: body.payment_route?.total_amt_msat !== undefined ? Number(body.payment_route.total_amt_msat) - Number(body.payment_route?.total_fees_msat ?? 0) : undefined
-    };
+    let last: LndRouterPayment | undefined;
+    let sawUpdate = false;
+    let buffered = "";
+    try {
+      for await (const chunk of res.body) {
+        buffered += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        let nl;
+        while ((nl = buffered.indexOf("\n")) >= 0) {
+          const line = buffered.slice(0, nl);
+          buffered = buffered.slice(nl + 1);
+          const outcome = this.routerLine(line, sawUpdate);
+          if (outcome === undefined) continue;
+          if ("final" in outcome) {
+            res.body.destroy();
+            return outcome.final;
+          }
+          sawUpdate = true;
+          last = outcome.update;
+        }
+      }
+    } catch (err) {
+      // Stream dropped after the 200: the payment may still settle.
+      return { status: "failed", error: `lnd_pay_transport:${err instanceof Error ? err.message : String(err)}` };
+    }
+    const outcome = this.routerLine(buffered, sawUpdate);
+    if (outcome && "final" in outcome) return outcome.final;
+    if (outcome) last = outcome.update;
+    // The stream ended without a final status: unconfirmed, never success or final failure.
+    return { status: "failed", paymentHash: lndBytesToHex(last?.payment_hash, 32), error: `lnd_pay_unconfirmed:${last?.status ?? "no_final_status"}` };
+  }
+
+  /** One NDJSON line of /v2/router/send: a final result, a non-final update, or undefined (blank/unparsable). */
+  private routerLine(line: string, sawUpdate: boolean): { final: PayInvoiceResult } | { update: LndRouterPayment } | undefined {
+    if (!line.trim()) return undefined;
+    let parsed: { result?: LndRouterPayment; error?: { message?: string } };
+    try {
+      parsed = JSON.parse(line) as typeof parsed;
+    } catch {
+      return undefined;
+    }
+    if (!parsed || typeof parsed !== "object") return undefined;
+    if (parsed.error) {
+      const message = parsed.error.message ?? "unknown";
+      // Before any payment update, LND refused to dispatch the payment (bad invoice, no route at
+      // send time, already paid / in flight - the last two payFailureIsFinal keeps unconfirmed).
+      // After an update, the HTLC may already be out: unconfirmed.
+      return { final: { status: "failed", error: sawUpdate ? `lnd_pay_stream_error:${message}` : `lnd_pay_error:${message}` } };
+    }
+    const payment = parsed.result;
+    if (!payment || typeof payment !== "object") return undefined;
+    const paymentHash = lndBytesToHex(payment.payment_hash, 32);
+    if (payment.status === "SUCCEEDED") {
+      const preimage = lndBytesToHex(payment.payment_preimage, 32);
+      if (!preimage || /^0+$/.test(preimage)) return { final: { status: "failed", paymentHash, error: "lnd_pay_no_preimage" } };
+      const preimageHash = createHash("sha256").update(Buffer.from(preimage, "hex")).digest("hex");
+      if (!paymentHash || preimageHash !== paymentHash) return { final: { status: "failed", paymentHash, error: "lnd_pay_preimage_mismatch" } };
+      const feeMsat = Number(payment.fee_msat ?? 0);
+      const valueMsat = payment.value_msat !== undefined ? Number(payment.value_msat) : undefined;
+      return {
+        final: {
+          status: "succeeded",
+          paymentHash,
+          preimage,
+          feeMsat: Number.isFinite(feeMsat) ? feeMsat : 0,
+          amountMsat: valueMsat !== undefined && Number.isFinite(valueMsat) ? valueMsat : undefined
+        }
+      };
+    }
+    if (payment.status === "FAILED") {
+      return { final: { status: "failed", paymentHash, error: `lnd_pay_failed:${payment.failure_reason ?? "unknown"}` } };
+    }
+    return { update: payment };
   }
 
   /** GET /v1/balance/blockchain + /v1/balance/channels. Throws on HTTP errors or malformed bodies. */
