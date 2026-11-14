@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { BASE_CSS, TOKENS_CSS, brandMark } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags } from "../assets.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 
 /**
@@ -12,12 +13,13 @@ import { CSP_NONCE } from "../csp-nonce.js";
  */
 export function verifyEmailPage(): string {
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <meta name="referrer" content="no-referrer" />
       <title>EdgeCoder Portal | Verify email</title>
+      ${themeHeadTags()}
       <style>
         ${TOKENS_CSS}
         ${BASE_CSS}

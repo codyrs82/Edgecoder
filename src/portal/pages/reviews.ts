@@ -28,71 +28,71 @@ app.get("/portal/reviews", async (_req, reply) => {
         display:grid; grid-template-columns:1fr 1fr; gap:0;
         border:1px solid var(--card-border); border-radius:var(--radius-md); overflow:hidden;
         font-family:var(--font-mono); font-size:12px; line-height:1.7;
-        background:#0d1117;
+        background:var(--bg-input);
       }
       .diff-pane { overflow-x:auto; }
       .diff-pane-header {
         padding:10px 14px; font-size:11px; font-weight:700;
         letter-spacing:0.04em; color:var(--muted);
-        border-bottom:1px solid rgba(255,255,255,0.06);
-        background:rgba(255,255,255,0.03);
+        border-bottom:1px solid color-mix(in srgb, var(--text) 6%, transparent);
+        background:color-mix(in srgb, var(--text) 3%, transparent);
         display:flex; align-items:center; gap:8px;
       }
       .diff-pane-header .diff-file-icon { opacity:0.5; }
-      .diff-pane-left .diff-pane-header { border-right:1px solid rgba(255,255,255,0.06); }
+      .diff-pane-left .diff-pane-header { border-right:1px solid color-mix(in srgb, var(--text) 6%, transparent); }
       .diff-line {
         display:flex; padding:0; min-height:22px; white-space:pre;
-        border-bottom:1px solid rgba(255,255,255,0.02);
+        border-bottom:1px solid color-mix(in srgb, var(--text) 2%, transparent);
       }
       .diff-line-num {
         width:48px; min-width:48px; text-align:right; padding:0 10px 0 8px;
-        color:rgba(255,255,255,0.25); user-select:none; flex-shrink:0;
-        font-size:11px; border-right:1px solid rgba(255,255,255,0.04);
-        background:rgba(255,255,255,0.01);
+        color:color-mix(in srgb, var(--text) 25%, transparent); user-select:none; flex-shrink:0;
+        font-size:11px; border-right:1px solid color-mix(in srgb, var(--text) 4%, transparent);
+        background:color-mix(in srgb, var(--text) 1%, transparent);
       }
       .diff-line-content { flex:1; min-width:0; padding:0 12px; }
       .diff-line.removed {
-        background:rgba(248, 81, 73, 0.12);
-        border-left:3px solid #f85149;
+        background:color-mix(in srgb, var(--danger) 12%, transparent);
+        border-left:3px solid var(--danger);
       }
-      .diff-line.removed .diff-line-num { background:rgba(248, 81, 73, 0.15); color:rgba(248, 81, 73, 0.7); }
+      .diff-line.removed .diff-line-num { background:color-mix(in srgb, var(--danger) 15%, transparent); color:color-mix(in srgb, var(--danger) 70%, transparent); }
       .diff-line.added {
-        background:rgba(63, 185, 80, 0.12);
-        border-left:3px solid #3fb950;
+        background:color-mix(in srgb, var(--ok) 12%, transparent);
+        border-left:3px solid var(--ok);
       }
-      .diff-line.added .diff-line-num { background:rgba(63, 185, 80, 0.15); color:rgba(63, 185, 80, 0.7); }
+      .diff-line.added .diff-line-num { background:color-mix(in srgb, var(--ok) 15%, transparent); color:color-mix(in srgb, var(--ok) 70%, transparent); }
       .diff-line.unchanged {
         border-left:3px solid transparent;
       }
-      .diff-pane-left { border-right:1px solid rgba(255,255,255,0.06); }
+      .diff-pane-left { border-right:1px solid color-mix(in srgb, var(--text) 6%, transparent); }
       /* ── Syntax highlighting hints ── */
-      .syntax-keyword { color:#ff7b72; }
-      .syntax-string { color:#a5d6ff; }
-      .syntax-comment { color:#8b949e; font-style:italic; }
-      .syntax-number { color:#79c0ff; }
-      .syntax-function { color:#d2a8ff; }
-      .syntax-builtin { color:#ffa657; }
+      .syntax-keyword { color:var(--danger); }
+      .syntax-string { color:var(--info); }
+      .syntax-comment { color:var(--muted); font-style:italic; }
+      .syntax-number { color:var(--info); }
+      .syntax-function { color:var(--brand-2); }
+      .syntax-builtin { color:var(--yellow); }
       .diff-stats {
         display:flex; gap:12px; padding:8px 14px; font-size:11px;
-        color:var(--muted); border-top:1px solid rgba(255,255,255,0.06);
-        background:rgba(255,255,255,0.02);
+        color:var(--muted); border-top:1px solid color-mix(in srgb, var(--text) 6%, transparent);
+        background:color-mix(in srgb, var(--text) 2%, transparent);
       }
-      .diff-stats .added-count { color:#3fb950; }
-      .diff-stats .removed-count { color:#f85149; }
+      .diff-stats .added-count { color:var(--ok); }
+      .diff-stats .removed-count { color:var(--danger); }
       /* ── Decision buttons ── */
       .review-actions { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
       .review-actions button { padding:9px 20px; font-size:13px; font-weight:600; border-radius:var(--radius-sm); }
-      .btn-accept { background:var(--ok); border:1px solid var(--ok); color:#111; }
-      .btn-accept:hover { filter:brightness(1.08); color:#111; }
-      .btn-reject { background:transparent; border:1px solid rgba(240,97,109,0.6); color:var(--danger); }
-      .btn-reject:hover { background:rgba(240,97,109,0.12); color:var(--danger); }
-      .btn-edit { background:var(--brand); border:1px solid var(--brand); color:#111; }
-      .btn-edit:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
+      .btn-accept { background:var(--ok); border:1px solid var(--ok); color:var(--on-accent); }
+      .btn-accept:hover { filter:brightness(1.08); color:var(--on-accent); }
+      .btn-reject { background:transparent; border:1px solid color-mix(in srgb, var(--danger) 60%, transparent); color:var(--danger); }
+      .btn-reject:hover { background:color-mix(in srgb, var(--danger) 12%, transparent); color:var(--danger); }
+      .btn-edit { background:var(--brand); border:1px solid var(--brand); color:var(--on-accent); }
+      .btn-edit:hover { background:var(--brand-2); border-color:var(--brand-2); color:var(--on-accent); }
       .edit-area {
         width:100%; min-height:300px; margin-top:10px;
         font-family:var(--font-mono); font-size:12px; line-height:1.7;
         padding:12px; border:1px solid var(--brand-border);
-        border-radius:var(--radius-sm); background:#0d1117; color:var(--text);
+        border-radius:var(--radius-sm); background:var(--bg-input); color:var(--text);
         resize:vertical;
       }
       .notes-section {
@@ -110,7 +110,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       .empty-state p { margin:0; font-size:13px; line-height:1.6; max-width:360px; display:inline-block; }
       .success-banner {
         padding:16px 20px; border-radius:var(--radius-md); text-align:center;
-        background:rgba(34, 197, 94, 0.12); border:1px solid rgba(34, 197, 94, 0.4);
+        background:color-mix(in srgb, var(--ok) 12%, transparent); border:1px solid color-mix(in srgb, var(--ok) 40%, transparent);
         color:var(--ok); font-weight:600; font-size:14px; margin-bottom:12px;
         animation:fadeSlideIn 0.3s ease;
       }

@@ -13,6 +13,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { marketingHomeHtml, privacyPolicyHtml, termsOfServiceHtml } from "./pages/public.js";
 import type { PublicPricing } from "./public-pricing.js";
+import { THEME_JS, portalTokensCss } from "./assets.js";
 
 export interface StaticSiteOptions {
   /** Canonical portal origin that dynamic paths redirect to, e.g. https://edgecoder.io */
@@ -40,6 +41,9 @@ export function staticSiteFiles(opts: StaticSiteOptions): Record<string, string>
     "index.html": marketingHomeHtml(opts.pricing),
     "privacy/index.html": privacyPolicyHtml(),
     "terms/index.html": termsOfServiceHtml(),
+    // #89: the pages link these (with a ?v= hash, which static hosts ignore).
+    "assets/tokens.css": portalTokensCss(),
+    "assets/theme.js": THEME_JS,
     "healthz": "ok\n",
     _redirects: redirects,
     _headers: headers,

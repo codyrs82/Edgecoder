@@ -26,7 +26,7 @@ export const MARKET_CONTENT = `
       .mkt-depth { height:160px; width:100%; }
       .mkt-toolbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
       .mkt-toolbar button { padding:4px 10px; font-size:12px; }
-      .mkt-toolbar button.active { background:var(--brand); color:#111; border-color:var(--brand); }
+      .mkt-toolbar button.active { background:var(--brand); color:var(--on-accent); border-color:var(--brand); }
       .book { font-family:var(--font-mono); font-size:12px; }
       .book table { width:100%; border-collapse:collapse; }
       .book td, .book th { padding:3px 6px; text-align:right; }
@@ -40,8 +40,8 @@ export const MARKET_CONTENT = `
       .order-tabs button { flex:1; border-radius:0; }
       .order-tabs button:first-child { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
       .order-tabs button:last-child { border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
-      .order-tabs button.buy.active { background:var(--ok); color:#000; border-color:var(--ok); }
-      .order-tabs button.sell.active { background:var(--danger); color:#000; border-color:var(--danger); }
+      .order-tabs button.buy.active { background:var(--ok); color:var(--on-accent); border-color:var(--ok); }
+      .order-tabs button.sell.active { background:var(--danger); color:var(--on-accent); border-color:var(--danger); }
       .field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
       .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
       .field input { font-family:var(--font-mono); }
@@ -144,17 +144,26 @@ export const MARKET_SCRIPT = `
         }
 
         function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+        // #89: chart colors come from the theme tokens (hex), with alpha, since the chart library
+        // does not resolve CSS variables or color-mix().
+        function alpha(name, a) {
+          var h = css(name).replace("#", "");
+          if (h.length === 3) h = h.replace(/./g, "$&$&");
+          var n = parseInt(h.slice(0, 6), 16);
+          if (!/^[0-9a-fA-F]{6}/.test(h) || isNaN(n)) return css(name);
+          return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+        }
 
         function buildCharts() {
           var LWC = window.LightweightCharts;
-          var common = { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } }, timeScale: { timeVisible: true, secondsVisible: false, borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") }, crosshair: { mode: 0 } };
+          var common = { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: alpha("--text", 0.04) }, horzLines: { color: alpha("--text", 0.04) } }, timeScale: { timeVisible: true, secondsVisible: false, borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") }, crosshair: { mode: 0 } };
           state.chart = LWC.createChart($("priceChart"), Object.assign({ autoSize: true }, common));
           state.candles = state.chart.addCandlestickSeries({ upColor: css("--ok"), downColor: css("--danger"), borderUpColor: css("--ok"), borderDownColor: css("--danger"), wickUpColor: css("--ok"), wickDownColor: css("--danger"), priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.volume = state.chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol", color: "rgba(193,120,80,0.5)" });
+          state.volume = state.chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol", color: alpha("--brand", 0.5) });
           state.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
           state.depth = LWC.createChart($("depthChart"), Object.assign({ autoSize: true }, common, { timeScale: { visible: false }, handleScroll: false, handleScale: false }));
-          state.bidSeries = state.depth.addAreaSeries({ lineColor: css("--ok"), topColor: "rgba(74,222,128,0.35)", bottomColor: "rgba(74,222,128,0.02)", priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.askSeries = state.depth.addAreaSeries({ lineColor: css("--danger"), topColor: "rgba(248,113,113,0.35)", bottomColor: "rgba(248,113,113,0.02)", priceFormat: { type: "price", precision: 0, minMove: 1 } });
+          state.bidSeries = state.depth.addAreaSeries({ lineColor: css("--ok"), topColor: alpha("--ok", 0.35), bottomColor: alpha("--ok", 0.02), priceFormat: { type: "price", precision: 0, minMove: 1 } });
+          state.askSeries = state.depth.addAreaSeries({ lineColor: css("--danger"), topColor: alpha("--danger", 0.35), bottomColor: alpha("--danger", 0.02), priceFormat: { type: "price", precision: 0, minMove: 1 } });
         }
 
         function classSpec(id) { for (var i = 0; i < state.classes.length; i++) if (state.classes[i].id === id) return state.classes[i]; return null; }
@@ -216,7 +225,7 @@ export const MARKET_SCRIPT = `
         function renderCandles(data) {
           var c = data.candles.map(function (k) { return { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }; });
           state.candles.setData(c);
-          state.volume.setData(data.candles.map(function (k) { return { time: k.time, value: k.volume, color: k.close >= k.open ? "rgba(74,222,128,0.5)" : "rgba(248,113,113,0.5)" }; }));
+          state.volume.setData(data.candles.map(function (k) { return { time: k.time, value: k.volume, color: k.close >= k.open ? alpha("--ok", 0.5) : alpha("--danger", 0.5) }; }));
           if (c.length) state.chart.timeScale().fitContent();
           if (c.length >= 2) {
             var first = c[Math.max(0, c.length - Math.round(86400 / (secondsOf(state.interval))))], lastC = c[c.length - 1];

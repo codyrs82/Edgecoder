@@ -12,6 +12,9 @@ COPY package*.json ./
 RUN npm ci --omit=optional
 COPY tsconfig.json ./
 COPY src ./src
+# #89: the portal serves the shared design tokens; `npm run build` copies them to dist/portal/assets.
+COPY scripts/copy-portal-assets.mjs ./scripts/
+COPY packages/tokens/dist/tokens.css ./packages/tokens/dist/
 RUN npm run build && npm prune --omit=dev --omit=optional
 
 FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
