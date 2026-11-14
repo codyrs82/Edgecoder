@@ -168,17 +168,23 @@ import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "
 import {
   anchorCheckpoint,
   anchorEpochOnce,
-  reconcileAnchors,
   reconcileConfigFromEnv,
-  isTxid,
-  refreshAnchors,
   requiredConfirmationsFromEnv,
   type AnchorDeps
 } from "../economy/anchoring.js";
+import { AnchorTracker, anchorEventLogger, anchorTrackerTuningFromEnv } from "../economy/anchor-tracker.js";
+import {
+  anchoringStatus,
+  checkpointAnchorFinality,
+  describeAnchor,
+  resolveAnchoringMode,
+  type AnchoringStatus,
+  type AnchorView
+} from "../economy/anchor-status.js";
 // ── Work receipts + replication (architecture step 2; src/receipts) ──
 import { MemoryReceiptStore, type ReceiptStore } from "../receipts/store.js";
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
-import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
+import { anchorEpoch, closeEpoch, repointEpochAnchor } from "../receipts/epochs.js";
 import { agentReceiptClaimSchema, issueReceiptForAccrual } from "../receipts/issue.js";
 import type { SignedAgentReceiptClaim } from "../receipts/receipt.js";
 import {
@@ -2104,26 +2110,28 @@ async function maybeFinalizeStatsCheckpoint(): Promise<void> {
 }
 
 /**
- * #46: anchoring needs a real provider. In production an unset BITCOIN_ANCHOR_PROVIDER
- * disables anchoring (no simulated records) instead of exiting; dev falls back to mock.
+ * #46: anchoring needs a real provider. An unset (or unusable) BITCOIN_ANCHOR_PROVIDER disables
+ * anchoring in every environment: nothing is broadcast and no anchor record is written. The
+ * mock provider is used only when asked for by name, and its rows are reported as simulated.
  */
+const ANCHORING_MODE = resolveAnchoringMode();
 let anchorProviderCache: BitcoinAnchorProvider | null | undefined;
 function anchorDeps(): AnchorDeps | null {
   if (!pgStore) return null;
   if (anchorProviderCache === undefined) {
-    if (IS_PROD && !process.env.BITCOIN_ANCHOR_PROVIDER) {
-      app.log.warn("bitcoin_anchoring_disabled: set BITCOIN_ANCHOR_PROVIDER=bitcoind|anchor-proxy to anchor checkpoints");
+    if (ANCHORING_MODE.mode === "disabled") {
+      app.log.warn(
+        { problem: ANCHORING_MODE.problem },
+        "bitcoin_anchoring_disabled: set BITCOIN_ANCHOR_PROVIDER=bitcoind|anchor-proxy to anchor checkpoints"
+      );
       anchorProviderCache = null;
     } else {
       anchorProviderCache = createBitcoinAnchorProviderFromEnv(BITCOIN_NETWORK);
     }
   }
-  return anchorProviderCache ? { provider: anchorProviderCache, store: pgStore, network: BITCOIN_NETWORK } : null;
-}
-
-/** Confirmations to report for an anchor: only real txids count (legacy simulated rows = 0). */
-function anchorConfirmations(anchor: BitcoinAnchorRecord | null | undefined): number {
-  return anchor && anchor.status !== "failed" && isTxid(anchor.txRef) ? anchor.confirmations ?? 0 : 0;
+  return anchorProviderCache
+    ? { provider: anchorProviderCache, store: pgStore, network: BITCOIN_NETWORK, providerName: ANCHORING_MODE.provider ?? undefined }
+    : null;
 }
 
 async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
@@ -2135,32 +2143,42 @@ async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord |
   return anchorCheckpoint(deps, { epochId: `stats:${checkpoint.height ?? 0}`, checkpointHash: checkpoint.hash });
 }
 
-/** #46: poll pending anchors (and re-verify the latest ones for reorgs). */
-async function refreshAnchorConfirmations(): Promise<void> {
-  const deps = anchorDeps();
-  if (!deps || !pgStore) return;
-  // #101: the newest rows plus the newest live anchor of each kind (stats rows alone can fill the top 5).
-  const recent = [...(await pgStore.listAnchors(5)), ...(await pgStore.latestLiveAnchorPerKind())];
-  const events = await refreshAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, recent);
-  for (const e of events) {
-    if (e.event === "reorg") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reorg_reverted_to_pending");
-    else if (e.event === "confirmed") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_confirmed");
-    else if (e.event === "unknown") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_confirmation_unavailable");
-    else if (e.event === "conflicted") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_conflicted_marked_failed");
-  }
+/**
+ * #46: confirmation loop (src/economy/anchor-tracker.ts). pending -> anchored at the required
+ * depth, back to pending on a reorg, and a new broadcast when the transaction is gone.
+ */
+const anchorTracker = new AnchorTracker({
+  deps: anchorDeps,
+  config: {
+    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
+    pollMs: ANCHOR_CONFIRM_POLL_MS,
+    reconcile: ANCHOR_RECONCILE_CONFIG,
+    ...anchorTrackerTuningFromEnv()
+  },
+  onEvent: anchorEventLogger(app.log),
+  // A receipt epoch keeps its own copy of the txid; follow a replacement or recovered broadcast.
+  onTxidAssigned: async (record) => {
+    if (await repointEpochAnchor(receiptStore, record)) {
+      app.log.info({ epochId: record.epochId, txRef: record.txRef }, "receipt_epoch_anchor_repointed");
+    }
+  },
+  onError: (error, where) => app.log.warn({ error, where }, "anchor_tracker_error")
+});
+
+/** #103: resolve "broadcasting" rows (crash mid-broadcast) and stuck pending txs; re-broadcast dropped ones. */
+async function reconcileAnchorRows(): Promise<void> {
+  await anchorTracker.reconcile();
 }
 
-/** #103: resolve "broadcasting" rows (crash mid-broadcast) and stuck pending txs. */
-async function reconcileAnchorRows(): Promise<void> {
-  const deps = anchorDeps();
-  if (!deps || !pgStore) return;
-  const events = await reconcileAnchors(deps, ANCHOR_REQUIRED_CONFIRMATIONS, ANCHOR_RECONCILE_CONFIG);
-  for (const e of events) {
-    if (e.event === "needs_admin") app.log.error({ anchorId: e.anchorId }, "bitcoin_anchor_needs_admin_reconcile");
-    else if (e.event === "recovered") app.log.info({ anchorId: e.anchorId }, "bitcoin_anchor_reconciled_txid_recovered");
-    else if (e.event === "failed") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reconciled_marked_failed");
-    else if (e.event === "retry_later") app.log.warn({ anchorId: e.anchorId }, "bitcoin_anchor_reconcile_lookup_failed");
-  }
+/** #46: whether this coordinator anchors at all, for the status endpoints. */
+function currentAnchoringStatus(): AnchoringStatus {
+  return anchoringStatus({
+    mode: ANCHORING_MODE,
+    storeAvailable: Boolean(pgStore),
+    network: BITCOIN_NETWORK,
+    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
+    tracker: anchorTracker.status()
+  });
 }
 
 async function latestStatsFinality(): Promise<{
@@ -2169,19 +2187,17 @@ async function latestStatsFinality(): Promise<{
   softFinalized: boolean;
   hardFinalized: boolean;
   finalityState: "soft_finalized" | "anchored_pending" | "anchored_confirmed" | "no_checkpoint";
-  anchor?: {
-    txRef: string;
-    network: string;
-    status: string;
-    confirmations: number;
-    anchoredAtMs?: number;
-  };
+  anchoring: AnchoringStatus;
+  /** Rows the old simulation or the mock provider wrote come back with status "simulated" and no txRef. */
+  anchor?: AnchorView;
 }> {
+  const anchoring = currentAnchoringStatus();
   if (!pgStore) {
     return {
       softFinalized: false,
       hardFinalized: false,
-      finalityState: "no_checkpoint"
+      finalityState: "no_checkpoint",
+      anchoring
     };
   }
   const latestCommit = await pgStore.latestStatsCheckpoint();
@@ -2189,29 +2205,26 @@ async function latestStatsFinality(): Promise<{
     return {
       softFinalized: false,
       hardFinalized: false,
-      finalityState: "no_checkpoint"
+      finalityState: "no_checkpoint",
+      anchoring
     };
   }
-  const anchor = await pgStore.latestAnchorByCheckpoint(latestCommit.hash);
-  const confirmations = anchorConfirmations(anchor);
-  const hardFinalized = Boolean(anchor) && confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS;
+  // #46: hard finality is a real transaction at the required depth, never a simulated row.
+  const { hardFinalized, anchorInProgress, anchor } = checkpointAnchorFinality({
+    anchor: await pgStore.latestAnchorByCheckpoint(latestCommit.hash),
+    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
+    minConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS
+  });
   return {
     checkpointHash: latestCommit.hash,
     checkpointHeight: latestCommit.height ?? undefined,
     softFinalized: true,
     hardFinalized,
-    // Without an anchor provider (production default) the quorum commit is final: say so instead of
+    // Without a real anchor provider (production default) the quorum commit is final: say so instead of
     // reporting an anchor that will never come.
-    finalityState: statsFinalityState({ hasCommit: true, anchoringEnabled: anchorDeps() !== null, anchorExists: Boolean(anchor), hardFinalized }),
-    anchor: anchor
-      ? {
-          txRef: anchor.txRef,
-          network: anchor.anchorNetwork,
-          status: anchor.status,
-          confirmations,
-          anchoredAtMs: anchor.anchoredAtMs
-        }
-      : undefined
+    finalityState: statsFinalityState({ hasCommit: true, anchoringEnabled: anchoring.enabled, anchorExists: anchorInProgress, hardFinalized }),
+    anchoring,
+    anchor
   };
 }
 
@@ -5797,13 +5810,14 @@ app.get("/economy/issuance/quorum/:epochId", async (req, reply) => {
 app.post("/economy/issuance/anchor", async (req, reply) => {
   if (!authorizeAdmin(req, reply)) return;
   const anchor = await maybeAnchorLatestFinalizedEpoch();
-  return { ok: true, anchor };
+  return { ok: true, anchoring: currentAnchoringStatus(), anchor: anchor ? describeAnchor(anchor, ANCHOR_REQUIRED_CONFIRMATIONS) : null };
 });
 
 app.get("/economy/issuance/anchors", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
   const anchors = (await pgStore?.listAnchors(50)) ?? [];
-  return { anchors };
+  // #46: read-time view; legacy simulated rows are labelled, not returned as "anchored".
+  return { anchoring: currentAnchoringStatus(), anchors: anchors.map((a) => describeAnchor(a, ANCHOR_REQUIRED_CONFIRMATIONS)) };
 });
 
 app.post("/economy/issuance/reconcile", async (req, reply) => {
@@ -6519,7 +6533,7 @@ app.post("/stats/anchors/anchor-latest", async (req, reply) => {
   const finality = await latestStatsFinality();
   return {
     ok: true,
-    anchor,
+    anchor: anchor ? describeAnchor(anchor, ANCHOR_REQUIRED_CONFIRMATIONS) : null,
     finality
   };
 });
@@ -6534,22 +6548,18 @@ app.get("/stats/anchors/verify", async (req, reply) => {
       checkpointHash: z.string().min(8)
     })
     .parse(req.query);
-  const anchor = await pgStore?.latestAnchorByCheckpoint(query.checkpointHash);
-  const confirmations = anchorConfirmations(anchor);
+  const finality = checkpointAnchorFinality({
+    anchor: await pgStore?.latestAnchorByCheckpoint(query.checkpointHash),
+    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
+    minConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS
+  });
   return {
     ok: true,
     checkpointHash: query.checkpointHash,
-    verified: confirmations >= STATS_ANCHOR_MIN_CONFIRMATIONS,
-    requiredConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS,
-    anchor: anchor
-      ? {
-          txRef: anchor.txRef,
-          network: anchor.anchorNetwork,
-          status: anchor.status,
-          confirmations,
-          anchoredAtMs: anchor.anchoredAtMs
-        }
-      : null
+    verified: finality.hardFinalized,
+    requiredConfirmations: finality.requiredConfirmations,
+    anchoring: currentAnchoringStatus(),
+    anchor: finality.anchor ?? null
   };
 });
 app.get("/stats/projections/summary", async (req, reply) => {
@@ -6592,7 +6602,8 @@ app.get("/stats/projections/summary", async (req, reply) => {
   let finality: Awaited<ReturnType<typeof latestStatsFinality>> = {
     softFinalized: false,
     hardFinalized: false,
-    finalityState: "no_checkpoint"
+    finalityState: "no_checkpoint",
+    anchoring: currentAnchoringStatus()
   };
   try {
     finality = await Promise.race([latestStatsFinality(), timeoutReject("stats_projection_finality")]);
@@ -8071,9 +8082,9 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void runResultVerificationTick().catch((error) => app.log.warn({ error }, "result_verification_expire_failed"));
       }, 60_000);
-      setInterval(() => {
-        void refreshAnchorConfirmations().catch((error) => app.log.warn({ error }, "anchor_confirm_tick_failed"));
-      }, ANCHOR_CONFIRM_POLL_MS);
+      // #46: polls now (resumes rows left pending by the previous process), then every
+      // ANCHOR_CONFIRM_POLL_MS, backing off while the provider is unreachable.
+      anchorTracker.start();
       setInterval(() => {
         void reconcileAnchorRows().catch((error) => app.log.warn({ error }, "anchor_reconcile_tick_failed"));
       }, ANCHOR_RECONCILE_MS);

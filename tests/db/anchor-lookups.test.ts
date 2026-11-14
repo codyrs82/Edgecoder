@@ -66,3 +66,43 @@ describe.skipIf(!PG_URL)("anchor lookups (#101, Postgres)", () => {
     expect(appends).toBe(1);
   });
 });
+
+// #46 against real Postgres: the provider column and the rows the tracker re-verifies for reorgs.
+describe.skipIf(!PG_URL)("anchor tracker queries (#46, Postgres)", () => {
+  let db: SharedDb;
+  beforeAll(async () => {
+    db = await twoCoordinatorsOneDatabase();
+  });
+  afterAll(async () => {
+    await db?.close();
+  });
+
+  it("stores the provider and keeps it when a later write omits it", async () => {
+    const s = db.a;
+    await s.upsertBitcoinAnchor(row("prov1", "issuance-p", 100, { anchorProvider: "bitcoind" }));
+    expect((await s.latestAnchorByEpoch("issuance-p"))?.anchorProvider).toBe("bitcoind");
+    await s.upsertBitcoinAnchor(row("prov1", "issuance-p", 100, { status: "anchored", confirmations: 6 }));
+    expect(await s.latestAnchorByEpoch("issuance-p")).toMatchObject({ status: "anchored", anchorProvider: "bitcoind" });
+    // Rows written before the column existed read back without a provider.
+    await s.upsertBitcoinAnchor(row("prov0", "issuance-old", 50));
+    expect((await s.latestAnchorByEpoch("issuance-old"))?.anchorProvider).toBeUndefined();
+  });
+
+  it("listAnchorsToReverify: anchored real txids below the watch depth, least recently checked first", async () => {
+    const s = db.b;
+    const anchored = (id: string, confirmations: number, lastCheckedAtMs?: number, over: Partial<BitcoinAnchorRecord> = {}) =>
+      row(id, `stats:${id}`, 1_000 + confirmations, { status: "anchored", confirmations, lastCheckedAtMs, ...over });
+    await s.upsertBitcoinAnchor(anchored("rv-new", 6, 900));
+    await s.upsertBitcoinAnchor(anchored("rv-old", 40, 100));
+    await s.upsertBitcoinAnchor(anchored("rv-never", 7));
+    await s.upsertBitcoinAnchor(anchored("rv-deep", 100, 50));
+    await s.upsertBitcoinAnchor(anchored("rv-legacy", 0, 10, { txRef: "anchor:signet:legacy" }));
+    await s.upsertBitcoinAnchor(row("rv-pending", "stats:rv-pending", 2_000, { confirmations: 2 }));
+    await s.upsertBitcoinAnchor(row("rv-failed", "stats:rv-failed", 2_001, { status: "failed", confirmations: 3 }));
+
+    const ids = (await s.listAnchorsToReverify(100)).map((a) => a.anchorId).filter((id) => id.startsWith("rv-"));
+    expect(ids).toEqual(["rv-never", "rv-old", "rv-new"]);
+    expect((await s.listAnchorsToReverify(100, 1)).map((a) => a.anchorId)).toHaveLength(1);
+    expect((await s.listAnchorsToReverify(7)).map((a) => a.anchorId).filter((id) => id.startsWith("rv-"))).toEqual(["rv-new"]);
+  });
+});
