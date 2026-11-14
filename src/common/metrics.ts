@@ -2,122 +2,197 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { timingSafeEqual } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+// The only importer of prom-client, so the library can be swapped in one file.
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 
 /*
- * #14: Prometheus /metrics for every Fastify service, with no extra dependency.
- * Exposes, in the text exposition format (version 0.0.4):
- *   edgecoder_http_requests_total{service,method,route,status}          counter
- *   edgecoder_http_request_duration_seconds{service,method,route}        histogram
- *   edgecoder_process_uptime_seconds / _resident_memory_bytes / _heap_used_bytes  gauges
- * `route` is the Fastify route pattern (e.g. /nodes/:nodeId), never the raw URL, so ids and
- * query strings can't blow up cardinality or leak into metrics. Unmatched requests use "unmatched".
+ * #14: Prometheus /metrics for every Fastify service (text exposition format 0.0.4).
+ *   edgecoder_http_requests_total{service,method,route,status_class}             counter
+ *   edgecoder_http_request_duration_seconds{service,method,route,status_class}   histogram
+ *   process_* / nodejs_*    prom-client's default process metrics (one set per process)
+ *   plus the domain gauges each service registers (queue depth, connected agents, ...).
+ * `route` is the Fastify route pattern (e.g. /nodes/:nodeId), never the raw URL, so ids, tokens
+ * and query strings can neither leak into metrics nor blow up cardinality. Requests that match
+ * no route are counted under "unmatched".
  *
  * The inference service already had a JSON /metrics, which is kept; its Prometheus endpoint is
  * /metrics/prometheus.
  *
- * Access: when METRICS_TOKEN is set, /metrics needs `Authorization: Bearer <token>`.
- * In production without METRICS_TOKEN, /metrics is not registered at all (404), so it is
- * never public by accident. Outside production it is open, for local scraping.
+ * Access. The services sit on the public internet behind an edge proxy, so /metrics is never
+ * public:
+ *   - a loopback caller (same machine, no proxy in between) is served;
+ *   - anyone else needs `Authorization: Bearer <METRICS_TOKEN>`: 401 when it is missing or wrong;
+ *   - when METRICS_TOKEN is unset, anyone else gets the service's ordinary 404, so the endpoint
+ *     cannot be told apart from a route that does not exist.
  */
 
+export const METRICS_PATH = "/metrics";
+
 const BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 
-type Labels = Record<string, string>;
-
-function labelString(labels: Labels): string {
-  const parts = Object.entries(labels).map(([k, v]) => `${k}="${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`);
-  return parts.length ? `{${parts.join(",")}}` : "";
+export function statusClass(status: number): string {
+  return status >= 100 && status < 600 ? `${Math.floor(status / 100)}xx` : "other";
 }
 
-export class MetricsRegistry {
-  private counts = new Map<string, { labels: Labels; value: number }>();
-  private hists = new Map<string, { labels: Labels; buckets: number[]; sum: number; count: number }>();
+// One process, one set of process metrics, however many services it hosts (src/index.ts runs
+// three). Started on first use so importing this module has no side effects.
+let processRegistry: Registry | undefined;
+function processMetrics(): Registry {
+  if (!processRegistry) {
+    processRegistry = new Registry();
+    collectDefaultMetrics({ register: processRegistry });
+  }
+  return processRegistry;
+}
 
-  constructor(readonly service: string) {}
+export class ServiceMetrics {
+  readonly registry = new Registry();
+  private readonly requests: Counter<"method" | "route" | "status_class">;
+  private readonly duration: Histogram<"method" | "route" | "status_class">;
+
+  constructor(readonly service: string) {
+    this.registry.setDefaultLabels({ service });
+    this.requests = new Counter({
+      name: "edgecoder_http_requests_total",
+      help: "HTTP requests handled, by method, route pattern and status class.",
+      labelNames: ["method", "route", "status_class"],
+      registers: [this.registry]
+    });
+    this.duration = new Histogram({
+      name: "edgecoder_http_request_duration_seconds",
+      help: "HTTP request duration in seconds, by method, route pattern and status class.",
+      labelNames: ["method", "route", "status_class"],
+      buckets: BUCKETS,
+      registers: [this.registry]
+    });
+  }
 
   observeRequest(method: string, route: string, status: number, seconds: number): void {
-    const cl = { service: this.service, method, route, status: String(status) };
-    const ck = JSON.stringify(cl);
-    const c = this.counts.get(ck) ?? { labels: cl, value: 0 };
-    c.value += 1;
-    this.counts.set(ck, c);
-
-    const hl = { service: this.service, method, route };
-    const hk = JSON.stringify(hl);
-    const h = this.hists.get(hk) ?? { labels: hl, buckets: BUCKETS.map(() => 0), sum: 0, count: 0 };
-    BUCKETS.forEach((b, i) => {
-      if (seconds <= b) h.buckets[i] += 1;
-    });
-    h.sum += seconds;
-    h.count += 1;
-    this.hists.set(hk, h);
+    const labels = { method: METHODS.has(method) ? method : "OTHER", route, status_class: statusClass(status) };
+    this.requests.inc(labels);
+    this.duration.observe(labels, seconds);
   }
 
-  render(): string {
-    const out: string[] = [];
-    out.push("# HELP edgecoder_http_requests_total HTTP requests handled, by route pattern and status.");
-    out.push("# TYPE edgecoder_http_requests_total counter");
-    for (const { labels, value } of this.counts.values()) out.push(`edgecoder_http_requests_total${labelString(labels)} ${value}`);
+  /**
+   * A gauge read from existing state when /metrics is scraped. `read` must be cheap (no I/O);
+   * a throwing or non-finite read is reported as NaN rather than failing the whole scrape.
+   */
+  gauge(name: string, help: string, read: () => number): void {
+    new Gauge({
+      name,
+      help,
+      registers: [this.registry],
+      collect() {
+        let value = Number.NaN;
+        try {
+          value = read();
+        } catch {
+          // keep NaN
+        }
+        this.set(Number.isFinite(value) ? value : Number.NaN);
+      }
+    });
+  }
 
-    out.push("# HELP edgecoder_http_request_duration_seconds HTTP request duration in seconds.");
-    out.push("# TYPE edgecoder_http_request_duration_seconds histogram");
-    for (const { labels, buckets, sum, count } of this.hists.values()) {
-      BUCKETS.forEach((b, i) => out.push(`edgecoder_http_request_duration_seconds_bucket${labelString({ ...labels, le: String(b) })} ${buckets[i]}`));
-      out.push(`edgecoder_http_request_duration_seconds_bucket${labelString({ ...labels, le: "+Inf" })} ${count}`);
-      out.push(`edgecoder_http_request_duration_seconds_sum${labelString(labels)} ${sum}`);
-      out.push(`edgecoder_http_request_duration_seconds_count${labelString(labels)} ${count}`);
-    }
+  /**
+   * A one-of-N state as `name{<label>="<state>"} 0|1`, the Prometheus convention for enums.
+   * `states` must be a fixed list: it is the label's whole value set.
+   */
+  stateGauge<S extends string>(name: string, help: string, label: string, states: readonly S[], read: () => S | undefined): void {
+    new Gauge({
+      name,
+      help,
+      labelNames: [label],
+      registers: [this.registry],
+      collect() {
+        let current: S | undefined;
+        try {
+          current = read();
+        } catch {
+          // report no state
+        }
+        for (const state of states) this.set({ [label]: state }, state === current ? 1 : 0);
+      }
+    });
+  }
 
-    const mem = process.memoryUsage();
-    const svc = labelString({ service: this.service });
-    out.push("# HELP edgecoder_process_uptime_seconds Process uptime in seconds.");
-    out.push("# TYPE edgecoder_process_uptime_seconds gauge");
-    out.push(`edgecoder_process_uptime_seconds${svc} ${process.uptime()}`);
-    out.push("# HELP edgecoder_process_resident_memory_bytes Resident set size in bytes.");
-    out.push("# TYPE edgecoder_process_resident_memory_bytes gauge");
-    out.push(`edgecoder_process_resident_memory_bytes${svc} ${mem.rss}`);
-    out.push("# HELP edgecoder_process_heap_used_bytes V8 heap used in bytes.");
-    out.push("# TYPE edgecoder_process_heap_used_bytes gauge");
-    out.push(`edgecoder_process_heap_used_bytes${svc} ${mem.heapUsed}`);
-    return `${out.join("\n")}\n`;
+  async render(): Promise<string> {
+    return `${await this.registry.metrics()}\n${await processMetrics().metrics()}`;
   }
 }
 
-function bearerMatches(header: unknown, token: string): boolean {
+function tokenMatches(header: unknown, token: string): boolean {
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
-  const a = Buffer.from(header.slice(7));
+  const a = Buffer.from(header.slice(7).trim());
   const b = Buffer.from(token);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export const METRICS_PATH = "/metrics";
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const a = address.startsWith("::ffff:") ? address.slice(7) : address;
+  return a === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
+}
+
+function isLoopbackHost(host: unknown): boolean {
+  if (typeof host !== "string") return false;
+  const name = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+  return name === "localhost" || name === "[::1]" || isLoopbackAddress(name);
+}
+
+// A proxy on the same machine (cloudflared, nginx, a sidecar) connects from 127.0.0.1 on behalf
+// of the internet. Any of these headers means the request was relayed.
+const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded", "via", "cf-connecting-ip", "cf-ray", "fly-client-ip"];
+
+/**
+ * True only for a direct connection from this machine: loopback peer address (the socket's, not
+ * `req.ip`, which trustProxy can make client-controlled), no proxy headers, and a loopback Host
+ * (a browser tricked into calling 127.0.0.1 under another name, i.e. DNS rebinding, fails this).
+ */
+export function isLoopbackCaller(req: Pick<FastifyRequest, "headers" | "socket">): boolean {
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
+  if (PROXY_HEADERS.some((h) => req.headers[h] !== undefined)) return false;
+  return isLoopbackHost(req.headers.host);
+}
+
+export type MetricsAccess = "allowed" | "unauthorized" | "hidden";
+
+export function metricsAccess(req: Pick<FastifyRequest, "headers" | "socket">, token: string): MetricsAccess {
+  if (isLoopbackCaller(req)) return "allowed";
+  if (!token) return "hidden";
+  return tokenMatches(req.headers.authorization, token) ? "allowed" : "unauthorized";
+}
+
+/** METRICS_TOKEN is read here and nowhere else. */
+export function metricsToken(env: NodeJS.ProcessEnv = process.env): string {
+  return env.METRICS_TOKEN?.trim() ?? "";
+}
 
 /** Count and time every request, and serve /metrics (see access rules above). */
 export function registerMetrics(
   app: FastifyInstance,
   service: string,
   opts: { path?: string; env?: NodeJS.ProcessEnv } = {}
-): MetricsRegistry {
-  const env = opts.env ?? process.env;
+): ServiceMetrics {
   const path = opts.path ?? METRICS_PATH;
-  const registry = new MetricsRegistry(service);
-  const token = env.METRICS_TOKEN?.trim() ?? "";
-  const production = (env.NODE_ENV ?? "").trim() === "production";
+  const metrics = new ServiceMetrics(service);
+  const token = metricsToken(opts.env);
 
   app.addHook("onResponse", async (req, reply) => {
     const route = req.routeOptions?.url ?? "unmatched";
     if (route === path) return;
-    registry.observeRequest(req.method, route, reply.statusCode, reply.elapsedTime / 1000);
+    metrics.observeRequest(req.method, route, reply.statusCode, reply.elapsedTime / 1000);
   });
-
-  if (production && !token) return registry;
 
   app.get(path, async (req, reply) => {
-    if (token && !bearerMatches(req.headers.authorization, token)) {
-      return reply.code(401).send({ error: "metrics_token_required" });
+    const access = metricsAccess(req, token);
+    if (access === "hidden") return reply.callNotFound();
+    if (access === "unauthorized") {
+      return reply.code(401).header("www-authenticate", "Bearer").send({ error: "metrics_token_required" });
     }
-    return reply.type("text/plain; version=0.0.4; charset=utf-8").send(registry.render());
+    return reply.type("text/plain; version=0.0.4; charset=utf-8").send(await metrics.render());
   });
-  return registry;
+  return metrics;
 }

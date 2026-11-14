@@ -24,10 +24,12 @@ export function edgeModeFrom(raw: string | undefined): EdgeMode {
  * Origin lock: a Cloudflare Transform Rule sets this header to PORTAL_ORIGIN_LOCK_TOKEN on every
  * request it forwards. When the token is configured the portal refuses requests without it, so the
  * Fly hostname cannot be used to go around the WAF and rate limits. Exempt: /health (Fly's checks
- * reach the machine directly) and callers that present the portal service token (coordinators).
+ * reach the machine directly), /metrics (#14: scrapers also reach the machine directly, and the
+ * route has its own loopback-or-METRICS_TOKEN guard) and callers that present the portal service
+ * token (coordinators).
  */
 export const ORIGIN_LOCK_HEADER = "x-edgecoder-origin";
-const ORIGIN_LOCK_EXEMPT_PATHS = new Set(["/health"]);
+const ORIGIN_LOCK_EXEMPT_PATHS = new Set(["/health", "/metrics"]);
 
 function headerEquals(value: unknown, expected: string): boolean {
   if (typeof value !== "string" || !expected) return false;

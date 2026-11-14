@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import Fastify from "fastify";
 import { ORIGIN_LOCK_HEADER, clientIp, edgeModeFrom, flyClientIpEnabled, registerPortalSecurity, rateLimitFor } from "../../src/portal/security.js";
 import { clearCookies, cookieName, encodeCookie, readCookie } from "../../src/portal/portal-utils.js";
+import { registerMetrics } from "../../src/common/metrics.js";
 
 // #10: security headers, CSRF origin check, rate limits and cookie hardening.
 async function buildApp() {
@@ -203,6 +204,31 @@ describe("Cloudflare edge: client IP and origin lock", () => {
     expect((await app.inject({ method: "GET", url: "/portal", headers: { "x-portal-service-token": "svc-token" } })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/health?x=1" })).statusCode).toBe(200);
+  });
+
+  it("#14: /metrics is exempt from the origin lock and keeps its own guard", async () => {
+    const build = async (env: NodeJS.ProcessEnv) => {
+      const app = Fastify({ trustProxy: 1 });
+      registerMetrics(app, "portal", { env });
+      await registerPortalSecurity(app, { publicOrigin: "https://edgecoder.io", trustedOrigins: [], edge: "cloudflare", originLockToken: "lock-123" });
+      app.get("/portal", async () => "ok");
+      await app.ready();
+      return app;
+    };
+    const direct = { method: "GET" as const, url: "/metrics", remoteAddress: "203.0.113.5" };
+    const open = await build({});
+    // Hidden, not "origin_locked": the route's own guard answers.
+    expect((await open.inject(direct)).statusCode).toBe(404);
+    // Through the edge it is just as hidden: the origin-lock header is not a metrics credential.
+    expect((await open.inject({ ...direct, headers: { [ORIGIN_LOCK_HEADER]: "lock-123", "cf-connecting-ip": "198.51.100.7" } })).statusCode).toBe(404);
+    expect((await open.inject({ ...direct, url: "/portal" })).statusCode).toBe(403);
+
+    const tokened = await build({ METRICS_TOKEN: "m".repeat(32) });
+    expect((await tokened.inject(direct)).statusCode).toBe(401);
+    expect((await tokened.inject({ ...direct, headers: { authorization: "Bearer wrong" } })).statusCode).toBe(401);
+    const ok = await tokened.inject({ ...direct, headers: { authorization: `Bearer ${"m".repeat(32)}` } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.body).toContain("edgecoder_http_requests_total");
   });
 
   it("without a lock token nothing is refused", async () => {
