@@ -169,7 +169,7 @@
     color: var(--text-primary);
   }
   .error-msg {
-    background: rgba(248, 113, 113, 0.1);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
     color: var(--red);
     padding: 8px 12px;
     border-radius: var(--radius-sm);
@@ -216,7 +216,7 @@
   .btn-primary {
     padding: 12px;
     background: var(--accent);
-    color: var(--on-accent, #fff);
+    color: var(--on-accent);
     border: none;
     border-radius: var(--radius-sm);
     font-size: 14px;

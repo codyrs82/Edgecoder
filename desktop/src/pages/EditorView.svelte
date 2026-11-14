@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { Popover, Tabs } from "bits-ui";
-  import { Settings as SettingsIcon } from "@lucide/svelte";
+  import { Settings as SettingsIcon, MessageSquare } from "@lucide/svelte";
   import { notify } from "../lib/toast";
   import FileTree from "../components/FileTree.svelte";
   import Select from "../components/ui/Select.svelte";
@@ -789,9 +789,7 @@
         onclick={toggleChatPanel}
         title={chatPanelVisible ? "Hide chat" : "Show chat"}
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-        </svg>
+        <MessageSquare size={16} />
       </button>
     </div>
     {#if trustPrompt && projectRoot}
@@ -1088,8 +1086,8 @@
     }
   }
   .ac-toggle.problems {
-    color: var(--warning, #d29922);
-    border-color: var(--warning, #d29922);
+    color: var(--yellow);
+    border-color: var(--yellow);
   }
   .ac-toggle.on {
     color: var(--accent);
@@ -1224,6 +1222,7 @@
     flex: 1;
     width: 100%;
     border: none;
+    /* Pages without their own background expect the browser's white canvas, in either theme. */
     background: #fff;
   }
   .split-editor {

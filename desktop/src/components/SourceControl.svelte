@@ -578,7 +578,7 @@
   }
   .error {
     margin: 2px 0;
-    color: var(--danger, #f85149);
+    color: var(--danger);
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -648,14 +648,14 @@
     width: 12px;
     text-align: center;
     font-weight: 600;
-    color: var(--warning, #d29922);
+    color: var(--yellow);
   }
   .status[data-status="U"],
   .status[data-status="A"] {
-    color: var(--success, #3fb950);
+    color: var(--green);
   }
   .status[data-status="D"],
   .status[data-status="C"] {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
 </style>

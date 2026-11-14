@@ -153,7 +153,7 @@
                 <tr>
                   <td>{reasonText(r.reason)}</td>
                   <td class="sp-muted">{new Date(r.atMs).toLocaleString()}</td>
-                  <td class="num" style="color:{r.type === 'earn' ? 'var(--success, #3fb950)' : 'inherit'}">{r.type === "earn" ? "+" : "−"}{fmt(Math.abs(r.cSats), 3)}</td>
+                  <td class="num" style="color:{r.type === 'earn' ? 'var(--green)' : 'inherit'}">{r.type === "earn" ? "+" : "−"}{fmt(Math.abs(r.cSats), 3)}</td>
                 </tr>
               {/each}
             </tbody>

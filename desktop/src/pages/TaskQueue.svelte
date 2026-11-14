@@ -139,10 +139,10 @@
     </div>
   {:else}
     <div class="stats-grid">
-      <StatCard label="Queued"        value={queued}  color="var(--yellow, #facc15)" />
-      <StatCard label="Active Agents" value={agents}  color="var(--green, #4ade80)" />
-      <StatCard label="Completed"     value={results} color="var(--accent-secondary, #60a5fa)" />
-      <StatCard label="Results / min" value={resultsPerMin().toFixed(1)} color="var(--accent, #3b82f6)" />
+      <StatCard label="Queued"        value={queued}  color="var(--yellow)" />
+      <StatCard label="Active Agents" value={agents}  color="var(--green)" />
+      <StatCard label="Completed"     value={results} color="var(--accent-secondary)" />
+      <StatCard label="Results / min" value={resultsPerMin().toFixed(1)} color="var(--accent)" />
     </div>
   {/if}
 
@@ -226,25 +226,25 @@
 
   /* ── toggle button ────────────────────────────────────────── */
   .toggle-btn {
-    background: var(--bg-surface, #1a1a2e);
-    color: var(--accent, #3b82f6);
-    border: 1px solid var(--accent, #3b82f6);
+    background: var(--bg-surface);
+    color: var(--accent);
+    border: 1px solid var(--accent);
     padding: 0.5rem 1.2rem;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 0.9rem;
     margin-bottom: 1rem;
     transition: background 0.15s;
   }
   .toggle-btn:hover {
-    background: rgba(59, 130, 246, 0.15);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
 
   /* ── submit form ──────────────────────────────────────────── */
   .submit-form {
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     padding: 1.25rem;
-    border-radius: var(--radius-md, 8px);
+    border-radius: var(--radius-md);
     margin-bottom: 1.5rem;
     display: flex;
     flex-direction: column;
@@ -269,15 +269,15 @@
   }
 
   .req {
-    color: #f87171;
+    color: var(--red);
   }
 
   textarea,
   input[type="text"] {
-    background: var(--bg-input, #0f0f23);
-    color: var(--text-primary, #e2e8f0);
-    border: 1px solid var(--border-control, #99928b);
-    border-radius: var(--radius-sm, 6px);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-sm);
     padding: 0.55rem 0.7rem;
     font-size: 0.9rem;
     font-family: inherit;
@@ -287,22 +287,22 @@
   textarea:focus,
   input[type="text"]:focus {
     outline: none;
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
 
   input[type="range"] {
-    accent-color: var(--accent, #3b82f6);
+    accent-color: var(--accent);
     width: 100%;
     margin-top: 0.25rem;
   }
 
   .submit-btn {
     align-self: flex-start;
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
     border: none;
     padding: 0.55rem 1.5rem;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 0.9rem;
     font-weight: 500;
@@ -319,35 +319,35 @@
   /* ── inline messages ──────────────────────────────────────── */
   .msg {
     padding: 0.6rem 0.85rem;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     font-size: 0.85rem;
   }
   .msg.success {
-    background: rgba(74, 222, 128, 0.12);
-    color: var(--green, #4ade80);
-    border: 1px solid rgba(74, 222, 128, 0.25);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+    color: var(--green);
+    border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
   }
   .msg.error {
-    background: rgba(248, 113, 113, 0.12);
-    color: #f87171;
-    border: 1px solid rgba(248, 113, 113, 0.25);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+    color: var(--red);
+    border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
   }
 
   /* ── empty state ──────────────────────────────────────────── */
   .empty {
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     padding: 1.2rem;
-    border-radius: var(--radius-md, 8px);
+    border-radius: var(--radius-md);
     opacity: 0.7;
     margin-top: 1rem;
   }
   .empty p {
     margin: 0;
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: var(--radius-md, 8px); margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
 
   button:focus-visible, input:focus-visible, textarea:focus-visible {
-    outline: 2px solid var(--accent, #3b82f6);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 </style>

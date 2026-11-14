@@ -10,7 +10,7 @@
   } from "../lib/api";
   import type { Conversation } from "../lib/types";
   import type { AuthUser } from "../lib/api";
-  import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud, Plus } from "@lucide/svelte";
+  import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud, Plus, X, EllipsisVertical, Pencil, Trash2 } from "@lucide/svelte";
   import { bots } from "../lib/bots-store";
   import { botStatusLine } from "../lib/bots";
   import BotAvatar from "./BotAvatar.svelte";
@@ -266,9 +266,7 @@
     <div class="sidebar-header">
       <h2 class="sidebar-title">History</h2>
       <button class="close-btn" type="button" onclick={onClose} title="Close" aria-label="Close history">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M18 6L6 18M6 6l12 12"/>
-        </svg>
+        <X size={18} />
       </button>
     </div>
   {/if}
@@ -313,9 +311,7 @@
 
   {#if searchOpen || !inline}
   <div class="search-wrapper">
-    <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-    </svg>
+    <span class="search-icon" aria-hidden="true"><Search size={14} /></span>
     <input
       class="search-input"
       type="text"
@@ -386,9 +382,7 @@
               aria-expanded={menuOpenId === convo.id}
               aria-controls={menuOpenId === convo.id ? `convo-menu-${convo.id}` : undefined}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
-              </svg>
+              <EllipsisVertical size={14} />
             </button>
             {#if menuOpenId === convo.id}
               <div
@@ -400,17 +394,11 @@
                 use:menu={{ onClose: closeMenu, trigger: menuTrigger }}
               >
                 <button class="context-menu-item" type="button" role="menuitem" tabindex="-1" onclick={() => startRename(convo)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
+                  <Pencil size={14} />
                   Rename
                 </button>
                 <button class="context-menu-item delete" type="button" role="menuitem" tabindex="-1" onclick={() => handleDelete(convo.id)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <polyline points="3 6 5 6 21 6"/>
-                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-                  </svg>
+                  <Trash2 size={14} />
                   {confirmDeleteId === convo.id ? "Confirm delete?" : "Delete"}
                 </button>
               </div>
@@ -494,7 +482,7 @@
   }
   .bot-status {
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -534,7 +522,7 @@
   }
   .ran-on {
     display: inline-flex;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     opacity: 0.8;
   }
   .conversation-item:hover .ran-on,
@@ -555,12 +543,12 @@
   .group-label {
     padding: 14px 12px 4px;
     font-size: 11px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
   }
   .backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--scrim);
     z-index: 99;
     animation: fadeIn 200ms ease-out;
   }
@@ -584,7 +572,7 @@
     flex-direction: column;
     transform: translateX(100%);
     transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-lg);
   }
 
   .sidebar.open {
@@ -647,6 +635,7 @@
   }
 
   .search-icon {
+    display: flex;
     position: absolute;
     left: 28px;
     top: 50%;
@@ -807,7 +796,7 @@
     border-radius: var(--radius-md);
     padding: 4px;
     min-width: 140px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-md);
     z-index: 10;
     animation: menuIn 150ms ease-out;
   }
@@ -849,7 +838,7 @@
 
   .context-menu-item:focus-visible {
     background: var(--bg-surface);
-    outline: 2px solid var(--focus-ring, var(--accent));
+    outline: 2px solid var(--focus-ring);
     outline-offset: -2px;
   }
 

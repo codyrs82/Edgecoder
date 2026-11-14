@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Square, ArrowUp } from "@lucide/svelte";
   import { tick, type Snippet } from "svelte";
 
   interface Props {
@@ -143,13 +144,11 @@
   <div class="toolbar">{@render toolbar?.()}</div>
   {#if streaming && onStop}
     <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc)">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      <Square size={14} fill="currentColor" />
     </button>
   {:else}
     <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 19V5M5 12l7-7 7 7"/>
-      </svg>
+      <ArrowUp size={16} strokeWidth={2.4} />
     </button>
   {/if}
   </div>
@@ -166,7 +165,7 @@
     background: var(--bg-elevated);
     border: 0.5px solid var(--border);
     border-radius: var(--radius-md);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-md);
     padding: 4px;
     z-index: 30;
   }
@@ -196,7 +195,7 @@
     margin-left: auto;
   }
   .mpath {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

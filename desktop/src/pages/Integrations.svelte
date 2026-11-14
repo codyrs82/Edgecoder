@@ -138,16 +138,16 @@
     font-size: 0.75rem;
     font-weight: 600;
     padding: 2px 8px;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
   }
   .badge.connected {
     color: var(--green);
-    background: rgba(74, 222, 128, 0.12);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
   }
   .btn-primary {
     padding: 8px 20px;
     background: var(--accent);
-    color: var(--on-accent, #fff);
+    color: var(--on-accent);
     border: none;
     border-radius: var(--radius-sm);
     font-size: 13px;
@@ -160,9 +160,9 @@
   }
   .btn-danger {
     padding: 8px 20px;
-    background: rgba(248, 113, 113, 0.1);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
     color: var(--red);
-    border: 1px solid rgba(248, 113, 113, 0.2);
+    border: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 13px;
@@ -170,7 +170,7 @@
     transition: all 0.15s;
   }
   .btn-danger:hover:not(:disabled) {
-    background: rgba(248, 113, 113, 0.2);
+    background: color-mix(in srgb, var(--red) 20%, transparent);
   }
   .btn-danger:disabled {
     opacity: 0.5;
@@ -178,7 +178,7 @@
   }
 
   button:focus-visible {
-    outline: 2px solid var(--accent, #3b82f6);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 </style>

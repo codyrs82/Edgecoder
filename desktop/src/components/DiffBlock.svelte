@@ -66,7 +66,7 @@
 
 <style>
   .diff-block {
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
@@ -83,7 +83,7 @@
   }
 
   .file-path {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 13px;
     color: var(--text-primary);
     white-space: nowrap;
@@ -99,7 +99,7 @@
 
   .btn {
     padding: 3px 12px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     border: none;
     font-size: 12px;
     font-weight: 500;
@@ -122,7 +122,7 @@
     font-size: 12px;
     font-weight: 500;
     padding: 2px 8px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
   }
   .status-label.applied {
     color: var(--green);
@@ -140,7 +140,7 @@
   }
 
   .diff-line {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.6;
     padding: 0 12px;

@@ -22,7 +22,7 @@
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
-  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Bot } from "@lucide/svelte";
+  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Bot, PanelLeft } from "@lucide/svelte";
   import type { RepoConnection } from "./lib/api";
   import BotView from "./pages/BotView.svelte";
   import BotForm from "./components/BotForm.svelte";
@@ -257,6 +257,7 @@
 
   // The header's + : what you can create.
   let newMenuOpen = $state(false);
+  let sidebarToggleLabel = $derived(activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : "Toggle chat");
   let newMenuTrigger: HTMLButtonElement | undefined = $state();
   function newChatHere() {
     newMenuOpen = false;
@@ -382,17 +383,14 @@
 
       <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
 
-      <button class="header-btn" title={activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : "Toggle chat"} onclick={() => {
+      <button class="header-btn" title={sidebarToggleLabel} aria-label={sidebarToggleLabel} onclick={() => {
         if (activeTab === "chat") {
           historyOpen = !historyOpen;
         } else {
           editorView?.toggleChatPanel?.();
         }
       }}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="18" height="18" rx="2"/>
-          <path d="M9 3v18"/>
-        </svg>
+        <PanelLeft size={18} />
       </button>
       <button class="header-btn" title="Settings" aria-label="Settings" onclick={() => openSettings()}>
         <SettingsIcon size={17} strokeWidth={2} />

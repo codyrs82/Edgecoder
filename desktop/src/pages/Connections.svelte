@@ -353,7 +353,7 @@
 
 <style>
   .conn.selected { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  .warn-row { background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); }
+  .warn-row { background: color-mix(in srgb, var(--yellow) 8%, transparent); }
   .conn-main {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;

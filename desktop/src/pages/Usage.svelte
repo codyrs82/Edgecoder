@@ -181,9 +181,9 @@
   .chart rect:hover { opacity: 1; }
   .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
   .meter { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 8px; max-width: 360px; }
-  .meter-fill { height: 100%; background: var(--success, #3fb950); }
-  .meter-fill.near { background: var(--warning, #d29922); }
-  .meter-fill.over { background: var(--danger, #e5484d); }
+  .meter-fill { height: 100%; background: var(--green); }
+  .meter-fill.near { background: var(--yellow); }
+  .meter-fill.over { background: var(--danger); }
   .log { max-height: 460px; overflow-y: auto; }
   tr.failed td { color: var(--text-secondary); }
 </style>

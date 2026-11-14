@@ -34,10 +34,10 @@
   // Core data
   // ---------------------------------------------------------------------------
 
-  let health: HealthRuntime | null = $state(null);
-  let status: CoordinatorStatus | null = $state(null);
-  let overview: DashboardOverview | null = $state(null);
-  let metrics: SystemMetrics | null = $state(null);
+  let health = $state<HealthRuntime | null>(null);
+  let status = $state<CoordinatorStatus | null>(null);
+  let overview = $state<DashboardOverview | null>(null);
+  let metrics = $state<SystemMetrics | null>(null);
   let metricsSupported: boolean = $state(true);
 
   let loading: boolean = $state(true);
@@ -221,7 +221,7 @@
         <StatCard
           label="Node Status"
           value={nodeOnline ? "Online" : "Offline"}
-          color={nodeOnline ? "#4ade80" : "#f87171"}
+          color={nodeOnline ? "var(--green)" : "var(--red)"}
         />
         <StatCard label="Provider" value={providerName} />
         <StatCard label="Connected Agents" value={agentCount} />
@@ -241,7 +241,7 @@
         <StatCard
           label="Ollama Version"
           value={ollamaVersion}
-          color={ollamaReachable ? "#4ade80" : "#f87171"}
+          color={ollamaReachable ? "var(--green)" : "var(--red)"}
         />
         <StatCard label="Active Model" value={activeModel} />
         <StatCard label="Models Installed" value={modelCount} />
@@ -319,7 +319,7 @@
     font-size: 1.8rem;
     font-weight: 700;
     margin-bottom: 1.5rem;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .section {
@@ -331,7 +331,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     margin-bottom: 0.75rem;
   }
 
@@ -342,18 +342,18 @@
   }
 
   .card-slot {
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     padding: 1.2rem;
     border-radius: 8px;
   }
 
   /* ---- Section C placeholder ---- */
   .placeholder-card {
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     padding: 2rem;
     border-radius: 8px;
     text-align: center;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
   }
 
   .placeholder-icon {
@@ -370,7 +370,7 @@
 
   /* ---- Section D chart ---- */
   .chart-card {
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg-surface);
     padding: 1.2rem;
     border-radius: 8px;
   }
@@ -380,19 +380,19 @@
     justify-content: space-between;
     margin-top: 0.5rem;
     font-size: 0.8rem;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
   }
 
   .legend-value {
     font-weight: 600;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
 
   .chart-placeholder {
     text-align: center;
     padding: 1.5rem;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
     font-size: 0.9rem;
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>

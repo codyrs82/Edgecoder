@@ -14,6 +14,6 @@
 
 <style>
   .skeleton-wrap { display: flex; flex-direction: column; gap: 0.5rem; }
-  .skeleton-line { background: linear-gradient(90deg, #1e1e3f 25%, #2a2a4f 50%, #1e1e3f 75%); background-size: 200% 100%; border-radius: 4px; animation: shimmer 1.5s infinite; }
+  .skeleton-line { background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--border-strong) 50%, var(--bg-elevated) 75%); background-size: 200% 100%; border-radius: 4px; animation: shimmer 1.5s infinite; }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 </style>

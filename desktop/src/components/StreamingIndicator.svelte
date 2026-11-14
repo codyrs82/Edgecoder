@@ -55,7 +55,7 @@
     font-size: 12px;
     color: var(--text-muted);
     padding: 4px 0 2px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .dot {
     width: 6px;

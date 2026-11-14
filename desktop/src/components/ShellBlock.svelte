@@ -58,7 +58,7 @@
 
 <style>
   .shell-block {
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-deep);
     margin: 6px 0;
     overflow: hidden;
@@ -83,14 +83,14 @@
 
   .prompt {
     color: var(--green);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 14px;
     font-weight: 700;
     flex-shrink: 0;
   }
 
   .command {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 13px;
     color: var(--text-primary);
     white-space: nowrap;
@@ -107,7 +107,7 @@
 
   .btn {
     padding: 3px 12px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     border: none;
     font-size: 12px;
     font-weight: 500;
@@ -127,11 +127,11 @@
   }
 
   .exit-badge {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 500;
     padding: 2px 8px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
   }
   .exit-badge.success {
     color: var(--green);
@@ -149,7 +149,7 @@
   }
 
   .output {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.5;
     white-space: pre-wrap;

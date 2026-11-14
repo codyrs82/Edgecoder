@@ -614,14 +614,14 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 14px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 14px;
     background: var(--bg-surface);
     margin-bottom: 8px;
   }
   .ask-card.waiting {
-    border-color: color-mix(in srgb, var(--warning, #d29922) 55%, transparent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning, #d29922) 12%, transparent);
+    border-color: color-mix(in srgb, var(--yellow) 55%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow) 12%, transparent);
   }
   .ask-q {
     font-size: 13px;
@@ -633,7 +633,7 @@
     padding: 6px 9px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-word;
@@ -647,7 +647,7 @@
   .ask-choices button {
     padding: 6px 14px;
     border-radius: 999px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12.5px;
@@ -669,14 +669,14 @@
     align-self: flex-end;
     padding: 4px 12px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--success, #3fb950) 16%, transparent);
-    color: var(--success, #3fb950);
+    background: color-mix(in srgb, var(--green) 16%, transparent);
+    color: var(--green);
     font-size: 12px;
     font-weight: 600;
   }
   .ask-answer.denied {
-    background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
   }
   .pr-ask {
     display: flex;
@@ -714,10 +714,10 @@
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
-    border: 0.5px solid color-mix(in srgb, var(--success, #3fb950) 50%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--green) 50%, transparent);
     border-radius: 14px;
-    background: color-mix(in srgb, var(--success, #3fb950) 8%, var(--bg-surface));
-    color: var(--success, #3fb950);
+    background: color-mix(in srgb, var(--green) 8%, var(--bg-surface));
+    color: var(--green);
     margin-bottom: 8px;
   }
   .pr-card-text {
@@ -735,7 +735,7 @@
   .pr-card-sub {
     font-size: 12px;
     color: var(--text-secondary);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -743,7 +743,7 @@
   .pr-card button {
     padding: 5px 12px;
     border-radius: 999px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12px;
@@ -767,7 +767,7 @@
     white-space: nowrap;
   }
   .repo-err {
-    color: var(--danger, #e5484d);
+    color: var(--danger);
   }
   /* --- details panel --- */
   .details {
@@ -776,7 +776,7 @@
     display: flex;
     flex-direction: column;
     border-left: 0.5px solid var(--border);
-    background: var(--bg-deep, var(--bg-base));
+    background: var(--bg-deep);
     overflow-y: auto;
   }
   .d-top {
@@ -930,7 +930,7 @@
     border-radius: 999px;
     border: none;
     padding: 0;
-    background: var(--border-strong, #444);
+    background: var(--border-control);
     cursor: pointer;
   }
   .switch::after {
@@ -941,11 +941,11 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: #fff;
+    background: var(--bg-surface);
     transition: transform 0.15s;
   }
   .switch[aria-checked="true"] {
-    background: var(--success, #3fb950);
+    background: var(--green);
   }
   .switch[aria-checked="true"]::after {
     transform: translateX(14px);
@@ -964,7 +964,7 @@
     padding: 10px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     line-height: 1.5;
     white-space: pre-wrap;
@@ -976,7 +976,7 @@
     padding: 8px 10px;
     border-radius: 8px;
     background: var(--bg-base);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     word-break: break-all;
   }
@@ -990,7 +990,7 @@
     align-items: center;
     gap: 6px;
     padding: 5px 10px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
     background: var(--bg-base);
     color: var(--text-primary);
@@ -1013,7 +1013,7 @@
       right: 0;
       bottom: 0;
       z-index: 30;
-      box-shadow: -12px 0 32px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--shadow-lg);
     }
   }
   .bot-head {
@@ -1065,14 +1065,14 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .chip.warn {
-    color: var(--warning, #d29922);
-    border-color: color-mix(in srgb, var(--warning, #d29922) 45%, transparent);
-    background: color-mix(in srgb, var(--warning, #d29922) 10%, transparent);
+    color: var(--yellow);
+    border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
+    background: color-mix(in srgb, var(--yellow) 10%, transparent);
   }
   .chip.err {
-    color: var(--danger, #e5484d);
-    border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, transparent);
-    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .meta {
     display: flex;
@@ -1080,7 +1080,7 @@
     gap: 6px;
     min-width: 0;
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
   }
@@ -1126,9 +1126,9 @@
     align-items: center;
     gap: 6px;
     padding: 6px 11px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
-    background: var(--bg-base, var(--bg-surface));
+    background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12.5px;
     cursor: pointer;
@@ -1167,10 +1167,10 @@
     display: flex;
     flex-direction: column;
     padding: 4px;
-    background: var(--bg-elevated, var(--bg-surface));
+    background: var(--bg-elevated);
     border: 0.5px solid var(--border);
     border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-lg);
   }
   .menu button {
     border: none;
@@ -1193,10 +1193,10 @@
     gap: 10px;
     margin: 10px 20px 0;
     padding: 10px 12px;
-    border: 0.5px solid color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 10px;
-    background: color-mix(in srgb, var(--danger, #e5484d) 7%, var(--bg-surface));
-    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger) 7%, var(--bg-surface));
+    color: var(--danger);
     font-size: 12.5px;
   }
   .notice-text {
@@ -1222,9 +1222,9 @@
   }
   .notice-actions button {
     padding: 4px 10px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 7px;
-    background: var(--bg-base, var(--bg-surface));
+    background: var(--bg-base);
     color: var(--text-primary);
     font-size: 12px;
     cursor: pointer;
@@ -1247,7 +1247,7 @@
   }
   .run-note {
     font-size: 11px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
   }
   .tabs {
     display: flex;
@@ -1293,7 +1293,7 @@
   .event {
     text-align: center;
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     padding: 10px 0 4px;
   }
   .empty {

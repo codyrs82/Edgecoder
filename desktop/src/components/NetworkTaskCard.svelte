@@ -90,13 +90,13 @@
     padding: 8px 10px;
     border-top: 0.5px solid var(--border);
     background: var(--bg-base);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: pre-wrap;
     max-height: 300px;
     overflow: auto;
   }
   pre.err {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
 </style>

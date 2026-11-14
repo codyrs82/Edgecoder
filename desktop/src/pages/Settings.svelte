@@ -484,8 +484,8 @@
   }
 
   .section {
-    background: var(--bg-surface, #1a1a2e);
-    border: 1px solid var(--border, #1e1e3f);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     padding: 1.2rem 1.4rem;
     border-radius: 10px;
     margin-bottom: 1.2rem;
@@ -494,7 +494,7 @@
   .section h2 {
     font-size: 0.92rem;
     margin: 0 0 1rem;
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 600;
@@ -508,7 +508,7 @@
   .label-text {
     display: block;
     font-size: 0.85rem;
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     margin-bottom: 0.35rem;
   }
 
@@ -516,8 +516,8 @@
   input[type="number"] {
     width: 100%;
     padding: 0.45rem 0.6rem;
-    background: var(--bg-input, #0d0d1a);
-    border: 1px solid var(--border-control, #99928b);
+    background: var(--bg-input);
+    border: 1px solid var(--border-control);
     border-radius: 5px;
     color: inherit;
     font-size: 0.88rem;
@@ -540,8 +540,8 @@
 
   .btn-sm {
     padding: 0.4rem 0.75rem;
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
     border: none;
     border-radius: 5px;
     cursor: pointer;
@@ -565,13 +565,13 @@
   }
 
   .badge.valid {
-    color: var(--green, #4ade80);
-    background: rgba(74, 222, 128, 0.12);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
   }
 
   .badge.invalid {
-    color: var(--red, #f87171);
-    background: rgba(248, 113, 113, 0.12);
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 
   .slider-row {
@@ -582,7 +582,7 @@
 
   .slider-row input[type="range"] {
     flex: 1;
-    accent-color: var(--accent, #3b82f6);
+    accent-color: var(--accent);
   }
 
   .slider-value {
@@ -601,7 +601,7 @@
   }
 
   .toggle input {
-    accent-color: var(--accent, #3b82f6);
+    accent-color: var(--accent);
   }
 
   /* Node Identity grid */
@@ -613,7 +613,7 @@
   }
 
   .id-label {
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
     padding-top: 0.15rem;
   }
 
@@ -625,7 +625,7 @@
   }
 
   .mono {
-    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-family: var(--font-mono);
     font-size: 0.8rem;
   }
 
@@ -635,16 +635,16 @@
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: 4px;
-    background: rgba(59, 130, 246, 0.12);
-    color: var(--accent, #3b82f6);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
   }
 
   .btn-copy {
     padding: 0.15rem 0.45rem;
     font-size: 0.72rem;
-    background: var(--border, #1e1e3f);
-    color: var(--text-muted, #94a3b8);
-    border: 1px solid var(--border, #1e1e3f);
+    background: var(--border);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
     border-radius: 4px;
     cursor: pointer;
     white-space: nowrap;
@@ -652,7 +652,7 @@
   }
 
   .btn-copy:hover {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
 
   .identity-loading,
@@ -662,11 +662,11 @@
   }
 
   .identity-error {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
 
   .identity-loading {
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
   }
 
   /* Save row */
@@ -679,8 +679,8 @@
 
   .btn-save {
     padding: 0.6rem 1.8rem;
-    background: var(--accent, #3b82f6);
-    color: var(--on-accent, #fff);
+    background: var(--accent);
+    color: var(--on-accent);
     border: none;
     border-radius: 7px;
     cursor: pointer;
@@ -707,40 +707,40 @@
     margin-bottom: 0;
   }
   .about-label {
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
   }
   .about-value {
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
     text-align: right;
     max-width: 60%;
     word-break: break-word;
   }
   .status-ok {
-    color: var(--green, #4ade80);
+    color: var(--green);
   }
   .status-err {
-    color: var(--red, #f87171);
+    color: var(--red);
   }
   .update-ok {
-    color: var(--green, #4ade80);
+    color: var(--green);
     font-weight: 600;
   }
   .update-available {
-    color: var(--accent-secondary, #4a90d9);
+    color: var(--accent-secondary);
     font-weight: 600;
   }
   .update-checking {
-    color: var(--text-muted, #94a3b8);
+    color: var(--text-muted);
   }
   .update-error {
-    color: var(--red, #f87171);
+    color: var(--red);
     font-size: 0.8rem;
   }
   .btn-check-update {
     padding: 0.35rem 0.75rem;
-    background: var(--bg-elevated, #454542);
-    color: var(--text-secondary, #b8b0a4);
-    border: 1px solid var(--border, rgba(214, 204, 194, 0.08));
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
     border-radius: 5px;
     cursor: pointer;
     font-size: 0.78rem;
@@ -748,8 +748,8 @@
     transition: all 0.15s;
   }
   .btn-check-update:hover {
-    background: var(--bg-surface, #3a3a37);
-    color: var(--text-primary, #f7f5f0);
+    background: var(--bg-surface);
+    color: var(--text-primary);
   }
   .mesh-status {
     display: flex;

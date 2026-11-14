@@ -130,6 +130,6 @@
   .reply-usage {
     margin-top: 6px;
     font-size: 11.5px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
   }
 </style>

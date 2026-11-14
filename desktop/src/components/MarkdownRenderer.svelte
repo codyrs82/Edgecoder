@@ -50,7 +50,7 @@
   }
   .markdown :global(pre) {
     background: var(--bg-deep);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     padding: 12px 16px;
     overflow-x: auto;
     margin: 0.75em 0;
@@ -118,7 +118,7 @@
   }
   .markdown :global(.code-block-wrapper pre) {
     margin: 0;
-    border-radius: 0 0 var(--radius-sm, 6px) var(--radius-sm, 6px);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
     border: 0.5px solid var(--border);
     border-top: none;
   }
@@ -128,7 +128,7 @@
     align-items: center;
     padding: 4px 12px;
     background: var(--bg-elevated);
-    border-radius: var(--radius-sm, 6px) var(--radius-sm, 6px) 0 0;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
     border: 0.5px solid var(--border);
     border-bottom: none;
   }

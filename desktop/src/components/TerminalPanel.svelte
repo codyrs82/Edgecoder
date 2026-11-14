@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import "@xterm/xterm/css/xterm.css";
   import tokens from "@edgecoder/tokens/tokens.json";
+  import { onThemeChange } from "../lib/theme";
 
   interface Props {
     /** Folder the shell starts in (the open project). */
@@ -20,9 +21,18 @@
   const unlisten: Array<() => void> = [];
   let resizeObserver: ResizeObserver | undefined;
 
-  function cssVar(name: string, fallback: string): string {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return v || fallback;
+  /** xterm paints on a canvas, so it gets resolved token values; an unset one falls back to xterm's own. */
+  function cssVar(name: string): string | undefined {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || undefined;
+  }
+
+  function termTheme() {
+    return {
+      background: cssVar("--bg-base"),
+      foreground: cssVar("--text-primary"),
+      cursor: cssVar("--accent"),
+      selectionBackground: cssVar("--selection"),
+    };
   }
 
   function b64ToBytes(b64: string): Uint8Array {
@@ -55,18 +65,15 @@
       fontSize: 13,
       cursorBlink: true,
       scrollback: 5000,
-      theme: {
-        background: cssVar("--bg-base", "#0d1117"),
-        foreground: cssVar("--text-primary", "#e6edf3"),
-        cursor: cssVar("--accent", "#e8963b"),
-        selectionBackground: "rgba(232, 150, 59, 0.3)",
-      },
+      theme: termTheme(),
     });
     fit = new FitAddon();
     term.loadAddon(fit);
     if (!host) return;
     term.open(host);
     fit.fit();
+    // Follow the app theme while the terminal is open.
+    unlisten.push(onThemeChange(() => { if (term) term.options.theme = termTheme(); }));
     unlisten.push(await listen<{ id: number; data: string }>("term-data", (e) => {
       if (e.payload.id === id) term.write(b64ToBytes(e.payload.data));
     }));
@@ -145,6 +152,6 @@
   .error {
     padding: 6px 10px;
     font-size: 12px;
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
 </style>
