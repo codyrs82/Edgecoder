@@ -78,7 +78,9 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/resend-verification$/,
   /^\/auth\/verify-email$/,
   /^\/auth\/passkey\//,
-  /^\/auth\/oauth\/[^/]+\/(start|callback)$/,
+  /^\/auth\/oauth\/[^/]+\/(start|callback|connect)$/,
+  // Logout needs no credential and runs a delete per token sent; limit it like sign-in.
+  /^\/auth\/logout$/,
   /^\/auth\/oauth\/mobile\/complete$/,
   // AI agent signup by public key (routes/agents.ts): unauthenticated, creates accounts.
   /^\/agents\/(challenge|signup)$/,

@@ -109,7 +109,8 @@ export function registerWalletRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORI
       })
       .parse(req.body);
 
-    const challenge = await store.consumeWalletSendMfaChallenge(body.challengeId);
+    // Scoped to the caller in the UPDATE itself, so another account cannot burn this challenge.
+    const challenge = await store.consumeWalletSendMfaChallenge(body.challengeId, user.userId);
     if (!challenge || challenge.userId !== user.userId) {
       return reply.code(400).send({ error: "wallet_send_mfa_challenge_invalid" });
     }

@@ -82,11 +82,11 @@ function makeStore() {
     createWalletSendMfaChallenge: async (input: Challenge) => {
       challenges.set(input.challengeId, { ...input });
     },
-    // UPDATE ... SET consumed_at_ms = now WHERE challenge_id = $1 AND consumed_at_ms IS NULL AND expires_at_ms > now RETURNING ...
-    consumeWalletSendMfaChallenge: async (challengeId: string) => {
+    // UPDATE ... SET consumed_at_ms = now WHERE challenge_id = $1 AND user_id = $3 AND consumed_at_ms IS NULL AND expires_at_ms > now RETURNING ...
+    consumeWalletSendMfaChallenge: async (challengeId: string, userId: string) => {
       const challenge = challenges.get(challengeId);
       const now = Date.now();
-      if (!challenge || challenge.consumedAtMs !== undefined || !(challenge.expiresAtMs > now)) return null;
+      if (!challenge || challenge.userId !== userId || challenge.consumedAtMs !== undefined || !(challenge.expiresAtMs > now)) return null;
       challenge.consumedAtMs = now;
       return { ...challenge };
     },
@@ -329,6 +329,14 @@ describe("POST /wallet/send/mfa/confirm", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({ error: "wallet_send_mfa_challenge_invalid" });
     expect(store.sendRequests).toEqual([]);
+  });
+
+  it("another user's attempt does not spend the owner's challenge", async () => {
+    const started = await start("alice");
+    expect((await confirm("bob", goodBody(started, bob))).statusCode).toBe(400);
+    const res = await confirm("alice", goodBody(started));
+    expect(res.statusCode).toBe(200);
+    expect(store.sendRequests).toHaveLength(1);
   });
 
   it("another user's passkey, or an unknown one, cannot stand in for the caller's", async () => {

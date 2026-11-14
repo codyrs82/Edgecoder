@@ -1367,7 +1367,11 @@ export class PortalStore {
     );
   }
 
-  async consumeWalletSendMfaChallenge(challengeId: string): Promise<{
+  /**
+   * Spends a send challenge, only for the user it was issued to: a guessed or leaked challenge id
+   * used from another account matches nothing and leaves the owner's challenge intact.
+   */
+  async consumeWalletSendMfaChallenge(challengeId: string, userId: string): Promise<{
     challengeId: string;
     userId: string;
     accountId: string;
@@ -1383,10 +1387,11 @@ export class PortalStore {
       `UPDATE portal_wallet_send_mfa_challenges
        SET consumed_at_ms = $2
        WHERE challenge_id = $1
+         AND user_id = $3
          AND consumed_at_ms IS NULL
          AND expires_at_ms > $2
        RETURNING challenge_id, user_id, account_id, destination, amount_sats, note, email_code_hash, passkey_challenge, expires_at_ms`,
-      [challengeId, now]
+      [challengeId, now, userId]
     );
     const row = result.rows[0];
     if (!row) return null;

@@ -122,9 +122,7 @@ function credentialFor(route: { method: string; url: string }): Credential {
 const OPERATOR_ONLY = ["/portal/api/admin/", "/coordinator/ops/", "/admin/", "/portal/api/escalations", "/portal/api/reviews"];
 
 /** Public state-changing routes that deliberately carry no rate limit. */
-const NO_RATE_LIMIT: Record<string, string> = {
-  "POST /auth/logout": "does nothing without a session and only ever deletes the caller's own"
-};
+const NO_RATE_LIMIT: Record<string, string> = {};
 
 const PARAMS: Record<string, string> = { provider: "google" };
 const concrete = (url: string) => url.replace(/:([A-Za-z]+)/g, (_m, name: string) => PARAMS[name] ?? `x-${name}`);
@@ -502,6 +500,14 @@ describe("portal rate-limit inventory (#17)", () => {
     }
   });
 
+  it("logout and connecting a sign-in provider carry the sign-in limit", () => {
+    for (const entry of ["POST /auth/logout", "POST /auth/oauth/:provider/connect"]) {
+      const route = routes.find((r) => key(r) === entry);
+      expect(route, entry).toBeDefined();
+      expect(limitOf(route!), entry).toMatchObject(security.AUTH_RATE_LIMIT);
+    }
+  });
+
   it("every state-changing wallet route carries the wallet limit", () => {
     const wallet = routes.filter((route) => route.url.startsWith("/wallet/") && STATE_CHANGING.has(route.method));
     expect(wallet.map(key).sort()).toEqual([
@@ -562,10 +568,11 @@ describe("session and wallet-challenge expiry is enforced in the store (#17)", (
   it("a wallet send challenge is consumed atomically, once, and only while unexpired", async () => {
     const { store, queries } = recordingStore();
     const before = Date.now();
-    expect(await store.consumeWalletSendMfaChallenge("challenge-1")).toBeNull();
+    expect(await store.consumeWalletSendMfaChallenge("challenge-1", "u-owner")).toBeNull();
     expect(queries).toHaveLength(1);
-    expect(queries[0].sql).toMatch(/^UPDATE portal_wallet_send_mfa_challenges SET consumed_at_ms = \$2 WHERE challenge_id = \$1 AND consumed_at_ms IS NULL AND expires_at_ms > \$2 RETURNING /);
+    expect(queries[0].sql).toMatch(/^UPDATE portal_wallet_send_mfa_challenges SET consumed_at_ms = \$2 WHERE challenge_id = \$1 AND user_id = \$3 AND consumed_at_ms IS NULL AND expires_at_ms > \$2 RETURNING /);
     expect(queries[0].params[0]).toBe("challenge-1");
+    expect(queries[0].params[2]).toBe("u-owner");
     expect(Number(queries[0].params[1])).toBeGreaterThanOrEqual(before);
   });
 });
