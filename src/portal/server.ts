@@ -8,6 +8,7 @@ import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
+import { isRequestValidationError, registerRequestValidationErrors } from "./validation-errors.js";
 import { registerPortalPages } from "./pages/index.js";
 import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
 import { coordinatorPricingSource } from "./public-pricing.js";
@@ -75,7 +76,9 @@ import { nativeRedirectMatches } from "./native-app-auth.js";
 const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: false });
 exposeRequestId(app);
 registerMetrics(app, "portal");
-await registerErrorTracking(app, "portal");
+// A malformed request body is a 400, not a 500, and is not reported as a server error.
+await registerErrorTracking(app, "portal", { ignore: isRequestValidationError });
+registerRequestValidationErrors(app);
 
 const DESKTOP_ORIGINS = [...DESKTOP_APP_ORIGINS];
 await app.register(cors, {

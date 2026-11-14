@@ -97,6 +97,8 @@ export interface ErrorTrackingOptions {
   load?: () => Promise<typeof SentryNode>;
   /** Report uncaughtException/unhandledRejection too. Default true; tests turn it off. */
   processHandlers?: boolean;
+  /** Handler errors the service answers as a client error (4xx) although they carry no statusCode. */
+  ignore?: (error: unknown) => boolean;
 }
 
 /** A reporter for `service`, or null when SENTRY_DSN is unset (or the SDK cannot be loaded). */
@@ -192,6 +194,7 @@ export async function registerErrorTracking(
     // Thrown errors without a statusCode become 500s (reply.statusCode is not set yet here).
     const status = (error as { statusCode?: number }).statusCode ?? 500;
     if (status < 500) return;
+    if (opts.ignore?.(error)) return;
     reporter.captureException(error, {
       requestId: String(req.id),
       // The pattern, never the raw URL: ids and query strings stay out of the report.
