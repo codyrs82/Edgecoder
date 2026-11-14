@@ -5,6 +5,44 @@ Work through it per seed; both seeds share one database, so the shared items (pa
 caps, fee-pool lock) only need checking once. Mechanics are in
 [economy-math.md](economy-math.md) section 5 ("Hot-wallet safeguards").
 
+## Switching the database to mainnet
+
+The ledger records the Bitcoin network it belongs to (table `ledger_network`, written by the first
+coordinator start). A coordinator whose `BITCOIN_NETWORK` differs refuses to start with
+`ledger_network_mismatch`, naming both networks. Any change refuses, not only regtest to mainnet:
+one database, one network. A database from before the network was recorded is adopted by the
+first start only if nothing contradicts it: its payment intents must all be on the configured
+network, and on mainnet it must hold no credit, payout or payment rows at all (their origin cannot
+be proven, so a database used on regtest can never quietly become mainnet).
+
+To move a database to a new network, wipe its ledger explicitly:
+
+1. Stop every coordinator on the database and take a backup.
+2. Dry run: `DATABASE_URL=... npx tsx scripts/ledger-reset-network.ts --confirm-wipe-ledger regtest --to bitcoin --dry-run`
+   (`--confirm-wipe-ledger` must name the recorded network, or `unrecorded`). It prints the rows
+   per table it would delete.
+3. Run it without `--dry-run`. In one transaction it deletes, and records `bitcoin`:
+   - money: `credit_transactions` (every cSat balance, earning and spend), `payment_intents`,
+     `coordinator_fee_events`, `payouts`, `usage_records`, `compute_reservations`;
+   - what reconciliation checks those against: `coordinator_earnings_projection`,
+     `compute_contribution_reports`;
+   - work that could still accrue earnings: `queue_tasks`, `queue_results`,
+     `queue_expired_holders`, `pending_verifications`;
+   - the signed and anchored history of all of it: `ledger_records`, `stats_ledger_records`,
+     `quorum_ledger_records`, `bitcoin_anchor_records`, `work_receipts`, `receipt_epochs`,
+     `issuance_epochs`, `issuance_allocations`, `issuance_payout_events`, `ledger_verifications`.
+
+   It keeps accounts and machines (`credit_accounts`, `account_memberships`, `agent_registry`,
+   `agent_signing_keys`, `agent_ownership`), payout destinations and their LNURL pins
+   (`wallet_accounts`, `payout_callback_pins`; a regtest on-chain address will not validate on
+   mainnet, Lightning addresses carry over), `infrastructure_hosts`, safety state
+   (`payout_controls` incl. the pause flag, `blacklist_events`, `verification_reputation`,
+   `hardware_verifications`, `request_nonces`, `ble_synced_tx` so old BLE transfers cannot be
+   replayed), and network-independent reference data (price/rate epochs, market history and
+   orders, treasury, key custody, rollouts, node status). The lists are `WIPED_TABLES` /
+   `KEPT_TABLES` in `src/db/ledger-reset.ts`; a test fails if a new table is in neither.
+4. Start the coordinators with `BITCOIN_NETWORK=bitcoin`.
+
 ## Lightning node
 
 - [ ] `LIGHTNING_PROVIDER=lnd` (or `cln`) with `LND_REST_URL` on a private network or loopback.

@@ -11,6 +11,7 @@ import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { EarningsSummary, FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import { assertLedgerNetwork, type LedgerNetworkCheck } from "./ledger-network.js";
 import type { SolvencyInputs } from "../economy/payout-reconcile.js";
 import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
@@ -39,6 +40,7 @@ function rowToPayout(row: Record<string, unknown>): PayoutRecord {
 }
 import {
   AccountMembership,
+  BitcoinNetwork,
   AgentOwnership,
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -761,6 +763,17 @@ CREATE TABLE IF NOT EXISTS pending_verifications (
   updated_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_verifications_coordinator ON pending_verifications (coordinator_id, started_at_ms);
+
+-- The Bitcoin network this database's ledger belongs to (src/db/ledger-network.ts). One row, written
+-- by the first coordinator start that checks it (assertLedgerNetwork); a coordinator configured for
+-- another network refuses to start. Changed only by scripts/ledger-reset-network.ts, which wipes
+-- the money rows in the same transaction, so regtest balances can never become mainnet sats.
+CREATE TABLE IF NOT EXISTS ledger_network (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  network TEXT NOT NULL,
+  recorded_at_ms BIGINT NOT NULL,
+  recorded_by TEXT NOT NULL
+);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -1330,6 +1343,14 @@ export class PostgresStore {
       maturedMsat: Number(row.matured_msat ?? 0),
       oldestHeldAtMs: row.oldest_held_ms === null || row.oldest_held_ms === undefined ? null : Number(row.oldest_held_ms)
     };
+  }
+
+  /**
+   * Refuse to run against a ledger recorded for another Bitcoin network (src/db/ledger-network.ts).
+   * The coordinator calls this at startup, after migrate() and before serving.
+   */
+  async assertLedgerNetwork(configured: BitcoinNetwork, recordedBy?: string): Promise<LedgerNetworkCheck> {
+    return assertLedgerNetwork(this.pool, configured, recordedBy);
   }
 
   /**
