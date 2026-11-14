@@ -39,7 +39,7 @@ const BASE58_VERSIONS: Record<"main" | "test", { p2pkh: number; p2sh: number }> 
   test: { p2pkh: 0x6f, p2sh: 0xc4 }
 };
 
-const base58check = createBase58check((data) => new Uint8Array(createHash("sha256").update(data).digest()));
+const base58check = createBase58check((data: Uint8Array) => new Uint8Array(createHash("sha256").update(data).digest()));
 
 function networkLabel(n: BitcoinNetwork): string {
   return n === "bitcoin" ? "Bitcoin mainnet" : n;
