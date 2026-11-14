@@ -7,7 +7,7 @@
 // filesystem, shell, and git operations within the user's project.
 // ---------------------------------------------------------------------------
 
-import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, lstat, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -278,6 +278,12 @@ function safeRealpath(p: string): string | null {
 /** True if an argument names a path outside `root` (absolute, ~, or ..-escaping). */
 function escapesRoot(arg: string, root: string): boolean {
   const value = arg.includes("=") && arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
+  if (valueEscapesRoot(value, root)) return true;
+  // #17: a short option with its value attached (`-f../x`, `-flink`) is checked like `-f ../x`.
+  return /^-[^-]./.test(arg) && valueEscapesRoot(arg.slice(2), root);
+}
+
+function valueEscapesRoot(value: string, root: string): boolean {
   if (!value || (value.startsWith("-") && !value.includes("/"))) return false;
   if (value.startsWith("~")) return true;
   const abs = resolve(root, value);
@@ -578,7 +584,9 @@ export class ToolExecutor {
         lines.push(`dir   ${entry.name}/`);
       } else {
         try {
-          const info = await stat(join(dirPath, entry.name));
+          // lstat, not stat (#17): a symlink is listed as itself. stat reports the size of what
+          // it points at, which can be a file outside the project root.
+          const info = await lstat(join(dirPath, entry.name));
           lines.push(`file  ${entry.name}  (${info.size} bytes)`);
         } catch {
           lines.push(`file  ${entry.name}`);
