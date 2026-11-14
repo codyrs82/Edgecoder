@@ -1,0 +1,62 @@
+# #98: regtest Lightning network for the LND settlement acceptance test (tests/e2e/lnd-regtest.test.ts).
+# bitcoind + two LND nodes (polar-style): "alice" plays the coordinator's node (creates invoices),
+# "bob" plays a payer. Driven by scripts/e2e/lnd-regtest.sh, which generates the RPC credentials
+# at runtime; there are no fixed secrets here. Regtest only: nothing here touches a real network.
+#
+# Images are pinned by digest (multi-arch index). Bump tag and digest together.
+x-lnd: &lnd
+  image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  restart: on-failure
+
+services:
+  bitcoind:
+    image: polarlightning/bitcoind:29.0@sha256:4521294ac25fdbf1492a8cc5ea987463a5f244b82546d29bbe8451db39f36f3a
+    command:
+      - bitcoind
+      - -regtest=1
+      - -server=1
+      - -txindex=1
+      - -fallbackfee=0.0002
+      - -rpcauth=${LND_REGTEST_RPCAUTH:?run scripts/e2e/lnd-regtest.sh, which generates it}
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -zmqpubrawblock=tcp://0.0.0.0:28334
+      - -zmqpubrawtx=tcp://0.0.0.0:28335
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -regtest -rpcuser=$$RPC_USER -rpcpassword=$$RPC_PASS getblockchaininfo >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    environment:
+      - RPC_USER=${LND_REGTEST_RPC_USER:?}
+      - RPC_PASS=${LND_REGTEST_RPC_PASS:?}
+
+  alice:
+    <<: *lnd
+    command: &lnd-args
+      - --noseedbackup
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=${LND_REGTEST_RPC_USER:?}
+      - --bitcoind.rpcpass=${LND_REGTEST_RPC_PASS:?}
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28334
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28335
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      # The test reaches REST through a published port on 127.0.0.1 and pins tls.cert.
+      - --tlsextraip=127.0.0.1
+      - --tlsextradomain=localhost
+      - --debuglevel=info
+    ports:
+      - "127.0.0.1::8080"
+
+  bob:
+    <<: *lnd
+    command: *lnd-args
+    ports:
+      - "127.0.0.1::8080"
