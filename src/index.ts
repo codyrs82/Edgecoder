@@ -10,16 +10,21 @@ import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { LISTEN_HOST } from "./common/env-guard.js";
 import { createLogger, setProcessName } from "./common/logger.js";
+import { loadConfigOrExit } from "./common/config.js";
+import { allInOneConfigSchema } from "./config/all-in-one.js";
 
 const logger = createLogger("unified-agent");
 setProcessName("unified-agent");
 
-const INFERENCE_PORT = Number(process.env.INFERENCE_PORT) || 4302;
-const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT) || 4301;
-const CONTROL_PLANE_PORT = Number(process.env.CONTROL_PLANE_PORT) || 4303;
-const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT) || 4305;
+// #15: the three services above validated their own configuration when they were imported.
+const C = loadConfigOrExit("all-in-one", allInOneConfigSchema);
+
+const INFERENCE_PORT = C.INFERENCE_PORT || 4302;
+const COORDINATOR_PORT = C.COORDINATOR_PORT || 4301;
+const CONTROL_PLANE_PORT = C.CONTROL_PLANE_PORT || 4303;
+const LOCAL_FORWARD_PORT = C.LOCAL_FORWARD_PORT || 4305;
 // The worker joins the network coordinator once the desktop app has enrolled this machine.
-const NETWORK_COORDINATOR_URL = process.env.AGENT_NETWORK_COORDINATOR_URL?.trim() || "";
+const NETWORK_COORDINATOR_URL = C.AGENT_NETWORK_COORDINATOR_URL ?? "";
 
 function isEaddrInUse(err: unknown): err is NodeJS.ErrnoException {
   return typeof err === "object" && err !== null && "code" in err && (err as NodeJS.ErrnoException).code === "EADDRINUSE";
@@ -34,10 +39,10 @@ function helpForPorts(): string {
  * this machine, else the edgecoder-local stub (which only echoes the task, so a stub worker
  * cannot do real swarm work). Decided once at boot.
  */
-let workerModelProvider = process.env.LOCAL_MODEL_PROVIDER;
+let workerModelProvider: string | undefined = C.LOCAL_MODEL_PROVIDER;
 async function detectWorkerModelProvider(): Promise<void> {
   if (workerModelProvider) return;
-  const host = (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
+  const host = C.OLLAMA_HOST.replace(/\/$/, "");
   try {
     const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
     workerModelProvider = res.ok ? "ollama-local" : "edgecoder-local";
@@ -54,7 +59,7 @@ function startWorkerProcess(): void {
   const __dirname = dirname(__filename);
   const workerScript = join(__dirname, "swarm", "worker-runner.js");
 
-  const agentId = process.env.AGENT_ID || `node-${hostname().slice(0, 8)}`;
+  const agentId = C.AGENT_ID || `node-${hostname().slice(0, 8)}`;
   // The desktop app sets AGENT_NETWORK_COORDINATOR_URL once the signed-in user has enrolled this
   // machine, so the worker contributes to the network; otherwise it stays on the local coordinator.
   const coordinatorUrl = NETWORK_COORDINATOR_URL || `http://127.0.0.1:${COORDINATOR_PORT}`;
@@ -63,8 +68,8 @@ function startWorkerProcess(): void {
     ...process.env as Record<string, string>,
     AGENT_ID: agentId,
     COORDINATOR_URL: coordinatorUrl,
-    AGENT_MODE: process.env.AGENT_MODE ?? "swarm-only",
-    AGENT_OS: process.env.AGENT_OS ?? "macos",
+    AGENT_MODE: C.AGENT_MODE,
+    AGENT_OS: C.AGENT_OS,
     LOCAL_MODEL_PROVIDER: workerModelProvider ?? "edgecoder-local",
     // A networked worker relays the IDE's swarm work (signed, billed to this machine's owner).
     ...(NETWORK_COORDINATOR_URL ? { LOCAL_FORWARD_PORT: String(LOCAL_FORWARD_PORT) } : {}),
@@ -137,13 +142,13 @@ async function boot(): Promise<void> {
   // Start embedded worker — every node contributes compute to the mesh
   // Set DISABLE_SELF_AGENT=1 to run coordinator-only (e.g. when the self-agent
   // can't execute tasks because Docker/sandbox isn't available on this host).
-  if (process.env.DISABLE_SELF_AGENT === "1") {
+  if (C.DISABLE_SELF_AGENT) {
     logger.info("self-agent disabled (DISABLE_SELF_AGENT=1)");
   } else {
     await detectWorkerModelProvider();
     startWorkerProcess();
   }
-  if (process.env.DISABLE_IDE_PROVIDER !== "1") startIdeProvider();
+  if (!C.DISABLE_IDE_PROVIDER) startIdeProvider();
 }
 
 boot().catch((error) => {

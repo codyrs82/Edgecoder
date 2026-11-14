@@ -4,6 +4,8 @@
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
+import { loadConfigOrExit } from "../common/config.js";
+import { anchorProxyConfigSchema } from "../config/anchor-proxy.js";
 import { buildAnchorProxyApp, registerAnchorProxyMetrics, type AnchorProxyStats } from "./anchor-proxy-app.js";
 import { rpcHostForLog } from "./anchor-proxy-health.js";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
@@ -29,25 +31,19 @@ import { registerErrorTracking } from "../common/error-tracking.js";
 /*  Auth: Bearer token via ANCHOR_PROXY_TOKEN env var.                 */
 /* ------------------------------------------------------------------ */
 
-const PORT = Number(process.env.ANCHOR_PROXY_PORT ?? "4311");
-const ANCHOR_PROXY_TOKEN = process.env.ANCHOR_PROXY_TOKEN;
-const BITCOIND_RPC_URL = process.env.BITCOIND_RPC_URL;
-const BITCOIND_RPC_USER = process.env.BITCOIND_RPC_USER;
-const BITCOIND_RPC_PASSWORD = process.env.BITCOIND_RPC_PASSWORD;
-const BITCOIND_WALLET_NAME = process.env.BITCOIND_WALLET_NAME ?? "";
-const BITCOIN_NETWORK = (process.env.BITCOIN_NETWORK ?? "signet") as BitcoinNetwork;
+// #15: validated once. A missing token or bitcoind RPC setting (required, as before), a
+// non-numeric port or an unknown network exits here with every problem listed.
+const C = loadConfigOrExit("anchor-proxy", anchorProxyConfigSchema);
+const PORT = C.ANCHOR_PROXY_PORT;
+const ANCHOR_PROXY_TOKEN = C.ANCHOR_PROXY_TOKEN;
+const BITCOIND_RPC_URL = C.BITCOIND_RPC_URL;
+const BITCOIND_RPC_USER = C.BITCOIND_RPC_USER;
+const BITCOIND_RPC_PASSWORD = C.BITCOIND_RPC_PASSWORD;
+const BITCOIND_WALLET_NAME = C.BITCOIND_WALLET_NAME;
+const BITCOIN_NETWORK: BitcoinNetwork = C.BITCOIN_NETWORK;
 
-// Startup failures happen before the Fastify app (and its logger) exists.
+// Used when listen() fails, outside any request.
 const startupLog = createLogger("anchor-proxy");
-
-if (!ANCHOR_PROXY_TOKEN) {
-  startupLog.fatal("ANCHOR_PROXY_TOKEN is required");
-  process.exit(1);
-}
-if (!BITCOIND_RPC_URL || !BITCOIND_RPC_USER || !BITCOIND_RPC_PASSWORD) {
-  startupLog.fatal("BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD are required");
-  process.exit(1);
-}
 
 const stats: AnchorProxyStats = {};
 const provider = new BitcoindRpcProvider(BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD, BITCOIND_WALLET_NAME);
@@ -55,8 +51,8 @@ const app = buildAnchorProxyApp({
   token: ANCHOR_PROXY_TOKEN,
   provider,
   network: BITCOIN_NETWORK,
-  maxBroadcastsPerMinute: Number(process.env.MAX_BROADCASTS_PER_MINUTE ?? "10"),
-  maxReconcileCallsPerMinute: Number(process.env.MAX_RECONCILE_CALLS_PER_MINUTE ?? "30"),
+  maxBroadcastsPerMinute: C.MAX_BROADCASTS_PER_MINUTE,
+  maxReconcileCallsPerMinute: C.MAX_RECONCILE_CALLS_PER_MINUTE,
   serverOptions: serviceLoggerOptions("anchor-proxy"),
   stats
 });

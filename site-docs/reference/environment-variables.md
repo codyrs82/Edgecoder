@@ -8,7 +8,7 @@ Consolidated reference for all environment controls. The primary config file on 
 
 | Variable | Values | Description |
 |---|---|---|
-| `EDGE_RUNTIME_MODE` | `worker` \| `coordinator` \| `ide-provider` \| `control-plane` \| `inference` \| `all-in-one` | Selects which service the daemon runs as. Required. |
+| `EDGE_RUNTIME_MODE` | `all-in-one` (default) \| `agent` \| `worker` \| `coordinator` \| `portal` \| `control-plane` \| `inference` \| `ide-provider` \| `install` | Selects which service the `edgecoder` launcher runs. Any other value stops the launcher with the list of roles. |
 | `HOST` | `127.0.0.1` | Listen address for all HTTP services; set `0.0.0.0` in containers/Fly or for LAN multi-machine setups. |
 
 ## Worker identity and enrollment
@@ -116,19 +116,9 @@ Reputation, abandonment and replica exclusion are keyed on the agent's reward ac
 | `PASSKEY_RP_ID` | `portal.edgecoder.io` | WebAuthn relying party ID (must match origin domain). |
 | `PASSKEY_RP_NAME` | `EdgeCoder Portal` | Display name for WebAuthn credential creation. |
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
-| `PASSKEY_CHALLENGE_TTL_MS` | `120000` | Passkey challenge expiry (ms). |
+| `PASSKEY_CHALLENGE_TTL_MS` | `300000` | Passkey challenge expiry (ms). |
 | `PORTAL_TRUST_FLY_CLIENT_IP` | unset | When `true` and Fly's runtime `FLY_APP_NAME` is set, the rate-limit client IP is read from the `Fly-Client-IP` header that the Fly edge proxy sets ([Fly request headers](https://fly.io/docs/networking/request-headers/)). Otherwise it is the socket address, and `X-Forwarded-*` is never trusted (`trustProxy: false`). **Keep unset until #31.** Until it is set, all portal traffic on Fly shares the proxy's rate-limit bucket. `PORTAL_TRUST_PROXY_HOPS` is gone, because Fastify 5.12 ignores hop counts. |
 | `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). **Required in production** (at least 32 characters; the portal refuses to start without it). Set the same value on every instance. Outside production, unset means a random key per process. |
-
-## Key provider and rotation
-
-| Variable | Values | Description |
-|---|---|---|
-| `KEY_PROVIDER` | `env` \| `hsm` \| `tpm` \| `secure-enclave` | Signing key backend. Default: `env`. |
-| `HSM_PKCS11_LIB` | `/usr/lib/libpkcs11.so` | Path to PKCS#11 shared library (required when `KEY_PROVIDER=hsm`). |
-| `HSM_SLOT_ID` | `0` | HSM slot identifier. |
-| `HSM_PIN` | _(secret)_ | HSM user PIN. |
-| `KEY_ROTATION_DAYS` | `90` | Maximum days between key rotations. |
 
 ## Bluetooth Local (BLE proxy — Mac IDE mode)
 
@@ -136,10 +126,8 @@ Used by the IDE provider server (`EDGE_RUNTIME_MODE=ide-provider`) to bridge the
 
 | Variable | Default | Description |
 |---|---|---|
-| `BT_PROXY_PORT` | `11435` | Port the Swift `edgecoder-ble-proxy` companion listens on. |
-| `BT_PROXY_HOST` | `127.0.0.1` | Host for the BLE proxy HTTP API. Always loopback in production. |
-| `BT_PROXY_URL` | `http://127.0.0.1:11435` | Full URL the IntelligentRouter calls for bluetooth-local inference. Overrides `BT_PROXY_HOST` + `BT_PROXY_PORT`. |
-| `BT_STATUS_URL` | _(auto-set)_ | Status endpoint checked by the router to decide if BT is available. Set automatically from `BT_PROXY_HOST:BT_PROXY_PORT`. |
+| `BT_PROXY_URL` | `http://127.0.0.1:11435` | Full URL the IntelligentRouter calls for bluetooth-local inference. |
+| `BT_STATUS_URL` | unset | Status endpoint checked by the router to decide if BT is available. |
 
 The `edgecoder-ble-proxy` binary must be installed first:
 ```bash
@@ -204,7 +192,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | `200000` | Daily anchoring budget: refuse a broadcast when (broadcasts in 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` exceeds it. |
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | `20000` | Absolute fee cap per anchor tx. |
 | `BITCOIN_ANCHOR_MAINNET` | unset | Set to `1` to allow broadcasting on `BITCOIN_NETWORK=bitcoin` (opt-in). |
-| `BITCOIN_NETWORK` | `signet` | Must match across all coordinators in the mesh. |
+| `BITCOIN_NETWORK` | `testnet` (coordinator), `signet` (anchor proxy) | `bitcoin`, `testnet`, `signet` or `regtest`. Must match across all coordinators in the mesh. |
 | `ANCHOR_PROXY_URL` | — | URL of the anchor proxy service (when provider is `anchor-proxy`). |
 | `ANCHOR_PROXY_TOKEN` | — | Bearer token for anchor proxy auth. |
 | `BITCOIND_RPC_URL` | — | Direct bitcoind RPC URL (when provider is `bitcoind`). |
@@ -216,15 +204,16 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `ANCHOR_POLL_RETRY_BASE_MS` | `30000` | First retry delay after a failed confirmation poll; doubles per failure. |
 | `ANCHOR_POLL_MAX_BACKOFF_MS` | `3600000` | Cap on the confirmation poll retry delay. |
 | `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Extra floor for stats hard finality; the larger of this and `BITCOIN_ANCHOR_CONFIRMATIONS` applies. |
-| `ANCHOR_PROXY_PORT` | `4310` | Listen port for the anchor proxy service. |
+| `ANCHOR_PROXY_PORT` | `4311` | Listen port for the anchor proxy service. |
 | `MAX_BROADCASTS_PER_MINUTE` | `10` | Rate limit for OP_RETURN broadcasts (anchor proxy). |
+| `MAX_RECONCILE_CALLS_PER_MINUTE` | `30` | Rate limit for reconcile calls (anchor proxy). |
 
 ## Wallet and economy
 
 | Variable | Description |
 |---|---|
 | `WALLET_DEFAULT_NETWORK` | Default chain/network for wallet operations. |
-| `WALLET_SECRET_PEPPER` | Server-side pepper for wallet key derivation. |
+| `WALLET_SECRET_PEPPER` | Accepted for existing deployments; no code reads it today. |
 | `COORDINATOR_FEE_BPS` | Coordinator fee in basis points. |
 | `COORDINATOR_FEE_ACCOUNT` | Fee recipient account address. |
 | `PAYMENT_INTENT_TTL_MS` | Payment intent expiry (ms). |
@@ -244,22 +233,247 @@ The inference service checks these values at startup against `inferenceConfigSch
 |---|---|
 | `NETWORK_MODE` | `public_mesh` or `enterprise_overlay` — mesh network policy mode. |
 | `CONTROL_PLANE_URL` | Control-plane service URL for coordinator/worker autodiscovery. |
-| `NODE_BIN` | Override Node.js binary path if auto-detection fails (macOS/Linux daemon). |
 | `DOCS_SITE_URL` | Documentation site URL (used in portal links). |
 | `GITHUB_REPO_URL` | Repository URL for changelog/release links. |
 | `SUPPORT_EMAIL` | Contact address on the portal's privacy and terms pages (default `support@edgecoder.io`; plain address only) (#22). |
 | `MODEL_DOWNLOAD_DOMAINS` | Comma-separated exact hostnames that signed model manifests may download from; replaces the default `models.edgecoder.io,huggingface.co` (#22). See [Self-hosting](../operations/self-hosting.md). |
 
+## All-in-one entry (`src/index.ts`)
+
+`EDGE_RUNTIME_MODE=all-in-one` runs inference, the coordinator and the control plane in one process and starts a worker and the IDE provider as children. Each of those validates its own schema as well.
+
+| Variable | Default | Description |
+|---|---|---|
+| `INFERENCE_PORT` | `4302` | Inference listen port. |
+| `COORDINATOR_PORT` | `4301` | Coordinator listen port. |
+| `CONTROL_PLANE_PORT` | `4303` | Control-plane listen port. |
+| `LOCAL_FORWARD_PORT` | `4305` (all-in-one); unset = off (worker) | Loopback port of the worker's forwarder, which carries the IDE's swarm requests. The all-in-one entry sets it for its worker once the machine is enrolled. |
+| `AGENT_NETWORK_COORDINATOR_URL` | unset | Set by the desktop app once this machine is enrolled; the embedded worker then joins that coordinator instead of the local one. An http(s) URL. |
+| `DISABLE_SELF_AGENT` | unset | `1` runs without the embedded worker. |
+| `DISABLE_IDE_PROVIDER` | unset | `1` runs without the IDE provider. |
+
+## Worker: other settings
+
+Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORTAL_URL` | unset | Portal the worker reports its enrollment to (with `AGENT_REGISTRATION_TOKEN`). An http(s) URL. |
+| `AGENT_DEVICE_ID` | generated | Stable device id reported at registration. |
+| `IOS_DEVICE_ID` | unset | Device id used when `AGENT_DEVICE_ID` is unset (iOS agents). |
+| `IOS_OLLAMA_MODEL` | `qwen3.5:0.8b` | Model the iOS agent entry (`src/swarm/ios-agent.ts`) runs. |
+| `EDGECODER_DISCOVERY` | unset | `1` turns coordinator discovery on even when `COORDINATOR_URL` is set. With `COORDINATOR_URL` unset, discovery is always on. |
+| `AGENT_REGISTER_REFRESH_MS` | `240000` | How often the worker re-registers. Values under 60000 use the default. |
+| `LEASE_HEARTBEAT_MS` | `15000` | Heartbeat interval while a claimed subtask runs (min 1000). |
+| `EDGECODER_TRUST_REVERIFY_MS` | `600000` | How long a coordinator identity verification lasts. |
+| `EDGECODER_IDENTITY_CHALLENGE` | by trust mode | `required` or `optional`: whether a coordinator must answer the identity challenge. |
+| `EDGECODER_RESPONSE_SIGNING` | by trust mode | `required` or `optional`: whether coordinator responses must be signed. |
+| `EDGECODER_STEERING` | on | `off`, `0` or `false` stops the worker following the signed coordinator registry. |
+| `EDGECODER_STEERING_INTERVAL_MS` | `600000` | Registry refresh interval (min 60000). |
+| `AGENT_PARALLEL_INFERENCE` | by installed memory | Concurrent model calls, 1 to 16. Other values fall back to the memory-based default. |
+| `SANDBOX_MODE` | `docker` (swarm-only), else `none` | `docker` or `none`. Any other value is treated as `none` with a warning, and the node takes no swarm tasks. |
+| `SANDBOX_REQUIRED` | unset | `true` refuses to run a task without a sandbox. |
+| `SANDBOX_MAX_OUTPUT_BYTES` | `1048576` | Cap on captured output per stream. |
+| `SANDBOX_SECCOMP_PROFILE` | unset | Path of a seccomp profile passed to `docker run`. |
+| `EDGECODER_UNSAFE_HOST_EXECUTION` | unset | `1` allows running code on the host without a sandbox (local use only). |
+| `SNAPSHOT_ENFORCEMENT` | `warn` | `strict`, `warn` or `off`: what happens to a task whose snapshot reference can't be verified. |
+| `AGENT_GPU_VENDOR` | detected | Overrides the detected GPU vendor. |
+| `AGENT_GPU_MODEL` | detected | Overrides the detected GPU model. |
+| `AGENT_GPU_VRAM_GB` | detected | Overrides the detected GPU memory, in GB. |
+| `AGENT_GPU_DATACENTER` | unset | `1` marks the GPU as a datacenter card. |
+| `AGENT_BENCHMARK` | on | `0` turns the local benchmark and the coordinator's benchmark challenges off. |
+| `AGENT_BENCHMARK_INTERVAL_MS` | `21600000` | How often the local benchmark reruns (min 600000). |
+| `AGENT_ASK_MSAT_PER_CREDIT` | unset | Lowest price this agent works for, in msat per credit. Unset follows the coordinator's reference price. |
+| `PEER_DIRECT_WORK_ITEMS` | built-in sample | Work offered to direct peers, separated by `\|\|`. |
+| `EDGECODER_BLE` | on | `0` turns the BLE mesh off (macOS). |
+| `BLE_TEST_ENABLED` | unset | `true` runs the BLE task test while the coordinator is reachable (dev only). |
+| `EDGECODER_CONFIG_DIR` | per platform | Directory for the worker's keys and trust file. |
+| `EDGECODER_LOG_DIR` | per platform | Directory for the worker's logs. |
+| `EDGECODER_DEV` | unset | `1` reports the `dev` distribution channel to the release-integrity check. |
+| `EDGECODER_RELEASE` | unset | `github` reports the `github` distribution channel. |
+
+## Model runtime: other settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_EDGE_MODEL` | `qwen3.5:9b` | Model used for edge (worker-side) prompts. |
+| `OLLAMA_GENERATE_ENDPOINT` | derived from `OLLAMA_HOST` | Full URL of Ollama's generate endpoint. |
+| `OLLAMA_TAGS_ENDPOINT` | `http://127.0.0.1:11434/api/tags` | Full URL of Ollama's model list endpoint. |
+| `OLLAMA_THINK` | unset | `1` turns model thinking on (much slower). |
+| `EDGECODER_OLLAMA_DIR` | per platform | Where a managed Ollama is installed. |
+
+## Coordinator discovery and registry
+
+Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coordinator-registry.ts`). See `docs/discovery.md`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EDGECODER_DISCOVERY_DOMAIN` | `edgecoder.io` | Domain looked up for coordinators. `off` disables DNS discovery. |
+| `EDGECODER_DISCOVERY_TIMEOUT_MS` | `4000` | Time limit for one discovery round. |
+| `EDGECODER_DISCOVERY_MARGIN` | `0.2` | Fraction by which another coordinator must be faster before a client switches to it. |
+| `EDGECODER_NOSTR_RELAYS` | `wss://relay.damus.io,wss://nos.lol` | Comma-separated Nostr relays. `off` disables Nostr discovery. |
+| `EDGECODER_NOSTR_AUTHORS` | unset | Comma-separated Nostr public keys whose announcements are trusted. |
+| `EDGECODER_COORDINATOR_PINS` | unset | Comma-separated key fingerprints or peer ids a discovered coordinator must match. |
+| `EDGECODER_NOSTR_ALLOW_UNPINNED` | unset | `1`, `true` or `yes` accepts Nostr announcements from coordinators that match no pin. |
+| `EDGECODER_COMPUTE_CLASS` | unset | Compute class a client prefers when it picks a coordinator. |
+| `EDGECODER_REGISTRY_URLS` | `<platform URL>/network/registry` | Comma-separated signed-registry URLs. |
+| `EDGECODER_REGISTRY_URL` | unset | Single-URL form, used when `EDGECODER_REGISTRY_URLS` is unset. |
+| `EDGECODER_REGISTRY_PUBLIC_KEYS` | built-in keys | Extra pinned registry keys (PEM or 64-hex Ed25519). Invalid entries are dropped. |
+| `EDGECODER_REGISTRY_PUBLIC_KEY` | unset | Single-key form, used when `EDGECODER_REGISTRY_PUBLIC_KEYS` is unset. |
+| `EDGECODER_NOSTR_ANNOUNCE` | unset | Coordinator: `1` publishes its signed announcement to Nostr. |
+| `EDGECODER_NOSTR_ANNOUNCE_INTERVAL_MS` | `300000` | Coordinator: announcement interval (min 15000). |
+| `NOSTR_SECRET_KEY_HEX` | derived from the coordinator key | Coordinator: Nostr signing key. An invalid key is logged and the announcer stays off. |
+| `COORDINATOR_REGION` | Fly region, else `unknown` | Coordinator: region named in its announcement. |
+| `EDGECODER_VERSION` | unset | Coordinator: version named in its announcement. |
+| `REGISTRY_UPSTREAM_URL` | `<portal>/network/registry` | Coordinator: where it mirrors the signed registry from. An http(s) URL. |
+| `PORTAL_DISCOVERY` | `ordered` | Portal: `selector` picks coordinators by score, `ordered` tries them in list order. |
+| `PORTAL_DISCOVERY_SOURCES` | `static` | Portal: comma list of `static`, `dns`, `nostr`. |
+| `REGISTRY_SEEDS` | unset | Portal: EdgeCoder's own coordinators, comma-separated `peerId:fingerprint@https://host[=region]`. |
+| `REGISTRY_POOL_FILE` | unset | Portal: JSON file of admitted community coordinators. |
+| `REGISTRY_SIGNING_KEY_PEM` | unset | Portal: Ed25519 private key (PKCS#8 PEM) that signs the registry. Without it the registry is not served. |
+| `REGISTRY_TTL_MS` | `900000` | Portal: how long a signed registry is valid. Values under 60000 use the default. |
+| `REGISTRY_HEALTH_INTERVAL_MS` | `60000` | Portal: interval between coordinator health checks. |
+| `REGISTRY_FALLBACK_URLS` | `https://coordinator.edgecoder.io` | Portal: comma-separated URLs clients use when nothing in the pool is usable. |
+
+## Coordinator: identity, leases and hardware checks
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | unset | Postgres connection string. **Required in production.** Unset elsewhere means in-memory state. |
+| `PORTAL_SERVICE_URL` | unset | Portal base URL for coordinator and control-plane calls. **Required on a production coordinator.** An http(s) URL. |
+| `COORDINATOR_PEER_ID` | derived from `COORDINATOR_PUBLIC_URL` | This coordinator's mesh peer id. |
+| `COORDINATOR_PUBLIC_KEY_PEM` | derived from the private key | Public half of `COORDINATOR_PRIVATE_KEY_PEM`. |
+| `COORDINATOR_PEER_CACHE_FILE` | `~/.edgecoder/coordinator-peer-cache.json` | Where known peers are cached between restarts. |
+| `APPROVED_COORDINATOR_IDS` | unset | Comma-separated peer ids allowed to peer. Empty allows any peer that passes the other checks. |
+| `MESH_REQUIRE_AGENT_SIGNED_RESULTS` | `true` in production, else `false` | Whether a forwarded result must carry the agent's signed envelope. |
+| `LEDGER_VERIFY_INTERVAL_MS` | `21600000` | Interval of the periodic ledger check. `0` turns it off. |
+| `CLAIM_LEASE_GRACE_MS` | `30000` | Extra time after a subtask's timeout before its claim expires. |
+| `CLAIM_LEASE_LIVENESS_MS` | `45000` | A claim with no heartbeat for this long expires (min 1000). |
+| `CLAIM_MAX_ATTEMPTS` | `3` | Times a subtask is handed out before it fails (min 1). |
+| `CLAIM_MAX_TIMEOUT_MS` | `1800000` | Longest timeout a subtask may ask for (min 1000). |
+| `HARDWARE_VERIFICATION` | on | `0` or `false` pays self-reported hardware tiers unverified (rollback only). |
+| `HARDWARE_GPU_REQUIRE_CROSS_CHECK` | on | `0` or `false` grants GPU tiers without a second agent's matching output. |
+| `HARDWARE_CROSS_CHECK_MIN_SIMILARITY` | `0.3` | Similarity (0 to 1) two agents' outputs need for a cross-check to pass. |
+| `HARDWARE_REVALIDATE_MS` | `21600000` | How long a verified tier lasts (60000 to 30 days). |
+| `HARDWARE_RETRY_MS` | `900000` | Wait before a failed verification is retried (10000 to 1 day). |
+| `HARDWARE_TIER_MIN_JSON` | built-in table | JSON object of tier minimums, for example `{"gpu.c24": 300}`. |
+| `RESULT_VERIFICATION_KINDS` | every verifiable kind | Comma-separated task kinds that are verified. |
+| `RESULT_VERIFICATION_MISMATCH_PENALTY` | `0.25` | Reputation (0 to 1) lost for a result outvoted by its replicas. |
+| `RESULT_VERIFICATION_TIMEOUT_MS` | `900000` | How long a held result waits for its replicas (min 10000). |
+| `INFRA_HOST_ENABLED` | on | `0` stops this coordinator reporting itself as an infrastructure host. |
+| `INFRA_HOST_ACCOUNT_ID` | unset | Portal account that earns this host's share of the network fee pool. |
+| `INFRA_HOST_LIGHTNING_ADDRESS` | unset | Lightning address (`user@domain`) fee-pool payouts are sent to. |
+| `INFRA_HOST_REGION` | Fly region | Region reported in the host heartbeat. |
+| `INFRA_HOST_SERVICES` | from the configured providers | Comma-separated services this host declares: `coordinator`, `bitcoind`, `lightning`, `electrs`. |
+| `ESCALATION_TIMEOUT_MS` | `30000` | Time limit for one escalation request. |
+| `ESCALATION_MAX_RETRIES` | `2` | Retries of a failed escalation request. |
+| `ESCALATION_RETRY_BASE_DELAY_MS` | `1000` | First retry delay; later retries back off from it. |
+| `ESCALATION_CALLBACK_URL` | unset | Where an escalation result is POSTed. An http(s) URL. |
+| `ESCALATION_CALLBACK_TOKEN` | `MESH_AUTH_TOKEN` | Token sent with the callback. |
+| `PARENT_COORDINATOR_URL` | unset | Parent coordinator that escalated tasks go to. An http(s) URL. |
+| `PARENT_MESH_TOKEN` | `MESH_AUTH_TOKEN` | Mesh token for the parent coordinator. |
+| `CLOUD_INFERENCE_URL` | unset | Cloud inference endpoint used when no parent takes an escalation. An http(s) URL. |
+| `CLOUD_INFERENCE_TOKEN` | `INFERENCE_AUTH_TOKEN` | Token for the cloud inference endpoint. |
+
+## Coordinator: pricing, payout and anchoring limits
+
+Amounts must be numbers of 0 or more. A value the reader's own limit rejects (noted per row) uses the default.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PRICE_CONSENSUS_QUORUM` | from the peer allowlist | Signers a price consensus round needs. |
+| `PRICE_EPOCH_CPU_MIN_SATS` | `10` | Lowest accepted CPU price per compute unit, in sats. |
+| `PRICE_EPOCH_CPU_MAX_SATS` | `120` | Highest accepted CPU price per compute unit, in sats. |
+| `PRICE_EPOCH_GPU_MIN_SATS` | `42` | Lowest accepted GPU price per compute unit, in sats. |
+| `PRICE_EPOCH_GPU_MAX_SATS` | `480` | Highest accepted GPU price per compute unit, in sats. |
+| `PRICE_EPOCH_MAX_CHANGE_BPS` | `2500` | Largest accepted move from the previous price epoch, in basis points. |
+| `RATE_NETWORK_MARKUP_BPS` | `2000` | Markup over the market reference, in basis points. |
+| `RATE_MAX_DAILY_MOVE_PCT` | `25` | Largest daily move of a reference rate, in percent. |
+| `RATE_MAX_SOURCE_SPREAD_PCT` | `5` | Sources further than this from the median are dropped, in percent. |
+| `RATE_MIN_SOURCES` | `2` | Sources needed for a fresh rate (min 1). |
+| `RATE_STALE_AFTER_MS` | `172800000` | Age after which the last rate counts as stale (min 60000). |
+| `RATE_HASHPRICE_ENABLED` | `true` | `false` leaves the Bitcoin hashprice out of the rate oracle. |
+| `RATE_MEMPOOL_BASE_URL` | `https://mempool.space` | Base URL of the mempool API used for hashprice. |
+| `RATE_BTC_USD_SOURCES_JSON` | built-in sources | Non-empty JSON array of BTC/USD price sources. |
+| `RATE_COMPUTE_SOURCES_JSON` | none | JSON array of compute price sources (`name`, `url`, `path`, `resourceClass`, optional `computeClass`). |
+| `BTC_USD_FALLBACK` | unset | Static BTC/USD rate used when every source fails and no earlier epoch exists. |
+| `COMPUTE_REFERENCE_USD_PER_HOUR_JSON` | built-in table | JSON object of class reference prices in USD per hour, for example `{"gpu": 0.12}`. |
+| `COMPUTE_REFERENCE_USD_PER_VCPU_HOUR` | `0.02` | Legacy form: CPU class reference price. |
+| `COMPUTE_REFERENCE_USD_PER_GPU_HOUR` | `0.35` | Legacy form: reference price of a `gpu.c24` hour. |
+| `COMPUTE_TIER_WEIGHTS_JSON` | built-in table | JSON object of tier weights, for example `{"gpu.c24": 3.2}`. Base tiers stay at 1. |
+| `PAYOUTS_ENABLED` | `true` | `false` turns withdrawals and auto payouts off. |
+| `PAYOUT_MIN_SATS` | `1000` | Smallest withdrawal. |
+| `PAYOUT_AUTO_MIN_SATS` | `10000` | Balance at which an auto payout is sent. |
+| `PAYOUT_MAX_FEE_BPS` | `100` | Routing-fee cap per payout, in basis points. |
+| `PAYOUT_MIN_FEE_FLOOR_SATS` | `10` | Lowest routing-fee cap. |
+| `PAYOUT_RESERVE_BPS` | `200` | Share of the node balance kept back from payouts, in basis points. |
+| `PAYOUT_SOLVENCY_ALLOWANCE_SATS` | `0` | Shortfall the solvency check tolerates before it pauses payouts. |
+| `LND_TLS_CERT_BASE64` | unset | LND's TLS certificate (base64 PEM), pinned for REST calls. |
+| `ANCHOR_RECONCILE_MS` | `900000` | Interval of the anchor reconcile pass (min 60000). |
+| `ANCHOR_RECONCILE_MAX_ATTEMPTS` | `5` | Broadcast attempts per anchor (min 1). |
+| `ANCHOR_STUCK_AFTER_MS` | `21600000` | An unconfirmed anchor older than this counts as stuck (min 60000). |
+| `ANCHOR_ABANDON_WATCH_MS` | `259200000` | How long an abandoned anchor transaction is still watched (min 60000). |
+| `BITCOIN_ANCHOR_MIN_FEE_SAT_VB` | `2` | Floor for the anchor fee rate, in sat/vB. |
+
+## Portal: security, DNS and app links
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESEND_API_KEY` | unset | Resend API key for portal email. **Required in production.** |
+| `PORTAL_TRUSTED_ORIGINS` | unset | Comma-separated extra origins allowed to make state-changing requests. |
+| `PORTAL_CONNECT_ORIGINS` | unset | Comma-separated extra origins for the CSP `connect-src`. |
+| `PORTAL_CSP_ENFORCE` | on | `0` or `false` switches the Content-Security-Policy to report-only. |
+| `PORTAL_EDGE` | `none` | `cloudflare` when Cloudflare proxies the portal (the client IP then comes from `cf-connecting-ip`), else `none`. |
+| `PORTAL_ORIGIN_LOCK_TOKEN` | unset | When set, every request must carry it in `x-edgecoder-origin` (set by a Cloudflare Transform Rule). |
+| `PORTAL_COOKIE_SECURE` | unset | `1` marks cookies Secure outside production (production always does). |
+| `AGENT_SIGNUPS_PER_HOUR` | `500` | New agent accounts accepted per hour. |
+| `IOS_APP_TEAM_ID` | `63CL88WY7G` | Apple team id in the app-site association file. |
+| `IOS_APP_BUNDLE_ID` | `io.edgecoder.ios` | iOS bundle id in the app-site association file. |
+| `GODADDY_API_KEY` | unset | GoDaddy API key for coordinator DNS records. DNS management is off unless key and secret are both set. |
+| `GODADDY_API_SECRET` | unset | GoDaddy API secret. |
+| `GODADDY_API_BASE` | `https://api.godaddy.com` | GoDaddy API base URL. |
+| `DNS_BASE_DOMAIN` | `edgecoder.io` | Domain coordinator records are created under. |
+| `DNS_COORDINATOR_PREFIX` | `coord` | Label between the coordinator name and the base domain. |
+| `DNS_RECORD_TTL` | `300` | TTL of created records, in seconds. |
+
+## IDE provider: other settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `IDE_PROVIDER_PORT` | `4304` | Listen port. |
+| `IDE_PREVIEW_PORT` | `4306` | Loopback port of the live preview server. |
+| `IDE_COMPLETION_MODEL` | `qwen2.5-coder:1.5b` | Model for inline completions. |
+| `IDE_EMBED_MODEL` | `nomic-embed-text` | Embedding model for the codebase index. |
+| `IDE_NATIVE_TOOLS` | on | `0` starts the agent loop without native tool calling. |
+| `IDE_SHELL_ENV_PASS` | unset | Comma-separated names of extra environment variables passed to shell commands. |
+| `IDE_SWARM_MAX_CREDITS` | no cap | Credit cap per swarm request. |
+| `IDE_SWARM_SESSION_MAX_CREDITS` | no cap | Credit cap per provider process. |
+| `IDE_SWARM_EXPECTED_CREDITS` | `1` | Estimated cost checked against the caps before a task is submitted. |
+| `IDE_SWARM_SNAPSHOT_REF` | the project's HEAD commit | Snapshot reference sent with swarm tasks. |
+| `SWARM_VIA_LOCAL_AGENT_URL` | unset | Set by the all-in-one entry once the machine is enrolled: swarm work goes through its own worker's forwarder. An http(s) URL. |
+| `AGENT_ACCOUNT_ID` | `AGENT_ID`, else `local-agent` | Account that swarm requests from the IDE are billed to. |
+| `EDGECODER_BOTS_FILE` | `~/.edgecoder/bots.json` | Where bots are stored. |
+| `EDGECODER_CONNECTIONS_FILE` | `~/.edgecoder/connections.json` | Where connections are stored. |
+| `EDGECODER_IDE_SETTINGS_FILE` | `~/.edgecoder/ide-settings.json` | Where IDE settings are stored. |
+| `EDGECODER_PROJECTS_DIR` | the setting, else `~/EdgeCoder` | Where projects are created. |
+| `EDGECODER_GH_BIN` | found on `PATH` | Path of the GitHub CLI. |
+
 ## Startup validation (#15)
 
-Each service reads its environment once at startup through a zod schema. An invalid value (for example `abc` for an interval, `maybe` for a flag, or a URL without `http(s)://`) stops the service, and the error lists every problem at once. Empty values count as unset. A `docs coverage` test (`tests/common/env-docs.test.ts`) fails if a schema key is missing from this page.
+Each service reads its environment once at startup through a zod schema. An invalid value (for example `abc` for a port or an interval, `maybe` for a flag, or a URL without `http(s)://`) stops the service with exit code 1. The error names each variable and what is wrong with it, and lists every problem at once. The value of a secret (a variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PRIVATE_KEY`, `API_KEY` and the like) is never printed. Empty values count as unset, and variables no schema lists are ignored.
+
+The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.ts` fails when the tables on this page and the schemas list different variable names, and when code in `src/` reads a variable no schema declares.
 
 | Service | Schema | Production-only rules |
 |---|---|---|
 | inference | `src/inference/config.ts` | `INFERENCE_AUTH_TOKEN` at least 32 characters |
-| portal | `src/portal/config.ts` | `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY`, `DOCS_SITE_URL` required; `CONTROL_PLANE_URL` or `COORDINATOR_DISCOVERY_URLS`; `CONTROL_PLANE_ADMIN_TOKEN` when `CONTROL_PLANE_URL` is set; https for `PORTAL_PUBLIC_URL`, `DOCS_SITE_URL` and passkey origins |
+| portal | `src/portal/config.ts` | `PORTAL_SERVICE_TOKEN`, `RESEND_API_KEY`, `DOCS_SITE_URL` required; `CONTROL_PLANE_URL` or `COORDINATOR_DISCOVERY_URLS`; `CONTROL_PLANE_ADMIN_TOKEN` when `CONTROL_PLANE_URL` is set; https for `PORTAL_PUBLIC_URL`, `DOCS_SITE_URL` and passkey origins |
 | coordinator | `src/swarm/coordinator-config.ts` | unchanged (`requireProdEnv`) |
 | control-plane | `src/control-plane/config.ts` | `ADMIN_API_TOKEN` required in every environment; at least 32 characters when `NODE_ENV=production` |
+| anchor proxy | `src/config/anchor-proxy.ts` | none; `ANCHOR_PROXY_TOKEN`, `BITCOIND_RPC_URL`, `BITCOIND_RPC_USER` and `BITCOIND_RPC_PASSWORD` are required in every environment |
+| worker | `src/config/worker.ts` | none |
+| IDE provider | `src/config/ide-provider.ts` | none |
+| all-in-one entry, launcher | `src/config/all-in-one.ts` | none of its own; the services it starts apply theirs |
 
 ### Portal: other validated settings
 
@@ -340,6 +554,22 @@ Each service reads its environment once at startup through a zod schema. An inva
 | `UI_RETIRE_REDIRECT_URL` | string | unset |
 | `ALLOWED_ADMIN_IPS` | string | unset |
 | `ALLOWED_UI_IPS` | string | unset |
+
+## Variables outside the service schemas
+
+These are not service configuration, so no schema lists them and the docs test skips this section.
+
+| Variable | Read by | Description |
+|---|---|---|
+| `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
+| `PATH`, `SHELL`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `APPDATA`, `LOCALAPPDATA`, `USERNAME`, `USERDOMAIN` | platform helpers, installer | Operating-system environment. |
+| `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider | Set by the IDE provider for the child processes it starts. |
+| `VITEST` | portal registry | Set by the test runner. |
+| `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |
+| `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`, `EDGECODER_API_KEY` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |
+| `BT_PROXY_PORT` | BLE proxy launch scripts | Port the Swift `edgecoder-ble-proxy` companion listens on (default `11435`). |
+| `BT_PROXY_HOST` | BLE proxy launch scripts | Host for the BLE proxy HTTP API (default `127.0.0.1`). |
+| `NODE_BIN` | macOS/Linux daemon scripts | Node.js binary to use when auto-detection fails. |
 
 ## Observability (#14)
 
@@ -445,7 +675,7 @@ OLLAMA_AUTO_INSTALL=true
 
 **Production fail-fast (#5).** With `NODE_ENV=production`, services refuse to boot when required secrets are empty (an empty token no longer means "auth off"):
 - coordinator: `MESH_AUTH_TOKEN`, `PORTAL_SERVICE_URL`, `PORTAL_SERVICE_TOKEN`, `ADMIN_API_TOKEN`, `PAYMENT_WEBHOOK_SECRET`, `DATABASE_URL` (#55: replay/idempotency keys and lease state are durable only in Postgres), and `LIGHTNING_PROVIDER` unless `ECONOMY_PAYMENTS_ENABLED=false`
-- portal: `PORTAL_SERVICE_TOKEN`, `WALLET_SECRET_PEPPER`, `RESEND_API_KEY` (plus the existing passkey/URL checks)
+- portal: `PORTAL_SERVICE_TOKEN`, `RESEND_API_KEY`, `DOCS_SITE_URL` (plus the existing passkey/URL checks)
 - inference: `INFERENCE_AUTH_TOKEN`
 - control-plane: `ADMIN_API_TOKEN`
 
