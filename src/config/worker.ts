@@ -66,12 +66,6 @@ export const workerConfigSchema = z.object({
   /** 1-16 concurrent model calls; unset or out of range = by installed memory (src/swarm/parallelism.ts). */
   AGENT_PARALLEL_INFERENCE: envInt(undefined, { min: 0 }),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
-  /**
-   * Reserved: inference-only mode (the agent serves `kind: "inference"` subtasks and never runs task
-   * code; set by deploy/gpu-agent/Dockerfile.inference). Declared ahead of the change that enforces
-   * it; nothing reads it yet, so today such an agent (SANDBOX_MODE=none) pulls no work.
-   */
-  AGENT_INFERENCE_ONLY: envFlag({ on: ["1"] }),
   SNAPSHOT_ENFORCEMENT: envEnumCi(["strict", "warn", "off"]),
 
   // ---- hardware profile and pricing ----
