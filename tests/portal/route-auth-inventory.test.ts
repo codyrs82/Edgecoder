@@ -223,6 +223,8 @@ let routes: Array<{ method: string; url: string; opts: RouteOpts }> = [];
 const isPublic = (route: { method: string; url: string }) => key(route.method === "HEAD" ? { method: "GET", url: route.url } : route) in PUBLIC;
 const protectedRoutes = () => routes.filter((route) => !isPublic(route));
 
+// Importing and booting the whole portal takes ~6 s alone; under a full parallel run it can pass the
+// default 10 s hook timeout, so this hook gets 60 s.
 beforeAll(async () => {
   for (const name of [
     "PORTAL_DATABASE_URL", "DATABASE_URL", "PORTAL_ALLOW_OPEN_INTERNAL", "PORTAL_ORIGIN_LOCK_TOKEN", "PORTAL_EDGE",
@@ -264,7 +266,7 @@ beforeAll(async () => {
   ({ portalServer: app } = await import("../../src/portal/server.js"));
   await app.ready();
   routes = h.routes.filter((route) => route.method !== "OPTIONS");
-});
+}, 60_000);
 
 afterAll(async () => {
   await app?.close();
