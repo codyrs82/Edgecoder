@@ -1,56 +1,143 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { pino } from "pino";
+import type { DestinationStream, Logger, LoggerOptions } from "pino";
+import { CENSOR, REDACT_PATHS, redactMeta, redactUrl, scrubText } from "./redaction.js";
+import { currentRequestContext } from "./request-context.js";
+
+export { redactMeta, SECRET_KEY_RE } from "./redaction.js";
+
 /*
- * #14: one deep redaction rule shared by `log.*` and every Fastify/pino logger
- * (http-logging.ts runs it as the pino `formatters.log` hook).
- * Keys are matched case-insensitively as substrings, so accessToken, refreshToken, meshToken,
- * api_key, privateKey, xprv, Password, ... are all caught.
+ * #14: the one logger factory. Every log line in the services is pino JSON built from
+ * `loggerOptions`, whether it comes from Fastify (http-logging.ts passes the same options),
+ * from a service logger (`createLogger`), or from library code (`moduleLogger`, `log`).
+ * So redaction, level and the request id behave the same everywhere.
+ *
+ * Request bodies are never logged by this module: the `req` serializer below is an allow-list
+ * (method, redacted url, host, peer address). Code that chooses to log a body or headers still
+ * goes through the redaction in redaction.ts.
  */
-export const SECRET_KEY_RE = /(token|secret|passw|private|mnemonic|seed|api_?key|signature|cookie|authorization|xprv|wif)/i;
-const MAX_DEPTH = 8;
 
-function isPlainObject(v: object): boolean {
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
+const LEVELS = new Set(["fatal", "error", "warn", "info", "debug", "trace", "silent"]);
+
+/** LOG_LEVEL, or "info" when it is unset or not a pino level (pino would throw at startup). */
+export function logLevel(env: NodeJS.ProcessEnv = process.env): string {
+  const level = env.LOG_LEVEL?.trim().toLowerCase() ?? "";
+  return LEVELS.has(level) ? level : "info";
 }
 
-export function redactMeta(value: unknown, depth = 0): unknown {
-  if (value === null || typeof value !== "object") return value;
-  // #128 review: never return raw data we didn't inspect.
-  if (depth > MAX_DEPTH) return "[truncated]";
-  if (Array.isArray(value)) return value.map((v) => redactMeta(v, depth + 1));
-  if (!isPlainObject(value)) {
-    // Date, Error, Buffer, Map, ...: keep their normal JSON form (Date -> ISO string).
-    const toJSON = (value as { toJSON?: () => unknown }).toJSON;
-    if (typeof toJSON === "function") return redactMeta(toJSON.call(value), depth + 1);
-    if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
-    if (value instanceof Map) return redactMeta(Object.fromEntries(value), depth + 1);
-    return value;
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    // Numbers/booleans under a matching key (e.g. tokensUsed) carry no secret.
-    out[k] = SECRET_KEY_RE.test(k) && v !== null && typeof v !== "number" && typeof v !== "boolean" ? "[redacted]" : redactMeta(v, depth + 1);
-  }
-  return out;
+/**
+ * Set on Fastify's per-request child logger (http-logging.ts), whose bindings already carry the
+ * request id, so the mixin does not write the field twice. Children inherit it: pino children
+ * are created with Object.create(parent).
+ */
+export const HAS_REQUEST_ID = Symbol("edgecoder.logger.hasRequestId");
+
+// What module loggers report as `service` outside a request: the name the entry point gave the
+// process (src/index.ts runs several services in one), else the one Fastify service built in it.
+const builtServices = new Set<string>();
+let processName: string | undefined;
+
+/** Called for each Fastify service built in this process (http-logging.ts). */
+export function nameProcessService(service: string): void {
+  builtServices.add(service);
 }
 
-function write(level: "info" | "warn" | "error", message: string, meta?: unknown): void {
-  const line = JSON.stringify({ level, message, meta: redactMeta(meta), ts: Date.now() });
-  if (level === "error") console.error(line);
-  else if (level === "warn") console.warn(line);
-  else console.log(line);
+/** Names the whole process; wins over the services built in it. */
+export function setProcessName(name: string): void {
+  processName = name;
 }
 
+function processService(): string {
+  if (processName) return processName;
+  return builtServices.size === 1 ? [...builtServices][0]! : "edgecoder";
+}
+
+type RequestLike = { method?: string; url?: string; hostname?: string; ip?: string; socket?: { remotePort?: number } };
+
+/**
+ * pino options shared by every logger. With `service` the logger is bound to that service; without
+ * it (module loggers) the service is resolved per line from the request being handled.
+ */
+export function loggerOptions(service: string | undefined, env: NodeJS.ProcessEnv = process.env): LoggerOptions {
+  return {
+    level: logLevel(env),
+    // No pid/hostname: the platform's log shipper already tags the machine.
+    base: service ? { service } : null,
+    redact: { paths: REDACT_PATHS, censor: CENSOR },
+    formatters: { log: (obj: Record<string, unknown>) => redactMeta(obj) as Record<string, unknown> },
+    serializers: {
+      req: (req: RequestLike) => ({
+        method: req.method,
+        url: redactUrl(req.url ?? ""),
+        host: req.hostname,
+        remoteAddress: req.ip,
+        remotePort: req.socket?.remotePort
+      })
+    },
+    hooks: {
+      // Message strings and printf-style arguments bypass formatters.log.
+      logMethod(args, method) {
+        const scrubbed: unknown[] = args.map((a) => (typeof a === "string" ? scrubText(a) : a));
+        // Without a message pino copies the error's own, unscrubbed: log.error(err), log.error({ err }).
+        const first = scrubbed[0];
+        if (scrubbed[1] === undefined && first !== null && typeof first === "object") {
+          const err = first instanceof Error ? first : (first as { err?: unknown }).err;
+          const message = (err as { message?: unknown } | null | undefined)?.message;
+          if (typeof message === "string") scrubbed[1] = scrubText(message);
+        }
+        method.apply(this, scrubbed as typeof args);
+      }
+    },
+    // Stamps the request id on lines written during a request through a logger that is not the
+    // request's own (app.log, module loggers). Returns a fresh object: pino merges into it.
+    mixin(_obj: object, _level: number, logger: object) {
+      const context = currentRequestContext();
+      const fields: Record<string, unknown> = {};
+      if (!service) fields.service = context?.service ?? processService();
+      if (context && !(logger as { [HAS_REQUEST_ID]?: boolean })[HAS_REQUEST_ID]) fields.requestId = context.requestId;
+      return fields;
+    }
+  };
+}
+
+export interface CreateLoggerOptions {
+  env?: NodeJS.ProcessEnv;
+  /** Where lines go; stdout when omitted. Tests pass a capturing stream. */
+  destination?: DestinationStream;
+}
+
+/** A logger for one service, e.g. for startup code that runs before the Fastify app exists. */
+export function createLogger(service: string, opts: CreateLoggerOptions = {}): Logger {
+  const options = loggerOptions(service, opts.env);
+  return opts.destination ? pino(options, opts.destination) : pino(options);
+}
+
+let root: Logger | undefined;
+function rootLogger(): Logger {
+  root ??= pino(loggerOptions(undefined));
+  return root;
+}
+
+/**
+ * A logger for code that is not tied to one service (mesh, economy, model routing, ...). Lines
+ * carry `component`, the service handling the current request (or the process's service), and the
+ * request id when there is one.
+ */
+export function moduleLogger(component: string): Logger {
+  return rootLogger().child({ component });
+}
+
+/** Message-first helper kept for existing callers; same pipeline as every other logger. */
 export const log = {
   info(message: string, meta?: unknown): void {
-    write("info", message, meta);
+    rootLogger().info(meta === undefined ? {} : { meta }, message);
   },
   warn(message: string, meta?: unknown): void {
-    write("warn", message, meta);
+    rootLogger().warn(meta === undefined ? {} : { meta }, message);
   },
   error(message: string, meta?: unknown): void {
-    write("error", message, meta);
+    rootLogger().error(meta === undefined ? {} : { meta }, message);
   }
 };
