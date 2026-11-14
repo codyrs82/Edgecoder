@@ -146,6 +146,8 @@ function makeStore() {
       return session && session.expiresAtMs > Date.now() ? session : null;
     },
     getUserById: (userId: string) => users.get(userId) ?? null,
+    // u-owner enrolled a coordinator node: that grants the view of coordinator operations, nothing more.
+    listNodesByOwner: (userId: string) => (userId === "u-owner" ? [{ nodeId: "coord-1", nodeKind: "coordinator", ownerUserId: "u-owner", active: true }] : []),
     userForApiKeyHash: (hash: string) => apiKeys.get(hash) ?? null,
     getNodeEnrollmentByRegistrationTokenHash: (hash: string) =>
       registrationTokens.has(hash) ? { nodeId: "node-1", nodeKind: "agent", ownerUserId: "u-user", active: true } : null
@@ -251,6 +253,8 @@ beforeAll(async () => {
   fake.addSession("admin-session", "u-admin");
   fake.addSession("ops-session", "u-ops");
   fake.addSession("claimed-session", "u-claimed");
+  fake.addUser({ userId: "u-owner", email: "owner@example.com" });
+  fake.addSession("owner-session", "u-owner");
   fake.addSession("expired-session", "u-admin", Date.now() - 1);
   fake.addSession("orphan-session", "u-deleted");
   fake.addApiKey("eck_valid_key", "u-user");
@@ -380,6 +384,28 @@ describe("portal route inventory (#17)", () => {
         const res = await call(route, cookie(session));
         if (res.statusCode === 401 || res.statusCode === 403) failures.push(`${key(route)} as ${session}: ${res.statusCode}`);
       }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it("the owner of a coordinator node may view coordinator operations but not manage them, nor reach any other operator route", async () => {
+    // What the view tier (requireCoordinatorOperationsUser) opens to a coordinator owner. Everything else
+    // under OPERATOR_ONLY needs a coordinator or system admin.
+    const VIEW_TIER = new Set(["GET /coordinator/ops/summary", "HEAD /coordinator/ops/summary", "GET /coordinator/ops/agent-diagnostics", "HEAD /coordinator/ops/agent-diagnostics"]);
+    const summary = await call({ method: "GET", url: "/coordinator/ops/summary" }, cookie("owner-session"));
+    expect([401, 403], "the owner is in the view tier").not.toContain(summary.statusCode);
+
+    const operatorRoutes = protectedRoutes().filter((route) => OPERATOR_ONLY.some((prefix) => route.url.startsWith(prefix)));
+    const manageRoutes = operatorRoutes.filter((route) => !VIEW_TIER.has(key(route)));
+    for (const url of ["/coordinator/ops/node-approval", "/coordinator/ops/coordinator-ollama", "/coordinator/ops/agents-model"]) {
+      expect(manageRoutes.some((route) => route.method === "POST" && route.url === url), url).toBe(true);
+    }
+    const failures: string[] = [];
+    for (const route of manageRoutes) {
+      const outboundBefore = h.outbound.length;
+      const res = await call(route, cookie("owner-session"));
+      if (res.statusCode !== 403) failures.push(`${key(route)}: ${res.statusCode} ${res.body.slice(0, 80)}`);
+      if (h.outbound.length !== outboundBefore) failures.push(`${key(route)}: made an outbound call before rejecting`);
     }
     expect(failures).toEqual([]);
   });
