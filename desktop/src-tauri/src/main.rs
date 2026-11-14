@@ -13,6 +13,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use sysinfo::{System, Disks};
 use serde::Serialize;
 
+mod agent_attest;
 mod agent_guard;
 mod agent_settings;
 mod ide_guard;
@@ -34,8 +35,9 @@ struct AgentControl {
     tokens: AgentTokens,
 }
 
-/// Per-launch secrets handed to the spawned agent (#6). Separate values so a
-/// leaked inference token (exposed to the webview) does not grant admin access.
+/// Secrets handed to the spawned agent (#6). Separate values so a leaked inference token
+/// (exposed to the webview) does not grant admin access. Fresh per launch, unless the agent an
+/// earlier launch started is still on :4301 and proves it holds them (#147).
 #[derive(Clone)]
 struct AgentTokens {
     inference: String,
@@ -109,8 +111,35 @@ fn get_local_token(
     process: tauri::State<'_, AgentProcess>,
 ) -> Result<String, String> {
     // Check the child right now, so a dead agent never gets the token in the monitor's gap.
-    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
+    let alive = agent_alive(&control, &process);
     control.guard.token_for_webview(&state.0, alive)
+}
+
+/// Whether our agent is there right now: the child we spawned is running, or (#147) the reused
+/// agent answers a fresh challenge with our admin token.
+fn agent_alive(control: &AgentControl, process: &AgentProcess) -> bool {
+    if control.guard.get() == AgentOwnership::Verified {
+        return agent_attest::challenge(AGENT_ADDR, &control.tokens.admin);
+    }
+    process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false)
+}
+
+/// #147: the listener on :4301 answers a fresh challenge with this app's admin token.
+fn verify_existing_agent(tokens: &AgentTokens) -> bool {
+    let ok = agent_attest::challenge(AGENT_ADDR, &tokens.admin);
+    if ok {
+        eprintln!("The agent already on :4301 answered the challenge; reusing it");
+    }
+    ok
+}
+
+/// Keep the tokens a spawned agent gets, so a later launch can verify and reuse it (#147).
+fn persist_tokens(tokens: &AgentTokens) {
+    let Some(p) = agent_attest::tokens_path() else { return };
+    let stored = agent_attest::StoredTokens { inference: tokens.inference.clone(), admin: tokens.admin.clone() };
+    if let Err(e) = agent_attest::save_tokens(&p, &stored) {
+        eprintln!("Could not save the agent tokens (a later launch won't reuse this agent): {e}");
+    }
 }
 
 /// True while the child we spawned is still running.
@@ -127,7 +156,7 @@ fn get_agent_status(
     control: tauri::State<'_, AgentControl>,
     process: tauri::State<'_, AgentProcess>,
 ) -> String {
-    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
+    let alive = agent_alive(&control, &process);
     if !alive {
         control.guard.apply(AgentEvent::Exited);
     }
@@ -140,15 +169,22 @@ fn retry_local_agent(
     control: tauri::State<'_, AgentControl>,
     process: tauri::State<'_, AgentProcess>,
 ) -> String {
-    let alive = process.0.lock().map(|mut g| child_alive(&mut g)).unwrap_or(false);
-    if alive && control.guard.get() == AgentOwnership::Spawned {
-        return "spawned".to_string();
+    let alive = agent_alive(&control, &process);
+    let state = control.guard.get();
+    if alive && matches!(state, AgentOwnership::Spawned | AgentOwnership::Verified) {
+        return state.as_str().to_string();
     }
     if !alive {
         control.guard.apply(AgentEvent::Exited);
     }
-    if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
-        return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
+    if port_in_use(AGENT_ADDR) {
+        // #147: reuse it only when it proves it holds our admin token.
+        if verify_existing_agent(&control.tokens) {
+            return control.guard.apply(AgentEvent::Verified).as_str().to_string();
+        }
+        if !reclaim_stale_agent(AGENT_ADDR) {
+            return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
+        }
     }
     let child = control.agent_dir.as_ref().and_then(|dir| spawn_agent_process(dir, &control.tokens));
     let event = if child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed };
@@ -252,10 +288,11 @@ fn get_ide_token(
     process: tauri::State<'_, AgentProcess>,
 ) -> Result<String, String> {
     let agent_pid = {
-        let mut slot = process.0.lock().map_err(|_| "agent state unavailable".to_string())?;
-        let alive = child_alive(&mut slot);
         // Same ownership rule as the inference token: refuse unless :4301 is our live agent.
+        let alive = agent_alive(&control, &process);
         control.guard.token_for_webview("", alive)?;
+        // A reused agent (#147) has no child here, so its IDE listeners can't be checked: refused.
+        let slot = process.0.lock().map_err(|_| "agent state unavailable".to_string())?;
         slot.as_ref().map(|c| c.id()).ok_or_else(|| "not_started: the local agent is not running".to_string())?
     };
     if let Some(listeners) = ide_guard::ide_listeners() {
@@ -372,6 +409,7 @@ fn agent_path() -> String {
 }
 
 fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Child> {
+    persist_tokens(tokens);
     let log = agent_log();
     let Some(node) = resolve_node_binary(agent_dir) else {
         let msg = "Node.js 22+ not found (bundle, Homebrew, nvm, /usr/local, PATH, login shell); not starting the agent";
@@ -448,10 +486,15 @@ fn resolve_agent_dir(app: &tauri::App) -> Option<PathBuf> {
     Some(agent_dir)
 }
 
-fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard) -> (Option<Child>, Option<PathBuf>) {
+fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard, reused: bool) -> (Option<Child>, Option<PathBuf>) {
     let agent_dir = resolve_agent_dir(app);
-    // #72: an existing listener never got this launch's tokens, so don't trust it. One left by an
-    // earlier launch of this app is stopped and replaced; anything else is left alone.
+    // #147: main() already challenged the listener with the saved tokens and adopted them.
+    if reused {
+        guard.apply(AgentEvent::Verified);
+        return (None, agent_dir);
+    }
+    // #72: an unverified listener never got this launch's tokens, so don't trust it. One left by
+    // an earlier launch of this app is stopped and replaced; anything else is left alone.
     if port_in_use(AGENT_ADDR) && !reclaim_stale_agent(AGENT_ADDR) {
         eprintln!("Something is already listening on :4301 — not spawning, inference token withheld");
         guard.apply(AgentEvent::PortBusy);
@@ -523,8 +566,12 @@ fn monitor_agent(
                 thread::sleep(Duration::from_secs(3));
 
                 if port_in_use(AGENT_ADDR) {
-                    eprintln!("Agent port taken by another process — skipping respawn, token withheld");
-                    agent_guard.apply(AgentEvent::PortBusy);
+                    if verify_existing_agent(&tokens) {
+                        agent_guard.apply(AgentEvent::Verified);
+                    } else {
+                        eprintln!("Agent port taken by another process — skipping respawn, token withheld");
+                        agent_guard.apply(AgentEvent::PortBusy);
+                    }
                     continue;
                 }
 
@@ -546,10 +593,21 @@ fn main() {
     // #6: per-launch tokens from the OS CSPRNG (never logged). The webview only
     // receives the inference token via get_local_token; the admin token stays
     // with the spawned agent process.
-    let tokens = AgentTokens {
+    // #147: if :4301 is taken, reuse it only when it proves (fresh nonce, HMAC with the admin
+    // token) that it is the agent an earlier launch started with the saved tokens.
+    let reused_tokens = if port_in_use(AGENT_ADDR) {
+        agent_attest::tokens_path()
+            .and_then(|p| agent_attest::load_tokens(&p))
+            .map(|t| AgentTokens { inference: t.inference, admin: t.admin })
+            .filter(verify_existing_agent)
+    } else {
+        None
+    };
+    let reused = reused_tokens.is_some();
+    let tokens = reused_tokens.unwrap_or_else(|| AgentTokens {
         inference: generate_local_token(),
         admin: generate_local_token(),
-    };
+    });
     let local_token = tokens.inference.clone();
 
     tauri::Builder::default()
@@ -599,7 +657,7 @@ fn main() {
             compute.prepare();
 
             let agent_guard = Arc::new(AgentGuard::new());
-            let (child, agent_dir) = start_agent(app, &tokens, &agent_guard);
+            let (child, agent_dir) = start_agent(app, &tokens, &agent_guard, reused);
             let agent_mutex = Arc::new(Mutex::new(child));
 
             let agent_for_compute = Arc::clone(&agent_mutex);

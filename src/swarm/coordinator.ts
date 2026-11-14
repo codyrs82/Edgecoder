@@ -89,6 +89,7 @@ import { MeshProtocol } from "../mesh/protocol.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
+import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../trust/local-attest.js";
 import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
 import { GossipMesh } from "../mesh/gossip.js";
 import { OrderingChain } from "../ledger/chain.js";
@@ -1640,6 +1641,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
   // Proof of key possession for agents verifying this coordinator (src/trust/identity-challenge.ts).
   if (reqPath === IDENTITY_CHALLENGE_PATH && (req as any).method === "POST") return;
+  // #147: the desktop shell checks a leftover :4301 agent holds its admin token (loopback only, see route).
+  if (reqPath === LOCAL_ATTEST_PATH && (req as any).method === "POST") return;
   if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
   // Mirror of the signed coordinator registry (clients verify the signature; no auth needed).
   if (reqPath === "/network/registry") return;
@@ -5528,6 +5531,12 @@ app.post(IDENTITY_CHALLENGE_PATH, async (req, reply) => {
   });
   if (!answer) return reply.code(400).send({ error: "invalid_challenge" });
   return { ...answer, responseSigning: RESPONSE_SIGNING_VERSION };
+});
+// #147: the desktop app proves an agent already on :4301 is the one it started (src/trust/local-attest.ts).
+const localAttestNonces = new NonceLog();
+app.post(LOCAL_ATTEST_PATH, async (req, reply) => {
+  const r = answerLocalAttest(req.body, { adminToken: ADMIN_API_TOKEN, loopback: requestOrigin(req).loopback, nonces: localAttestNonces });
+  return reply.code(r.status).send(r.body);
 });
 app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
 

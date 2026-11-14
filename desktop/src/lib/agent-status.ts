@@ -1,11 +1,13 @@
 // #72: the desktop shell only hands the inference token to an agent it spawned itself.
 // "port_occupied" means something else already listens on 127.0.0.1:4301; the webview then
 // treats the local agent as unavailable (remote mode) and the UI can offer a retry.
+// #147: "verified" is an agent already on :4301 that proved (challenge with our admin token) it is
+// the one this app started in an earlier launch; it is used like "spawned".
 
-export type LocalAgentStatus = "spawned" | "port_occupied" | "not_started" | "unknown";
+export type LocalAgentStatus = "spawned" | "verified" | "port_occupied" | "not_started" | "unknown";
 
 export function parseAgentStatus(value: unknown): LocalAgentStatus {
-  return value === "spawned" || value === "port_occupied" || value === "not_started" ? value : "unknown";
+  return value === "spawned" || value === "verified" || value === "port_occupied" || value === "not_started" ? value : "unknown";
 }
 
 /** Status carried in a get_local_token error ("port_occupied: …" / "not_started: …"), if any. */
@@ -15,12 +17,12 @@ export function statusFromTokenError(message: string): LocalAgentStatus | null {
 }
 
 /**
- * Whether local :4301 may be used: only our own live agent ("spawned"), or "unknown" outside
+ * Whether local :4301 may be used: only our own live agent ("spawned", or "verified" #147), or "unknown" outside
  * Tauri (dev / web build, where there is no shell to ask). "not_started" and "port_occupied"
  * are unusable.
  */
 export function localAgentUsable(status: LocalAgentStatus): boolean {
-  return status === "spawned" || status === "unknown";
+  return status === "spawned" || status === "verified" || status === "unknown";
 }
 
 /** The cached inference token must be dropped whenever the shell says it's not our live agent. */
