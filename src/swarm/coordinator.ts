@@ -11,41 +11,25 @@ import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import type { FastifyReply } from "fastify";
 import { registerCoordinatorMetrics } from "./coordinator-metrics.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { request } from "undici";
 import { z } from "zod";
 import {
   safeTokenEqual,
   readHeaderValue,
-  normalizeUrl,
   pairKey,
-  parseRecordPayload,
-  computeIntentFee,
   contributionPolicyDecision,
   mayRelayOverWs
 } from "./coordinator-utils.js";
-import { RobotQueue } from "./robot-queue.js";
 import { registerRobotRoutes } from "./robot-routes.js";
-import { registerDiscoveryRoutes, startCoordinatorAnnouncer } from "../discovery/announce.js";
+import { registerDiscoveryRoutes } from "../discovery/announce.js";
 import { createRegistryMirror } from "../discovery/registry-mirror.js";
 import { extractCode } from "../model/extract.js";
 import type {
-  BitcoinAnchorRecord,
   BlacklistRecord,
   BlacklistReasonCode,
-  CoordinatorFeeEvent,
-  IssuanceAllocationRecord,
-  IssuanceEpochRecord,
-  IssuancePayoutEvent,
-  ExecutionPolicy,
-  KeyCustodyEvent,
-  PaymentIntent,
   PriceEpochRecord,
   QueueEventRecord,
-  QuorumLedgerRecord,
   MeshPeerIdentity,
-  NetworkMode,
   ResourceClass,
   WalletType,
   Subtask,
@@ -54,17 +38,14 @@ import type {
   CapabilityAnnouncePayload,
   MeshPeerRole,
   SandboxMode,
-  SubtaskResult,
-  CreditTransaction,
-  InfrastructureHost
+  SubtaskResult
 } from "../common/types.js";
-import { signPayload, verifyPayload } from "../mesh/peer.js";
+import { signPayload } from "../mesh/peer.js";
 import {
   checkPeerRegistration,
   isAllowlistedKey,
   PEER_SIGNATURE_MAX_SKEW_MS,
   signForwardedResult,
-  signRegistration,
   verifyForwardedResult
 } from "../mesh/peer-trust.js";
 import {
@@ -79,15 +60,12 @@ import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../trust/local-a
 import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { reconcileLedger, type ReconcileReport } from "../ledger/reconcile.js";
-import { hashRecordPayload } from "../ledger/record.js";
-import { finalizeStatsCheckpoint, statsCheckpointPeriodMs, statsFinalityState } from "../ledger/stats-checkpoint.js";
 import {
   DuplicateDebitError,
   NETWORK_FEE_POOL_ACCOUNT,
   accruePricedJob,
   creditEngine,
   earnedMsat,
-  grantCredits,
   grantCreditsIdempotent,
   refundTxId,
   rewardAccountForAgent,
@@ -124,7 +102,6 @@ import {
   COMPUTE_CLASS_IDS,
   classifyHardware,
   modalityMultiplier,
-  normalizeComputeClass,
   resolveRequestedClass,
   settlementClassFor,
   type ComputeClassId
@@ -143,47 +120,12 @@ import {
 import { capabilityConstraints, meetsCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
-import {
-  computeDailyPoolTokens,
-  computeHourlyIssuanceAllocations,
-  computeLoadIndex,
-  type IssuancePoolConfig,
-  smoothLoadIndex
-} from "../economy/issuance.js";
-import {
-  ensureIssuanceEpoch,
-  type IssuanceAllocationDraft,
-  type IssuanceEpochDraft,
-  type IssuanceWindow
-} from "../economy/issuance-epoch.js";
 import { debugRoutesEnabled, isProduction, LISTEN_HOST } from "../common/env-guard.js";
-import {
-  HOST_HEARTBEAT_MAX_SKEW_MS,
-  attestSelfServices,
-  heartbeatCounts,
-  normalizeServices,
-  signHostHeartbeat,
-  verifyHostHeartbeat,
-  type AttestationResult
-} from "../economy/host-attestation.js";
-import { probeElectrum } from "../economy/service-probes.js";
-import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
-import { anchorCheckpoint, anchorEpochOnce, type AnchorDeps } from "../economy/anchoring.js";
-import { AnchorTracker, anchorEventLogger, anchorTrackerTuningFromEnv } from "../economy/anchor-tracker.js";
-import {
-  anchoringStatus,
-  checkpointAnchorFinality,
-  describeAnchor,
-  resolveAnchoringMode,
-  type AnchoringStatus,
-  type AnchorView
-} from "../economy/anchor-status.js";
+import { HOST_HEARTBEAT_MAX_SKEW_MS, verifyHostHeartbeat } from "../economy/host-attestation.js";
+import { checkpointAnchorFinality, describeAnchor } from "../economy/anchor-status.js";
 // ── Work receipts + replication (architecture step 2; src/receipts) ──
-import { MemoryReceiptStore, type ReceiptStore } from "../receipts/store.js";
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
-import { anchorEpoch, closeEpoch, repointEpochAnchor } from "../receipts/epochs.js";
-import { agentReceiptClaimSchema, issueReceiptForAccrual } from "../receipts/issue.js";
-import type { SignedAgentReceiptClaim } from "../receipts/receipt.js";
+import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import {
   checkResultClaim,
   classifyResultAuth,
@@ -219,11 +161,7 @@ import {
   createInMemoryBleTransfer,
   isBleSyncAuthorized
 } from "../credits/ble-sync.js";
-import {
-  createPaymentSettler,
-  reconcilePaymentIntent,
-  verifyPaymentWebhookSignature
-} from "../economy/payment-settlement.js";
+import { verifyPaymentWebhookSignature } from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import { evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
@@ -248,9 +186,7 @@ import {
   type VerificationStatus,
   type BinaryIntegrityPayload
 } from "../security/release-verifier.js";
-import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
-import { SubtaskDepTracker } from "./subtask-deps.js";
 import { lateResultRejectionDurable } from "./lease-gate.js";
 import { app, metrics } from "./coordinator/app.js";
 import {
@@ -258,45 +194,10 @@ import {
   identity,
   coordinatorKeys,
   CC,
-  COORDINATOR_PUBLIC_URL,
-  MESH_AUTH_TOKEN,
-  ROBOT_QUEUE_ENABLED,
-  ROBOT_COORDINATOR_FEE_BPS,
-  ROBOT_TASK_DEFAULT_TIMEOUT_MS,
-  ROBOT_AUTO_SETTLE_DELAY_MS,
-  ROBOT_SWEEP_INTERVAL_MS,
-  ROBOT_MIN_SWEEP_SATS,
-  BITCOIN_NETWORK,
-  type ResultMeta,
   mesh,
-  COORDINATOR_PEER_CACHE_FILE,
-  COORDINATOR_DISCOVERY_URL,
-  COORDINATOR_BOOTSTRAP_URLS,
-  PEER_ALLOWLIST_ENFORCED,
-  peerScore,
-  networkMode,
-  COORDINATOR_REGISTRATION_TOKEN,
-  PORTAL_SERVICE_URL,
-  PORTAL_OUTBOUND_TOKEN,
-  STATS_LEDGER_SYNC_INTERVAL_MS,
-  ANCHOR_REQUIRED_CONFIRMATIONS,
-  ANCHOR_CONFIRM_POLL_MS,
-  ANCHOR_RECONCILE_CONFIG,
-  STATS_ANCHOR_MIN_CONFIRMATIONS,
-  APPROVED_COORDINATOR_IDS,
-  ISSUANCE_BASE_DAILY_POOL_TOKENS,
-  ISSUANCE_MIN_DAILY_POOL_TOKENS,
-  ISSUANCE_MAX_DAILY_POOL_TOKENS,
-  ISSUANCE_LOAD_CURVE_SLOPE,
-  ISSUANCE_SMOOTHING_ALPHA,
-  ISSUANCE_RECALC_MS,
-  ISSUANCE_WINDOW_MS,
+  MESH_AUTH_TOKEN,
   CONTRIBUTION_BURST_CREDITS,
   MIN_CONTRIBUTION_RATIO,
-  ISSUANCE_COORDINATOR_SHARE,
-  ISSUANCE_RESERVE_SHARE,
-  COORDINATOR_FEE_ACCOUNT,
-  PAYMENT_INTENT_TTL_MS,
   requestOrigin,
   agentRateLimiter,
   OLLAMA_MODEL,
@@ -307,10 +208,12 @@ import {
   INFERENCE_AUTH_TOKEN,
   INFERENCE_URL,
   protocol,
+  COORDINATOR_PUBLIC_URL,
   IOS_BATTERY_PULL_MIN_INTERVAL_MS,
   IOS_BATTERY_TASK_STOP_LEVEL_PCT,
   reservations,
   claimedTradePrice,
+  type ResultMeta,
   noteUsageRun,
   FALLBACK_BTC_USD,
   taskOriginMap,
@@ -318,33 +221,45 @@ import {
   saveUsage,
   MESH_PEER_ALLOWLIST,
   forwardReplayCache,
+  PEER_ALLOWLIST_ENFORCED,
   offeredToPeers,
   REQUIRE_AGENT_SIGNED_FORWARDS,
   memoryUsage,
   OLLAMA_HOST,
   PROVIDER,
+  networkMode,
+  BITCOIN_NETWORK,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
-  COORDINATOR_FEE_BPS,
+  peerScore,
+  PAYMENT_INTENT_TTL_MS,
   PAYMENT_WEBHOOK_SECRET,
+  ISSUANCE_RECALC_MS,
+  ISSUANCE_WINDOW_MS,
+  ANCHOR_REQUIRED_CONFIRMATIONS,
+  PORTAL_SERVICE_URL,
   peerMessageWindow,
   MESH_RATE_LIMIT_PER_10S,
   PEER_OFFER_BUDGET_MAX_ENTRIES,
+  STATS_ANCHOR_MIN_CONFIRMATIONS,
+  PORTAL_OUTBOUND_TOKEN,
   OLLAMA_AUTO_INSTALL,
+  COORDINATOR_BOOTSTRAP_URLS,
   coordinatorPullTracker,
   ANCHOR_INTERVAL_MS,
+  STATS_LEDGER_SYNC_INTERVAL_MS,
   STATS_ANCHOR_INTERVAL_MS,
   ANCHOR_RECONCILE_MS
 } from "./coordinator/context.js";
 import { mutable } from "./coordinator/mutable-state.js";
 import {
   agentCapabilities,
-  ordering,
   activeBlacklistRecord,
   releaseManifestCache,
   REQUIRE_VERIFIED_AGENTS,
   behaviorTracker,
   evaluateAndEnforce,
+  ordering,
   pendingTunnelInvites,
   pendingTunnelCloseNotices,
   directWorkInbox,
@@ -390,8 +305,6 @@ import {
 } from "./coordinator/auth.js";
 import {
   isPaymentGatedRequest,
-  latestPriceEpochByResource,
-  paymentIntents,
   rateOracleConfig,
   hardwareVerifier,
   marketOrders,
@@ -407,6 +320,7 @@ import {
   marketHistory,
   classRefMsatPerCredit,
   NETWORK_FEE_BPS,
+  latestPriceEpochByResource,
   quoteSatsPerCredit,
   RATE_ORACLE_ENABLED,
   RATE_RECALIBRATION_MS,
@@ -415,29 +329,72 @@ import {
   previousPriceEpochSats,
   PRICE_EPOCH_BOUNDS,
   PRICE_CONSENSUS_QUORUM_OVERRIDE,
+  paymentIntents,
   syncOrderBookReference,
   recordMarketTicks,
   MARKET_TICK_MS
 } from "./coordinator/economy.js";
 import {
-  memoryPayoutStore,
-  INFRA_HOST_SERVICES,
   ECONOMY_PAYMENTS_ENABLED,
   lightningProvider,
-  INFRA_HOST_ENABLED,
-  INFRA_HOST_REPORT_URLS,
-  payoutStore,
   payoutService,
+  payoutStore,
   callbackPins,
   payoutPolicy,
   payoutLimits,
   payoutPause,
+  memoryPayoutStore,
   RESERVED_HOST_ACCOUNTS,
   hostAttestor,
   runFeePoolDistribution,
   payoutReconcileConfig,
   payoutReconciler
 } from "./coordinator/payouts.js";
+import {
+  robotQueue,
+  receiptStore,
+  discoveryAnnouncer,
+  diagnosticsByAgentId,
+  depTracker,
+  recordWorkReceipt,
+  keyCustodyEvents,
+  appendAgentDiagnostic
+} from "./coordinator/services.js";
+import { coordinatorPublicKeyById, isApprovedCoordinator, bootstrapPeerMesh } from "./coordinator/peers.js";
+import {
+  anchorDeps,
+  persistStatsLedgerRecord,
+  currentAnchoringStatus,
+  statsQuorumThreshold,
+  ingestStatsLedgerRecords,
+  maybeAnchorLatestStatsCheckpoint,
+  latestStatsFinality,
+  syncStatsLedgerFromPeer,
+  maybeFinalizeStatsCheckpoint,
+  anchorTracker,
+  reconcileAnchorRows
+} from "./coordinator/stats-ledger.js";
+import { validatePortalNode } from "./coordinator/enrollment.js";
+import { recordInfraHeartbeat, selfInfraHeartbeat } from "./coordinator/infra-hosts.js";
+import { attestAgentSigningKey, trustedAgentSigningKeys } from "./coordinator/attested-keys.js";
+import {
+  runIssuanceTick,
+  appendQuorumRecord,
+  maybeFinalizeIssuanceEpoch,
+  maybeAnchorLatestFinalizedEpoch
+} from "./coordinator/issuance.js";
+import { createPaymentIntent, reconcileIntent, settleIfPaid } from "./coordinator/payments.js";
+import {
+  registerSchema,
+  defaultPolicy,
+  heartbeatSchema,
+  benchmarkResponseSchema,
+  diagnosticsSchema,
+  taskSchema,
+  pullSchema,
+  resultSchema,
+  classParam
+} from "./coordinator/schemas.js";
 
 // Read at scrape time, so the sources may be declared further down this module.
 registerCoordinatorMetrics(metrics, {
@@ -458,166 +415,11 @@ queue.onLeaseFailure((result) => {
 // or, for a streamed body, in a trailer (src/trust/response-signing.ts). Advertised as responseSigning.
 registerResponseSigning(app, { peerId: identity.peerId, privateKeyPem: coordinatorKeys.privateKeyPem });
 
-/**
- * Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime ×
- * attested services (src/economy/host-attestation.ts). A heartbeat counts toward the window at
- * most once per ~HOST_HEARTBEAT_MS, and only attested services are stored in `services`.
- */
-async function recordInfraHeartbeat(input: {
-  hostId: string;
-  accountId?: string;
-  declaredServices: string[];
-  attestation: AttestationResult;
-  region?: string;
-  coordinatorUrl?: string;
-  lightningAddress?: string;
-  lightningNodeId?: string;
-}): Promise<{ host: InfrastructureHost; counted: boolean }> {
-  const now = Date.now();
-  const minCountIntervalMs = Math.floor(CC.HOST_HEARTBEAT_MS * 0.8);
-  const host: InfrastructureHost = {
-    hostId: input.hostId,
-    accountId: input.accountId ?? `host:${input.hostId}`,
-    coordinatorUrl: input.coordinatorUrl,
-    region: input.region,
-    services: input.attestation.attested,
-    declaredServices: normalizeServices(input.declaredServices),
-    attestedAtMs: input.attestation.atMs,
-    lightningNodeId: input.lightningNodeId,
-    lightningAddress: input.lightningAddress,
-    firstSeenMs: now,
-    lastSeenMs: now,
-    lastCountedMs: now,
-    heartbeatsInWindow: 1
-  };
-  if (pgStore) {
-    const r = await pgStore.recordAttestedHostHeartbeat(host, now, minCountIntervalMs);
-    return { host: { ...host, heartbeatsInWindow: r.heartbeatsInWindow }, counted: r.counted };
-  }
-  if (!memoryPayoutStore) return { host, counted: false };
-  const existing = memoryPayoutStore.hosts.get(host.hostId);
-  let counted = true;
-  if (existing) {
-    counted = heartbeatCounts(existing.lastCountedMs, now, CC.HOST_HEARTBEAT_MS);
-    Object.assign(existing, {
-      accountId: host.accountId,
-      services: host.services,
-      declaredServices: host.declaredServices,
-      attestedAtMs: host.attestedAtMs,
-      lastSeenMs: now,
-      lastCountedMs: counted ? now : existing.lastCountedMs,
-      heartbeatsInWindow: existing.heartbeatsInWindow + (counted ? 1 : 0),
-      region: host.region ?? existing.region,
-      coordinatorUrl: host.coordinatorUrl ?? existing.coordinatorUrl,
-      lightningAddress: host.lightningAddress ?? existing.lightningAddress,
-      lightningNodeId: host.lightningNodeId ?? existing.lightningNodeId
-    });
-  } else {
-    memoryPayoutStore.hosts.set(host.hostId, host);
-  }
-  if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
-  return { host: memoryPayoutStore.hosts.get(host.hostId) ?? host, counted };
-}
-
-/** Our own services: each counts only if the backend this process uses answers (cached 10 min). */
-let selfAttestation: AttestationResult | null = null;
-async function attestOwnServices(): Promise<AttestationResult> {
-  if (selfAttestation && Date.now() - selfAttestation.atMs < 10 * 60_000) return selfAttestation;
-  const electrs = CC.INFRA_HOST_ELECTRS_ENDPOINT.split(":");
-  selfAttestation = await attestSelfServices(INFRA_HOST_SERVICES, {
-    lightning: async () => {
-      if (!ECONOMY_PAYMENTS_ENABLED || !lightningProvider.getBalances) return { ok: false, detail: "lightning_unavailable" };
-      const b = await lightningProvider.getBalances();
-      return b.supported ? { ok: true } : { ok: false, detail: b.reason };
-    },
-    bitcoind: async () => {
-      const provider = process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind" ? anchorDeps()?.provider : undefined;
-      if (!provider) return { ok: false, detail: "bitcoind_not_configured" };
-      const h = await provider.healthCheck();
-      return h.reachable ? { ok: true, detail: h.chain } : { ok: false, detail: h.error ?? "unreachable" };
-    },
-    electrs: () => probeElectrum(electrs[0], Number(electrs[1] ?? 50001))
-  });
-  const missing = normalizeServices(INFRA_HOST_SERVICES).filter((x) => !selfAttestation!.attested.includes(x));
-  if (missing.length) app.log.warn({ missing, results: selfAttestation.results }, "infra_host_services_not_attested");
-  return selfAttestation;
-}
-
-async function selfInfraHeartbeat(): Promise<void> {
-  if (!INFRA_HOST_ENABLED) return;
-  const fields = {
-    hostId: identity.peerId,
-    accountId: CC.INFRA_HOST_ACCOUNT_ID,
-    services: INFRA_HOST_SERVICES,
-    region: CC.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
-    coordinatorUrl: COORDINATOR_PUBLIC_URL,
-    lightningAddress: CC.INFRA_HOST_LIGHTNING_ADDRESS,
-    lightningNodeId: CC.INFRA_HOST_LIGHTNING_NODE_ID
-  };
-  await recordInfraHeartbeat({ ...fields, declaredServices: fields.services, attestation: await attestOwnServices() });
-  for (const url of INFRA_HOST_REPORT_URLS) {
-    // Fresh signature per target: each heartbeat is single-use on the receiver.
-    const body = signHostHeartbeat(fields, coordinatorKeys.privateKeyPem);
-    void fetch(`${url}/economy/hosts/heartbeat`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000)
-    })
-      .then(async (res) => {
-        if (!res.ok) app.log.warn({ url, status: res.status, body: await res.text().catch(() => "") }, "infra_heartbeat_report_rejected");
-      })
-      .catch((error) => app.log.warn({ url, error: String(error) }, "infra_heartbeat_report_failed"));
-  }
-}
-
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
   }
 });
-
-const keyCustodyEvents: KeyCustodyEvent[] = [];
-let smoothedLoadIndex: number | null = null;
-const diagnosticsByAgentId = new Map<string, Array<{ eventAtMs: number; message: string }>>();
-function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Date.now()): void {
-  const text = String(message ?? "").trim();
-  if (!text) return;
-  const existing = diagnosticsByAgentId.get(agentId) ?? [];
-  const merged = [...existing, { eventAtMs: Number(eventAtMs || Date.now()), message: text }].slice(-250);
-  diagnosticsByAgentId.set(agentId, merged);
-}
-
-// ── Subtask dependency tracking ─────────────────────────────────────────────
-const depTracker = new SubtaskDepTracker();
-
-/**
- * The portal owns node enrollment, so a portal-validated agent's earnings and spending belong to
- * the enrolling user's account (acct-<userId>, as the portal names it). Linked on every validated
- * registration: re-enrolling a node is the owner's alone (portal upsertNodeEnrollment).
- */
-async function linkPortalOwnership(agentId: string, ownerUserId: string): Promise<void> {
-  if (!pgStore) return;
-  const accountId = `acct-${ownerUserId}`;
-  try {
-    const existing = await pgStore.getAgentOwnership(agentId);
-    if (existing?.accountId === accountId && existing.ownerUserId === ownerUserId) return;
-    await pgStore.linkAgentOwnership({ agentId, accountId, ownerUserId });
-  } catch (err) {
-    app.log.warn({ err, agentId }, "agent_ownership_link_failed");
-  }
-}
-
-const robotQueue = ROBOT_QUEUE_ENABLED
-  ? new RobotQueue({
-      coordinatorFeeBps: ROBOT_COORDINATOR_FEE_BPS,
-      defaultTimeoutMs: ROBOT_TASK_DEFAULT_TIMEOUT_MS,
-      autoSettleDelayMs: ROBOT_AUTO_SETTLE_DELAY_MS,
-      sweepIntervalMs: ROBOT_SWEEP_INTERVAL_MS,
-      minSweepSats: ROBOT_MIN_SWEEP_SATS,
-      bitcoinNetwork: BITCOIN_NETWORK
-    })
-  : null;
 
 if (robotQueue) {
   registerRobotRoutes(app, robotQueue, {
@@ -627,9 +429,6 @@ if (robotQueue) {
   });
 }
 
-// ── Work receipts (architecture step 2): store, routes, epoch close + anchor, peer replication ──
-// Receipts are issued in accrueResultCredits (recordWorkReceipt); everything else lives in src/receipts.
-const receiptStore: ReceiptStore = pgStore ? pgStore.receiptStore() : new MemoryReceiptStore();
 registerReceiptRoutes(app, {
   store: receiptStore,
   coordinatorId: identity.peerId,
@@ -638,31 +437,7 @@ registerReceiptRoutes(app, {
   coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
   log: app.log
 });
-/**
- * `computeClass` is the class the credits were valued in (cpu | apple | gpu | gpu.dc) and
- * `msatPerCredit` the price locked on the earn row. Receipts issued before the four-class model
- * carry the resource class ("cpu" / "gpu") and the legacy price-epoch rate; they verify unchanged
- * because the field is a free string inside the signed body.
- */
-async function recordWorkReceipt(r: ExecutionResult<ResultMeta>, credits: number, computeClass: ComputeClassId, msatPerCredit: number | undefined): Promise<void> {
-  const resourceClass = r.meta.subtask.projectMeta.resourceClass;
-  const legacyMsat = (latestPriceEpochByResource.get(resourceClass)?.pricePerComputeUnitSats ?? 30) * 1000;
-  const outcome = issueReceiptForAccrual({
-    claim: (r.meta.report as { receipt?: SignedAgentReceiptClaim }).receipt,
-    result: { taskId: r.meta.taskId, subtaskId: r.subtaskId, agentId: r.agentId, output: r.output },
-    registeredAgentPublicKeyPem: agentCapabilities.get(r.agentId)?.publicKeyPem,
-    coordinator: { coordinatorId: identity.peerId, publicKeyPem: identity.publicKeyPem, privateKeyPem: coordinatorKeys.privateKeyPem },
-    computeClass,
-    credits,
-    msatPerCredit: msatPerCredit ?? legacyMsat
-  });
-  if (!outcome.receipt) {
-    app.log.debug({ subtaskId: r.subtaskId, agentId: r.agentId, reason: outcome.skipped }, "work_receipt_skipped");
-    return;
-  }
-  await receiptStore.append(outcome.receipt);
-  app.log.info({ receiptId: outcome.receipt.receiptId, subtaskId: r.subtaskId, agentId: r.agentId }, "work_receipt_issued");
-}
+
 app.addHook("onReady", async () => {
   const epochTimer = setInterval(() => {
     void (async () => {
@@ -691,83 +466,8 @@ app.addHook("onReady", async () => {
     log: app.log
   });
 });
-// ── end work receipts ──
-// Architecture step 3: signed self-announcement + Nostr announcer (EDGECODER_NOSTR_ANNOUNCE=1), see docs/discovery.md.
-const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: CC.EDGECODER_NOSTR_ANNOUNCE, log: (msg, meta) => app.log.info(meta ?? {}, msg) });
+
 registerDiscoveryRoutes(app, discoveryAnnouncer);
-
-async function applyStatsProjectionRecord(record: {
-  eventType: string;
-  taskId: string;
-  actorId: string;
-  issuedAtMs: number;
-  payloadJson?: string;
-}): Promise<void> {
-  if (!pgStore) return;
-  const payload = parseRecordPayload(record);
-  if (record.eventType === "node_approval" || record.eventType === "node_validation") {
-    const [kindRaw, nodeIdRaw] = record.taskId.split(":");
-    const nodeId = nodeIdRaw || record.actorId;
-    const nodeKind = kindRaw === "coordinator" ? "coordinator" : "agent";
-    await pgStore.upsertNodeStatusProjection({
-      nodeId,
-      nodeKind,
-      ownerEmail: typeof payload.ownerEmail === "string" ? payload.ownerEmail : undefined,
-      emailVerified: typeof payload.emailVerified === "boolean" ? payload.emailVerified : undefined,
-      nodeApproved:
-        typeof payload.nodeApproved === "boolean"
-          ? payload.nodeApproved
-          : typeof payload.approved === "boolean"
-            ? payload.approved
-            : undefined,
-      active: typeof payload.active === "boolean" ? payload.active : undefined,
-      sourceIp: typeof payload.sourceIp === "string" ? payload.sourceIp : undefined,
-      countryCode: typeof payload.countryCode === "string" ? payload.countryCode : undefined,
-      vpnDetected: typeof payload.vpnDetected === "boolean" ? payload.vpnDetected : undefined,
-      lastSeenMs: record.issuedAtMs,
-      updatedAtMs: record.issuedAtMs
-    });
-    return;
-  }
-  if (record.eventType === "earnings_accrual") {
-    const credits =
-      typeof payload.credits === "number"
-        ? payload.credits
-        : typeof payload.estimatedCredits === "number"
-          ? payload.estimatedCredits
-          : 0;
-    if (credits <= 0) return;
-    await pgStore.incrementCoordinatorEarningsProjection({
-      accountId: record.actorId,
-      ownerEmail: typeof payload.ownerEmail === "string" ? payload.ownerEmail : undefined,
-      credits,
-      taskCountDelta: 1,
-      updatedAtMs: record.issuedAtMs
-    });
-  }
-}
-
-async function persistStatsLedgerRecord(record: {
-  id: string;
-  eventType: any;
-  taskId: string;
-  subtaskId?: string;
-  actorId: string;
-  sequence: number;
-  issuedAtMs: number;
-  prevHash: string;
-  coordinatorId?: string;
-  checkpointHeight?: number;
-  checkpointHash?: string;
-  payloadJson?: string;
-  hash: string;
-  signature: string;
-}): Promise<void> {
-  // Projections (earnings totals, node status) apply once per record: a row another coordinator on
-  // this database already stored, or one sync re-ingests, is not counted again.
-  const inserted = pgStore ? await pgStore.persistStatsLedgerRecord(record) : false;
-  if (inserted) await applyStatsProjectionRecord(record);
-}
 
 app.addHook("onRequest", async (req, reply) => {
   // Allow initial agent registration without mesh token; coordinator validates
@@ -808,802 +508,6 @@ app.addHook("onRequest", async (req, reply) => {
   }
 });
 
-async function readCachedPeerUrls(): Promise<string[]> {
-  try {
-    const raw = await readFile(COORDINATOR_PEER_CACHE_FILE, "utf8");
-    const parsed = JSON.parse(raw) as { peers?: string[] };
-    if (!Array.isArray(parsed.peers)) return [];
-    return parsed.peers.map((item) => normalizeUrl(item) ?? "").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-async function writeCachedPeerUrls(urls: string[]): Promise<void> {
-  try {
-    await mkdir(dirname(COORDINATOR_PEER_CACHE_FILE), { recursive: true });
-    await writeFile(
-      COORDINATOR_PEER_CACHE_FILE,
-      JSON.stringify({ peers: urls, updatedAtMs: Date.now() }, null, 2),
-      "utf8"
-    );
-  } catch {
-    // Best-effort cache only.
-  }
-}
-
-async function discoverCoordinatorUrlsFromRegistry(): Promise<string[]> {
-  if (!COORDINATOR_DISCOVERY_URL) return [];
-  try {
-    const res = await request(COORDINATOR_DISCOVERY_URL, { method: "GET" });
-    if (res.statusCode < 200 || res.statusCode >= 300) return [];
-    const payload = (await res.body.json()) as {
-      coordinators?: Array<{ coordinatorUrl?: string }>;
-    };
-    return (payload.coordinators ?? [])
-      .map((item) => normalizeUrl(item.coordinatorUrl) ?? "")
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-async function discoverBootstrapPeers(): Promise<string[]> {
-  const fromRegistry = await discoverCoordinatorUrlsFromRegistry();
-  const fromCache = await readCachedPeerUrls();
-  const candidates = [...fromRegistry, ...fromCache, ...COORDINATOR_BOOTSTRAP_URLS]
-    .map((value) => normalizeUrl(value) ?? "")
-    .filter(Boolean)
-    .filter((value, index, arr) => arr.indexOf(value) === index)
-    .filter((value) => value !== normalizeUrl(COORDINATOR_PUBLIC_URL));
-  return candidates;
-}
-
-/** Whether `url` serves the coordinator identity `peerId` (so its announced URL is safe to use). */
-async function peerAnswersAs(url: string, peerId: string): Promise<boolean> {
-  try {
-    const res = await request(`${url}/identity`, { method: "GET", headersTimeout: 5_000, bodyTimeout: 5_000 });
-    if (res.statusCode !== 200) {
-      await res.body.text().catch(() => undefined);
-      return false;
-    }
-    return ((await res.body.json()) as { peerId?: string }).peerId === peerId;
-  } catch {
-    return false;
-  }
-}
-
-async function bootstrapPeerMesh(): Promise<void> {
-  const candidates = await discoverBootstrapPeers();
-  app.log.info({ candidateCount: candidates.length, candidates }, "mesh_bootstrap_start");
-  if (candidates.length === 0) return;
-
-  const discoveredForCache = new Set<string>();
-  for (const peerUrl of candidates) {
-    try {
-      const identityRes = await request(`${peerUrl}/identity`, {
-        method: "GET",
-        headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined,
-        signal: AbortSignal.timeout(8_000)
-      });
-      if (identityRes.statusCode < 200 || identityRes.statusCode >= 300) {
-        // Must consume the body to release the socket (undici requirement)
-        await identityRes.body.text().catch(() => undefined);
-        app.log.warn({ peerUrl, status: identityRes.statusCode }, "mesh_bootstrap_identity_failed");
-        continue;
-      }
-      const remote = (await identityRes.body.json()) as {
-        peerId: string;
-        publicKeyPem: string;
-        coordinatorUrl: string;
-        networkMode: NetworkMode;
-      };
-      app.log.info({ peerUrl, remotePeerId: remote.peerId, localPeerId: identity.peerId }, "mesh_bootstrap_identity_fetched");
-      if (!remote.peerId || remote.peerId === identity.peerId) {
-        app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_skip_same_peer");
-        continue;
-      }
-
-      // Prefer the peer's self-reported coordinatorUrl, but fall back to the
-      // actual URL we successfully reached it on (the bootstrap/discovery URL).
-      // This handles cases where the self-reported URL (e.g. custom domain) is
-      // unreachable but the direct URL (e.g. fly.dev) works.
-      const normalizedRemoteUrl = normalizeUrl(remote.coordinatorUrl);
-      const normalizedPeerUrl = normalizeUrl(peerUrl);
-      const effectiveUrl = normalizedRemoteUrl ?? normalizedPeerUrl;
-      if (!effectiveUrl || effectiveUrl === normalizeUrl(COORDINATOR_PUBLIC_URL)) {
-        app.log.warn({ peerUrl, effectiveUrl, localUrl: normalizeUrl(COORDINATOR_PUBLIC_URL) }, "mesh_bootstrap_skip_same_url");
-        continue;
-      }
-      // Gossip on the peer's own public URL (its domain) when it answers there as the same peer;
-      // otherwise on the URL we reached it at (e.g. a bootstrap fly.dev host).
-      let gossipUrl = normalizedPeerUrl ?? effectiveUrl;
-      if (normalizedRemoteUrl && normalizedRemoteUrl !== normalizedPeerUrl && (await peerAnswersAs(normalizedRemoteUrl, remote.peerId))) gossipUrl = normalizedRemoteUrl;
-      const admitted = mesh.addPeer(
-        {
-          peerId: remote.peerId,
-          publicKeyPem: remote.publicKeyPem,
-          coordinatorUrl: gossipUrl!,
-          networkMode: remote.networkMode
-        },
-        // Dev without an allowlist keeps the old refresh-on-bootstrap behaviour.
-        { authoritative: !PEER_ALLOWLIST_ENFORCED, source: "bootstrap" }
-      );
-      if (!admitted) {
-        app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_not_allowlisted");
-        continue;
-      }
-      peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
-      discoveredForCache.add(gossipUrl!);
-
-      const selfUrl = normalizeUrl(COORDINATOR_PUBLIC_URL) ?? COORDINATOR_PUBLIC_URL;
-      const registerRes = await request(`${peerUrl}/mesh/register-peer`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {})
-        },
-        body: JSON.stringify({
-          peerId: identity.peerId,
-          publicKeyPem: identity.publicKeyPem,
-          coordinatorUrl: selfUrl,
-          networkMode,
-          registrationToken: COORDINATOR_REGISTRATION_TOKEN,
-          // #52: prove we hold the key the peer's allowlist names.
-          ...signRegistration(
-            { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl, networkMode },
-            coordinatorKeys.privateKeyPem
-          )
-        }),
-        signal: AbortSignal.timeout(8_000)
-      });
-      await registerRes.body.text().catch(() => undefined);
-      app.log.info({ peerUrl, registerStatus: registerRes.statusCode, remotePeerId: remote.peerId }, "mesh_bootstrap_registered");
-      if (registerRes.statusCode >= 200 && registerRes.statusCode < 300) {
-        discoveredForCache.add(peerUrl);
-      }
-    } catch (err) {
-      app.log.warn({ peerUrl, error: (err as Error).message }, "mesh_bootstrap_peer_error");
-    }
-  }
-
-  if (discoveredForCache.size > 0) {
-    await writeCachedPeerUrls([...discoveredForCache]);
-  }
-}
-
-async function validatePortalNode(input: {
-  nodeId: string;
-  nodeKind: "agent" | "coordinator";
-  registrationToken?: string;
-  deviceId?: string;
-  /** Client IP for the portal's geo/VPN checks and the audit record. Never used for trust. */
-  sourceIp?: string;
-  /** The TCP peer is this machine (embedded worker). Decided from the socket, never headers. */
-  loopback?: boolean;
-  /**
-   * The request is signed by the public key this coordinator already holds for the agent, and does
-   * not change that key. Only then may an agent re-register without a portal-validated token.
-   */
-  proofOfKey?: boolean;
-}): Promise<{
-  allowed: boolean;
-  reason?: string;
-  ownerEmail?: string;
-  sourceIp?: string;
-  countryCode?: string;
-  vpnDetected?: boolean;
-}> {
-  const appendValidationEvent = async (outcome: { allowed: boolean; reason?: string; ownerEmail?: string }) => {
-    try {
-      const validationRecord = ordering.append({
-        eventType: "node_validation",
-        taskId: `${input.nodeKind}:${input.nodeId}`,
-        actorId: input.nodeId,
-        coordinatorId: identity.peerId,
-        payloadJson: JSON.stringify({
-          nodeKind: input.nodeKind,
-          sourceIp: input.sourceIp,
-          allowed: outcome.allowed,
-          reason: outcome.reason ?? null,
-          ownerEmail: outcome.ownerEmail ?? null
-        })
-      });
-      const validationAuditTimeoutMs = 2_000;
-      await Promise.race([
-        Promise.all([pgStore?.persistLedgerRecord(validationRecord), persistStatsLedgerRecord(validationRecord)]),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("validation_audit_persist_timeout")), validationAuditTimeoutMs)
-        )
-      ]);
-    } catch {
-      // Best-effort audit signal; validation path should not fail due to ledger write.
-    }
-  };
-  // A known agent may skip the portal only by proving it holds the key already registered for it.
-  // Knowing an agent ID is not enough to re-register it with a new key.
-  const allowIfKnownAgent = (reason: string): {
-    allowed: boolean;
-    reason?: string;
-    ownerEmail?: string;
-    sourceIp?: string;
-    countryCode?: string;
-    vpnDetected?: boolean;
-  } | null => {
-    if (input.nodeKind !== "agent" || input.proofOfKey !== true) return null;
-    const existing = agentCapabilities.get(input.nodeId);
-    if (!existing?.publicKeyPem) return null;
-    return {
-      allowed: true,
-      reason,
-      ownerEmail: existing.ownerEmail,
-      sourceIp: existing.sourceIp,
-      countryCode: existing.countryCode,
-      vpnDetected: existing.vpnDetected
-    };
-  };
-  if (!PORTAL_SERVICE_URL) {
-    const outcome = { allowed: true, reason: "portal_validation_disabled" };
-    await appendValidationEvent(outcome);
-    return outcome;
-  }
-  // Allow loopback registrations: the embedded worker self-registers against its own coordinator.
-  // input.loopback comes from the socket address; a forwarded-IP header cannot set it.
-  if (input.loopback === true) {
-    const outcome = { allowed: true, reason: "loopback_self_registration" };
-    await appendValidationEvent(outcome);
-    return outcome;
-  }
-  if (!input.registrationToken) {
-    const cached = allowIfKnownAgent("registration_token_missing_proven_key");
-    if (cached) {
-      await appendValidationEvent(cached);
-      return cached;
-    }
-    const outcome = { allowed: false, reason: "registration_token_required" };
-    await appendValidationEvent(outcome);
-    return outcome;
-  }
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
-  try {
-    const portalValidationTimeoutMs = 5_000;
-    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/validate`, {
-      method: "POST",
-      headers,
-      headersTimeout: portalValidationTimeoutMs,
-      bodyTimeout: portalValidationTimeoutMs,
-      body: JSON.stringify({
-        nodeId: input.nodeId,
-        nodeKind: input.nodeKind,
-        registrationToken: input.registrationToken,
-        deviceId: input.deviceId,
-        sourceIp: input.sourceIp
-      })
-    });
-    const payload = (await res.body.json()) as {
-      allowed?: boolean;
-      reason?: string;
-      node?: {
-        ownerUserId?: string;
-        ownerEmail?: string;
-        sourceIp?: string;
-        countryCode?: string;
-        vpnDetected?: boolean;
-      };
-    };
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      await appendValidationEvent({
-        allowed: false,
-        reason: payload.reason ?? `portal_validation_failed_${res.statusCode}`
-      });
-      return {
-        allowed: false,
-        reason: payload.reason ?? `portal_validation_failed_${res.statusCode}`
-      };
-    }
-    await appendValidationEvent({
-      allowed: payload.allowed === true,
-      reason: payload.reason,
-      ownerEmail: payload.node?.ownerEmail
-    });
-    if (payload.allowed === true && input.nodeKind === "agent" && payload.node?.ownerUserId) {
-      await linkPortalOwnership(input.nodeId, payload.node.ownerUserId);
-    }
-    return {
-      allowed: payload.allowed === true,
-      reason: payload.reason,
-      ownerEmail: payload.node?.ownerEmail,
-      sourceIp: payload.node?.sourceIp,
-      countryCode: payload.node?.countryCode,
-      vpnDetected: payload.node?.vpnDetected
-    };
-  } catch {
-    // If portal validation is temporarily unavailable, allow agents we already know that prove
-    // their registered key. This avoids flapping registrations for long-running approved nodes.
-    const cached = allowIfKnownAgent("portal_validation_unreachable_proven_key");
-    if (cached) {
-      await appendValidationEvent(cached);
-      return cached;
-    }
-    const outcome = { allowed: false, reason: "portal_validation_unreachable" };
-    await appendValidationEvent(outcome);
-    return outcome;
-  }
-}
-
-function coordinatorPublicKeyById(peerId: string): string | null {
-  if (peerId === identity.peerId) return identity.publicKeyPem;
-  const peer = mesh.listPeers().find((item) => item.peerId === peerId);
-  return peer?.publicKeyPem ?? null;
-}
-
-function verifyStatsLedgerRecord(record: {
-  eventType: any;
-  taskId: string;
-  subtaskId?: string;
-  actorId: string;
-  sequence: number;
-  issuedAtMs: number;
-  prevHash: string;
-  coordinatorId?: string;
-  checkpointHeight?: number;
-  checkpointHash?: string;
-  payloadJson?: string;
-  hash: string;
-  signature: string;
-}): boolean {
-  if (!record.coordinatorId) return false;
-  const publicKeyPem = coordinatorPublicKeyById(record.coordinatorId);
-  if (!publicKeyPem) return false;
-  const expectedHash = hashRecordPayload({
-    eventType: record.eventType,
-    taskId: record.taskId,
-    subtaskId: record.subtaskId,
-    actorId: record.actorId,
-    sequence: record.sequence,
-    issuedAtMs: record.issuedAtMs,
-    prevHash: record.prevHash,
-    coordinatorId: record.coordinatorId,
-    checkpointHeight: record.checkpointHeight,
-    checkpointHash: record.checkpointHash,
-    payloadJson: record.payloadJson
-  });
-  if (expectedHash !== record.hash) return false;
-  return verifyPayload(record.hash, record.signature, publicKeyPem);
-}
-
-function statsQuorumThreshold(): number {
-  const totalCoordinators = mesh.listPeers().length + 1;
-  return Math.max(1, Math.floor(totalCoordinators / 2) + 1);
-}
-
-/** One checkpoint per period; the settle delay covers records still being written by any coordinator. */
-const STATS_CHECKPOINT_PERIOD_MS = statsCheckpointPeriodMs(STATS_LEDGER_SYNC_INTERVAL_MS);
-const STATS_CHECKPOINT_SETTLE_MS = Math.max(5_000, STATS_LEDGER_SYNC_INTERVAL_MS);
-
-/**
- * Sign the shared checkpoint target (src/ledger/stats-checkpoint.ts) and commit once a quorum of
- * coordinators signed it. Signing never moves the target, so coordinators converge on one hash
- * instead of each signing the other's last signature.
- */
-async function maybeFinalizeStatsCheckpoint(): Promise<void> {
-  if (!pgStore) return;
-  const store = pgStore;
-  const outcome = await finalizeStatsCheckpoint({
-    store,
-    selfId: identity.peerId,
-    threshold: statsQuorumThreshold(),
-    nowMs: Date.now(),
-    periodMs: STATS_CHECKPOINT_PERIOD_MS,
-    settleMs: STATS_CHECKPOINT_SETTLE_MS,
-    writeSignature: async (target, threshold) => {
-      const signatureRecord = ordering.append({
-        eventType: "stats_checkpoint_signature",
-        taskId: "stats-ledger",
-        actorId: identity.peerId,
-        coordinatorId: identity.peerId,
-        checkpointHeight: target.height,
-        checkpointHash: target.hash,
-        payloadJson: JSON.stringify({ threshold, signerPeerId: identity.peerId, targetIssuedAtMs: target.issuedAtMs })
-      });
-      await store.persistLedgerRecord(signatureRecord);
-      await persistStatsLedgerRecord(signatureRecord);
-    },
-    writeCommit: async (target, threshold, signers) => {
-      const commitRecord = ordering.append({
-        eventType: "stats_checkpoint_commit",
-        taskId: "stats-ledger",
-        actorId: identity.peerId,
-        coordinatorId: identity.peerId,
-        checkpointHeight: target.height,
-        checkpointHash: target.hash,
-        payloadJson: JSON.stringify({ threshold, signerSet: signers, targetIssuedAtMs: target.issuedAtMs })
-      });
-      await store.persistLedgerRecord(commitRecord);
-      await persistStatsLedgerRecord(commitRecord);
-    }
-  });
-  if (outcome.committed) app.log.info({ checkpointHash: outcome.target?.hash, signers: outcome.signers }, "stats_checkpoint_committed");
-}
-
-/**
- * #46: anchoring needs a real provider. An unset (or unusable) BITCOIN_ANCHOR_PROVIDER disables
- * anchoring in every environment: nothing is broadcast and no anchor record is written. The
- * mock provider is used only when asked for by name, and its rows are reported as simulated.
- */
-const ANCHORING_MODE = resolveAnchoringMode();
-let anchorProviderCache: BitcoinAnchorProvider | null | undefined;
-function anchorDeps(): AnchorDeps | null {
-  if (!pgStore) return null;
-  if (anchorProviderCache === undefined) {
-    if (ANCHORING_MODE.mode === "disabled") {
-      app.log.warn(
-        { problem: ANCHORING_MODE.problem },
-        "bitcoin_anchoring_disabled: set BITCOIN_ANCHOR_PROVIDER=bitcoind|anchor-proxy to anchor checkpoints"
-      );
-      anchorProviderCache = null;
-    } else {
-      anchorProviderCache = createBitcoinAnchorProviderFromEnv(BITCOIN_NETWORK);
-    }
-  }
-  return anchorProviderCache
-    ? { provider: anchorProviderCache, store: pgStore, network: BITCOIN_NETWORK, providerName: ANCHORING_MODE.provider ?? undefined }
-    : null;
-}
-
-async function maybeAnchorLatestStatsCheckpoint(): Promise<BitcoinAnchorRecord | null> {
-  const deps = anchorDeps();
-  if (!deps || !pgStore) return null;
-  // Anchor what the quorum committed (latestStatsFinality looks the anchor up by that hash).
-  const checkpoint = await pgStore.latestStatsCheckpoint();
-  if (!checkpoint) return null;
-  return anchorCheckpoint(deps, { epochId: `stats:${checkpoint.height ?? 0}`, checkpointHash: checkpoint.hash });
-}
-
-/**
- * #46: confirmation loop (src/economy/anchor-tracker.ts). pending -> anchored at the required
- * depth, back to pending on a reorg, and a new broadcast when the transaction is gone.
- */
-const anchorTracker = new AnchorTracker({
-  deps: anchorDeps,
-  config: {
-    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
-    pollMs: ANCHOR_CONFIRM_POLL_MS,
-    reconcile: ANCHOR_RECONCILE_CONFIG,
-    ...anchorTrackerTuningFromEnv()
-  },
-  onEvent: anchorEventLogger(app.log),
-  // A receipt epoch keeps its own copy of the txid; follow a replacement or recovered broadcast.
-  onTxidAssigned: async (record) => {
-    if (await repointEpochAnchor(receiptStore, record)) {
-      app.log.info({ epochId: record.epochId, txRef: record.txRef }, "receipt_epoch_anchor_repointed");
-    }
-  },
-  onError: (error, where) => app.log.warn({ error, where }, "anchor_tracker_error")
-});
-
-/** #103: resolve "broadcasting" rows (crash mid-broadcast) and stuck pending txs; re-broadcast dropped ones. */
-async function reconcileAnchorRows(): Promise<void> {
-  await anchorTracker.reconcile();
-}
-
-/** #46: whether this coordinator anchors at all, for the status endpoints. */
-function currentAnchoringStatus(): AnchoringStatus {
-  return anchoringStatus({
-    mode: ANCHORING_MODE,
-    storeAvailable: Boolean(pgStore),
-    network: BITCOIN_NETWORK,
-    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
-    tracker: anchorTracker.status()
-  });
-}
-
-async function latestStatsFinality(): Promise<{
-  checkpointHash?: string;
-  checkpointHeight?: number;
-  softFinalized: boolean;
-  hardFinalized: boolean;
-  finalityState: "soft_finalized" | "anchored_pending" | "anchored_confirmed" | "no_checkpoint";
-  anchoring: AnchoringStatus;
-  /** Rows the old simulation or the mock provider wrote come back with status "simulated" and no txRef. */
-  anchor?: AnchorView;
-}> {
-  const anchoring = currentAnchoringStatus();
-  if (!pgStore) {
-    return {
-      softFinalized: false,
-      hardFinalized: false,
-      finalityState: "no_checkpoint",
-      anchoring
-    };
-  }
-  const latestCommit = await pgStore.latestStatsCheckpoint();
-  if (!latestCommit || !latestCommit.hash) {
-    return {
-      softFinalized: false,
-      hardFinalized: false,
-      finalityState: "no_checkpoint",
-      anchoring
-    };
-  }
-  // #46: hard finality is a real transaction at the required depth, never a simulated row.
-  const { hardFinalized, anchorInProgress, anchor } = checkpointAnchorFinality({
-    anchor: await pgStore.latestAnchorByCheckpoint(latestCommit.hash),
-    requiredConfirmations: ANCHOR_REQUIRED_CONFIRMATIONS,
-    minConfirmations: STATS_ANCHOR_MIN_CONFIRMATIONS
-  });
-  return {
-    checkpointHash: latestCommit.hash,
-    checkpointHeight: latestCommit.height ?? undefined,
-    softFinalized: true,
-    hardFinalized,
-    // Without a real anchor provider (production default) the quorum commit is final: say so instead of
-    // reporting an anchor that will never come.
-    finalityState: statsFinalityState({ hasCommit: true, anchoringEnabled: anchoring.enabled, anchorExists: anchorInProgress, hardFinalized }),
-    anchoring,
-    anchor
-  };
-}
-
-async function ingestStatsLedgerRecords(records: QueueEventRecord[]): Promise<{ ingested: number; skipped: number }> {
-  let ingested = 0;
-  let skipped = 0;
-  for (const record of records) {
-    if (!verifyStatsLedgerRecord(record)) {
-      skipped += 1;
-      continue;
-    }
-    await persistStatsLedgerRecord(record);
-    ingested += 1;
-  }
-  if (ingested > 0) {
-    await maybeFinalizeStatsCheckpoint();
-  }
-  return { ingested, skipped };
-}
-
-async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinatorUrl: string }): Promise<void> {
-  if (!pgStore) return;
-  try {
-    const meshHeaders = MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined;
-    const headRes = await request(`${peer.coordinatorUrl}/stats/ledger/head`, {
-      method: "GET",
-      headers: meshHeaders,
-      headersTimeout: 8_000,
-      bodyTimeout: 8_000,
-    });
-    if (headRes.statusCode < 200 || headRes.statusCode >= 300) {
-      await headRes.body.text().catch(() => "");
-      return;
-    }
-    const remoteHead = (await headRes.body.json()) as { issuedAtMs?: number };
-    if (!remoteHead.issuedAtMs) return;
-    const localHead = await pgStore.latestStatsLedgerHead();
-    const sinceIssuedAtMs = localHead?.issuedAtMs ?? 0;
-    if (remoteHead.issuedAtMs <= sinceIssuedAtMs) return;
-    const rangeRes = await request(
-      `${peer.coordinatorUrl}/stats/ledger/range?sinceIssuedAtMs=${encodeURIComponent(String(sinceIssuedAtMs))}&limit=1000`,
-      {
-        method: "GET",
-        headers: meshHeaders,
-        headersTimeout: 15_000,
-        bodyTimeout: 15_000,
-      }
-    );
-    if (rangeRes.statusCode < 200 || rangeRes.statusCode >= 300) {
-      await rangeRes.body.text().catch(() => "");
-      return;
-    }
-    const payload = (await rangeRes.body.json()) as { records?: QueueEventRecord[] };
-    if (!Array.isArray(payload.records) || payload.records.length === 0) return;
-    await ingestStatsLedgerRecords(payload.records);
-  } catch {
-    // Best effort sync.
-  }
-}
-
-/** #122: agent keys this coordinator trusts: its own registration plus the shared key table. */
-async function trustedAgentSigningKeys(agentId: string): Promise<string[]> {
-  const keys = new Set<string>((await pgStore?.listAgentSigningKeys(agentId)) ?? []);
-  const local = agentCapabilities.get(agentId)?.publicKeyPem;
-  if (local) keys.add(local);
-  return [...keys];
-}
-
-const attestedAgentKeys = new Set<string>();
-function attestAgentSigningKey(agentId: string, publicKeyPem: string): void {
-  if (!pgStore) return;
-  const k = `${agentId}\n${publicKeyPem}`;
-  if (attestedAgentKeys.has(k)) return;
-  attestedAgentKeys.add(k);
-  void pgStore.recordAgentSigningKey(agentId, publicKeyPem, identity.peerId).catch((error) => {
-    attestedAgentKeys.delete(k);
-    app.log.warn({ error, agentId }, "agent_signing_key_record_failed");
-  });
-}
-
-function isApprovedCoordinator(peerId: string): boolean {
-  if (APPROVED_COORDINATOR_IDS.size === 0) return true;
-  return APPROVED_COORDINATOR_IDS.has(peerId);
-}
-
-const issuancePoolConfig: IssuancePoolConfig = {
-  baseDailyPoolTokens: ISSUANCE_BASE_DAILY_POOL_TOKENS,
-  minDailyPoolTokens: ISSUANCE_MIN_DAILY_POOL_TOKENS,
-  maxDailyPoolTokens: ISSUANCE_MAX_DAILY_POOL_TOKENS,
-  loadCurveSlope: ISSUANCE_LOAD_CURVE_SLOPE,
-  smoothingAlpha: ISSUANCE_SMOOTHING_ALPHA
-};
-
-function quorumThreshold(): number {
-  if (!mutable.treasuryPolicy || mutable.treasuryPolicy.approvedCoordinatorIds.length === 0) return 1;
-  return Math.max(1, Math.floor(mutable.treasuryPolicy.approvedCoordinatorIds.length / 2) + 1);
-}
-
-async function appendQuorumRecord(input: {
-  recordType: QuorumLedgerRecord["recordType"];
-  epochId: string;
-  payload: Record<string, unknown>;
-}): Promise<QuorumLedgerRecord> {
-  const prev = await pgStore?.latestQuorumLedgerRecord();
-  const payloadJson = JSON.stringify(input.payload);
-  const hash = createHash("sha256")
-    .update(
-      JSON.stringify({
-        recordType: input.recordType,
-        epochId: input.epochId,
-        coordinatorId: identity.peerId,
-        prevHash: prev?.hash ?? "GENESIS",
-        payloadJson
-      })
-    )
-    .digest("hex");
-  const record: QuorumLedgerRecord = {
-    recordId: randomUUID(),
-    recordType: input.recordType,
-    epochId: input.epochId,
-    coordinatorId: identity.peerId,
-    prevHash: prev?.hash ?? "GENESIS",
-    hash,
-    payloadJson,
-    signature: signPayload(hash, coordinatorKeys.privateKeyPem),
-    createdAtMs: Date.now()
-  };
-  await pgStore?.persistQuorumLedgerRecord(record);
-  return record;
-}
-
-/** Call under the shared issuance lock (pgStore.withIssuanceLock) so the commit is written once. */
-async function maybeFinalizeIssuanceEpoch(epoch: IssuanceEpochRecord): Promise<boolean> {
-  const records = (await pgStore?.listQuorumLedgerByEpoch(epoch.issuanceEpochId)) ?? [];
-  const approvals = new Set<string>();
-  for (const record of records) {
-    if (record.recordType === "issuance_proposal") approvals.add(record.coordinatorId);
-    if (record.recordType === "issuance_vote") {
-      const payload = JSON.parse(record.payloadJson) as { vote?: "approve" | "reject" };
-      if (payload.vote === "approve") approvals.add(record.coordinatorId);
-    }
-  }
-  if (approvals.size < quorumThreshold()) return false;
-  const hasCommit = records.some((record) => record.recordType === "issuance_commit");
-  if (!hasCommit) {
-    await appendQuorumRecord({
-      recordType: "issuance_commit",
-      epochId: epoch.issuanceEpochId,
-      payload: { approvals: [...approvals], threshold: quorumThreshold() }
-    });
-  }
-  if (!epoch.finalized) await pgStore?.markIssuanceEpochFinalized(epoch.issuanceEpochId);
-  return true;
-}
-
-/**
- * One epoch per issuance window across every seed on this database: the window is aligned to
- * ISSUANCE_RECALC_MS and the epoch id derives from it, so the first seed to tick computes and writes
- * the epoch and its allocations; the others (and restarts) read it back. Only the computing seed
- * proposes and self-approves; other seeds vote through /economy/issuance/quorum/vote as before.
- */
-async function runIssuanceTick(): Promise<{ epoch?: IssuanceEpochRecord; allocations: IssuanceAllocationRecord[]; created: boolean }> {
-  if (!pgStore) return { allocations: [], created: false };
-  const store = pgStore;
-  return ensureIssuanceEpoch({
-    store,
-    nowMs: Date.now(),
-    recalcMs: ISSUANCE_RECALC_MS,
-    windowMs: ISSUANCE_WINDOW_MS,
-    compute: (window) => computeIssuanceEpoch(store, window),
-    afterEpoch: async ({ epoch, created }) => {
-      if (created) {
-        await appendQuorumRecord({
-          recordType: "issuance_proposal",
-          epochId: epoch.issuanceEpochId,
-          payload: {
-            windowStartMs: epoch.windowStartMs,
-            windowEndMs: epoch.windowEndMs,
-            dailyPoolTokens: epoch.dailyPoolTokens,
-            loadIndex: epoch.loadIndex
-          }
-        });
-        await appendQuorumRecord({
-          recordType: "issuance_vote",
-          epochId: epoch.issuanceEpochId,
-          payload: { vote: "approve", voterCoordinatorId: identity.peerId }
-        });
-      }
-      if (epoch.finalized) return epoch;
-      return (await maybeFinalizeIssuanceEpoch(epoch)) ? { ...epoch, finalized: true } : epoch;
-    }
-  });
-}
-
-async function computeIssuanceEpoch(
-  store: PostgresStore,
-  { windowStartMs, windowEndMs }: IssuanceWindow
-): Promise<{ epoch: IssuanceEpochDraft; allocations: IssuanceAllocationDraft[] } | null> {
-  const shares = await store.rollingContributionShares(windowStartMs, windowEndMs);
-  if (shares.length === 0) return null;
-  const status = queue.status();
-  const cpuCapacity = Math.max(
-    1,
-    [...agentCapabilities.values()].reduce((sum, item) => sum + Math.max(1, item.maxConcurrentTasks), 0)
-  );
-  const gpuCapacity = Math.max(
-    1,
-    [...agentCapabilities.values()].filter((item) => item.localModelProvider === "ollama-local").length
-  );
-  const rawLoadIndex = computeLoadIndex({
-    queuedTasks: status.queued,
-    activeAgents: status.agents,
-    cpuCapacity,
-    gpuCapacity
-  });
-  // Smooth from the network's last epoch (whichever seed wrote it), so the one series stays continuous.
-  const previous = (await store.latestIssuanceEpoch(false, ISSUANCE_RECALC_MS))?.loadIndex ?? smoothedLoadIndex;
-  smoothedLoadIndex = smoothLoadIndex(previous, rawLoadIndex, issuancePoolConfig.smoothingAlpha);
-  const dailyPoolTokens = computeDailyPoolTokens(smoothedLoadIndex, issuancePoolConfig);
-  const totalWeightedContribution = shares.reduce((sum, item) => sum + item.weightedContribution, 0);
-  return {
-    epoch: {
-      coordinatorId: identity.peerId,
-      loadIndex: smoothedLoadIndex,
-      dailyPoolTokens,
-      hourlyTokens: Number((dailyPoolTokens / 24).toFixed(6)),
-      totalWeightedContribution: Number(totalWeightedContribution.toFixed(6)),
-      contributionCount: shares.length,
-      createdAtMs: Date.now()
-    },
-    allocations: computeHourlyIssuanceAllocations(shares, dailyPoolTokens)
-  };
-}
-
-async function maybeAnchorLatestFinalizedEpoch(): Promise<BitcoinAnchorRecord | null> {
-  const deps = anchorDeps();
-  if (!deps || !pgStore) return null;
-  const epoch = await pgStore.latestIssuanceEpoch(true, ISSUANCE_RECALC_MS);
-  if (!epoch) return null;
-  const store = pgStore;
-  let allocationCount = 0;
-  // #46/#101: looked up by epoch id (then checkpoint hash under the lock), never "newest row";
-  // the ledger checkpoint record is appended only when this tick actually broadcast.
-  const { record } = await anchorEpochOnce(deps, {
-    epochId: epoch.issuanceEpochId,
-    computeCheckpointHash: async () => {
-      const allocations = await store.listIssuanceAllocations(epoch.issuanceEpochId);
-      allocationCount = allocations.length;
-      return createHash("sha256").update(JSON.stringify({ epoch, allocations })).digest("hex");
-    },
-    onBroadcast: async (anchor) => {
-      await appendQuorumRecord({
-        recordType: "issuance_checkpoint",
-        epochId: epoch.issuanceEpochId,
-        payload: { checkpointHash: anchor.checkpointHash, allocationCount, anchorTxRef: anchor.txRef }
-      }).catch((error) => app.log.error({ error, epochId: epoch.issuanceEpochId, txRef: anchor.txRef }, "issuance_checkpoint_ledger_append_failed"));
-    }
-  });
-  return record;
-}
-
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
   if (!pgStore) return { ok: true };
   const stats = await pgStore.creditContributionStats(accountId);
@@ -1614,329 +518,6 @@ async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: 
   });
   return decision.ok ? { ok: true } : decision;
 }
-
-async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {
-  if (!pgStore) return [];
-  const store = pgStore;
-  const epoch = await store.latestIssuanceEpoch(true, ISSUANCE_RECALC_MS);
-  if (!epoch) return [];
-  const allocations = await store.listIssuanceAllocations(epoch.issuanceEpochId);
-  if (allocations.length === 0) return [];
-  const coordinatorShare = Math.max(0, Math.min(0.5, ISSUANCE_COORDINATOR_SHARE));
-  const reserveShare = Math.max(0, Math.min(0.5, ISSUANCE_RESERVE_SHARE));
-  const contributorShare = Math.max(0, 1 - coordinatorShare - reserveShare);
-  const contributorPool = intent.netSats * contributorShare;
-  const payoutEvents: IssuancePayoutEvent[] = [];
-  for (const allocation of allocations) {
-    payoutEvents.push({
-      payoutEventId: randomUUID(),
-      issuanceEpochId: epoch.issuanceEpochId,
-      accountId: allocation.accountId,
-      payoutType: "contributor",
-      tokens: Number((contributorPool * allocation.allocationShare).toFixed(6)),
-      sourceIntentId: intent.intentId,
-      createdAtMs: Date.now()
-    });
-  }
-  payoutEvents.push({
-    payoutEventId: randomUUID(),
-    issuanceEpochId: epoch.issuanceEpochId,
-    accountId: COORDINATOR_FEE_ACCOUNT,
-    payoutType: "coordinator_service",
-    tokens: Number((intent.netSats * coordinatorShare).toFixed(6)),
-    sourceIntentId: intent.intentId,
-    createdAtMs: Date.now()
-  });
-  payoutEvents.push({
-    payoutEventId: randomUUID(),
-    issuanceEpochId: epoch.issuanceEpochId,
-    accountId: `reserve:${identity.peerId}`,
-    payoutType: "reserve",
-    tokens: Number((intent.netSats * reserveShare).toFixed(6)),
-    sourceIntentId: intent.intentId,
-    createdAtMs: Date.now()
-  });
-  await Promise.all(payoutEvents.map((event) => store.persistIssuancePayoutEvent(event)));
-  return payoutEvents;
-}
-
-async function recordIntentSettlementSideEffects(settled: PaymentIntent): Promise<CoordinatorFeeEvent> {
-  const feeEvent: CoordinatorFeeEvent = {
-    eventId: randomUUID(),
-    coordinatorId: identity.peerId,
-    intentId: settled.intentId,
-    feeWalletAccountId: COORDINATOR_FEE_ACCOUNT,
-    feeSats: settled.coordinatorFeeSats,
-    createdAtMs: Date.now()
-  };
-  await pgStore?.persistCoordinatorFeeEvent(feeEvent);
-  // The coordinator fee on a purchase is network revenue: it goes to the fee pool as sats (no
-  // compute credits attached) and reaches infrastructure hosts at the next distribution.
-  if (settled.coordinatorFeeSats > 0) {
-    const row: CreditTransaction = {
-      txId: `purchase-fee:${settled.intentId}`,
-      accountId: NETWORK_FEE_POOL_ACCOUNT,
-      type: "earn",
-      credits: 0,
-      reason: `purchase_fee:${settled.intentId}`,
-      timestampMs: Date.now(),
-      msat: Math.round(settled.coordinatorFeeSats * 1000)
-    };
-    await payoutStore.recordCreditTransactions([row]);
-  }
-  await allocateIntentPayouts(settled);
-  return feeEvent;
-}
-
-// #42: the only settlement path. Always asks the Lightning node; never trusts caller-supplied
-// txRef/settled flags. Postgres mode uses an atomic CAS + credit insert; in-memory mode uses a
-// per-intent mutex and a status check.
-const settleIfPaid = createPaymentSettler({
-  provider: lightningProvider,
-  store: pgStore,
-  getIntent: (intentId) => paymentIntents.get(intentId),
-  saveIntent: (intent) => {
-    paymentIntents.set(intent.intentId, intent);
-  },
-  grantCredits: (accountId, credits, reason) => grantCredits(accountId, credits, reason),
-  onSettled: async (intent) => {
-    await recordIntentSettlementSideEffects(intent);
-  }
-});
-
-// Grace on top of the TTL so a payment made just before expiry is still picked up.
-const PAYMENT_INTENT_EXPIRY_GRACE_MS = CC.PAYMENT_INTENT_EXPIRY_GRACE_MS;
-
-/** #42 review: always ask the node first; expire only an unpaid intent past TTL + grace. */
-function reconcileIntent(intent: PaymentIntent): Promise<"settled" | "expired" | "pending"> {
-  return reconcilePaymentIntent(intent, settleIfPaid, expireIntentIfStale);
-}
-
-async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
-  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS) return false;
-  const expired: PaymentIntent = { ...intent, status: "expired" };
-  paymentIntents.set(expired.intentId, expired);
-  await pgStore?.upsertPaymentIntent(expired);
-  return true;
-}
-
-const defaultPolicy: ExecutionPolicy = {
-  cpuCapPercent: 50,
-  memoryLimitMb: 2048,
-  idleOnly: true,
-  maxConcurrentTasks: 1,
-  allowedHours: { startHourUtc: 22, endHourUtc: 6 }
-};
-
-const hardwareProfileSchema = z.object({
-  cpuCores: z.number().int().min(1).max(4096).optional(),
-  cpuModel: z.string().max(128).optional(),
-  ramGb: z.number().min(0).max(65536).optional(),
-  arch: z.string().max(16).optional(),
-  platform: z.string().max(16).optional(),
-  gpu: z
-    .object({
-      vendor: z.string().max(32).optional(),
-      model: z.string().max(128).optional(),
-      vramGb: z.number().min(0).max(8192).optional(),
-      datacenter: z.boolean().optional()
-    })
-    .optional(),
-  benchmarkScore: z.number().min(0).optional(),
-  overridden: z.boolean().optional()
-});
-
-/** The agent's self-benchmark (src/swarm/benchmark.ts). Plausibility evidence only; a malformed one is dropped, never a 400. */
-const benchmarkReportSchema = z
-  .object({
-    version: z.literal(1),
-    ranAtMs: z.number().nonnegative(),
-    durationMs: z.number().nonnegative().max(3_600_000),
-    cpu: z
-      .object({
-        workUnitsPerSec: z.number().nonnegative().max(1e9),
-        threads: z.number().int().min(1).max(4096),
-        processed: z.number().int().nonnegative(),
-        elapsedMs: z.number().nonnegative(),
-        digest: z.string().max(64)
-      })
-      .optional(),
-    gpu: z
-      .object({
-        model: z.string().max(128),
-        tokensPerSec: z.number().nonnegative().max(1e6),
-        evalTokens: z.number().int().nonnegative().max(1e7),
-        weightsGb: z.number().nonnegative().max(4096).optional(),
-        bandwidthGbps: z.number().nonnegative().max(1e6).optional()
-      })
-      .optional(),
-    loaded: z.object({ model: z.string().max(128), vramGb: z.number().nonnegative().max(8192) }).optional(),
-    errors: z.array(z.string().max(120)).max(8).optional()
-  })
-  .optional()
-  .catch(undefined);
-/** Challenge kinds the agent can answer; absent (older agents) = none, so they stay at base tier. */
-const challengeKindsSchema = z.array(z.string().max(16)).max(8).optional().catch(undefined);
-
-const registerSchema = z.object({
-  agentId: z.string(),
-  deviceId: z.string().min(3).max(128).optional(),
-  os: z.string().min(2),
-  version: z.string(),
-  mode: z.enum(["swarm-only", "ide-enabled"]),
-  registrationToken: z.string().optional(),
-  localModelProvider: z.enum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
-  /** Models installed in the agent's Ollama (network inference runs only on agents that have the model). */
-  installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
-  activeModel: z.string().min(1).max(200).optional(),
-  clientType: z.string().min(1).max(64).default("edgecoder-native"),
-  maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
-  powerTelemetry: z
-    .object({
-      onExternalPower: z.boolean().optional(),
-      batteryLevelPct: z.number().min(0).max(100).optional(),
-      lowPowerMode: z.boolean().optional(),
-      updatedAtMs: z.number().optional(),
-      onACPower: z.boolean().optional(),
-      batteryPct: z.number().min(0).max(100).optional(),
-      thermalState: z.enum(["nominal", "fair", "serious", "critical"]).optional(),
-      cpuUsagePct: z.number().min(0).max(100).optional(),
-      memoryUsagePct: z.number().min(0).max(100).optional(),
-      deviceType: z.enum(["desktop", "laptop", "phone", "tablet", "server"]).optional()
-    })
-    .optional(),
-  publicKeyPem: z.string().optional(),
-  x25519PublicKey: z.string().optional(),
-  sandboxMode: z.enum(["none", "docker", "vm"]).default("none"),
-  /** Hardware the agent runs on; classified into a compute class that prices its seconds. */
-  hardwareProfile: hardwareProfileSchema.optional(),
-  /** Minimum price the agent will work for (msat per credit). Omit to track the class reference. */
-  askMsatPerCredit: z.number().positive().max(1e9).optional(),
-  benchmark: benchmarkReportSchema,
-  challengeKinds: challengeKindsSchema,
-  binaryIntegrity: z
-    .object({
-      distHash: z.string(),
-      releaseVersion: z.string(),
-      releaseSignature: z.string(),
-      distributionChannel: z.string(),
-    })
-    .optional()
-});
-
-const heartbeatSchema = z.object({
-  agentId: z.string(),
-  /** #51: renew claim leases only; don't drain tunnel invites/notices or offers. */
-  leaseOnly: z.boolean().optional(),
-  powerTelemetry: z
-    .object({
-      onExternalPower: z.boolean().optional(),
-      batteryLevelPct: z.number().min(0).max(100).optional(),
-      lowPowerMode: z.boolean().optional(),
-      updatedAtMs: z.number().optional(),
-      onACPower: z.boolean().optional(),
-      batteryPct: z.number().min(0).max(100).optional(),
-      thermalState: z.enum(["nominal", "fair", "serious", "critical"]).optional(),
-      cpuUsagePct: z.number().min(0).max(100).optional(),
-      memoryUsagePct: z.number().min(0).max(100).optional(),
-      deviceType: z.enum(["desktop", "laptop", "phone", "tablet", "server"]).optional()
-    })
-    .optional(),
-  activeModel: z.string().optional(),
-  activeModelParamSize: z.number().optional(),
-  /** #54: models in the agent's Ollama (/api/tags); refreshes the catalog. Signed heartbeats only. */
-  installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
-  modelSwapInProgress: z.boolean().optional(),
-  sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
-  /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
-  askMsatPerCredit: z.number().min(0).max(1e9).optional(),
-  /** A new self-benchmark (periodic). */
-  benchmark: benchmarkReportSchema
-});
-/** Answer to a benchmark challenge handed out in a heartbeat response. */
-const benchmarkResponseSchema = z.object({
-  agentId: z.string(),
-  challengeId: z.string().min(1).max(128),
-  kind: z.enum(["cpu", "gpu"]),
-  solutions: z.array(z.number().int().nonnegative()).max(4096).optional(),
-  output: z.string().max(16_000).optional(),
-  evalCount: z.number().nonnegative().max(1e7).optional(),
-  evalDurationMs: z.number().nonnegative().max(3_600_000).optional(),
-  elapsedMs: z.number().nonnegative().max(3_600_000),
-  declined: z.string().max(120).optional()
-});
-const diagnosticsSchema = z.object({
-  agentId: z.string(),
-  events: z
-    .array(
-      z.object({
-        eventAtMs: z.number().optional(),
-        message: z.string().min(1).max(500)
-      })
-    )
-    .max(40),
-  source: z.string().optional(),
-  runtimeState: z.string().optional(),
-  modelState: z.string().optional()
-});
-
-/**
- * API edge for a class parameter: the four current ids plus the nine legacy ones, which are mapped
- * (never rejected) so stale clients, scripts and bookmarked portal URLs keep working.
- */
-const classParam = z
-  .string()
-  .refine((v) => normalizeComputeClass(v) !== undefined, { message: `computeClass must be one of ${COMPUTE_CLASS_IDS.join(", ")}` })
-  .transform((v) => normalizeComputeClass(v) as ComputeClassId);
-/** Capability constraint (GB): positive and bounded. */
-const minGbParam = z.number().positive().max(4096).optional();
-
-const taskSchema = z.object({
-  taskId: z.string(),
-  prompt: z.string().min(1),
-  /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
-  source: z.string().max(80).optional(),
-  language: z.enum(["python", "javascript"]).default("python"),
-  snapshotRef: z.string().min(1).refine(isValidSnapshotRef, {
-    message: "snapshotRef must be a 40-char hex commit hash or an https:// tarball URL"
-  }),
-  submitterAccountId: z.string().default("anonymous"),
-  projectId: z.string().default("default"),
-  tenantId: z.string().optional(),
-  resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
-  priority: z.number().min(0).max(100).default(50),
-  requestedModel: z.string().optional(),
-  sandboxRequired: z.boolean().default(false),
-  /**
-   * Which class-market should run it (cpu | apple | gpu | gpu.dc), or "any". A legacy id
-   * (gpu.c24, ...) is mapped onto its class with the capability it implied (see /submit).
-   */
-  computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
-  /** Requester's ceiling in msat per credit. Default: class reference × (1 + MARKET_DEFAULT_BID_PREMIUM_BPS). */
-  maxBidMsatPerCredit: z.number().positive().max(1e9).optional(),
-  /** Only agents with at least this much discrete GPU VRAM may claim (e.g. 24 for a 30B model). Default: no constraint. */
-  minVramGb: minGbParam,
-  /** Only agents with at least this much system / unified memory may claim. Default: no constraint. */
-  minMemoryGb: minGbParam,
-  /** Only agents with a rolling reliability score (0..1) at least this high may claim; agents without enough evidence never do. */
-  minReliability: z.number().positive().max(1).optional()
-});
-
-const pullSchema = z.object({ agentId: z.string() });
-const resultSchema = z.object({
-  subtaskId: z.string(),
-  taskId: z.string(),
-  agentId: z.string(),
-  ok: z.boolean(),
-  output: z.string(),
-  error: z.string().optional(),
-  durationMs: z.number(),
-  reportNonce: z.string().optional(),
-  reportSignature: z.string().optional(),
-  /** #54: the model that produced the result (newer agents; covered by the request signature). */
-  model: z.string().min(1).max(200).optional(),
-  receipt: agentReceiptClaimSchema.optional() // work receipt claim signed by the agent (src/receipts)
-});
 
 /**
  * Proof of key for /register: the request is signed (worker-runner signs /register) by the key
@@ -4549,36 +3130,6 @@ app.post("/economy/payments/intents", async (req, reply) => {
     .parse(req.body);
   return { ok: true, intent: await createPaymentIntent(body.accountId, body.amountSats, body.walletType as WalletType) };
 });
-
-/** A Lightning invoice that buys cSats for an account: 1 cSat per sat, after the coordinator fee. */
-async function createPaymentIntent(accountId: string, amountSats: number, walletType: WalletType = "lightning"): Promise<PaymentIntent> {
-  const { feeSats, netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);
-  const invoice = await lightningProvider.createInvoice({
-    amountSats,
-    memo: `edgecoder_credits:${accountId}`,
-    expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000)
-  });
-  const intent: PaymentIntent = {
-    intentId: randomUUID(),
-    accountId,
-    coordinatorId: identity.peerId,
-    walletType,
-    network: BITCOIN_NETWORK,
-    invoiceRef: invoice.invoiceRef,
-    paymentHash: invoice.paymentHash,
-    amountSats,
-    coordinatorFeeBps: COORDINATOR_FEE_BPS,
-    coordinatorFeeSats: feeSats,
-    netSats,
-    // 1 cSat = 1 sat of prepaid compute: the net sats, after the coordinator fee.
-    quotedCredits: netSats,
-    status: "created",
-    createdAtMs: Date.now()
-  };
-  paymentIntents.set(intent.intentId, intent);
-  await pgStore?.upsertPaymentIntent(intent);
-  return intent;
-}
 
 /** Buy cSats for the signing agent's owner: returns the invoice to pay. */
 app.post("/account/buy", async (req, reply) => {
