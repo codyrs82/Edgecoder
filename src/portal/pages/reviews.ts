@@ -192,27 +192,36 @@ app.get("/portal/reviews", async (_req, reply) => {
       container.innerHTML = html;
     }
 
-    // Element text only (the highlighter's regexes run on the result, so quotes stay literal).
-    // Everything else on this page uses the shell's escapeHtml (pages/escape.ts).
+    // Element text only. Everything else on this page uses the shell's escapeHtml (pages/escape.ts).
     function escapeCodeText(str) {
       return String(str === null || str === undefined ? "" : str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
+    // One pass over the raw line: each token is escaped and wrapped once, and the text between
+    // tokens is escaped as it is copied. (Chained replaces re-scanned their own output: the keyword
+    // rule matched the "class" of an earlier span, and the broken markup showed up as text.)
+    // Order = precedence at one position: comment, string, number, keyword, built-in, call.
+    var SYNTAX_CLASSES = ["comment", "string", "number", "keyword", "builtin", "function"];
+    var SYNTAX_RE = new RegExp([
+      /(\\/\\/.*$|#.*$)/,
+      /("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*')/,
+      /\\b(\\d+\\.?\\d*)\\b/,
+      /\\b(function|return|const|let|var|if|else|for|while|class|import|from|export|default|async|await|try|catch|throw|new|this|def|self|yield|with|as|in|not|and|or|True|False|None|true|false|null|undefined|typeof|instanceof)\\b/,
+      /\\b(console|print|len|range|map|filter|reduce|parseInt|parseFloat|Math|JSON|Object|Array|String|Number|Promise|setTimeout|require)\\b/,
+      /\\b([a-zA-Z_]\\w*)(?=\\s*\\()/
+    ].map(function (r) { return r.source; }).join("|"), "gm");
+
     function syntaxHighlight(text) {
-      var s = escapeCodeText(text);
-      // Comments (single-line: // or #)
-      s = s.replace(/(\\/\\/.*$|#.*$)/gm, '<span class="syntax-comment">$1</span>');
-      // Strings (double and single quotes)
-      s = s.replace(/(&quot;[^&]*?&quot;|&#039;[^&]*?&#039;)/g, '<span class="syntax-string">$1</span>');
-      // Numbers
-      s = s.replace(/\\b(\\d+\\.?\\d*)\\b/g, '<span class="syntax-number">$1</span>');
-      // Keywords (JS/TS/Python)
-      s = s.replace(/\\b(function|return|const|let|var|if|else|for|while|class|import|from|export|default|async|await|try|catch|throw|new|this|def|self|yield|with|as|in|not|and|or|True|False|None|true|false|null|undefined|typeof|instanceof)\\b/g, '<span class="syntax-keyword">$1</span>');
-      // Built-in functions
-      s = s.replace(/\\b(console|print|len|range|map|filter|reduce|parseInt|parseFloat|Math|JSON|Object|Array|String|Number|Promise|setTimeout|require)\\b/g, '<span class="syntax-builtin">$1</span>');
-      // Function calls
-      s = s.replace(/\\b([a-zA-Z_]\\w*)\\s*\\(/g, '<span class="syntax-function">$1</span>(');
-      return s;
+      var src = String(text === null || text === undefined ? "" : text);
+      var out = "", last = 0, m;
+      SYNTAX_RE.lastIndex = 0;
+      while ((m = SYNTAX_RE.exec(src)) !== null) {
+        var cls = "";
+        for (var g = 1; g <= SYNTAX_CLASSES.length; g++) if (m[g] !== undefined) { cls = SYNTAX_CLASSES[g - 1]; break; }
+        out += escapeCodeText(src.slice(last, m.index)) + '<span class="syntax-' + cls + '">' + escapeCodeText(m[0]) + '</span>';
+        last = m.index + m[0].length;
+      }
+      return out + escapeCodeText(src.slice(last));
     }
 
     function computeDiff(oldCode, newCode) {
