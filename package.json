@@ -32,6 +32,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.e2e.config.ts",
     "test:lnd-regtest": "bash scripts/e2e/lnd-regtest.sh",
+    "package:vscode": "bash scripts/release/package-vscode.sh \"\" build/vscode",
     "docs:dev": "vitepress dev site-docs",
     "docs:build": "vitepress build site-docs",
     "site:export": "tsx scripts/export-static-site.ts",
