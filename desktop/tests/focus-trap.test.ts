@@ -1,16 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { nextFocusIndex, rovingIndex } from "../src/lib/focus-trap";
+import { rovingIndex } from "../src/lib/focus-trap";
 
-describe("focus trap helpers (#26)", () => {
-  it("Tab wraps forward and Shift+Tab wraps back", () => {
-    expect(nextFocusIndex(0, 3, false)).toBe(1);
-    expect(nextFocusIndex(2, 3, false)).toBe(0);
-    expect(nextFocusIndex(0, 3, true)).toBe(2);
-    expect(nextFocusIndex(-1, 3, false)).toBe(0); // focus outside the trap -> first
-    expect(nextFocusIndex(-1, 3, true)).toBe(2);
-    expect(nextFocusIndex(0, 0, false)).toBe(-1);
-  });
-
+describe("roving focus (#26)", () => {
   it("arrow keys rove a vertical tablist with Home/End", () => {
     expect(rovingIndex("ArrowDown", 0, 4)).toBe(1);
     expect(rovingIndex("ArrowDown", 3, 4)).toBe(0);
@@ -23,17 +14,9 @@ describe("focus trap helpers (#26)", () => {
   });
 });
 
-import { escapeClosesDialog, tabStops } from "../src/lib/focus-trap";
+import { escapeClosesDialog } from "../src/lib/focus-trap";
 
-const el = (tabIndex: number, rects = 1) => ({ tabIndex, getClientRects: () => ({ length: rects }) });
-
-describe("focus trap stops and Escape (#130 review)", () => {
-  it("skips roving tabindex=-1 tabs and unrendered elements, keeps fixed-position ones", () => {
-    const activeTab = el(0), inactiveTab = el(-1), hidden = el(0, 0), fixedBtn = el(0, 1), panel = el(0);
-    expect(tabStops([activeTab, inactiveTab, inactiveTab, hidden, fixedBtn, panel])).toEqual([activeTab, fixedBtn, panel]);
-    expect(tabStops([hidden], hidden)).toEqual([hidden]); // the focused element always counts
-  });
-
+describe("dialog Escape (#130 review)", () => {
   it("Escape closes only when nothing inside handled it", () => {
     const t = (tagName: string, attrs: Record<string, string> = {}) => ({ tagName, getAttribute: (n: string) => attrs[n] ?? null });
     expect(escapeClosesDialog({ defaultPrevented: false, target: t("BUTTON") })).toBe(true);

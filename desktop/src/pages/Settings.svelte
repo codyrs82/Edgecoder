@@ -5,6 +5,8 @@
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
+  import Select from "../components/ui/Select.svelte";
+  import { notify } from "../lib/toast";
 
   // App version
   let appVersion = $state("—");
@@ -111,8 +113,6 @@
   let identityError = $state("");
 
   // Save feedback
-  let showSaved = $state(false);
-  let savedTimeout: ReturnType<typeof setTimeout> | undefined = $state(undefined);
 
   // Clipboard feedback
   let copiedKey = $state(false);
@@ -216,9 +216,7 @@
     saveSetting("cpuCapPercent", String(cpuCapPercent));
     saveSetting("idleOnly", String(idleOnly));
 
-    showSaved = true;
-    if (savedTimeout) clearTimeout(savedTimeout);
-    savedTimeout = setTimeout(() => { showSaved = false; }, 2000);
+    notify("Settings saved", "success", "settings-saved");
   }
   let themePref = $state<ThemePreference>(getThemePreference());
 
@@ -258,15 +256,12 @@
     <label>
       <span class="label-text">Theme</span>
       <div class="input-row">
-        <select
-          aria-label="Theme"
-          value={themePref}
-          onchange={(e) => { themePref = e.currentTarget.value as ThemePreference; setTheme(themePref); }}
-        >
-          <option value="system">System</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
+        <Select
+          ariaLabel="Theme"
+          bind:value={themePref}
+          onChange={(v) => setTheme(v)}
+          options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]}
+        />
       </div>
     </label>
   </div>
@@ -417,9 +412,6 @@
   <!-- Save -->
   <div class="save-row">
     <button class="btn-save" onclick={save}>Save Settings</button>
-    {#if showSaved}
-      <span class="saved-toast">Saved!</span>
-    {/if}
   </div>
 
   <!-- Local Model -->
@@ -699,20 +691,6 @@
 
   .btn-save:hover {
     opacity: 0.9;
-  }
-
-  .saved-toast {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--green, #4ade80);
-    animation: fadeInOut 2s ease forwards;
-  }
-
-  @keyframes fadeInOut {
-    0% { opacity: 0; transform: translateX(-4px); }
-    15% { opacity: 1; transform: translateX(0); }
-    80% { opacity: 1; }
-    100% { opacity: 0; }
   }
 
   .about-section {

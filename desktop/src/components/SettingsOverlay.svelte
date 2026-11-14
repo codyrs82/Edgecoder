@@ -17,7 +17,8 @@
   import LogViewer from "../pages/LogViewer.svelte";
   import ProfileMenu from "./ProfileMenu.svelte";
   import type { AuthUser } from "../lib/api";
-  import { focusTrap } from "../lib/focus-trap";
+  import { Tabs } from "bits-ui";
+  import Dialog from "./ui/Dialog.svelte";
   import { untrack } from "svelte";
 
   interface Props {
@@ -53,7 +54,8 @@
   const startAt = untrack(() => LEGACY[initialSection ?? ""] ?? initialSection);
   let activeSectionId = $state<string>(sections.some((s) => s.id === startAt) ? startAt! : "general");
   let query = $state("");
-  let tabButtons: Record<string, HTMLButtonElement> = $state({});
+  // Every key starts as null: binding `undefined` to bits-ui's `ref` (which has a default) throws.
+  let tabButtons: Record<string, HTMLElement | null> = $state(Object.fromEntries(sections.map((s) => [s.id, null])));
 
   let visible = $derived(
     query.trim()
@@ -64,65 +66,58 @@
   function go(id?: string) {
     activeSectionId = id && sections.some((s) => s.id === id) ? id : LEGACY[id ?? ""] ?? "general";
   }
-
-  // #26: arrow keys / Home / End move between sections (WAI-ARIA tabs, automatic activation).
-  function onNavKeydown(e: KeyboardEvent, id: string) {
-    const ids: string[] = visible.map((s) => s.id);
-    const i = ids.indexOf(id);
-    let next = -1;
-    if (e.key === "ArrowDown") next = (i + 1) % ids.length;
-    else if (e.key === "ArrowUp") next = (i - 1 + ids.length) % ids.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = ids.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    activeSectionId = ids[next];
-    tabButtons[ids[next]]?.focus();
-  }
 </script>
 
-<div
-  class="overlay"
-  role="dialog"
-  aria-modal="true"
-  aria-label="Settings"
-  tabindex="-1"
-  use:focusTrap={{ onEscape: onClose, initialFocus: () => tabButtons[activeSectionId] }}
->
-  <aside class="settings-side">
-    <button class="back-btn" onclick={onClose}>
-      <ArrowLeft size={15} strokeWidth={2} />
-      Back
-    </button>
-    <label class="search">
-      <Search size={14} />
-      <input type="text" placeholder="Search settings" aria-label="Search settings" bind:value={query}
-        onkeydown={(e) => { if (e.key === "Enter" && visible[0]) activeSectionId = visible[0].id; }} />
-    </label>
-    <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
-      {#each visible as section, i (section.id)}
-        {#if i > 0 && visible[i - 1].group !== section.group}<div class="gap"></div>{/if}
-        <button
-          bind:this={tabButtons[section.id]}
-          class="nav-item"
-          class:active={activeSectionId === section.id}
-          role="tab"
-          id="settings-tab-{section.id}"
-          aria-selected={activeSectionId === section.id}
-          aria-controls="settings-panel"
-          tabindex={activeSectionId === section.id ? 0 : -1}
-          onclick={() => (activeSectionId = section.id)}
-          onkeydown={(e) => onNavKeydown(e, section.id)}
-        >
-          <section.icon size={16} strokeWidth={1.8} />
-          {section.label}
-        </button>
-      {/each}
-      {#if visible.length === 0}<p class="no-match">No settings match "{query}"</p>{/if}
-    </nav>
-    <ProfileMenu {user} onOpenSettings={(s) => go(s)} {onLogout} />
-  </aside>
-  <div class="settings-content" role="tabpanel" id="settings-panel" aria-labelledby="settings-tab-{activeSectionId}" tabindex="0">
+<!-- #24/#26: a full-window bits-ui Dialog (focus trap, Escape, focus return) holding vertical
+     bits-ui Tabs (arrow keys, Home/End, automatic activation). Only the open section is rendered,
+     so one Tabs.Content follows the active value. -->
+<Dialog variant="full" label="Settings" {onClose} initialFocus={() => tabButtons[activeSectionId]}>
+  <Tabs.Root orientation="vertical" bind:value={activeSectionId}>
+    {#snippet child({ props })}
+      <div {...props} class="overlay">
+        <aside class="settings-side">
+          <button class="back-btn" onclick={onClose}>
+            <ArrowLeft size={15} strokeWidth={2} />
+            Back
+          </button>
+          <label class="search">
+            <Search size={14} />
+            <input type="text" placeholder="Search settings" aria-label="Search settings" bind:value={query}
+              onkeydown={(e) => { if (e.key === "Enter" && visible[0]) activeSectionId = visible[0].id; }} />
+          </label>
+          <Tabs.List aria-label="Settings sections">
+            {#snippet child({ props })}
+              <div {...props} class="settings-nav">
+                {#each visible as section, i (section.id)}
+                  {#if i > 0 && visible[i - 1].group !== section.group}<div class="gap" role="presentation"></div>{/if}
+                  <Tabs.Trigger value={section.id} id="settings-tab-{section.id}" bind:ref={tabButtons[section.id]}>
+                    {#snippet child({ props })}
+                      <button {...props} class="nav-item">
+                        <section.icon size={16} strokeWidth={1.8} />
+                        {section.label}
+                      </button>
+                    {/snippet}
+                  </Tabs.Trigger>
+                {/each}
+              </div>
+            {/snippet}
+          </Tabs.List>
+          {#if visible.length === 0}<p class="no-match" role="status">No settings match "{query}"</p>{/if}
+          <ProfileMenu {user} onOpenSettings={(s) => go(s)} {onLogout} />
+        </aside>
+        <Tabs.Content value={activeSectionId} id="settings-panel">
+          {#snippet child({ props })}
+            <div {...props} class="settings-content">
+              {@render page()}
+            </div>
+          {/snippet}
+        </Tabs.Content>
+      </div>
+    {/snippet}
+  </Tabs.Root>
+</Dialog>
+
+{#snippet page()}
     {#if activeSectionId === "profile"}
       <Account {user} {onLogout} {onUserChange} />
     {:else if activeSectionId === "plan"}
@@ -152,15 +147,13 @@
     {:else}
       <Settings />
     {/if}
-  </div>
-</div>
+{/snippet}
 
 <style>
   .overlay {
-    position: fixed;
-    inset: 0;
+    flex: 1;
+    min-height: 0;
     background: var(--bg-base);
-    z-index: 100;
     display: flex;
     animation: fadeIn 0.15s ease;
   }
@@ -181,7 +174,7 @@
     border: none;
     background: none;
     color: var(--text-secondary);
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     font-size: 13px;
   }
@@ -232,20 +225,20 @@
     text-align: left;
     cursor: pointer;
     font-size: 13px;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
   }
   .nav-item:hover {
     color: var(--text-primary);
     background: var(--bg-surface);
   }
-  .nav-item.active {
+  .nav-item[data-state="active"] {
     color: var(--text-primary);
     background: var(--bg-surface);
   }
   .nav-item:focus-visible,
   .back-btn:focus-visible,
   .settings-content:focus-visible {
-    outline: 2px solid var(--accent, #3b82f6);
+    outline: 2px solid var(--focus-ring);
     outline-offset: -2px;
   }
   .no-match {

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
+  import Dialog from "./ui/Dialog.svelte";
   import { detectLanguage } from "../lib/editor-store";
   import { onThemeChange, resolvedTheme } from "../lib/theme";
   import { monacoThemeDataOrBase } from "../lib/monaco-theme";
@@ -27,6 +28,8 @@
     monaco.editor.defineTheme("edgecoder-dark", monacoThemeDataOrBase(tokens, "dark"));
     monaco.editor.defineTheme("edgecoder-light", monacoThemeDataOrBase(tokens, "light"));
     offTheme = onThemeChange((t) => monaco.editor.setTheme(`edgecoder-${t}`));
+    // The dialog renders in a portal, so make sure its body exists before Monaco needs it.
+    await tick();
     if (!container) return;
     const language = detectLanguage(path);
     const original = monaco.editor.createModel(before ?? "", language);
@@ -52,17 +55,10 @@
     for (const m of models) m.dispose();
   });
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onClose();
-  }
-
   let label = $derived(before === null ? "new file" : after === null ? "deleted" : "modified");
 </script>
 
-<svelte:window onkeydown={onKey} />
-
-<div class="backdrop" role="presentation" onclick={onClose}></div>
-<div class="modal" role="dialog" aria-modal="true" aria-label="Changes to {path}">
+<Dialog variant="inset" label="Changes to {path}" {onClose}>
   <header>
     <div class="title">
       <span class="path">{path}</span>
@@ -75,26 +71,9 @@
   </header>
   <div class="sides"><span>Before</span><span>After</span></div>
   <div class="diff" bind:this={container}></div>
-</div>
+</Dialog>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.45);
-    z-index: 100;
-  }
-  .modal {
-    position: fixed;
-    inset: 5vh 5vw;
-    z-index: 101;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-base);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
   header {
     display: flex;
     align-items: center;
@@ -110,7 +89,7 @@
     min-width: 0;
   }
   .path {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 13px;
     color: var(--text-primary);
     overflow: hidden;
@@ -135,8 +114,8 @@
     font-size: 12px;
   }
   button.undo:hover {
-    border-color: var(--danger, #f85149);
-    color: var(--danger, #f85149);
+    border-color: var(--red);
+    color: var(--red);
   }
   .sides {
     display: grid;
@@ -148,5 +127,6 @@
   }
   .diff {
     flex: 1;
+    min-height: 0;
   }
 </style>

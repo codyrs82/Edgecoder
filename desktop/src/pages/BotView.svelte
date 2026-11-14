@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Tabs } from "bits-ui";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
@@ -290,10 +291,16 @@
     </div>
   </header>
 
-  <div class="tabs" role="tablist">
-    <button role="tab" aria-selected={view === "chat"} class:active={view === "chat"} onclick={() => (view = "chat")}><MessageSquare size={13} /> Conversation</button>
-    <button role="tab" aria-selected={view === "history"} class:active={view === "history"} onclick={() => (view = "history")}><History size={13} /> Runs ({runs.length})</button>
-  </div>
+  <!-- #24: bits-ui Tabs; the root is display: contents so the column layout is unchanged. -->
+  <Tabs.Root class="contents" bind:value={view}>
+  <Tabs.List aria-label="Bot views">
+    {#snippet child({ props })}
+      <div {...props} class="tabs">
+        <Tabs.Trigger value="chat"><MessageSquare size={13} /> Conversation</Tabs.Trigger>
+        <Tabs.Trigger value="history"><History size={13} /> Runs ({runs.length})</Tabs.Trigger>
+      </div>
+    {/snippet}
+  </Tabs.List>
 
   {#if error}<div class="error" role="alert">{error}</div>{/if}
 
@@ -316,7 +323,9 @@
   {/if}
 
   {#if view === "chat"}
-    <div class="messages" bind:this={scrollEl}>
+    <Tabs.Content value="chat">
+    {#snippet child({ props })}
+    <div {...props} class="messages" bind:this={scrollEl}>
       {#if messages.length === 0}
         <div class="empty">
           <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={72} decorative />
@@ -388,8 +397,12 @@
         {/if}
       {/each}
     </div>
+    {/snippet}
+    </Tabs.Content>
   {:else}
-    <div class="history">
+    <Tabs.Content value="history">
+    {#snippet child({ props })}
+    <div {...props} class="history">
       {#if runs.length === 0}
         <div class="empty"><p>No runs yet.</p></div>
       {:else}
@@ -416,7 +429,10 @@
         </table>
       {/if}
     </div>
+    {/snippet}
+    </Tabs.Content>
   {/if}
+  </Tabs.Root>
 
   <div class="composer">
     <ChatInput onSend={send} placeholder={busy ? `${bot.name} is working; your message goes next…` : `Message ${bot.name}`} />
@@ -434,12 +450,19 @@
       {#if bot.role}<div class="d-role">{bot.role}</div>{/if}
       <span class="chip {chip.tone}">{chip.text}</span>
     </div>
-    <div class="d-tabs" role="tablist" aria-label="Details">
-      {#each [["details", "Details"], ["memory", "Memory"], ["folder", "Folder"]] as [id, label] (id)}
-        <button role="tab" aria-selected={panelTab === id} class:active={panelTab === id} onclick={() => (panelTab = id as typeof panelTab)}>{label}</button>
-      {/each}
-    </div>
-    <div class="d-body" role="tabpanel">
+    <Tabs.Root class="contents" bind:value={panelTab}>
+    <Tabs.List aria-label="Details">
+      {#snippet child({ props })}
+        <div {...props} class="d-tabs">
+          {#each [["details", "Details"], ["memory", "Memory"], ["folder", "Folder"]] as [id, label] (id)}
+            <Tabs.Trigger value={id}>{label}</Tabs.Trigger>
+          {/each}
+        </div>
+      {/snippet}
+    </Tabs.List>
+    <Tabs.Content value={panelTab}>
+    {#snippet child({ props })}
+    <div {...props} class="d-body">
       {#if panelTab === "details"}
         <div class="d-section">
           <div class="d-label">Routines</div>
@@ -542,6 +565,9 @@
         </div>
       {/if}
     </div>
+    {/snippet}
+    </Tabs.Content>
+    </Tabs.Root>
   </aside>
  {/if}
 </div>
@@ -634,7 +660,7 @@
     font-weight: 600;
   }
   .ask-choices button:focus-visible,
-  .d-tabs button:focus-visible,
+  .d-tabs :global(button:focus-visible),
   .details button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
@@ -809,7 +835,7 @@
     background: var(--bg-base);
     border: 0.5px solid var(--border);
   }
-  .d-tabs button {
+  .d-tabs :global(button) {
     flex: 1;
     padding: 5px 8px;
     border: none;
@@ -819,10 +845,10 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .d-tabs button.active {
+  .d-tabs :global(button[data-state="active"]) {
     background: var(--bg-surface);
     color: var(--text-primary);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-sm);
   }
   .d-body {
     display: flex;
@@ -1228,7 +1254,7 @@
     gap: 2px;
     padding: 6px 16px 0;
   }
-  .tabs button {
+  .tabs :global(button) {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1240,7 +1266,7 @@
     font-size: 12.5px;
     cursor: pointer;
   }
-  .tabs button.active {
+  .tabs :global(button[data-state="active"]) {
     background: var(--bg-surface);
     color: var(--text-primary);
   }

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { ensureNetworkEnrollment } from "./lib/network-enrollment";
   import TabSwitcher from "./components/TabSwitcher.svelte";
+  import { menu } from "./lib/menu";
+  import Toaster from "./components/ui/Toaster.svelte";
   import ChatInput from "./components/ChatInput.svelte";
   import ChatView from "./pages/ChatView.svelte";
   import EditorView from "./pages/EditorView.svelte";
@@ -255,6 +257,7 @@
 
   // The header's + : what you can create.
   let newMenuOpen = $state(false);
+  let newMenuTrigger: HTMLButtonElement | undefined = $state();
   function newChatHere() {
     newMenuOpen = false;
     activeBotId.set(null);
@@ -347,6 +350,7 @@
 </script>
 
 <EndpointBanner />
+<Toaster />
 
 {#if !authChecked}
   <div class="loading-screen">
@@ -360,13 +364,13 @@
     <!-- Header / Title Bar -->
     <header class="header" data-tauri-drag-region>
       <div class="new-menu-wrap">
-        <button class="header-btn" title="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
+        <button bind:this={newMenuTrigger} class="header-btn" title="New" aria-label="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
           <Plus size={18} strokeWidth={2} />
         </button>
         {#if newMenuOpen}
-          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-          <div class="new-menu-backdrop" onclick={() => (newMenuOpen = false)}></div>
-          <div class="new-menu" role="menu" tabindex="-1" onkeydown={(e) => e.key === "Escape" && (newMenuOpen = false)}>
+          <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
+          <div class="new-menu" role="menu" aria-label="New" tabindex="-1"
+            use:menu={{ trigger: newMenuTrigger, onClose: (returnFocus) => { newMenuOpen = false; if (returnFocus) newMenuTrigger?.focus(); } }}>
             <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
             <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
             <button role="menuitem" onclick={connectRepoHere} title="Clone or update a repository in your projects folder"><FolderGit2 size={15} /> Connect repository…</button>
@@ -397,7 +401,7 @@
 
     <!-- Main Content Area — both views stay mounted, hidden via CSS -->
     <main class="content">
-      <div class="tab-panel chat-layout" class:hidden={activeTab !== "chat"}>
+      <div class="tab-panel chat-layout" class:hidden={activeTab !== "chat"} role="tabpanel" id="view-chat" aria-labelledby="view-tab-chat">
         <div class="chat-sidebar" class:collapsed={!historyOpen}>
           <ConversationSidebar
             open={true}
@@ -430,7 +434,7 @@
           </div>
         </div>
       </div>
-      <div class="tab-panel" class:hidden={activeTab !== "editor"}>
+      <div class="tab-panel" class:hidden={activeTab !== "editor"} role="tabpanel" id="view-editor" aria-labelledby="view-tab-editor">
         <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} onProjectOpened={adoptProject} onRepoConnected={(r) => void repoConnected(r)} />
       </div>
     </main>
@@ -583,11 +587,6 @@
   .new-menu-wrap {
     position: relative;
   }
-  .new-menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-  }
   .new-menu {
     position: absolute;
     top: calc(100% + 6px);
@@ -595,10 +594,10 @@
     z-index: 61;
     min-width: 200px;
     padding: 6px;
-    background: var(--bg-elevated, var(--bg-surface));
-    border: 0.5px solid var(--border);
-    border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    background: var(--bg-elevated);
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
   }
   .new-menu button {
     display: flex;

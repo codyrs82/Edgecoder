@@ -4,6 +4,7 @@
   import StatCard from "../components/StatCard.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import Select from "../components/ui/Select.svelte";
 
   interface Props {
     /** unused – page component receives no props today */
@@ -167,13 +168,10 @@
       </label>
 
       <div class="row-2col">
-        <label class="field">
-          <span class="field-label">Language</span>
-          <select bind:value={language}>
-            <option value="python">Python</option>
-            <option value="javascript">JavaScript</option>
-          </select>
-        </label>
+        <div class="field">
+          <span class="field-label" id="tq-language">Language</span>
+          <Select bind:value={language} labelledby="tq-language" options={[{ value: "python", label: "Python" }, { value: "javascript", label: "JavaScript" }]} />
+        </div>
 
         <label class="field">
           <span class="field-label">Snapshot Ref</span>
@@ -182,13 +180,10 @@
       </div>
 
       <div class="row-2col">
-        <label class="field">
-          <span class="field-label">Resource Class</span>
-          <select bind:value={resourceClass}>
-            <option value="cpu">CPU</option>
-            <option value="gpu">GPU</option>
-          </select>
-        </label>
+        <div class="field">
+          <span class="field-label" id="tq-resource">Resource Class</span>
+          <Select bind:value={resourceClass} labelledby="tq-resource" options={[{ value: "cpu", label: "CPU" }, { value: "gpu", label: "GPU" }]} />
+        </div>
 
         <label class="field">
           <span class="field-label">Priority: {priority}</span>
@@ -278,8 +273,7 @@
   }
 
   textarea,
-  input[type="text"],
-  select {
+  input[type="text"] {
     background: var(--bg-input, #0f0f23);
     color: var(--text-primary, #e2e8f0);
     border: 1px solid var(--border-control, #99928b);
@@ -291,8 +285,7 @@
     transition: border-color 0.15s;
   }
   textarea:focus,
-  input[type="text"]:focus,
-  select:focus {
+  input[type="text"]:focus {
     outline: none;
     border-color: var(--accent, #3b82f6);
   }
@@ -353,7 +346,7 @@
   }
   .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: var(--radius-md, 8px); margin-bottom: 1rem; font-size: 0.9rem; }
 
-  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  button:focus-visible, input:focus-visible, textarea:focus-visible {
     outline: 2px solid var(--accent, #3b82f6);
     outline-offset: 2px;
   }

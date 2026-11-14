@@ -19,6 +19,7 @@
     type Reservation,
   } from "../lib/api";
   import { CLASS_LABELS, shortModel } from "../lib/compute-choice";
+  import Select from "../components/ui/Select.svelte";
 
   interface Props {
     onNavigate?: (section: string) => void;
@@ -265,9 +266,11 @@
             {#if form.target === "reserved"}
               <label for="cn-res">Reservation</label>
               {#if leases.length}
-                <select id="cn-res" bind:value={form.reservationId}>
-                  {#each leases as l}<option value={l.id}>{CLASS_LABELS[l.computeClass]} until {new Date(l.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</option>{/each}
-                </select>
+                <Select
+                  id="cn-res"
+                  bind:value={form.reservationId}
+                  options={leases.map((l) => ({ value: l.id, label: `${CLASS_LABELS[l.computeClass]} until ${new Date(l.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` }))}
+                />
               {:else}
                 <span class="sp-muted">No active reservations. <button class="small" onclick={() => onNavigate?.("compute")}>Reserve a machine</button></span>
               {/if}
@@ -278,10 +281,7 @@
               <span class="sp-muted">Chosen per request: the cheapest place and smallest model that fits (your free machines first, network GPUs for heavy work).</span>
             {:else}
               <label for="cn-model">Model</label>
-              <select id="cn-model" bind:value={form.model}>
-                <option value="" disabled>Choose a model</option>
-                {#each formModels as m}<option value={m}>{m}</option>{/each}
-              </select>
+              <Select id="cn-model" bind:value={form.model} placeholder="Choose a model" options={formModels.map((m) => ({ value: m, label: m }))} />
             {/if}
 
             {#if form.target !== "local" && form.target !== "mine"}

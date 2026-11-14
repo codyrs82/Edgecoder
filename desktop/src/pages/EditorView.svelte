@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
+  import { Popover, Tabs } from "bits-ui";
+  import { Settings as SettingsIcon } from "@lucide/svelte";
+  import { notify } from "../lib/toast";
   import FileTree from "../components/FileTree.svelte";
+  import Select from "../components/ui/Select.svelte";
   import QuickOpen from "../components/QuickOpen.svelte";
   import TerminalPanel from "../components/TerminalPanel.svelte";
   import SourceControl from "../components/SourceControl.svelte";
@@ -41,7 +45,6 @@
   let gitBranch: string | null = $state(null);
   let gitFiles: Record<string, string> = $state({});
   let treeRefresh = $state(0);
-  let notice: { kind: "error" | "info"; text: string } | null = $state(null);
   let explorerWidth = $state(240);
 
   let chatPanelWidth = $state(380);
@@ -227,9 +230,9 @@
   /** Suppresses the dirty flag while the editor itself loads content into a model. */
   let applyingExternal = false;
 
+  /** One editor message at a time: a new one replaces the last (#24: a toast, not a banner). */
   function showNotice(text: string, kind: "error" | "info" = "error") {
-    notice = { kind, text };
-    if (kind === "info") setTimeout(() => { if (notice?.text === text) notice = null; }, 4000);
+    notify(text, kind, "editor-notice");
   }
 
   onMount(async () => {
@@ -678,37 +681,44 @@
 <div class="editor-layout" class:resizing={isResizing}>
   <div class="explorer-panel" style="width: {explorerWidth}px">
     {#if projectRoot}
-      <div class="sidebar-tabs" role="tablist">
-        <button role="tab" aria-selected={sidebarView === "files"} class:active={sidebarView === "files"} onclick={() => (sidebarView = "files")}>Files</button>
-        <button role="tab" aria-selected={sidebarView === "git"} class:active={sidebarView === "git"} onclick={() => (sidebarView = "git")}>
-          Source Control{#if changeCount}<span class="count">{changeCount}</span>{/if}
-        </button>
-      </div>
-    {/if}
-    {#if projectRoot && sidebarView === "git"}
-      <div class="sidebar-body">
-        <SourceControl
-          refreshKey={treeRefresh}
-          onOpen={(p) => void openPath(p)}
-          onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
-          onError={(m) => showNotice(m)}
-          onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
-          onProjectOpened={(root) => onProjectOpened?.(root)}
-        />
-      </div>
-    {:else if projectRoot}
-      <div class="sidebar-body">
-      <FileTree
-        {projectRoot}
-        activePath={activeFilePath}
-        {gitFiles}
-        refreshKey={treeRefresh}
-        onOpen={(p) => void openPath(p)}
-        onRenamed={handleRenamed}
-        onDeleted={handleDeleted}
-        onError={(m) => showNotice(m)}
-      />
-      </div>
+      <!-- #24: bits-ui Tabs. Only the open view is mounted, as before. -->
+      <Tabs.Root class="contents" bind:value={sidebarView}>
+        <Tabs.List aria-label="Sidebar">
+          {#snippet child({ props })}
+            <div {...props} class="sidebar-tabs">
+              <Tabs.Trigger value="files">Files</Tabs.Trigger>
+              <Tabs.Trigger value="git">Source Control{#if changeCount}<span class="count">{changeCount}</span>{/if}</Tabs.Trigger>
+            </div>
+          {/snippet}
+        </Tabs.List>
+        <Tabs.Content value={sidebarView} tabindex={-1}>
+          {#snippet child({ props })}
+            <div {...props} class="sidebar-body">
+              {#if sidebarView === "git"}
+                <SourceControl
+                  refreshKey={treeRefresh}
+                  onOpen={(p) => void openPath(p)}
+                  onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
+                  onError={(m) => showNotice(m)}
+                  onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
+                  onProjectOpened={(root) => onProjectOpened?.(root)}
+                />
+              {:else}
+                <FileTree
+                  {projectRoot}
+                  activePath={activeFilePath}
+                  {gitFiles}
+                  refreshKey={treeRefresh}
+                  onOpen={(p) => void openPath(p)}
+                  onRenamed={handleRenamed}
+                  onDeleted={handleDeleted}
+                  onError={(m) => showNotice(m)}
+                />
+              {/if}
+            </div>
+          {/snippet}
+        </Tabs.Content>
+      </Tabs.Root>
     {:else}
       <div class="no-project">
         <p>No folder open</p>
@@ -745,10 +755,15 @@
         <button class="ac-toggle" class:on={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} onclick={() => (splitPath ? closeSplit() : openSplit())}>Split</button>
       {/if}
       <button class="ac-toggle" class:on={terminalOpen} title="Terminal (Ctrl+`)" onclick={toggleTerminal}>Terminal</button>
-      <div class="settings-wrap">
-        <button class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
-        {#if settingsOpen}
-          <div class="settings-pop" role="dialog" aria-label="Editor settings">
+      <!-- #24: a bits-ui Popover: closes on Escape or a click away and returns focus to the button. -->
+      <Popover.Root bind:open={settingsOpen}>
+        <Popover.Trigger>
+          {#snippet child({ props })}
+            <button {...props} class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings"><SettingsIcon size={13} /></button>
+          {/snippet}
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content class="ui-popup settings-pop" role="dialog" aria-label="Editor settings" align="end" sideOffset={6} collisionPadding={8}>
             <label>Font size <input type="number" min="10" max="28" value={editorSettings.fontSize} onchange={(e) => updateSettings({ fontSize: Number((e.target as HTMLInputElement).value) })} /></label>
             <label>Tab size <input type="number" min="1" max="8" value={editorSettings.tabSize} onchange={(e) => updateSettings({ tabSize: Number((e.target as HTMLInputElement).value) })} /></label>
             <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
@@ -759,9 +774,9 @@
             {/if}
             <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
             <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
-          </div>
-        {/if}
-      </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
       <button
         class="ac-toggle"
         class:on={autocompleteOn}
@@ -786,12 +801,6 @@
           <button disabled={trustBusy} onclick={() => void setTrust(true)}>Trust</button>
           <button disabled={trustBusy} onclick={() => { trustDeclined = true; trustPrompt = false; }}>Not now</button>
         </span>
-      </div>
-    {/if}
-    {#if notice}
-      <div class="notice" class:error={notice.kind === "error"} role="status">
-        <span>{notice.text}</span>
-        <button aria-label="Dismiss" onclick={() => (notice = null)}>×</button>
       </div>
     {/if}
     {#if activeFile?.diskChanged}
@@ -820,9 +829,13 @@
       {#if splitPath}
         <div class="split-pane">
           <div class="split-bar">
-            <select aria-label="File in split view" value={splitPath} onchange={(e) => (splitPath = (e.target as HTMLSelectElement).value)}>
-              {#each files as f (f.path)}<option value={f.path}>{tabName(f.path)}{f.dirty ? " ●" : ""}</option>{/each}
-            </select>
+            <Select
+              class="ui-select--sm ui-select--fill"
+              ariaLabel="File in split view"
+              value={splitPath ?? undefined}
+              onChange={(p) => (splitPath = p)}
+              options={files.map((f) => ({ value: f.path, label: `${tabName(f.path)}${f.dirty ? " ●" : ""}` }))}
+            />
             <button title="Close split" aria-label="Close split" onclick={closeSplit}>×</button>
           </div>
           <div class="split-editor" bind:this={splitContainer}></div>
@@ -901,7 +914,7 @@
     border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
   }
-  .sidebar-tabs button {
+  .sidebar-tabs :global(button) {
     border: none;
     background: none;
     color: var(--text-muted);
@@ -913,7 +926,7 @@
     align-items: center;
     gap: 4px;
   }
-  .sidebar-tabs button.active {
+  .sidebar-tabs :global(button[data-state="active"]) {
     color: var(--text-primary);
     border-bottom-color: var(--accent);
   }
@@ -1030,54 +1043,49 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .settings-wrap {
-    position: relative;
+  .ac-toggle :global(svg) {
+    vertical-align: -2px;
   }
-  .settings-pop {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 8px;
-    z-index: 40;
-    width: 270px;
-    padding: 10px 12px;
-    background: var(--bg-elevated);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  .settings-pop label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .settings-pop label.check {
-    justify-content: flex-start;
-  }
-  .settings-pop input[type="number"] {
-    width: 56px;
-  }
-  .settings-pop input[type="text"] {
-    width: 140px;
-  }
-  .settings-pop input[type="number"],
-  .settings-pop input[type="text"] {
-    background: var(--bg-base);
-    color: var(--text-primary);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 2px 6px;
-    font-size: 12px;
-  }
-  .settings-note {
-    margin: 0;
-    font-size: 11px;
-    color: var(--text-muted);
+  /* Portalled to <body> by bits-ui, outside this component's scope. */
+  :global {
+    .settings-pop {
+      width: min(270px, calc(100vw - 16px));
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .settings-pop label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .settings-pop label.check {
+      justify-content: flex-start;
+    }
+    .settings-pop input[type="number"] {
+      width: 56px;
+    }
+    .settings-pop input[type="text"] {
+      width: 140px;
+    }
+    .settings-pop input[type="number"],
+    .settings-pop input[type="text"] {
+      background: var(--bg-base);
+      color: var(--text-primary);
+      border: 0.5px solid var(--border-control);
+      border-radius: var(--radius-sm);
+      padding: 2px 6px;
+      font-size: 12px;
+    }
+    .settings-pop .settings-note {
+      margin: 0;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
   }
   .ac-toggle.problems {
     color: var(--warning, #d29922);
@@ -1124,9 +1132,6 @@
     display: flex;
     gap: 6px;
     flex-shrink: 0;
-  }
-  .notice.error {
-    color: var(--danger, #f85149);
   }
   .notice button {
     border: 0.5px solid var(--border);
@@ -1200,16 +1205,6 @@
     padding: 3px 8px;
     border-bottom: 0.5px solid var(--border);
     background: var(--bg-surface);
-  }
-  .split-bar select {
-    flex: 1;
-    min-width: 0;
-    font-size: 12px;
-    background: var(--bg-base);
-    color: var(--text-primary);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 2px 4px;
   }
   .split-bar button {
     border: none;

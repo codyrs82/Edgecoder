@@ -1,4 +1,8 @@
 <script lang="ts">
+  // #24/#26: the searchable model combobox, on bits-ui Popover + Command (the pair shadcn-svelte's
+  // Combobox is made of). Typing filters; Up/Down move through every choice, Enter picks it,
+  // Escape closes and returns focus to the trigger.
+  import { Command, Popover } from "bits-ui";
   import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap } from "@lucide/svelte";
   import { computeOverview, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
   import { CLASS_LABELS, choiceId, choiceLabel, parseChoice, shortModel } from "../lib/compute-choice";
@@ -19,7 +23,10 @@
   let localModels = $state<string[]>([]);
   let overview = $state<ComputeOverview | null>(null);
   let leases = $state<Reservation[]>([]);
-  let searchEl: HTMLInputElement | undefined = $state();
+  const uid = $props.id();
+  const listId = `${uid}-list`;
+  let searchEl: HTMLInputElement | null = $state(null);
+  let triggerEl: HTMLElement | null = $state(null);
 
   let label = $derived(choiceLabel(selected));
   let current = $derived(parseChoice(selected));
@@ -39,18 +46,25 @@
     loading = false;
   }
 
-  function toggle() {
-    open = !open;
-    if (open) {
-      filter = "";
-      void refresh();
-      queueMicrotask(() => searchEl?.focus());
-    }
+  function onOpenChange(next: boolean) {
+    if (!next) return;
+    filter = "";
+    void refresh();
   }
 
   function pick(id: string | undefined) {
     onSelect(id);
     open = false;
+  }
+
+  // The footer leaves for Settings. Focus goes back to the trigger first, so that is where
+  // Settings returns it when it closes; the popover must not move it again afterwards.
+  let leaving = false;
+  function leaveFor(section: string) {
+    leaving = true;
+    open = false;
+    triggerEl?.focus();
+    onOpenSettings?.(section);
   }
 
   const match = (m: string) => !filter.trim() || m.toLowerCase().includes(filter.trim().toLowerCase());
@@ -62,163 +76,205 @@
     return [...counts.entries()].map(([model, machines]) => ({ model, machines })).filter((x) => match(x.model));
   });
   let networkModels = $derived((overview?.models ?? []).filter((m) => match(m.model)));
-
-  function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      open = false;
-      e.stopPropagation();
-    }
-  }
+  let localMatches = $derived(localModels.filter(match));
+  let leaseModels = $derived(
+    leases.flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),
+  );
+  // While searching, the two Auto rows show only if they match, so Enter picks the first model found.
+  let showAuto = $derived(match("auto"));
+  let nothing = $derived(!showAuto && !localMatches.length && !myModels.length && !leaseModels.length && !networkModels.length);
 </script>
 
-<div class="compute-picker" onkeydown={onKeydown} role="presentation">
-  <button class="trigger" onclick={toggle} aria-haspopup="listbox" aria-expanded={open} title="Choose the model and where it runs">
-    <span class="model">{label.model}</span>
-    <span class="where">{label.where}</span>
-    <ChevronDown size={12} strokeWidth={2.5} />
-  </button>
+<Popover.Root bind:open {onOpenChange}>
+  <Popover.Trigger bind:ref={triggerEl}>
+    {#snippet child({ props })}
+      <button {...props} class="trigger" title="Choose the model and where it runs">
+        <span class="model">{label.model}</span>
+        <span class="where">{label.where}</span>
+        <ChevronDown size={12} strokeWidth={2.5} />
+      </button>
+    {/snippet}
+  </Popover.Trigger>
+  <Popover.Portal>
+    <Popover.Content
+      class="ui-popup compute-menu"
+      role="dialog"
+      aria-label="Model and compute"
+      side={up ? "top" : "bottom"}
+      align="start"
+      sideOffset={6}
+      collisionPadding={8}
+      onOpenAutoFocus={(e) => { e.preventDefault(); searchEl?.focus(); }}
+      onCloseAutoFocus={(e) => { if (leaving) e.preventDefault(); leaving = false; }}
+    >
+      <Command.Root class="compute-command" label="Search models" shouldFilter={false} loop>
+        <div class="search">
+          <Search size={13} />
+          <Command.Input bind:ref={searchEl} bind:value={filter} placeholder="Search models">
+            {#snippet child({ props })}
+              <!-- bits-ui points aria-controls at its inner viewport; the listbox is what the field controls. -->
+              <input {...props} aria-controls={listId} bind:value={filter} />
+            {/snippet}
+          </Command.Input>
+        </div>
+        <Command.List id={listId} class="scroll" aria-label="Compute">
+          <Command.Viewport>
+            {#if showAuto}
+              <Command.Item class="ui-command-item row {current.where === 'anywhere' ? 'current' : ''}" value="auto-anywhere" onSelect={() => pick("auto")}>
+                <Zap size={14} />
+                <span class="name">Auto</span>
+                <span class="meta">Cheapest place that fits each request: yours first, GPUs for heavy work</span>
+                {#if current.where === "anywhere"}{@render currentMark()}{/if}
+              </Command.Item>
+              <Command.Item class="ui-command-item row {current.where === 'auto' ? 'current' : ''}" value="auto-local" onSelect={() => pick(undefined)}>
+                <Laptop size={14} />
+                <span class="name">Auto</span>
+                <span class="meta">This computer only · free</span>
+                {#if current.where === "auto"}{@render currentMark()}{/if}
+              </Command.Item>
+            {/if}
 
-  {#if open}
-    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-    <div class="backdrop" onclick={() => (open = false)}></div>
-    <div class="menu" class:up role="listbox" aria-label="Compute">
-      <div class="search">
-        <Search size={13} />
-        <input bind:this={searchEl} bind:value={filter} placeholder="Search models" aria-label="Search models" />
-      </div>
-      <div class="scroll">
-        <button class="row" class:active={current.where === "anywhere"} onclick={() => pick("auto")}>
-          <Zap size={14} />
-          <span class="name">Auto</span>
-          <span class="meta">Cheapest place that fits each request: yours first, GPUs for heavy work</span>
-          {#if current.where === "anywhere"}<Check size={14} />{/if}
-        </button>
-        <button class="row" class:active={current.where === "auto"} onclick={() => pick(undefined)}>
-          <Laptop size={14} />
-          <span class="name">Auto</span>
-          <span class="meta">This computer only · free</span>
-          {#if current.where === "auto"}<Check size={14} />{/if}
-        </button>
+            {#if localMatches.length}
+              <Command.Group value="group-local">
+                <Command.GroupHeading class="group"><Laptop size={12} /> This computer <span class="tag">free</span></Command.GroupHeading>
+                <Command.GroupItems>
+                  {#each localMatches as m (m)}
+                    <Command.Item class="ui-command-item row {selected === m ? 'current' : ''}" value={m} onSelect={() => pick(m)}>
+                      <span class="name">{shortModel(m)}</span>
+                      <span class="meta">{shortModel(m) !== m ? m : ""}</span>
+                      {#if selected === m}{@render currentMark()}{/if}
+                    </Command.Item>
+                  {/each}
+                </Command.GroupItems>
+              </Command.Group>
+            {/if}
 
-        {#if localModels.some(match)}
-          <div class="group"><Laptop size={12} /> This computer <span class="tag">free</span></div>
-          {#each localModels.filter(match) as m}
-            {@const id = m}
-            <button class="row" class:active={selected === id} onclick={() => pick(id)}>
-              <span class="name">{shortModel(m)}</span>
-              <span class="meta">{shortModel(m) !== m ? m : ""}</span>
-              {#if selected === id}<Check size={14} />{/if}
-            </button>
-          {/each}
-        {/if}
+            {#if myModels.length}
+              <Command.Group value="group-mine">
+                <Command.GroupHeading class="group"><Server size={12} /> My machines <span class="tag">free</span></Command.GroupHeading>
+                <Command.GroupItems>
+                  {#each myModels as m (m.model)}
+                    {@const id = choiceId({ where: "mine", model: m.model })}
+                    <Command.Item class="ui-command-item row {selected === id ? 'current' : ''}" value={id} onSelect={() => pick(id)}>
+                      <span class="name">{shortModel(m.model)}</span>
+                      <span class="meta">{m.machines === 1 ? "on one of your machines" : `on ${m.machines} of your machines`}</span>
+                      {#if selected === id}{@render currentMark()}{/if}
+                    </Command.Item>
+                  {/each}
+                </Command.GroupItems>
+              </Command.Group>
+            {/if}
 
-        {#if myModels.length}
-          <div class="group"><Server size={12} /> My machines <span class="tag">free</span></div>
-          {#each myModels as m}
-            {@const id = choiceId({ where: "mine", model: m.model })}
-            <button class="row" class:active={selected === id} onclick={() => pick(id)}>
-              <span class="name">{shortModel(m.model)}</span>
-              <span class="meta">{m.machines === 1 ? "on one of your machines" : `on ${m.machines} of your machines`}</span>
-              {#if selected === id}<Check size={14} />{/if}
-            </button>
-          {/each}
-        {/if}
+            {#if leaseModels.length}
+              <Command.Group value="group-reserved">
+                <Command.GroupHeading class="group"><Lock size={12} /> Reserved</Command.GroupHeading>
+                <Command.GroupItems>
+                  {#each leaseModels as { r, model, id } (id)}
+                    <Command.Item class="ui-command-item row {selected === id ? 'current' : ''}" value={id} onSelect={() => pick(id)}>
+                      <span class="name">{shortModel(model)}</span>
+                      <span class="meta">{CLASS_LABELS[r.computeClass] ?? r.computeClass} · until {new Date(r.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+                      {#if selected === id}{@render currentMark()}{/if}
+                    </Command.Item>
+                  {/each}
+                </Command.GroupItems>
+              </Command.Group>
+            {/if}
 
-        {#if leases.length}
-          <div class="group"><Lock size={12} /> Reserved</div>
-          {#each leases as r}
-            {#each (r.models.length ? r.models : r.model ? [r.model] : []).filter(match) as model}
-              {@const id = choiceId({ where: "reserved", reservationId: r.id, model })}
-              <button class="row" class:active={selected === id} onclick={() => pick(id)}>
-                <span class="name">{shortModel(model)}</span>
-                <span class="meta">{CLASS_LABELS[r.computeClass] ?? r.computeClass} · until {new Date(r.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
-                {#if selected === id}<Check size={14} />{/if}
-              </button>
-            {/each}
-          {/each}
-        {/if}
-
-        {#if networkModels.length}
-          <div class="group"><Globe size={12} /> Network <span class="tag">cSats per million tokens</span></div>
-          {#each networkModels as m}
-            <div class="net-row">
-              <div class="net-head">
-                <span class="name">{shortModel(m.model)}</span>
-                <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
-              </div>
-              <div class="chips">
-                {#each CLASSES.filter((c) => c === "any" || m.classes.includes(c)) as cls}
-                  {@const id = choiceId({ where: "network", model: m.model, computeClass: cls })}
-                  <button class="chip" class:active={selected === id} onclick={() => pick(id)} title={cls === "any" ? "Any machine that has it (the fastest free one)" : `Only ${CLASS_LABELS[cls]} machines; same price per token, different speed`}>
-                    {CLASS_LABELS[cls]}
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/each}
-        {:else if !loading && overview && !overview.connected}
-          <div class="note">Sign in and let the agent connect to use network compute.</div>
-        {/if}
-
-        {#if loading}<div class="note">Loading…</div>{/if}
-      </div>
+            {#if networkModels.length}
+              <div class="group" role="presentation"><Globe size={12} /> Network <span class="tag">cSats per million tokens</span></div>
+              <!-- One group per model: its options are the machine classes it can run on. -->
+              {#each networkModels as m (m.model)}
+                <Command.Group class="net-row" value="group-network-{m.model}">
+                  <Command.GroupHeading class="net-head">
+                    <span class="name">{shortModel(m.model)}</span>
+                    <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
+                  </Command.GroupHeading>
+                  <Command.GroupItems class="chips">
+                    {#each CLASSES.filter((c) => c === "any" || m.classes.includes(c)) as cls (cls)}
+                      {@const id = choiceId({ where: "network", model: m.model, computeClass: cls })}
+                      <Command.Item
+                        class="chip {selected === id ? 'current' : ''}"
+                        value={id}
+                        onSelect={() => pick(id)}
+                        aria-label="{shortModel(m.model)}, {CLASS_LABELS[cls]}{selected === id ? ', current choice' : ''}"
+                        title={cls === "any" ? "Any machine that has it (the fastest free one)" : `Only ${CLASS_LABELS[cls]} machines; same price per token, different speed`}
+                      >
+                        {CLASS_LABELS[cls]}
+                      </Command.Item>
+                    {/each}
+                  </Command.GroupItems>
+                </Command.Group>
+              {/each}
+            {:else if !loading && overview && !overview.connected}
+              <div class="note" role="presentation">Sign in and let the agent connect to use network compute.</div>
+            {/if}
+          </Command.Viewport>
+        </Command.List>
+        <!-- Outside the listbox, which may only hold options. -->
+        {#if loading}<div class="note" role="status">Loading…</div>{:else if nothing}<div class="note" role="status">No models match "{filter}"</div>{/if}
+      </Command.Root>
       {#if onOpenSettings}
         <div class="footer">
-          <button onclick={() => { open = false; onOpenSettings?.("compute"); }}><Plus size={13} /> Reserve</button>
-          <button onclick={() => { open = false; onOpenSettings?.("plan"); }}>Buy cSats</button>
-          <button onclick={() => { open = false; onOpenSettings?.("connect"); }}>Use in tools</button>
+          <button onclick={() => leaveFor("compute")}><Plus size={13} /> Reserve</button>
+          <button onclick={() => leaveFor("plan")}>Buy cSats</button>
+          <button onclick={() => leaveFor("connect")}>Use in tools</button>
         </div>
       {/if}
-    </div>
-  {/if}
-</div>
+    </Popover.Content>
+  </Popover.Portal>
+</Popover.Root>
+
+{#snippet currentMark()}
+  <Check size={14} /><span class="sr-only">, current choice</span>
+{/snippet}
 
 <style>
-  .compute-picker { position: relative; display: inline-flex; }
   .trigger {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: none; border-radius: var(--radius-sm, 6px);
-    background: transparent; color: var(--text-secondary); font-size: 12.5px; cursor: pointer; max-width: 320px;
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-secondary); font-size: 12.5px; cursor: pointer; max-width: 320px; min-width: 0;
   }
   .trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-surface); color: var(--text-primary); }
   .trigger .model { color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .trigger .where { color: var(--text-muted, var(--text-secondary)); white-space: nowrap; }
-  .backdrop { position: fixed; inset: 0; z-index: 40; }
-  .menu {
-    position: absolute; left: 0; top: calc(100% + 6px); z-index: 41; width: 360px; max-height: 460px; display: flex; flex-direction: column;
-    background: var(--bg-elevated, var(--bg-surface)); border: 0.5px solid var(--border); border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35); overflow: hidden;
+  .trigger .where { color: var(--text-muted); white-space: nowrap; }
+
+  /* The menu is portalled to <body> by bits-ui, outside this component's scope. */
+  :global {
+    .compute-menu {
+      width: min(360px, calc(100vw - 16px)); max-height: min(460px, var(--bits-popover-content-available-height, 460px));
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .compute-menu .compute-command { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+    .compute-menu .search { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 0.5px solid var(--border); color: var(--text-secondary); }
+    .compute-menu .search input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--text-primary); font-size: 13px; outline: none; }
+    .compute-menu .scroll { overflow-y: auto; padding: 6px; min-height: 0; }
+    .compute-menu .group { display: flex; align-items: center; gap: 6px; padding: 10px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+    .compute-menu .tag { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-muted); }
+    .compute-menu .row { padding: 7px 8px; border-radius: var(--radius-md); }
+    .compute-menu .row.current { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    .compute-menu .row[data-selected] { background: var(--bg-surface); }
+    .compute-menu .row .name { font-weight: 500; white-space: nowrap; }
+    .compute-menu .row .meta { flex: 1; min-width: 0; color: var(--text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .compute-menu .row svg { flex: none; }
+    .compute-menu .net-row { padding: 6px 8px; border-radius: var(--radius-md); }
+    .compute-menu .net-row:hover { background: var(--bg-surface); }
+    .compute-menu .net-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 13px; color: var(--text-primary); }
+    .compute-menu .net-head .name { font-weight: 500; }
+    .compute-menu .net-head .meta { color: var(--text-secondary); font-size: 12px; }
+    .compute-menu .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+    .compute-menu .chip {
+      display: inline-flex; gap: 4px; align-items: baseline; padding: 2px 8px; border-radius: 999px; border: 0.5px solid var(--border-control);
+      background: transparent; color: var(--text-secondary); font-size: 11.5px; cursor: pointer; user-select: none;
+    }
+    .compute-menu .chip:hover, .compute-menu .chip[data-selected] { color: var(--text-primary); border-color: var(--text-secondary); }
+    /* The keyboard highlight is a ring, so it still shows on the filled current chip. */
+    .compute-menu .chip[data-selected] { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+    .compute-menu .chip.current { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .compute-menu .note { padding: 10px 14px; color: var(--text-secondary); font-size: 12px; }
+    .compute-menu .footer { display: flex; gap: 4px; padding: 6px; border-top: 0.5px solid var(--border); }
+    .compute-menu .footer button {
+      flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 6px; border: none; border-radius: var(--radius-md);
+      background: none; color: var(--text-secondary); font-size: 12px; cursor: pointer;
+    }
+    .compute-menu .footer button:hover { background: var(--bg-surface); color: var(--text-primary); }
   }
-  .menu.up { top: auto; bottom: calc(100% + 6px); }
-  .search { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 0.5px solid var(--border); color: var(--text-secondary); }
-  .search input { flex: 1; border: none; background: transparent; color: var(--text-primary); font-size: 13px; outline: none; }
-  .scroll { overflow-y: auto; padding: 6px; }
-  .group { display: flex; align-items: center; gap: 6px; padding: 10px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
-  .tag { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-muted, var(--text-secondary)); }
-  .row {
-    display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: none; border-radius: 8px; background: none;
-    color: var(--text-primary); font-size: 13px; cursor: pointer; text-align: left;
-  }
-  .row:hover, .row:focus-visible { background: var(--bg-surface); outline: none; }
-  .row.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .row .name { font-weight: 500; white-space: nowrap; }
-  .row .meta { flex: 1; color: var(--text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .net-row { padding: 6px 8px; border-radius: 8px; }
-  .net-row:hover { background: var(--bg-surface); }
-  .net-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--text-primary); }
-  .net-head .name { font-weight: 500; }
-  .net-head .meta { color: var(--text-secondary); font-size: 12px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
-  .chip {
-    display: inline-flex; gap: 4px; align-items: baseline; padding: 2px 8px; border-radius: 999px; border: 0.5px solid var(--border);
-    background: transparent; color: var(--text-secondary); font-size: 11.5px; cursor: pointer;
-  }
-  .chip:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-  .chip.active { background: var(--accent); border-color: var(--accent); color: #111; }
-  .note { padding: 10px 8px; color: var(--text-secondary); font-size: 12px; }
-  .footer { display: flex; gap: 4px; padding: 6px; border-top: 0.5px solid var(--border); }
-  .footer button {
-    flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 6px; border: none; border-radius: 8px;
-    background: none; color: var(--text-secondary); font-size: 12px; cursor: pointer;
-  }
-  .footer button:hover { background: var(--bg-surface); color: var(--text-primary); }
 </style>
