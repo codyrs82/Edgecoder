@@ -516,6 +516,9 @@ ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS last_checked_at_ms B
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS abandoned_at_ms BIGINT;
 CREATE INDEX IF NOT EXISTS idx_anchor_records_status ON bitcoin_anchor_records (status);
+-- #101: the epoch-anchor guard looks anchors up by epoch id and by checkpoint hash.
+CREATE INDEX IF NOT EXISTS idx_anchor_records_epoch ON bitcoin_anchor_records (epoch_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_anchor_records_checkpoint ON bitcoin_anchor_records (checkpoint_hash, created_at_ms DESC);
 
 CREATE TABLE IF NOT EXISTS issuance_payout_events (
   payout_event_id TEXT PRIMARY KEY,
@@ -1812,6 +1815,38 @@ export class PostgresStore {
        ORDER BY created_at_ms ASC
        LIMIT $1`,
       [limit]
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
+  /** #101: newest anchor row for an epoch id (issuance epochs, `stats:<h>`, `receipts:<id>`). */
+  async latestAnchorByEpoch(epochId: string): Promise<BitcoinAnchorRecord | null> {
+    const result = await this.pool.query(
+      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+       FROM bitcoin_anchor_records
+       WHERE epoch_id = $1
+       ORDER BY created_at_ms DESC
+       LIMIT 1`,
+      [epochId]
+    );
+    const row = result.rows[0];
+    return row ? this.anchorFromRow(row) : null;
+  }
+
+  /**
+   * #101: the newest live (non-failed, real txid) anchor of each kind (stats checkpoints,
+   * receipt epochs, issuance epochs), so reorg re-checks cover every kind even when one kind
+   * fills the newest rows.
+   */
+  async latestLiveAnchorPerKind(): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT DISTINCT ON (kind) anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+       FROM (
+         SELECT *, CASE WHEN epoch_id LIKE 'stats:%' THEN 'stats' WHEN epoch_id LIKE 'receipts:%' THEN 'receipts' ELSE 'issuance' END AS kind
+         FROM bitcoin_anchor_records
+         WHERE status <> 'failed' AND tx_ref ~ '^[0-9a-f]{64}$'
+       ) a
+       ORDER BY kind, created_at_ms DESC`
     );
     return result.rows.map((row) => this.anchorFromRow(row));
   }
