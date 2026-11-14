@@ -10,7 +10,7 @@ import "./coordinator/load-order.js";
 import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import type { FastifyReply } from "fastify";
 import { registerCoordinatorMetrics } from "./coordinator-metrics.js";
-import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { request } from "undici";
@@ -18,14 +18,11 @@ import { z } from "zod";
 import {
   safeTokenEqual,
   readHeaderValue,
-  extractClientIp,
-  isLoopbackSocket,
   normalizeUrl,
   pairKey,
   parseRecordPayload,
   computeIntentFee,
   contributionPolicyDecision,
-  submitterAccountDecision,
   mayRelayOverWs
 } from "./coordinator-utils.js";
 import { RobotQueue } from "./robot-queue.js";
@@ -43,7 +40,6 @@ import type {
   IssuancePayoutEvent,
   ExecutionPolicy,
   KeyCustodyEvent,
-  OllamaRolloutRecord,
   PaymentIntent,
   PriceEpochRecord,
   QueueEventRecord,
@@ -81,7 +77,6 @@ import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fin
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
 import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../trust/local-attest.js";
 import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
-import { OrderingChain } from "../ledger/chain.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { reconcileLedger, type ReconcileReport } from "../ledger/reconcile.js";
 import { hashRecordPayload } from "../ledger/record.js";
@@ -105,46 +100,25 @@ import {
   jobCostMsat,
   msatToCSats,
   ratePerSecondMsat,
-  reserveMsat,
   splitJobCost
 } from "../economy/job-pricing.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import { InferenceStreams, boundTokenCounts } from "./inference-streams.js";
-import {
-  MemoryPayoutStore,
-  PayoutService,
-  type FeePoolDistribution,
-  type PayoutStore
-} from "../economy/payout-service.js";
-import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../economy/payout-safeguards.js";
-import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../economy/payout-reconcile.js";
-import { payoutPolicyFromEnv } from "../economy/payouts.js";
-import { MemoryCallbackPinStore, callbackPinStatus, type CallbackPinStore } from "../economy/lnurl-callback-pin.js";
+import { payoutsPausedByEnv } from "../economy/payout-safeguards.js";
+import { callbackPinStatus } from "../economy/lnurl-callback-pin.js";
 import { validateLightningAddress } from "../economy/payout-destination.js";
-import { fetchPublicJson } from "../security/public-fetch.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
 import type { PostgresStore } from "../db/postgres.js";
-import {
-  computeDynamicPricePerComputeUnitSats,
-  dynamicLoadMultiplier,
-  LEGACY_BASE_SATS_PER_UNIT
-} from "../economy/pricing.js";
+import { computeDynamicPricePerComputeUnitSats } from "../economy/pricing.js";
 import {
   checkPriceEpoch,
   priceConsensusQuorum,
-  priceEpochBoundsFromEnv,
   resolvePriceConsensus,
   signPriceQuote,
   verifyPriceQuote
 } from "../economy/price-epoch-guard.js";
-import {
-  isRateEpochStale,
-  normalizeRateEpoch,
-  rateOracleConfigFromEnv,
-  recalibrateRates,
-  type RateEpoch
-} from "../economy/rate-oracle.js";
+import { isRateEpochStale, normalizeRateEpoch } from "../economy/rate-oracle.js";
 import {
   ACCEPTED_COMPUTE_CLASS_IDS,
   COMPUTE_CLASS_IDS,
@@ -153,10 +127,7 @@ import {
   normalizeComputeClass,
   resolveRequestedClass,
   settlementClassFor,
-  type ComputeClassId,
-  type HardwareClassification,
-  type HardwareProfile,
-  satsPerCreditForClass
+  type ComputeClassId
 } from "../economy/compute-classes.js";
 import { summarizeUsage } from "../economy/usage.js";
 import {
@@ -169,7 +140,7 @@ import {
   type Reservation,
   type ReservationEndReason
 } from "../economy/reservations.js";
-import { ComputeOrderBook, capabilityConstraints, meetsCapability, type AskCapability } from "../economy/order-book.js";
+import { capabilityConstraints, meetsCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { catalogEntryForTag } from "../model/catalog.js";
 import {
@@ -185,24 +156,17 @@ import {
   type IssuanceEpochDraft,
   type IssuanceWindow
 } from "../economy/issuance-epoch.js";
-import { checkSharedToken, debugRoutesEnabled, isProduction, LISTEN_HOST } from "../common/env-guard.js";
+import { debugRoutesEnabled, isProduction, LISTEN_HOST } from "../common/env-guard.js";
 import {
   HOST_HEARTBEAT_MAX_SKEW_MS,
-  HostServiceAttestor,
   attestSelfServices,
   heartbeatCounts,
-  networkServiceProbes,
   normalizeServices,
   signHostHeartbeat,
   verifyHostHeartbeat,
   type AttestationResult
 } from "../economy/host-attestation.js";
 import { probeElectrum } from "../economy/service-probes.js";
-import {
-  createLightningProviderFromEnv,
-  economyPaymentsEnabled,
-  type LightningProvider
-} from "../economy/lightning.js";
 import { createBitcoinAnchorProviderFromEnv, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
 import { anchorCheckpoint, anchorEpochOnce, type AnchorDeps } from "../economy/anchoring.js";
 import { AnchorTracker, anchorEventLogger, anchorTrackerTuningFromEnv } from "../economy/anchor-tracker.js";
@@ -224,11 +188,9 @@ import {
   checkResultClaim,
   classifyResultAuth,
   creditedDurationMs,
-  requireSignedAgentRequests,
   RESULT_ROUTE_BODY_LIMIT_BYTES,
   resultBodyTooLarge,
-  resultReportId,
-  unsignedRequestDecision
+  resultReportId
 } from "./result-integrity.js";
 import {
   ResultVerifier,
@@ -242,11 +204,6 @@ import {
   type ReplicaRequest,
   type VerificationOutcome
 } from "./verification.js";
-import {
-  HardwareVerifier,
-  hardwareVerificationConfigFromEnv,
-  type HardwareVerificationRecord
-} from "./hardware-verification.js";
 import {
   agentHasModel,
   normalizeReportedModels,
@@ -268,7 +225,7 @@ import {
   verifyPaymentWebhookSignature
 } from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
-import { type AgentPowerTelemetry, evaluateAgentPowerPolicy } from "./power-policy.js";
+import { evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
   type BlacklistEvidenceInput,
   validateIncomingBlacklistRecord,
@@ -283,19 +240,14 @@ import {
   decryptResult as decryptEnvelopeResult,
   type EncryptedResult
 } from "../security/envelope.js";
-import { rawBodyOf, verifySignedRequest, type SignedHeaders } from "../security/request-signing.js";
+import { rawBodyOf } from "../security/request-signing.js";
 import { verifyNonce } from "../security/nonce-verifier.js";
-import type { SecurityEventType } from "../audit/security-events.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
-import { AgentBehaviorTracker } from "../security/behavior-tracker.js";
-import { AnomalyDetector } from "../security/anomaly-detector.js";
-import { AutoBlacklister, type BlacklistAction } from "../security/auto-blacklister.js";
 import {
   verifyBinaryIntegrity,
   type VerificationStatus,
   type BinaryIntegrityPayload
 } from "../security/release-verifier.js";
-import { ReleaseManifestCache } from "../security/release-manifest-cache.js";
 import { isValidSnapshotRef } from "./snapshot-resolver.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
 import { SubtaskDepTracker } from "./subtask-deps.js";
@@ -303,34 +255,20 @@ import { lateResultRejectionDurable } from "./lease-gate.js";
 import { app, metrics } from "./coordinator/app.js";
 import {
   queue,
-  FALLBACK_BTC_USD,
   identity,
   coordinatorKeys,
   CC,
-  protocol,
-  mesh,
-  securityLog,
-  BITCOIN_NETWORK,
-  PORTAL_SERVICE_URL,
-  PORTAL_OUTBOUND_TOKEN,
-  COORDINATOR_FEE_ACCOUNT,
   COORDINATOR_PUBLIC_URL,
   MESH_AUTH_TOKEN,
-  IS_PROD,
-  PORTAL_SERVICE_TOKEN,
   ROBOT_QUEUE_ENABLED,
   ROBOT_COORDINATOR_FEE_BPS,
   ROBOT_TASK_DEFAULT_TIMEOUT_MS,
   ROBOT_AUTO_SETTLE_DELAY_MS,
   ROBOT_SWEEP_INTERVAL_MS,
   ROBOT_MIN_SWEEP_SATS,
+  BITCOIN_NETWORK,
   type ResultMeta,
-  CLIENT_IP_TRUST,
-  preAuthFailures,
-  SECURITY_MAX_SKEW_MS,
-  agentRateLimiter,
-  nonceStore,
-  SECURITY_NONCE_TTL_MS,
+  mesh,
   COORDINATOR_PEER_CACHE_FILE,
   COORDINATOR_DISCOVERY_URL,
   COORDINATOR_BOOTSTRAP_URLS,
@@ -338,6 +276,8 @@ import {
   peerScore,
   networkMode,
   COORDINATOR_REGISTRATION_TOKEN,
+  PORTAL_SERVICE_URL,
+  PORTAL_OUTBOUND_TOKEN,
   STATS_LEDGER_SYNC_INTERVAL_MS,
   ANCHOR_REQUIRED_CONFIRMATIONS,
   ANCHOR_CONFIRM_POLL_MS,
@@ -355,19 +295,24 @@ import {
   MIN_CONTRIBUTION_RATIO,
   ISSUANCE_COORDINATOR_SHARE,
   ISSUANCE_RESERVE_SHARE,
+  COORDINATOR_FEE_ACCOUNT,
   PAYMENT_INTENT_TTL_MS,
   requestOrigin,
+  agentRateLimiter,
   OLLAMA_MODEL,
+  securityLog,
   SUBTASK_RESERVE_TIMEOUT_MS,
   taskBilling,
   usagePending,
   INFERENCE_AUTH_TOKEN,
   INFERENCE_URL,
+  protocol,
   IOS_BATTERY_PULL_MIN_INTERVAL_MS,
   IOS_BATTERY_TASK_STOP_LEVEL_PCT,
   reservations,
   claimedTradePrice,
   noteUsageRun,
+  FALLBACK_BTC_USD,
   taskOriginMap,
   peerOfferBudgetMsat,
   saveUsage,
@@ -378,6 +323,8 @@ import {
   memoryUsage,
   OLLAMA_HOST,
   PROVIDER,
+  nonceStore,
+  SECURITY_NONCE_TTL_MS,
   COORDINATOR_FEE_BPS,
   PAYMENT_WEBHOOK_SECRET,
   peerMessageWindow,
@@ -390,6 +337,107 @@ import {
   ANCHOR_RECONCILE_MS
 } from "./coordinator/context.js";
 import { mutable } from "./coordinator/mutable-state.js";
+import {
+  agentCapabilities,
+  ordering,
+  activeBlacklistRecord,
+  releaseManifestCache,
+  REQUIRE_VERIFIED_AGENTS,
+  behaviorTracker,
+  evaluateAndEnforce,
+  pendingTunnelInvites,
+  pendingTunnelCloseNotices,
+  directWorkInbox,
+  directWorkById,
+  type DirectWorkOffer,
+  agentOrchestration,
+  blacklistByAgent,
+  lastTaskAssignedByAgent,
+  envelopeSharedKeys,
+  ENVELOPE_KEY_TTL_MS,
+  autoBlacklister,
+  REQUIRE_SIGNED_AGENT_REQUESTS,
+  meshBlacklistReason,
+  activeTunnels,
+  appendBlacklistRecord,
+  federatedCapabilities,
+  blacklistAuditLog,
+  issueCoordinatorBlacklistRecord,
+  tunnelByPairKey,
+  relayWindowByAgent,
+  RELAY_RATE_LIMIT_PER_10S,
+  TUNNEL_MAX_RELAYS_PER_MIN,
+  offerWindowByAgent,
+  DIRECT_WORK_OFFERS_PER_10S,
+  upsertRollout,
+  ollamaRollouts,
+  cleanupStaleTunnels,
+  anomalyDetector
+} from "./coordinator/agent-state.js";
+import {
+  hasMeshToken,
+  hasPortalServiceToken,
+  requireMeshToken,
+  extractSignedHeaders,
+  verifyAgentRequest,
+  resolveSubmitterAccount,
+  callerAccount,
+  requireMeshOrPortalToken,
+  requirePortalServiceToken,
+  authorizeAdmin,
+  ADMIN_API_TOKEN,
+  requireAgentSelf
+} from "./coordinator/auth.js";
+import {
+  isPaymentGatedRequest,
+  latestPriceEpochByResource,
+  paymentIntents,
+  rateOracleConfig,
+  hardwareVerifier,
+  marketOrders,
+  effectiveHardware,
+  orderBook,
+  askCapabilityOf,
+  verificationSummary,
+  benchmarkModelFor,
+  pickBenchmarkWitness,
+  repostAsk,
+  subtaskReserveMsat,
+  MARKET_DEFAULT_BID_PREMIUM_BPS,
+  marketHistory,
+  classRefMsatPerCredit,
+  NETWORK_FEE_BPS,
+  quoteSatsPerCredit,
+  RATE_ORACLE_ENABLED,
+  RATE_RECALIBRATION_MS,
+  applyMarketOrder,
+  recalibrateRateEpoch,
+  previousPriceEpochSats,
+  PRICE_EPOCH_BOUNDS,
+  PRICE_CONSENSUS_QUORUM_OVERRIDE,
+  syncOrderBookReference,
+  recordMarketTicks,
+  MARKET_TICK_MS
+} from "./coordinator/economy.js";
+import {
+  memoryPayoutStore,
+  INFRA_HOST_SERVICES,
+  ECONOMY_PAYMENTS_ENABLED,
+  lightningProvider,
+  INFRA_HOST_ENABLED,
+  INFRA_HOST_REPORT_URLS,
+  payoutStore,
+  payoutService,
+  callbackPins,
+  payoutPolicy,
+  payoutLimits,
+  payoutPause,
+  RESERVED_HOST_ACCOUNTS,
+  hostAttestor,
+  runFeePoolDistribution,
+  payoutReconcileConfig,
+  payoutReconciler
+} from "./coordinator/payouts.js";
 
 // Read at scrape time, so the sources may be declared further down this module.
 registerCoordinatorMetrics(metrics, {
@@ -405,584 +453,10 @@ queue.onLeaseFailure((result) => {
   );
 });
 
-/** msat per credit (base-tier second) of a class: the oracle's rate, else its USD reference. */
-function classRefMsatPerCredit(cls: ComputeClassId): number {
-  const oracle = mutable.latestRateEpoch?.classRates?.[cls]?.msatPerCredit;
-  if (oracle && oracle > 0) return oracle;
-  const spec = rateOracleConfig.computeClasses[cls];
-  return satsPerCreditForClass(spec?.usdPerHourReference ?? 0.02, FALLBACK_BTC_USD, 0) * 1000;
-}
-
-/**
- * Worst-case msat to set aside for one subtask: CPU work is paid as CPU (settlementClassFor); GPU
- * work at the requested class, or the dearest GPU-type class for "any".
- */
-function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: ComputeClassId | "any", timeoutMs: number, bidCeiling?: number): number {
-  const classes: ComputeClassId[] =
-    resourceClass === "cpu" ? ["cpu"] : taskClass === "any" ? (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).filter((c) => c !== "cpu") : [taskClass];
-  return Math.max(
-    ...classes.map((c) =>
-      reserveMsat({
-        timeoutMs,
-        classRefMsatPerCredit: classRefMsatPerCredit(c),
-        maxTierWeight: Math.max(1, ...(rateOracleConfig.computeClasses[c]?.tiers ?? []).map((t) => t.creditsPerSecond)),
-        bidCeilingMsatPerCredit: bidCeiling,
-      })
-    )
-  );
-}
-
 // Every response to an agent request (one carrying x-agent-nonce: register, heartbeat, pull, result,
 // agent-mesh, inference, orchestration, errors included) is signed with the identity key, in headers
 // or, for a streamed body, in a trailer (src/trust/response-signing.ts). Advertised as responseSigning.
 registerResponseSigning(app, { peerId: identity.peerId, privateKeyPem: coordinatorKeys.privateKeyPem });
-const ordering = new OrderingChain(identity.peerId, coordinatorKeys.privateKeyPem);
-
-const agentOrchestration = new Map<
-  string,
-  {
-    rolloutId: string;
-    provider: "edgecoder-local" | "ollama-local";
-    model?: string;
-    autoInstall: boolean;
-    pending: boolean;
-    requestedAtMs: number;
-    status?: { phase: string; message: string; progressPct?: number; updatedAtMs: number };
-  }
->();
-type DirectWorkOffer = {
-  offerId: string;
-  fromAgentId: string;
-  toAgentId: string;
-  workType: "code_task" | "model_inference";
-  language?: "python" | "javascript";
-  input: string;
-  createdAtMs: number;
-  status: "offered" | "accepted" | "completed" | "rejected";
-  acceptedBy?: string;
-  acceptedAtMs?: number;
-  result?: { ok: boolean; output: string; error?: string; durationMs: number; completedAtMs: number };
-};
-
-const directWorkById = new Map<string, DirectWorkOffer>();
-const directWorkInbox = new Map<string, string[]>();
-export const agentCapabilities = new Map<
-  string,
-  {
-    os: string;
-    version: string;
-    mode: "swarm-only" | "ide-enabled";
-    localModelEnabled: boolean;
-    localModelProvider: "edgecoder-local" | "ollama-local";
-    localModelCatalog: string[];
-    /** #54: localModelCatalog came from the agent's signed /api/tags report (not assumed or gossiped). */
-    modelsReported?: boolean;
-    clientType: string;
-    swarmEnabled: boolean;
-    ideEnabled: boolean;
-    maxConcurrentTasks: number;
-    connectedPeers: Set<string>;
-    ownerEmail?: string;
-    sourceIp?: string;
-    countryCode?: string;
-    vpnDetected?: boolean;
-    enrollmentReason?: string;
-    powerTelemetry?: AgentPowerTelemetry;
-    activeModel?: string;
-    activeModelParamSize?: number;
-    modelSwapInProgress?: boolean;
-    publicKeyPem?: string;
-    x25519PublicKey?: string;
-    sandboxMode: SandboxMode;
-    lastSeenMs: number;
-    hardwareProfile?: HardwareProfile;
-    /** Derived from hardwareProfile at registration: the class-market whose flat price values the agent's credits. */
-    computeClass: ComputeClassId;
-    /** Tier, weight (credits per measured second) and capability (vramGb / memoryGb) from the same classification. */
-    hardwareClass?: HardwareClassification;
-  }
->();
-const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
-const ENVELOPE_KEY_TTL_MS = 60 * 60 * 1000; // 1 hour
-const federatedCapabilities = new Map<string, CapabilitySummaryPayload>();
-const lastTaskAssignedByAgent = new Map<string, number>();
-const ollamaRollouts = new Map<string, OllamaRolloutRecord>();
-const pendingTunnelInvites = new Map<string, Array<{ fromAgentId: string; token: string }>>();
-const activeTunnels = new Map<
-  string,
-  {
-    fromAgentId: string;
-    toAgentId: string;
-    createdAtMs: number;
-    lastRelayMs: number;
-    relayCount: number;
-    relayWindowStartMs: number;
-    relayWindowCount: number;
-  }
->();
-const tunnelByPairKey = new Map<string, string>();
-const TUNNEL_IDLE_TTL_MS = CC.TUNNEL_IDLE_TTL_MS;
-const TUNNEL_MAX_RELAYS_PER_MIN = CC.TUNNEL_MAX_RELAYS_PER_MIN;
-const RELAY_RATE_LIMIT_PER_10S = CC.RELAY_RATE_LIMIT_PER_10S;
-const DIRECT_WORK_OFFERS_PER_10S = CC.DIRECT_WORK_OFFERS_PER_10S;
-const blacklistByAgent = new Map<string, BlacklistRecord>();
-const blacklistAuditLog: BlacklistRecord[] = [];
-
-// ── Behavioral monitoring ──
-const behaviorTracker = new AgentBehaviorTracker();
-const anomalyDetector = new AnomalyDetector();
-/** Append a blacklist record this coordinator issues itself (signed with its key) and gossip it. */
-function issueCoordinatorBlacklistRecord(input: {
-  agentId: string;
-  reasonCode: BlacklistReasonCode;
-  reason: string;
-  evidenceHashSha256: string;
-  reportedBy: string;
-  expiresAtMs?: number;
-}): BlacklistRecord {
-  const now = Date.now();
-  const eventId = randomUUID();
-  const evidenceSignatureVerified = false;
-  const prevEventHash = mutable.lastBlacklistEventHash;
-  const eventHash = buildBlacklistEventHash({
-    eventId,
-    agentId: input.agentId,
-    reasonCode: input.reasonCode,
-    reason: input.reason,
-    evidenceHashSha256: input.evidenceHashSha256,
-    reporterId: identity.peerId,
-    sourceCoordinatorId: identity.peerId,
-    timestampMs: now,
-    expiresAtMs: input.expiresAtMs,
-    prevEventHash,
-    evidenceSignatureVerified,
-  });
-  const coordinatorSignature = signPayload(eventHash, coordinatorKeys.privateKeyPem);
-  const record: BlacklistRecord = {
-    eventId,
-    agentId: input.agentId,
-    reasonCode: input.reasonCode,
-    reason: input.reason,
-    evidenceHashSha256: input.evidenceHashSha256,
-    reporterId: identity.peerId,
-    evidenceSignatureVerified,
-    sourceCoordinatorId: identity.peerId,
-    reportedBy: input.reportedBy,
-    timestampMs: now,
-    expiresAtMs: input.expiresAtMs,
-    prevEventHash,
-    eventHash,
-    coordinatorSignature,
-  };
-  appendBlacklistRecord(record);
-  const gossipMessage = protocol.createMessage(
-    "blacklist_update",
-    identity.peerId,
-    record as unknown as Record<string, unknown>,
-    coordinatorKeys.privateKeyPem
-  );
-  void mesh.broadcast(gossipMessage);
-  return record;
-}
-
-const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
-  issueCoordinatorBlacklistRecord({
-    agentId: action.agentId,
-    reasonCode: action.reasonCode,
-    reason: action.reason,
-    evidenceHashSha256: action.evidenceHashSha256,
-    reportedBy: "behavioral_monitoring",
-    expiresAtMs: CC.AUTO_BLACKLIST_TTL_MS > 0 ? Date.now() + CC.AUTO_BLACKLIST_TTL_MS : undefined,
-  });
-  securityLog.log({
-    level: "CRITICAL",
-    event: "auto_blacklist_triggered",
-    source: { type: "system", id: identity.peerId },
-    details: { agentId: action.agentId, reasonCode: action.reasonCode, reason: action.reason, rules: action.anomalyEvents.map(e => e.ruleId) },
-    action: "agent_blacklisted",
-    coordinatorId: identity.peerId,
-  });
-});
-
-function evaluateAndEnforce(agentId: string): void {
-  const stats = behaviorTracker.getStats(agentId);
-  if (!stats) return;
-  const anomalies = anomalyDetector.evaluate(stats);
-  if (anomalies.length > 0) {
-    for (const anomaly of anomalies) {
-      securityLog.log({
-        level: anomaly.severity,
-        event: "behavioral_anomaly_detected",
-        source: { type: "agent", id: agentId },
-        details: { ruleId: anomaly.ruleId, ruleName: anomaly.ruleName, ...anomaly.stats },
-        action: "anomaly_recorded",
-        coordinatorId: identity.peerId,
-      });
-    }
-    autoBlacklister.processAnomalies(agentId, anomalies);
-  }
-}
-
-// ── Release manifest cache for code signing verification ──
-const releaseManifestCache = new ReleaseManifestCache();
-releaseManifestCache.start();
-const REQUIRE_VERIFIED_AGENTS = CC.REQUIRE_VERIFIED_AGENTS;
-// #44: signed agent requests are mandatory by default (always in production).
-const REQUIRE_SIGNED_AGENT_REQUESTS = requireSignedAgentRequests();
-
-const relayWindowByAgent = new Map<string, { windowMs: number; count: number }>();
-const offerWindowByAgent = new Map<string, { windowMs: number; count: number }>();
-const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: string; token: string; reason: string }>>();
-const paymentIntents = new Map<string, PaymentIntent>();
-const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
-/** #53: band and max step for the legacy price epoch, and how many signed coordinators a consensus round needs. */
-const PRICE_EPOCH_BOUNDS = { cpu: priceEpochBoundsFromEnv("cpu"), gpu: priceEpochBoundsFromEnv("gpu") } as const;
-const PRICE_CONSENSUS_QUORUM_OVERRIDE = CC.PRICE_CONSENSUS_QUORUM;
-function previousPriceEpochSats(resourceClass: ResourceClass): number {
-  return latestPriceEpochByResource.get(resourceClass)?.pricePerComputeUnitSats ?? LEGACY_BASE_SATS_PER_UNIT[resourceClass];
-}
-
-// ── Rate oracle: sats per CPU-hour from market data, recalibrated daily ──
-const RATE_RECALIBRATION_MS = CC.RATE_RECALIBRATION_MS;
-const RATE_ORACLE_ENABLED = CC.RATE_ORACLE_ENABLED;
-const rateOracleConfig = rateOracleConfigFromEnv();
-
-/**
- * Compute market: agents' asks and tasks' bids per compute class, in msat per credit. The
- * oracle sets the reference each epoch; tracking asks follow it (see order-book.ts).
- */
-const orderBook = new ComputeOrderBook();
-/** Minute ticks + trade tape per class: candles, depth and the trade list for the market page. */
-const marketHistory = new MarketHistory();
-const MARKET_TICK_MS = 60_000;
-/** Standing orders from the portal keyed by `${accountId}:${side}`. */
-const marketOrders = new Map<string, MarketOrder>();
-/**
- * Hardware verification (src/swarm/hardware-verification.ts): hardware is self-reported, so a tier
- * above the class base is paid only after the agent passes a coordinator-issued benchmark
- * challenge; until then (and for agents without benchmark support) it earns base weight 1.
- */
-const hardwareVerifier = new HardwareVerifier({
-  config: hardwareVerificationConfigFromEnv(),
-  classes: rateOracleConfig.computeClasses,
-  persist: (r) => pgStore?.upsertHardwareVerification(r)
-});
-/** The class, tier and weight an agent is paid and matched at (its verified grant); undefined for an unknown agent. */
-function effectiveHardware(agentId: string, cap?: { hardwareClass?: HardwareClassification }): HardwareClassification | undefined {
-  const c = cap ?? agentCapabilities.get(agentId);
-  return c?.hardwareClass ? hardwareVerifier.effective(agentId, c.hardwareClass) : undefined;
-}
-/** What an agent's ask advertises to the matcher: verified tier and weight, capability (VRAM, memory), reliability. */
-function askCapabilityOf(agentId: string, cap: { hardwareClass?: HardwareClassification } | undefined): AskCapability | undefined {
-  const h = effectiveHardware(agentId, cap);
-  const reliability = hardwareVerifier.reliability(agentId);
-  return h ? { tier: h.tier, creditsPerSecond: h.creditsPerSecond, vramGb: h.vramGb, memoryGb: h.memoryGb, ...(reliability !== undefined ? { reliability } : {}) } : undefined;
-}
-/** Re-post an agent's ask after its grant changed; an explicit price survives only within the same class. */
-function repostAsk(agentId: string, nowMs = Date.now()): void {
-  const cap = agentCapabilities.get(agentId);
-  const eff = effectiveHardware(agentId, cap);
-  if (!cap || !eff) return;
-  const prev = orderBook.askFor(agentId);
-  const keepPrice = prev && !prev.tracking && prev.computeClass === eff.computeClass ? prev.msatPerCredit : undefined;
-  orderBook.postAsk(agentId, eff.computeClass, keepPrice, nowMs, askCapabilityOf(agentId, cap));
-}
-/** Short verification state for the agent / portal. */
-function verificationSummary(r: HardwareVerificationRecord | undefined): Record<string, unknown> | null {
-  if (!r) return null;
-  return { status: r.status, claimedTier: r.claimed.tier, grantedTier: r.granted.tier, grantedClass: r.granted.computeClass, measured: r.measured ?? null, reliability: hardwareVerifier.reliability(r.agentId) ?? null, flags: r.flags };
-}
-/** The Ollama model a GPU challenge runs on: the agent's active model, else the one it benchmarked. */
-function benchmarkModelFor(agentId: string): string | undefined {
-  const rec = hardwareVerifier.get(agentId);
-  return agentCapabilities.get(agentId)?.activeModel || rec?.selfReport?.gpu?.model || rec?.selfReport?.loaded?.model || undefined;
-}
-/**
- * A second agent to run the same GPU challenge (cross-check): online, same model, not the subject's
- * owner or IP, preferring agents that are themselves cross-checked. Sybils across owners are the
- * residual risk; ongoing evidence and re-challenges with a fresh random witness bound it.
- */
-function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number): string | undefined {
-  const subject = agentCapabilities.get(subjectId);
-  const candidates: Array<{ id: string; rank: number }> = [];
-  for (const [id, cap] of agentCapabilities) {
-    if (id === subjectId || nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
-    if (subject?.ownerEmail && cap.ownerEmail === subject.ownerEmail) continue;
-    if (subject?.sourceIp && cap.sourceIp === subject.sourceIp) continue;
-    const rec = hardwareVerifier.get(id);
-    if (!rec?.challengeKinds.includes("gpu") || benchmarkModelFor(id) !== model) continue;
-    candidates.push({ id, rank: rec.measured?.crossChecked ? 2 : rec.status === "verified" ? 1 : 0 });
-  }
-  const best = Math.max(-1, ...candidates.map((c) => c.rank));
-  const top = candidates.filter((c) => c.rank === best);
-  return top.length ? top[randomInt(top.length)].id : undefined;
-}
-
-const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;
-function recordMarketTicks(nowMs = Date.now()): void {
-  // Bids are per task; drop any that outlived their task (failed, abandoned, lost on restart).
-  orderBook.pruneBids((bid) => nowMs - bid.createdAtMs > MARKET_BID_MAX_AGE_MS || (queue.openSubtaskCount(bid.taskId) === 0 && nowMs - bid.createdAtMs > 10 * 60_000));
-  for (const id of COMPUTE_CLASS_IDS) {
-    if (!orderBook.hasReference(id)) continue; // no oracle rate yet: nothing meaningful to chart
-    const snap = orderBook.snapshot(id, nowMs);
-    const tick = {
-      atMs: nowMs,
-      computeClass: id,
-      referenceMsat: snap.referenceMsatPerCredit,
-      bestAskMsat: snap.bestAsk,
-      bestBidMsat: snap.bestBid,
-      midMsat: snap.midMsatPerCredit,
-      clearingMsat: snap.clearingMsatPerCredit,
-      agents: snap.agents,
-      openTasks: snap.openTasks
-    };
-    marketHistory.recordTick(tick);
-    void pgStore?.persistMarketTick(tick).catch(() => undefined);
-  }
-}
-
-/** A seller's standing order applies to every agent the account owns; a buyer's becomes the default bid for its tasks. */
-async function applyMarketOrder(order: MarketOrder): Promise<void> {
-  marketOrders.set(`${order.accountId}:${order.side}`, order);
-  await pgStore?.upsertMarketOrder(order);
-  if (order.side === "sell") {
-    const owned = (await pgStore?.listAgentOwnershipByAccount(order.accountId)) ?? [];
-    const ids = new Set<string>([...owned.map((o) => o.agentId), order.accountId]);
-    for (const agentId of ids) {
-      const cap = agentCapabilities.get(agentId);
-      const cls = cap ? (effectiveHardware(agentId, cap)?.computeClass ?? cap.computeClass) : undefined;
-      if (cap && cls && (order.computeClass === "any" || order.computeClass === cls)) {
-        orderBook.postAsk(agentId, cls, order.msatPerCredit > 0 ? order.msatPerCredit : undefined, Date.now(), askCapabilityOf(agentId, cap));
-      }
-    }
-  }
-}
-const MARKET_DEFAULT_BID_PREMIUM_BPS = CC.MARKET_DEFAULT_BID_PREMIUM_BPS;
-const NETWORK_FEE_BPS = CC.NETWORK_FEE_BPS;
-
-function syncOrderBookReference(epoch: RateEpoch | null): void {
-  if (!epoch) return;
-  for (const id of COMPUTE_CLASS_IDS) {
-    const r = epoch.classRates?.[id];
-    if (r) orderBook.setReference(id, r.msatPerCredit);
-  }
-}
-
-async function recalibrateRateEpoch(): Promise<RateEpoch> {
-  const epoch = await recalibrateRates({ cfg: rateOracleConfig, previous: mutable.latestRateEpoch });
-  mutable.latestRateEpoch = epoch;
-  syncOrderBookReference(epoch);
-  recordMarketTicks();
-  await pgStore?.upsertRateEpoch(epoch);
-  app.log.info(
-    {
-      epochId: epoch.epochId,
-      status: epoch.status,
-      btcUsd: epoch.btcUsd,
-      satsPerCpuHour: epoch.satsPerCpuHour,
-      satsPerGpuHour: epoch.satsPerGpuHour,
-      msatPerCredit: epoch.msatPerCredit,
-      clamped: Boolean(epoch.clamped),
-      sources: epoch.btcUsdSources.map((s) => `${s.name}:${s.ok ? (s.outlier ? "outlier" : "ok") : "fail"}`)
-    },
-    "rate_epoch_recalibrated"
-  );
-  return epoch;
-}
-
-export interface CreditQuote {
-  satsPerCredit: number;
-  msatPerCredit: number;
-  loadMultiplier: number;
-  quoteSource: "rate_oracle" | "price_epoch" | "default_floor";
-  rateEpochId?: string;
-  rateEpochAtMs?: number;
-  stale: boolean;
-}
-
-/**
- * What one credit (one CPU-second) costs right now: the oracle's market rate × the scarcity
- * multiplier. Falls back to the legacy mesh price epoch, then to the legacy 30-sat floor, when
- * the oracle has never produced an epoch (e.g. RATE_ORACLE_ENABLED=false or offline dev).
- */
-function quoteSatsPerCredit(resourceClass: ResourceClass = "cpu"): CreditQuote {
-  const status = queue.status();
-  const cpuCapacity = Math.max(1, [...agentCapabilities.values()].reduce((sum, a) => sum + Math.max(1, a.maxConcurrentTasks), 0));
-  const gpuCapacity = Math.max(1, [...agentCapabilities.values()].filter((a) => a.localModelProvider === "ollama-local").length);
-  const loadMultiplier = Number(
-    dynamicLoadMultiplier(resourceClass, { cpuCapacity, gpuCapacity, queuedTasks: status.queued, activeAgents: status.agents }).toFixed(4)
-  );
-  if (mutable.latestRateEpoch) {
-    const classRate = mutable.latestRateEpoch.classRates?.[resourceClass === "gpu" ? "gpu" : "cpu"];
-    const perCreditBase = classRate ? classRate.satsPerCredit : (resourceClass === "gpu" ? mutable.latestRateEpoch.satsPerGpuHour : mutable.latestRateEpoch.satsPerCpuHour) / 3600;
-    const satsPerCredit = Number((perCreditBase * loadMultiplier).toFixed(6));
-    return {
-      satsPerCredit,
-      msatPerCredit: Math.max(1, Math.round(satsPerCredit * 1000)),
-      loadMultiplier,
-      quoteSource: "rate_oracle",
-      rateEpochId: mutable.latestRateEpoch.epochId,
-      rateEpochAtMs: mutable.latestRateEpoch.createdAtMs,
-      stale: isRateEpochStale(mutable.latestRateEpoch, rateOracleConfig)
-    };
-  }
-  const legacy = latestPriceEpochByResource.get(resourceClass);
-  const satsPerCredit = legacy?.pricePerComputeUnitSats ?? (resourceClass === "gpu" ? 120 : 30);
-  return {
-    satsPerCredit,
-    msatPerCredit: Math.round(satsPerCredit * 1000),
-    loadMultiplier,
-    quoteSource: legacy ? "price_epoch" : "default_floor",
-    stale: true
-  };
-}
-/** Routes that need a Lightning provider: payment intents/webhook and robot task creation (invoices). */
-function isPaymentGatedRequest(method: string, url: string): boolean {
-  const path = url.split("?")[0];
-  if (path.startsWith("/economy/payments")) return true;
-  return method === "POST" && path === "/robot/tasks";
-}
-// ECONOMY_PAYMENTS_ENABLED=false lets a coordinator boot (including in production)
-// without a Lightning node: payment routes return 503 and no provider is created.
-const ECONOMY_PAYMENTS_ENABLED = economyPaymentsEnabled();
-const disabledLightningProvider: LightningProvider = {
-  async createInvoice() {
-    throw new Error("economy_payments_disabled");
-  },
-  async checkSettlement() {
-    return { settled: false };
-  },
-  async payInvoice() {
-    return { status: "failed" as const, error: "economy_payments_disabled" };
-  },
-  async getBalances() {
-    return { supported: false as const, reason: "economy_payments_disabled" };
-  },
-  async listPayments() {
-    return { supported: false as const, reason: "economy_payments_disabled" };
-  }
-};
-const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
-  ? createLightningProviderFromEnv()
-  : disabledLightningProvider;
-
-// ── Payouts and the network fee pool (docs/economy-math.md "Payouts") ──
-// Earned sats leave the ledger only through PayoutService: a withdrawal pays a BOLT11 invoice from
-// the coordinator's Lightning node, auto payouts pay Lightning addresses, and the fee pool (network
-// fee on every accrual + the coordinator fee on every purchase) is distributed to infrastructure
-// hosts by uptime. In-memory mode (no Postgres) keeps the same semantics without durability.
-const payoutPolicy = payoutPolicyFromEnv(BITCOIN_NETWORK);
-class EnginePayoutStore extends MemoryPayoutStore {
-  constructor() {
-    super((accountId) => creditEngine.earnedMsat(accountId));
-  }
-  override async creditBalance(accountId: string): Promise<number> {
-    return creditEngine.balance(accountId) + (await super.creditBalance(accountId));
-  }
-  /** Engine-held earnings can't be totalled across accounts, so the liability check is skipped in memory mode. */
-  override async liabilitiesMsat(): Promise<number | undefined> {
-    return undefined;
-  }
-}
-const memoryPayoutStore = pgStore ? null : new EnginePayoutStore();
-const payoutStore: PayoutStore = pgStore ?? (memoryPayoutStore as PayoutStore);
-
-// Hot-wallet safeguards (docs/going-to-mainnet.md): caps, the kill switch and reconciliation.
-const payoutLimits = payoutLimitsFromEnv(BITCOIN_NETWORK);
-const payoutPause = new PayoutPauseControl({
-  store: payoutStore,
-  envPaused: payoutsPausedByEnv(),
-  onChange: (state, previous) => {
-    securityLog.log({
-      level: securityLog.severity(state.paused ? "payouts_paused" : "payouts_resumed"),
-      event: state.paused ? "payouts_paused" : "payouts_resumed",
-      source: { type: state.source === "reconciliation" ? "system" : "coordinator", id: state.changedBy ?? identity.peerId },
-      details: { reason: state.reason, source: state.source, wasPaused: previous.paused },
-      action: state.paused ? "halt_outbound_payments" : "resume_outbound_payments",
-      coordinatorId: identity.peerId
-    });
-    ordering.append({
-      eventType: "payouts_pause_changed",
-      taskId: `payouts_pause:${state.changedAtMs ?? Date.now()}`,
-      actorId: state.changedBy ?? identity.peerId,
-      coordinatorId: identity.peerId,
-      payloadJson: JSON.stringify({ paused: state.paused, reason: state.reason, source: state.source, changedAtMs: state.changedAtMs })
-    });
-  }
-});
-// Defense in depth: even a caller that skipped PayoutService's checks cannot pay while paused.
-const payoutProvider: LightningProvider = {
-  createInvoice: (input) => lightningProvider.createInvoice(input),
-  checkSettlement: (ref, hash) => lightningProvider.checkSettlement(ref, hash),
-  async payInvoice(input) {
-    if (await payoutPause.isPaused()) return { status: "failed", error: "payouts_paused" };
-    return lightningProvider.payInvoice(input);
-  },
-  getBalances: lightningProvider.getBalances ? () => lightningProvider.getBalances!() : undefined,
-  listPayments: lightningProvider.listPayments ? (input) => lightningProvider.listPayments!(input) : undefined
-};
-// LNURL callback pins (src/economy/lnurl-callback-pin.ts). A changed callback host holds the
-// account's auto payouts and tells the portal once, which emails the owner (/internal/payouts/callback-changed).
-const callbackPins: CallbackPinStore = pgStore ? pgStore.callbackPinStore() : new MemoryCallbackPinStore();
-async function notifyPortalCallbackChanged(info: { accountId: string; destination: string; previousOrigin: string; newOrigin: string }): Promise<boolean> {
-  if (!PORTAL_SERVICE_URL) return false;
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
-  const res = await request(`${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/payouts/callback-changed`, {
-    method: "POST",
-    headers,
-    headersTimeout: 5_000,
-    bodyTimeout: 5_000,
-    body: JSON.stringify(info)
-  });
-  await res.body.dump();
-  return res.statusCode >= 200 && res.statusCode < 300;
-}
-const payoutService = new PayoutService({
-  store: payoutStore,
-  pins: callbackPins,
-  onCallbackChanged: notifyPortalCallbackChanged,
-  provider: payoutProvider,
-  policy: payoutPolicy,
-  limits: payoutLimits,
-  pause: payoutPause,
-  onSecurityEvent: (event, details) => {
-    securityLog.log({
-      level: securityLog.severity(event),
-      event,
-      source: { type: "system", id: String(details.accountId ?? "payouts") },
-      details,
-      action: "reject_payout",
-      coordinatorId: identity.peerId
-    });
-  },
-  coordinatorId: identity.peerId,
-  feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT,
-  // LNURL hosts are user-chosen: public https only, checked again at connect, no redirects.
-  fetcher: (url: string) => fetchPublicJson(url, { timeoutMs: 10_000 }),
-  log: app.log,
-  onPaid: async (p) => {
-    ordering.append({
-      eventType: "payout_settled",
-      taskId: p.payoutId,
-      subtaskId: p.paymentHash,
-      actorId: p.accountId,
-      coordinatorId: identity.peerId,
-      payloadJson: JSON.stringify({ payoutId: p.payoutId, accountId: p.accountId, kind: p.kind, amountMsat: p.amountMsat, feeMsat: p.feeMsat, paymentHash: p.paymentHash, destination: p.destination, settledAtMs: p.settledAtMs })
-    });
-  },
-  onDistributed: async (rows, hosts) => {
-    mutable.lastFeePoolDistribution = { atMs: Date.now(), distributedMsat: hosts.reduce((a, h) => a + h.msat, 0), hosts: hosts.length };
-    ordering.append({
-      eventType: "fee_pool_distribution",
-      taskId: rows[0]?.txId ?? randomUUID(),
-      subtaskId: "",
-      actorId: NETWORK_FEE_POOL_ACCOUNT,
-      coordinatorId: identity.peerId,
-      payloadJson: JSON.stringify({ hosts, totalMsat: hosts.reduce((a, h) => a + h.msat, 0) })
-    });
-  }
-});
 
 /**
  * Infrastructure hosts (this coordinator included) report uptime by heartbeat; weight = uptime ×
@@ -1044,22 +518,7 @@ async function recordInfraHeartbeat(input: {
   if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
   return { host: memoryPayoutStore.hosts.get(host.hostId) ?? host, counted };
 }
-const INFRA_HOST_ENABLED = CC.INFRA_HOST_ENABLED;
-const INFRA_HOST_SERVICES: string[] = (CC.INFRA_HOST_SERVICES ?? "")
-  .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
-if (INFRA_HOST_SERVICES.length === 0) {
-  INFRA_HOST_SERVICES.push("coordinator");
-  if (process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind") INFRA_HOST_SERVICES.push("bitcoind");
-  if (["lnd", "cln"].includes((CC.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
-}
-/** Systems accounts a host record may never name as its payee. */
-const RESERVED_HOST_ACCOUNTS = [NETWORK_FEE_POOL_ACCOUNT, COORDINATOR_FEE_ACCOUNT];
-// Remote hosts: probes run against the host of the URL the mesh admitted (service-probes.ts).
-// HOST_ATTEST_ALLOW_PRIVATE=1 lets local test networks probe private addresses.
-const hostAttestor = new HostServiceAttestor({
-  network: BITCOIN_NETWORK,
-  probes: networkServiceProbes({ allowPrivate: CC.HOST_ATTEST_ALLOW_PRIVATE })
-});
+
 /** Our own services: each counts only if the backend this process uses answers (cached 10 min). */
 let selfAttestation: AttestationResult | null = null;
 async function attestOwnServices(): Promise<AttestationResult> {
@@ -1083,8 +542,7 @@ async function attestOwnServices(): Promise<AttestationResult> {
   if (missing.length) app.log.warn({ missing, results: selfAttestation.results }, "infra_host_services_not_attested");
   return selfAttestation;
 }
-/** Other coordinators whose fee pool this host also reports to (signed POST /economy/hosts/heartbeat). */
-const INFRA_HOST_REPORT_URLS = (CC.INFRA_HOST_REPORT_URLS ?? "").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
+
 async function selfInfraHeartbeat(): Promise<void> {
   if (!INFRA_HOST_ENABLED) return;
   const fields = {
@@ -1112,42 +570,7 @@ async function selfInfraHeartbeat(): Promise<void> {
       .catch((error) => app.log.warn({ url, error: String(error) }, "infra_heartbeat_report_failed"));
   }
 }
-let feePoolDistributing: Promise<FeePoolDistribution> | null = null;
-async function runFeePoolDistribution(opts: { manual?: boolean } = {}): Promise<FeePoolDistribution> {
-  // Single-flight: concurrent callers (a flooded endpoint, overlapping timers) share one run so
-  // the pool is not distributed twice for the same window (audit econ#3). Across instances sharing
-  // one database, distributeFeePool holds a Postgres advisory lock (a second coordinator skips with
-  // "locked"), and the timer skips a window another instance already distributed ("recent", at
-  // 90% of FEE_POOL_DISTRIBUTION_MS). The admin route is a manual override of the latter only.
-  if (feePoolDistributing) return feePoolDistributing;
-  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
-  const minIntervalMs = opts.manual ? 0 : Math.floor(CC.FEE_POOL_DISTRIBUTION_MS * 0.9);
-  feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats, { minIntervalMs }).finally(() => { feePoolDistributing = null; });
-  return feePoolDistributing;
-}
-const payoutReconcileConfig = payoutReconcileConfigFromEnv();
-export const payoutReconciler = new PayoutReconciler({
-  provider: lightningProvider,
-  ledger: payoutStore,
-  config: payoutReconcileConfig,
-  coordinatorId: identity.peerId,
-  webhookUrl: CC.PAYOUT_ALERT_WEBHOOK_URL,
-  log: app.log,
-  pause: async (reason) => {
-    await payoutPause.pause(reason, "reconciliation", identity.peerId);
-  },
-  onAlert: (r) => {
-    const event = r.status === "error" ? "payout_reconciliation_error" : "payout_reconciliation_mismatch";
-    securityLog.log({
-      level: securityLog.severity(event),
-      event,
-      source: { type: "system", id: "payout_reconciler" },
-      details: { status: r.status, failed: r.checks.filter((c) => !c.ok).map((c) => ({ name: c.name, detail: c.detail, msat: c.msat })), error: r.error },
-      action: r.status === "tripped" ? "pause_payouts" : "alert",
-      coordinatorId: identity.peerId
-    });
-  }
-});
+
 app.addHook("onRequest", async (req, reply) => {
   if (!ECONOMY_PAYMENTS_ENABLED && isPaymentGatedRequest(req.method, req.url)) {
     return reply.code(503).send({ error: "economy_payments_disabled" });
@@ -1168,63 +591,6 @@ function appendAgentDiagnostic(agentId: string, message: string, eventAtMs = Dat
 // ── Subtask dependency tracking ─────────────────────────────────────────────
 const depTracker = new SubtaskDepTracker();
 
-// #5: an empty token means "open" only outside production; in production it is 503/denied.
-function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
-  const result = checkSharedToken(MESH_AUTH_TOKEN, req.headers["x-mesh-token"], IS_PROD);
-  if (result === "ok") return true;
-  reply.code(result === "not_configured" ? 503 : 401);
-  return false;
-}
-
-function hasMeshToken(headers: Record<string, unknown>): boolean {
-  return checkSharedToken(MESH_AUTH_TOKEN, headers["x-mesh-token"], IS_PROD) === "ok";
-}
-
-function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
-  return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
-}
-
-/*
- * Mesh token scope (docs/security-baseline.md, "Coordinator route authority"). Every enrolled agent
- * holds MESH_AUTH_TOKEN, so it is a transport gate only (the global onRequest hook). Routes that act
- * for one agent take the agent from its request signature (requireAgentSelf); operator routes need
- * authorizeAdmin; coordinator-to-coordinator routes verify an allowlisted peer signature.
- */
-
-/**
- * Agent-self routes: the request must be signed by a registered agent key, and when the route
- * names an agent (`claimedAgentId`, from the body or path) it must be the signer. Sends 401/403
- * and returns null otherwise.
- */
-async function requireAgentSelf(
-  req: { headers?: unknown; url?: string; ip?: string },
-  reply: { code: (n: number) => { send: (b: unknown) => unknown } },
-  claimedAgentId?: string
-): Promise<string | null> {
-  const routePath = String(req.url ?? "").split("?")[0];
-  const verified = await verifyAgentRequest((req.headers ?? {}) as Record<string, unknown>, routePath, req.ip, {
-    requireSigned: true,
-    rawBody: rawBodyOf(req as any)
-  });
-  if (!verified || verified === "rejected") {
-    reply.code(401).send({ error: "agent_signature_required" });
-    return null;
-  }
-  if (claimedAgentId !== undefined && claimedAgentId !== verified.agentId) {
-    reply.code(403).send({ error: "agent_identity_mismatch" });
-    return null;
-  }
-  return verified.agentId;
-}
-
-/** Routes the portal proxies for logged-in users (market data and standing orders) accept either token. */
-function requireMeshOrPortalToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
-  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
-  if (hasMeshToken(headers) || hasPortalServiceToken(headers)) return true;
-  reply.code(401).send({ error: "mesh_unauthorized" });
-  return false;
-}
-
 /**
  * The portal owns node enrollment, so a portal-validated agent's earnings and spending belong to
  * the enrolling user's account (acct-<userId>, as the portal names it). Linked on every validated
@@ -1240,19 +606,6 @@ async function linkPortalOwnership(agentId: string, ownerUserId: string): Promis
   } catch (err) {
     app.log.warn({ err, agentId }, "agent_ownership_link_failed");
   }
-}
-
-/**
- * Account-scoped money routes (withdraw, set payout address, read a user's balance) require the
- * PORTAL service token specifically. The portal binds accountId = acct-<userId> from the session
- * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents hold
- * only the shared mesh token and must NOT be able to move another account's funds (audit econ#1).
- */
-function requirePortalServiceToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
-  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
-  if (hasPortalServiceToken(headers)) return true;
-  reply.code(401).send({ error: "portal_service_unauthorized" });
-  return false;
 }
 
 const robotQueue = ROBOT_QUEUE_ENABLED
@@ -1342,140 +695,6 @@ app.addHook("onReady", async () => {
 // Architecture step 3: signed self-announcement + Nostr announcer (EDGECODER_NOSTR_ANNOUNCE=1), see docs/discovery.md.
 const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: CC.EDGECODER_NOSTR_ANNOUNCE, log: (msg, meta) => app.log.info(meta ?? {}, msg) });
 registerDiscoveryRoutes(app, discoveryAnnouncer);
-
-function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
-  const agentId = headers["x-agent-id"];
-  const timestampMs = headers["x-timestamp-ms"];
-  const nonce = headers["x-nonce"];
-  const bodySha256 = headers["x-body-sha256"];
-  const signature = headers["x-signature"];
-  if (
-    typeof agentId !== "string" ||
-    typeof timestampMs !== "string" ||
-    typeof nonce !== "string" ||
-    typeof bodySha256 !== "string" ||
-    typeof signature !== "string"
-  ) {
-    return null;
-  }
-  return {
-    "x-agent-id": agentId,
-    "x-timestamp-ms": timestampMs,
-    "x-nonce": nonce,
-    "x-body-sha256": bodySha256,
-    "x-signature": signature,
-  };
-}
-
-async function verifyAgentRequest(
-  headers: Record<string, unknown>,
-  routePath: string,
-  sourceIp?: string,
-  opts?: { allowUnsigned?: boolean; requireSigned?: boolean; rawBody?: string }
-): Promise<{ agentId: string; nonce: string } | "rejected" | null> {
-  const signed = extractSignedHeaders(headers);
-  // #44: unsigned requests are rejected unless the policy is explicitly relaxed (non-prod),
-  // or the route has its own alternative auth for unsigned callers (allowUnsigned).
-  // requireSigned: the route acts on behalf of a named agent and has no other auth, so it is
-  // signed-only whatever the policy (an unsigned caller could otherwise speak for any agent).
-  if (!signed) return unsignedRequestDecision({ requireSignedPolicy: REQUIRE_SIGNED_AGENT_REQUESTS, ...opts });
-
-  // The claimed id is not proven until the signature verifies: nothing before that is counted
-  // against the agent (anyone can name it), only against the address the request came from.
-  const agentId = signed["x-agent-id"];
-
-  // 1. Skip rate limiting for loopback (embedded worker is trusted)
-  const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST);
-  const clientIp = extractClientIp(headers, sourceIp, CLIENT_IP_TRUST) ?? "unknown";
-  const rejectUnproven = (event: SecurityEventType, reason: string, countFailure = true): "rejected" => {
-    if (!isLoopback && countFailure) preAuthFailures.record(clientIp);
-    securityLog.log({
-      level: securityLog.severity(event),
-      event,
-      source: { type: "system", id: "unauthenticated", ip: clientIp },
-      details: { reason, route: routePath, claimedAgentId: agentId },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    return "rejected";
-  };
-
-  // 2. An address sending many unverifiable requests is turned away before any checking.
-  if (!isLoopback && preAuthFailures.blocked(clientIp)) return rejectUnproven("auth_rate_limit_hit", "too_many_failed_signatures");
-
-  // 3. Look up agent public key (a missing key means the agent needs to re-register, e.g. after a
-  //    coordinator restart: not counted as a failure)
-  const cap = agentCapabilities.get(agentId);
-  if (!cap?.publicKeyPem) return rejectUnproven("invalid_signature", "no_public_key", false);
-
-  // 4. Verify signature
-  const sigResult = verifySignedRequest({
-    method: "POST",
-    path: routePath,
-    headers: signed,
-    publicKeyPem: cap.publicKeyPem,
-    maxSkewMs: SECURITY_MAX_SKEW_MS,
-    // Body binding: x-body-sha256 must be the hash of the bytes actually received. Every agent
-    // build since signing shipped hashes JSON.stringify(body), the same bytes it sends.
-    rawBody: opts?.rawBody ?? "",
-  });
-
-  if (!sigResult.valid) {
-    // Only a body mismatch comes after the signature checked out (a signed request replayed with a
-    // new payload): that one is the agent's key. Skew and bad signatures prove nothing about who sent them.
-    if (sigResult.reason !== "body_hash_mismatch") {
-      return rejectUnproven(sigResult.reason === "timestamp_skew" ? "replay_attempt" : "invalid_signature", sigResult.reason ?? "invalid_signature");
-    }
-    securityLog.log({
-      level: securityLog.severity("replay_attempt"),
-      event: "replay_attempt",
-      source: { type: "agent", id: agentId, ip: clientIp },
-      details: { reason: sigResult.reason, route: routePath },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    behaviorTracker.recordProtocolViolation(agentId, "replay_attempt");
-    return "rejected";
-  }
-
-  // 5. Per-agent rate limit, now that the request is the agent's own — skip for loopback
-  if (!isLoopback && !agentRateLimiter.check(agentId)) {
-    securityLog.log({
-      level: securityLog.severity("auth_rate_limit_hit"),
-      event: "auth_rate_limit_hit",
-      source: { type: "agent", id: agentId, ip: clientIp },
-      details: { route: routePath },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
-    return "rejected";
-  }
-
-  // 6. Nonce replay detection
-  const nonceResult = await verifyNonce(nonceStore, {
-    nonce: sigResult.nonce!,
-    sourceId: agentId,
-    timestampMs: Number(signed["x-timestamp-ms"]),
-    maxSkewMs: SECURITY_MAX_SKEW_MS,
-    ttlMs: SECURITY_NONCE_TTL_MS,
-  });
-
-  if (!nonceResult.valid) {
-    securityLog.log({
-      level: securityLog.severity("replay_attempt"),
-      event: "replay_attempt",
-      source: { type: "agent", id: agentId },
-      details: { nonce: sigResult.nonce, reason: nonceResult.reason, route: routePath },
-      action: "reject_request",
-      coordinatorId: identity.peerId,
-    });
-    behaviorTracker.recordProtocolViolation(agentId, "replay_attempt");
-    return "rejected";
-  }
-
-  return { agentId: sigResult.agentId!, nonce: sigResult.nonce! };
-}
 
 async function applyStatsProjectionRecord(record: {
   eventType: string;
@@ -2184,26 +1403,6 @@ async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinatorUrl: s
   }
 }
 
-function activeBlacklistRecord(agentId: string): BlacklistRecord | undefined {
-  const record = blacklistByAgent.get(agentId);
-  if (!record) return undefined;
-  if (record.expiresAtMs && Date.now() > record.expiresAtMs) {
-    blacklistByAgent.delete(agentId);
-    mutable.blacklistVersion += 1;
-    return undefined;
-  }
-  return record;
-}
-
-/** #122: blacklisted here or by any coordinator on the shared database. */
-async function meshBlacklistReason(agentId: string): Promise<string | null> {
-  const local = activeBlacklistRecord(agentId);
-  if (local) return local.reason;
-  const shared = await pgStore?.latestBlacklistEvent(agentId);
-  if (shared && !(shared.expiresAtMs && Date.now() > shared.expiresAtMs)) return shared.reason;
-  return null;
-}
-
 /** #122: agent keys this coordinator trusts: its own registration plus the shared key table. */
 async function trustedAgentSigningKeys(agentId: string): Promise<string[]> {
   const keys = new Set<string>((await pgStore?.listAgentSigningKeys(agentId)) ?? []);
@@ -2222,30 +1421,6 @@ function attestAgentSigningKey(agentId: string, publicKeyPem: string): void {
     attestedAgentKeys.delete(k);
     app.log.warn({ error, agentId }, "agent_signing_key_record_failed");
   });
-}
-
-function appendBlacklistRecord(record: BlacklistRecord): void {
-  blacklistByAgent.set(record.agentId, record);
-  blacklistAuditLog.push(record);
-  mutable.blacklistVersion += 1;
-  mutable.lastBlacklistEventHash = record.eventHash;
-  void pgStore?.persistBlacklistEvent(record).catch(() => undefined);
-}
-
-async function upsertRollout(record: OllamaRolloutRecord): Promise<void> {
-  ollamaRollouts.set(record.rolloutId, record);
-  try {
-    const rolloutPersistTimeoutMs = 2_000;
-    await Promise.race([
-      pgStore?.upsertOllamaRollout(record),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("rollout_persist_timeout")), rolloutPersistTimeoutMs)
-      )
-    ]);
-  } catch (error) {
-    // Keep orchestration UX responsive even if Postgres is transiently unavailable.
-    app.log.warn({ error, rolloutId: record.rolloutId, targetId: record.targetId }, "rollout_persist_failed");
-  }
 }
 
 function isApprovedCoordinator(peerId: string): boolean {
@@ -2543,24 +1718,6 @@ async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
   paymentIntents.set(expired.intentId, expired);
   await pgStore?.upsertPaymentIntent(expired);
   return true;
-}
-
-function cleanupStaleTunnels(): number {
-  const now = Date.now();
-  let removed = 0;
-  for (const [token, tunnel] of activeTunnels.entries()) {
-    const stale = now - tunnel.lastRelayMs > TUNNEL_IDLE_TTL_MS;
-    const invalidAgent =
-      !agentCapabilities.has(tunnel.fromAgentId) || !agentCapabilities.has(tunnel.toAgentId);
-    if (stale || invalidAgent) {
-      activeTunnels.delete(token);
-      tunnelByPairKey.delete(pairKey(tunnel.fromAgentId, tunnel.toAgentId));
-      agentCapabilities.get(tunnel.fromAgentId)?.connectedPeers.delete(tunnel.toAgentId);
-      agentCapabilities.get(tunnel.toAgentId)?.connectedPeers.delete(tunnel.fromAgentId);
-      removed += 1;
-    }
-  }
-  return removed;
 }
 
 const defaultPolicy: ExecutionPolicy = {
@@ -3175,27 +2332,6 @@ app.get("/agent/diagnostics/:agentId", async (req, reply) => {
     latestEventAtMs: sorted.length > 0 ? sorted[0].eventAtMs : undefined
   });
 });
-
-/** Whose credits a submitted task spends: see submitterAccountDecision. */
-async function resolveSubmitterAccount(
-  req: { headers: Record<string, unknown>; ip: string },
-  requested: string,
-  routePath = "/submit"
-): Promise<{ accountId: string } | { status: number; error: string }> {
-  const headers = (req.headers ?? {}) as Record<string, unknown>;
-  const portalService = hasPortalServiceToken(headers);
-  const verified = portalService
-    ? null
-    : await verifyAgentRequest(headers, routePath, req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req as any) });
-  const signer = verified && verified !== "rejected" ? verified.agentId : null;
-  return submitterAccountDecision({
-    requested,
-    portalService,
-    signature: verified === "rejected" ? "rejected" : signer ? { agentId: signer } : null,
-    ownerAccountId: signer ? (await pgStore?.getAgentOwnership(signer))?.accountId : undefined,
-    loopback: req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1"
-  });
-}
 
 app.post("/submit", async (req, reply) => {
   const body = taskSchema.parse(req.body);
@@ -4301,20 +3437,6 @@ const inferenceSubmitSchema = z.object({
   /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
   source: z.string().max(80).optional(),
 });
-
-/**
- * Whose account an /account/* call is for: the portal (service token) names it; otherwise the
- * signing agent's owner (or the agent itself when it has no owner yet).
- */
-async function callerAccount(req: any, routePath: string, requested?: string): Promise<{ accountId: string } | { status: number; error: string }> {
-  const headers = (req.headers ?? {}) as Record<string, unknown>;
-  // The portal path needs the header itself: with no token configured (development) every request
-  // would otherwise count as the portal's.
-  if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) return requested ? { accountId: requested } : { status: 400, error: "account_required" };
-  const verified = await verifyAgentRequest(headers, routePath, req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (!verified || verified === "rejected") return { status: 401, error: "signature_invalid" };
-  return { accountId: (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId };
-}
 
 /** The signing agent's owner account: cSats balance, earnings and recent activity (for the app's Compute page). */
 app.post("/account/summary", async (req, reply) => {
@@ -8002,22 +7124,6 @@ export async function initCoordinator(): Promise<void> {
   await maybeAnchorLatestStatsCheckpoint().catch(() => undefined);
 }
 
-/* ── Admin dashboard (token-gated) ── */
-const ADMIN_API_TOKEN = CC.ADMIN_API_TOKEN ?? "";
-
-function authorizeAdmin(req: any, reply: any): boolean {
-  if (!ADMIN_API_TOKEN) {
-    reply.code(503).send({ error: "admin_dashboard_not_configured" });
-    return false;
-  }
-  const headerToken = readHeaderValue(req.headers, "x-admin-token");
-  if (!headerToken || !safeTokenEqual(headerToken, ADMIN_API_TOKEN)) {
-    reply.code(401).send({ error: "invalid_admin_token" });
-    return false;
-  }
-  return true;
-}
-
 // #40: every /admin/* route lives in this plugin behind authorizeAdmin (in addition to the
 // per-route checks), so new admin routes can't forget it.
 app.register(async (admin) => {
@@ -8207,3 +7313,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 
 export { app as coordinatorServer };
+export type { CreditQuote } from "./coordinator/economy.js";
