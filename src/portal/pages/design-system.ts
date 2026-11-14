@@ -8,8 +8,10 @@
  * Direction: an infrastructure / trading console. Graphite surfaces, hairline borders, one
  * accent (Bitcoin orange) reserved for primary actions and the active nav item, semantic
  * green/red only for money and status, tabular monospace numerals, no gradients, no blur,
- * no hover-lift, no emoji. Page styles are inline (CSP: style-src inline); scripts are nonce'd or
- * external.
+ * no hover-lift, no emoji. Page styles are <style> blocks that carry the request's CSP nonce and
+ * scripts are nonce'd or external. There are no style attributes: the policy has no
+ * 'unsafe-inline', so an attribute would be dropped by the browser. Use a class (the u-* utilities
+ * below for one-off spacing), or set el.style from a script, which the policy allows.
  *
  * #89: colors come from the shared @edgecoder/tokens stylesheet (/assets/tokens.css, see
  * ../assets.ts), the same tokens as the desktop app, with light and dark values selected by
@@ -162,7 +164,9 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 .dot.green { background: var(--ok); } .dot.yellow { background: var(--yellow); } .dot.red { background: var(--danger); } .dot.gray { background: var(--muted); }
 
 /* Brand mark (brandMark()) and the theme toggle (assets.ts themeToggleButton()) */
-.mark { display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--brand); color: var(--on-accent); }
+.mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 6px; background: var(--brand); color: var(--on-accent); }
+.mark-24 { width: 24px; height: 24px; border-radius: 5px; }
+.mark-30 { width: 30px; height: 30px; border-radius: 7px; }
 .theme-toggle [data-theme-label] { font-size: 12px; }
 
 /* Misc */
@@ -180,6 +184,24 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 }
 .empty { color: var(--muted); font-size: 13px; padding: var(--sp-6); text-align: center; border: 1px dashed var(--card-border); border-radius: var(--radius-sm); }
 @media (max-width: 920px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+/* Utilities. Pages have no style attributes (the CSP has no 'unsafe-inline' for styles), so the
+   one-off spacing and alignment tweaks are classes. !important keeps the precedence an inline
+   style had. .u-m-0 comes first so that "u-m-0 u-mb-8" reads as margin: 0 0 8px. */
+.u-m-0 { margin: 0 !important; }
+.u-mt-0 { margin-top: 0 !important; } .u-mt-4 { margin-top: 4px !important; } .u-mt-6 { margin-top: 6px !important; }
+.u-mt-8 { margin-top: 8px !important; } .u-mt-10 { margin-top: 10px !important; } .u-mt-12 { margin-top: 12px !important; }
+.u-mt-14 { margin-top: 14px !important; }
+.u-mb-4 { margin-bottom: 4px !important; } .u-mb-6 { margin-bottom: 6px !important; } .u-mb-8 { margin-bottom: 8px !important; }
+.u-mb-10 { margin-bottom: 10px !important; } .u-mb-12 { margin-bottom: 12px !important; }
+.u-ml-8 { margin-left: 8px !important; } .u-ml-auto { margin-left: auto !important; } .u-mr-6 { margin-right: 6px !important; }
+.u-pad-12 { padding: 12px !important; }
+.u-flex-1 { flex: 1 !important; } .u-between { justify-content: space-between !important; }
+.u-w-full { width: 100% !important; } .u-w-34 { width: 34% !important; }
+.u-center { text-align: center !important; } .u-left { text-align: left !important; } .u-break-all { word-break: break-all !important; }
+.u-fs-10 { font-size: 10px !important; } .u-fs-12 { font-size: 12px !important; } .u-fs-13 { font-size: 13px !important; }
+.u-font-ui { font-family: system-ui !important; } .u-font-mono { font-family: var(--font-mono) !important; }
+.u-muted { color: var(--muted) !important; } .u-brand-2 { color: var(--brand-2) !important; } .u-danger { color: var(--danger) !important; }
 `;
 
 /** Inline SVG icons (24x24 viewBox, stroke-based, currentColor). */
@@ -235,7 +257,7 @@ export function icon(name: string, size = 16, className = ""): string {
 }
 
 /** The brand mark: an orange square with a monogram, no gradient. */
-export function brandMark(size = 28): string {
-  const r = Math.round(size * 0.22);
-  return `<span class="mark" style="width:${size}px;height:${size}px;border-radius:${r}px;" aria-hidden="true"><svg width="${Math.round(size * 0.6)}" height="${Math.round(size * 0.6)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h14"/><path d="M4 12h10"/><path d="M4 18h14"/><path d="M20 10l-3 2 3 2"/></svg></span>`;
+export function brandMark(size: 24 | 28 | 30 = 28): string {
+  // The box size is a class (BASE_CSS .mark, .mark-24, .mark-30): the CSP allows no style attributes.
+  return `<span class="mark${size === 28 ? "" : ` mark-${size}`}" aria-hidden="true"><svg width="${Math.round(size * 0.6)}" height="${Math.round(size * 0.6)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h14"/><path d="M4 12h10"/><path d="M4 18h14"/><path d="M20 10l-3 2 3 2"/></svg></span>`;
 }

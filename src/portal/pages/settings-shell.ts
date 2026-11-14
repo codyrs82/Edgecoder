@@ -4,6 +4,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { icon } from "./design-system.js";
 import { portalAuthedPageHtml } from "./layout.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 /**
  * The Settings frame (like the desktop app's): a left sub-navigation with icons and a "Search
@@ -56,7 +57,7 @@ export function settingRow(title: string, desc: string, control: string, opts: {
 }
 
 export const SETTINGS_CSS = `
-  <style>
+  <style nonce="${CSP_NONCE}">
     .settings-layout { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 36px; max-width: 1060px; margin: 4px auto 0; }
     .settings-nav { position: sticky; top: calc(var(--topbar-h) + 20px); align-self: start; }
     .settings-search { position: relative; margin-bottom: 10px; }
@@ -108,6 +109,8 @@ export const SETTINGS_CSS = `
       .set-row { flex-direction: column; align-items: stretch; gap: 10px; }
       .set-control { max-width: none; justify-content: flex-start; }
     }
+    /* Plan & usage: the retired-address and changed-callback notices */
+    .payout-warning { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 6px; }
   </style>`;
 
 function settingsNav(active: SettingsSection): string {

@@ -2,14 +2,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { request } from "undici";
 import { z } from "zod";
 import type { MarketRoutesDeps } from "../server.js";
 import { registerHostedRoutes } from "./hosted.js";
+import { chartLibSource } from "../chart-lib.js";
 
 /**
  * Compute market API for the portal's /portal/market page: proxies the coordinator's
@@ -21,37 +18,8 @@ export function registerMarketRoutes(app: FastifyInstance, deps: MarketRoutesDep
   const { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser } = deps;
   // Buying compute from your tools: the hosted model endpoint and its API keys.
   registerHostedRoutes(app, deps);
-  const require = createRequire(import.meta.url);
-  let chartLib: string | null = null;
-  const chartLibCandidates = (): string[] => {
-    const rel = "lightweight-charts/dist/lightweight-charts.standalone.production.js";
-    const out: string[] = [];
-    try {
-      out.push(require.resolve(rel));
-    } catch {
-      // the package's "exports" map doesn't list dist/, so resolve the package root instead
-    }
-    try {
-      out.push(resolve(dirname(require.resolve("lightweight-charts")), "dist", "lightweight-charts.standalone.production.js"));
-    } catch {
-      // not installed via the main entry either
-    }
-    out.push(resolve(fileURLToPath(new URL("../../../node_modules/" + rel, import.meta.url))));
-    out.push(resolve(process.cwd(), "node_modules", rel));
-    return out;
-  };
   app.get("/portal/vendor/lightweight-charts.js", async (_req, reply) => {
-    if (chartLib === null) {
-      chartLib = "";
-      for (const candidate of chartLibCandidates()) {
-        try {
-          chartLib = readFileSync(candidate, "utf8");
-          break;
-        } catch {
-          // try the next location
-        }
-      }
-    }
+    const chartLib = chartLibSource();
     if (!chartLib) return reply.code(404).send("lightweight-charts not installed");
     return reply.header("content-type", "application/javascript; charset=utf-8").header("cache-control", "public, max-age=86400").send(chartLib);
   });

@@ -10,11 +10,13 @@
  * from live asks/bids, the trade tape, and a panel to place standing buy/sell orders.
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
+import { CSP_NONCE } from "../csp-nonce.js";
+
 export const MARKET_SUBTITLE =
   "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.";
 
 export const MARKET_CONTENT = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .mkt-top { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
       .mkt-pair { font-size:20px; font-weight:700; letter-spacing:0.01em; }
       .mkt-stat { display:flex; flex-direction:column; min-width:110px; }
@@ -49,10 +51,12 @@ export const MARKET_CONTENT = `
       .pos { color:var(--ok); } .neg { color:var(--danger); }
       .agents-list { font-size:12px; }
       .agents-list div { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid var(--card-border); }
+      select.pair-select { width:auto; min-width:260px; font-size:14px; font-weight:600; }
+      .hint.depth-label { margin:8px 0 4px; }
     </style>
 
     <div class="mkt-top">
-      <select id="pairSelect" style="width:auto;min-width:260px;font-size:14px;font-weight:600;"></select>
+      <select id="pairSelect" class="pair-select"></select>
       <div class="mkt-pair" id="pairLabel">…/BTC</div>
       <div class="mkt-stat"><span class="k">Last</span><span class="v" id="statLast">–</span></div>
       <div class="mkt-stat"><span class="k">24h change</span><span class="v" id="statChange">–</span></div>
@@ -66,24 +70,24 @@ export const MARKET_CONTENT = `
 
     <div class="mkt-grid">
       <div>
-        <div class="card" style="padding:12px;">
+        <div class="card u-pad-12">
           <div class="mkt-toolbar">
-            <span class="hint" style="margin-right:6px;">Interval</span>
+            <span class="hint u-mr-6">Interval</span>
             ${["1m", "5m", "15m", "1h", "4h", "1d"].map((i) => `<button data-interval="${i}" class="${i === "5m" ? "active" : ""}">${i}</button>`).join("")}
-            <span class="hint" style="margin-left:auto;" id="chartMeta">msat per credit · 1 credit = 1 measured second on the base tier of this class</span>
+            <span class="hint u-ml-auto" id="chartMeta">msat per credit · 1 credit = 1 measured second on the base tier of this class</span>
           </div>
           <div id="priceChart" class="mkt-chart"></div>
-          <div class="hint" style="margin:8px 0 4px;">Depth (cumulative agents asking / tasks bidding)</div>
+          <div class="hint depth-label">Depth (cumulative agents asking / tasks bidding)</div>
           <div id="depthChart" class="mkt-depth"></div>
         </div>
-        <div class="card" style="padding:12px;margin-top:12px;">
-          <h3 style="margin:0 0 8px;">Recent trades</h3>
+        <div class="card u-pad-12 u-mt-12">
+          <h3 class="u-m-0 u-mb-8">Recent trades</h3>
           <div class="tape" id="tape"><div class="hint">No trades yet on this class.</div></div>
         </div>
       </div>
       <div>
-        <div class="card book" style="padding:12px;">
-          <h3 style="margin:0 0 8px;font-family:system-ui;">Order book</h3>
+        <div class="card book u-pad-12">
+          <h3 class="u-m-0 u-mb-8 u-font-ui">Order book</h3>
           <table>
             <thead><tr><th>Price (msat/credit)</th><th>Agents</th><th>Cum.</th></tr></thead>
             <tbody id="asksBody"></tbody>
@@ -94,15 +98,15 @@ export const MARKET_CONTENT = `
             <tfoot><tr><th>Price (msat/credit)</th><th>Tasks</th><th>Cum.</th></tr></tfoot>
           </table>
         </div>
-        <div class="card book" style="padding:12px;margin-top:12px;">
-          <h3 style="margin:0 0 4px;font-family:system-ui;">Hardware tiers</h3>
-          <div class="hint" id="tierExplain" style="font-family:system-ui;margin-bottom:6px;"></div>
+        <div class="card book u-pad-12 u-mt-12">
+          <h3 class="u-m-0 u-mb-4 u-font-ui">Hardware tiers</h3>
+          <div class="hint u-font-ui u-mb-6" id="tierExplain"></div>
           <table>
-            <thead><tr><th style="text-align:left;">Tier</th><th>Credits/s</th><th>sats/h</th><th>Agents</th></tr></thead>
+            <thead><tr><th class="u-left">Tier</th><th>Credits/s</th><th>sats/h</th><th>Agents</th></tr></thead>
             <tbody id="tiersBody"></tbody>
           </table>
         </div>
-        <div class="card" style="padding:12px;margin-top:12px;">
+        <div class="card u-pad-12 u-mt-12">
           <div class="order-tabs">
             <button class="buy active" id="tabBuy">Buy compute</button>
             <button class="sell" id="tabSell">Sell compute</button>
@@ -116,11 +120,11 @@ export const MARKET_CONTENT = `
             <label>Class</label>
             <select id="orderClass"><option value="any">Any (match by class of the chart)</option></select>
           </div>
-          <div class="hint" id="orderExplain" style="margin-bottom:10px;"></div>
-          <button class="primary" id="placeOrder" style="width:100%;">Place standing bid</button>
-          <div class="hint" id="orderStatus" style="margin-top:8px;"></div>
-          <div id="myOrders" class="hint" style="margin-top:10px;"></div>
-          <div id="myAgents" class="agents-list" style="margin-top:10px;"></div>
+          <div class="hint u-mb-10" id="orderExplain"></div>
+          <button class="primary u-w-full" id="placeOrder">Place standing bid</button>
+          <div class="hint u-mt-8" id="orderStatus"></div>
+          <div id="myOrders" class="hint u-mt-10"></div>
+          <div id="myAgents" class="agents-list u-mt-10"></div>
         </div>
       </div>
     </div>`;
@@ -215,11 +219,11 @@ export const MARKET_SCRIPT = `
         // Weight table: one price per credit in the class; a tier's hour is the credit-hour × its weight.
         function renderTiers(spec, refMsat) {
           var tiers = spec.tiers || [];
-          if (!tiers.length) { $("tiersBody").innerHTML = "<tr><td colspan='4' class='hint' style='text-align:center'>one tier</td></tr>"; $("tierExplain").textContent = ""; return; }
+          if (!tiers.length) { $("tiersBody").innerHTML = "<tr><td colspan='4' class='hint u-center'>one tier</td></tr>"; $("tierExplain").textContent = ""; return; }
           var top = tiers[tiers.length - 1];
           $("tierExplain").textContent = "Same price per credit for every tier. Faster hardware earns more credits per second, so one hour of " + top.label + " costs " + top.creditsPerSecond + " " + spec.label + " credit-hours. Tasks can require minVramGb / minMemoryGb; under-spec agents cannot fill them.";
           $("tiersBody").innerHTML = tiers.map(function (t) {
-            return "<tr><td style='text-align:left;'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + esc(t.creditsPerSecond) + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + esc(t.agents || 0) + "</td></tr>";
+            return "<tr><td class='u-left'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + esc(t.creditsPerSecond) + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + esc(t.agents || 0) + "</td></tr>";
           }).join("");
         }
 
@@ -228,11 +232,11 @@ export const MARKET_SCRIPT = `
           var totalA = 0; for (var i = 0; i < book.asks.length; i++) totalA += book.asks[i].count;
           cum = totalA;
           for (var a = 0; a < asks.length; a++) { rows.push("<tr><td class='ask'>" + fmt(asks[a].msatPerCredit) + "</td><td>" + esc(asks[a].count) + "</td><td>" + esc(cum) + "</td></tr>"); cum -= asks[a].count; }
-          $("asksBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no asks</td></tr>";
+          $("asksBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint u-center'>no asks</td></tr>";
           $("bookMid").textContent = fmt(book.midMsatPerCredit) + " msat · clearing " + fmt(book.clearingMsatPerCredit);
           cum = 0; rows = [];
           for (var b = 0; b < book.bids.length; b++) { cum += book.bids[b].count; rows.push("<tr><td class='bid'>" + fmt(book.bids[b].msatPerCredit) + "</td><td>" + esc(book.bids[b].count) + "</td><td>" + esc(cum) + "</td></tr>"); }
-          $("bidsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no bids (open tasks)</td></tr>";
+          $("bidsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint u-center'>no bids (open tasks)</td></tr>";
         }
 
         function renderDepth(depth) {

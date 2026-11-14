@@ -23,7 +23,7 @@ app.get("/portal", async (_req, reply) => {
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>EdgeCoder Portal | Sign in</title>
       ${themeHeadTags()}
-      <style>
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         .auth { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
@@ -59,6 +59,7 @@ app.get("/portal", async (_req, reply) => {
         .link-btn { background: none; border: none; color: var(--text-secondary); padding: 0; min-height: 0; font-size: 12px; }
         .link-btn:hover { color: var(--brand-2); background: none; }
         @media (max-width: 860px) { .auth { grid-template-columns: 1fr; } .auth-brand { border-right: none; border-bottom: 1px solid var(--card-border); padding: 24px; } .auth-brand h1 { font-size: 24px; } }
+        .brand-gap { height: 48px; }
       </style>
     </head>
     <body>
@@ -66,7 +67,7 @@ app.get("/portal", async (_req, reply) => {
         <section class="auth-brand">
           <div>
             <div class="brand">${brandMark(30)}<span>EdgeCoder</span></div>
-            <div style="height:48px"></div>
+            <div class="brand-gap"></div>
             <h1>Compute, priced in Bitcoin.</h1>
             <p class="lead">Run AI coding workloads on a global mesh of machines. Contribute capacity and earn sats, or buy capacity with sats at a market rate recalibrated daily.</p>
             <div class="props">
@@ -89,11 +90,11 @@ app.get("/portal", async (_req, reply) => {
               <div class="sub">Sign in with your email, a passkey, or single sign-on.</div>
               <label>Email</label><input id="loginEmail" type="email" placeholder="you@company.com" autocomplete="email" />
               <label>Password</label><input id="loginPassword" type="password" placeholder="Your password" autocomplete="current-password" />
-              <div class="row" style="margin-top:14px;">
-                <button class="primary" id="loginBtn" style="flex:1;">Sign in</button>
+              <div class="row u-mt-14">
+                <button class="primary u-flex-1" id="loginBtn">Sign in</button>
                 <button id="passkeyLoginBtn">${icon("key", 14)} Passkey</button>
               </div>
-              <div class="row" style="margin-top:10px; justify-content:space-between;"><a class="link-btn" id="forgotLink" href="/portal/reset-password">Forgot password?</a><button class="link-btn" id="resendBtn">Resend verification email</button></div>
+              <div class="row u-mt-10 u-between"><a class="link-btn" id="forgotLink" href="/portal/reset-password">Forgot password?</a><button class="link-btn" id="resendBtn">Resend verification email</button></div>
               ${ssoBlock}
             </div>
 
@@ -103,16 +104,16 @@ app.get("/portal", async (_req, reply) => {
               <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" autocomplete="email" />
               <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
               <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
-              <div class="row" style="margin-top:14px;">
-                <button class="primary" id="signupBtn" style="flex:1;">Create account</button>
+              <div class="row u-mt-14">
+                <button class="primary u-flex-1" id="signupBtn">Create account</button>
               </div>
-              <p class="muted" style="margin-top:12px;">We email a verification link. Nodes you enroll activate once the address is verified.</p>
+              <p class="muted u-mt-12">We email a verification link. Nodes you enroll activate once the address is verified.</p>
             </div>
 
             <div id="sessionBanner" class="callout session-banner hidden">
               <h3>Already signed in</h3>
               <div id="sessionUserLine" class="muted">You already have an active session.</div>
-              <div class="row" style="margin-top:10px;">
+              <div class="row u-mt-10">
                 <button class="primary" id="continueSessionBtn">Continue to dashboard</button>
                 <button id="switchUserBtn">Switch user</button>
               </div>

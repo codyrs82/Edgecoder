@@ -61,7 +61,7 @@ export function portalAuthedPageHtml(input: {
     : `<a class="nav-link nav-action" id="newChatBtn" href="/portal/chat?new=1">${icon("edit", 16)}<span class="nav-label">New chat</span></a>`;
   const primaryHtml = PRIMARY_NAV_ITEMS.map((item) => {
     const active = item.key === input.activeTab;
-    const badge = item.badge ? `<span class="nav-badge" id="${item.badge}" style="display:none;">0</span>` : "";
+    const badge = item.badge ? `<span class="nav-badge hidden" id="${item.badge}">0</span>` : "";
     return `<a class="nav-link${active ? " active" : ""}" href="${item.href}" title="${item.label}"${active ? ' aria-current="page"' : ""}>${icon(item.icon, 16)}<span class="nav-label">${item.label}</span>${badge}</a>`;
   }).join("");
   const menuHtml = ACCOUNT_MENU_ITEMS.map((m) => {
@@ -78,7 +78,7 @@ export function portalAuthedPageHtml(input: {
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${input.title}</title>
       ${themeHeadTags()}
-      <style>
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         /* ── Shell ── */
@@ -132,6 +132,7 @@ export function portalAuthedPageHtml(input: {
           margin-left: auto; background: var(--brand); color: var(--on-accent); font-size: 10px; font-weight: 700;
           min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
         }
+        .topbar-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
         /* ── Profile row + account menu (bottom of the sidebar) ── */
         .sidebar-foot { position: relative; border-top: 1px solid var(--card-border); padding: 8px; }
         .profile-row { display: flex; align-items: center; gap: 4px; border-radius: var(--radius-sm); }
@@ -229,7 +230,7 @@ export function portalAuthedPageHtml(input: {
         <div class="scrim" id="navScrim"></div>
         <div class="main">
           <header class="topbar">
-            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <div class="topbar-lead">
               <button class="hamburger-btn ghost" id="hamburgerBtn" aria-label="Open navigation">${icon("menu", 18)}</button>
               <div class="topbar-title"><h1>${input.heading}</h1><div class="sub">${input.subtitle}</div></div>
             </div>
@@ -425,7 +426,7 @@ export function portalAuthedPageHtml(input: {
             var badge = document.getElementById("reviewsBadge");
             if (badge && reviews.length > 0) {
               badge.textContent = String(reviews.length);
-              badge.style.display = "inline-flex";
+              badge.classList.remove("hidden");
             }
           } catch { /* noop */ }
         }
@@ -470,7 +471,7 @@ export function portalCardPageHtml(input: {
       <meta name="referrer" content="no-referrer" />
       <title>${input.title}</title>
       ${themeHeadTags()}
-      <style>
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 36px 16px; }

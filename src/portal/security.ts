@@ -6,6 +6,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ServerResponse } from "node:http";
+import { chartLibStyleHashes } from "./chart-lib.js";
 import { applyCspNonce, newCspNonce } from "./csp-nonce.js";
 import { createPgRateLimitStore, type PgRateLimitStoreOptions, type RateLimitPool } from "./rate-limit-store.js";
 
@@ -271,7 +272,9 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
         // Inline scripts run only with this request's nonce; inline event handlers
         // (script-src-attr 'none', a helmet default) and injected <script> tags do not.
         "script-src": ["'self'", (_req, res) => `'nonce-${(res as NonceResponse).cspNonce ?? ""}'`],
-        "style-src": ["'self'", "'unsafe-inline'"],
+        // #27: no 'unsafe-inline'. <style> blocks carry the same nonce, pages have no style
+        // attributes, and the one stylesheet the chart library injects is allowed by hash.
+        "style-src": ["'self'", (_req, res) => `'nonce-${(res as NonceResponse).cspNonce ?? ""}'`, ...chartLibStyleHashes()],
         "img-src": ["'self'", "data:", "https:"],
         "connect-src": ["'self'", ...(opts.connectOrigins ?? [])],
         "frame-ancestors": ["'none'"],

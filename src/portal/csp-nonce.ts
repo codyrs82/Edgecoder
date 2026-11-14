@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /*
- * Per-request CSP nonces for the portal's inline <script> blocks.
+ * Per-request CSP nonces for the portal's inline <script> and <style> blocks.
  *
- * Page templates write `<script nonce="${CSP_NONCE}">`. CSP_NONCE is a marker that is random per
- * process and never leaves the server: registerPortalSecurity's onSend hook replaces it in every
- * HTML response with that request's nonce, which is also the one in the Content-Security-Policy
- * header. Markup that reaches a page from user or agent data cannot carry a valid nonce, so an
- * injected <script> does not run under the enforced policy.
+ * Page templates write `<script nonce="${CSP_NONCE}">` and `<style nonce="${CSP_NONCE}">`.
+ * CSP_NONCE is a marker that is random per process and never leaves the server:
+ * registerPortalSecurity's onSend hook replaces it in every HTML response with that request's
+ * nonce, which is also the one in the Content-Security-Policy header. Markup that reaches a page
+ * from user or agent data cannot carry a valid nonce, so an injected <script> does not run and an
+ * injected <style> or style attribute does not apply under the enforced policy.
+ *
+ * The static mirror has no per-request header, so static-site.ts drops the attribute and lists the
+ * hash of each <style> block instead.
  */
 import { randomBytes } from "node:crypto";
 

@@ -83,6 +83,12 @@ The mirror carries a `_redirects` file that forwards `/portal*`, `/auth/*`, `/wa
 always-up landing page, and keep the apex on the live portal. Cloudflare's Always Online does the
 same for cached copies of those pages on the apex.
 
+The mirror's `_headers` file carries its Content-Security-Policy. A static host cannot issue the
+per-request nonce the live portal uses, so the export lists the SHA-256 hash of each page's
+`<style>` block instead (no `'unsafe-inline'`). The hashes are of the exported bytes: re-export
+after any page change, and do not let the host minify or otherwise rewrite the HTML, or the
+browser will drop the styles.
+
 ### 2c. Independent origins with health-based failover (hours; paid add-on)
 
 For a second origin that keeps sign-in working while Fly `ord` is down:

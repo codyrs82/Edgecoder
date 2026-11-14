@@ -252,7 +252,9 @@ describe("enforced CSP with per-request script nonces", () => {
     expect(csp).toMatch(/script-src 'self' 'nonce-[A-Za-z0-9+/=]{20,}'/);
     expect(csp).toContain("script-src-attr 'none'");
     expect(csp).toContain("upgrade-insecure-requests");
-    expect(csp).not.toContain("unsafe-inline' 'nonce"); // style-src keeps unsafe-inline without a nonce
+    // #27: styles are held to the same nonce; nothing in the policy allows inline without it
+    expect(csp).toMatch(/style-src 'self' 'nonce-[A-Za-z0-9+/=]{20,}'/);
+    expect(csp).not.toContain("unsafe-inline");
     const nonceA = csp.match(/'nonce-([^']+)'/)![1];
     const nonceB = String(b.headers["content-security-policy"]).match(/'nonce-([^']+)'/)![1];
     expect(nonceA).not.toBe(nonceB);

@@ -151,7 +151,7 @@ describe("portal tokens and theme (#89)", () => {
     expect(files["assets/tokens.css"]).toBe(PACKAGE_TOKENS);
     expect(files["assets/theme.js"]).toBe(THEME_JS);
     expectThemed(files["index.html"], "mirror index");
-    expect(files._headers).not.toContain("unsafe-inline'; script");
+    expect(files._headers).not.toContain("unsafe-inline");
   });
 
   it("npm run build's copy step puts tokens.css where the built server reads it", () => {

@@ -4,13 +4,14 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 /* ───────────────── Reviews page — Cloud Review Diff UI ───────────────── */
 export function registerReviewsPage(app: FastifyInstance): void {
 app.get("/portal/reviews", async (_req, reply) => {
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .reviews-layout { display:flex; gap:12px; min-height:calc(100vh - 120px); }
       .reviews-list { width:320px; min-width:280px; flex-shrink:0; }
       .reviews-detail { flex:1; min-width:0; }
@@ -121,13 +122,20 @@ app.get("/portal/reviews", async (_req, reply) => {
         .reviews-list { width:100%; }
         .diff-container { grid-template-columns:1fr; }
       }
+      .reviews-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+      /* By id: the script replaces this badge's class list when the count loads. */
+      #reviewCountBadge { font-size:10px; }
+      .empty-state.compact { padding:32px 12px; }
+      p.task-text { color:var(--text-secondary); margin:0; font-size:14px; line-height:1.6; }
+      .card.diff-card { padding:0; overflow:hidden; }
+      label.edit-label { font-size:12px; color:var(--muted); text-transform:uppercase; }
     </style>
     <div class="reviews-layout">
       <div class="reviews-list">
         <div class="card">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <h3 style="margin:0;">Pending Reviews</h3>
-            <span class="status-badge" id="reviewCountBadge" style="font-size:10px;">--</span>
+          <div class="reviews-head">
+            <h3 class="u-m-0">Pending Reviews</h3>
+            <span class="status-badge" id="reviewCountBadge">--</span>
           </div>
           <div id="reviewsList"><div class="loading-state"><span class="loading-spinner sm"></span> Loading reviews...</div></div>
         </div>
@@ -168,7 +176,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         badge.className = reviews.length > 0 ? "status-badge warn" : "status-badge ok";
       }
       if (reviews.length === 0) {
-        container.innerHTML = '<div class="empty-state" style="padding:32px 12px;"><div class="empty-icon">${icon("check", 28)}</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
+        container.innerHTML = '<div class="empty-state compact"><div class="empty-icon">${icon("check", 28)}</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
         return;
       }
       var html = "";
@@ -178,7 +186,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         var statusTone = r.status === "completed" ? "ok" : r.status === "failed" ? "danger" : "warn";
         html += '<div class="review-item' + active + '" data-task-id="' + escapeHtml(r.taskId) + '">';
         html += '<div class="ri-task">' + escapeHtml(r.task || r.taskId) + '</div>';
-        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span style="color:var(--muted);">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
+        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span class="u-muted">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
         html += '</div>';
       }
       container.innerHTML = html;
@@ -269,14 +277,14 @@ app.get("/portal/reviews", async (_req, reply) => {
 
       var html = '';
       html += '<div class="card">';
-      html += '<h2 style="margin-top:0;">Task</h2>';
-      html += '<p style="color:var(--text-secondary);margin:0;font-size:14px;line-height:1.6;">' + escapeHtml(data.task || "No task description") + '</p>';
+      html += '<h2 class="u-mt-0">Task</h2>';
+      html += '<p class="task-text">' + escapeHtml(data.task || "No task description") + '</p>';
       if (data.language) {
-        html += '<div style="margin-top:8px;">' + statusBadge(data.language, "neutral") + '</div>';
+        html += '<div class="u-mt-8">' + statusBadge(data.language, "neutral") + '</div>';
       }
       html += '</div>';
 
-      html += '<div class="card" style="padding:0;overflow:hidden;">';
+      html += '<div class="card diff-card">';
       html += '<div class="diff-container">';
       html += '<div class="diff-pane diff-pane-left">';
       html += '<div class="diff-pane-header"><span class="diff-file-icon">${icon("file", 13)}</span> Original (failed)</div>';
@@ -312,7 +320,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       editMode = !editMode;
       var editArea = document.getElementById("editArea");
       if (editMode && currentReview) {
-        editArea.innerHTML = '<label style="font-size:12px;color:var(--muted);text-transform:uppercase;">Edit improved code before accepting</label>'
+        editArea.innerHTML = '<label class="edit-label">Edit improved code before accepting</label>'
           + '<textarea class="edit-area" id="editTextarea">' + escapeHtml(currentReview.improvedCode || "") + '</textarea>';
         document.getElementById("editTextarea").focus();
       } else {
