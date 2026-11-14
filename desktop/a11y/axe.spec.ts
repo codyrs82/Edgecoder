@@ -74,5 +74,42 @@ for (const vp of VIEWPORTS) {
       await audit(page);
       await noHorizontalOverflow(page);
     });
+
+    // #161: a conversation row with its menu open; keyboard focus goes in and comes back.
+    test("conversation menu (signed in)", async ({ page }) => {
+      await stubBackend(page, true);
+      await seedConversation(page);
+      await page.goto("/");
+      const trigger = page.getByRole("button", { name: `More options for ${SEEDED_TITLE}` });
+      await expect(trigger).toBeAttached({ timeout: 15_000 });
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      const items = page.getByRole("menu").getByRole("menuitem");
+      await expect(items.first()).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await expect(items.nth(1)).toBeFocused();
+      // Let the menu's open animation finish, or axe measures half-faded colours.
+      await page.getByRole("menu").evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+      await audit(page);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    });
   });
+}
+
+const SEEDED_TITLE = "Seeded a11y chat";
+
+/** Put one chat conversation in the app's IndexedDB store (src/lib/chat-store.ts) before load. */
+async function seedConversation(page: Page) {
+  await page.addInitScript((title) => {
+    const req = indexedDB.open("edgecoder-chat", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("conversations", { keyPath: "id" });
+    req.onsuccess = () => {
+      const now = Date.now();
+      const tx = req.result.transaction("conversations", "readwrite");
+      tx.objectStore("conversations").put({ id: "a11y-seed", title, messages: [], createdAt: now, updatedAt: now, source: "chat" });
+      tx.oncomplete = () => req.result.close();
+    };
+  }, SEEDED_TITLE);
 }
