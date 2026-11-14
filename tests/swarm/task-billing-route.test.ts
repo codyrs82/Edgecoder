@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
-import { earnedMsat, grantCredits } from "../../src/credits/store.js";
+import { creditEngine, earnedMsat, grantCredits } from "../../src/credits/store.js";
+import { jobCostMsat } from "../../src/economy/job-pricing.js";
 
 /*
  * What an agent earns is what the requester was charged (real coordinator app, Fastify inject):
@@ -140,6 +141,117 @@ describe("anonymous /submit", () => {
       vi.useRealTimers();
     }
     expect(await earnedMsat(worker.peerId)).toBe(before);
+    expect(await accrualsFor(st!.id)).toEqual([]);
+  });
+});
+
+/** The earnings_accrual payloads the coordinator's ledger holds for a subtask. */
+async function accrualsFor(subtaskId: string): Promise<any[]> {
+  const snap = (await app.inject({ method: "GET", url: "/ledger/snapshot", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json();
+  return snap.records.filter((r: any) => r.eventType === "earnings_accrual" && r.subtaskId === subtaskId).map((r: any) => JSON.parse(r.payloadJson));
+}
+
+/** Submit a paid code job as the requester and claim it; returns the reserve it took from the balance. */
+async function submitJob(extra: Record<string, unknown> = {}) {
+  const taskId = `job-${randomUUID()}`;
+  const balanceBefore = creditEngine.balance(requester.peerId);
+  const sub = await post("/submit", { taskId, prompt: "print 1", language: "python", submitterAccountId: requester.peerId, snapshotRef: "a".repeat(40), projectId: "p", resourceClass: "cpu", priority: 10, ...extra }, requester);
+  expect(sub.statusCode).toBe(200);
+  const reservedMsat = Math.round((balanceBefore - creditEngine.balance(requester.peerId)) * 1000);
+  expect(reservedMsat).toBeGreaterThan(0);
+  const st = await pull();
+  expect(st?.taskId).toBe(taskId);
+  return { taskId, st: st!, balanceBefore, reservedMsat };
+}
+
+/** Report a result after `ms` of server-clock time has passed since the claim. */
+async function resultAfter(ms: number, body: Record<string, unknown>) {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.now() + ms);
+    return await post("/result", body, worker);
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+describe("/result pricing (#38)", () => {
+  test("a successful code job is priced per measured second, not a flat amount, and the ledger matches the balance", async () => {
+    const { taskId, st, balanceBefore, reservedMsat } = await submitJob();
+    const before = await earnedMsat(worker.peerId);
+    // Reports far more time than the server saw: only the server-measured ~10 s is priced.
+    const res = await resultAfter(10_000, { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: randomUUID(), durationMs: 25_000 });
+    expect(res.statusCode).toBe(200);
+    const earned = (await earnedMsat(worker.peerId)) - before;
+
+    const [acc, ...rest] = await accrualsFor(st.id);
+    expect(rest).toEqual([]);
+    expect(acc.pricingBasis).toBe("per_second");
+    expect(acc.ok).toBe(true);
+    expect(acc.reportedDurationMs).toBe(25_000);
+    expect(acc.durationMs).toBeGreaterThanOrEqual(10_000);
+    expect(acc.durationMs).toBeLessThan(15_000);
+    expect(acc.costMsat).toBe(jobCostMsat(acc.durationMs, acc.ratePerSecondMsat));
+    expect(acc.costMsat).toBeGreaterThan(0);
+    expect(acc.costMsat).toBeLessThanOrEqual(reservedMsat);
+    // The agent gets the cost minus the network fee; the ledger records exactly what was credited.
+    expect(acc.msat + acc.feeMsat).toBe(acc.costMsat);
+    expect(earned).toBe(acc.msat);
+    expect(acc.credits).toBeCloseTo(acc.msat / 1000, 6);
+    expect(acc.credits).not.toBe(5);
+    // The requester pays the cost (the unused reserve is refunded once the task settles).
+    expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(acc.costMsat / 1000, 2);
+  });
+
+  test("a failed result earns nothing and the requester is refunded in full", async () => {
+    const { taskId, st, balanceBefore } = await submitJob();
+    const before = await earnedMsat(worker.peerId);
+    const res = await resultAfter(10_000, { subtaskId: st.id, taskId, agentId: worker.peerId, ok: false, output: "", error: "boom", durationMs: 10_000 });
+    expect(res.statusCode).toBe(200);
+    expect(await earnedMsat(worker.peerId)).toBe(before);
+    expect(await accrualsFor(st.id)).toEqual([]);
+    expect(creditEngine.balance(requester.peerId)).toBeCloseTo(balanceBefore, 6);
+  });
+
+  test("pay is capped at what the requester set aside", async () => {
+    // A 1 msat/credit ceiling makes the reserve tiny (10 s at 1 msat x tier weight), while a long
+    // reply priced per token is worth far more: the agent gets the reserve and no more.
+    const taskId = `inf-${randomUUID()}`;
+    const balanceBefore = creditEngine.balance(requester.peerId);
+    const sub = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: "hi" }], timeoutMs: 10_000, maxBidMsatPerCredit: 1 }, requester);
+    expect(sub.statusCode).toBe(200);
+    const reservedMsat = Math.round((balanceBefore - creditEngine.balance(requester.peerId)) * 1000);
+    expect(reservedMsat).toBeGreaterThan(0);
+    const st = await pull();
+    expect(st?.taskId).toBe(taskId);
+    const before = await earnedMsat(worker.peerId);
+    const reply = "x".repeat(200_000);
+    expect((await post("/inference/chunks", { subtaskId: st!.id, seq: 0, delta: reply, done: true, promptTokens: 10, outputTokens: 200_000 }, worker)).statusCode).toBe(200);
+    const res = await resultAfter(1_000, { subtaskId: st!.id, taskId, agentId: worker.peerId, ok: true, output: reply, durationMs: 1_000 });
+    expect(res.statusCode).toBe(200);
+    const earned = (await earnedMsat(worker.peerId)) - before;
+    const [acc] = await accrualsFor(st!.id);
+    expect(acc.pricingBasis).toBe("tokens");
+    // 200,000 output tokens on a 7B model is 0.02 USD (20,000 msat at 100k USD/BTC): far above the reserve.
+    expect(reservedMsat).toBeLessThan(20_000);
+    expect(acc.costMsat).toBe(reservedMsat);
+    expect(acc.msat + acc.feeMsat).toBe(reservedMsat);
+    expect(earned).toBe(acc.msat);
+    // The requester is charged the reserve, never more.
+    expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(reservedMsat / 1000, 6);
+  });
+
+  test("a replayed result earns nothing more", async () => {
+    const { taskId, st, balanceBefore } = await submitJob();
+    const body = { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: randomUUID(), durationMs: 5_000 };
+    expect((await resultAfter(5_000, body)).statusCode).toBe(200);
+    const afterFirst = await earnedMsat(worker.peerId);
+    const charged = balanceBefore - creditEngine.balance(requester.peerId);
+    const replay = await resultAfter(5_000, body);
+    expect(replay.statusCode).not.toBe(200);
+    expect(await earnedMsat(worker.peerId)).toBe(afterFirst);
+    expect(await accrualsFor(st.id)).toHaveLength(1);
+    expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(charged, 6);
   });
 });
 
