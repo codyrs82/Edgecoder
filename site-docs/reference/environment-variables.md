@@ -275,6 +275,7 @@ Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
 | `AGENT_PARALLEL_INFERENCE` | by installed memory | Concurrent model calls, 1 to 16. Other values fall back to the memory-based default. |
 | `SANDBOX_MODE` | `docker` (swarm-only), else `none` | `docker` or `none`. Any other value is treated as `none` with a warning, and the node takes no swarm tasks. |
 | `SANDBOX_REQUIRED` | unset | `true` refuses to run a task without a sandbox. |
+| `AGENT_INFERENCE_ONLY` | unset | Reserved: inference-only mode, not yet enforced. `1` will make the agent take only `kind: "inference"` subtasks and never run task code (for GPU container hosts without Docker, `deploy/gpu-agent/`). Today it has no effect: with `SANDBOX_MODE=none` the agent registers and heartbeats but pulls no work. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `1048576` | Cap on captured output per stream. |
 | `SANDBOX_SECCOMP_PROFILE` | unset | Path of a seccomp profile passed to `docker run`. |
 | `EDGECODER_UNSAFE_HOST_EXECUTION` | unset | `1` allows running code on the host without a sandbox (local use only). |
