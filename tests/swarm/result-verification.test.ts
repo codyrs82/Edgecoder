@@ -7,6 +7,10 @@ import {
   payableWinners,
   verificationStartupWarning,
   DEFAULT_VERIFICATION,
+  executionResultKey,
+  parseVerificationKinds,
+  verificationKindsWarning,
+  VERIFIABLE_KINDS,
   type ExecutionResult,
   type ReplicaRequest
 } from "../../src/swarm/verification.js";
@@ -53,7 +57,7 @@ function harness(rate: number, workers: Record<string, Worker>, random = () => 0
         r.winners.forEach(earn);
         if (r.status !== "unresolved") released.push({ id: r.originalSubtaskId, output: r.output });
       }
-    } else if (verifier.shouldVerify(agentId)) {
+    } else if (verifier.shouldVerify(agentId, st.kind)) {
       enqueue(verifier.start(st, exec));
     } else {
       earn(exec);
@@ -76,8 +80,8 @@ function harness(rate: number, workers: Record<string, Worker>, random = () => 0
 
 describe("ResultVerifier (#50)", () => {
   it("rate 0 never samples; rate 1 always; lower reputation samples more", () => {
-    expect(new ResultVerifier({ rate: 0 }).shouldVerify("a")).toBe(false);
-    expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a")).toBe(true);
+    expect(new ResultVerifier({ rate: 0 }).shouldVerify("a", "single_step")).toBe(false);
+    expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a", "single_step")).toBe(true);
     const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5, initialReputation: 1 }, () => 0);
     expect(v.sampleRate("a")).toBeCloseTo(0.1);
     const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "bad", meta: null });
@@ -139,7 +143,7 @@ describe("ResultVerifier (#50)", () => {
     expect(verificationConfigFromEnv({}).rate).toBe(0);
     const v = new ResultVerifier<null>(verificationConfigFromEnv({}), () => 0);
     expect(v.sampleRate("anyone")).toBe(0);
-    expect(v.shouldVerify("anyone")).toBe(false);
+    expect(v.shouldVerify("anyone", "single_step")).toBe(false);
   });
 
   it("replicas exclude the original's reward account; a second agent id on it can't vote", () => {
@@ -339,5 +343,57 @@ describe("replica reward minting (#114)", () => {
     expect(verificationStartupWarning({ rate: 0, mintReplicaRewards: false })).toBeNull();
     expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false })).toMatch(/NOT paid/);
     expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: true })).toMatch(/minted/);
+  });
+});
+
+describe("#104: per-kind opt-in and comparators", () => {
+  const inference = (id: string): Subtask => ({ ...subtask(id, "write a haiku"), kind: "inference", requestedModel: "m" });
+  const exec = (agentId: string, id: string, output: string, ok = true): ExecutionResult<null> => ({ subtaskId: id, agentId, ok, output, meta: null });
+
+  it("LLM inference is never sampled, even at rate 1 and even if listed", () => {
+    const v = new ResultVerifier<null>({ rate: 1, kinds: ["inference", "single_step"] as any }, () => 0);
+    expect(v.shouldVerify("a", "inference")).toBe(false);
+    expect(v.verifiesKind("inference")).toBe(false);
+    expect(v.shouldVerify("a", "single_step")).toBe(true);
+    expect(() => v.start(inference("s1"), exec("a", "s1", "x"))).toThrow(/not enabled/);
+    expect(() => resultKey({ ok: true, output: "x" }, "inference")).toThrow(/no result comparator/);
+  });
+
+  it("only configured kinds are sampled", () => {
+    const v = new ResultVerifier<null>({ rate: 1, kinds: ["micro_loop"] }, () => 0);
+    expect(v.shouldVerify("a", "micro_loop")).toBe(true);
+    expect(v.shouldVerify("a", "single_step")).toBe(false);
+    expect(new ResultVerifier<null>({ rate: 1, kinds: [] }, () => 0).shouldVerify("a", "micro_loop")).toBe(false);
+  });
+
+  it("RESULT_VERIFICATION_KINDS parsing: default = code kinds, inference and unknown kinds dropped", () => {
+    expect(VERIFIABLE_KINDS).toEqual(["micro_loop", "single_step"]);
+    expect(DEFAULT_VERIFICATION.kinds).toEqual(["micro_loop", "single_step"]);
+    expect(verificationConfigFromEnv({}).kinds).toEqual(["micro_loop", "single_step"]);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_KINDS: "single_step" }).kinds).toEqual(["single_step"]);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_KINDS: "none" }).kinds).toEqual([]);
+    expect(parseVerificationKinds(" inference, micro_loop ,bogus,micro_loop")).toEqual({ kinds: ["micro_loop"], rejected: ["inference", "bogus"] });
+    expect(verificationKindsWarning({ RESULT_VERIFICATION_KINDS: "inference" })).toMatch(/ignoring \[inference\]/);
+    expect(verificationKindsWarning({})).toBeNull();
+  });
+
+  it("execution comparator: exit status + stdout, formatting noise ignored, values not", () => {
+    expect(executionResultKey({ ok: true, output: "42  \r\n7\t\n\n" })).toBe(executionResultKey({ ok: true, output: "\n42\n7" }));
+    expect(executionResultKey({ ok: true, output: "42" })).not.toBe(executionResultKey({ ok: false, output: "42" }));
+    expect(executionResultKey({ ok: true, output: "42" })).not.toBe(executionResultKey({ ok: true, output: "43" }));
+    expect(executionResultKey({ ok: true, output: "4 2" })).not.toBe(executionResultKey({ ok: true, output: "42" }));
+    expect(resultKey({ ok: true, output: "a \nb" }, "micro_loop")).toBe(executionResultKey({ ok: true, output: "a\nb" }));
+  });
+
+  it("code-kind replicas that differ only in trailing whitespace verify", () => {
+    const v = new ResultVerifier<null>({ rate: 1, initialReputation: 1 }, () => 0);
+    const st = { ...subtask("c1", "print(6*7)"), kind: "micro_loop" as const };
+    const req = v.start(st, exec("a", "c1", "42\n"));
+    const out = v.recordReplica(req.subtask.id, exec("b", req.subtask.id, "42   \r\n"));
+    expect(out?.status).toBe("verified");
+  });
+
+  it("the startup warning names the verified kinds", () => {
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false, kinds: ["micro_loop"] })).toMatch(/micro_loop.*inference is never verified/);
   });
 });
