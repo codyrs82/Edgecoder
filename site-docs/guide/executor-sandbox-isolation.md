@@ -56,8 +56,9 @@ Without Docker, a local run fails with `sandbox_unavailable` unless the operator
 
 The regex deny-list and the AST checks (`src/executor/subset.ts`, `ast-javascript.ts`, `ast-python.ts`) reject code outside the supported subset. That includes the common escape shapes: `.constructor` and `__proto__` access, dunder attributes such as `__class__` and `__subclasses__`, and references to `eval`, `exec`, `getattr` and similar builtins. They are a filter, not a security boundary. A deny-list over JavaScript or Python source cannot be complete; for example, a property name assembled at runtime is not seen. Isolation comes only from the Docker sandbox.
 - With `SANDBOX_MODE=none` a worker still registers and heartbeats, but it never calls `/pull` and does not run mesh or peer code.
-- The coordinator also rejects `/pull` from agents that report `sandboxMode: "none"` before claiming a task, so nothing is claimed and then requeued.
-- Installer env examples default to `SANDBOX_MODE=docker`. Hosts without Docker simply contribute no swarm compute.
+- **Inference-only mode.** With `SANDBOX_MODE=none` and `AGENT_INFERENCE_ONLY=1`, a worker does call `/pull`, and runs only `kind: "inference"` subtasks: a model on text, never task code. This is for GPU container hosts that cannot run Docker. It refuses any other subtask with `inference_only_agent` instead of running it; mesh, BLE and peer-direct code stay off.
+- The coordinator lets an agent that reports `sandboxMode: "none"` (or no sandbox) claim inference subtasks only. The rule is applied inside the claim, so a code subtask is never claimed and then requeued for such an agent.
+- Installer env examples default to `SANDBOX_MODE=docker`. Hosts without Docker contribute no code-execution compute.
 
 ### Container hardening
 

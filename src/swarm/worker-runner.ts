@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
-import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
@@ -161,6 +161,14 @@ const ASK_MSAT_PER_CREDIT = (() => {
 const SANDBOX_REQUIRED = W.SANDBOX_REQUIRED;
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
+// Inference-only mode: with no sandbox, AGENT_INFERENCE_ONLY=1 lets the agent pull from the coordinator,
+// which then hands it inference subtasks only (a model on text, never task code). Mesh, BLE and
+// peer-direct code execution stay off. With a sandbox the flag is ignored: the agent takes all work.
+const INFERENCE_ONLY = SANDBOX_MODE === "none" && W.AGENT_INFERENCE_ONLY === true;
+if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
+  console.warn(`[agent] AGENT_INFERENCE_ONLY is ignored with SANDBOX_MODE=${SANDBOX_MODE}: this agent takes code and inference work`);
+}
+const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
 let warnedNoSandbox = false;
 const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
 const PORTAL_URL = W.PORTAL_URL ?? "";
@@ -1321,11 +1329,14 @@ async function loop(): Promise<void> {
         }
 
         const pullBody = { agentId: AGENT_ID };
-        if (!SWARM_EXECUTION_ENABLED && !warnedNoSandbox) {
+        if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
-          console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
+          console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
+        } else if (INFERENCE_ONLY && !warnedNoSandbox) {
+          warnedNoSandbox = true;
+          console.log(`[agent:${AGENT_ID}] inference-only: pulling inference subtasks only (no sandbox, no task code is run)`);
         }
-        const pulled = (SWARM_EXECUTION_ENABLED && !sandboxDown
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -1362,6 +1373,19 @@ async function loop(): Promise<void> {
 
         if (pulled.subtask) {
           const st = pulled.subtask;
+
+          // Inference-only: never run task code, whatever the coordinator sent.
+          const inferenceOnlyRefusal = inferenceOnlyRejection(INFERENCE_ONLY, st);
+          if (inferenceOnlyRefusal) {
+            console.error(`[agent:${AGENT_ID}] refused subtask ${st.id}: ${inferenceOnlyRefusal}`);
+            try {
+              await post("/result", {
+                subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
+                ok: false, output: "", error: inferenceOnlyRefusal, durationMs: 0,
+              }, { signed: true });
+            } catch { /* best effort */ }
+            continue;
+          }
 
           // ── Frozen snapshot enforcement (Design Decision #8; same check for every source) ──
           const snapshotPolicy = checkSnapshotPolicy(st, SNAPSHOT_ENFORCEMENT);

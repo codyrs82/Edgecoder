@@ -4,7 +4,7 @@
 /**
  * Task routes: submit, pull and result.
  */
-import { pullSandboxRejection } from "../../sandbox-enforcement.js";
+import { agentMayClaim, inferenceOnlyAgent } from "../../sandbox-enforcement.js";
 import { createHash, randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { z } from "zod";
@@ -362,12 +362,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         return reply.send({ subtask: null, powerDeferred: true, deferMs: powerDecisionForPull.deferMs, reason: powerDecisionForPull.reason });
       }
     }
-    // #45: every swarm task requires a sandbox; check before claim so nothing is claimed/requeued.
-    const sandboxRejection = pullSandboxRejection(capability);
-    if (sandboxRejection) {
-      app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
-      return reply.send(sandboxRejection);
-    }
+    // #45: code subtasks need a sandbox. An agent without one claims inference subtasks only
+    // (they run a model, never task code); the rule is applied inside claim() below, so nothing
+    // is claimed and requeued for an agent that may not run it.
+    const inferenceOnly = inferenceOnlyAgent(capability);
     const pullerAccount = await rewardAccountForAgent(body.agentId);
     // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
     const lease = reservations.activeForAgent(body.agentId);
@@ -378,6 +376,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // The book enforces the bid's class, price and constraints. The subtask's own constraints are
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
       (subtask) => {
+        if (!agentMayClaim(capability, subtask)) return false;
         // #54: a job that names a model goes only to an agent that reported it (inference: installed;
         // code: its active model, which is what code work runs on).
         const hasModel = subtaskModelEligible(capability, subtask);
@@ -445,7 +444,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         }
       }
     }
-    return reply.send({ subtask: task ?? null });
+    // inferenceOnly tells a sandbox-less agent why it only ever gets inference work.
+    return reply.send({ subtask: task ?? null, ...(inferenceOnly ? { inferenceOnly: true } : {}) });
   });
 
   // #122: a peer forward carries the output twice (plaintext + the agent's signed body), so the route

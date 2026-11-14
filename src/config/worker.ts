@@ -66,6 +66,8 @@ export const workerConfigSchema = z.object({
   /** 1-16 concurrent model calls; unset or out of range = by installed memory (src/swarm/parallelism.ts). */
   AGENT_PARALLEL_INFERENCE: envInt(undefined, { min: 0 }),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
+  // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
+  AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),
   SNAPSHOT_ENFORCEMENT: envEnumCi(["strict", "warn", "off"]),
 
   // ---- hardware profile and pricing ----
