@@ -342,16 +342,47 @@ Each service reads its environment once at startup through a zod schema. An inva
 
 | Variable | Default | Description |
 |---|---|---|
-| `LOG_LEVEL` | `info` | pino log level for every service. |
-| `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). In production, `/metrics` is not served at all unless this is set. Outside production it is open. |
+| `LOG_LEVEL` | `info` | Log level for every service: `fatal`, `error`, `warn`, `info`, `debug`, `trace` or `silent`. Any other value is treated as `info`. |
+| `METRICS_TOKEN` | unset | Bearer token for Prometheus `/metrics` (inference: `/metrics/prometheus`). Unset: only a caller on the same machine can read metrics, everyone else gets `404`. Set: other callers must send `authorization: Bearer <token>`, and get `401` without it. Use a long random value (for example `openssl rand -hex 32`); it is separate from the mesh and admin tokens, which are not accepted here. |
 | `REQUEST_ID_FORWARD_ORIGINS` | unset | Extra comma-separated origins that receive `x-request-id` on outbound calls. The service URLs (`COORDINATOR_URL`, `CONTROL_PLANE_URL`, `INFERENCE_URL`, `PORTAL_SERVICE_URL`, `COORDINATOR_PUBLIC_URL`, `COORDINATOR_DISCOVERY_URLS`) are included automatically; third-party APIs never get it. |
-| `SENTRY_DSN` | unset | Optional error tracking. Unset: off, nothing is loaded. Set: 5xx errors go to Sentry, tagged with service, route and request id, with no request bodies, headers or cookies. Needs `@sentry/node` in the image; if it's missing, the service logs one warning and runs without it. |
-| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Sentry environment name. |
-| `SENTRY_RELEASE` | unset | Sentry release (for example the git SHA). |
+| `SENTRY_DSN` | unset | Error tracking. Unset: off, the Sentry SDK is never loaded and nothing is sent. Set: 5xx errors and fatal process errors (`uncaughtException`, `unhandledRejection`) go to Sentry. |
+| `SENTRY_ENVIRONMENT` | `NODE_ENV`, else `development` | Sentry environment name. |
+| `SENTRY_RELEASE` | `edgecoder@<package version>` | Sentry release (for example the git SHA). |
+
+### Logs
+
+Every service writes one JSON object per line to stdout (pino): `level`, `time`, `service`, `msg`, plus `requestId` on every line written while a request is being handled.
+
+- **Request id.** An incoming `x-request-id` is kept if it is 8 to 128 characters of `A-Z a-z 0-9 . _ : -`; anything else is replaced with a new UUID. The id is returned in the `x-request-id` response header and forwarded on calls to the other EdgeCoder services.
+- **Redaction.** Credential headers (`authorization`, `cookie`, `set-cookie`, `x-admin-token`, `x-mesh-token`, `x-inference-token`, `x-portal-service-token`, `x-api-key`, the request-signature headers) and any field whose name looks secret (`password`, `token`, `secret`, `mnemonic`, `seed`, `preimage`, `apiKey`, `privateKey`, ...) are written as `[redacted]`, at any depth. Credentials inside strings (`//user:pass@host`, `Bearer <token>`) are masked too.
+- **Request bodies and headers are not logged.** A request line carries the method, the URL with secret query values masked, the host and the peer address.
+
+### Metrics
+
+`/metrics` (inference: `/metrics/prometheus`, because that service already has a JSON `/metrics`) serves the Prometheus text format:
+
+| Metric | Labels | From |
+|---|---|---|
+| `edgecoder_http_requests_total` | `service`, `method`, `route`, `status_class` | every service |
+| `edgecoder_http_request_duration_seconds` (histogram) | `service`, `method`, `route`, `status_class` | every service |
+| `process_*`, `nodejs_*` | none | every service (CPU, memory, event loop lag, GC, open handles) |
+| `edgecoder_queue_depth`, `edgecoder_queue_results` | `service` | coordinator |
+| `edgecoder_connected_agents` | `service` | coordinator |
+| `edgecoder_payout_reconcile_status` | `service`, `status` (`ok`, `alert`, `tripped`, `error`, `unsupported`, `never_run`; 1 for the current one) | coordinator |
+| `edgecoder_payout_reconcile_last_run_timestamp_seconds` | `service` | coordinator |
+| `edgecoder_anchor_proxy_bitcoind_reachable`, `edgecoder_anchor_proxy_block_height`, `edgecoder_anchor_proxy_last_health_check_timestamp_seconds` | `service` | anchor proxy (updated by its health check) |
+
+`route` is the route pattern (`/nodes/:nodeId`), never the URL, and `status_class` is `2xx`..`5xx`, so no ids, tokens or user data reach a label. Requests that match no route are counted as `route="unmatched"`.
+
+**Access.** The services are reachable from the internet, so `/metrics` is never public. A request counts as local only when it connects from a loopback address, carries no proxy headers (`x-forwarded-for`, `cf-connecting-ip`, `fly-client-ip`, `via`, ...) and uses a loopback `Host`. If you run your own reverse proxy on the same machine, make sure it sets `x-forwarded-for` (Caddy and cloudflared do by default; nginx needs `proxy_set_header X-Forwarded-For`), or it will be treated as a local caller. On the portal, `/metrics` is exempt from the origin lock so a scraper can reach the machine directly; the rule above still applies. The IDE provider (port 4304) additionally requires its own bearer token on every path.
+
+### Error tracking
+
+With `SENTRY_DSN` set, each event carries the error (type, message, stack), the tags `service`, `requestId`, `route` (the pattern) and `method`, the release, the environment and the machine's hostname. Nothing else about the request is attached, and every event is scrubbed before it is sent: no request body, no cookies or headers, no query strings, and credentials quoted in an error message are masked. Only errors answered with a 5xx are reported; 4xx are not. After a fatal process error the service still exits with code 1, once the report has been sent or two seconds have passed.
 
 ### Alerting on 5xx without Sentry
 
-Every service exports `edgecoder_http_requests_total{service,method,route,status}`. Example Prometheus rules:
+Example Prometheus rules:
 
 ```yaml
 groups:
@@ -360,15 +391,19 @@ groups:
       - alert: EdgeCoderHigh5xxRate
         # more than 5% of requests failing with 5xx for 10 minutes, per service
         expr: |
-          sum by (service) (rate(edgecoder_http_requests_total{status=~"5.."}[5m]))
+          sum by (service) (rate(edgecoder_http_requests_total{status_class="5xx"}[5m]))
             / sum by (service) (rate(edgecoder_http_requests_total[5m])) > 0.05
         for: 10m
         labels: { severity: page }
       - alert: EdgeCoder5xxOnRoute
         # any single route returning 5xx steadily (catches a broken endpoint on a busy service)
-        expr: sum by (service, route) (rate(edgecoder_http_requests_total{status=~"5.."}[5m])) > 0.1
+        expr: sum by (service, route) (rate(edgecoder_http_requests_total{status_class="5xx"}[5m])) > 0.1
         for: 15m
         labels: { severity: ticket }
+      - alert: EdgeCoderPayoutReconcileNotOk
+        expr: max by (service) (edgecoder_payout_reconcile_status{status=~"alert|tripped|error"}) == 1
+        for: 10m
+        labels: { severity: page }
       - alert: EdgeCoderMetricsMissing
         # the scrape itself failing usually means the service is down or METRICS_TOKEN is wrong
         expr: up{job=~"edgecoder-.*"} == 0
@@ -376,7 +411,7 @@ groups:
         labels: { severity: page }
 ```
 
-Scrape `/metrics` (inference: `/metrics/prometheus`) with `authorization: Bearer $METRICS_TOKEN`. `route` is the route pattern, so these rules stay low-cardinality.
+Scrape `/metrics` (inference: `/metrics/prometheus`) with `authorization: Bearer $METRICS_TOKEN`.
 
 ## Common profiles
 
