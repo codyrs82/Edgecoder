@@ -23,6 +23,9 @@ pub enum AgentOwnership {
     Spawned,
     /// Something this app did not start is listening on the agent port.
     PortOccupied,
+    /// #147: an agent already on the port answered our challenge with our admin token (one this
+    /// app started, e.g. in an earlier launch), so it is reused.
+    Verified,
 }
 
 impl AgentOwnership {
@@ -31,6 +34,7 @@ impl AgentOwnership {
             AgentOwnership::NotStarted => "not_started",
             AgentOwnership::Spawned => "spawned",
             AgentOwnership::PortOccupied => "port_occupied",
+            AgentOwnership::Verified => "verified",
         }
     }
 }
@@ -44,18 +48,23 @@ pub enum AgentEvent {
     SpawnOk,
     /// Spawning failed (no bundled agent, no node, ...).
     SpawnFailed,
-    /// The child we spawned has exited (or can no longer be checked).
+    /// The child we spawned has exited (or can no longer be checked), or a reused agent no
+    /// longer answers the challenge.
     Exited,
+    /// #147: the listener on the agent port answered a fresh challenge correctly.
+    Verified,
 }
 
-/// Next ownership state. Only `SpawnOk` can lead to `Spawned`; an exit always revokes it.
+/// Next ownership state. Only `SpawnOk` can lead to `Spawned` and only `Verified` (a passed
+/// challenge) to `Verified`; an exit always revokes either.
 pub fn transition(state: AgentOwnership, event: AgentEvent) -> AgentOwnership {
     match event {
         AgentEvent::PortBusy => AgentOwnership::PortOccupied,
         AgentEvent::SpawnOk => AgentOwnership::Spawned,
         AgentEvent::SpawnFailed => AgentOwnership::NotStarted,
+        AgentEvent::Verified => AgentOwnership::Verified,
         AgentEvent::Exited => match state {
-            AgentOwnership::Spawned => AgentOwnership::NotStarted,
+            AgentOwnership::Spawned | AgentOwnership::Verified => AgentOwnership::NotStarted,
             other => other,
         },
     }
@@ -90,14 +99,15 @@ impl AgentGuard {
         }
     }
 
-    /// The inference token, but only while the agent on :4301 is the one this app spawned and
-    /// `child_alive` (checked by the caller right now) says it is still running.
+    /// The inference token, but only while the agent on :4301 is the one this app spawned (or a
+    /// verified one, #147) and `child_alive` (checked by the caller right now: the child is
+    /// running, or the reused agent just answered a fresh challenge) says it is still there.
     pub fn token_for_webview(&self, token: &str, child_alive: bool) -> Result<String, String> {
         if !child_alive {
             self.apply(AgentEvent::Exited);
         }
         match self.get() {
-            AgentOwnership::Spawned => Ok(token.to_string()),
+            AgentOwnership::Spawned | AgentOwnership::Verified => Ok(token.to_string()),
             AgentOwnership::PortOccupied => Err(format!(
                 "port_occupied: another process is already listening on {AGENT_ADDR}; the inference token is not sent to it. Stop that process, then retry."
             )),
@@ -228,6 +238,11 @@ mod tests {
             (PortOccupied, Exited, PortOccupied),
             (PortOccupied, SpawnOk, Spawned),
             (PortOccupied, SpawnFailed, NotStarted),
+            (PortOccupied, AgentEvent::Verified, AgentOwnership::Verified),
+            (NotStarted, AgentEvent::Verified, AgentOwnership::Verified),
+            (AgentOwnership::Verified, Exited, NotStarted),
+            (AgentOwnership::Verified, PortBusy, PortOccupied),
+            (AgentOwnership::Verified, SpawnOk, Spawned),
         ];
         for (from, ev, to) in cases {
             assert_eq!(transition(from, ev), to, "{from:?} + {ev:?}");
@@ -252,6 +267,20 @@ mod tests {
         assert_eq!(AgentOwnership::NotStarted.as_str(), "not_started");
         assert_eq!(AgentOwnership::Spawned.as_str(), "spawned");
         assert_eq!(AgentOwnership::PortOccupied.as_str(), "port_occupied");
+        assert_eq!(AgentOwnership::Verified.as_str(), "verified");
+    }
+
+    #[test]
+    fn verified_agent_gets_the_token_until_it_fails_a_challenge() {
+        let g = AgentGuard::new();
+        g.apply(AgentEvent::PortBusy);
+        assert!(g.token_for_webview("t", true).is_err());
+        g.apply(AgentEvent::Verified);
+        assert_eq!(g.token_for_webview("t", true).unwrap(), "t");
+        // A failed re-challenge (caller passes false) revokes it at once.
+        let err = g.token_for_webview("secret", false).unwrap_err();
+        assert!(err.starts_with("not_started") && !err.contains("secret"));
+        assert!(g.token_for_webview("t", true).is_err());
     }
 
     #[test]

@@ -49,7 +49,7 @@ export async function retryLocalAgent(): Promise<LocalAgentStatus> {
     const { invoke } = await import("@tauri-apps/api/core");
     _localToken = null;
     setAgentStatus(parseAgentStatus(await invoke<string>("retry_local_agent")));
-    if (_agentStatus === "spawned") await detectBackend();
+    if (_agentStatus === "spawned" || _agentStatus === "verified") await detectBackend();
   } catch {
     // Not running inside Tauri.
   }

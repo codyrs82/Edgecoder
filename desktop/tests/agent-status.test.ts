@@ -32,3 +32,12 @@ describe("local agent status (#72)", () => {
     expect(shouldDropToken("unknown")).toBe(false);
   });
 });
+
+describe("verified agent (#147)", () => {
+  it("an agent that passed the shell's challenge is used like our own", () => {
+    expect(parseAgentStatus("verified")).toBe("verified");
+    expect(localAgentUsable("verified")).toBe(true);
+    expect(shouldDropToken("verified")).toBe(false);
+    expect(agentStatusMessage("verified")).toBeNull();
+  });
+});

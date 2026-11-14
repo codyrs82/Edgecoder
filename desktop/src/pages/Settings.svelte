@@ -1,7 +1,7 @@
 <script lang="ts">
   import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
-  import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
+  import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
   import type { NodeIdentity } from "../lib/types";
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
@@ -44,6 +44,21 @@
   let endpointError = $state("");
   let endpointTest: Record<EndpointKind, "idle" | "testing" | "ok" | "fail"> = $state({ coordinator: "idle", portal: "idle" });
   const endpointDefaults = defaultEndpoints();
+  // #138: the window's CSP only picks up a changed host after a restart (the shell adds it at launch).
+  let endpointRestartNeeded = $state(false);
+  async function applyEndpointsToShell() {
+    try {
+      endpointRestartNeeded = await syncEndpointsToShell();
+    } catch (e) {
+      endpointError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  async function restartForEndpoints() {
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  }
+  // Overrides saved before #138 reach the shell too.
+  void applyEndpointsToShell();
 
   async function handleTestEndpoint(kind: EndpointKind) {
     endpointTest[kind] = "testing";
@@ -56,6 +71,7 @@
     portalUrl = currentPortalUrl();
     endpointError = "";
     endpointTest = { coordinator: "idle", portal: "idle" };
+    void applyEndpointsToShell();
   }
   let maxConcurrentTasks = $state(1);
   let cpuCapPercent = $state(50);
@@ -195,6 +211,7 @@
     }
     setEndpoint("coordinator", coordinatorUrl === endpointDefaults.coordinator ? "" : coordinatorUrl);
     setEndpoint("portal", portalUrl === endpointDefaults.portal ? "" : portalUrl);
+    void applyEndpointsToShell();
     saveSetting("maxConcurrentTasks", String(maxConcurrentTasks));
     saveSetting("cpuCapPercent", String(cpuCapPercent));
     saveSetting("idleOnly", String(idleOnly));
@@ -322,6 +339,12 @@
       </label>
     {/each}
     {#if endpointError}<p class="badge invalid">{endpointError}</p>{/if}
+    {#if endpointRestartNeeded}
+      <p class="hint" role="status">
+        EdgeCoder needs a restart before it can reach a changed host (the app only connects to hosts it allowed at launch).
+        <button class="btn-sm" onclick={restartForEndpoints}>Restart now</button>
+      </p>
+    {/if}
     <button class="btn-sm" onclick={handleResetEndpoints}>Reset to defaults</button>
   </div>
 
