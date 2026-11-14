@@ -10,15 +10,14 @@ end before any real money moves.
 | Host | What runs | Takes work today? |
 | --- | --- | --- |
 | Vultr GPU VM (full Linux VM) | Full agent: Ollama on the GPU **and** the Docker sandbox for code tasks (`SANDBOX_MODE=docker`) | Yes |
-| Vast.ai GPU container (no Docker inside) | Inference-only agent: Ollama on the GPU, never runs task code (`SANDBOX_MODE=none`, `AGENT_INFERENCE_ONLY=1`) | **No, not yet** (see below) |
+| Vast.ai GPU container (no Docker inside) | Inference-only agent: Ollama on the GPU, never runs task code (`SANDBOX_MODE=none`, `AGENT_INFERENCE_ONLY=1`) | Yes, inference subtasks only (see below) |
 
-> **The Vast agent will not receive work until inference-only mode lands.** Today an agent with
-> `SANDBOX_MODE=none` registers and heartbeats but pulls nothing: the worker does not call `/pull`
-> (`src/swarm/worker-runner.ts`) and the coordinator refuses sandbox-less agents
-> (`pullSandboxRejection` in `src/swarm/sandbox-enforcement.ts`). `AGENT_INFERENCE_ONLY=1` is
-> reserved for the change that will let such agents pull `kind: "inference"` subtasks only; until
-> it ships, running the Vast container proves registration, GPU detection and model pull, and costs
-> money for no work. Rent it last, or only for a short registration check.
+> **The Vast agent takes inference work only.** With `SANDBOX_MODE=none` and `AGENT_INFERENCE_ONLY=1`
+> the worker pulls from the coordinator, and the coordinator hands an agent without a sandbox
+> `kind: "inference"` subtasks only (`agentMayClaim` in `src/swarm/sandbox-enforcement.ts`). The
+> worker also refuses any other subtask with `inference_only_agent` before running anything. Code
+> tasks go only to sandboxed agents such as the Vultr VM. The coordinator must run a build that
+> includes this mode (PR #275).
 
 Files:
 
