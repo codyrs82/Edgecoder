@@ -1,8 +1,9 @@
 # Work receipts and pinned-key trust
 
 Architecture steps 2 and 4. Code lives in `src/receipts/` (receipts, epochs, replication) and
-`src/trust/pinned-keys.ts` (agent-side trust); the coordinator wires them in a single block in
-`src/swarm/coordinator.ts` ("Work receipts") and in `accrueResultCredits`.
+`src/trust/pinned-keys.ts` (agent-side trust); the coordinator wires them in
+`src/swarm/coordinator.ts` and `src/swarm/coordinator/services.ts` ("Work receipts") and in
+`accrueResultCredits` (`src/swarm/coordinator/results.ts`).
 
 ## What a receipt proves
 

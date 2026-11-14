@@ -58,7 +58,7 @@ export const coordinatorConfigSchema = z.object({
   ...bleSyncEnv,
   EDGECODER_RESPONSE_SIGNING: trustEnv.EDGECODER_RESPONSE_SIGNING,
   DATABASE_URL: str(),
-  // Tokens: required in production by requireProdEnv() in coordinator.ts (#5).
+  // Tokens: required in production by requireProdEnv() in coordinator/context.ts (#5).
   MESH_AUTH_TOKEN: str(),
   ADMIN_API_TOKEN: str(),
   INFERENCE_AUTH_TOKEN: str(),

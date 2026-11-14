@@ -68,7 +68,7 @@ The portal is the user-facing web application. It serves:
 
 The portal authenticates sessions via cookies and communicates with the coordinator and control plane using service tokens (`PORTAL_SERVICE_TOKEN`, `CONTROL_PLANE_ADMIN_TOKEN`).
 
-### Coordinator (`src/swarm/coordinator.ts`)
+### Coordinator (`src/swarm/coordinator.ts`, `src/swarm/coordinator/`)
 
 The coordinator is the central hub of the swarm. It manages:
 
