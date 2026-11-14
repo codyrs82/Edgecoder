@@ -1,0 +1,467 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+/**
+ * Agent routes: register, heartbeat, benchmark response and diagnostics.
+ */
+import { z } from "zod";
+import type { SandboxMode } from "../../../common/types.js";
+import { rewardAccountForAgent } from "../../../credits/store.js";
+import { pgStore } from "../../../db/store.js";
+import { classifyHardware } from "../../../economy/compute-classes.js";
+import { normalizeReportedModels } from "../../model-catalog.js";
+import type { ChallengeResponse } from "../../benchmark.js";
+import { rawBodyOf } from "../../../security/request-signing.js";
+import {
+  verifyBinaryIntegrity,
+  type VerificationStatus,
+  type BinaryIntegrityPayload
+} from "../../../security/release-verifier.js";
+import type { CoordinatorApp } from "../app.js";
+import {
+  requestOrigin,
+  agentRateLimiter,
+  queue,
+  OLLAMA_MODEL,
+  securityLog,
+  identity,
+  MESH_AUTH_TOKEN
+} from "../context.js";
+import { mutable } from "../mutable-state.js";
+import {
+  agentCapabilities,
+  activeBlacklistRecord,
+  releaseManifestCache,
+  REQUIRE_VERIFIED_AGENTS,
+  behaviorTracker,
+  evaluateAndEnforce,
+  ordering,
+  pendingTunnelInvites,
+  pendingTunnelCloseNotices,
+  directWorkInbox,
+  directWorkById,
+  type DirectWorkOffer,
+  agentOrchestration,
+  blacklistByAgent
+} from "../agent-state.js";
+import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import {
+  rateOracleConfig,
+  hardwareVerifier,
+  marketOrders,
+  effectiveHardware,
+  orderBook,
+  askCapabilityOf,
+  verificationSummary,
+  benchmarkModelFor,
+  pickBenchmarkWitness,
+  repostAsk
+} from "../economy.js";
+import { diagnosticsByAgentId } from "../services.js";
+import { persistStatsLedgerRecord } from "../stats-ledger.js";
+import { validatePortalNode } from "../enrollment.js";
+import { attestAgentSigningKey } from "../attested-keys.js";
+import {
+  registerSchema,
+  defaultPolicy,
+  heartbeatSchema,
+  benchmarkResponseSchema,
+  diagnosticsSchema
+} from "../schemas.js";
+
+/**
+ * Proof of key for /register: the request is signed (worker-runner signs /register) by the key
+ * this coordinator already holds for the agent, and keeps that key. A key change never counts as
+ * proof; it needs a portal-validated registration token (or the loopback exemption).
+ */
+async function registerProvesStoredKey(
+  req: unknown,
+  agentId: string,
+  claimedKeyPem: string | undefined,
+  storedKeyPem: string | undefined
+): Promise<boolean> {
+  if (!storedKeyPem) return false;
+  if (claimedKeyPem !== undefined && claimedKeyPem !== storedKeyPem) return false;
+  const r = req as { headers?: Record<string, unknown>; ip?: string };
+  const headers = r.headers ?? {};
+  if (!extractSignedHeaders(headers)) return false;
+  const verified = await verifyAgentRequest(headers, "/register", r.ip, { requireSigned: true, rawBody: rawBodyOf(req as any) });
+  return verified !== null && verified !== "rejected" && verified.agentId === agentId;
+}
+
+export function registerAgentRoutes(app: CoordinatorApp): void {
+  app.post("/register", async (req, reply) => {
+    const parsedRegister = registerSchema.safeParse(req.body);
+    if (!parsedRegister.success) {
+      // A malformed registration is the agent's fault, not a server error: 400 with the
+      // issues so the agent logs something actionable instead of retrying a 500 forever.
+      return reply.code(400).send({ error: "invalid_registration", issues: parsedRegister.error.issues });
+    }
+    const body = parsedRegister.data;
+    const now = Date.now();
+    const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
+    const origin = requestOrigin(req);
+    const sourceIp = origin.clientIp;
+    const previous = agentCapabilities.get(body.agentId);
+    const proofOfKey = await registerProvesStoredKey(req, body.agentId, body.publicKeyPem, previous?.publicKeyPem);
+    const activation = await validatePortalNode({
+      nodeId: body.agentId,
+      nodeKind: "agent",
+      registrationToken: body.registrationToken,
+      deviceId: body.deviceId,
+      sourceIp,
+      loopback: origin.loopback,
+      proofOfKey
+    });
+    if (!activation.allowed) {
+      app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
+      return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
+    }
+    app.log.info({ agentId: body.agentId, reason: activation.reason }, "register_allowed");
+    agentRateLimiter.reset(body.agentId);
+    const blacklisted = activeBlacklistRecord(body.agentId);
+    if (blacklisted) {
+      return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
+    }
+    queue.registerAgent(body.agentId, defaultPolicy, {
+      os: body.os,
+      version: body.version,
+      mode: body.mode,
+      localModelEnabled: true
+    });
+    const reportedModels = normalizeReportedModels(body.installedModels);
+    agentCapabilities.set(body.agentId, {
+      os: body.os,
+      version: body.version,
+      mode: body.mode,
+      localModelEnabled: true,
+      localModelProvider: body.localModelProvider,
+      // What the agent reports it has installed (signed /register). Older agents don't say: the default
+      // model is assumed for display, but an assumed catalog never makes them eligible for a named model (#54).
+      localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
+      modelsReported: reportedModels.length > 0,
+      ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
+      clientType: body.clientType,
+      swarmEnabled: true,
+      ideEnabled: body.mode === "ide-enabled",
+      maxConcurrentTasks: body.maxConcurrentTasks,
+      connectedPeers: previous?.connectedPeers ?? new Set<string>(),
+      ownerEmail: activation.ownerEmail,
+      sourceIp: activation.sourceIp ?? sourceIp,
+      countryCode: activation.countryCode,
+      vpnDetected: activation.vpnDetected,
+      enrollmentReason: activation.reason,
+      powerTelemetry: body.powerTelemetry
+        ? {
+            ...body.powerTelemetry,
+            updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
+          }
+        : undefined,
+      // A body without a key keeps the registered one; a body without an envelope key keeps the
+      // stored one only while the signing key is unchanged.
+      publicKeyPem: body.publicKeyPem ?? previous?.publicKeyPem,
+      x25519PublicKey:
+        body.x25519PublicKey ??
+        (previous?.publicKeyPem && (body.publicKeyPem ?? previous.publicKeyPem) === previous.publicKeyPem ? previous.x25519PublicKey : undefined),
+      sandboxMode: body.sandboxMode as SandboxMode,
+      hardwareProfile: body.hardwareProfile,
+      computeClass: hardwareClass.computeClass,
+      hardwareClass,
+      lastSeenMs: now
+    });
+    // #122: the shared key record lets other coordinators verify this agent's forwarded results.
+    const registeredKey = agentCapabilities.get(body.agentId)?.publicKeyPem;
+    if (registeredKey) attestAgentSigningKey(body.agentId, registeredKey);
+    // ── Binary integrity verification ──
+    let verificationStatus: VerificationStatus = "unverified";
+    if (body.binaryIntegrity) {
+      const result = verifyBinaryIntegrity(
+        body.binaryIntegrity as BinaryIntegrityPayload,
+        releaseManifestCache.getAllManifests(),
+        now
+      );
+      verificationStatus = result.status;
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) {
+        (existing as any).verificationStatus = verificationStatus;
+        agentCapabilities.set(body.agentId, existing);
+      }
+      if (result.status === "signature_mismatch" || result.status === "hash_mismatch") {
+        securityLog.log({
+          level: securityLog.severity("binary_integrity_failure"),
+          event: "binary_integrity_failure",
+          source: { type: "agent", id: body.agentId },
+          details: { status: result.status, details: result.details, version: body.binaryIntegrity.releaseVersion, channel: body.binaryIntegrity.distributionChannel },
+          action: "integrity_flag",
+          coordinatorId: identity.peerId,
+        });
+        if (REQUIRE_VERIFIED_AGENTS) {
+          return reply.code(403).send({ error: "binary_integrity_failed", status: result.status });
+        }
+      }
+      app.log.info({ agentId: body.agentId, verificationStatus, version: body.binaryIntegrity.releaseVersion }, "binary_integrity_check");
+    }
+    // Verified-only policy: a missing attestation, an uncached manifest, or absent release keys all
+    // leave verificationStatus "unverified" — reject those too, not just explicit mismatches, so the
+    // policy actually guarantees a verified binary when enabled (audit mesh#2).
+    if (REQUIRE_VERIFIED_AGENTS && verificationStatus !== "verified") {
+      return reply.code(403).send({ error: "binary_integrity_required", status: verificationStatus });
+    }
+
+    behaviorTracker.recordRegistration(body.agentId, now);
+    evaluateAndEnforce(body.agentId);
+    // Hardware verification: the claim is paid at its class base tier until a challenge proves it.
+    const hardwareRecord = hardwareVerifier.register({
+      agentId: body.agentId,
+      claimed: hardwareClass,
+      profile: body.hardwareProfile,
+      benchmark: body.benchmark,
+      challengeKinds: body.challengeKinds,
+      nowMs: now
+    });
+    // Market: post the agent's ask on its (verified) compute class (tracking the oracle reference unless explicit).
+    {
+      const ownerAccount = await rewardAccountForAgent(body.agentId);
+      const standing = marketOrders.get(`${ownerAccount}:sell`);
+      const cls = (effectiveHardware(body.agentId, { hardwareClass }) ?? hardwareClass).computeClass;
+      const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
+      orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf(body.agentId, { hardwareClass }));
+    }
+    const approvalRecord = ordering.append({
+      eventType: "node_approval",
+      taskId: `agent:${body.agentId}`,
+      actorId: body.agentId,
+      coordinatorId: identity.peerId,
+      payloadJson: JSON.stringify({
+        approved: true,
+        activationReason: activation.reason ?? null,
+        ownerEmail: activation.ownerEmail ?? null,
+        sourceIp: activation.sourceIp ?? sourceIp ?? null,
+        countryCode: activation.countryCode ?? null,
+        vpnDetected: activation.vpnDetected ?? null
+      })
+    });
+    try {
+      const registerAuditPersistTimeoutMs = 3_000;
+      await Promise.race([
+        Promise.all([
+          pgStore?.persistLedgerRecord(approvalRecord),
+          persistStatsLedgerRecord(approvalRecord)
+        ]),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("register_audit_persist_timeout")), registerAuditPersistTimeoutMs)
+        )
+      ]);
+    } catch (error) {
+      app.log.warn({ error, agentId: body.agentId }, "register_audit_persist_failed");
+    }
+    return reply.send({
+      accepted: true,
+      policy: defaultPolicy,
+      mode: body.mode,
+      meshToken: MESH_AUTH_TOKEN || undefined,
+      hardwareVerification: verificationSummary(hardwareRecord),
+      // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
+      rewardAccountId: await rewardAccountForAgent(body.agentId)
+    });
+  });
+
+  app.post("/heartbeat", async (req, reply) => {
+    const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip, { rawBody: rawBodyOf(req) });
+    if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+
+    const parsedHeartbeat = heartbeatSchema.safeParse(req.body);
+    if (!parsedHeartbeat.success) {
+      return reply.code(400).send({ error: "invalid_heartbeat", issues: parsedHeartbeat.error.issues });
+    }
+    const body = parsedHeartbeat.data;
+    if (verified && verified.agentId !== body.agentId) {
+      return reply.code(401).send({ error: "agent_id_mismatch" });
+    }
+    const now = Date.now();
+    if (!agentCapabilities.has(body.agentId)) {
+      return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+    }
+    const blacklisted = activeBlacklistRecord(body.agentId);
+    if (blacklisted) {
+      return reply.send({
+        ok: false,
+        blacklisted: true,
+        reason: blacklisted.reason,
+        blacklistVersion: mutable.blacklistVersion
+      });
+    }
+    queue.heartbeat(body.agentId);
+    // A busy agent is alive: without this a long job (a big prompt on a slow model) made it look
+    // offline, which ended its reservation and hid it from the model list.
+    const seen = agentCapabilities.get(body.agentId);
+    if (seen) seen.lastSeenMs = now;
+    if (body.leaseOnly) {
+      // #51: mid-task lease renewal. Signature was checked above (unsigned is rejected
+      // when REQUIRE_SIGNED_AGENT_REQUESTS is on, the production default); nothing is drained.
+      return reply.send({ ok: true, leaseOnly: true });
+    }
+    behaviorTracker.recordHeartbeat(body.agentId);
+    // A tier claim starts (or resets) hardware verification, so only a signed heartbeat may make one.
+    if (body.benchmark && verified) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
+    if (body.powerTelemetry) {
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) {
+        existing.powerTelemetry = {
+          ...body.powerTelemetry,
+          updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
+        };
+        existing.lastSeenMs = now;
+        agentCapabilities.set(body.agentId, existing);
+      }
+    } else {
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) {
+        existing.lastSeenMs = now;
+        agentCapabilities.set(body.agentId, existing);
+      }
+    }
+    // #54: a signed heartbeat refreshes the installed-model catalog (a model pulled or removed since
+    // /register). Unsigned heartbeats (non-production only) can't change what the agent is routed.
+    if (body.installedModels !== undefined && verified) {
+      const existing = agentCapabilities.get(body.agentId);
+      const models = normalizeReportedModels(body.installedModels);
+      if (existing && models.length) {
+        existing.localModelCatalog = models;
+        existing.modelsReported = true;
+        if (!existing.activeModel || !models.includes(existing.activeModel)) existing.activeModel = models[0];
+      }
+    }
+    if (body.activeModel !== undefined) {
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) {
+        existing.activeModel = body.activeModel;
+        existing.activeModelParamSize = body.activeModelParamSize ?? 0;
+        existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
+      }
+    }
+    if (body.askMsatPerCredit !== undefined) {
+      const existing = agentCapabilities.get(body.agentId);
+      const cls = existing ? (effectiveHardware(body.agentId, existing)?.computeClass ?? existing.computeClass) : undefined;
+      if (existing && cls) orderBook.postAsk(body.agentId, cls, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(body.agentId, existing));
+    }
+    if (body.sandboxMode !== undefined) {
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) {
+        existing.sandboxMode = body.sandboxMode as SandboxMode;
+      }
+    }
+    // #51: lease-based requeue (timeout + grace, renewed by heartbeat, retry cap).
+    const leaseExpiry = queue.expireLeases();
+    const requeued = leaseExpiry.requeued.length;
+    if (leaseExpiry.failed.length > 0) {
+      app.log.warn({ subtaskIds: leaseExpiry.failed }, "subtask_failed_max_attempts");
+    }
+    const tunnelInvites = pendingTunnelInvites.get(body.agentId) ?? [];
+    pendingTunnelInvites.set(body.agentId, []);
+    const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
+    pendingTunnelCloseNotices.set(body.agentId, []);
+    const directOfferIds = directWorkInbox.get(body.agentId) ?? [];
+    const directWorkOffers = directOfferIds
+      .map((id) => directWorkById.get(id))
+      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered"));
+    // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
+    const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
+      nowMs: now,
+      model: benchmarkModelFor(body.agentId),
+      pickWitness: (model) => pickBenchmarkWitness(body.agentId, model, now)
+    });
+    return reply.send({
+      ok: true,
+      ...(benchmarkChallenge ? { benchmarkChallenge } : {}),
+      hardwareVerification: verificationSummary(hardwareVerifier.get(body.agentId)),
+      requeued,
+      policy: defaultPolicy,
+      orchestration: agentOrchestration.get(body.agentId) ?? null,
+      tunnelInvites,
+      tunnelCloseNotices,
+      directWorkOffers,
+      blacklist: {
+        version: mutable.blacklistVersion,
+        agents: [...blacklistByAgent.keys()]
+      }
+    });
+  });
+
+  app.post("/benchmark/response", async (req, reply) => {
+    // Signed-only (any trust policy): an answer settles that agent's tier, or a witness check on
+    // another agent's, so an unsigned caller naming a registered agentId could demote it.
+    const verified = await verifyAgentRequest((req as any).headers ?? {}, "/benchmark/response", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+    if (verified === "rejected" || !verified) return reply.code(401).send({ error: "signature_invalid" });
+    const parsed = benchmarkResponseSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_benchmark_response", issues: parsed.error.issues });
+    const { agentId, ...response } = parsed.data;
+    if (verified.agentId !== agentId) return reply.code(401).send({ error: "agent_id_mismatch" });
+    if (!agentCapabilities.has(agentId)) return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+    if (activeBlacklistRecord(agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
+    const result = hardwareVerifier.submit(agentId, response as ChallengeResponse, Date.now());
+    if (!result.accepted) return reply.code(409).send({ ok: false, error: result.reason });
+    // A witness's answer can settle the subject's cross-check: act on the record it changed.
+    const subjectId = result.record?.agentId ?? agentId;
+    if (result.invalid) {
+      securityLog.log({
+        level: securityLog.severity("hardware_challenge_invalid"),
+        event: "hardware_challenge_invalid",
+        source: { type: "agent", id: subjectId },
+        details: { reason: result.invalid, claimedTier: result.record?.claimed.tier, reportedBy: agentId },
+        action: "grant_base_tier",
+        coordinatorId: identity.peerId
+      });
+    }
+    if (result.changed) repostAsk(subjectId);
+    if (result.record) {
+      app.log.info({ agentId: subjectId, status: result.record.status, granted: result.record.granted.tier, measured: result.record.measured?.value, unit: result.record.measured?.unit }, "hardware_challenge_result");
+    }
+    return reply.send({ ok: true, verification: subjectId === agentId ? verificationSummary(result.record) : null });
+  });
+
+  app.post("/agent/diagnostics", async (req, reply) => {
+    const body = diagnosticsSchema.parse(req.body);
+    if (!agentCapabilities.has(body.agentId)) {
+      return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
+    }
+    const existing = diagnosticsByAgentId.get(body.agentId) ?? [];
+    const normalizedEvents = body.events.map((event) => ({
+      eventAtMs: Number(event.eventAtMs ?? Date.now()),
+      message: event.message
+    }));
+    const merged = [...existing, ...normalizedEvents].slice(-200);
+    diagnosticsByAgentId.set(body.agentId, merged);
+    const last = normalizedEvents.at(-1);
+    app.log.info(
+      {
+        agentId: body.agentId,
+        source: body.source ?? "unknown",
+        runtimeState: body.runtimeState,
+        modelState: body.modelState,
+        eventCount: normalizedEvents.length,
+        lastEvent: last?.message
+      },
+      "agent_diagnostics"
+    );
+    return reply.send({ ok: true, stored: merged.length });
+  });
+
+  app.get("/agent/diagnostics/:agentId", async (req, reply) => {
+    const meshAuthorized = hasMeshToken((req as any).headers ?? {});
+    const portalAuthorized = hasPortalServiceToken((req as any).headers ?? {});
+    if (!meshAuthorized && !portalAuthorized) {
+      return reply.code(401).send({ error: "diagnostics_access_unauthorized" });
+    }
+    const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
+    const events = diagnosticsByAgentId.get(params.agentId) ?? [];
+    const sorted = [...events].sort((a, b) => Number(b.eventAtMs) - Number(a.eventAtMs));
+    return reply.send({
+      ok: true,
+      agentId: params.agentId,
+      events: sorted.slice(0, 200),
+      count: sorted.length,
+      latestEventAtMs: sorted.length > 0 ? sorted[0].eventAtMs : undefined
+    });
+  });
+}

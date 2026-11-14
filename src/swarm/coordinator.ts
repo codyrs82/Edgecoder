@@ -7,19 +7,12 @@
  * listed above it.
  */
 import "./coordinator/load-order.js";
-import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import type { FastifyReply } from "fastify";
 import { registerCoordinatorMetrics } from "./coordinator-metrics.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
-import {
-  safeTokenEqual,
-  readHeaderValue,
-  pairKey,
-  contributionPolicyDecision,
-  mayRelayOverWs
-} from "./coordinator-utils.js";
+import { safeTokenEqual, readHeaderValue, pairKey, mayRelayOverWs } from "./coordinator-utils.js";
 import { registerRobotRoutes } from "./robot-routes.js";
 import { registerDiscoveryRoutes } from "../discovery/announce.js";
 import { createRegistryMirror } from "../discovery/registry-mirror.js";
@@ -32,7 +25,6 @@ import type {
   MeshPeerIdentity,
   ResourceClass,
   WalletType,
-  Subtask,
   CapabilitySummaryPayload,
   PeerExchangePayload,
   CapabilityAnnouncePayload,
@@ -40,13 +32,7 @@ import type {
   SandboxMode
 } from "../common/types.js";
 import { signPayload } from "../mesh/peer.js";
-import {
-  checkPeerRegistration,
-  isAllowlistedKey,
-  PEER_SIGNATURE_MAX_SKEW_MS,
-  verifyForwardedResult
-} from "../mesh/peer-trust.js";
-import { buildAgentEnvelope, verifyForwardedAgentEnvelope } from "../mesh/forwarded-agent-envelope.js";
+import { checkPeerRegistration, isAllowlistedKey, PEER_SIGNATURE_MAX_SKEW_MS } from "../mesh/peer-trust.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
@@ -54,19 +40,7 @@ import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../trust/local-a
 import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
 import { verifyOrderingChain } from "../ledger/verify.js";
 import { reconcileLedger, type ReconcileReport } from "../ledger/reconcile.js";
-import {
-  DuplicateDebitError,
-  NETWORK_FEE_POOL_ACCOUNT,
-  accruePricedJob,
-  creditEngine,
-  earnedMsat,
-  grantCreditsIdempotent,
-  rewardAccountForAgent,
-  spendCredits
-} from "../credits/store.js";
-import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat, splitJobCost } from "../economy/job-pricing.js";
-import { paramsB } from "../inference-api/auto-route.js";
-import { InferenceStreams, boundTokenCounts } from "./inference-streams.js";
+import { NETWORK_FEE_POOL_ACCOUNT, creditEngine, rewardAccountForAgent } from "../credits/store.js";
 import { payoutsPausedByEnv } from "../economy/payout-safeguards.js";
 import { callbackPinStatus } from "../economy/lnurl-callback-pin.js";
 import { validateLightningAddress } from "../economy/payout-destination.js";
@@ -84,22 +58,9 @@ import { isRateEpochStale, normalizeRateEpoch } from "../economy/rate-oracle.js"
 import {
   ACCEPTED_COMPUTE_CLASS_IDS,
   COMPUTE_CLASS_IDS,
-  classifyHardware,
   resolveRequestedClass,
   type ComputeClassId
 } from "../economy/compute-classes.js";
-import { summarizeUsage } from "../economy/usage.js";
-import {
-  RESERVATION_MAX_MINUTES,
-  RESERVATION_MIN_MINUTES,
-  claimReservationEnd,
-  dueReservations,
-  reservationPriceMsat,
-  syncReservations,
-  type Reservation,
-  type ReservationEndReason
-} from "../economy/reservations.js";
-import { capabilityConstraints, meetsCapability } from "../economy/order-book.js";
 import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
 import { debugRoutesEnabled, isProduction, LISTEN_HOST } from "../common/env-guard.js";
 import { HOST_HEARTBEAT_MAX_SKEW_MS, verifyHostHeartbeat } from "../economy/host-attestation.js";
@@ -107,22 +68,6 @@ import { checkpointAnchorFinality, describeAnchor } from "../economy/anchor-stat
 // ── Work receipts + replication (architecture step 2; src/receipts) ──
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
 import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
-import {
-  checkResultClaim,
-  classifyResultAuth,
-  creditedDurationMs,
-  RESULT_ROUTE_BODY_LIMIT_BYTES,
-  resultBodyTooLarge
-} from "./result-integrity.js";
-import { executorKey, type ExecutionResult, type VerificationOutcome } from "./verification.js";
-import {
-  agentHasModel,
-  normalizeReportedModels,
-  resultModelMismatch,
-  routableModels,
-  subtaskModelEligible
-} from "./model-catalog.js";
-import type { ChallengeResponse } from "./benchmark.js";
 import {
   applyBleSyncBatch,
   bleSyncAllowV1,
@@ -132,7 +77,6 @@ import {
 } from "../credits/ble-sync.js";
 import { verifyPaymentWebhookSignature } from "../economy/payment-settlement.js";
 import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
-import { evaluateAgentPowerPolicy } from "./power-policy.js";
 import {
   type BlacklistEvidenceInput,
   validateIncomingBlacklistRecord,
@@ -142,21 +86,10 @@ import {
 import type { EscalationRequest, EscalationResult } from "../escalation/types.js";
 import { createEscalationResolverFromEnv } from "../escalation/server.js";
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../mesh/capability-gossip.js";
-import {
-  createTaskEnvelope,
-  decryptResult as decryptEnvelopeResult,
-  type EncryptedResult
-} from "../security/envelope.js";
 import { rawBodyOf } from "../security/request-signing.js";
 import { verifyNonce } from "../security/nonce-verifier.js";
 import { startPruneScheduler, type PrunableStore } from "../audit/prune-scheduler.js";
-import {
-  verifyBinaryIntegrity,
-  type VerificationStatus,
-  type BinaryIntegrityPayload
-} from "../security/release-verifier.js";
 import { buildChatSystemPrompt, type SystemPromptContext } from "../model/system-prompt.js";
-import { lateResultRejectionDurable } from "./lease-gate.js";
 import { app, metrics } from "./coordinator/app.js";
 import {
   queue,
@@ -165,94 +98,69 @@ import {
   CC,
   mesh,
   MESH_AUTH_TOKEN,
-  CONTRIBUTION_BURST_CREDITS,
-  MIN_CONTRIBUTION_RATIO,
-  requestOrigin,
-  agentRateLimiter,
-  OLLAMA_MODEL,
-  securityLog,
-  SUBTASK_RESERVE_TIMEOUT_MS,
-  taskBilling,
-  usagePending,
-  INFERENCE_AUTH_TOKEN,
-  INFERENCE_URL,
-  protocol,
-  COORDINATOR_PUBLIC_URL,
-  IOS_BATTERY_PULL_MIN_INTERVAL_MS,
-  IOS_BATTERY_TASK_STOP_LEVEL_PCT,
-  reservations,
-  claimedTradePrice,
-  MESH_PEER_ALLOWLIST,
-  forwardReplayCache,
-  PEER_ALLOWLIST_ENFORCED,
-  offeredToPeers,
-  REQUIRE_AGENT_SIGNED_FORWARDS,
-  type ResultMeta,
-  saveUsage,
-  memoryUsage,
-  FALLBACK_BTC_USD,
-  OLLAMA_HOST,
-  PROVIDER,
-  networkMode,
   BITCOIN_NETWORK,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
+  securityLog,
   peerScore,
+  MESH_PEER_ALLOWLIST,
   PAYMENT_INTENT_TTL_MS,
   PAYMENT_WEBHOOK_SECRET,
   ISSUANCE_RECALC_MS,
   ISSUANCE_WINDOW_MS,
   ANCHOR_REQUIRED_CONFIRMATIONS,
+  COORDINATOR_PUBLIC_URL,
+  requestOrigin,
   PORTAL_SERVICE_URL,
+  PEER_ALLOWLIST_ENFORCED,
   peerMessageWindow,
   MESH_RATE_LIMIT_PER_10S,
+  protocol,
   peerOfferBudgetMsat,
   PEER_OFFER_BUDGET_MAX_ENTRIES,
+  SUBTASK_RESERVE_TIMEOUT_MS,
   taskOriginMap,
   STATS_ANCHOR_MIN_CONFIRMATIONS,
   PORTAL_OUTBOUND_TOKEN,
+  OLLAMA_MODEL,
+  OLLAMA_HOST,
   OLLAMA_AUTO_INSTALL,
   COORDINATOR_BOOTSTRAP_URLS,
   coordinatorPullTracker,
+  INFERENCE_AUTH_TOKEN,
+  reservations,
   ANCHOR_INTERVAL_MS,
   STATS_LEDGER_SYNC_INTERVAL_MS,
   STATS_ANCHOR_INTERVAL_MS,
-  ANCHOR_RECONCILE_MS
+  ANCHOR_RECONCILE_MS,
+  PROVIDER
 } from "./coordinator/context.js";
 import { mutable } from "./coordinator/mutable-state.js";
 import {
+  ordering,
   agentCapabilities,
   activeBlacklistRecord,
-  releaseManifestCache,
-  REQUIRE_VERIFIED_AGENTS,
-  behaviorTracker,
-  evaluateAndEnforce,
-  ordering,
-  pendingTunnelInvites,
-  pendingTunnelCloseNotices,
-  directWorkInbox,
-  directWorkById,
-  type DirectWorkOffer,
-  agentOrchestration,
-  blacklistByAgent,
-  lastTaskAssignedByAgent,
-  envelopeSharedKeys,
-  ENVELOPE_KEY_TTL_MS,
-  REQUIRE_SIGNED_AGENT_REQUESTS,
-  meshBlacklistReason,
-  activeTunnels,
   appendBlacklistRecord,
   federatedCapabilities,
+  directWorkById,
+  activeTunnels,
+  blacklistByAgent,
   blacklistAuditLog,
   issueCoordinatorBlacklistRecord,
+  behaviorTracker,
   autoBlacklister,
   tunnelByPairKey,
+  pendingTunnelInvites,
   relayWindowByAgent,
   RELAY_RATE_LIMIT_PER_10S,
   TUNNEL_MAX_RELAYS_PER_MIN,
+  pendingTunnelCloseNotices,
   offerWindowByAgent,
   DIRECT_WORK_OFFERS_PER_10S,
+  type DirectWorkOffer,
+  directWorkInbox,
   upsertRollout,
+  agentOrchestration,
   ollamaRollouts,
   cleanupStaleTunnels,
   anomalyDetector
@@ -261,44 +169,37 @@ import {
   hasMeshToken,
   hasPortalServiceToken,
   requireMeshToken,
-  extractSignedHeaders,
-  verifyAgentRequest,
-  resolveSubmitterAccount,
-  callerAccount,
   requireMeshOrPortalToken,
   requirePortalServiceToken,
   authorizeAdmin,
+  callerAccount,
   ADMIN_API_TOKEN,
-  requireAgentSelf
+  requireAgentSelf,
+  verifyAgentRequest
 } from "./coordinator/auth.js";
 import {
   isPaymentGatedRequest,
-  rateOracleConfig,
-  hardwareVerifier,
-  marketOrders,
-  effectiveHardware,
-  orderBook,
-  askCapabilityOf,
-  verificationSummary,
-  benchmarkModelFor,
-  pickBenchmarkWitness,
-  repostAsk,
-  subtaskReserveMsat,
-  MARKET_DEFAULT_BID_PREMIUM_BPS,
-  marketHistory,
-  NETWORK_FEE_BPS,
-  classRefMsatPerCredit,
   latestPriceEpochByResource,
   quoteSatsPerCredit,
   RATE_ORACLE_ENABLED,
   RATE_RECALIBRATION_MS,
+  rateOracleConfig,
+  NETWORK_FEE_BPS,
+  orderBook,
+  MARKET_DEFAULT_BID_PREMIUM_BPS,
+  marketHistory,
   applyMarketOrder,
+  marketOrders,
+  effectiveHardware,
+  hardwareVerifier,
   recalibrateRateEpoch,
   previousPriceEpochSats,
   PRICE_EPOCH_BOUNDS,
   PRICE_CONSENSUS_QUORUM_OVERRIDE,
   paymentIntents,
+  subtaskReserveMsat,
   syncOrderBookReference,
+  repostAsk,
   recordMarketTicks,
   MARKET_TICK_MS
 } from "./coordinator/economy.js";
@@ -322,16 +223,14 @@ import {
   robotQueue,
   receiptStore,
   discoveryAnnouncer,
-  diagnosticsByAgentId,
-  depTracker,
   keyCustodyEvents,
   appendAgentDiagnostic
 } from "./coordinator/services.js";
 import { coordinatorPublicKeyById, isApprovedCoordinator, bootstrapPeerMesh } from "./coordinator/peers.js";
 import {
   anchorDeps,
-  persistStatsLedgerRecord,
   currentAnchoringStatus,
+  persistStatsLedgerRecord,
   statsQuorumThreshold,
   ingestStatsLedgerRecords,
   maybeAnchorLatestStatsCheckpoint,
@@ -343,7 +242,7 @@ import {
 } from "./coordinator/stats-ledger.js";
 import { validatePortalNode } from "./coordinator/enrollment.js";
 import { recordInfraHeartbeat, selfInfraHeartbeat } from "./coordinator/infra-hosts.js";
-import { attestAgentSigningKey, trustedAgentSigningKeys } from "./coordinator/attested-keys.js";
+import "./coordinator/attested-keys.js";
 import {
   runIssuanceTick,
   appendQuorumRecord,
@@ -351,35 +250,17 @@ import {
   maybeAnchorLatestFinalizedEpoch
 } from "./coordinator/issuance.js";
 import { createPaymentIntent, reconcileIntent, settleIfPaid } from "./coordinator/payments.js";
-import {
-  registerSchema,
-  defaultPolicy,
-  heartbeatSchema,
-  benchmarkResponseSchema,
-  diagnosticsSchema,
-  taskSchema,
-  pullSchema,
-  resultSchema,
-  classParam
-} from "./coordinator/schemas.js";
+import { classParam } from "./coordinator/schemas.js";
 import {
   finalizeFailedSubtask,
-  taskIdInUse,
-  refundTaskSubmit,
-  resultVerifier,
-  verificationAccountFor,
-  enqueueReplica,
-  settleVerification,
-  holdSettlement,
-  publishResult,
-  releaseDependents,
-  addTaskCost,
-  accrueResultCredits,
-  settleTaskIfDone,
-  accrualsInFlight,
   restorePendingVerifications,
   runResultVerificationTick
 } from "./coordinator/results.js";
+import { registerInferenceRoutes } from "./coordinator/routes/inference.js";
+import { registerAccountRoutes } from "./coordinator/routes/account.js";
+import { registerAgentRoutes } from "./coordinator/routes/agents.js";
+import { registerTaskRoutes } from "./coordinator/routes/tasks.js";
+import { registerStatusRoutes } from "./coordinator/routes/status.js";
 
 // Read at scrape time, so the sources may be declared further down this module.
 registerCoordinatorMetrics(metrics, {
@@ -493,1486 +374,11 @@ app.addHook("onRequest", async (req, reply) => {
   }
 });
 
-async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
-  if (!pgStore) return { ok: true };
-  const stats = await pgStore.creditContributionStats(accountId);
-  const balance = await pgStore.creditBalance(accountId);
-  const decision = contributionPolicyDecision(stats, balance, {
-    burstCredits: CONTRIBUTION_BURST_CREDITS,
-    minRatio: MIN_CONTRIBUTION_RATIO
-  });
-  return decision.ok ? { ok: true } : decision;
-}
-
-/**
- * Proof of key for /register: the request is signed (worker-runner signs /register) by the key
- * this coordinator already holds for the agent, and keeps that key. A key change never counts as
- * proof; it needs a portal-validated registration token (or the loopback exemption).
- */
-async function registerProvesStoredKey(
-  req: unknown,
-  agentId: string,
-  claimedKeyPem: string | undefined,
-  storedKeyPem: string | undefined
-): Promise<boolean> {
-  if (!storedKeyPem) return false;
-  if (claimedKeyPem !== undefined && claimedKeyPem !== storedKeyPem) return false;
-  const r = req as { headers?: Record<string, unknown>; ip?: string };
-  const headers = r.headers ?? {};
-  if (!extractSignedHeaders(headers)) return false;
-  const verified = await verifyAgentRequest(headers, "/register", r.ip, { requireSigned: true, rawBody: rawBodyOf(req as any) });
-  return verified !== null && verified !== "rejected" && verified.agentId === agentId;
-}
-
-app.post("/register", async (req, reply) => {
-  const parsedRegister = registerSchema.safeParse(req.body);
-  if (!parsedRegister.success) {
-    // A malformed registration is the agent's fault, not a server error: 400 with the
-    // issues so the agent logs something actionable instead of retrying a 500 forever.
-    return reply.code(400).send({ error: "invalid_registration", issues: parsedRegister.error.issues });
-  }
-  const body = parsedRegister.data;
-  const now = Date.now();
-  const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
-  const origin = requestOrigin(req);
-  const sourceIp = origin.clientIp;
-  const previous = agentCapabilities.get(body.agentId);
-  const proofOfKey = await registerProvesStoredKey(req, body.agentId, body.publicKeyPem, previous?.publicKeyPem);
-  const activation = await validatePortalNode({
-    nodeId: body.agentId,
-    nodeKind: "agent",
-    registrationToken: body.registrationToken,
-    deviceId: body.deviceId,
-    sourceIp,
-    loopback: origin.loopback,
-    proofOfKey
-  });
-  if (!activation.allowed) {
-    app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
-    return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
-  }
-  app.log.info({ agentId: body.agentId, reason: activation.reason }, "register_allowed");
-  agentRateLimiter.reset(body.agentId);
-  const blacklisted = activeBlacklistRecord(body.agentId);
-  if (blacklisted) {
-    return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
-  }
-  queue.registerAgent(body.agentId, defaultPolicy, {
-    os: body.os,
-    version: body.version,
-    mode: body.mode,
-    localModelEnabled: true
-  });
-  const reportedModels = normalizeReportedModels(body.installedModels);
-  agentCapabilities.set(body.agentId, {
-    os: body.os,
-    version: body.version,
-    mode: body.mode,
-    localModelEnabled: true,
-    localModelProvider: body.localModelProvider,
-    // What the agent reports it has installed (signed /register). Older agents don't say: the default
-    // model is assumed for display, but an assumed catalog never makes them eligible for a named model (#54).
-    localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
-    modelsReported: reportedModels.length > 0,
-    ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
-    clientType: body.clientType,
-    swarmEnabled: true,
-    ideEnabled: body.mode === "ide-enabled",
-    maxConcurrentTasks: body.maxConcurrentTasks,
-    connectedPeers: previous?.connectedPeers ?? new Set<string>(),
-    ownerEmail: activation.ownerEmail,
-    sourceIp: activation.sourceIp ?? sourceIp,
-    countryCode: activation.countryCode,
-    vpnDetected: activation.vpnDetected,
-    enrollmentReason: activation.reason,
-    powerTelemetry: body.powerTelemetry
-      ? {
-          ...body.powerTelemetry,
-          updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
-        }
-      : undefined,
-    // A body without a key keeps the registered one; a body without an envelope key keeps the
-    // stored one only while the signing key is unchanged.
-    publicKeyPem: body.publicKeyPem ?? previous?.publicKeyPem,
-    x25519PublicKey:
-      body.x25519PublicKey ??
-      (previous?.publicKeyPem && (body.publicKeyPem ?? previous.publicKeyPem) === previous.publicKeyPem ? previous.x25519PublicKey : undefined),
-    sandboxMode: body.sandboxMode as SandboxMode,
-    hardwareProfile: body.hardwareProfile,
-    computeClass: hardwareClass.computeClass,
-    hardwareClass,
-    lastSeenMs: now
-  });
-  // #122: the shared key record lets other coordinators verify this agent's forwarded results.
-  const registeredKey = agentCapabilities.get(body.agentId)?.publicKeyPem;
-  if (registeredKey) attestAgentSigningKey(body.agentId, registeredKey);
-  // ── Binary integrity verification ──
-  let verificationStatus: VerificationStatus = "unverified";
-  if (body.binaryIntegrity) {
-    const result = verifyBinaryIntegrity(
-      body.binaryIntegrity as BinaryIntegrityPayload,
-      releaseManifestCache.getAllManifests(),
-      now
-    );
-    verificationStatus = result.status;
-    const existing = agentCapabilities.get(body.agentId);
-    if (existing) {
-      (existing as any).verificationStatus = verificationStatus;
-      agentCapabilities.set(body.agentId, existing);
-    }
-    if (result.status === "signature_mismatch" || result.status === "hash_mismatch") {
-      securityLog.log({
-        level: securityLog.severity("binary_integrity_failure"),
-        event: "binary_integrity_failure",
-        source: { type: "agent", id: body.agentId },
-        details: { status: result.status, details: result.details, version: body.binaryIntegrity.releaseVersion, channel: body.binaryIntegrity.distributionChannel },
-        action: "integrity_flag",
-        coordinatorId: identity.peerId,
-      });
-      if (REQUIRE_VERIFIED_AGENTS) {
-        return reply.code(403).send({ error: "binary_integrity_failed", status: result.status });
-      }
-    }
-    app.log.info({ agentId: body.agentId, verificationStatus, version: body.binaryIntegrity.releaseVersion }, "binary_integrity_check");
-  }
-  // Verified-only policy: a missing attestation, an uncached manifest, or absent release keys all
-  // leave verificationStatus "unverified" — reject those too, not just explicit mismatches, so the
-  // policy actually guarantees a verified binary when enabled (audit mesh#2).
-  if (REQUIRE_VERIFIED_AGENTS && verificationStatus !== "verified") {
-    return reply.code(403).send({ error: "binary_integrity_required", status: verificationStatus });
-  }
-
-  behaviorTracker.recordRegistration(body.agentId, now);
-  evaluateAndEnforce(body.agentId);
-  // Hardware verification: the claim is paid at its class base tier until a challenge proves it.
-  const hardwareRecord = hardwareVerifier.register({
-    agentId: body.agentId,
-    claimed: hardwareClass,
-    profile: body.hardwareProfile,
-    benchmark: body.benchmark,
-    challengeKinds: body.challengeKinds,
-    nowMs: now
-  });
-  // Market: post the agent's ask on its (verified) compute class (tracking the oracle reference unless explicit).
-  {
-    const ownerAccount = await rewardAccountForAgent(body.agentId);
-    const standing = marketOrders.get(`${ownerAccount}:sell`);
-    const cls = (effectiveHardware(body.agentId, { hardwareClass }) ?? hardwareClass).computeClass;
-    const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
-    orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf(body.agentId, { hardwareClass }));
-  }
-  const approvalRecord = ordering.append({
-    eventType: "node_approval",
-    taskId: `agent:${body.agentId}`,
-    actorId: body.agentId,
-    coordinatorId: identity.peerId,
-    payloadJson: JSON.stringify({
-      approved: true,
-      activationReason: activation.reason ?? null,
-      ownerEmail: activation.ownerEmail ?? null,
-      sourceIp: activation.sourceIp ?? sourceIp ?? null,
-      countryCode: activation.countryCode ?? null,
-      vpnDetected: activation.vpnDetected ?? null
-    })
-  });
-  try {
-    const registerAuditPersistTimeoutMs = 3_000;
-    await Promise.race([
-      Promise.all([
-        pgStore?.persistLedgerRecord(approvalRecord),
-        persistStatsLedgerRecord(approvalRecord)
-      ]),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("register_audit_persist_timeout")), registerAuditPersistTimeoutMs)
-      )
-    ]);
-  } catch (error) {
-    app.log.warn({ error, agentId: body.agentId }, "register_audit_persist_failed");
-  }
-  return reply.send({
-    accepted: true,
-    policy: defaultPolicy,
-    mode: body.mode,
-    meshToken: MESH_AUTH_TOKEN || undefined,
-    hardwareVerification: verificationSummary(hardwareRecord),
-    // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
-    rewardAccountId: await rewardAccountForAgent(body.agentId)
-  });
-});
-
-app.post("/heartbeat", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/heartbeat", req.ip, { rawBody: rawBodyOf(req) });
-  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-
-  const parsedHeartbeat = heartbeatSchema.safeParse(req.body);
-  if (!parsedHeartbeat.success) {
-    return reply.code(400).send({ error: "invalid_heartbeat", issues: parsedHeartbeat.error.issues });
-  }
-  const body = parsedHeartbeat.data;
-  if (verified && verified.agentId !== body.agentId) {
-    return reply.code(401).send({ error: "agent_id_mismatch" });
-  }
-  const now = Date.now();
-  if (!agentCapabilities.has(body.agentId)) {
-    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
-  }
-  const blacklisted = activeBlacklistRecord(body.agentId);
-  if (blacklisted) {
-    return reply.send({
-      ok: false,
-      blacklisted: true,
-      reason: blacklisted.reason,
-      blacklistVersion: mutable.blacklistVersion
-    });
-  }
-  queue.heartbeat(body.agentId);
-  // A busy agent is alive: without this a long job (a big prompt on a slow model) made it look
-  // offline, which ended its reservation and hid it from the model list.
-  const seen = agentCapabilities.get(body.agentId);
-  if (seen) seen.lastSeenMs = now;
-  if (body.leaseOnly) {
-    // #51: mid-task lease renewal. Signature was checked above (unsigned is rejected
-    // when REQUIRE_SIGNED_AGENT_REQUESTS is on, the production default); nothing is drained.
-    return reply.send({ ok: true, leaseOnly: true });
-  }
-  behaviorTracker.recordHeartbeat(body.agentId);
-  // A tier claim starts (or resets) hardware verification, so only a signed heartbeat may make one.
-  if (body.benchmark && verified) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
-  if (body.powerTelemetry) {
-    const existing = agentCapabilities.get(body.agentId);
-    if (existing) {
-      existing.powerTelemetry = {
-        ...body.powerTelemetry,
-        updatedAtMs: body.powerTelemetry.updatedAtMs ?? now
-      };
-      existing.lastSeenMs = now;
-      agentCapabilities.set(body.agentId, existing);
-    }
-  } else {
-    const existing = agentCapabilities.get(body.agentId);
-    if (existing) {
-      existing.lastSeenMs = now;
-      agentCapabilities.set(body.agentId, existing);
-    }
-  }
-  // #54: a signed heartbeat refreshes the installed-model catalog (a model pulled or removed since
-  // /register). Unsigned heartbeats (non-production only) can't change what the agent is routed.
-  if (body.installedModels !== undefined && verified) {
-    const existing = agentCapabilities.get(body.agentId);
-    const models = normalizeReportedModels(body.installedModels);
-    if (existing && models.length) {
-      existing.localModelCatalog = models;
-      existing.modelsReported = true;
-      if (!existing.activeModel || !models.includes(existing.activeModel)) existing.activeModel = models[0];
-    }
-  }
-  if (body.activeModel !== undefined) {
-    const existing = agentCapabilities.get(body.agentId);
-    if (existing) {
-      existing.activeModel = body.activeModel;
-      existing.activeModelParamSize = body.activeModelParamSize ?? 0;
-      existing.modelSwapInProgress = body.modelSwapInProgress ?? false;
-    }
-  }
-  if (body.askMsatPerCredit !== undefined) {
-    const existing = agentCapabilities.get(body.agentId);
-    const cls = existing ? (effectiveHardware(body.agentId, existing)?.computeClass ?? existing.computeClass) : undefined;
-    if (existing && cls) orderBook.postAsk(body.agentId, cls, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(body.agentId, existing));
-  }
-  if (body.sandboxMode !== undefined) {
-    const existing = agentCapabilities.get(body.agentId);
-    if (existing) {
-      existing.sandboxMode = body.sandboxMode as SandboxMode;
-    }
-  }
-  // #51: lease-based requeue (timeout + grace, renewed by heartbeat, retry cap).
-  const leaseExpiry = queue.expireLeases();
-  const requeued = leaseExpiry.requeued.length;
-  if (leaseExpiry.failed.length > 0) {
-    app.log.warn({ subtaskIds: leaseExpiry.failed }, "subtask_failed_max_attempts");
-  }
-  const tunnelInvites = pendingTunnelInvites.get(body.agentId) ?? [];
-  pendingTunnelInvites.set(body.agentId, []);
-  const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
-  pendingTunnelCloseNotices.set(body.agentId, []);
-  const directOfferIds = directWorkInbox.get(body.agentId) ?? [];
-  const directWorkOffers = directOfferIds
-    .map((id) => directWorkById.get(id))
-    .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered"));
-  // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
-  const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
-    nowMs: now,
-    model: benchmarkModelFor(body.agentId),
-    pickWitness: (model) => pickBenchmarkWitness(body.agentId, model, now)
-  });
-  return reply.send({
-    ok: true,
-    ...(benchmarkChallenge ? { benchmarkChallenge } : {}),
-    hardwareVerification: verificationSummary(hardwareVerifier.get(body.agentId)),
-    requeued,
-    policy: defaultPolicy,
-    orchestration: agentOrchestration.get(body.agentId) ?? null,
-    tunnelInvites,
-    tunnelCloseNotices,
-    directWorkOffers,
-    blacklist: {
-      version: mutable.blacklistVersion,
-      agents: [...blacklistByAgent.keys()]
-    }
-  });
-});
-
-app.post("/benchmark/response", async (req, reply) => {
-  // Signed-only (any trust policy): an answer settles that agent's tier, or a witness check on
-  // another agent's, so an unsigned caller naming a registered agentId could demote it.
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/benchmark/response", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (verified === "rejected" || !verified) return reply.code(401).send({ error: "signature_invalid" });
-  const parsed = benchmarkResponseSchema.safeParse(req.body);
-  if (!parsed.success) return reply.code(400).send({ error: "invalid_benchmark_response", issues: parsed.error.issues });
-  const { agentId, ...response } = parsed.data;
-  if (verified.agentId !== agentId) return reply.code(401).send({ error: "agent_id_mismatch" });
-  if (!agentCapabilities.has(agentId)) return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
-  if (activeBlacklistRecord(agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
-  const result = hardwareVerifier.submit(agentId, response as ChallengeResponse, Date.now());
-  if (!result.accepted) return reply.code(409).send({ ok: false, error: result.reason });
-  // A witness's answer can settle the subject's cross-check: act on the record it changed.
-  const subjectId = result.record?.agentId ?? agentId;
-  if (result.invalid) {
-    securityLog.log({
-      level: securityLog.severity("hardware_challenge_invalid"),
-      event: "hardware_challenge_invalid",
-      source: { type: "agent", id: subjectId },
-      details: { reason: result.invalid, claimedTier: result.record?.claimed.tier, reportedBy: agentId },
-      action: "grant_base_tier",
-      coordinatorId: identity.peerId
-    });
-  }
-  if (result.changed) repostAsk(subjectId);
-  if (result.record) {
-    app.log.info({ agentId: subjectId, status: result.record.status, granted: result.record.granted.tier, measured: result.record.measured?.value, unit: result.record.measured?.unit }, "hardware_challenge_result");
-  }
-  return reply.send({ ok: true, verification: subjectId === agentId ? verificationSummary(result.record) : null });
-});
-
-app.post("/agent/diagnostics", async (req, reply) => {
-  const body = diagnosticsSchema.parse(req.body);
-  if (!agentCapabilities.has(body.agentId)) {
-    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
-  }
-  const existing = diagnosticsByAgentId.get(body.agentId) ?? [];
-  const normalizedEvents = body.events.map((event) => ({
-    eventAtMs: Number(event.eventAtMs ?? Date.now()),
-    message: event.message
-  }));
-  const merged = [...existing, ...normalizedEvents].slice(-200);
-  diagnosticsByAgentId.set(body.agentId, merged);
-  const last = normalizedEvents.at(-1);
-  app.log.info(
-    {
-      agentId: body.agentId,
-      source: body.source ?? "unknown",
-      runtimeState: body.runtimeState,
-      modelState: body.modelState,
-      eventCount: normalizedEvents.length,
-      lastEvent: last?.message
-    },
-    "agent_diagnostics"
-  );
-  return reply.send({ ok: true, stored: merged.length });
-});
-
-app.get("/agent/diagnostics/:agentId", async (req, reply) => {
-  const meshAuthorized = hasMeshToken((req as any).headers ?? {});
-  const portalAuthorized = hasPortalServiceToken((req as any).headers ?? {});
-  if (!meshAuthorized && !portalAuthorized) {
-    return reply.code(401).send({ error: "diagnostics_access_unauthorized" });
-  }
-  const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
-  const events = diagnosticsByAgentId.get(params.agentId) ?? [];
-  const sorted = [...events].sort((a, b) => Number(b.eventAtMs) - Number(a.eventAtMs));
-  return reply.send({
-    ok: true,
-    agentId: params.agentId,
-    events: sorted.slice(0, 200),
-    count: sorted.length,
-    latestEventAtMs: sorted.length > 0 ? sorted[0].eventAtMs : undefined
-  });
-});
-
-app.post("/submit", async (req, reply) => {
-  const body = taskSchema.parse(req.body);
-  const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId);
-  if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
-  body.submitterAccountId = submitter.accountId;
-  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-  if (body.submitterAccountId !== "anonymous") {
-    const policy = await enforceContributionFirstPolicy(body.submitterAccountId);
-    if (!policy.ok) {
-      return reply.code(403).send({ error: "contribute_first_required", detail: policy.reason });
-    }
-    try {
-      // Set aside the worst case for one subtask now (topped up once the task is split), settled
-      // to the actual cost when it finishes (job-pricing.ts).
-      const early = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
-      const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
-      // One charge per task id network-wide: the same task sent again (retry, or to the other seed) is refused.
-      await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: `task_reserve:${body.taskId}` });
-      taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
-      usagePending.set(body.taskId, { id: body.taskId, accountId: body.submitterAccountId, atMs: Date.now(), kind: "job", placement: "network", computeClass: early.computeClass ?? undefined, ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}) });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-      if (message.startsWith("insufficient_credits")) {
-        return reply.code(402).send({ error: "insufficient_credits" });
-      }
-      // DB/lock failures are not "insufficient credits" (#48 review): surface and log them.
-      req.log.error({ err, taskId: body.taskId }, "task_submit_debit_failed");
-      return reply.code(500).send({ error: "credit_debit_failed" });
-    }
-  }
-
-  const decomposeBody = JSON.stringify(body);
-  const decomposeBodySha256 = createHash("sha256").update(decomposeBody).digest("hex");
-  const decomposeTimestampMs = Date.now();
-  const decomposeNonce = randomUUID();
-  const decomposeSignaturePayload = JSON.stringify({
-    peerId: identity.peerId,
-    method: "POST",
-    path: "/decompose",
-    timestampMs: decomposeTimestampMs,
-    nonce: decomposeNonce,
-    bodySha256: decomposeBodySha256
-  });
-  const decomposeSignature = signPayload(decomposeSignaturePayload, coordinatorKeys.privateKeyPem);
-
-  const decomposeHeaders: Record<string, string> = {
-    "content-type": "application/json"
-  };
-  if (INFERENCE_AUTH_TOKEN) {
-    decomposeHeaders["x-inference-token"] = INFERENCE_AUTH_TOKEN;
-  }
-  decomposeHeaders["x-coordinator-peer-id"] = identity.peerId;
-  decomposeHeaders["x-inference-timestamp-ms"] = String(decomposeTimestampMs);
-  decomposeHeaders["x-inference-nonce"] = decomposeNonce;
-  decomposeHeaders["x-inference-body-sha256"] = decomposeBodySha256;
-  decomposeHeaders["x-inference-signature"] = decomposeSignature;
-  const decompose = await request(`${INFERENCE_URL}/decompose`, {
-    method: "POST",
-    headers: decomposeHeaders,
-    body: decomposeBody
-  });
-
-  if (decompose.statusCode < 200 || decompose.statusCode >= 300) {
-    await refundTaskSubmit(body.taskId);
-    return reply.code(502).send({ error: "inference_service_unavailable" });
-  }
-
-  const payload = (await decompose.body.json()) as {
-    subtasks: Array<{
-      taskId: string;
-      kind: "micro_loop" | "single_step";
-      input: string;
-      language: "python" | "javascript";
-      timeoutMs: number;
-      snapshotRef: string;
-      dependsOn?: string[];
-      subtaskIndex?: number;
-    }>;
-  };
-
-  const enqueueRecord = ordering.append({
-    eventType: "task_enqueue",
-    taskId: body.taskId,
-    actorId: body.submitterAccountId
-  });
-  await pgStore?.persistLedgerRecord(enqueueRecord);
-  await persistStatsLedgerRecord(enqueueRecord);
-  const billingEntry = taskBilling.get(body.taskId);
-  if (billingEntry && payload.subtasks.length > 1) {
-    const extra = billingEntry.perSubtaskReserveMsat * (payload.subtasks.length - 1);
-    try {
-      await spendCredits(billingEntry.accountId, msatToCSats(extra), "task_reserve", body.taskId, { idempotencyKey: `task_reserve_topup:${body.taskId}` });
-      billingEntry.reservedMsat += extra;
-    } catch (err) {
-      await refundTaskSubmit(body.taskId);
-      const message = err instanceof Error ? err.message : String(err);
-      return reply.code(message.startsWith("insufficient_credits") ? 402 : 500).send({ error: message.startsWith("insufficient_credits") ? "insufficient_credits" : "credit_debit_failed" });
-    }
-  }
-
-  // If mesh peers exist, delay local claiming to give peers a chance to claim
-  // via gossip first (prevents duplicate execution across coordinators).
-  const hasMeshPeers = mesh.listPeers().length > 0;
-  const GOSSIP_CLAIM_DELAY_MS = 3_000;
-
-  // Market: register the requester's bid for this task (default = reference × premium). A legacy
-  // class id maps onto its class, its explicit price into the current unit, and the capability it
-  // implied (gpu.c24 => minVramGb 17) so an under-spec card cannot fill it; explicit constraints win.
-  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, { minVramGb: body.minVramGb, minMemoryGb: body.minMemoryGb, minReliability: body.minReliability }, rateOracleConfig.computeClasses);
-  const taskClass = resolved.computeClass as ComputeClassId | "any"; // validated by taskSchema
-  const explicitBid = resolved.msatPerCredit;
-  const constraints = capabilityConstraints(resolved.constraints);
-  const standingBuy = marketOrders.get(`${body.submitterAccountId}:buy`);
-  const bidCeiling = explicitBid ?? (standingBuy && (standingBuy.computeClass === "any" || standingBuy.computeClass === taskClass) ? standingBuy.msatPerCredit : undefined);
-  const marketBid = orderBook.postBid(body.taskId, taskClass, bidCeiling, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), constraints);
-
-  // Assign stable IDs before scheduling so dependsOn references resolve
-  const subtasksWithIds = payload.subtasks.map((s) => ({
-    ...s,
-    id: randomUUID(),
-    requestedModel: body.requestedModel,
-    projectMeta: {
-      projectId: body.projectId,
-      tenantId: body.tenantId,
-      resourceClass: body.resourceClass as ResourceClass,
-      priority: body.priority,
-      computeClass: taskClass,
-      maxBidMsatPerCredit: marketBid.maxMsatPerCredit,
-      ...constraints
-    }
-  }));
-
-  // Detect circular dependencies and warn (enqueue anyway to avoid deadlock)
-  const circularIds = depTracker.detectCircularDeps(subtasksWithIds);
-  if (circularIds.size > 0) {
-    app.log.warn(
-      { taskId: body.taskId, circularIds: [...circularIds] },
-      "circular_subtask_dependencies_detected_enqueuing_anyway"
-    );
-  }
-
-  const enqueueOpts = hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : undefined;
-  const created: Subtask[] = [];
-  const deferred: string[] = [];
-
-  for (const subtask of subtasksWithIds) {
-    const deps = subtask.dependsOn;
-    const hasDeps = Array.isArray(deps) && deps.length > 0;
-    const isCircular = circularIds.has(subtask.id);
-
-    if (hasDeps && !isCircular) {
-      // Hold until dependencies complete
-      depTracker.hold({
-        subtask,
-        dependsOn: deps!,
-        enqueueOpts
-      });
-      deferred.push(subtask.id);
-    } else {
-      // Enqueue immediately (no deps, or circular — enqueue to prevent deadlock)
-      const enqueued = queue.enqueueSubtask(subtask, enqueueOpts);
-      created.push(enqueued);
-    }
-  }
-
-  // Gossip each immediately-enqueued subtask as a task_offer to peer coordinators
-  for (const subtask of created) {
-    const offerMsg = protocol.createMessage(
-      "task_offer",
-      identity.peerId,
-      {
-        subtaskId: subtask.id,
-        taskId: subtask.taskId,
-        kind: subtask.kind,
-        language: subtask.language,
-        input: subtask.input,
-        timeoutMs: subtask.timeoutMs,
-        snapshotRef: subtask.snapshotRef,
-        projectMeta: subtask.projectMeta,
-        originCoordinatorId: identity.peerId,
-        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
-      },
-      coordinatorKeys.privateKeyPem,
-      60_000
-    );
-    void mesh.broadcast(offerMsg);
-  }
-
-  const allIds = [...created.map((s) => s.id), ...deferred];
-  const message = protocol.createMessage(
-    "queue_summary",
-    identity.peerId,
-    { taskId: body.taskId, queued: created.length, deferred: deferred.length, projectId: body.projectId },
-    coordinatorKeys.privateKeyPem
-  );
-  void mesh.broadcast(message);
-
-  return reply.send({ taskId: body.taskId, subtasks: allIds });
-});
-
-app.post("/pull", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/pull", req.ip, { rawBody: rawBodyOf(req) });
-  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-
-  const body = pullSchema.parse(req.body);
-  if (verified && verified.agentId !== body.agentId) {
-    return reply.code(401).send({ error: "agent_id_mismatch" });
-  }
-  if (!agentCapabilities.has(body.agentId)) {
-    return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
-  }
-  const blacklisted = activeBlacklistRecord(body.agentId);
-  if (blacklisted) {
-    return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
-  }
-  const capability = agentCapabilities.get(body.agentId);
-  // Verified-only policy: /register stores the agent before its integrity check refuses it, so the
-  // check is enforced where work is handed out too.
-  if (REQUIRE_VERIFIED_AGENTS && (capability as { verificationStatus?: string } | undefined)?.verificationStatus !== "verified") {
-    return reply.code(403).send({ error: "binary_integrity_required" });
-  }
-  let powerDecisionForPull: ReturnType<typeof evaluateAgentPowerPolicy> | undefined;
-  if (capability) {
-    powerDecisionForPull = evaluateAgentPowerPolicy({
-      os: capability.os,
-      telemetry: capability.powerTelemetry,
-      nowMs: Date.now(),
-      lastTaskAssignedAtMs: lastTaskAssignedByAgent.get(body.agentId),
-      batteryPullMinIntervalMs: IOS_BATTERY_PULL_MIN_INTERVAL_MS,
-      batteryTaskStopLevelPct: IOS_BATTERY_TASK_STOP_LEVEL_PCT
-    });
-    if (!powerDecisionForPull.allowCoordinatorTasks) {
-      return reply.send({ subtask: null, powerDeferred: true, reason: powerDecisionForPull.reason });
-    }
-    if (powerDecisionForPull.deferMs && powerDecisionForPull.deferMs > 0) {
-      return reply.send({ subtask: null, powerDeferred: true, deferMs: powerDecisionForPull.deferMs, reason: powerDecisionForPull.reason });
-    }
-  }
-  // #45: every swarm task requires a sandbox; check before claim so nothing is claimed/requeued.
-  const sandboxRejection = pullSandboxRejection(capability);
-  if (sandboxRejection) {
-    app.log.warn({ agentId: body.agentId }, "sandbox_capability_mismatch");
-    return reply.send(sandboxRejection);
-  }
-  const pullerAccount = await rewardAccountForAgent(body.agentId);
-  // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
-  const lease = reservations.activeForAgent(body.agentId);
-  const task = queue.claim(
-    body.agentId,
-    capability?.activeModel,
-    pullerAccount,
-    // The book enforces the bid's class, price and constraints. The subtask's own constraints are
-    // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-    (subtask) => {
-      // #54: a job that names a model goes only to an agent that reported it (inference: installed;
-      // code: its active model, which is what code work runs on).
-      const hasModel = subtaskModelEligible(capability, subtask);
-      const meta = subtask.projectMeta;
-      if (lease) return meta.reservationId === lease.id && hasModel;
-      if (meta.reservationId) return false;
-      if (meta.onlyAccountId) return meta.onlyAccountId === pullerAccount && hasModel;
-      return orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(body.agentId, capability), meta) && hasModel;
-    }
-  );
-  if (task) {
-    // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
-    const match = orderBook.canMatch(body.agentId, task.taskId);
-    if (match.ok) {
-      claimedTradePrice.set(task.id, { msatPerCredit: match.msatPerCredit, computeClass: match.computeClass, creditsPerSecond: effectiveHardware(body.agentId, capability)?.creditsPerSecond ?? 1 });
-      const trade = { taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, computeClass: match.computeClass, msatPerCredit: match.msatPerCredit, atMs: Date.now() };
-      orderBook.recordTrade(trade);
-      marketHistory.recordTrade(trade);
-      void pgStore?.persistMarketTrade(trade).catch(() => undefined);
-    }
-
-    // ── Power policy: small-tasks-only check ──
-    if (powerDecisionForPull?.allowSmallTasksOnly && task.timeoutMs > 10_000) {
-      app.log.info({ subtaskId: task.id, agentId: body.agentId, reason: powerDecisionForPull.reason }, "power_small_task_filter");
-      queue.requeue(task.id);
-      return reply.send({ subtask: null, powerDeferred: true, reason: powerDecisionForPull.reason });
-    }
-
-    lastTaskAssignedByAgent.set(body.agentId, Date.now());
-    behaviorTracker.recordTaskClaim(body.agentId);
-    // #106: remember who took a verification replica, so abandoning it can't force an unverified payout.
-    // #162: keyed on the reward account, so a new agent id on the same account is still the abandoner.
-    if (resultVerifier.isReplica(task.id)) resultVerifier.markReplicaClaimed(task.id, body.agentId, pullerAccount);
-    const claimRecord = ordering.append({
-      eventType: "task_claim",
-      taskId: task.taskId,
-      subtaskId: task.id,
-      actorId: body.agentId
-    });
-    await pgStore?.persistLedgerRecord(claimRecord);
-    await persistStatsLedgerRecord(claimRecord);
-
-    // Envelope encryption: if agent registered an X25519 key, encrypt the task
-    const agentX25519 = capability?.x25519PublicKey;
-    if (agentX25519) {
-      try {
-        const agentPubKey = Buffer.from(agentX25519, "base64");
-        const { envelope, sharedKey } = createTaskEnvelope(
-          { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
-          agentPubKey,
-          task.id,
-          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel }
-        );
-        envelopeSharedKeys.set(task.id, { key: sharedKey, createdAtMs: Date.now() });
-        // Expire stale shared keys
-        const now = Date.now();
-        for (const [sid, entry] of envelopeSharedKeys) {
-          if (now - entry.createdAtMs > ENVELOPE_KEY_TTL_MS) envelopeSharedKeys.delete(sid);
-        }
-        app.log.info({ subtaskId: task.id, agentId: body.agentId }, "task_encrypted_with_envelope");
-        return reply.send({ subtask: null, envelope });
-      } catch (envelopeErr) {
-        app.log.warn({ subtaskId: task.id, error: String(envelopeErr) }, "envelope_encryption_failed_falling_back");
-        // Fall through to plaintext
-      }
-    }
-  }
-  return reply.send({ subtask: task ?? null });
-});
-
-// #122: a peer forward carries the output twice (plaintext + the agent's signed body), so the route
-// limit fits a forwarded max-size agent result; agents themselves stay at the old 1 MiB.
-app.post("/result", { bodyLimit: RESULT_ROUTE_BODY_LIMIT_BYTES }, async (req, reply) => {
-  {
-    const h = (req as any).headers ?? {};
-    const peerForwardCandidate = !extractSignedHeaders(h) && hasMeshToken(h);
-    if (resultBodyTooLarge(Buffer.byteLength(rawBodyOf(req)), peerForwardCandidate)) {
-      return reply.code(413).send({ error: "payload_too_large" });
-    }
-  }
-  // allowUnsigned only so the mesh-token peer-forward path below can be evaluated; plain
-  // unsigned agent results are still rejected when REQUIRE_SIGNED_AGENT_REQUESTS is on.
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/result", req.ip, { allowUnsigned: true, rawBody: rawBodyOf(req) });
-  if (verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-
-  const rawBody = req.body as Record<string, unknown>;
-
-  // Check if this is an encrypted envelope result
-  const cachedKey = typeof rawBody.subtaskId === "string" ? envelopeSharedKeys.get(rawBody.subtaskId) : undefined;
-  let body: z.infer<typeof resultSchema>;
-  let envelopeKey: Buffer | undefined;
-  if (cachedKey && typeof rawBody.encryptedPayload === "string") {
-    try {
-      const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, cachedKey.key);
-      envelopeSharedKeys.delete(rawBody.subtaskId as string);
-      envelopeKey = cachedKey.key;
-      body = resultSchema.parse({
-        ...decrypted,
-        subtaskId: rawBody.subtaskId,
-        taskId: rawBody.taskId,
-        agentId: rawBody.agentId,
-        reportNonce: rawBody.reportNonce,
-        reportSignature: rawBody.reportSignature,
-        model: rawBody.model,
-        receipt: rawBody.receipt,
-      });
-      app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
-    } catch (decryptErr) {
-      app.log.error({ subtaskId: rawBody.subtaskId, error: String(decryptErr) }, "envelope_result_decrypt_failed");
-      return reply.code(400).send({ error: "envelope_decrypt_failed" });
-    }
-  } else {
-    body = resultSchema.parse(rawBody);
-  }
-
-  if (verified && verified.agentId !== body.agentId) {
-    return reply.code(401).send({ error: "agent_id_mismatch" });
-  }
-  const blacklisted = activeBlacklistRecord(body.agentId);
-  if (blacklisted) {
-    return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
-  }
-  // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
-  const late = await lateResultRejectionDurable(queue, body.subtaskId, body.agentId);
-  if (late) return reply.code(late.statusCode).send(late.body);
-  // ── #44: claim ownership, before anything is recorded ──
-  const claim = queue.getClaim(body.subtaskId);
-  // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the
-  // mesh token but no agent signature and have no local claim. They are accepted for bookkeeping
-  // and dependency release only; no credits are accrued here.
-  const resultAuth = classifyResultAuth({
-    verified,
-    // #44 review: "locally owned" only if a local agent actually claimed it; an unclaimed
-    // queued copy of a gossiped subtask must still accept the relayed result.
-    hasLocalClaim: Boolean(claim?.claimedBy),
-    meshTokenConfigured: MESH_AUTH_TOKEN !== "",
-    meshTokenValid: hasMeshToken((req as any).headers ?? {}),
-    requireSigned: REQUIRE_SIGNED_AGENT_REQUESTS
-  });
-  if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });
-  const isPeerForward = resultAuth === "peer_forward";
-  if (isPeerForward) {
-    // #52: a forwarded result must be signed by an allowlisted peer coordinator.
-    const fwd = verifyForwardedResult({
-      headers: (req as any).headers ?? {},
-      // #118 review: verify the exact bytes received, not a re-serialization.
-      bodyJson: (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(rawBody),
-      allowlist: MESH_PEER_ALLOWLIST,
-      production: isProduction(),
-      publicKeyFor: (id) => (id === identity.peerId ? null : coordinatorPublicKeyById(id)),
-      replay: forwardReplayCache
-    });
-    if (!fwd.ok) {
-      app.log.warn({ subtaskId: body.subtaskId, error: fwd.error }, "forwarded_result_rejected");
-      return reply.code(fwd.code).send({ error: fwd.error });
-    }
-    // #118 review: only results for subtasks we offered to peers, and only once each.
-    if (PEER_ALLOWLIST_ENFORCED) {
-      const exp = offeredToPeers.get(body.subtaskId);
-      if (exp === undefined || exp <= Date.now()) {
-        app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_not_offered");
-        return reply.code(403).send({ error: "subtask_not_offered" });
-      }
-      offeredToPeers.delete(body.subtaskId);
-    }
-    // #122: the result itself must be signed by the agent that produced it.
-    const agentCheck = await verifyForwardedAgentEnvelope({
-      result: body,
-      envelope: rawBody.agentEnvelope,
-      required: REQUIRE_AGENT_SIGNED_FORWARDS,
-      agentKeys: trustedAgentSigningKeys,
-      blacklisted: meshBlacklistReason
-    });
-    if (!agentCheck.ok) {
-      app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId, agentId: agentCheck.agentId, error: agentCheck.error }, "forwarded_result_agent_check_failed");
-      return reply.code(agentCheck.code).send({ error: agentCheck.error });
-    }
-    if (agentCheck.mode === "legacy_unenveloped") {
-      app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_without_agent_signature_accepted");
-    }
-  }
-  // #122: kept with the result so the origin coordinator can check the agent's own signature.
-  const signedHeaders = verified ? extractSignedHeaders((req as any).headers ?? {}) : null;
-  const agentEnvelope = signedHeaders ? buildAgentEnvelope(signedHeaders, rawBodyOf(req), envelopeKey) : undefined;
-  if (!isPeerForward) {
-    const claimCheck = checkResultClaim(claim, body.agentId);
-    if (!claimCheck.ok) return reply.code(claimCheck.code).send({ error: claimCheck.error });
-  }
-  const subtask = isPeerForward ? undefined : claim?.subtask;
-  // #54: the agent says (signed) which model ran; it must be the one requested.
-  if (subtask && resultModelMismatch(subtask.requestedModel, body.model)) {
-    app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId, requestedModel: subtask.requestedModel, reportedModel: body.model }, "result_model_mismatch");
-    return reply.code(409).send({ error: "result_model_mismatch", requestedModel: subtask.requestedModel });
-  }
-  // The claimed subtask says which task this result belongs to. Workers before 1.4.12 derived the
-  // task id of an encrypted (envelope) task from the subtask id, so the requester's poll, which
-  // matches on task id, never found the result.
-  if (subtask && body.taskId !== subtask.taskId) body = { ...body, taskId: subtask.taskId };
-  // Server-side duration: never more than measured since claim or the subtask timeout.
-  const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
-  // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
-  // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
-  if (!isPeerForward && claim?.claimedAt) {
-    const nowMs = Date.now();
-    // Model calls carry the model's real token count (reported with the last streamed piece).
-    hardwareVerifier.recordTask(body.agentId, { ok: body.ok, outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt, outputTokens: usagePending.get(body.taskId)?.outputTokens }, nowMs);
-    repostAsk(body.agentId, nowMs);
-  }
-
-  // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
-  if (!isPeerForward) {
-    behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
-    evaluateAndEnforce(body.agentId);
-  }
-
-  // ── #50: sampled results are held for redundant verification ──
-  // A held result (or a replica) doesn't release dependents or earn until the
-  // verification settles (see settleVerification).
-  let verificationHold = false;
-  let verificationOutcome: VerificationOutcome<ResultMeta> | null = null;
-  // Peer-forwarded results skip verification here: their agentId is unauthenticated and
-  // they earn nothing on this coordinator; the coordinator that ran the claim verifies
-  // (and holds) before paying or forwarding.
-  if (!isPeerForward && subtask) {
-    const execution: ExecutionResult<ResultMeta> = {
-      subtaskId: body.subtaskId,
-      agentId: body.agentId,
-      accountId: await verificationAccountFor(body.agentId),
-      ok: body.ok,
-      output: body.output ?? "",
-      meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, agentEnvelope }
-    };
-    if (resultVerifier.isReplica(body.subtaskId)) {
-      verificationHold = true;
-      const r = resultVerifier.recordReplica(body.subtaskId, execution);
-      if (r && r.status === "pending") enqueueReplica(r.next);
-      else if (r) verificationOutcome = r;
-    } else if (resultVerifier.shouldVerify(executorKey(execution), subtask.kind)) {
-      verificationHold = true;
-      enqueueReplica(resultVerifier.start(subtask, execution));
-      app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "result_held_for_verification");
-    }
-  }
-
-  if (verificationHold) {
-    // #50: held original or replica. Nothing is visible to the requester or the origin
-    // coordinator, and nothing is paid, until the verdict (settleVerification).
-    queue.removeHeld(body.subtaskId);
-    if (verificationOutcome) await settleVerification(verificationOutcome);
-    await mutable.verificationWrites; // #105: the held state is stored before the agent is told
-    return reply.send({ ok: true, held: true });
-  }
-
-  // The result is visible to the requester's stream read from here on, and that read settles the
-  // task: it must not return the reserve before this result's cost has been taken from it.
-  const releaseSettlement = holdSettlement(body.taskId);
-  try {
-    await publishResult(body, agentEnvelope);
-    inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
-    // ── Dependency tracking: store output and release dependent subtasks ──
-    releaseDependents(body.subtaskId, body.output ?? "");
-    // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
-    if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
-
-    if (subtask) {
-      await accrueResultCredits({
-        subtaskId: body.subtaskId,
-        agentId: body.agentId,
-        ok: body.ok,
-        output: body.output ?? "",
-        meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
-      });
-    }
-  } finally {
-    releaseSettlement();
-  }
-  await settleTaskIfDone(body.taskId);
-  return reply.send({ ok: true });
-});
-
-// ── Network inference (chat completions on agents' local models, streamed) ──────────────────
-const inferenceStreams = new InferenceStreams();
-setInterval(() => inferenceStreams.prune(), 60_000).unref?.();
-const INFERENCE_MAX_TIMEOUT_MS = 300_000;
-
-const inferenceSubmitSchema = z.object({
-  taskId: z.string().min(1).max(200),
-  submitterAccountId: z.string().min(1).max(200),
-  model: z.string().min(1).max(200),
-  // Ollama chat format: tool calls on assistant turns, tool results as role "tool".
-  messages: z
-    .array(z.object({ role: z.enum(["system", "user", "assistant", "tool"]), content: z.string().max(400_000), tool_calls: z.array(z.unknown()).max(64).optional(), tool_name: z.string().max(200).optional() }))
-    .min(1)
-    .max(2000),
-  tools: z.array(z.unknown()).max(256).optional(),
-  maxTokens: z.number().int().positive().max(32_768).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
-  maxBidMsatPerCredit: z.number().positive().max(1e9).optional(),
-  timeoutMs: z.number().int().min(10_000).max(INFERENCE_MAX_TIMEOUT_MS).default(180_000),
-  /** network: any agent, billed per second; mine: only the requester's own machines, not billed. */
-  target: z.enum(["network", "mine"]).default("network"),
-  /** Run on the agent a reserved-capacity lease holds (the lease pays). */
-  reservationId: z.string().min(1).max(100).optional(),
-  /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
-  source: z.string().max(80).optional(),
-});
-
-/** The signing agent's owner account: cSats balance, earnings and recent activity (for the app's Compute page). */
-app.post("/account/summary", async (req, reply) => {
-  const caller = await callerAccount(req, "/account/summary", (req.body as { accountId?: string } | undefined)?.accountId);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  const accountId = caller.accountId;
-  const balance = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
-  const history = pgStore ? await pgStore.creditHistory(accountId) : creditEngine.history(accountId);
-  const recent = [...history].sort((a, b) => b.timestampMs - a.timestampMs).slice(0, 25).map((t) => ({
-    type: t.type, cSats: Number(t.credits), reason: t.reason, taskId: t.relatedTaskId, atMs: t.timestampMs,
-  }));
-  // Your machines as this coordinator sees them (the app's Mesh page and "My machines" in the compute picker).
-  const owned = new Set([...((await pgStore?.listAgentOwnershipByAccount(accountId)) ?? []).map((o) => o.agentId), accountId]);
-  const now = Date.now();
-  const machines = [...owned]
-    .map((agentId) => ({ agentId, cap: agentCapabilities.get(agentId) }))
-    .filter((m) => m.cap)
-    .map(({ agentId, cap }) => {
-      const eff = effectiveHardware(agentId, cap);
-      const lease = reservations.activeForAgent(agentId, now);
-      // Hardware verification: what was claimed, what is paid (granted), and the evidence.
-      const v = hardwareVerifier.get(agentId);
-      return {
-        agentId,
-        ...(v
-          ? {
-              verification: {
-                status: v.status, claimedTier: v.claimed.tier, grantedTier: v.granted.tier, reason: v.lastFailReason ?? null,
-                lastPassAtMs: v.lastPassAtMs ?? null, score: v.evidence.score ?? null, tokensPerSec: v.evidence.tokensPerSec ?? null,
-              },
-            }
-          : {}),
-        online: now - cap!.lastSeenMs < 2 * 60_000,
-        lastSeenMs: cap!.lastSeenMs,
-        computeClass: eff?.computeClass ?? cap!.computeClass,
-        tier: eff?.tier ?? null,
-        activeModel: cap!.activeModel ?? null,
-        models: [...(cap!.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
-        reservedUntilMs: lease?.endMs ?? null,
-      };
-    });
-  let networkAgents = 0;
-  for (const cap of agentCapabilities.values()) if (now - cap.lastSeenMs < 2 * 60_000) networkAgents++;
-  return reply.send({ accountId, cSats: Number(balance.toFixed(3)), earnedSats: Math.floor((await earnedMsat(accountId)) / 1000), recent, machines, networkAgents, coordinator: { peerId: identity.peerId, url: COORDINATOR_PUBLIC_URL } });
-});
-
-// ── Reserved capacity (src/economy/reservations.ts) ──
-
-const reserveSchema = z.object({
-  accountId: z.string().max(200).optional(),
-  computeClass: z.enum(["cpu", "apple", "gpu", "gpu.dc"]),
-  minutes: z.number().int().min(RESERVATION_MIN_MINUTES).max(RESERVATION_MAX_MINUTES),
-  /** Only an agent that has this model installed. */
-  model: z.string().min(1).max(200).optional(),
-  minVramGb: z.number().min(0).max(1024).optional(),
-});
-
-/** Agents a lease is being made for right now (between choosing the agent and recording the lease). */
-const reservingAgents = new Set<string>();
-
-/** Agents that could be reserved now for an account: online, of the class, not held, not its own. */
-async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
-  const now = Date.now();
-  const out: Array<{ agentId: string; ownerAccountId: string; tier?: string; creditsPerSecond: number; vramGb?: number; models: string[] }> = [];
-  for (const [id, cap] of agentCapabilities) {
-    if (activeBlacklistRecord(id) || now - cap.lastSeenMs > 60_000 || reservations.isHeld(id, now)) continue;
-    const eff = effectiveHardware(id, cap);
-    if ((eff?.computeClass ?? "cpu") !== cls) continue;
-    if (model && !agentHasModel(cap, model)) continue;
-    if (minVramGb && (eff?.vramGb ?? 0) < minVramGb) continue;
-    const owner = await rewardAccountForAgent(id);
-    if (owner === accountId) continue;
-    out.push({ agentId: id, ownerAccountId: owner, tier: eff?.tier, creditsPerSecond: eff?.creditsPerSecond ?? 1, vramGb: eff?.vramGb, models: [...(cap.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default") });
-  }
-  // Cheapest first (lowest tier weight), then most reliable.
-  return out.sort((a, b) => a.creditsPerSecond - b.creditsPerSecond || (hardwareVerifier.reliability(b.agentId) ?? 0) - (hardwareVerifier.reliability(a.agentId) ?? 0));
-}
-
-function publicReservation(r: Reservation) {
-  const cSats = (msat: number | undefined) => (msat === undefined ? undefined : msatToCSats(msat));
-  return {
-    id: r.id, computeClass: r.computeClass, tier: r.tier, model: r.model, agentId: r.agentId, startMs: r.startMs, endMs: r.endMs,
-    status: r.status, endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
-    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
-  };
-}
-
-/** End a lease: pay the agent's owner for the time held (minus the network fee) and refund the rest. */
-async function endReservation(id: string, reason: ReservationEndReason, atMs = Date.now()): Promise<Reservation | undefined> {
-  // Coordinators sharing the database race to end a lease; only the one that wins the stored
-  // compare-and-set pays and refunds (the loser's book takes the stored copy).
-  let r: Reservation | undefined;
-  try {
-    r = await claimReservationEnd(reservations, pgStore, id, atMs, reason);
-  } catch (err) {
-    app.log.warn({ err, reservationId: id }, "reservation_end_claim_failed");
-    return undefined;
-  }
-  if (!r) return undefined;
-  const used = r.usedMsat ?? 0;
-  const { agentMsat, feeMsat } = splitJobCost(used, NETWORK_FEE_BPS);
-  const heldSeconds = Math.max(0, ((r.endedAtMs ?? atMs) - r.startMs) / 1000);
-  try {
-    await accruePricedJob(
-      {
-        reportId: `reservation:${r.id}`, agentId: r.agentAccountId, sourceAgentId: r.agentId, taskId: `reservation:${r.id}`,
-        resourceClass: r.computeClass === "cpu" ? "cpu" : "gpu", cpuSeconds: r.computeClass === "cpu" ? heldSeconds : 0, gpuSeconds: r.computeClass === "cpu" ? 0 : heldSeconds,
-        success: true, qualityScore: 1, timestampMs: Date.now(), hardwareWeight: r.creditsPerSecond,
-      },
-      { agentMsat, feeMsat }
-    );
-    if ((r.refundMsat ?? 0) > 0) await grantCreditsIdempotent(r.accountId, msatToCSats(r.refundMsat!), `reservation_refund:${r.id}`, `reservation_refund:${r.id}`);
-  } catch (err) {
-    app.log.error({ err, reservationId: r.id }, "reservation_settle_failed");
-  }
-  app.log.info({ reservationId: r.id, reason, usedMsat: used, refundMsat: r.refundMsat }, "reservation_ended");
-  void saveUsage({
-    id: `usage-${r.id}`, accountId: r.accountId, atMs: r.startMs, kind: "reservation", placement: "reserved", computeClass: r.computeClass,
-    agentId: r.agentId, ...(r.model ? { model: r.model } : {}), source: "Reservation", ok: true, durationMs: heldSeconds * 1000, costMsat: used,
-  });
-  return r;
-}
-
-setInterval(async () => {
-  const now = Date.now();
-  try {
-    // Leases made or ended on another coordinator, and heartbeats it saw, come from the shared store.
-    await syncReservations(reservations, pgStore);
-    const due = await dueReservations(reservations, pgStore, now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs);
-    for (const { r, reason } of due) await endReservation(r.id, reason, now);
-  } catch (err) {
-    app.log.warn({ err }, "reservation_tick_failed");
-  }
-  reservations.prune(now);
-  // Usage records whose task never settled (lost, timed out without a result): drop after a day.
-  for (const [id, u] of usagePending) if (now - u.atMs > 86_400_000) usagePending.delete(id);
-}, 30_000).unref?.();
-
-/** Your usage over the last N days: totals, per day, per model / class / source / placement, newest records. */
-app.post("/account/usage", async (req, reply) => {
-  const body = z.object({ accountId: z.string().max(200).optional(), days: z.number().int().min(1).max(90).default(30) }).parse(req.body ?? {});
-  const caller = await callerAccount(req, "/account/usage", body.accountId);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  const now = Date.now();
-  const since = now - body.days * 86_400_000;
-  const records = pgStore ? await pgStore.listUsage(caller.accountId, since) : memoryUsage.forAccount(caller.accountId, since);
-  return reply.send(summarizeUsage(records, since, now));
-});
-
-/** Your leases, and what you could reserve now per class (cheapest agent and how many are free). */
-app.post("/account/reservations/list", async (req, reply) => {
-  const caller = await callerAccount(req, "/account/reservations/list", (req.body as { accountId?: string } | undefined)?.accountId);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
-  const options: Record<string, { available: number; cSatsPerSecond?: number; tiers: string[]; models: string[] }> = {};
-  for (const cls of ["cpu", "apple", "gpu", "gpu.dc"] as ComputeClassId[]) {
-    const free = await reservableAgents(caller.accountId, cls);
-    options[cls] = {
-      available: free.length,
-      ...(free[0] ? { cSatsPerSecond: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(cls), free[0].creditsPerSecond)) } : {}),
-      tiers: [...new Set(free.map((a) => a.tier).filter((t): t is string => !!t))],
-      models: [...new Set(free.flatMap((a) => a.models))].sort(),
-    };
-  }
-  return reply.send({ reservations: reservations.listForAccount(caller.accountId).map(publicReservation), options, minMinutes: RESERVATION_MIN_MINUTES, maxMinutes: RESERVATION_MAX_MINUTES });
-});
-
-/** Reserve one agent of a class for some minutes, paid now in cSats (unused time comes back). */
-app.post("/account/reservations", async (req, reply) => {
-  const body = reserveSchema.parse(req.body);
-  const caller = await callerAccount(req, "/account/reservations", body.accountId);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  const accountId = caller.accountId;
-  // The agent is taken (synchronously, after the awaits that listed it) before the debit is awaited,
-  // so two leases made at once cannot both get it.
-  const agent = (await reservableAgents(accountId, body.computeClass, body.model, body.minVramGb)).find((a) => !reservingAgents.has(a.agentId) && !reservations.isHeld(a.agentId, Date.now()));
-  if (!agent) return reply.code(409).send({ error: "no_agent_available", computeClass: body.computeClass });
-  reservingAgents.add(agent.agentId);
-  try {
-    const rate = ratePerSecondMsat(classRefMsatPerCredit(body.computeClass), agent.creditsPerSecond);
-    const prepaid = reservationPriceMsat(body.minutes, rate);
-    const id = `res-${randomUUID()}`;
-    try {
-      await spendCredits(accountId, msatToCSats(prepaid), "compute_reservation", id);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(prepaid) });
-      req.log.error({ err }, "reservation_debit_failed");
-      return reply.code(500).send({ error: "credit_debit_failed" });
-    }
-    const now = Date.now();
-    const r: Reservation = {
-      id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
-      creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
-      ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
-    };
-    reservations.add(r);
-    await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
-    app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
-    return reply.send({ reservation: publicReservation(r) });
-  } finally {
-    reservingAgents.delete(agent.agentId);
-  }
-});
-
-/** End a lease early; the unused time is refunded. */
-app.post("/account/reservations/cancel", async (req, reply) => {
-  const body = z.object({ reservationId: z.string().min(1).max(100), accountId: z.string().max(200).optional() }).parse(req.body);
-  const caller = await callerAccount(req, "/account/reservations/cancel", body.accountId);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  // Made on another coordinator (the portal moved seeds): read it from the shared store.
-  if (!reservations.get(body.reservationId)) await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
-  const r = reservations.get(body.reservationId);
-  if (!r || r.accountId !== caller.accountId) return reply.code(404).send({ error: "unknown_reservation" });
-  const ended = r.status === "active" ? await endReservation(r.id, "cancelled") : r;
-  // Lost the race to another coordinator: the book now holds the stored (already ended) copy.
-  return reply.send({ reservation: publicReservation(ended ?? reservations.get(r.id) ?? r) });
-});
-
-/** Models agents on the network can run now, with how many agents and the price per class. */
-app.get("/inference/models", async () => {
-  const now = Date.now();
-  const byModel = new Map<string, { agents: number; classes: Set<ComputeClassId> }>();
-  for (const [id, cap] of agentCapabilities) {
-    if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
-    const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
-    // #54: only models the agent reported (what it can actually be routed).
-    for (const m of new Set(routableModels(cap))) {
-      const e = byModel.get(m) ?? { agents: 0, classes: new Set<ComputeClassId>() };
-      e.agents++;
-      e.classes.add(cls);
-      byModel.set(m, e);
-    }
-  }
-  const classes = Object.fromEntries(
-    (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).map((c) => [c, { label: rateOracleConfig.computeClasses[c].label, cSatsPerSecondBaseTier: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(c), 1)) }])
-  );
-  return {
-    // Model calls are priced per token: cSats per million tokens in and out, by model size.
-    models: [...byModel.entries()]
-      .map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
-      .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
-    classes,
-  };
-});
-
-app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
-  const body = inferenceSubmitSchema.parse(req.body);
-  const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId, "/inference/submit");
-  if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
-  if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
-  const accountId = submitter.accountId;
-  const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
-  // Unbilled targets: a lease you already paid for, or your own machines.
-  let onlyAccountId: string | undefined;
-  let reservationId: string | undefined;
-  if (body.reservationId) {
-    if (reservations.get(body.reservationId)?.status !== "active") await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
-    const lease = reservations.get(body.reservationId);
-    if (!lease || lease.accountId !== accountId || lease.status !== "active" || Date.now() >= lease.endMs) return reply.code(404).send({ error: "reservation_not_active" });
-    const cap = agentCapabilities.get(lease.agentId);
-    if (!agentHasModel(cap, body.model)) return reply.code(409).send({ error: "reserved_agent_lacks_model", model: body.model, models: cap?.localModelCatalog ?? [] });
-    reservationId = lease.id;
-  } else if (body.target === "mine") {
-    let own = 0;
-    for (const [id] of holders) if ((await rewardAccountForAgent(id)) === accountId) own++;
-    if (own === 0) return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model });
-    onlyAccountId = accountId;
-  } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
-    return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
-  }
-  if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-  const billed = !reservationId && !onlyAccountId;
-  const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
-  const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
-  const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
-  const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
-  if (reserve > 0) {
-    try {
-      await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: `inference_reserve:${body.taskId}` });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-      if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
-      req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
-      return reply.code(500).send({ error: "credit_debit_failed" });
-    }
-  }
-  taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
-  usagePending.set(body.taskId, {
-    id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
-    model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),
-  });
-  const marketBid = billed ? orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {}) : undefined;
-  const subtask = queue.enqueueSubtask({
-    taskId: body.taskId,
-    kind: "inference",
-    language: "python",
-    input: JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens: body.maxTokens, temperature: body.temperature }),
-    timeoutMs: body.timeoutMs,
-    snapshotRef: "inference",
-    requestedModel: body.model,
-    projectMeta: {
-      projectId: `inference:${accountId}`, resourceClass, priority: 60, computeClass: taskClass,
-      ...(marketBid ? { maxBidMsatPerCredit: marketBid.maxMsatPerCredit } : {}),
-      ...(onlyAccountId ? { onlyAccountId } : {}),
-      ...(reservationId ? { reservationId } : {}),
-    },
-  });
-  inferenceStreams.open(subtask.id, body.taskId);
-  app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
-  return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
-});
-
-app.post("/inference/chunks", async (req, reply) => {
-  const verified = await verifyAgentRequest((req as any).headers ?? {}, "/inference/chunks", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
-  if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
-  const body = z
-    .object({
-      subtaskId: z.string().min(1), seq: z.number().int().min(0), delta: z.string().max(1_000_000), done: z.boolean().default(false), error: z.string().max(2000).optional(),
-      toolCalls: z.array(z.unknown()).max(64).optional(),
-      // Token counts from the model, with the last piece. The call is priced on them
-      // (accrueResultCredits), so they are bounded below and never cost more than was set aside.
-      promptTokens: z.number().int().min(0).max(10_000_000).optional(),
-      outputTokens: z.number().int().min(0).max(10_000_000).optional(),
-    })
-    .parse(req.body);
-  const claim = queue.getClaim(body.subtaskId);
-  if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
-  const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
-  // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
-  // nothing), set rather than added, and kept within what the request and the reply could hold.
-  if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
-    const u = usagePending.get(claim.subtask.taskId);
-    if (u) {
-      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
-      u.promptTokens = bounded.promptTokens;
-      u.outputTokens = bounded.outputTokens;
-    }
-  }
-  return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
-});
-
-/** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */
-app.post("/inference/stream", async (req, reply) => {
-  const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
-  const billing = taskBilling.get(body.taskId);
-  const reader = await resolveSubmitterAccount(req as any, billing?.accountId ?? "", "/inference/stream");
-  if ("error" in reader || !billing || reader.accountId !== billing.accountId) return reply.code(403).send({ error: "not_requester" });
-  // The subtask must be one of this task's: owning a task gives no read of another's stream.
-  if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
-  const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
-  if (!r) return reply.code(404).send({ error: "unknown_stream" });
-  // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
-  let result = r.done ? queue.getResult(body.subtaskId) : undefined;
-  for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {
-    await new Promise((res) => setTimeout(res, 100));
-    result = queue.getResult(body.subtaskId);
-  }
-  if (result) await settleTaskIfDone(body.taskId);
-  return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs } : {}) });
-});
-
-app.get("/status", async () => queue.status());
-
-/**
- * Requester-side result lookup for a submitted subtask (used by the IDE /run/swarm
- * route, which polls after POST /submit). Mesh-token protected by the global hook.
- * 404 while the subtask is still queued/running or when the ids don't match.
- */
-app.get("/tasks/:taskId/subtasks/:subtaskId/result", async (req, reply) => {
-  const { taskId, subtaskId } = req.params as { taskId: string; subtaskId: string };
-  const result = queue.getResult(subtaskId);
-  if (!result || result.taskId !== taskId) {
-    return reply.code(404).send({ error: "result_not_ready", taskId, subtaskId });
-  }
-  const billing = taskBilling.get(taskId);
-  return reply.send({
-    taskId: result.taskId,
-    subtaskId: result.subtaskId,
-    ok: result.ok,
-    output: result.output,
-    error: result.error,
-    durationMs: result.durationMs,
-    // What /submit charged the submitter (0 once refunded or for anonymous tasks).
-    // cSats: the settled cost once the task finished, else what is set aside for it.
-    creditsSpent: billing ? msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat) : 0
-  });
-});
-
-app.get("/health/runtime", async () => {
-  const status = queue.status();
-  const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
-  let ollamaReachable = false;
-  let ollamaVersion: string | null = null;
-  let ollamaModelCount = 0;
-  let ollamaError: string | null = null;
-
-  try {
-    const versionRes = await request(`${ollamaHost}/api/version`, { method: "GET" });
-    if (versionRes.statusCode >= 200 && versionRes.statusCode < 300) {
-      const payload = (await versionRes.body.json()) as { version?: string };
-      ollamaReachable = true;
-      ollamaVersion = payload.version ?? null;
-    }
-  } catch (error) {
-    ollamaError = String(error);
-  }
-
-  try {
-    const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
-    if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
-      const payload = (await tagsRes.body.json()) as { models?: Array<{ name?: string }> };
-      ollamaReachable = true;
-      ollamaModelCount = payload.models?.length ?? 0;
-    }
-  } catch (error) {
-    if (!ollamaError) ollamaError = String(error);
-  }
-
-  return {
-    ok: true,
-    coordinator: {
-      provider: mutable.coordinatorProvider,
-      queued: status.queued,
-      agents: status.agents,
-      results: status.results
-    },
-    ollama: {
-      expectedProvider: PROVIDER,
-      host: ollamaHost,
-      reachable: ollamaReachable,
-      version: ollamaVersion,
-      modelCount: ollamaModelCount,
-      error: ollamaError
-    }
-  };
-});
-app.get("/features", async () => ({
-  public_mesh: networkMode === "public_mesh",
-  enterprise_overlay: networkMode === "enterprise_overlay"
-}));
-app.get("/models/available", async (_req, reply) => {
-  const modelMap: Record<string, { model: string; paramSize: number; agentCount: number; avgLoad: number }> = {};
-
-  for (const [_agentId, cap] of agentCapabilities) {
-    const model = cap.activeModel;
-    if (!model) continue;
-    if (!modelMap[model]) {
-      modelMap[model] = { model, paramSize: cap.activeModelParamSize ?? 0, agentCount: 0, avgLoad: 0 };
-    }
-    modelMap[model].agentCount += 1;
-    // agentCapabilities does not track per-agent load; default to 0
-    modelMap[model].avgLoad += 0;
-  }
-
-  const models = Object.values(modelMap).map(m => ({
-    ...m,
-    avgLoad: m.agentCount > 0 ? m.avgLoad / m.agentCount : 0,
-  }));
-
-  return reply.send(models);
-});
-app.get("/capacity", async () => {
-  const agents = [...agentCapabilities.entries()].map(([agentId, info]) => {
-    const powerDecision = evaluateAgentPowerPolicy({
-      os: info.os,
-      telemetry: info.powerTelemetry,
-      nowMs: Date.now(),
-      lastTaskAssignedAtMs: lastTaskAssignedByAgent.get(agentId),
-      batteryPullMinIntervalMs: IOS_BATTERY_PULL_MIN_INTERVAL_MS,
-      batteryTaskStopLevelPct: IOS_BATTERY_TASK_STOP_LEVEL_PCT
-    });
-    const orch = agentOrchestration.get(agentId);
-    const recentDiagnostics = diagnosticsByAgentId.get(agentId) ?? [];
-    const lastDiagnostic = recentDiagnostics.at(-1);
-    // Owner email and network location are personal data: never in this mesh-token read.
-    const { ownerEmail: _email, sourceIp: _ip, countryCode: _cc, vpnDetected: _vpn, ...publicInfo } = info;
-    return {
-      agentId,
-      ...publicInfo,
-      connectedPeers: [...info.connectedPeers],
-      blacklisted: Boolean(activeBlacklistRecord(agentId)),
-      powerPolicy: powerDecision,
-      lastSeenMs: info.lastSeenMs,
-      orchestrationStatus: orch?.pending && orch?.status ? orch.status : undefined,
-      diagnostics: lastDiagnostic
-        ? {
-            lastEventAtMs: lastDiagnostic.eventAtMs,
-            lastEventMessage: lastDiagnostic.message,
-            recentCount: recentDiagnostics.length
-          }
-        : undefined
-    };
-  });
-  const totalCapacity = agents.reduce((sum, a) => sum + a.maxConcurrentTasks, 0);
-  return {
-    totals: {
-      agentsConnected: agents.length,
-      totalCapacity,
-      swarmEnabledCount: agents.filter((a) => a.swarmEnabled).length,
-      localOllamaCount: agents.filter((a) => a.localModelProvider === "ollama-local").length,
-      ideEnabledCount: agents.filter((a) => a.ideEnabled).length,
-      activeTunnels: activeTunnels.size,
-      peerDirectAccepted: [...directWorkById.values()].filter((w) => w.status === "accepted").length,
-      peerDirectCompleted: [...directWorkById.values()].filter((w) => w.status === "completed").length,
-      blacklistedAgents: [...blacklistByAgent.keys()].filter((agentId) => Boolean(activeBlacklistRecord(agentId)))
-        .length
-    },
-    agents
-  };
-});
+registerAgentRoutes(app);
+registerTaskRoutes(app);
+registerAccountRoutes(app);
+registerInferenceRoutes(app);
+registerStatusRoutes(app);
 
 app.get("/economy/price/current", async (req, reply) => {
   if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
