@@ -22,12 +22,13 @@ npm run fly:bootstrap -- <org-slug> [app-prefix]
 1. creates the apps in the org (skips existing ones);
 2. creates a Fly Postgres cluster `<prefix>-pg` and attaches it (`DATABASE_URL` on the seeds,
    `PORTAL_DATABASE_URL` on the portal);
-3. creates the Ollama model volumes (`ollama_data` in `ord`, `ollama_data_eu` in `cdg`);
+3. creates the Ollama model volume of each seed whose config mounts `/data/ollama` (`ollama_data_eu`
+   in `cdg`; the US seed is coordinator-only since #39 and has none, see `docs/DEPLOYMENT.md`);
 4. generates the production-required secrets once (kept in `.fly-bootstrap/<org>.env`, git-ignored,
    `chmod 600`) and sets them on each app;
 5. renders `deploy/fly/*.toml` for the prefix and portal domain into `.fly-bootstrap/<org>/`;
-6. deploys the seeds, runs the #9 post-deploy step (`chown -R 1000:1000 /data/ollama`, restart),
-   deploys the portal and the anchor proxy;
+6. deploys the seeds, runs the #9 post-deploy step (`chown -R 1000:1000 /data/ollama`, restart) on
+   the seed that has the volume, deploys the portal and the anchor proxy;
 7. smoke-tests `/health/runtime` and `/capacity` on both seeds and `/health` on the portal.
 
 Pass a prefix when the default `edgecoder-*` app names are taken (Fly app names are global).
@@ -40,7 +41,8 @@ records to create. Passkeys are bound to that host (`PASSKEY_RP_ID`), so pick it
 - Seeds: `https://<prefix>-seed.fly.dev/health/runtime` (public), `/status` and `/capacity` (mesh token)
 - Enrol a node on the portal Nodes page, then start a worker with `AGENT_REGISTRATION_TOKEN`,
   `MESH_AUTH_TOKEN` (from the secrets file) and `COORDINATOR_URL=https://<prefix>-seed.fly.dev`.
-- Ollama pulls `OLLAMA_MODEL` on first use (`OLLAMA_AUTO_INSTALL=true`); the first chat is slow.
+- The EU seed's Ollama pulls `OLLAMA_MODEL` on first use (`OLLAMA_AUTO_INSTALL=true`); the first chat
+  is slow. The US seed runs no model (#39): the portal sends a chat to a seed that reports capacity.
 
 ## CI deploys
 
@@ -101,6 +103,8 @@ then update `COORDINATOR_PUBLIC_URL` in its TOML and `COORDINATOR_DISCOVERY_URLS
 
 - DNS names are bootstrap/rendezvous only.
 - The portal tries `COORDINATOR_DISCOVERY_URLS` in order and uses the first healthy seed (cached 60 s).
+  Chat is the exception (#39): it goes to the first seed in that order that reports capacity for the
+  request, with one retry on the next (`src/portal/chat-capacity.ts`).
 - Workers pick a coordinator from the portal's `/nodes/discover-coordinator`, then their local
   cache, then the bootstrap `COORDINATOR_URL`.
 - Seeds find each other through `COORDINATOR_BOOTSTRAP_URLS` (the script points each seed at the other).
