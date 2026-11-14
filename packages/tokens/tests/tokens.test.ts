@@ -44,6 +44,13 @@ describe("@edgecoder/tokens (#23)", () => {
     for (const name of Object.keys(tokens.color)) expect(css).toContain(`--${name}:`);
   });
 
+  it("elevation (shadows and the modal scrim) is generated once, outside the per-theme blocks", () => {
+    const css = buildCss(tokens);
+    for (const k of Object.keys(tokens.shadow)) expect(css).toContain(`--shadow-${k}: ${tokens.shadow[k]};`);
+    expect(css.match(/--scrim:/g)).toHaveLength(1);
+    expect(buildTheme(tokens)).toContain("--shadow-lg:");
+  });
+
   it("committed dist/tokens.css and src/theme.css are up to date", () => {
     expect(norm(readFileSync(join(root, "dist/tokens.css"), "utf8"))).toBe(buildCss(tokens));
     expect(norm(readFileSync(join(root, "src/theme.css"), "utf8"))).toBe(buildTheme(tokens));
