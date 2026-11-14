@@ -52,5 +52,14 @@ USING round(quoted_credits::numeric, 6)`, run only while the column isn't `NUMER
   `'payment_intents'::regclass`.
 - **Rollback:** `... TYPE DOUBLE PRECISION`.
 
-`coordinator_earnings_projection.total_credits` is still `DOUBLE PRECISION`. Its conversion is
-blocked on the coordinator split (#153).
+### `coordinator_earnings_projection.total_credits` to `NUMERIC(30, 6)` (#153)
+
+Same pattern again: `ALTER TABLE coordinator_earnings_projection ALTER COLUMN total_credits TYPE
+NUMERIC(30, 6) USING round(total_credits::numeric, 6)`, run only while the column isn't
+`NUMERIC(30, 6)`. Writes round the increment to 6 decimals before adding it.
+
+- **Lock:** `ACCESS EXCLUSIVE` on `coordinator_earnings_projection` while the table is rewritten.
+  It holds one row per account, so the rewrite is short. Earnings accrual blocks until it commits.
+- **Dependent views:** none ship with EdgeCoder. To check for your own, run the query above with
+  `'coordinator_earnings_projection'::regclass`.
+- **Rollback:** `... TYPE DOUBLE PRECISION`.

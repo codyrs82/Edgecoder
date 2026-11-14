@@ -143,7 +143,7 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
   for (const p of input.projections) {
     const expected = ledgerCredits.get(p.accountId) ?? 0;
     const stored = Number(p.totalCredits);
-    // Projection is DOUBLE PRECISION: allow float noise, not a missing or doubled accrual.
+    // The ledger side is summed in floats here: allow float noise, not a missing or doubled accrual.
     if (Math.abs(stored - expected) > 1e-6 * Math.max(1, Math.abs(expected))) {
       flag({ kind: "earnings_projection_mismatch", accountId: p.accountId, detail: { stored, fromLedger: expected } });
     }

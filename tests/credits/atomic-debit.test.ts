@@ -291,7 +291,28 @@ describe.skipIf(!PG_URL)("NUMERIC credits against real Postgres (#108)", () => {
         coordinator_fee_sats BIGINT NOT NULL, net_sats BIGINT NOT NULL, quoted_credits DOUBLE PRECISION NOT NULL,
         status TEXT NOT NULL, created_at_ms BIGINT NOT NULL, settled_at_ms BIGINT, tx_ref TEXT)`);
       await pool.query(`INSERT INTO payment_intents VALUES ('i','m','c','lightning','regtest','inv',100,0,0,100,0.1 + 0.2,'pending',1,NULL,NULL)`);
+      // #153: a legacy earnings projection with a float total.
+      await pool.query(`CREATE TABLE coordinator_earnings_projection (
+        account_id TEXT PRIMARY KEY, owner_email TEXT, total_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+        task_count BIGINT NOT NULL DEFAULT 0, updated_at_ms BIGINT NOT NULL)`);
+      await pool.query(`INSERT INTO coordinator_earnings_projection VALUES ('m',NULL,0.1 + 0.2,3,1)`);
       await pool.query(SCHEMA_SQL);
+      const e = await pool.query(`SELECT total_credits::text AS c FROM coordinator_earnings_projection WHERE account_id = 'm'`);
+      expect(e.rows[0].c).toBe("0.300000");
+      const et = await pool.query(
+        `SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'coordinator_earnings_projection' AND column_name = 'total_credits'`,
+        [schema],
+      );
+      expect(et.rows[0]).toEqual({ numeric_precision: 30, numeric_scale: 6 });
+      // Increments add exactly: ten 0.1s on top of 0.3 is 1.3, not 1.2999999999999998.
+      const projection = new PostgresStore(pool);
+      for (let i = 0; i < 10; i++) {
+        await projection.incrementCoordinatorEarningsProjection({ accountId: "m", credits: 0.1, taskCountDelta: 1, updatedAtMs: 2 });
+      }
+      const sum = await pool.query(`SELECT total_credits::text AS c, task_count FROM coordinator_earnings_projection WHERE account_id = 'm'`);
+      expect(sum.rows[0].c).toBe("1.300000");
+      expect(Number(sum.rows[0].task_count)).toBe(13);
+      expect((await projection.listCoordinatorEarningsProjection()).find((r) => r.accountId === "m")?.totalCredits).toBe(1.3);
       const q = await pool.query(`SELECT quoted_credits::text AS q FROM payment_intents WHERE intent_id = 'i'`);
       expect(q.rows[0].q).toBe("0.300000");
       const qt = await pool.query(

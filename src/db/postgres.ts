@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS node_status_projection (
 CREATE TABLE IF NOT EXISTS coordinator_earnings_projection (
   account_id TEXT PRIMARY KEY,
   owner_email TEXT,
-  total_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+  total_credits NUMERIC(30, 6) NOT NULL DEFAULT 0,
   task_count BIGINT NOT NULL DEFAULT 0,
   updated_at_ms BIGINT NOT NULL
 );
@@ -611,6 +611,17 @@ BEGIN
                AND column_name = 'quoted_credits'
                AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
     ALTER TABLE payment_intents ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6) USING round(quoted_credits::numeric, 6);
+  END IF;
+END $$;
+-- #153: coordinator_earnings_projection.total_credits to NUMERIC(30,6), same rules again. The sum is
+-- accumulated in SQL (incrementCoordinatorEarningsProjection), so a float column collects rounding error.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'coordinator_earnings_projection'
+               AND column_name = 'total_credits'
+               AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
+    ALTER TABLE coordinator_earnings_projection ALTER COLUMN total_credits TYPE NUMERIC(30, 6) USING round(total_credits::numeric, 6);
   END IF;
 END $$;
 -- #42: payment hash proof per intent (additive migration)
@@ -1200,7 +1211,7 @@ export class PostgresStore {
     await this.pool.query(
       `INSERT INTO coordinator_earnings_projection (
         account_id, owner_email, total_credits, task_count, updated_at_ms
-      ) VALUES ($1,$2,$3,$4,$5)
+      ) VALUES ($1,$2,round($3::numeric, 6),$4,$5)
       ON CONFLICT (account_id) DO UPDATE SET
         owner_email = COALESCE(EXCLUDED.owner_email, coordinator_earnings_projection.owner_email),
         total_credits = coordinator_earnings_projection.total_credits + EXCLUDED.total_credits,
