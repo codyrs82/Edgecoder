@@ -164,7 +164,7 @@ describe("payout kill switch", () => {
 });
 
 describe("coordinator wiring (source)", () => {
-  const src = ["src/swarm/coordinator/payouts.ts", "src/swarm/coordinator.ts"].map((f) => readFileSync(f, "utf8")).join("\n");
+  const src = ["src/swarm/coordinator/payouts.ts", "src/swarm/coordinator/routes/admin.ts"].map((f) => readFileSync(f, "utf8")).join("\n");
   it("pause and reconciliation routes live in the admin plugin; the payout service pays through the pause-guarded provider", () => {
     const plugin = src.slice(src.indexOf("app.register(async (admin) => {"));
     for (const r of ['admin.get("/admin/payouts/pause"', 'admin.post("/admin/payouts/pause"', 'admin.get("/admin/payouts/reconciliation"', 'admin.post("/admin/payouts/reconciliation/run"']) {
