@@ -20,6 +20,7 @@ This index links the documents this wiki synthesizes.
 
 - [Security Baseline](https://github.com/codyrs82/Edgecoder/blob/main/docs/security-baseline.md)
 - [ADR 0001 Locked Decisions](https://github.com/codyrs82/Edgecoder/blob/main/docs/adrs/0001-locked-decisions.md)
+- [ADR 0002 The Portal Stays Server-Rendered](https://github.com/codyrs82/Edgecoder/blob/main/docs/adrs/0002-portal-stays-server-rendered.md)
 
 ## Docs infrastructure
 

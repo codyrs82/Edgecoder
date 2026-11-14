@@ -21,7 +21,6 @@ const PAGES = [
   "/",
   "/privacy",
   "/terms",
-  "/portal-legacy",
   "/portal",
   "/portal/reset-password",
   "/portal/chat",
@@ -94,9 +93,12 @@ describe("portal tokens and theme (#89)", () => {
 
   it("page CSS uses token vars, not hard-coded colors", () => {
     const dir = new URL("src/portal/pages/", ROOT);
-    // Allowed: Google / Microsoft logo fills, the <select> chevron data URI, and black shadows/scrims.
-    const allowed = /fill="#|%23[0-9a-f]{6}|rgba\(0, ?0, ?0, ?0?\.\d+\)/i;
+    // Allowed: Google / Microsoft logo fills and, in design-system.ts only (#27), the <select>
+    // chevron data URI and the black shadow and scrim tokens.
+    const logos = /fill="#/i;
+    const designSystemOnly = /fill="#|%23[0-9a-f]{6}|rgba\(0, ?0, ?0, ?0?\.\d+\)/i;
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const allowed = f === "design-system.ts" ? designSystemOnly : logos;
       const lines = readFileSync(new URL(f, dir), "utf8").split("\n");
       const bad = lines
         .filter((l) => /#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(l.replace(new RegExp(allowed, "gi"), "")))
@@ -150,7 +152,7 @@ describe("portal tokens and theme (#89)", () => {
     expect(files["assets/tokens.css"]).toBe(PACKAGE_TOKENS);
     expect(files["assets/theme.js"]).toBe(THEME_JS);
     expectThemed(files["index.html"], "mirror index");
-    expect(files._headers).not.toContain("unsafe-inline'; script");
+    expect(files._headers).not.toContain("unsafe-inline");
   });
 
   it("npm run build's copy step puts tokens.css where the built server reads it", () => {

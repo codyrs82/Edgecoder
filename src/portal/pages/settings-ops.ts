@@ -150,7 +150,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     </div>
     <div id="userMgmtSection" class="hidden">
     <div class="card">
-      <h2 style="margin-top:0;">User management</h2>
+      <h2 class="u-mt-0">User management</h2>
       <table>
         <thead><tr><th>Email</th><th>Role</th><th>Email verified</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody id="userMgmtBody"></tbody>
@@ -159,7 +159,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     </div>
     <div id="adminNodeApprovalSection" class="hidden">
     <div class="card">
-      <h3 style="margin-top:0;">Coordinator enrollment requests</h3>
+      <h3 class="u-mt-0">Coordinator enrollment requests</h3>
       <div class="row">
         <button class="primary" id="filterAllBtn">All pending</button>
         <button id="filterCoordinatorBtn">Coordinator enrollment requests</button>
@@ -172,7 +172,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       <div id="opsPendingNote" class="muted"></div>
     </div>
     <div class="card">
-      <h3 style="margin-top:0;">Approved nodes</h3>
+      <h3 class="u-mt-0">Approved nodes</h3>
       <div class="row">
         <button class="primary" id="approvedFilterAllBtn">All approved</button>
         <button id="approvedFilterCoordinatorBtn">Coordinators</button>

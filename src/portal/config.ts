@@ -42,6 +42,9 @@ export const portalConfigSchema = z.object({
   /** Most sats one account can withdraw to invoices per rolling 24 h through the portal; 0 = no portal cap. */
   PORTAL_WITHDRAW_DAILY_CAP_SATS: envInt(500_000, { min: 0, max: 2_100_000_000_000_000 }),
   MOBILE_OAUTH_TOKEN_TTL_MS: ttl(300_000),
+  // #39: read by chatCapacityOptionsFromEnv (src/portal/chat-capacity.ts); declared here so a bad value stops startup.
+  PORTAL_CHAT_CAPACITY_TIMEOUT_MS: envInt(2_000, { min: 100, max: 30_000 }),
+  PORTAL_CHAT_CAPACITY_TTL_MS: envInt(15_000, { min: 0, max: 600_000 }),
   OAUTH_MICROSOFT_PROMPT: z.string().default("select_account"),
   PASSKEY_RP_ID: optStr,
   PASSKEY_RP_NAME: z.string().default("EdgeCoder Portal"),

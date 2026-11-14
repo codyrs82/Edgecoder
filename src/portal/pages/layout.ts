@@ -61,7 +61,7 @@ export function portalAuthedPageHtml(input: {
     : `<a class="nav-link nav-action" id="newChatBtn" href="/portal/chat?new=1">${icon("edit", 16)}<span class="nav-label">New chat</span></a>`;
   const primaryHtml = PRIMARY_NAV_ITEMS.map((item) => {
     const active = item.key === input.activeTab;
-    const badge = item.badge ? `<span class="nav-badge" id="${item.badge}" style="display:none;">0</span>` : "";
+    const badge = item.badge ? `<span class="nav-badge hidden" id="${item.badge}">0</span>` : "";
     return `<a class="nav-link${active ? " active" : ""}" href="${item.href}" title="${item.label}"${active ? ' aria-current="page"' : ""}>${icon(item.icon, 16)}<span class="nav-label">${item.label}</span>${badge}</a>`;
   }).join("");
   const menuHtml = ACCOUNT_MENU_ITEMS.map((m) => {
@@ -78,7 +78,7 @@ export function portalAuthedPageHtml(input: {
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${input.title}</title>
       ${themeHeadTags()}
-      <style>
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         /* ── Shell ── */
@@ -89,7 +89,6 @@ export function portalAuthedPageHtml(input: {
         }
         .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px; height: var(--topbar-h); border-bottom: 1px solid var(--card-border); }
         .sidebar-brand a { display: flex; align-items: center; gap: 10px; color: var(--text); }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); flex: none; }
         .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
         .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
         .sidebar-nav { padding: 10px 10px; flex: 1; overflow-y: auto; }
@@ -133,6 +132,7 @@ export function portalAuthedPageHtml(input: {
           margin-left: auto; background: var(--brand); color: var(--on-accent); font-size: 10px; font-weight: 700;
           min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
         }
+        .topbar-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
         /* ── Profile row + account menu (bottom of the sidebar) ── */
         .sidebar-foot { position: relative; border-top: 1px solid var(--card-border); padding: 8px; }
         .profile-row { display: flex; align-items: center; gap: 4px; border-radius: var(--radius-sm); }
@@ -155,7 +155,7 @@ export function portalAuthedPageHtml(input: {
         .account-menu {
           position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 70;
           background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-md);
-          box-shadow: var(--shadow-2, 0 12px 32px rgba(0,0,0,0.45)); padding: 5px;
+          box-shadow: var(--shadow-2); padding: 5px;
         }
         .account-menu[hidden], .account-menu [role="menuitem"][hidden] { display: none; }
         .account-menu .menu-head { padding: 8px 10px 6px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -186,7 +186,7 @@ export function portalAuthedPageHtml(input: {
           .app { grid-template-columns: 1fr; }
           .sidebar { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); transform: translateX(-100%); transition: transform var(--transition-med); z-index: 60; box-shadow: var(--shadow-2); }
           .sidebar.mobile-open { transform: translateX(0); }
-          .scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 55; display: none; }
+          .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 55; display: none; }
           .scrim.show { display: block; }
           .hamburger-btn { display: inline-flex; }
           .topbar { padding: 0 14px; }
@@ -230,7 +230,7 @@ export function portalAuthedPageHtml(input: {
         <div class="scrim" id="navScrim"></div>
         <div class="main">
           <header class="topbar">
-            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <div class="topbar-lead">
               <button class="hamburger-btn ghost" id="hamburgerBtn" aria-label="Open navigation">${icon("menu", 18)}</button>
               <div class="topbar-title"><h1>${input.heading}</h1><div class="sub">${input.subtitle}</div></div>
             </div>
@@ -426,7 +426,7 @@ export function portalAuthedPageHtml(input: {
             var badge = document.getElementById("reviewsBadge");
             if (badge && reviews.length > 0) {
               badge.textContent = String(reviews.length);
-              badge.style.display = "inline-flex";
+              badge.classList.remove("hidden");
             }
           } catch { /* noop */ }
         }
@@ -442,6 +442,66 @@ export function portalAuthedPageHtml(input: {
         loadReviewsBadge();
       </script>
       <script nonce="${CSP_NONCE}">
+        ${input.script}
+      </script>
+    </body>
+  </html>`;
+}
+
+/**
+ * #27: the signed-out single-card page (reset password, verify email): brand, one card, a way back
+ * to sign-in and the theme toggle. Pages supply `content` (HTML) and `script` (JS); `show(text,
+ * kind)` writes to the `#msg` callout, which starts hidden unless `message` is given. These pages
+ * read a token from the URL, so they send no referrer.
+ */
+export function portalCardPageHtml(input: {
+  title: string;
+  content: string;
+  script: string;
+  /** Initial text of the #msg callout. */
+  message?: string;
+  /** Optional small print (HTML) under the callout. */
+  note?: string;
+}): string {
+  return `<!doctype html>
+  ${htmlOpenTag()}
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <meta name="referrer" content="no-referrer" />
+      <title>${input.title}</title>
+      ${themeHeadTags()}
+      <style nonce="${CSP_NONCE}">
+        ${TOKENS_CSS}
+        ${BASE_CSS}
+        .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 36px 16px; }
+        .page-card { width: min(420px, 100%); }
+        .page-card .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 24px; }
+        .page-card h2 { font-size: 20px; margin-bottom: 4px; }
+        .page-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+        .page-card button.primary { width: 100%; margin-top: 14px; }
+        .msg { margin-top: 14px; }
+        .page-note { margin: 16px 0 0; }
+        .page-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; font-size: 12px; color: var(--muted); }
+        .page-foot .theme-toggle { min-height: 0; padding: 0 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <div class="page-card">
+          <div class="brand">${brandMark(28)}<span>EdgeCoder</span></div>
+          ${input.content}
+          <div id="msg" class="callout msg${input.message ? "" : " hidden"}" role="status" aria-live="polite">${input.message ?? ""}</div>
+          ${input.note ? `<p class="muted page-note">${input.note}</p>` : ""}
+          <div class="page-foot"><a href="/portal">Back to sign in</a>${themeToggleButton()}</div>
+        </div>
+      </div>
+      <script nonce="${CSP_NONCE}">
+        const msg = document.getElementById("msg");
+        function show(text, kind) {
+          msg.textContent = text;
+          msg.className = "callout msg " + (kind || "");
+        }
         ${input.script}
       </script>
     </body>

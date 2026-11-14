@@ -4,13 +4,14 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 /* ───────────────── Reviews page — Cloud Review Diff UI ───────────────── */
 export function registerReviewsPage(app: FastifyInstance): void {
 app.get("/portal/reviews", async (_req, reply) => {
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .reviews-layout { display:flex; gap:12px; min-height:calc(100vh - 120px); }
       .reviews-list { width:320px; min-width:280px; flex-shrink:0; }
       .reviews-detail { flex:1; min-width:0; }
@@ -46,7 +47,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       }
       .diff-line-num {
         width:48px; min-width:48px; text-align:right; padding:0 10px 0 8px;
-        color:color-mix(in srgb, var(--text) 25%, transparent); user-select:none; flex-shrink:0;
+        color:var(--muted); user-select:none; flex-shrink:0;
         font-size:11px; border-right:1px solid color-mix(in srgb, var(--text) 4%, transparent);
         background:color-mix(in srgb, var(--text) 1%, transparent);
       }
@@ -55,20 +56,22 @@ app.get("/portal/reviews", async (_req, reply) => {
         background:color-mix(in srgb, var(--danger) 12%, transparent);
         border-left:3px solid var(--danger);
       }
-      .diff-line.removed .diff-line-num { background:color-mix(in srgb, var(--danger) 15%, transparent); color:color-mix(in srgb, var(--danger) 70%, transparent); }
+      .diff-line.removed .diff-line-num { background:color-mix(in srgb, var(--danger) 15%, transparent); color:var(--text-secondary); }
       .diff-line.added {
         background:color-mix(in srgb, var(--ok) 12%, transparent);
         border-left:3px solid var(--ok);
       }
-      .diff-line.added .diff-line-num { background:color-mix(in srgb, var(--ok) 15%, transparent); color:color-mix(in srgb, var(--ok) 70%, transparent); }
+      .diff-line.added .diff-line-num { background:color-mix(in srgb, var(--ok) 15%, transparent); color:var(--text-secondary); }
       .diff-line.unchanged {
         border-left:3px solid transparent;
       }
       .diff-pane-left { border-right:1px solid color-mix(in srgb, var(--text) 6%, transparent); }
       /* ── Syntax highlighting hints ── */
-      .syntax-keyword { color:var(--danger); }
+      /* #27: line numbers and syntax colors keep 4.5:1 on the added/removed tints in both themes. */
+      .syntax-keyword { color:var(--danger-ink); }
       .syntax-string { color:var(--info); }
       .syntax-comment { color:var(--muted); font-style:italic; }
+      .diff-line.removed .syntax-comment, .diff-line.added .syntax-comment { color:var(--text-secondary); }
       .syntax-number { color:var(--info); }
       .syntax-function { color:var(--brand-2); }
       .syntax-builtin { color:var(--yellow); }
@@ -84,8 +87,8 @@ app.get("/portal/reviews", async (_req, reply) => {
       .review-actions button { padding:9px 20px; font-size:13px; font-weight:600; border-radius:var(--radius-sm); }
       .btn-accept { background:var(--ok); border:1px solid var(--ok); color:var(--on-accent); }
       .btn-accept:hover { filter:brightness(1.08); color:var(--on-accent); }
-      .btn-reject { background:transparent; border:1px solid color-mix(in srgb, var(--danger) 60%, transparent); color:var(--danger); }
-      .btn-reject:hover { background:color-mix(in srgb, var(--danger) 12%, transparent); color:var(--danger); }
+      .btn-reject { background:transparent; border:1px solid color-mix(in srgb, var(--danger) 60%, transparent); color:var(--danger-ink); }
+      .btn-reject:hover { background:color-mix(in srgb, var(--danger) 12%, transparent); color:var(--danger-ink); }
       .btn-edit { background:var(--brand); border:1px solid var(--brand); color:var(--on-accent); }
       .btn-edit:hover { background:var(--brand-2); border-color:var(--brand-2); color:var(--on-accent); }
       .edit-area {
@@ -119,13 +122,20 @@ app.get("/portal/reviews", async (_req, reply) => {
         .reviews-list { width:100%; }
         .diff-container { grid-template-columns:1fr; }
       }
+      .reviews-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+      /* By id: the script replaces this badge's class list when the count loads. */
+      #reviewCountBadge { font-size:10px; }
+      .empty-state.compact { padding:32px 12px; }
+      p.task-text { color:var(--text-secondary); margin:0; font-size:14px; line-height:1.6; }
+      .card.diff-card { padding:0; overflow:hidden; }
+      label.edit-label { font-size:12px; color:var(--muted); text-transform:uppercase; }
     </style>
     <div class="reviews-layout">
       <div class="reviews-list">
         <div class="card">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <h3 style="margin:0;">Pending Reviews</h3>
-            <span class="status-badge" id="reviewCountBadge" style="font-size:10px;">--</span>
+          <div class="reviews-head">
+            <h3 class="u-m-0">Pending Reviews</h3>
+            <span class="status-badge" id="reviewCountBadge">--</span>
           </div>
           <div id="reviewsList"><div class="loading-state"><span class="loading-spinner sm"></span> Loading reviews...</div></div>
         </div>
@@ -166,7 +176,7 @@ app.get("/portal/reviews", async (_req, reply) => {
         badge.className = reviews.length > 0 ? "status-badge warn" : "status-badge ok";
       }
       if (reviews.length === 0) {
-        container.innerHTML = '<div class="empty-state" style="padding:32px 12px;"><div class="empty-icon">${icon("check", 28)}</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
+        container.innerHTML = '<div class="empty-state compact"><div class="empty-icon">${icon("check", 28)}</div><h3>No reviews pending</h3><p>All caught up! When agents escalate tasks for human review, they will appear here.</p></div>';
         return;
       }
       var html = "";
@@ -176,33 +186,42 @@ app.get("/portal/reviews", async (_req, reply) => {
         var statusTone = r.status === "completed" ? "ok" : r.status === "failed" ? "danger" : "warn";
         html += '<div class="review-item' + active + '" data-task-id="' + escapeHtml(r.taskId) + '">';
         html += '<div class="ri-task">' + escapeHtml(r.task || r.taskId) + '</div>';
-        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span style="color:var(--muted);">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
+        html += '<div class="ri-meta">' + statusBadge(r.status, statusTone) + ' <span class="u-muted">&middot;</span> ' + escapeHtml(r.language || "unknown") + '</div>';
         html += '</div>';
       }
       container.innerHTML = html;
     }
 
-    // Element text only (the highlighter's regexes run on the result, so quotes stay literal).
-    // Everything else on this page uses the shell's escapeHtml (pages/escape.ts).
+    // Element text only. Everything else on this page uses the shell's escapeHtml (pages/escape.ts).
     function escapeCodeText(str) {
       return String(str === null || str === undefined ? "" : str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
+    // One pass over the raw line: each token is escaped and wrapped once, and the text between
+    // tokens is escaped as it is copied. (Chained replaces re-scanned their own output: the keyword
+    // rule matched the "class" of an earlier span, and the broken markup showed up as text.)
+    // Order = precedence at one position: comment, string, number, keyword, built-in, call.
+    var SYNTAX_CLASSES = ["comment", "string", "number", "keyword", "builtin", "function"];
+    var SYNTAX_RE = new RegExp([
+      /(\\/\\/.*$|#.*$)/,
+      /("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*')/,
+      /\\b(\\d+\\.?\\d*)\\b/,
+      /\\b(function|return|const|let|var|if|else|for|while|class|import|from|export|default|async|await|try|catch|throw|new|this|def|self|yield|with|as|in|not|and|or|True|False|None|true|false|null|undefined|typeof|instanceof)\\b/,
+      /\\b(console|print|len|range|map|filter|reduce|parseInt|parseFloat|Math|JSON|Object|Array|String|Number|Promise|setTimeout|require)\\b/,
+      /\\b([a-zA-Z_]\\w*)(?=\\s*\\()/
+    ].map(function (r) { return r.source; }).join("|"), "gm");
+
     function syntaxHighlight(text) {
-      var s = escapeCodeText(text);
-      // Comments (single-line: // or #)
-      s = s.replace(/(\\/\\/.*$|#.*$)/gm, '<span class="syntax-comment">$1</span>');
-      // Strings (double and single quotes)
-      s = s.replace(/(&quot;[^&]*?&quot;|&#039;[^&]*?&#039;)/g, '<span class="syntax-string">$1</span>');
-      // Numbers
-      s = s.replace(/\\b(\\d+\\.?\\d*)\\b/g, '<span class="syntax-number">$1</span>');
-      // Keywords (JS/TS/Python)
-      s = s.replace(/\\b(function|return|const|let|var|if|else|for|while|class|import|from|export|default|async|await|try|catch|throw|new|this|def|self|yield|with|as|in|not|and|or|True|False|None|true|false|null|undefined|typeof|instanceof)\\b/g, '<span class="syntax-keyword">$1</span>');
-      // Built-in functions
-      s = s.replace(/\\b(console|print|len|range|map|filter|reduce|parseInt|parseFloat|Math|JSON|Object|Array|String|Number|Promise|setTimeout|require)\\b/g, '<span class="syntax-builtin">$1</span>');
-      // Function calls
-      s = s.replace(/\\b([a-zA-Z_]\\w*)\\s*\\(/g, '<span class="syntax-function">$1</span>(');
-      return s;
+      var src = String(text === null || text === undefined ? "" : text);
+      var out = "", last = 0, m;
+      SYNTAX_RE.lastIndex = 0;
+      while ((m = SYNTAX_RE.exec(src)) !== null) {
+        var cls = "";
+        for (var g = 1; g <= SYNTAX_CLASSES.length; g++) if (m[g] !== undefined) { cls = SYNTAX_CLASSES[g - 1]; break; }
+        out += escapeCodeText(src.slice(last, m.index)) + '<span class="syntax-' + cls + '">' + escapeCodeText(m[0]) + '</span>';
+        last = m.index + m[0].length;
+      }
+      return out + escapeCodeText(src.slice(last));
     }
 
     function computeDiff(oldCode, newCode) {
@@ -267,14 +286,14 @@ app.get("/portal/reviews", async (_req, reply) => {
 
       var html = '';
       html += '<div class="card">';
-      html += '<h2 style="margin-top:0;">Task</h2>';
-      html += '<p style="color:var(--text-secondary);margin:0;font-size:14px;line-height:1.6;">' + escapeHtml(data.task || "No task description") + '</p>';
+      html += '<h2 class="u-mt-0">Task</h2>';
+      html += '<p class="task-text">' + escapeHtml(data.task || "No task description") + '</p>';
       if (data.language) {
-        html += '<div style="margin-top:8px;">' + statusBadge(data.language, "neutral") + '</div>';
+        html += '<div class="u-mt-8">' + statusBadge(data.language, "neutral") + '</div>';
       }
       html += '</div>';
 
-      html += '<div class="card" style="padding:0;overflow:hidden;">';
+      html += '<div class="card diff-card">';
       html += '<div class="diff-container">';
       html += '<div class="diff-pane diff-pane-left">';
       html += '<div class="diff-pane-header"><span class="diff-file-icon">${icon("file", 13)}</span> Original (failed)</div>';
@@ -310,7 +329,7 @@ app.get("/portal/reviews", async (_req, reply) => {
       editMode = !editMode;
       var editArea = document.getElementById("editArea");
       if (editMode && currentReview) {
-        editArea.innerHTML = '<label style="font-size:12px;color:var(--muted);text-transform:uppercase;">Edit improved code before accepting</label>'
+        editArea.innerHTML = '<label class="edit-label">Edit improved code before accepting</label>'
           + '<textarea class="edit-area" id="editTextarea">' + escapeHtml(currentReview.improvedCode || "") + '</textarea>';
         document.getElementById("editTextarea").focus();
       } else {

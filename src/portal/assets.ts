@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
+import { CSP_NONCE } from "./csp-nonce.js";
 
 /** localStorage key and values shared with the desktop app (desktop/src/lib/theme.ts). */
 export const THEME_STORAGE_KEY = "edgecoder-theme";
@@ -136,7 +137,7 @@ export function themeToggleButton(className = "ghost sm"): string {
 export function messagePage(title: string, bodyHtml: string): string {
   return `<!doctype html>${htmlOpenTag()}<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
       ${themeHeadTags()}
-      <style>body { margin: 0; padding: 32px 20px; max-width: 640px; font-family: var(--font-sans); font-size: 14px; line-height: 1.5; background: var(--bg); color: var(--text); } a { color: var(--brand); }</style>
+      <style nonce="${CSP_NONCE}">body { margin: 0; padding: 32px 20px; max-width: 640px; font-family: var(--font-sans); font-size: 14px; line-height: 1.5; background: var(--bg); color: var(--text); } a { color: var(--brand); }</style>
     </head><body>${bodyHtml}</body></html>`;
 }
 

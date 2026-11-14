@@ -9,7 +9,9 @@ import { z } from "zod";
 import type { ChatApiRoutesDeps } from "../server.js";
 import { networkBackend } from "../../inference-api/backends.js";
 import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
+import type { Transport } from "../../apps/ide/network-inference.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
+import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
 import { moduleLogger } from "../../common/logger.js";
 
 const logger = moduleLogger("portal-chat");
@@ -33,9 +35,67 @@ export function boundChatHistory<T extends { content: string }>(messages: T[], m
   return kept;
 }
 
+/** #39: a chat is tried on at most this many coordinators (the pick, then one retry). */
+export const CHAT_MAX_COORDINATOR_ATTEMPTS = 2;
+
+/** #39: sent when no coordinator can serve the chat. The chat page shows `error` as it is. */
+export const NO_COMPUTE_BODY = { error: "No compute is available right now. Try again in a moment.", code: "no_compute_available" } as const;
+
+type DefaultChatEvent = { content?: string; warning?: string };
+interface OpenedDefaultChat {
+  first: DefaultChatEvent;
+  events: AsyncGenerator<DefaultChatEvent>;
+}
+
+/** The `data:` payloads of an SSE body, one per line, whatever the chunk boundaries. */
+export async function* sseDataLines(body: AsyncIterable<Buffer | string>): AsyncGenerator<string> {
+  let buffer = "";
+  // A character split across two chunks is decoded whole.
+  const utf8 = new TextDecoder();
+  for await (const chunk of body) {
+    buffer += typeof chunk === "string" ? chunk : utf8.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).replace(/^data:\s*/, "").trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) yield line;
+    }
+  }
+  const rest = buffer.replace(/^data:\s*/, "").trim();
+  if (rest) yield rest;
+}
+
+/** The content and warning events of a coordinator /portal/chat stream, up to [DONE]. */
+async function* defaultChatEvents(body: AsyncIterable<Buffer | string>): AsyncGenerator<DefaultChatEvent> {
+  for await (const line of sseDataLines(body)) {
+    if (line === "[DONE]") return;
+    let parsed: DefaultChatEvent;
+    try {
+      parsed = JSON.parse(line) as DefaultChatEvent;
+    } catch {
+      continue; // skip unparseable lines
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const content = typeof parsed.content === "string" && parsed.content ? parsed.content : undefined;
+    const warning = typeof parsed.warning === "string" && parsed.warning ? parsed.warning : undefined;
+    if (content || warning) yield { ...(warning ? { warning } : {}), ...(content ? { content } : {}) };
+  }
+}
+
+/** Errors raised before a request reached the coordinator: nothing ran there, so another one may be tried. */
+function failedBeforeSend(err: unknown): boolean {
+  const code = String((err as { code?: unknown } | null)?.code ?? "");
+  return code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "UND_ERR_CONNECT_TIMEOUT";
+}
+
 /** #16: Chat API: model list and streaming chat (/portal/api/models, /portal/api/chat). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesDeps): void {
   const { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store } = deps;
+  // #39: server.ts passes the directory. Without one (tests), build it over the discovered list,
+  // which the caller has already put through the coordinator URL policy.
+  const capacity: ChatCapacityDirectory =
+    (deps.chatCapacity as ChatCapacityDirectory | undefined) ??
+    createChatCapacityDirectory({ candidates: discoverCoordinatorUrlsForPortal, allowed: () => true, serviceToken: PORTAL_SERVICE_TOKEN });
 
   /** A chat on a chosen compute, through networkBackend for the user's account; streams {content} then {done, cSatsSpent}. */
   async function runOnNetwork(
@@ -48,14 +108,57 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
   ) {
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
-    const pieces = networkBackend(portalNetworkDeps(deps, accountIdFor(userId)), networkTargetFor(compute))({ messages }, ac.signal);
-    // Wait for the first piece so a refusal (no machine, not enough cSats, lease ended) is a plain HTTP error.
-    let first: IteratorResult<ChatPiece>;
-    try {
-      first = await pieces.next();
-    } catch (err) {
-      const status = err instanceof ChatBackendError ? err.status : 502;
-      return reply.code(status >= 400 && status < 600 ? status : 502).send({ error: (err as Error).message, compute: computeLabel(compute) });
+    const accountId = accountIdFor(userId);
+    const tried: string[] = [];
+    let pieces: AsyncGenerator<ChatPiece> | undefined;
+    let first: IteratorResult<ChatPiece> | undefined;
+    let refusal: unknown;
+    // #39: run on a coordinator whose agents have the model; if it turns the job down before
+    // taking it, try one other. Once a coordinator has accepted the job (and set cSats aside for
+    // it) the chat stays there: a second submit could bill twice. When no coordinator lists the
+    // model, a reachable one is still asked, so the user gets its exact refusal.
+    while (!first && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
+      const { url, known } = await capacity.pick({ kind: "network", model: compute.model }, tried);
+      if (!url) {
+        if (tried.length > 0) break;
+        if (known === 0) return reply.code(502).send({ error: "no_coordinators_available", compute: computeLabel(compute) });
+        return reply.code(503).send({ ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
+      }
+      tried.push(url);
+      // Every call of this chat goes to the chosen coordinator.
+      const pinned = portalNetworkDeps({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+      const inner = pinned.transport!;
+      // What became of the submit call: its HTTP status, or the error when no answer came back.
+      const submit: { status?: number; error?: unknown } = {};
+      const transport: Transport = async (method, path, body, signal) => {
+        if (path !== "/inference/submit") return inner(method, path, body, signal);
+        try {
+          const res = await inner(method, path, body, signal);
+          submit.status = res.status;
+          return res;
+        } catch (err) {
+          submit.error = err;
+          throw err;
+        }
+      };
+      pieces = networkBackend({ ...pinned, transport }, networkTargetFor(compute))({ messages }, ac.signal);
+      // Wait for the first piece so a refusal (no machine, not enough cSats, lease ended) is a plain HTTP error.
+      try {
+        first = await pieces.next();
+      } catch (err) {
+        const paymentRequired = err instanceof ChatBackendError && err.status === 402;
+        // Keep the preferred coordinator's answer unless the other one says the account is short.
+        if (refusal === undefined || paymentRequired) refusal = err;
+        const refused = submit.status !== undefined && submit.status !== 200;
+        const unreached = submit.status === undefined && failedBeforeSend(submit.error);
+        if (unreached || (submit.status ?? 0) >= 500) capacity.markFailed(url);
+        // Not enough cSats is the same on every coordinator; anything after acceptance is not retried.
+        if (ac.signal.aborted || paymentRequired || !(refused || unreached)) break;
+      }
+    }
+    if (!first || !pieces) {
+      const status = refusal instanceof ChatBackendError ? refusal.status : 502;
+      return reply.code(status >= 400 && status < 600 ? status : 502).send({ error: (refusal as Error | undefined)?.message ?? "all_coordinators_failed", compute: computeLabel(compute) });
     }
     writeSseHead(reply);
     const send = (o: unknown) => reply.raw.write(`data: ${JSON.stringify(o)}\n\n`);
@@ -82,6 +185,38 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     reply.raw.end();
     return reply;
   }
+  /** POST /portal/chat on one coordinator, held until its first event so a dead end can still be retried elsewhere. */
+  async function openDefaultChat(url: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<OpenedDefaultChat | { reason: string; retry: boolean }> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
+    let res;
+    try {
+      res = await request(`${url.replace(/\/+$/, "")}/portal/chat`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        headersTimeout: 120_000, // allow time for cold model loads (~70s)
+        bodyTimeout: 0, // no body timeout for streaming
+        signal,
+      });
+    } catch (err) {
+      return { reason: String(err), retry: true };
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const text = await res.body.text().catch(() => "");
+      // A request the coordinator calls malformed or too large would be refused by the next one too.
+      return { reason: `HTTP ${res.statusCode} ${text}`, retry: ![400, 413, 422].includes(res.statusCode) };
+    }
+    const events = defaultChatEvents(res.body);
+    try {
+      const first = await events.next();
+      if (first.done) return { reason: "stream ended before any content", retry: true };
+      return { events, first: first.value };
+    } catch (err) {
+      return { reason: String(err), retry: true };
+    }
+  }
+
   app.get("/portal/api/models", async (req, reply) => {
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
@@ -174,50 +309,42 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
 
     if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
 
-    // Discover coordinators
-    const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
-    if (coordinatorUrls.length === 0) {
-      return reply.code(502).send({ error: "no_coordinators_available" });
-    }
-
-    // Call coordinator's portal chat endpoint (streams Ollama via SSE)
-    const chatHeaders: Record<string, string> = { "content-type": "application/json" };
-    if (PORTAL_SERVICE_TOKEN) chatHeaders["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
-
     const chatPayload: Record<string, unknown> = { messages };
     if (body.model) chatPayload.model = body.model;
 
-    // Try each coordinator until one responds with 2xx
-    let coordinatorRes;
+    const ac = new AbortController();
+    reply.raw.on("close", () => ac.abort());
+
+    // #39: send the chat to a coordinator that reports a model to answer with, preferring the
+    // configured primary. If it fails before anything was streamed, try one other.
+    const tried: string[] = [];
     let lastError = "";
-    for (const rawUrl of coordinatorUrls) {
-      const coordinatorUrl = rawUrl.replace(/\/$/, "");
-      try {
-        coordinatorRes = await request(`${coordinatorUrl}/portal/chat`, {
-          method: "POST",
-          headers: chatHeaders,
-          body: JSON.stringify(chatPayload),
-          headersTimeout: 120_000, // allow time for cold model loads (~70s)
-          bodyTimeout: 0, // no body timeout for streaming
-        });
-        if (coordinatorRes.statusCode >= 200 && coordinatorRes.statusCode < 300) {
-          break; // success — stream this response
-        }
-        // Non-2xx: consume body, try next coordinator
-        lastError = await coordinatorRes.body.text().catch(() => "");
-        coordinatorRes = null;
-      } catch (err) {
-        lastError = String(err);
-        coordinatorRes = null;
+    let stream: OpenedDefaultChat | undefined;
+    while (!stream && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
+      const { url, known } = await capacity.pick({ kind: "chat" }, tried);
+      if (!url) {
+        if (tried.length > 0) break;
+        if (known === 0) return reply.code(502).send({ error: "no_coordinators_available" });
+        return reply.code(503).send(NO_COMPUTE_BODY);
       }
+      tried.push(url);
+      const opened = await openDefaultChat(url, chatPayload, ac.signal);
+      if ("events" in opened) {
+        stream = opened;
+        break;
+      }
+      lastError = opened.reason;
+      if (ac.signal.aborted) return reply; // the browser went away
+      capacity.markFailed(url);
+      if (!opened.retry) break;
     }
 
-    if (!coordinatorRes) {
+    if (!stream) {
       // Upstream error text stays in the log; the client gets a fixed error.
-      logger.warn({ coordinators: coordinatorUrls.length, lastError: lastError.slice(0, 500) }, "chat: all coordinators failed");
+      logger.warn({ coordinators: tried.length, lastError: lastError.slice(0, 500) }, "chat: all coordinators failed");
       return reply.code(502).send({
         error: "all_coordinators_failed",
-        triedCount: coordinatorUrls.length,
+        triedCount: tried.length,
       });
     }
 
@@ -225,28 +352,18 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     writeSseHead(reply);
 
     let fullContent = "";
-    try {
-      for await (const chunk of coordinatorRes.body) {
-        const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-        for (const line of text.split("\n")) {
-          const trimmed = line.replace(/^data:\s*/, "").trim();
-          if (!trimmed) continue;
-          if (trimmed === "[DONE]") break;
-          try {
-            const parsed = JSON.parse(trimmed) as { content?: string; warning?: string };
-            if (parsed.warning) {
-              reply.raw.write(`data: ${JSON.stringify({ warning: parsed.warning })}\n\n`);
-            }
-            if (parsed.content) {
-              fullContent += parsed.content;
-              reply.raw.write(`data: ${JSON.stringify({ content: parsed.content })}\n\n`);
-            }
-          } catch {
-            // skip unparseable lines
-          }
-        }
+    const relay = (e: DefaultChatEvent) => {
+      if (e.warning) reply.raw.write(`data: ${JSON.stringify({ warning: e.warning })}\n\n`);
+      if (e.content) {
+        fullContent += e.content;
+        reply.raw.write(`data: ${JSON.stringify({ content: e.content })}\n\n`);
       }
+    };
+    try {
+      relay(stream.first);
+      for await (const e of stream.events) relay(e);
     } catch {
+      // Tokens already reached the browser, so this is not retried on another coordinator.
       reply.raw.write(`data: ${JSON.stringify({ error: "stream_interrupted" })}\n\n`);
     }
 

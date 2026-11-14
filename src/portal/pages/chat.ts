@@ -4,12 +4,13 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
 app.get("/portal/chat", async (_req, reply) => {
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
       .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
@@ -23,7 +24,7 @@ app.get("/portal/chat", async (_req, reply) => {
         font-size:11px; font-weight:700; text-transform:uppercase;
         letter-spacing:0.5px; color:var(--muted);
       }
-      .chat-msg .msg-time { font-size:10px; color:var(--muted); opacity:0.7; }
+      .chat-msg .msg-time { font-size:10px; color:var(--muted); }
       .chat-msg.user .msg-role { color:var(--brand); }
       .chat-msg .msg-body { color:var(--text); }
       .chat-msg .msg-body p { margin:0 0 8px; }
@@ -100,7 +101,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .model-dropdown {
         position:absolute; bottom:calc(100% + 8px); left:-6px; width:min(380px, 86vw);
         background:var(--bg-surface); border:1px solid var(--border-strong);
-        border-radius:var(--radius-md); box-shadow:0 -6px 28px rgba(0,0,0,0.45);
+        border-radius:var(--radius-md); box-shadow:var(--shadow-up);
         z-index:100; padding:6px; display:flex; flex-direction:column;
       }
       .model-dropdown input { min-height:30px; padding:6px 10px; font-size:12.5px; margin-bottom:4px; }
@@ -126,23 +127,28 @@ app.get("/portal/chat", async (_req, reply) => {
       .msg-error { color:var(--danger); }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
+      /* Empty thread and the streaming status line */
+      .chat-empty { padding:60px 0; text-align:center; }
+      .chat-empty-icon { display:inline-flex; width:44px; height:44px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:12px; }
+      .chat-empty .chat-empty-title { margin:0 0 6px; font-size:18px; color:var(--text); }
+      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
     </style>
     <div class="chat-layout">
       <!-- Conversations (New chat, Search, recent chats) live in the shell's sidebar. -->
       <div class="chat-main">
         <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
-            <div style="padding:60px 0; text-align:center;">
-              <div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div>
-              <h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2>
-              <div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
+            <div class="chat-empty">
+              <div class="chat-empty-icon">${icon("chat", 20)}</div>
+              <h2 class="chat-empty-title">Start a conversation</h2>
+              <div class="muted u-fs-13">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
             </div>
           </div>
         </div>
-        <div id="streamingIndicator" class="hidden" style="max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px;">
+        <div id="streamingIndicator" class="hidden stream-indicator">
           <div class="typing-indicator"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
           <span id="streamStatus">Thinking...</span>
-          <span id="streamTokens" style="margin-left:auto;"></span>
+          <span id="streamTokens" class="u-ml-auto"></span>
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
@@ -162,7 +168,7 @@ app.get("/portal/chat", async (_req, reply) => {
                 <button class="chat-send-btn" id="sendBtn">Send</button>
               </div>
             </div>
-            <div class="muted" style="font-size:10px; margin-top:6px; text-align:center;">Enter to send, Shift+Enter for newline</div>
+            <div class="muted u-fs-10 u-mt-6 u-center">Enter to send, Shift+Enter for newline</div>
           </div>
         </div>
       </div>
@@ -238,7 +244,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var container = document.getElementById("chatMessages");
       var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
+        container.innerHTML = '<div class="chat-empty"><div class="chat-empty-icon">${icon("chat", 20)}</div><h2 class="chat-empty-title">Start a conversation</h2><div class="muted u-fs-13">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
         return;
       }
       var html = "";
