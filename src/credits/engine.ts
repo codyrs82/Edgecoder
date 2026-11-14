@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
 import { contributionCredits, LoadSnapshot } from "./pricing.js";
+import { earnRowMatured } from "../economy/payouts.js";
 
 /** #108: in-memory balances use integer micro-credits (6 decimals, matching the Postgres migration). */
 const MICROS = 1_000_000;
@@ -29,9 +30,15 @@ export class CreditEngine {
     return [...(this.txByAccount.get(accountId) ?? [])];
   }
 
-  /** Sats value (msat) of everything this account earned, as locked at accrual time. */
-  earnedMsat(accountId: string): number {
-    return (this.txByAccount.get(accountId) ?? []).reduce((sum, tx) => sum + (tx.type === "earn" ? Math.floor(tx.msat ?? 0) : 0), 0);
+  /**
+   * Sats value (msat) of everything this account earned, as locked at accrual time. With a cutoff,
+   * only earnings matured at it (earnings hold, earnRowMatured).
+   */
+  earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): number {
+    return (this.txByAccount.get(accountId) ?? []).reduce(
+      (sum, tx) => sum + (tx.type === "earn" && earnRowMatured(tx.timestampMs, maturedAtOrBeforeMs) ? Math.floor(tx.msat ?? 0) : 0),
+      0
+    );
   }
 
   /** Mark a contribution report as recorded; false when it already was (#44 idempotency). */

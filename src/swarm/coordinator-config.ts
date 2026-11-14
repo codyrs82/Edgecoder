@@ -135,6 +135,8 @@ export const coordinatorConfigSchema = z.object({
   FEE_POOL_DISTRIBUTION_MS: envInt(86_400_000, { min: 60_000 }),
   /** Automatic Lightning-address payouts run this often. */
   PAYOUT_AUTO_INTERVAL_MS: envInt(21_600_000, { min: 60_000 }),
+  /** Earnings hold before an earn row is withdrawable (ms). Unset: 24 h on mainnet, 0 elsewhere (earningsHoldFromEnv). */
+  PAYOUT_EARNINGS_HOLD_MS: envInt(undefined, { min: 0 }),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),

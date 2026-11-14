@@ -26,6 +26,13 @@ caps, fee-pool lock) only need checking once. Mechanics are in
       2M for the coordinator per 24 h. Set `PAYOUT_MAX_SINGLE_SATS`,
       `PAYOUT_MAX_ACCOUNT_DAILY_SATS`, `PAYOUT_MAX_GLOBAL_DAILY_SATS` explicitly; the global cap
       should not exceed what you can lose from the hot wallet in a day.
+- [ ] Earnings hold reviewed. Unset on mainnet, `PAYOUT_EARNINGS_HOLD_MS` is 24 h: an earn row is
+      withdrawable only once it is that old, so a bad result caught by spot checks or a
+      blacklisting can be handled (pause payouts, correct the ledger) before its sats leave. The
+      payout balance shows the held part as `heldMsat` and `maturesAtMs`. A shorter value
+      (including `0`) is honoured but reported as `mainnet_earnings_hold_disabled` /
+      `mainnet_earnings_hold_below_default` at startup. The hold should cover at least the time
+      verification verdicts and blacklist reports take to arrive.
 - [ ] `GET /admin/payouts/pause` shows `paused: false` and the limits you expect.
 - [ ] Kill-switch drill: `POST /admin/payouts/pause {"paused": true, "reason": "drill"}`, confirm a
       withdrawal returns `503 payouts_paused` while a purchase invoice still settles, then resume
