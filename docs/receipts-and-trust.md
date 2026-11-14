@@ -55,6 +55,8 @@ No empty epochs are closed. When a Bitcoin anchor provider is configured
 stats checkpoints use (`anchorCheckpoint`: one broadcast per root, daily budget, mainnet opt-in,
 crash-safe `broadcasting` row). The anchor record's `epoch_id` is `receipts:<epochId>` and its
 `checkpoint_hash` is the Merkle root; the txid is stored on the epoch (`receipt_epochs.anchor_tx_ref`).
+If that transaction is dropped and the root is broadcast again, `anchor_tx_ref` is repointed at the new
+txid. The mock provider's made-up txid is never stored on the epoch (#46).
 
 ## Verifying a receipt against an anchored root
 

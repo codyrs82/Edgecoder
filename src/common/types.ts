@@ -499,6 +499,12 @@ export interface BitcoinAnchorRecord {
    * failed. The txid is kept and watched; if it confirms anyway the row is re-marked anchored.
    */
   abandonedAtMs?: number;
+  /**
+   * #46: provider that broadcast this row ("bitcoind" | "anchor-proxy" | "mock"). Unset on rows
+   * written before the column existed. "mock" rows carry a made-up txid and are reported as
+   * simulated at read time (anchor-status.ts).
+   */
+  anchorProvider?: string;
 }
 
 export interface CoordinatorFeeEvent {

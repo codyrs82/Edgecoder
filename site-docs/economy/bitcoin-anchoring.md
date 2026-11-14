@@ -2,6 +2,8 @@
 
 EdgeCoder coordinators anchor checkpoint and issuance epoch hashes to the Bitcoin blockchain using OP_RETURN transactions. This provides cryptographic finality: once anchored, checkpoint integrity can be verified by anyone with access to a Bitcoin node or block explorer.
 
+Anchoring is off by default. It needs a provider with a funded wallet (`BITCOIN_ANCHOR_PROVIDER=anchor-proxy` or `bitcoind`). Without one the coordinator broadcasts nothing, records no anchors, and reports `anchoring.mode: "disabled"` on its status endpoints; checkpoints stop at `soft_finalized`.
+
 ## Architecture
 
 ```mermaid
@@ -30,7 +32,11 @@ flowchart LR
 
 4. The OP_RETURN transaction is broadcast via the anchor proxy, which forwards to the Bitcoin Knots node over local JSON-RPC.
 
-5. The coordinator polls for block confirmations. Once the transaction has the required confirmations (default: 1), the anchor status is promoted from `pending` to `anchored`.
+5. The anchor row is stored as `pending` with the txid the provider returned. The coordinator polls the provider for the transaction's confirmation count and block. At `BITCOIN_ANCHOR_CONFIRMATIONS` (default: 6) the status becomes `anchored`.
+
+6. Anchored rows keep being re-verified until they are `ANCHOR_REORG_WATCH_CONFIRMATIONS` deep (default: 100). If the block that held the transaction changed, or the transaction is no longer in a block, the row goes back to `pending`. If the transaction is also gone from the mempool, it is abandoned and the checkpoint is broadcast again in a new transaction.
+
+7. If the provider can't be reached, rows keep their status and the poll is retried with exponential backoff (`ANCHOR_POLL_RETRY_BASE_MS`, doubling up to `ANCHOR_POLL_MAX_BACKOFF_MS`). After a coordinator restart, pending rows are polled again; they are not broadcast a second time.
 
 ## Anchor leader election
 
@@ -84,18 +90,22 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | **anchor-proxy** | Production (recommended) | `BITCOIN_ANCHOR_PROVIDER=anchor-proxy` |
 | **bitcoind** | Direct RPC access to a local node | `BITCOIN_ANCHOR_PROVIDER=bitcoind` |
 | **blockstream** | Read-only confirmation lookups. **Not accepted for anchoring** (it can't broadcast); the factory rejects it with `blockstream_cannot_anchor` (#102). | (used internally for lookups only) |
-| **mock** | Development and testing | `BITCOIN_ANCHOR_PROVIDER=mock` |
+| **mock** | Development and testing only. Ignored in production. Its rows are reported as `simulated`, never as anchored. | `BITCOIN_ANCHOR_PROVIDER=mock` |
+| (unset) | Anchoring disabled, in every environment | |
 
 ## Coordinator environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `BITCOIN_ANCHOR_PROVIDER` | Yes | Provider type (see above) |
+| `BITCOIN_ANCHOR_PROVIDER` | To anchor | Provider type (see above). Unset, unknown, or missing credentials: anchoring is disabled |
 | `BITCOIN_NETWORK` | Yes | Must match across all coordinators in the mesh |
 | `ANCHOR_PROXY_URL` | When using anchor-proxy | URL of the anchor proxy service |
 | `ANCHOR_PROXY_TOKEN` | When using anchor-proxy | Bearer token matching the proxy |
-| `ANCHOR_CONFIRMATION_POLL_MS` | No | Poll interval for pending anchors (default: `60000`) |
-| `STATS_ANCHOR_MIN_CONFIRMATIONS` | No | Required confirmations (default: `1`) |
+| `ANCHOR_CONFIRM_POLL_MS` | No | Poll interval for anchor confirmations (default: `600000`, minimum `30000`) |
+| `ANCHOR_REORG_WATCH_CONFIRMATIONS` | No | Depth up to which anchored rows are re-verified for reorgs (default: `100`) |
+| `ANCHOR_POLL_RETRY_BASE_MS` | No | First retry delay after a failed poll; doubles per failure (default: `30000`) |
+| `ANCHOR_POLL_MAX_BACKOFF_MS` | No | Cap on the retry delay (default: `3600000`) |
+| `STATS_ANCHOR_MIN_CONFIRMATIONS` | No | Extra floor for stats hard finality (default: `1`). The effective depth is the larger of this and `BITCOIN_ANCHOR_CONFIRMATIONS` |
 | `BITCOIN_ANCHOR_CONFIRMATIONS` | No | Confirmations before an anchor counts as `anchored` (default: `6`) |
 | `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | No | Daily anchoring budget in sats (default: `200000`). A broadcast is refused when (broadcasts in the last 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` would exceed it, so the default allows 10 anchors/day at the default fee cap. `0` disables broadcasting. |
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | No | Absolute fee cap per anchor tx (default: `20000`) |
@@ -111,6 +121,21 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 A `broadcasting` row means the coordinator stopped between broadcasting and storing the txid. On startup and every `ANCHOR_RECONCILE_MS`, the coordinator searches the bitcoind wallet for a transaction whose OP_RETURN carries that checkpoint. If it finds one, it stores the txid and tracks confirmations as usual. If the wallet definitely has no such transaction, the row becomes `failed` and is re-anchored. If the node can't answer, the coordinator counts an attempt. After `ANCHOR_RECONCILE_MAX_ATTEMPTS` failed attempts the row becomes `needs_admin` (logged as `bitcoin_anchor_needs_admin_reconcile`). That checkpoint is then never re-broadcast automatically. An operator checks the wallet and sets the row's `tx_ref`/`status` by hand. Wallet lookup needs `BITCOIN_ANCHOR_PROVIDER=bitcoind` or `anchor-proxy`. With other providers, in-flight rows go to `needs_admin`.
 
 Before a stuck `pending` tx is marked `failed`, the coordinator calls bitcoind `abandontransaction` on it so its inputs are released and a re-anchor can't conflict with the old tx. If that call fails, or the provider can't abandon transactions, the row stays `pending` and the failure counts as an attempt. Each reconcile pass re-reads a row under the checkpoint lock and skips it if it changed since it was listed. An abandoned transaction keeps its txid and is watched for `ANCHOR_ABANDON_WATCH_MS` (default `259200000`, 72h). If it confirms anyway, the row goes back to `pending` and then `anchored`, and its fee counts toward the daily budget for the 24h after it confirmed. `needs_admin` rows also count toward the budget, since they may have spent sats. The final fee of a recovered transaction is not re-checked against `BITCOIN_ANCHOR_MAX_FEE_SATS`.
+
+## Anchor status in API responses
+
+`GET /economy/issuance/anchors`, `GET /stats/anchors/verify` and the stats finality block return an `anchoring` object (`mode`: `disabled`, `simulated` or `enabled`; `provider`; `network`; `requiredConfirmations`; `detail`; `tracker` with the poll loop's last success, consecutive failures and next delay) and anchor rows with one of these statuses:
+
+| Status | Meaning |
+|--------|---------|
+| `broadcasting` | Intent recorded, transaction not yet known to be sent |
+| `pending` | Real txid, fewer than the required confirmations (also after a reorg) |
+| `anchored` | Real txid at the required depth |
+| `failed` | Transaction conflicted, was dropped, or was never sent; the checkpoint is re-broadcast under a new row |
+| `needs_admin` | Could not be reconciled automatically |
+| `simulated` | Not a Bitcoin transaction. Written by the simulation that predates real anchoring (`tx_ref` like `anchor:<network>:<hash>`) or by the mock provider. No `txRef`, 0 confirmations, never verifies. The stored reference is in `simulatedTxRef` |
+
+Stored rows are not rewritten; the `simulated` label is applied when they are read.
 
 ## Verification
 
@@ -135,7 +160,7 @@ open "https://blockstream.info/tx/<TXID>"
 - The anchor proxy only accepts requests with a valid Bearer token.
 - Rate limiting prevents runaway broadcast costs (default: 10 per minute).
 - Cross-network checkpoint messages from peers with a different `BITCOIN_NETWORK` are rejected with a peer score penalty.
-- Chain reorganization detection automatically demotes anchors if their transaction disappears from the longest chain.
+- Chain reorganization detection demotes an anchor to `pending` if its transaction leaves the longest chain or lands in a different block.
 
 ## Related
 

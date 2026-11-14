@@ -616,7 +616,7 @@ Even for code tasks, generated programs can print differently between honest run
 |----------|---------|-------------|
 | `STATS_LEDGER_SYNC_INTERVAL_MS` | `10000` | Stats ledger sync interval |
 | `STATS_ANCHOR_INTERVAL_MS` | `600000` (10 min) | Stats anchor interval |
-| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Min Bitcoin confirmations for anchors |
+| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Extra floor for stats hard finality; the effective depth is the larger of this and `BITCOIN_ANCHOR_CONFIRMATIONS` (default 6) |
 
 ### Rate Limiting
 

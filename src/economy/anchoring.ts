@@ -40,6 +40,10 @@ export interface AnchorStore {
   listAnchorsToReconcile?(pendingBeforeMs: number, limit?: number, abandonedSinceMs?: number): Promise<BitcoinAnchorRecord[]>;
   /** Broadcast attempts (real txids or in-flight "broadcasting" rows) created since `sinceMs`. */
   countAnchorBroadcastsSince?(sinceMs: number): Promise<number>;
+  /** #101: newest live anchor of each kind (stats / receipts / issuance). */
+  latestLiveAnchorPerKind?(): Promise<BitcoinAnchorRecord[]>;
+  /** #46: anchored rows still shallower than `belowConfirmations`, least recently checked first. */
+  listAnchorsToReverify?(belowConfirmations: number, limit?: number): Promise<BitcoinAnchorRecord[]>;
 }
 
 /** #46 review: spend guards. Every broadcast can cost up to `maxFeeSats`. */
@@ -71,6 +75,8 @@ export interface AnchorDeps {
   now?: () => number;
   /** Defaults to anchorPolicyFromEnv(). */
   policy?: AnchorPolicy;
+  /** #46: recorded on every row this provider broadcasts (BitcoinAnchorRecord.anchorProvider). */
+  providerName?: string;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -198,7 +204,8 @@ async function anchorCheckpointLocked(
     confirmations: 0,
     blockHash: undefined,
     blockHeight: undefined,
-    lastCheckedAtMs: now()
+    lastCheckedAtMs: now(),
+    anchorProvider: deps.providerName
   };
   await deps.store.upsertBitcoinAnchor(base);
   if (!deps.store.countAnchorBroadcastsSince) localBroadcastTimes.push(base.createdAtMs);
@@ -458,11 +465,12 @@ export async function reconcileAnchors(
   deps: AnchorDeps,
   required: number,
   cfg: ReconcileConfig
-): Promise<Array<{ anchorId: string; event: ReconcileEvent }>> {
+): Promise<Array<{ anchorId: string; event: ReconcileEvent; record: BitcoinAnchorRecord }>> {
   if (!deps.store.listAnchorsToReconcile) return [];
   const nowMs = (deps.now ?? Date.now)();
   const rows = await deps.store.listAnchorsToReconcile(nowMs - cfg.stuckAfterMs, 50, nowMs - cfg.abandonWatchMs);
-  const out: Array<{ anchorId: string; event: ReconcileEvent }> = [];
+  // `record` is the row as listed (before this pass changed it), so callers know what it was.
+  const out: Array<{ anchorId: string; event: ReconcileEvent; record: BitcoinAnchorRecord }> = [];
   for (const row of rows) {
     // Same per-checkpoint lock as anchorCheckpoint, so reconcile never races a broadcast.
     // #109 review: re-read under the lock and skip the row if anything moved since listing.
@@ -480,7 +488,7 @@ export async function reconcileAnchors(
       return reconcileAnchor(deps, fresh, required, cfg);
     };
     const event = deps.store.withCheckpointLock ? await deps.store.withCheckpointLock(row.checkpointHash, run) : await run();
-    out.push({ anchorId: row.anchorId, event });
+    out.push({ anchorId: row.anchorId, event, record: row });
   }
   return out;
 }

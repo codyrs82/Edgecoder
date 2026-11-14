@@ -1,9 +1,9 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import type { BitcoinNetwork } from "../common/types.js";
+import type { BitcoinAnchorRecord, BitcoinNetwork } from "../common/types.js";
 import { signPayload, verifyPayload } from "../mesh/peer.js";
-import { anchorCheckpoint, type AnchorPolicy, type AnchorStore } from "../economy/anchoring.js";
+import { anchorCheckpoint, isLiveAnchor, type AnchorPolicy, type AnchorStore } from "../economy/anchoring.js";
 import { encodeCheckpointForOpReturn, type BitcoinAnchorProvider } from "../economy/bitcoin-rpc.js";
 import {
   canonicalJson,
@@ -104,6 +104,8 @@ export interface EpochAnchorTarget {
   store?: AnchorStore;
   policy?: AnchorPolicy;
   now?: () => number;
+  /** #46: BITCOIN_ANCHOR_PROVIDER, recorded on the anchor row ("mock" rows are reported as simulated). */
+  providerName?: string;
 }
 
 export interface EpochAnchorResult {
@@ -127,16 +129,31 @@ export async function anchorEpoch(
   let txRef: string;
   if (target.store) {
     const record = await anchorCheckpoint(
-      { provider: target.provider, store: target.store, network: target.network, policy: target.policy, now: target.now },
+      { provider: target.provider, store: target.store, network: target.network, policy: target.policy, now: target.now, providerName: target.providerName },
       { epochId: `${RECEIPT_ANCHOR_EPOCH_PREFIX}${epoch.epochId}`, checkpointHash: epoch.merkleRoot }
     );
     txRef = record.txRef;
+    // #46: a mock txid is not a transaction; keep it off the epoch that inclusion proofs quote.
+    if (record.anchorProvider === "mock") return { epoch, txRef, dataHex };
   } else {
     txRef = (await target.provider.broadcastOpReturn(dataHex)).txid;
   }
   const anchored: ReceiptEpoch = { ...epoch, anchorTxRef: txRef, anchorNetwork: target.network };
   if (receiptStore) await receiptStore.persistEpoch(anchored);
   return { epoch: anchored, txRef, dataHex };
+}
+
+/**
+ * #46: the epoch keeps a copy of its anchor txid. When the anchor row gets a different txid
+ * (dropped transaction re-broadcast, or a crash-left broadcast recovered), point the epoch at
+ * the transaction that now carries its root. Returns whether the epoch changed.
+ */
+export async function repointEpochAnchor(receiptStore: ReceiptStore, record: BitcoinAnchorRecord): Promise<boolean> {
+  if (!record.epochId.startsWith(RECEIPT_ANCHOR_EPOCH_PREFIX) || !isLiveAnchor(record) || record.anchorProvider === "mock") return false;
+  const epoch = await receiptStore.getEpoch(record.epochId.slice(RECEIPT_ANCHOR_EPOCH_PREFIX.length));
+  if (!epoch || epoch.merkleRoot !== record.checkpointHash || epoch.anchorTxRef === record.txRef) return false;
+  await receiptStore.persistEpoch({ ...epoch, anchorTxRef: record.txRef, anchorNetwork: record.anchorNetwork });
+  return true;
 }
 
 export interface ReceiptInclusionProof {

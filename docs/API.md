@@ -83,7 +83,7 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `POST` | `/economy/issuance/quorum/vote` | Submit quorum vote for an issuance epoch | mesh token + admin token |
 | `GET` | `/economy/issuance/quorum/:epochId` | Get quorum votes for an epoch | mesh token |
 | `POST` | `/economy/issuance/anchor` | Anchor current issuance epoch to Bitcoin (spends sats) | admin token |
-| `GET` | `/economy/issuance/anchors` | List Bitcoin anchor records | mesh token |
+| `GET` | `/economy/issuance/anchors` | Anchoring status (`anchoring.mode`: disabled, simulated, enabled) and anchor records; pre-#46 simulated rows have `status: "simulated"` | mesh token |
 | `POST` | `/economy/issuance/reconcile` | Reconcile issuance across peers | mesh token |
 
 ### Mesh Networking
@@ -144,7 +144,7 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `GET` | `/stats/ledger/range` | Stats ledger range query | mesh token |
 | `POST` | `/stats/ledger/ingest` | Ingest stats ledger records from peers | mesh token |
 | `POST` | `/stats/anchors/anchor-latest` | Anchor latest stats to Bitcoin (spends sats) | admin token |
-| `GET` | `/stats/anchors/verify` | Verify stats anchors | mesh token |
+| `GET` | `/stats/anchors/verify` | Whether a checkpoint has a real anchor tx at the required confirmations, plus anchoring status | mesh token |
 | `GET` | `/stats/projections/summary` | Projected network stats summary | mesh token |
 
 ### BLE Credits

@@ -533,6 +533,8 @@ ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS last_checked_at_ms B
 -- #103: reconciliation attempts for broadcasting / stuck rows.
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS abandoned_at_ms BIGINT;
+-- #46: which provider broadcast the row; 'mock' rows are reported as simulated. NULL on older rows.
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS anchor_provider TEXT;
 CREATE INDEX IF NOT EXISTS idx_anchor_records_status ON bitcoin_anchor_records (status);
 -- #101: the epoch-anchor guard looks anchors up by epoch id and by checkpoint hash.
 CREATE INDEX IF NOT EXISTS idx_anchor_records_epoch ON bitcoin_anchor_records (epoch_id, created_at_ms DESC);
@@ -764,6 +766,9 @@ export const INVALIDATE_SERVER_SEED_WALLETS_SQL = `UPDATE wallet_accounts
 const BALANCE_CHECK_SQL = `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
          COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) >= round($2::numeric, 6) AS enough
          FROM credit_transactions WHERE account_id = $1`;
+
+const ANCHOR_COLUMNS =
+  "anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms, anchor_provider";
 
 export class PostgresStore {
   constructor(private readonly pool: Pool) {}
@@ -1808,8 +1813,8 @@ export class PostgresStore {
   async upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO bitcoin_anchor_records (
-        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms, anchor_provider
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT (anchor_id) DO UPDATE SET
         tx_ref = EXCLUDED.tx_ref,
         status = EXCLUDED.status,
@@ -1819,7 +1824,8 @@ export class PostgresStore {
         block_height = EXCLUDED.block_height,
         last_checked_at_ms = EXCLUDED.last_checked_at_ms,
         reconcile_attempts = EXCLUDED.reconcile_attempts,
-        abandoned_at_ms = EXCLUDED.abandoned_at_ms`,
+        abandoned_at_ms = EXCLUDED.abandoned_at_ms,
+        anchor_provider = COALESCE(EXCLUDED.anchor_provider, bitcoin_anchor_records.anchor_provider)`,
       [
         record.anchorId,
         record.epochId,
@@ -1834,7 +1840,8 @@ export class PostgresStore {
         record.blockHeight ?? null,
         record.lastCheckedAtMs ?? null,
         record.reconcileAttempts ?? 0,
-        record.abandonedAtMs ?? null
+        record.abandonedAtMs ?? null,
+        record.anchorProvider ?? null
       ]
     );
   }
@@ -1854,13 +1861,14 @@ export class PostgresStore {
       blockHeight: row.block_height !== undefined && row.block_height !== null ? Number(row.block_height) : undefined,
       lastCheckedAtMs: row.last_checked_at_ms ? Number(row.last_checked_at_ms) : undefined,
       reconcileAttempts: row.reconcile_attempts !== undefined && row.reconcile_attempts !== null ? Number(row.reconcile_attempts) : 0,
-      abandonedAtMs: row.abandoned_at_ms !== undefined && row.abandoned_at_ms !== null ? Number(row.abandoned_at_ms) : undefined
+      abandonedAtMs: row.abandoned_at_ms !== undefined && row.abandoned_at_ms !== null ? Number(row.abandoned_at_ms) : undefined,
+      anchorProvider: row.anchor_provider ?? undefined
     };
   }
 
   async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT 1`
@@ -1871,7 +1879,7 @@ export class PostgresStore {
 
   async listAnchors(limit = 100): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT $1`,
@@ -1911,7 +1919,7 @@ export class PostgresStore {
   /** #103: rows to reconcile: in-flight broadcasts, and pending rows older than `pendingBeforeMs`. */
   async listAnchorsToReconcile(pendingBeforeMs: number, limit = 50, abandonedSinceMs?: number): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE status = 'broadcasting' OR (status = 'pending' AND created_at_ms < $1)
           OR (status = 'failed' AND abandoned_at_ms IS NOT NULL AND abandoned_at_ms >= $3)
@@ -1925,7 +1933,7 @@ export class PostgresStore {
   /** #46: anchors awaiting confirmation depth (or re-confirmation after a reorg). */
   async listPendingAnchors(limit = 50): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE status = 'pending'
        ORDER BY created_at_ms ASC
@@ -1935,10 +1943,26 @@ export class PostgresStore {
     return result.rows.map((row) => this.anchorFromRow(row));
   }
 
+  /**
+   * #46: confirmed anchors still inside the reorg watch window (fewer than `belowConfirmations`),
+   * least recently checked first, so every one of them is re-verified, not only the newest rows.
+   */
+  async listAnchorsToReverify(belowConfirmations: number, limit = 50): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT ${ANCHOR_COLUMNS}
+       FROM bitcoin_anchor_records
+       WHERE status = 'anchored' AND tx_ref ~ '^[0-9a-f]{64}$' AND confirmations < $1
+       ORDER BY last_checked_at_ms ASC NULLS FIRST
+       LIMIT $2`,
+      [belowConfirmations, limit]
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
   /** #101: newest anchor row for an epoch id (issuance epochs, `stats:<h>`, `receipts:<id>`). */
   async latestAnchorByEpoch(epochId: string): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE epoch_id = $1
        ORDER BY created_at_ms DESC
@@ -1956,7 +1980,7 @@ export class PostgresStore {
    */
   async latestLiveAnchorPerKind(): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT DISTINCT ON (kind) anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT DISTINCT ON (kind) ${ANCHOR_COLUMNS}
        FROM (
          SELECT *, CASE WHEN epoch_id LIKE 'stats:%' THEN 'stats' WHEN epoch_id LIKE 'receipts:%' THEN 'receipts' ELSE 'issuance' END AS kind
          FROM bitcoin_anchor_records
@@ -1969,7 +1993,7 @@ export class PostgresStore {
 
   async latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE checkpoint_hash = $1
        ORDER BY created_at_ms DESC

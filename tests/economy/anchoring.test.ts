@@ -472,7 +472,7 @@ describe("reconciliation (#103)", () => {
       async listAnchorsToReconcile() { return [listed]; }
     });
     const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
-    expect(out).toEqual([{ anchorId: "b1", event: "skipped" }]);
+    expect(out).toMatchObject([{ anchorId: "b1", event: "skipped" }]);
     expect(store.rows.get("b1")?.status).toBe("pending");
   });
 
@@ -507,7 +507,7 @@ describe("reconciliation (#103)", () => {
       async listAnchorsToReconcile() { return [...store.rows.values()].filter((r) => r.status === "broadcasting"); }
     });
     const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
-    expect(out).toEqual([{ anchorId: "b1", event: "failed" }]);
+    expect(out).toMatchObject([{ anchorId: "b1", event: "failed" }]);
   });
 
   it("config from env", () => {
