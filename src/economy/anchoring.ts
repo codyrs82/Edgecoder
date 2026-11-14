@@ -31,6 +31,8 @@ export function requiredConfirmationsFromEnv(
 export interface AnchorStore {
   upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void>;
   latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null>;
+  /** #101: newest anchor row recorded for an epoch id (any checkpoint hash). */
+  latestAnchorByEpoch?(epochId: string): Promise<BitcoinAnchorRecord | null>;
   listPendingAnchors(limit?: number): Promise<BitcoinAnchorRecord[]>;
   /** Cross-instance lock for one checkpoint (Postgres advisory lock). */
   withCheckpointLock?<T>(checkpointHash: string, fn: () => Promise<T>): Promise<T>;
@@ -113,20 +115,59 @@ export async function anchorCheckpoint(
   deps: AnchorDeps,
   input: { epochId: string; checkpointHash: string }
 ): Promise<BitcoinAnchorRecord> {
+  return (await anchorCheckpointWithOutcome(deps, input)).record;
+}
+
+/** Like anchorCheckpoint, but says whether this call broadcast (`broadcast: true`) or found a live anchor. */
+export async function anchorCheckpointWithOutcome(
+  deps: AnchorDeps,
+  input: { epochId: string; checkpointHash: string }
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
   const run = () => anchorCheckpointLocked(deps, input);
   return withLocalLock(input.checkpointHash, () =>
     deps.store.withCheckpointLock ? deps.store.withCheckpointLock(input.checkpointHash, run) : run()
   );
 }
 
+/** A real broadcast that must not be re-sent: pending or anchored with a txid. */
+export function isLiveAnchor(record: BitcoinAnchorRecord | null | undefined): boolean {
+  return Boolean(record) && record!.status !== "failed" && isTxid(record!.txRef);
+}
+
+/**
+ * #101: anchor an epoch's checkpoint at most once. The guard looks the anchor up by epoch id
+ * (store.latestAnchorByEpoch), then by checkpoint hash under the lock, instead of "the newest
+ * anchor row" (usually a stats anchor), so a tick for an already-anchored or in-flight epoch
+ * does no work. `computeCheckpointHash` runs only when the epoch still needs anchoring, and
+ * `onBroadcast` (e.g. the ledger checkpoint record) runs only after this call actually broadcast.
+ */
+export async function anchorEpochOnce(
+  deps: AnchorDeps,
+  input: {
+    epochId: string;
+    computeCheckpointHash: () => Promise<string>;
+    onBroadcast?: (record: BitcoinAnchorRecord) => Promise<void>;
+  }
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
+  const byEpoch = deps.store.latestAnchorByEpoch ? await deps.store.latestAnchorByEpoch(input.epochId) : null;
+  // Live, or a broadcast still being reconciled (#103): never start a second one for the epoch.
+  if (byEpoch && (isLiveAnchor(byEpoch) || byEpoch.status === "broadcasting" || byEpoch.status === "needs_admin")) {
+    return { record: byEpoch, broadcast: false };
+  }
+  const checkpointHash = await input.computeCheckpointHash();
+  const outcome = await anchorCheckpointWithOutcome(deps, { epochId: input.epochId, checkpointHash });
+  if (outcome.broadcast && input.onBroadcast) await input.onBroadcast(outcome.record);
+  return outcome;
+}
+
 async function anchorCheckpointLocked(
   deps: AnchorDeps,
   input: { epochId: string; checkpointHash: string }
-): Promise<BitcoinAnchorRecord> {
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
   const now = deps.now ?? Date.now;
   const policy = deps.policy ?? anchorPolicyFromEnv();
   const existing = await deps.store.latestAnchorByCheckpoint(input.checkpointHash);
-  if (existing && existing.status !== "failed" && isTxid(existing.txRef)) return existing;
+  if (existing && isLiveAnchor(existing)) return { record: existing, broadcast: false };
   if (existing?.status === "broadcasting" || existing?.status === "needs_admin") {
     throw new Error(`anchor_broadcast_unreconciled:${existing.anchorId}`);
   }
@@ -188,7 +229,7 @@ async function anchorCheckpointLocked(
 
   const record: BitcoinAnchorRecord = { ...base, txRef: normalized, status: "pending", lastCheckedAtMs: now() };
   await deps.store.upsertBitcoinAnchor(record);
-  return record;
+  return { record, broadcast: true };
 }
 
 export type ConfirmationEvent = "confirmed" | "progress" | "reorg" | "unchanged" | "unknown" | "conflicted";
