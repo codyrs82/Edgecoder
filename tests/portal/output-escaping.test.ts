@@ -238,7 +238,7 @@ describe("POST /nodes/enroll node id validation", () => {
 
 describe("enforced CSP with per-request script nonces", () => {
   const PAGES = [
-    "/portal", "/portal-legacy", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/settings/plan",
+    "/portal", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/settings/plan",
     "/portal/settings", "/portal/settings/nodes", "/portal/settings/admin", "/portal/settings/install", "/portal/reviews", "/portal/settings/compute",
     "/", "/privacy", "/terms",
   ];

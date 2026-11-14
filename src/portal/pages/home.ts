@@ -32,7 +32,6 @@ app.get("/portal", async (_req, reply) => {
           padding: 36px 44px; background: var(--bg-soft); border-right: 1px solid var(--card-border);
         }
         .auth-brand .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .auth-brand h1 { font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 12px; max-width: 480px; }
         .auth-brand .lead { color: var(--text-secondary); font-size: 15px; max-width: 480px; margin-bottom: 28px; }
         .props { display: grid; gap: 14px; max-width: 480px; }

@@ -35,8 +35,22 @@ export const TOKENS_CSS = `
   --content-max: 1320px;
   --transition-fast: 0.12s ease;
   --transition-med: 0.2s ease;
+  /* #27: text on a tint of its own color. Plain --danger on a 10-12% danger tint is under 4.5:1 in
+     both themes; mixing in a fifth of the text color brings it to 5:1 or better. */
+  --danger-ink: color-mix(in srgb, var(--danger) 80%, var(--text));
+  /* Shadows and the mobile-nav scrim are the only raw colors in the portal CSS; they live here so
+     the page modules stay on tokens. Light values first (tokens.css defaults to light). */
+  --shadow-1: 0 1px 2px rgba(0,0,0,0.08);
+  --shadow-2: 0 8px 24px rgba(0,0,0,0.14);
+  --shadow-up: 0 -6px 28px rgba(0,0,0,0.16);
+  --scrim: rgba(0,0,0,0.35);
+}
+/* theme.js always resolves <html data-theme> to light or dark, and pages render dark by default. */
+[data-theme=dark] {
   --shadow-1: 0 1px 2px rgba(0,0,0,0.3);
   --shadow-2: 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-up: 0 -6px 28px rgba(0,0,0,0.45);
+  --scrim: rgba(0,0,0,0.5);
 }`;
 
 /** Base styles shared by every page: reset, type, buttons, inputs, tables, cards, badges, KPIs, utilities. */
@@ -81,7 +95,7 @@ button.primary, .btn.primary, .dl-btn { background: var(--brand); border-color: 
 button.primary:hover, .btn.primary:hover, .dl-btn:hover { background: var(--brand-2); border-color: var(--brand-2); color: var(--on-accent); }
 button.ghost, .btn.ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
 button.ghost:hover, .btn.ghost:hover { background: var(--bg-elevated); color: var(--text); }
-button.danger { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger); background: transparent; }
+button.danger { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger-ink); background: transparent; }
 button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 button.sm, .btn.sm { padding: 4px 9px; min-height: 26px; font-size: 12px; }
 button svg, .btn svg { width: 14px; height: 14px; flex: none; }
@@ -142,13 +156,13 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 }
 .status-badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .status-badge.warn { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: color-mix(in srgb, var(--yellow) 10%, transparent); }
-.status-badge.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.status-badge.danger { color: var(--danger-ink); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .status-badge.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); background: color-mix(in srgb, var(--info) 10%, transparent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
 .dot.green { background: var(--ok); } .dot.yellow { background: var(--yellow); } .dot.red { background: var(--danger); } .dot.gray { background: var(--muted); }
 
 /* Brand mark (brandMark()) and the theme toggle (assets.ts themeToggleButton()) */
-.mark { color: var(--on-accent); }
+.mark { display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--brand); color: var(--on-accent); }
 .theme-toggle [data-theme-label] { font-size: 12px; }
 
 /* Misc */

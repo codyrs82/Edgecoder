@@ -154,16 +154,44 @@ export const MARKET_SCRIPT = `
           return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
         }
 
+        // Every color the charts use, read from the current theme's tokens.
+        function chartColors() {
+          return {
+            chart: { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: alpha("--text", 0.04) }, horzLines: { color: alpha("--text", 0.04) } }, timeScale: { borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") } },
+            candles: { upColor: css("--ok"), downColor: css("--danger"), borderUpColor: css("--ok"), borderDownColor: css("--danger"), wickUpColor: css("--ok"), wickDownColor: css("--danger") },
+            volume: { color: alpha("--brand", 0.5) },
+            bids: { lineColor: css("--ok"), topColor: alpha("--ok", 0.35), bottomColor: alpha("--ok", 0.02) },
+            asks: { lineColor: css("--danger"), topColor: alpha("--danger", 0.35), bottomColor: alpha("--danger", 0.02) }
+          };
+        }
+
         function buildCharts() {
           var LWC = window.LightweightCharts;
-          var common = { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: alpha("--text", 0.04) }, horzLines: { color: alpha("--text", 0.04) } }, timeScale: { timeVisible: true, secondsVisible: false, borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") }, crosshair: { mode: 0 } };
+          var c = chartColors();
+          var common = { timeScale: { timeVisible: true, secondsVisible: false }, crosshair: { mode: 0 } };
+          var price = { priceFormat: { type: "price", precision: 0, minMove: 1 } };
           state.chart = LWC.createChart($("priceChart"), Object.assign({ autoSize: true }, common));
-          state.candles = state.chart.addCandlestickSeries({ upColor: css("--ok"), downColor: css("--danger"), borderUpColor: css("--ok"), borderDownColor: css("--danger"), wickUpColor: css("--ok"), wickDownColor: css("--danger"), priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.volume = state.chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol", color: alpha("--brand", 0.5) });
+          state.candles = state.chart.addCandlestickSeries(Object.assign({}, price, c.candles));
+          state.volume = state.chart.addHistogramSeries(Object.assign({ priceFormat: { type: "volume" }, priceScaleId: "vol" }, c.volume));
           state.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
           state.depth = LWC.createChart($("depthChart"), Object.assign({ autoSize: true }, common, { timeScale: { visible: false }, handleScroll: false, handleScale: false }));
-          state.bidSeries = state.depth.addAreaSeries({ lineColor: css("--ok"), topColor: alpha("--ok", 0.35), bottomColor: alpha("--ok", 0.02), priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.askSeries = state.depth.addAreaSeries({ lineColor: css("--danger"), topColor: alpha("--danger", 0.35), bottomColor: alpha("--danger", 0.02), priceFormat: { type: "price", precision: 0, minMove: 1 } });
+          state.bidSeries = state.depth.addAreaSeries(Object.assign({}, price, c.bids));
+          state.askSeries = state.depth.addAreaSeries(Object.assign({}, price, c.asks));
+          themeCharts();
+          // #27: the library holds resolved colors, so re-read the tokens when the theme toggle
+          // (or the system setting, in "system" mode) flips <html data-theme>.
+          if (window.MutationObserver) new MutationObserver(themeCharts).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+        }
+
+        function themeCharts() {
+          if (!state.chart) return;
+          var c = chartColors();
+          state.chart.applyOptions(c.chart);
+          state.depth.applyOptions(c.chart);
+          state.candles.applyOptions(c.candles);
+          state.volume.applyOptions(c.volume);
+          state.bidSeries.applyOptions(c.bids);
+          state.askSeries.applyOptions(c.asks);
         }
 
         function classSpec(id) { for (var i = 0; i < state.classes.length; i++) if (state.classes[i].id === id) return state.classes[i]; return null; }

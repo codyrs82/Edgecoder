@@ -23,7 +23,7 @@ app.get("/portal/chat", async (_req, reply) => {
         font-size:11px; font-weight:700; text-transform:uppercase;
         letter-spacing:0.5px; color:var(--muted);
       }
-      .chat-msg .msg-time { font-size:10px; color:var(--muted); opacity:0.7; }
+      .chat-msg .msg-time { font-size:10px; color:var(--muted); }
       .chat-msg.user .msg-role { color:var(--brand); }
       .chat-msg .msg-body { color:var(--text); }
       .chat-msg .msg-body p { margin:0 0 8px; }
@@ -100,7 +100,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .model-dropdown {
         position:absolute; bottom:calc(100% + 8px); left:-6px; width:min(380px, 86vw);
         background:var(--bg-surface); border:1px solid var(--border-strong);
-        border-radius:var(--radius-md); box-shadow:0 -6px 28px rgba(0,0,0,0.45);
+        border-radius:var(--radius-md); box-shadow:var(--shadow-up);
         z-index:100; padding:6px; display:flex; flex-direction:column;
       }
       .model-dropdown input { min-height:30px; padding:6px 10px; font-size:12.5px; margin-bottom:4px; }

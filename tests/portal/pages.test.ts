@@ -8,7 +8,6 @@ const PAGES: Record<string, string> = {
   "/": "EdgeCoder | Private AI Coding on Your Infrastructure",
   "/privacy": "Privacy Policy | EdgeCoder",
   "/terms": "Terms of Service | EdgeCoder",
-  "/portal-legacy": "EdgeCoder Portal",
   "/portal": "EdgeCoder Portal | Sign in",
   "/portal/reset-password": "EdgeCoder Portal | Reset password",
   "/portal/chat": "EdgeCoder Portal | Chat",
@@ -111,11 +110,19 @@ describe("portal pages module (#16)", () => {
     await app.close();
   });
 
-  it("keeps page-specific markup (portal sign-in, legacy auth view)", async () => {
+  it("keeps page-specific markup (portal sign-in)", async () => {
     const app = Fastify();
     registerPortalPages(app);
     expect((await app.inject({ url: "/portal" })).body).toContain('id="signupEmail"');
-    expect((await app.inject({ url: "/portal-legacy" })).body).toContain('id="authView"');
+    await app.close();
+  });
+
+  it("#27: the retired /portal-legacy page redirects to sign-in", async () => {
+    const app = Fastify();
+    registerPortalPages(app);
+    const res = await app.inject({ url: "/portal-legacy" });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe("/portal");
     await app.close();
   });
 });

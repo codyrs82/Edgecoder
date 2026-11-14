@@ -61,7 +61,6 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -273,7 +272,6 @@ export function privacyPolicyHtml(): string {
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -416,7 +414,6 @@ export function termsOfServiceHtml(): string {
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
