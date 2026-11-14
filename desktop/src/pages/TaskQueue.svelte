@@ -219,7 +219,7 @@
   /* ── stats grid ───────────────────────────────────────────── */
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 1rem;
     margin-bottom: 1.5rem;
   }
@@ -253,7 +253,7 @@
 
   .row-2col {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 1rem;
   }
 
@@ -265,7 +265,7 @@
 
   .field-label {
     font-size: 0.85rem;
-    opacity: 0.8;
+    color: var(--text-secondary);
   }
 
   .req {
@@ -329,7 +329,7 @@
   }
   .msg.error {
     background: color-mix(in srgb, var(--red) 12%, transparent);
-    color: var(--red);
+    color: var(--red-strong);
     border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
   }
 
@@ -338,13 +338,13 @@
     background: var(--bg-surface);
     padding: 1.2rem;
     border-radius: var(--radius-md);
-    opacity: 0.7;
     margin-top: 1rem;
+    color: var(--text-secondary);
   }
   .empty p {
     margin: 0;
   }
-  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
 
   button:focus-visible, input:focus-visible, textarea:focus-visible {
     outline: 2px solid var(--accent);

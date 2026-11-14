@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 // #23/#28: every surface takes its colours from the shared tokens, so light and dark both work.
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const TOKENS_CSS = fileURLToPath(new URL("../../packages/tokens/dist/tokens.css", import.meta.url));
+const TOKENS = JSON.parse(readFileSync(fileURLToPath(new URL("../../packages/tokens/src/tokens.json", import.meta.url)), "utf8")) as {
+  color: Record<string, Record<Mode, string>>;
+  aliases: Record<string, string>;
+  derived: Record<string, { of: string; percent: number; into: string }>;
+};
+type Mode = "light" | "dark";
+type Rgb = [number, number, number];
 
 function walk(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -36,6 +43,45 @@ function rawColors(rel: string, text: string): string[] {
   return found.filter((c) => !allowed.some((re) => re.test(c)));
 }
 
+const mix = (a: Rgb, percent: number, b: Rgb) => a.map((v, i) => (v * percent + b[i] * (100 - percent)) / 100) as Rgb;
+/** A token's opaque colour in one theme; undefined for translucent tokens and unknown names. */
+function tokenRgb(name: string, mode: Mode): Rgb | undefined {
+  const d = TOKENS.derived[name];
+  if (d) {
+    const [a, b] = [tokenRgb(d.of, mode), tokenRgb(d.into, mode)];
+    return a && b ? mix(a, d.percent, b) : undefined;
+  }
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(TOKENS.color[TOKENS.aliases[name] ?? name]?.[mode] ?? "");
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : undefined;
+}
+function luminance(c: Rgb): number {
+  const [r, g, b] = c.map((v) => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a: Rgb, b: Rgb): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+const SURFACES = ["bg-base", "bg-surface", "bg-elevated", "bg-input", "bg-deep"];
+const TINT = /background(?:-color)?:\s*color-mix\(in srgb,\s*var\(--([\w-]+)\)\s*(\d+)%,\s*transparent\)/;
+const TEXT = /(?<![-\w])color:\s*var\(--([\w-]+)\)/;
+
+/** Rules that set both a translucent tint and a text colour, where the text falls below 4.5:1 on some surface. */
+function lowContrastTints(rel: string, text: string): string[] {
+  const out: string[] = [];
+  for (const rule of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const [tint, fg] = [TINT.exec(rule[2]), TEXT.exec(rule[2])];
+    if (!tint || !fg) continue;
+    for (const mode of ["light", "dark"] as const) {
+      const [tintRgb, fgRgb] = [tokenRgb(tint[1], mode), tokenRgb(fg[1], mode)];
+      if (!tintRgb || !fgRgb) continue;
+      const worst = Math.min(...SURFACES.map((s) => contrast(fgRgb, mix(tintRgb, Number(tint[2]), tokenRgb(s, mode)!))));
+      if (worst < 4.5) out.push(`${rel}: ${rule[1].trim().split("\n").pop()!.trim()} (${mode}) ${worst.toFixed(2)}`);
+    }
+  }
+  return out;
+}
+
 describe("desktop styles use design tokens (#23, #28)", () => {
   it("no hard-coded colours outside the documented exceptions", () => {
     const offenders = FILES.flatMap((f) => rawColors(f.rel, f.text).map((c) => `${f.rel}: ${c}`));
@@ -58,6 +104,13 @@ describe("desktop styles use design tokens (#23, #28)", () => {
       }
     }
     expect([...missing]).toEqual([]);
+  });
+
+  // #29: a badge or banner that tints its background with a colour and writes in a colour has to stay
+  // readable wherever it is placed. Red text on a red tint needs --red-strong; other tints stay light.
+  it("text on a tinted background keeps 4.5:1 on every surface in both themes", () => {
+    expect(lowContrastTints("x.css", ".bad { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }")).toHaveLength(2);
+    expect(FILES.flatMap((f) => lowContrastTints(f.rel, f.text))).toEqual([]);
   });
 
   it("no stale fallbacks inside var() for a token", () => {

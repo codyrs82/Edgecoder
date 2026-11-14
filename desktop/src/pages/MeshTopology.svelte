@@ -52,9 +52,17 @@
   let nodeById = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
   let graphEl: SVGSVGElement | undefined = $state(undefined);
 
+  /** Text drawn under a peer in the graph. */
+  function nodeText(id: string): string {
+    return truncate(id, 8);
+  }
+
   function nodeLabel(id: string, self: boolean): string {
     const score = reputationMap.get(id);
-    return `${self ? "This node" : "Peer"}${id ? ` ${truncate(id, 12)}` : ""}${score !== undefined ? `, reputation ${score}` : ""}`;
+    // The name has to contain the text drawn under the node. The end of the id follows it,
+    // because peer ids share their first characters and would otherwise all be named alike.
+    const name = self ? `This node${id ? ` ${truncate(id, 12)}` : ""}` : `Peer ${nodeText(id)}${id.slice(Math.max(8, id.length - 4))}`;
+    return `${name}${score !== undefined ? `, reputation ${score}` : ""}`;
   }
 
   function onNodeKey(e: KeyboardEvent, i: number, id: string) {
@@ -218,7 +226,7 @@
             onkeydown={(e) => onNodeKey(e, i, node.id)}
           >
             <circle r={node.self ? 22 : 16} />
-            <text y={node.self ? 38 : 30} text-anchor="middle" aria-hidden="true">{node.self ? "This node" : truncate(node.id, 8)}</text>
+            <text y={node.self ? 38 : 30} text-anchor="middle" aria-hidden="true">{node.self ? "This node" : nodeText(node.id)}</text>
           </g>
         {/each}
       </svg>
@@ -349,7 +357,6 @@
   .subtitle {
     margin: 0;
     font-size: 0.9rem;
-    opacity: 0.6;
     color: var(--text-secondary);
   }
 
@@ -471,13 +478,11 @@
 
   .detail-label {
     color: var(--text-secondary);
-    opacity: 0.7;
     flex-shrink: 0;
   }
 
   .detail-value {
     color: var(--text-primary);
-    opacity: 0.85;
     text-align: right;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -525,22 +530,20 @@
   }
 
   .rep-red {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 
   .rep-unknown {
     color: var(--text-secondary);
     background: color-mix(in srgb, var(--text-muted) 10%, transparent);
-    opacity: 0.6;
   }
 
   .rep-label {
     font-size: 0.75rem;
     color: var(--text-secondary);
-    opacity: 0.6;
   }
-  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
   .machines {
     margin-bottom: 16px;
   }

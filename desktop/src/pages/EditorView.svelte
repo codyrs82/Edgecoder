@@ -1241,6 +1241,8 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
+    /* Keeps the repository form off the pane edges when the pane is narrow. */
+    padding: 0 12px;
     color: var(--text-muted);
     font-size: 13px;
     background: var(--bg-base);
@@ -1267,5 +1269,10 @@
     overflow: hidden;
     background: var(--bg-base);
     position: relative;
+  }
+  /* #29: the side panels keep their dragged widths until the window is too narrow for all three. */
+  @media (max-width: 860px) {
+    .explorer-panel { max-width: 26vw; }
+    .chat-panel { max-width: 40vw; }
   }
 </style>

@@ -161,7 +161,7 @@
   .btn-danger {
     padding: 8px 20px;
     background: color-mix(in srgb, var(--red) 10%, transparent);
-    color: var(--red);
+    color: var(--red-strong);
     border: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
     border-radius: var(--radius-sm);
     cursor: pointer;
@@ -170,7 +170,7 @@
     transition: all 0.15s;
   }
   .btn-danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--red) 20%, transparent);
+    background: color-mix(in srgb, var(--red) 15%, transparent);
   }
   .btn-danger:disabled {
     opacity: 0.5;

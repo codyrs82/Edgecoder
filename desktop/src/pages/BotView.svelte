@@ -538,7 +538,8 @@
           {#if memory === null}
             <div class="d-sub muted">Loading…</div>
           {:else if memory.trim()}
-            <pre class="memory">{memory}</pre>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <pre class="memory" tabindex="0" aria-label="Bot memory">{memory}</pre>
           {:else}
             <div class="d-sub muted">Nothing yet. It saves notes with its remember tool as it works.</div>
           {/if}
@@ -669,14 +670,14 @@
     align-self: flex-end;
     padding: 4px 12px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--green) 16%, transparent);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
     color: var(--green);
     font-size: 12px;
     font-weight: 600;
   }
   .ask-answer.denied {
     background: color-mix(in srgb, var(--danger) 14%, transparent);
-    color: var(--danger);
+    color: var(--red-strong);
   }
   .pr-ask {
     display: flex;
@@ -1070,7 +1071,7 @@
     background: color-mix(in srgb, var(--yellow) 10%, transparent);
   }
   .chip.err {
-    color: var(--danger);
+    color: var(--red-strong);
     border-color: color-mix(in srgb, var(--danger) 45%, transparent);
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
@@ -1100,7 +1101,7 @@
   }
   .meta .sep {
     flex-shrink: 0;
-    opacity: 0.6;
+    color: var(--text-muted);
   }
   .meter {
     display: inline-block;
@@ -1275,7 +1276,7 @@
     padding: 8px 12px;
     border-radius: 8px;
     font-size: 12.5px;
-    color: var(--danger);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .messages {

@@ -170,7 +170,7 @@
   }
   .error-msg {
     background: color-mix(in srgb, var(--red) 10%, transparent);
-    color: var(--red);
+    color: var(--red-strong);
     padding: 8px 12px;
     border-radius: var(--radius-sm);
     font-size: 13px;

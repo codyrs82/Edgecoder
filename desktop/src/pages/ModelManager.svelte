@@ -11,6 +11,7 @@
     isRemoteMode,
   } from "../lib/api";
   import { formatBytes, formatParamSize } from "../lib/format";
+  import { scrollRegion } from "../lib/scroll-region";
   import { MODEL_CATALOG, CATEGORY_LABELS, type CatalogModel } from "../lib/models";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
@@ -437,7 +438,7 @@
     {#if nonCatalogModels.length > 0}
       <section class="models-section">
         <h2 class="section-title">Other Installed Models</h2>
-        <div class="model-table">
+        <div class="model-table" role="group" aria-label="Other installed models" use:scrollRegion>
           <div class="model-header">
             <span class="col-name">Model</span>
             <span class="col-params">Params</span>
@@ -470,7 +471,7 @@
                 {#if model.running && model.vramSize !== null}
                   <span class="vram-value">{formatBytes(model.vramSize)}</span>
                 {:else}
-                  <span class="vram-empty">\u2014</span>
+                  <span class="vram-empty">—</span>
                 {/if}
               </span>
               <span class="col-actions">
@@ -635,13 +636,14 @@
     flex-shrink: 0;
   }
 
+  /* Tint and text share a hue: blue text on the accent's tint falls short of 4.5:1 in light. */
   .badge-active-status {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
     color: var(--accent-secondary);
   }
 
   .badge-installed-status {
-    background: color-mix(in srgb, var(--green) 15%, transparent);
+    background: color-mix(in srgb, var(--green) 10%, transparent);
     color: var(--green);
   }
 
@@ -652,7 +654,7 @@
     border-radius: var(--radius-sm);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    background: color-mix(in srgb, var(--yellow) 20%, transparent);
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
     color: var(--yellow);
     flex-shrink: 0;
   }
@@ -675,7 +677,7 @@
   }
 
   .meta-sep {
-    opacity: 0.5;
+    color: var(--text-muted);
   }
 
   .card-actions {
@@ -733,7 +735,7 @@
 
   .progress-bytes {
     font-weight: 400;
-    opacity: 0.7;
+    color: var(--text-secondary);
   }
 
   /* ---- Advanced pull (collapsible) ---- */
@@ -805,7 +807,7 @@
     background: var(--bg-surface);
     border-radius: 10px;
     border: 1px solid var(--border);
-    overflow: hidden;
+    overflow-x: auto;
   }
 
   .model-header,
@@ -815,6 +817,8 @@
     align-items: center;
     padding: 0.6rem 1rem;
     gap: 0.5rem;
+    /* Seven columns need this much; in a narrower window the table scrolls sideways. */
+    min-width: 640px;
   }
 
   .model-header {
@@ -871,12 +875,12 @@
   }
 
   .badge-active {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
     color: var(--accent-secondary);
   }
 
   .badge-running {
-    background: color-mix(in srgb, var(--green) 20%, transparent);
+    background: color-mix(in srgb, var(--green) 10%, transparent);
     color: var(--green);
   }
 
@@ -948,26 +952,26 @@
   }
 
   .btn-install {
-    background: color-mix(in srgb, var(--green) 15%, transparent);
+    background: color-mix(in srgb, var(--green) 8%, transparent);
     color: var(--green);
     border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
   }
   .btn-install:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--green) 25%, transparent);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
   }
 
   .btn-active-indicator {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
     color: var(--accent-secondary);
     cursor: default;
   }
 
   .btn-delete {
-    background: color-mix(in srgb, var(--red) 15%, transparent);
-    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    color: var(--red-strong);
   }
   .btn-delete:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--red) 30%, transparent);
+    background: color-mix(in srgb, var(--red) 15%, transparent);
   }
 
   .btn-confirm {
@@ -987,7 +991,7 @@
   .info-banner {
     display: flex;
     align-items: center;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
     color: var(--accent-secondary);
     padding: 0.75rem 1rem;
     border-radius: 8px;

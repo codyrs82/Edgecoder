@@ -62,8 +62,9 @@ describe("MeshTopology graph", () => {
   it("Enter selects a peer and shows its details; Escape clears", async () => {
     render(MeshTopology);
     const all = await nodes();
-    const a = all.find((n) => /peer-aaaa/.test(n.getAttribute("aria-label") ?? ""))!;
-    expect(a.getAttribute("aria-label")).toMatch(/reputation 91/);
+    // The name starts with the text drawn under the node ("peer-aaa…") and ends with the rest of the id.
+    const a = all.find((n) => /peer-aaa/.test(n.getAttribute("aria-label") ?? ""))!;
+    expect(a.getAttribute("aria-label")).toBe("Peer peer-aaa\u2026a, reputation 91");
     a.focus();
     await fireEvent.keyDown(a, { key: "Enter" });
     expect(a.getAttribute("aria-pressed")).toBe("true");

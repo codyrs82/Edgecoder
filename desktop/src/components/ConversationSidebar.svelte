@@ -523,7 +523,6 @@
   .ran-on {
     display: inline-flex;
     color: var(--text-muted);
-    opacity: 0.8;
   }
   .conversation-item:hover .ran-on,
   .conversation-item:focus-within .ran-on {

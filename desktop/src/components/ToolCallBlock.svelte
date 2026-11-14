@@ -133,9 +133,11 @@
         <div class="body-args"><ToolArgs {tool} {args} /></div>
       {/if}
       {#if error}
-        <pre class="output error-output">{error}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output error-output" tabindex="0" aria-label="Tool error">{error}</pre>
       {:else if truncatedResult}
-        <pre class="output">{truncatedResult}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output" tabindex="0" aria-label="Tool result">{truncatedResult}</pre>
       {:else if status === "executing"}
         <span class="placeholder">Running...</span>
       {:else}

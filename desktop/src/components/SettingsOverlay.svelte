@@ -107,9 +107,12 @@
         </aside>
         <Tabs.Content value={activeSectionId} id="settings-panel">
           {#snippet child({ props })}
-            <div {...props} class="settings-content">
-              {@render page()}
-            </div>
+            <!-- Keyed, so a section opens at its top instead of at the last one's scroll offset. -->
+            {#key activeSectionId}
+              <div {...props} class="settings-content">
+                {@render page()}
+              </div>
+            {/key}
           {/snippet}
         </Tabs.Content>
       </div>
@@ -250,6 +253,14 @@
     flex: 1;
     overflow-y: auto;
     min-width: 0;
+  }
+  /* #29: at the 640px minimum window the nav gives its width to the page. */
+  @media (max-width: 760px) {
+    .settings-side { width: 176px; }
+    .back-btn { margin: 8px 6px 4px; }
+    .search { margin: 4px 6px 8px; }
+    .settings-nav { padding: 0 6px 8px; }
+    .nav-item { gap: 8px; padding: 6px 8px; }
   }
   @keyframes fadeIn {
     from { opacity: 0; }

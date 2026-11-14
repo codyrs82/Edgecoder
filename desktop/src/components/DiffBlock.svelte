@@ -129,7 +129,7 @@
     background: color-mix(in srgb, var(--green) 10%, transparent);
   }
   .status-label.rejected {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 10%, transparent);
   }
 
@@ -153,7 +153,7 @@
     background: color-mix(in srgb, var(--green) 8%, transparent);
   }
   .diff-line.remove {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 8%, transparent);
   }
   .diff-line.context {

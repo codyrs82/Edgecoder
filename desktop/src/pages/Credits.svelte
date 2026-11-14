@@ -245,7 +245,7 @@
   .btn-primary {
     padding: 0.6rem 1.8rem;
     background: var(--accent);
-    color: white;
+    color: var(--on-accent);
     border: none;
     border-radius: 7px;
     cursor: pointer;

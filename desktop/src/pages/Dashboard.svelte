@@ -364,8 +364,8 @@
 
   .placeholder-hint {
     font-size: 0.8rem;
-    opacity: 0.6;
     margin-top: 0.25rem;
+    color: var(--text-muted);
   }
 
   /* ---- Section D chart ---- */

@@ -254,7 +254,6 @@
 
   .tab-count {
     font-size: 0.7rem;
-    opacity: 0.7;
   }
 
   .auto-scroll-toggle {
@@ -314,7 +313,6 @@
     color: var(--text-muted);
     text-align: center;
     padding: 3rem 1rem;
-    opacity: 0.6;
     font-family: inherit;
   }
 
@@ -336,7 +334,6 @@
 
   .ts {
     color: var(--text-muted);
-    opacity: 0.6;
     flex-shrink: 0;
     min-width: 5.5em;
   }
@@ -362,7 +359,7 @@
   }
 
   .level-error {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 
@@ -386,6 +383,5 @@
   .entry-count {
     font-size: 0.75rem;
     color: var(--text-muted);
-    opacity: 0.6;
   }
 </style>

@@ -44,6 +44,8 @@
 .sp th, .sp td { text-align: left; padding: 9px 16px; border-top: 0.5px solid var(--border); }
 .sp thead th { border-top: none; color: var(--text-secondary); font-weight: 500; font-size: 11.5px; }
 .sp td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* A table wider than its card scrolls sideways inside it instead of being cut off by it. */
+.sp .sp-table-scroll { overflow-x: auto; }
 .sp .sp-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--text-muted); }
 .sp .sp-dot.on { background: var(--green); }
 .sp .sp-dot.err { background: var(--danger); }
@@ -52,3 +54,13 @@
 .sp .sp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg-surface); transition: transform .15s; }
 .sp .sp-switch[aria-checked="true"] { background: var(--green); }
 .sp .sp-switch[aria-checked="true"]::after { transform: translateX(14px); }
+
+/* #29: at the 640px minimum window a row's control drops under its text instead of squeezing it. */
+@media (max-width: 760px) {
+  .sp { padding: 20px 16px 32px; }
+  .sp .sp-row { flex-wrap: wrap; gap: 10px 16px; }
+  .sp .sp-row .sp-text { flex: 1 1 180px; }
+  .sp .sp-controls { justify-content: flex-start; }
+  /* Cells squeezed to one word per line are harder to read than a table that scrolls. */
+  .sp .sp-table-scroll th, .sp .sp-table-scroll td { white-space: nowrap; padding: 8px 12px; }
+}

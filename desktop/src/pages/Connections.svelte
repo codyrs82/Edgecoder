@@ -314,7 +314,9 @@
         <span class="sp-desc">{steps.text}</span>
         {#if steps.code}
           <div class="code-wrap">
-            <pre class="sp-code">{steps.code}</pre>
+            <!-- Scrolls sideways, so it has to take keyboard focus. -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <pre class="sp-code" tabindex="0" aria-label="Setup steps">{steps.code}</pre>
             <button class="small copy" onclick={() => copy(steps.code ?? "", "steps")}>{copied === "steps" ? "Copied" : "Copy"}</button>
           </div>
         {/if}
@@ -359,6 +361,13 @@
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;
   }
   .conn-main .sp-desc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* A loopback address has no break points and would run under the buttons in a narrow window. */
+  .conn-main .sp-desc { overflow-wrap: anywhere; }
+  @media (max-width: 760px) {
+    .conn-main { flex: 1 1 180px; }
+    /* The copy button sits over the first line once the lines reach the right edge. */
+    .code-wrap .sp-code { padding-top: 36px; }
+  }
   .form-grid { display: grid; grid-template-columns: 110px 1fr; gap: 10px 14px; align-items: center; font-size: 13px; color: var(--text-secondary); }
   .form-grid .inline { display: flex; align-items: center; gap: 8px; }
   .new { gap: 14px; }

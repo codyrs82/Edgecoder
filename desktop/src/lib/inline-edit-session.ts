@@ -27,7 +27,7 @@ function injectStyles() {
   const css = `
   .ec-ie-added { background: color-mix(in srgb, var(--green) 18%, transparent); }
   .ec-ie-added-gutter { border-left: 3px solid color-mix(in srgb, var(--green) 90%, transparent); }
-  .ec-ie-removed { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--text-muted); text-decoration: line-through; white-space: pre; overflow: hidden; font-family: inherit; }
+  .ec-ie-removed { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--text-secondary); text-decoration: line-through; white-space: pre; overflow: hidden; font-family: inherit; }
   .ec-ie-removed div { padding-left: 4px; border-left: 3px solid color-mix(in srgb, var(--red) 90%, transparent); }
   .ec-ie-box { width: max-content; white-space: nowrap; display: flex; gap: 6px; align-items: center; padding: 4px; border-radius: 6px; background: var(--bg-elevated); border: 1px solid var(--accent); box-shadow: var(--shadow-md); font: 12px system-ui, sans-serif; color: var(--text-primary); z-index: 20; }
   .ec-ie-box input { width: 380px; border: none; outline: none; background: transparent; color: inherit; font: 13px system-ui, sans-serif; padding: 4px 6px; }

@@ -28,7 +28,7 @@
 
 <style>
   .stat-card { background: var(--bg-surface); padding: 1.2rem; border-radius: 8px; }
-  .label { display: block; font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.3rem; }
+  .label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; color: var(--text-secondary); }
   .value { font-size: 1.6rem; font-weight: 600; }
   .progress-track { margin-top: 0.6rem; height: 4px; background: var(--border-strong); border-radius: 2px; overflow: hidden; }
   .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s ease; }

@@ -45,7 +45,9 @@
   </div>
 
   {#if stdout || stderr}
-    <div class="body">
+    <!-- Scrolls, so it has to take keyboard focus. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="body" role="group" tabindex="0" aria-label="Command output">
       {#if stdout}
         <pre class="output stdout">{stdout}</pre>
       {/if}
@@ -137,7 +139,7 @@
     color: var(--green);
   }
   .exit-badge.failure {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 10%, transparent);
   }
 

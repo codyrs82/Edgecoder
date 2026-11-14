@@ -531,7 +531,12 @@
   .input-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
+  }
+  .input-row code {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .input-row input[type="text"] {
@@ -570,7 +575,7 @@
   }
 
   .badge.invalid {
-    color: var(--red);
+    color: var(--red-strong);
     background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 

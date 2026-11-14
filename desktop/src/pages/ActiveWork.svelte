@@ -252,7 +252,7 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
-  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
 
   .agent-list, .peer-list { list-style: none; margin: 0; padding: 0; }
   @media (max-width: 720px) {

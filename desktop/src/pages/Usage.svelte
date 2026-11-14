@@ -4,6 +4,7 @@
   import { getUsage, computeErrorText, type UsageSummary, type UsageSlice } from "../lib/api";
   import { CLASS_LABELS, shortModel } from "../lib/compute-choice";
   import { budgetState, cSatsPerMillionTokens, loadBudget, monthToDate, saveBudget, usageCsv } from "../lib/usage-view";
+  import { scrollRegion } from "../lib/scroll-region";
 
   let days = $state(30);
   let data = $state<UsageSummary | null>(null);
@@ -131,6 +132,7 @@
         {#if slices.length === 0}
           <div class="sp-row"><span class="sp-muted">Nothing in this period yet.</span></div>
         {:else}
+          <div class="sp-table-scroll" role="group" aria-label="Usage breakdown" use:scrollRegion>
           <table>
             <thead><tr><th>{tab === "source" ? "Tool" : tab === "placement" ? "Where" : tab === "class" ? "Class" : "Model"}</th><th class="num">Requests</th><th class="num">Time</th><th class="num">Tokens in / out</th><th class="num">cSats / M tokens</th><th class="num">cSats</th></tr></thead>
             <tbody>
@@ -140,16 +142,18 @@
               {/each}
             </tbody>
           </table>
+          </div>
         {/if}
       </div>
     </div>
 
     <div class="sp-group">
       <div class="sp-group-title">Requests</div>
-      <div class="sp-card log">
+      <div class="sp-card">
         {#if data.records.length === 0}
           <div class="sp-row"><span class="sp-muted">No requests in this period.</span></div>
         {:else}
+          <div class="sp-table-scroll log" role="group" aria-label="Requests" use:scrollRegion>
           <table>
             <thead><tr><th>When</th><th>Model</th><th>Where</th><th>Tool</th><th class="num">Time</th><th class="num">Tokens</th><th class="num">cSats</th></tr></thead>
             <tbody>
@@ -166,6 +170,7 @@
               {/each}
             </tbody>
           </table>
+          </div>
         {/if}
       </div>
     </div>
