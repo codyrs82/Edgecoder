@@ -61,8 +61,8 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `GET` | `/economy/price/current` | Current dynamic price epoch | mesh token |
 | `GET` | `/economy/price/quote` | Get a sats quote for a given resource class | mesh token |
 | `GET` | `/economy/credits/:accountId/quote` | Credit-to-sats conversion quote | mesh token |
-| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only) | mesh token + admin token |
-| `POST` | `/economy/price/consensus` | Run weighted-median price consensus across peers | mesh token + admin token |
+| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only; 422 `price_out_of_bounds` outside the configured band or max step) | mesh token + admin token |
+| `POST` | `/economy/price/consensus` | Median price over signed quotes from allowlisted coordinators; 409 `price_quorum_not_met` without a quorum; result clamped to the max step | mesh token + admin token |
 | `POST` | `/economy/payments/intents` | Create a BTC/Lightning payment intent | mesh token + admin token |
 | `GET` | `/economy/payments/intents/:intentId` | Get payment intent status | mesh token |
 | `POST` | `/economy/payments/intents/:intentId/confirm` | Confirm payment settlement and mint credits | mesh token + admin token |

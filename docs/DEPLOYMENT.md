@@ -561,6 +561,10 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `COORDINATOR_FEE_BPS` | `150` | Coordinator fee in basis points |
 | `COORDINATOR_FEE_ACCOUNT` | `coordinator-fee:default` | Fee collection account |
 | `APPROVED_COORDINATOR_IDS` | | Comma-separated approved coordinator peer IDs |
+| `PRICE_EPOCH_CPU_MIN_SATS` / `PRICE_EPOCH_CPU_MAX_SATS` | `10` / `120` | Band for the legacy CPU price epoch (sats per compute unit) |
+| `PRICE_EPOCH_GPU_MIN_SATS` / `PRICE_EPOCH_GPU_MAX_SATS` | `42` / `480` | Band for the legacy GPU price epoch |
+| `PRICE_EPOCH_MAX_CHANGE_BPS` | `2500` | Largest move of a price epoch from the previous one, in basis points |
+| `PRICE_CONSENSUS_QUORUM` | majority | Signed allowlisted coordinators a price consensus needs (can only raise the majority) |
 | `LIGHTNING_PROVIDER` | `mock` | Lightning provider: `mock`, `lnd`, `cln` |
 | `PAYMENT_INTENT_TTL_MS` | `900000` (15 min) | Payment intent expiry |
 | `PAYMENT_WEBHOOK_SECRET` | | Webhook secret for payment notifications |
