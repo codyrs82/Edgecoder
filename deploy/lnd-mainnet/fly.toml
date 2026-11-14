@@ -1,0 +1,59 @@
+# Mainnet Lightning node for the coordinators (see Dockerfile and README.md). Real funds.
+# Two machines in one app, each with its own volume:
+#   bitcoind  pruned Bitcoin Core; RPC/ZMQ on the private network only
+#   lnd       the coordinators' payout/invoice node; REST (8080) on the private network only,
+#             P2P (9735) public so other nodes can open channels to it
+# The coordinators reach it at https://lnd.process.edgecoder-lnd.internal:8080 over Fly's 6PN.
+app = "edgecoder-lnd"
+primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  bitcoind = "bitcoind"
+  lnd = "lnd"
+
+[env]
+  LND_ALIAS = "edgecoder"
+  BITCOIN_PRUNE_MB = "50000"   # keeps ~50 GB of blocks; lnd fetches older pruned blocks from peers
+  BITCOIN_DBCACHE_MB = "2000"  # raise to 6000 for the initial sync on the larger VM, then lower
+  LND_EXTERNAL_IP = "37.16.0.48" # the app's dedicated IPv4 (README step 1), so peers can find the node
+
+[[mounts]]
+  source = "btcdata"
+  destination = "/data"
+  initial_size = "80gb"
+  processes = ["bitcoind"]
+
+[[mounts]]
+  source = "lnddata"
+  destination = "/data"
+  initial_size = "10gb"
+  snapshot_retention = 30 # days; the wallet db and channel state (encrypted by the wallet password)
+  processes = ["lnd"]
+
+# Lightning P2P, public. Needs a dedicated IPv4 (fly ips allocate-v4); IPv6 works without one.
+[[services]]
+  internal_port = 9735
+  protocol = "tcp"
+  processes = ["lnd"]
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  [[services.ports]]
+    port = 9735
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "60s"
+
+[[vm]]
+  processes = ["bitcoind"]
+  size = "shared-cpu-4x" # README: performance-4x for the initial sync, then back to this
+  memory = "4gb"
+
+[[vm]]
+  processes = ["lnd"]
+  size = "shared-cpu-2x"
+  memory = "2gb"
