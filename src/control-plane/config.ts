@@ -3,6 +3,7 @@
 
 import { z } from "zod";
 import { envBool, envUrl } from "../common/config.js";
+import { modelEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /** Minimum ADMIN_API_TOKEN length when NODE_ENV=production (same floor as INFERENCE_AUTH_TOKEN). */
 export const ADMIN_PROD_MIN_TOKEN_LENGTH = 32;
@@ -10,11 +11,17 @@ export const ADMIN_PROD_MIN_TOKEN_LENGTH = 32;
 /**
  * #15: control-plane (port 4303) configuration, validated once at startup.
  * ADMIN_API_TOKEN is required in every environment (unchanged). ALLOWED_ADMIN_IPS and
- * ALLOWED_UI_IPS are still read per request so they can change at runtime. Documented in
- * site-docs/reference/environment-variables.md.
+ * ALLOWED_UI_IPS are declared here but still read per request, so tests and operators can change
+ * them without a restart. Documented in site-docs/reference/environment-variables.md.
  */
 export const controlPlaneConfigSchema = z.object({
+  ...observabilityEnv,
+  ...serviceUrlsEnv,
+  ...modelEnv,
   NODE_ENV: z.string().default("development"),
+  /** Comma-separated client IPs allowed to call admin routes / load the UI; unset = no IP restriction. */
+  ALLOWED_ADMIN_IPS: z.string().optional(),
+  ALLOWED_UI_IPS: z.string().optional(),
   COORDINATOR_URL: envUrl("http://127.0.0.1:4301"),
   ADMIN_API_TOKEN: z.string({ message: "is required" }),
   COORDINATOR_MESH_TOKEN: z.string().optional(),

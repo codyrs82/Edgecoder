@@ -3,6 +3,7 @@
 
 import { z } from "zod";
 import { envBool, envInt, envUrl } from "../common/config.js";
+import { modelEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /** Minimum INFERENCE_AUTH_TOKEN length in production (#127 review: a placeholder like "changeme" must fail). */
 export const INFERENCE_PROD_MIN_TOKEN_LENGTH = 32;
@@ -31,6 +32,9 @@ const trustedKeysJson = z
 /** #15: inference service (port 4302) configuration. Documented in site-docs/reference/environment-variables.md. */
 export const inferenceConfigSchema = z
   .object({
+    ...observabilityEnv,
+    ...serviceUrlsEnv,
+    ...modelEnv,
     NODE_ENV: z.string().default("development"),
     INFERENCE_AUTH_TOKEN: z.string({ message: "is required" }),
     INFERENCE_REQUIRE_SIGNED_COORDINATOR_REQUESTS: envBool(false),

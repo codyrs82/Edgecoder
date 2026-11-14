@@ -64,7 +64,7 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { edgeModeFrom, parseOriginList, registerPortalSecurity } from "./security.js";
+import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
@@ -82,6 +82,8 @@ await app.register(cors, {
   credentials: true,
 });
 
+// #15: validated once at import; invalid values exit with every problem listed.
+const C = loadConfigOrExit("portal", portalConfigSchema);
 const store = PortalStore.fromEnv();
 
 // #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
@@ -91,25 +93,23 @@ await registerPortalSecurity(app, {
   rateLimitUserId: async (req) => (await getCurrentUser(req as any))?.userId,
   publicOrigin: (() => {
     try {
-      return new URL(process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310").origin;
+      return new URL(C.PORTAL_PUBLIC_URL).origin;
     } catch {
       return "http://127.0.0.1:4310";
     }
   })(),
-  trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
-  connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
-  enforceCsp: !["0", "false"].includes(process.env.PORTAL_CSP_ENFORCE ?? ""),
+  trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(C.PORTAL_TRUSTED_ORIGINS)],
+  connectOrigins: parseOriginList(C.PORTAL_CONNECT_ORIGINS),
+  enforceCsp: C.PORTAL_CSP_ENFORCE,
   // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
-  edge: edgeModeFrom(process.env.PORTAL_EDGE),
-  originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
-  serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
-  coordinatorToken: process.env.PORTAL_COORDINATOR_TOKEN?.trim() || undefined,
+  edge: C.PORTAL_EDGE,
+  originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN,
+  serviceToken: C.PORTAL_SERVICE_TOKEN,
+  coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
   // Shared Postgres rate-limit counters across portal machines (memory store without a database).
   rateLimitPool: store?.pool,
 });
 
-// #15: validated once at import; invalid values exit with every problem listed.
-const C = loadConfigOrExit("portal", portalConfigSchema);
 const PORTAL_SERVICE_TOKEN = C.PORTAL_SERVICE_TOKEN ?? "";
 const EXTERNAL_HTTP_TIMEOUT_MS = C.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS;
 const RESEND_API_KEY = C.RESEND_API_KEY ?? "";

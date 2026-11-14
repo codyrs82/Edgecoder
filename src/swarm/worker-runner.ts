@@ -46,10 +46,15 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
+import { loadConfigOrExit } from "../common/config.js";
+import { workerConfigSchema } from "../config/worker.js";
+
+// #15: validated once; a malformed value exits here with a message naming the variable.
+const W = loadConfigOrExit("worker", workerConfigSchema);
 
 const platformInfo: PlatformInfo = detectPlatform();
-const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
-const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
+const PLATFORM_CONFIG_DIR = W.EDGECODER_CONFIG_DIR ?? getConfigDir();
+const PLATFORM_LOG_DIR = W.EDGECODER_LOG_DIR ?? getLogDir();
 // Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
 // On the edgecoder.io network the default is strict with the seeds' keys (src/trust/seed-keys.ts).
 const TRUST_ENV = withNetworkTrustDefaults(process.env);
@@ -59,7 +64,7 @@ const coordinatorTrustStore = PinnedKeyStore.fromEnv(TRUST_ENV, { pinFile: `${PL
 const coordinatorTrust = new CoordinatorTrustGate({
   store: coordinatorTrustStore,
   challenge: challengePolicyFromEnv(TRUST_ENV, coordinatorTrustStore.mode),
-  reverifyMs: Number(process.env.EDGECODER_TRUST_REVERIFY_MS) > 0 ? Number(process.env.EDGECODER_TRUST_REVERIFY_MS) : DEFAULT_TRUST_REVERIFY_MS
+  reverifyMs: W.EDGECODER_TRUST_REVERIFY_MS || DEFAULT_TRUST_REVERIFY_MS
 });
 {
   // Strict mode with nothing listed would refuse every coordinator: say so once and stop.
@@ -73,30 +78,28 @@ const coordinatorTrust = new CoordinatorTrustGate({
 // Forked by the all-in-one agent: exit with it rather than linger as an orphan.
 if (process.send) process.on("disconnect", () => process.exit(0));
 
-const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
-const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(process.env.SNAPSHOT_ENFORCEMENT);
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
+const COORDINATOR_BOOTSTRAP_URL = W.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(W.SNAPSHOT_ENFORCEMENT);
+const CONTROL_PLANE_URL = W.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
 // #96: default to a per-host id so N replicas without AGENT_ID (docker compose --scale) don't all register as "worker-1".
-const AGENT_ID = process.env.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
-const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
-const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
-const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
-  | "edgecoder-local"
-  | "ollama-local";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
-const OLLAMA_HOST = process.env.OLLAMA_HOST;
-const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
+const AGENT_ID = W.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
+const MODE = W.AGENT_MODE;
+const OS = (W.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
+const PROVIDER = W.LOCAL_MODEL_PROVIDER;
+const OLLAMA_MODEL = W.OLLAMA_MODEL;
+const OLLAMA_HOST = W.OLLAMA_HOST;
+const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
 const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
 const inflightInference = new Set<Promise<void>>();
-let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
-const COORDINATOR_HTTP_TIMEOUT_MS = Number(process.env.COORDINATOR_HTTP_TIMEOUT_MS ?? "15000");
-const COORDINATOR_POST_RETRIES = Number(process.env.COORDINATOR_POST_RETRIES ?? "2");
-const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
-const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
-const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
+let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
+const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
+const COORDINATOR_POST_RETRIES = W.COORDINATOR_POST_RETRIES;
+const MAX_CONCURRENT_TASKS = W.MAX_CONCURRENT_TASKS;
+const AGENT_CLIENT_TYPE = W.AGENT_CLIENT_TYPE;
+const PEER_DIRECT_WORK_ITEMS = (W.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
 const hardwareProbe: Probe = (cmd, args) => {
@@ -116,16 +119,16 @@ const hardwareProbe: Probe = (cmd, args) => {
  */
 function buildHardwareProfile(): Record<string, unknown> {
   const hw = detectHardware({ probe: hardwareProbe });
-  const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
-  const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
+  const gpuModel = W.AGENT_GPU_MODEL;
+  const gpuVram = W.AGENT_GPU_VRAM_GB ?? Number.NaN;
   if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
     return {
       ...hardwareProfileFor(hw, undefined),
       gpu: {
-        vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+        vendor: W.AGENT_GPU_VENDOR,
         model: gpuModel || undefined,
         vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
-        datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+        datacenter: W.AGENT_GPU_DATACENTER
       },
       overridden: true
     };
@@ -139,8 +142,8 @@ const HARDWARE_PROFILE = buildHardwareProfile();
  * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
  * (the agent then earns at its class base tier).
  */
-const BENCHMARK_ENABLED = process.env.AGENT_BENCHMARK !== "0";
-const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, Number(process.env.AGENT_BENCHMARK_INTERVAL_MS ?? 6 * 60 * 60_000) || 6 * 60 * 60_000);
+const BENCHMARK_ENABLED = W.AGENT_BENCHMARK;
+const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, W.AGENT_BENCHMARK_INTERVAL_MS || 6 * 60 * 60_000);
 let lastBenchmark: AgentBenchmarkReport | undefined;
 let benchmarkDueAtMs = 0;
 let benchmarkUnreported = false;
@@ -152,17 +155,17 @@ function challengeAcceptable(c: BenchmarkChallenge): boolean {
 }
 /** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
 const ASK_MSAT_PER_CREDIT = (() => {
-  const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
+  const n = W.AGENT_ASK_MSAT_PER_CREDIT ?? Number.NaN;
   return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
 })();
-const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
+const SANDBOX_REQUIRED = W.SANDBOX_REQUIRED;
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
 let warnedNoSandbox = false;
-const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
-const PORTAL_URL = process.env.PORTAL_URL ?? "";
+const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
+const PORTAL_URL = W.PORTAL_URL ?? "";
 const AGENT_DEVICE_ID = (() => {
-  const explicit = (process.env.AGENT_DEVICE_ID ?? process.env.IOS_DEVICE_ID ?? "").trim();
+  const explicit = W.AGENT_DEVICE_ID ?? W.IOS_DEVICE_ID ?? "";
   if (explicit) return explicit;
   if (OS === "ios") return AGENT_ID.replace(/^ios-|^iphone-/i, "").trim();
   return "";
@@ -170,7 +173,7 @@ const AGENT_DEVICE_ID = (() => {
 const keys = createPeerKeys(AGENT_ID);
 const envelopeKeys = generateX25519KeyPair();
 const peerTunnels = new Map<string, string>();
-const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
+const peerOfferCooldownMs = W.PEER_OFFER_COOLDOWN_MS;
 const lastOfferAtByPeer = new Map<string, number>();
 let peerWorkCursor = 0;
 async function discoverCoordinatorFromPortal(): Promise<string | null> {
@@ -228,10 +231,10 @@ const coordinatorClient = createCoordinatorClient({
  */
 const REGISTRY_PUBLIC_KEYS = registryPublicKeysFromEnv(process.env);
 const STEERING_ENABLED =
-  !["off", "0", "false"].includes((process.env.EDGECODER_STEERING ?? "").trim().toLowerCase()) &&
+  W.EDGECODER_STEERING &&
   !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL) &&
   REGISTRY_PUBLIC_KEYS.length > 0;
-const STEERING_INTERVAL_MS = Math.max(60_000, Number(process.env.EDGECODER_STEERING_INTERVAL_MS ?? "600000") || 600_000);
+const STEERING_INTERVAL_MS = Math.max(60_000, W.EDGECODER_STEERING_INTERVAL_MS || 600_000);
 const coordinatorSteering = STEERING_ENABLED
   ? createCoordinatorSteering({
       registryUrls: registryUrlsFor(COORDINATOR_BOOTSTRAP_URL, PORTAL_URL || undefined),
@@ -271,7 +274,7 @@ async function steerCoordinator(): Promise<SteeringResult | null> {
 // is awaited and before anything talks to a coordinator), so it cannot swap the URL mid-iteration.
 const startupDiscovery: Promise<{ url: string; source: string } | null> = (async () => {
   let pick: { url: string; source: string } | null = null;
-  if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
+  if (!W.COORDINATOR_URL || W.EDGECODER_DISCOVERY) {
     // Strict trust: never pick an announced coordinator whose key is not listed (key-less
     // candidates are still checked against /identity by the trust gate before registering).
     const acceptCandidate =
@@ -339,7 +342,7 @@ let sandboxImagesReady = SANDBOX_MODE !== "docker";
 let sandboxImagesBuilding = false;
 
 // The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
-const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT ?? "");
+const LOCAL_FORWARD_PORT = W.LOCAL_FORWARD_PORT ?? 0;
 if (LOCAL_FORWARD_PORT > 0) {
   let forwardToken: string | undefined;
   createLocalForwarder({
@@ -548,7 +551,7 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "steering
  * #51: while a claimed subtask runs, heartbeat every LEASE_HEARTBEAT_MS so the
  * coordinator renews the claim lease (it expires after CLAIM_LEASE_LIVENESS_MS of silence).
  */
-const LEASE_HEARTBEAT_MS = Math.max(1_000, Number(process.env.LEASE_HEARTBEAT_MS ?? "15000") || 15_000);
+const LEASE_HEARTBEAT_MS = Math.max(1_000, W.LEASE_HEARTBEAT_MS || 15_000);
 /**
  * #51: lease-only renewal while a claimed subtask runs. `leaseOnly` tells the
  * coordinator to renew leases without draining tunnel invites / close notices /
@@ -970,8 +973,8 @@ async function loop(): Promise<void> {
   }
   const bleGuard = new BleRequestGuard();
   // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
-  if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
-  if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
+  if (OS === "macos" && !W.EDGECODER_BLE) console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
+  if (OS === "macos" && W.EDGECODER_BLE) {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
@@ -1722,13 +1725,13 @@ async function loop(): Promise<void> {
 
       // ═══ BLE peer discovery — only in offline mode or when explicitly enabled ═══
       // BLE is a last-resort transport; HTTP mesh is primary for task distribution.
-      if (bleTransport && (!coordinatorOnline || process.env.BLE_TEST_ENABLED === "true")) {
+      if (bleTransport && (!coordinatorOnline || W.BLE_TEST_ENABLED)) {
         const blePeers = bleTransport.discoveredPeers();
         if (blePeers.length > 0) {
           try { for (const p of blePeers) { localStore.upsertBLEPeer(p.agentId, p.model, p.modelParamSize, p.deviceType, p.rssi); } } catch (e) { console.warn(`[db] BLE peer write failed: ${e}`); }
           console.log(`[agent:${AGENT_ID}] BLE peers (offline): ${blePeers.map(p => `${p.agentId}(rssi:${p.rssi})`).join(", ")}`);
 
-          if (!bleTaskTestDone && process.env.BLE_TEST_ENABLED === "true") {
+          if (!bleTaskTestDone && W.BLE_TEST_ENABLED) {
             bleTaskTestDone = true;
             const peer = blePeers[0];
             console.log(`[BLE-TEST] will send test task to ${peer.agentId} in 5s...`);

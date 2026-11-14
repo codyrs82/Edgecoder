@@ -290,8 +290,8 @@ mesh.onBroadcast((message) => {
   for (const [id, exp] of offeredToPeers) if (exp <= now) offeredToPeers.delete(id);
   offeredToPeers.set(subtaskId, now + OFFERED_SUBTASK_TTL_MS);
 });
-if (process.env.MESH_AUTH_TOKEN) {
-  mesh.setMeshToken(process.env.MESH_AUTH_TOKEN);
+if (CC.MESH_AUTH_TOKEN) {
+  mesh.setMeshToken(CC.MESH_AUTH_TOKEN);
 }
 const peerScore = new Map<string, number>();
 const peerMessageWindow = new Map<string, { windowMs: number; count: number }>();
@@ -375,12 +375,12 @@ function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: ComputeClas
 }
 /** Market price agreed at claim time per subtask (msat per credit on the agent's class) and the tier weight the credits mint at. */
 const claimedTradePrice = new Map<string, { msatPerCredit: number; computeClass: ComputeClassId; creditsPerSecond: number }>();
-const MESH_AUTH_TOKEN = process.env.MESH_AUTH_TOKEN ?? "";
+const MESH_AUTH_TOKEN = CC.MESH_AUTH_TOKEN ?? "";
 // #52: coordinators trusted by key, not just by holding MESH_AUTH_TOKEN. Required in production.
 const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
   try {
-    const parsed = parsePeerAllowlist(process.env.MESH_PEER_ALLOWLIST);
-    assertUrlPinsForProduction(process.env.MESH_PEER_ALLOWLIST, isProduction());
+    const parsed = parsePeerAllowlist(CC.MESH_PEER_ALLOWLIST);
+    assertUrlPinsForProduction(CC.MESH_PEER_ALLOWLIST, isProduction());
     return parsed;
   } catch (error) {
     // Fail closed, but say why before the process exits.
@@ -389,7 +389,7 @@ const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
   }
 })();
 // #118 review: optional `@url` on each allowlist entry pins that peer's endpoint.
-const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(process.env.MESH_PEER_ALLOWLIST);
+const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(CC.MESH_PEER_ALLOWLIST);
 const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
 /** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */
 const forwardReplayCache = new ReplayCache();
@@ -409,13 +409,13 @@ function requestOrigin(req: unknown): { clientIp?: string; loopback: boolean } {
     loopback: isLoopbackSocket(socketIp, CLIENT_IP_TRUST)
   };
 }
-const PORTAL_SERVICE_TOKEN = process.env.PORTAL_SERVICE_TOKEN ?? "";
+const PORTAL_SERVICE_TOKEN = CC.PORTAL_SERVICE_TOKEN ?? "";
 // What this coordinator presents to the portal's read/validate /internal routes. Defaults to
 // PORTAL_SERVICE_TOKEN; once PORTAL_COORDINATOR_TOKEN is set here and on the portal, coordinators
 // no longer need the portal's own service token for those calls.
-const PORTAL_OUTBOUND_TOKEN = (process.env.PORTAL_COORDINATOR_TOKEN ?? "").trim() || PORTAL_SERVICE_TOKEN;
+const PORTAL_OUTBOUND_TOKEN = CC.PORTAL_COORDINATOR_TOKEN || PORTAL_SERVICE_TOKEN;
 const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
-const COORDINATOR_FEE_ACCOUNT = process.env.COORDINATOR_FEE_ACCOUNT ?? "coordinator-fee:default";
+const COORDINATOR_FEE_ACCOUNT = CC.COORDINATOR_FEE_ACCOUNT;
 const BITCOIN_NETWORK = CC.BITCOIN_NETWORK;
 const ROBOT_QUEUE_ENABLED = CC.ROBOT_QUEUE_ENABLED;
 const ROBOT_COORDINATOR_FEE_BPS = CC.ROBOT_COORDINATOR_FEE_BPS;
@@ -425,7 +425,7 @@ const ROBOT_MIN_SWEEP_SATS = CC.ROBOT_MIN_SWEEP_SATS;
 const ROBOT_TASK_DEFAULT_TIMEOUT_MS = CC.ROBOT_TASK_DEFAULT_TIMEOUT_MS;
 const ROBOT_AUTO_SETTLE_DELAY_MS = CC.ROBOT_AUTO_SETTLE_DELAY_MS;
 const APPROVED_COORDINATOR_IDS = new Set(
-  (process.env.APPROVED_COORDINATOR_IDS ?? "")
+  (CC.APPROVED_COORDINATOR_IDS ?? "")
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean)
@@ -458,13 +458,13 @@ const COORDINATOR_PUBLIC_URL = CC.COORDINATOR_PUBLIC_URL;
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
-const COORDINATOR_BOOTSTRAP_URLS = (process.env.COORDINATOR_BOOTSTRAP_URLS ?? "")
+const COORDINATOR_BOOTSTRAP_URLS = (CC.COORDINATOR_BOOTSTRAP_URLS ?? "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const COORDINATOR_REGISTRATION_TOKEN = process.env.COORDINATOR_REGISTRATION_TOKEN ?? "";
+const COORDINATOR_REGISTRATION_TOKEN = CC.COORDINATOR_REGISTRATION_TOKEN ?? "";
 const COORDINATOR_PEER_CACHE_FILE = resolve(
-  process.env.COORDINATOR_PEER_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-peer-cache.json`
+  CC.COORDINATOR_PEER_CACHE_FILE ?? `${homedir()}/.edgecoder/coordinator-peer-cache.json`
 );
 const STATS_LEDGER_SYNC_INTERVAL_MS = CC.STATS_LEDGER_SYNC_INTERVAL_MS;
 const STATS_ANCHOR_INTERVAL_MS = CC.STATS_ANCHOR_INTERVAL_MS;
@@ -472,9 +472,9 @@ const STATS_ANCHOR_MIN_CONFIRMATIONS = CC.STATS_ANCHOR_MIN_CONFIRMATIONS;
 // #46: depth at which an anchor counts as "anchored", and how often pending anchors are polled.
 const ANCHOR_REQUIRED_CONFIRMATIONS = requiredConfirmationsFromEnv();
 /** #103: reconcile in-flight / stuck anchors on startup and on this interval. */
-const ANCHOR_RECONCILE_MS = Math.max(60_000, Number(process.env.ANCHOR_RECONCILE_MS ?? "900000") || 900_000);
+const ANCHOR_RECONCILE_MS = Math.max(60_000, CC.ANCHOR_RECONCILE_MS || 900_000);
 const ANCHOR_RECONCILE_CONFIG = reconcileConfigFromEnv();
-const ANCHOR_CONFIRM_POLL_MS = Math.max(30_000, Number(process.env.ANCHOR_CONFIRM_POLL_MS ?? "600000") || 600_000);
+const ANCHOR_CONFIRM_POLL_MS = Math.max(30_000, CC.ANCHOR_CONFIRM_POLL_MS || 600_000);
 const AGENT_RATE_LIMIT_MAX = CC.AGENT_RATE_LIMIT_MAX;
 const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
 const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
@@ -496,7 +496,7 @@ function loadCoordinatorKeys() {
   // Derive a unique peerId from COORDINATOR_PUBLIC_URL so each coordinator
   // instance has a distinct identity in the mesh (avoids peerId collision
   // that prevents mutual peering).
-  const explicitPeerId = process.env.COORDINATOR_PEER_ID;
+  const explicitPeerId = CC.COORDINATOR_PEER_ID;
   const peerId = explicitPeerId ??
     `coord-${createHash("sha256").update(COORDINATOR_PUBLIC_URL).digest("hex").slice(0, 12)}`;
   const privateKeyPem = process.env.COORDINATOR_PRIVATE_KEY_PEM;
@@ -515,14 +515,13 @@ function loadCoordinatorKeys() {
 }
 
 const coordinatorKeys = loadCoordinatorKeys();
-const networkMode: NetworkMode =
-  (process.env.NETWORK_MODE as NetworkMode | undefined) ?? "public_mesh";
+const networkMode: NetworkMode = CC.NETWORK_MODE;
 const PROVIDER = CC.LOCAL_MODEL_PROVIDER;
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
-const OLLAMA_HOST = process.env.OLLAMA_HOST;
+const OLLAMA_MODEL = CC.OLLAMA_MODEL;
+const OLLAMA_HOST = CC.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = CC.OLLAMA_AUTO_INSTALL;
 const INFERENCE_URL = CC.INFERENCE_URL;
-const INFERENCE_AUTH_TOKEN = process.env.INFERENCE_AUTH_TOKEN ?? "";
+const INFERENCE_AUTH_TOKEN = CC.INFERENCE_AUTH_TOKEN ?? "";
 const identity = createPeerIdentity(coordinatorKeys, COORDINATOR_PUBLIC_URL, networkMode);
 // Every response to an agent request (one carrying x-agent-nonce: register, heartbeat, pull, result,
 // agent-mesh, inference, orchestration, errors included) is signed with the identity key, in headers
@@ -731,7 +730,7 @@ const paymentIntents = new Map<string, PaymentIntent>();
 const latestPriceEpochByResource = new Map<ResourceClass, PriceEpochRecord>();
 /** #53: band and max step for the legacy price epoch, and how many signed coordinators a consensus round needs. */
 const PRICE_EPOCH_BOUNDS = { cpu: priceEpochBoundsFromEnv("cpu"), gpu: priceEpochBoundsFromEnv("gpu") } as const;
-const PRICE_CONSENSUS_QUORUM_OVERRIDE = process.env.PRICE_CONSENSUS_QUORUM ? Number(process.env.PRICE_CONSENSUS_QUORUM) : undefined;
+const PRICE_CONSENSUS_QUORUM_OVERRIDE = CC.PRICE_CONSENSUS_QUORUM;
 function previousPriceEpochSats(resourceClass: ResourceClass): number {
   return latestPriceEpochByResource.get(resourceClass)?.pricePerComputeUnitSats ?? LEGACY_BASE_SATS_PER_UNIT[resourceClass];
 }
@@ -1139,13 +1138,13 @@ async function recordInfraHeartbeat(input: {
   if (host.lightningAddress) memoryPayoutStore.autoAccounts.set(host.accountId, host.lightningAddress);
   return { host: memoryPayoutStore.hosts.get(host.hostId) ?? host, counted };
 }
-const INFRA_HOST_ENABLED = (process.env.INFRA_HOST_ENABLED ?? "1") !== "0";
-const INFRA_HOST_SERVICES: string[] = (process.env.INFRA_HOST_SERVICES ?? "")
+const INFRA_HOST_ENABLED = CC.INFRA_HOST_ENABLED;
+const INFRA_HOST_SERVICES: string[] = (CC.INFRA_HOST_SERVICES ?? "")
   .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
 if (INFRA_HOST_SERVICES.length === 0) {
   INFRA_HOST_SERVICES.push("coordinator");
   if (process.env.BITCOIN_ANCHOR_PROVIDER === "bitcoind") INFRA_HOST_SERVICES.push("bitcoind");
-  if (["lnd", "cln"].includes((process.env.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
+  if (["lnd", "cln"].includes((CC.LIGHTNING_PROVIDER ?? "").toLowerCase())) INFRA_HOST_SERVICES.push("lightning");
 }
 /** Systems accounts a host record may never name as its payee. */
 const RESERVED_HOST_ACCOUNTS = [NETWORK_FEE_POOL_ACCOUNT, COORDINATOR_FEE_ACCOUNT];
@@ -1153,13 +1152,13 @@ const RESERVED_HOST_ACCOUNTS = [NETWORK_FEE_POOL_ACCOUNT, COORDINATOR_FEE_ACCOUN
 // HOST_ATTEST_ALLOW_PRIVATE=1 lets local test networks probe private addresses.
 const hostAttestor = new HostServiceAttestor({
   network: BITCOIN_NETWORK,
-  probes: networkServiceProbes({ allowPrivate: process.env.HOST_ATTEST_ALLOW_PRIVATE === "1" })
+  probes: networkServiceProbes({ allowPrivate: CC.HOST_ATTEST_ALLOW_PRIVATE })
 });
 /** Our own services: each counts only if the backend this process uses answers (cached 10 min). */
 let selfAttestation: AttestationResult | null = null;
 async function attestOwnServices(): Promise<AttestationResult> {
   if (selfAttestation && Date.now() - selfAttestation.atMs < 10 * 60_000) return selfAttestation;
-  const electrs = (process.env.INFRA_HOST_ELECTRS_ENDPOINT || "electrs:50001").split(":");
+  const electrs = CC.INFRA_HOST_ELECTRS_ENDPOINT.split(":");
   selfAttestation = await attestSelfServices(INFRA_HOST_SERVICES, {
     lightning: async () => {
       if (!ECONOMY_PAYMENTS_ENABLED || !lightningProvider.getBalances) return { ok: false, detail: "lightning_unavailable" };
@@ -1179,17 +1178,17 @@ async function attestOwnServices(): Promise<AttestationResult> {
   return selfAttestation;
 }
 /** Other coordinators whose fee pool this host also reports to (signed POST /economy/hosts/heartbeat). */
-const INFRA_HOST_REPORT_URLS = (process.env.INFRA_HOST_REPORT_URLS ?? "").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
+const INFRA_HOST_REPORT_URLS = (CC.INFRA_HOST_REPORT_URLS ?? "").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
 async function selfInfraHeartbeat(): Promise<void> {
   if (!INFRA_HOST_ENABLED) return;
   const fields = {
     hostId: identity.peerId,
-    accountId: process.env.INFRA_HOST_ACCOUNT_ID || undefined,
+    accountId: CC.INFRA_HOST_ACCOUNT_ID,
     services: INFRA_HOST_SERVICES,
-    region: process.env.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
+    region: CC.INFRA_HOST_REGION || process.env.FLY_REGION || undefined,
     coordinatorUrl: COORDINATOR_PUBLIC_URL,
-    lightningAddress: process.env.INFRA_HOST_LIGHTNING_ADDRESS || undefined,
-    lightningNodeId: process.env.INFRA_HOST_LIGHTNING_NODE_ID || undefined
+    lightningAddress: CC.INFRA_HOST_LIGHTNING_ADDRESS,
+    lightningNodeId: CC.INFRA_HOST_LIGHTNING_NODE_ID
   };
   await recordInfraHeartbeat({ ...fields, declaredServices: fields.services, attestation: await attestOwnServices() });
   for (const url of INFRA_HOST_REPORT_URLS) {
@@ -1226,7 +1225,7 @@ const payoutReconciler = new PayoutReconciler({
   ledger: payoutStore,
   config: payoutReconcileConfig,
   coordinatorId: identity.peerId,
-  webhookUrl: process.env.PAYOUT_ALERT_WEBHOOK_URL?.trim() || undefined,
+  webhookUrl: CC.PAYOUT_ALERT_WEBHOOK_URL,
   log: app.log,
   pause: async (reason) => {
     await payoutPause.pause(reason, "reconciliation", identity.peerId);
@@ -1437,7 +1436,7 @@ app.addHook("onReady", async () => {
 });
 // ── end work receipts ──
 // Architecture step 3: signed self-announcement + Nostr announcer (EDGECODER_NOSTR_ANNOUNCE=1), see docs/discovery.md.
-const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: process.env.EDGECODER_NOSTR_ANNOUNCE === "1", log: (msg, meta) => app.log.info(meta ?? {}, msg) });
+const discoveryAnnouncer = startCoordinatorAnnouncer({ identity: coordinatorKeys, url: COORDINATOR_PUBLIC_URL, services: ["swarm", "mesh", "economy"], enabled: CC.EDGECODER_NOSTR_ANNOUNCE, log: (msg, meta) => app.log.info(meta ?? {}, msg) });
 registerDiscoveryRoutes(app, discoveryAnnouncer);
 
 function extractSignedHeaders(headers: Record<string, unknown>): SignedHeaders | null {
@@ -5100,7 +5099,7 @@ app.get("/economy/fee-pool", async (req, reply) => {
 });
 // ── #115: credits-ledger reconciliation (src/ledger/reconcile.ts). Reads only; never corrects. ──
 /** How often the periodic reconciliation runs (one coordinator per window on a shared database); 0 = off. */
-const LEDGER_VERIFY_INTERVAL_MS = Math.max(0, Number(process.env.LEDGER_VERIFY_INTERVAL_MS ?? 6 * 3_600_000) || 0);
+const LEDGER_VERIFY_INTERVAL_MS = CC.LEDGER_VERIFY_INTERVAL_MS;
 type LedgerVerifyResult = ReconcileReport & { checkedAtMs: number; durationMs: number; coordinatorId: string };
 
 async function verifyCreditLedger(maxDiscrepancies: number): Promise<LedgerVerifyResult | null> {
@@ -5849,9 +5848,9 @@ app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
 
 // The portal's signed coordinator registry, mirrored so the one platform URL serves it too
 // (src/discovery/registry-mirror.ts). REGISTRY_UPSTREAM_URL overrides the source.
-const REGISTRY_PORTAL_URL = PORTAL_SERVICE_URL || (process.env.PORTAL_PUBLIC_URL ?? "https://edgecoder.io");
+const REGISTRY_PORTAL_URL = PORTAL_SERVICE_URL || CC.PORTAL_PUBLIC_URL;
 const registryMirror = createRegistryMirror({
-  upstreamUrl: process.env.REGISTRY_UPSTREAM_URL?.trim() || `${REGISTRY_PORTAL_URL.replace(/\/+$/, "")}/network/registry`
+  upstreamUrl: CC.REGISTRY_UPSTREAM_URL || `${REGISTRY_PORTAL_URL.replace(/\/+$/, "")}/network/registry`
 });
 app.get("/network/registry", async (_req, reply) => {
   const doc = await registryMirror.get();
@@ -6335,7 +6334,7 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
 // Each connection is bound to one peerId (src/mesh/ws-auth.ts): signed binds prove the peer's
 // key, unsigned (older agents) binds are allowed until MESH_WS_REQUIRE_SIGNED=true and never
 // displace an authenticated one, and every message must come from the bound peer.
-const MESH_WS_REQUIRE_SIGNED = (process.env.MESH_WS_REQUIRE_SIGNED ?? "false").trim().toLowerCase() === "true";
+const MESH_WS_REQUIRE_SIGNED = CC.MESH_WS_REQUIRE_SIGNED;
 const meshWsBindings = new Map<string, { socket: unknown; authenticated: boolean }>();
 app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
@@ -8111,7 +8110,7 @@ export async function initCoordinator(): Promise<void> {
 }
 
 /* ── Admin dashboard (token-gated) ── */
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN ?? "";
+const ADMIN_API_TOKEN = CC.ADMIN_API_TOKEN ?? "";
 
 function authorizeAdmin(req: any, reply: any): boolean {
   if (!ADMIN_API_TOKEN) {
