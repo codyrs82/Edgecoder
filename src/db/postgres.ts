@@ -10,7 +10,8 @@ import type { Reservation } from "../economy/reservations.js";
 import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
-import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import type { EarningsSummary, FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import { assertLedgerNetwork, type LedgerNetworkCheck } from "./ledger-network.js";
 import type { SolvencyInputs } from "../economy/payout-reconcile.js";
 import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
@@ -39,6 +40,7 @@ function rowToPayout(row: Record<string, unknown>): PayoutRecord {
 }
 import {
   AccountMembership,
+  BitcoinNetwork,
   AgentOwnership,
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -101,6 +103,13 @@ export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 export const STATS_CHECKPOINT_EVENT_TYPES = ["stats_checkpoint_signature", "stats_checkpoint_commit"] as const;
 /** What a payout row has or may still move: pending rows count at their fee cap. */
 const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fee_msat, max_fee_msat) ELSE fee_msat END`;
+/**
+ * The one SQL definition of a matured credit_transactions row (earnings hold, PAYOUT_EARNINGS_HOLD_MS).
+ * `param` is the cutoff placeholder: NULL = no hold, every row matured. In-memory twin:
+ * earnRowMatured (src/economy/payouts.ts); cutoff from earningsMaturityCutoffMs.
+ */
+export const EARN_MATURED_SQL = (param: string): string => `(${param}::bigint IS NULL OR timestamp_ms <= ${param}::bigint)`;
+const EARNED_MSAT_SQL = `SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND ${EARN_MATURED_SQL("$2")}`;
 
 export const SCHEMA_SQL = `
 SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});
@@ -754,6 +763,17 @@ CREATE TABLE IF NOT EXISTS pending_verifications (
   updated_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_verifications_coordinator ON pending_verifications (coordinator_id, started_at_ms);
+
+-- The Bitcoin network this database's ledger belongs to (src/db/ledger-network.ts). One row, written
+-- by the first coordinator start that checks it (assertLedgerNetwork); a coordinator configured for
+-- another network refuses to start. Changed only by scripts/ledger-reset-network.ts, which wipes
+-- the money rows in the same transaction, so regtest balances can never become mainnet sats.
+CREATE TABLE IF NOT EXISTS ledger_network (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  network TEXT NOT NULL,
+  recorded_at_ms BIGINT NOT NULL,
+  recorded_by TEXT NOT NULL
+);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -1298,10 +1318,39 @@ export class PostgresStore {
     return Number(r.rows[0]?.msat ?? 0);
   }
 
-  /** Sats (msat) earned by an account, as locked on its earn rows. */
-  async earnedMsat(accountId: string): Promise<number> {
-    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [accountId]);
+  /**
+   * Sats (msat) earned by an account, as locked on its earn rows. With `maturedAtOrBeforeMs`, only
+   * rows matured at that cutoff (the earnings hold); without it, every earn row.
+   */
+  async earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number> {
+    const r = await this.pool.query(EARNED_MSAT_SQL, [accountId, maturedAtOrBeforeMs ?? null]);
     return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /** Total and matured earnings plus the oldest held row, in one read (PayoutService.balance). */
+  async earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary> {
+    const matured = EARN_MATURED_SQL("$2");
+    const r = await this.pool.query(
+      `SELECT COALESCE(SUM(msat), 0) AS total_msat,
+              COALESCE(SUM(msat) FILTER (WHERE ${matured}), 0) AS matured_msat,
+              MIN(timestamp_ms) FILTER (WHERE NOT ${matured} AND msat > 0) AS oldest_held_ms
+         FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`,
+      [accountId, maturedAtOrBeforeMs ?? null]
+    );
+    const row = r.rows[0] ?? {};
+    return {
+      totalMsat: Number(row.total_msat ?? 0),
+      maturedMsat: Number(row.matured_msat ?? 0),
+      oldestHeldAtMs: row.oldest_held_ms === null || row.oldest_held_ms === undefined ? null : Number(row.oldest_held_ms)
+    };
+  }
+
+  /**
+   * Refuse to run against a ledger recorded for another Bitcoin network (src/db/ledger-network.ts).
+   * The coordinator calls this at startup, after migrate() and before serving.
+   */
+  async assertLedgerNetwork(configured: BitcoinNetwork, recordedBy?: string): Promise<LedgerNetworkCheck> {
+    return assertLedgerNetwork(this.pool, configured, recordedBy);
   }
 
   /**
@@ -2716,8 +2765,14 @@ export class PostgresStore {
    * payable (earned − paid/pending, capped at the credit balance) against amount + fee cap and the
    * coordinator's capacity, then insert the pending row and its credit debit together.
    * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
+   * Earned counts only rows matured at `maturedAtOrBeforeMs` (earnings hold; undefined = all).
    */
-  async reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+  async reservePayout(
+    payout: PayoutRecord,
+    capacityMsat: (paidOrPendingAllMsat: number) => number,
+    limits?: ReservationLimits,
+    maturedAtOrBeforeMs?: number
+  ): Promise<ReserveResult> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -2728,7 +2783,7 @@ export class PostgresStore {
       // The account's credit lock last (debitCredits and applyBleTransfer take only this one), so a
       // spend cannot slip between the balance read below and the payout's debit row.
       await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, payout.accountId]);
-      const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
+      const earned = await client.query(EARNED_MSAT_SQL, [payout.accountId, maturedAtOrBeforeMs ?? null]);
       const spent = await client.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
       const bal = await client.query(BALANCE_CHECK_SQL, [payout.accountId, "0"]);
       const payable = withdrawableMsat(Number(earned.rows[0]?.msat ?? 0), Number(spent.rows[0]?.msat ?? 0), Number(bal.rows[0]?.balance ?? 0));

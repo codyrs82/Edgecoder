@@ -16,7 +16,7 @@ import {
 } from "../../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../../economy/payout-reconcile.js";
-import { payoutPolicyFromEnv } from "../../economy/payouts.js";
+import { earningsHoldFromEnv, payoutPolicyFromEnv } from "../../economy/payouts.js";
 import { MemoryCallbackPinStore, type CallbackPinStore } from "../../economy/lnurl-callback-pin.js";
 import { fetchPublicJson } from "../../security/public-fetch.js";
 import { pgStore } from "../../db/store.js";
@@ -69,9 +69,14 @@ export const lightningProvider: LightningProvider = ECONOMY_PAYMENTS_ENABLED
 // fee on every accrual + the coordinator fee on every purchase) is distributed to infrastructure
 // hosts by uptime. In-memory mode (no Postgres) keeps the same semantics without durability.
 export const payoutPolicy = payoutPolicyFromEnv(BITCOIN_NETWORK);
+{
+  // Earnings become withdrawable only after this hold (24 h on mainnet by default, 0 elsewhere).
+  const earningsHold = earningsHoldFromEnv(BITCOIN_NETWORK);
+  if (earningsHold.warning) app.log.warn({ holdMs: earningsHold.holdMs, warning: earningsHold.warning }, "payout_earnings_hold");
+}
 class EnginePayoutStore extends MemoryPayoutStore {
   constructor() {
-    super((accountId) => creditEngine.earnedMsat(accountId));
+    super((accountId, cutoff) => creditEngine.earnedMsat(accountId, cutoff));
   }
   override async creditBalance(accountId: string): Promise<number> {
     return creditEngine.balance(accountId) + (await super.creditBalance(accountId));

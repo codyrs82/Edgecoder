@@ -10,6 +10,8 @@ import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck 
 import {
   creditsToMsat,
   distributeFeePool,
+  earningsMaturityCutoffMs,
+  earnRowMatured,
   msatToCredits,
   payoutCapacityMsat,
   payoutDebitTxId,
@@ -45,15 +47,35 @@ export type ReserveResult =
 
 export type FeePoolLockResult<T> = { acquired: true; value: T } | { acquired: false };
 
+/** An account's earnings split by the earnings hold (see earningsMaturityCutoffMs). */
+export interface EarningsSummary {
+  /** Every earn row's msat (matured or not). */
+  totalMsat: number;
+  /** Earn rows at or before the cutoff: the only earnings payable counts. */
+  maturedMsat: number;
+  /** Timestamp of the oldest earn row (with msat) still held, or null when none is held or unknown. */
+  oldestHeldAtMs: number | null;
+}
+
 export interface PayoutStore extends ReconcileLedger, PayoutPauseStore {
-  earnedMsat(accountId: string): Promise<number>;
+  /** msat on the account's earn rows; with a cutoff, only rows matured at it (timestamp <= cutoff). */
+  earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number>;
+  /** Total and matured earnings in one read (balance reporting). */
+  earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary>;
   receivedPurchaseMsat(): Promise<number>;
   payoutsTotalMsat(filter: { accountId?: string; statuses: Array<PayoutRecord["status"]> }): Promise<number>;
   /**
    * Insert the pending row if payable, capacity and (when given) the 24 h caps all hold. Postgres
    * serialises every reservation under one advisory lock so the global cap and capacity are exact.
+   * `maturedAtOrBeforeMs`: payable counts only earn rows matured at this cutoff (earnings hold);
+   * undefined = no hold.
    */
-  reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult>;
+  reservePayout(
+    payout: PayoutRecord,
+    capacityMsat: (paidOrPendingAllMsat: number) => number,
+    limits?: ReservationLimits,
+    maturedAtOrBeforeMs?: number
+  ): Promise<ReserveResult>;
   settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void>;
   listPayouts(accountId: string, limit?: number): Promise<PayoutRecord[]>;
   listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>>;
@@ -87,15 +109,28 @@ export class MemoryPayoutStore implements PayoutStore {
   received = 0;
   private reserving: Promise<unknown> = Promise.resolve();
   /**
-   * `earned`: msat earned outside this store's rows. `credits`: credit balance held outside them
-   * (added to the rows' balance); a subclass may override creditBalance instead.
+   * `earned`: msat earned outside this store's rows; given a cutoff it should count only earnings
+   * matured at it (a callback that ignores it applies no hold to those earnings). `credits`: credit
+   * balance held outside the rows (added to the rows' balance); a subclass may override creditBalance instead.
    */
   constructor(
-    private readonly earned: (accountId: string) => number,
+    private readonly earned: (accountId: string, maturedAtOrBeforeMs?: number) => number,
     private readonly credits: (accountId: string) => number = () => 0
   ) {}
-  async earnedMsat(accountId: string): Promise<number> {
-    return this.earned(accountId) + this.rows.filter((r) => r.accountId === accountId && r.type === "earn").reduce((s, r) => s + (r.msat ?? 0), 0);
+  private earnRows(accountId: string): CreditTransaction[] {
+    return this.rows.filter((r) => r.accountId === accountId && r.type === "earn");
+  }
+  async earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number> {
+    const own = this.earnRows(accountId).filter((r) => earnRowMatured(r.timestampMs, maturedAtOrBeforeMs)).reduce((s, r) => s + (r.msat ?? 0), 0);
+    return this.earned(accountId, maturedAtOrBeforeMs) + own;
+  }
+  async earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary> {
+    const held = this.earnRows(accountId).filter((r) => (r.msat ?? 0) > 0 && !earnRowMatured(r.timestampMs, maturedAtOrBeforeMs));
+    return {
+      totalMsat: await this.earnedMsat(accountId),
+      maturedMsat: await this.earnedMsat(accountId, maturedAtOrBeforeMs),
+      oldestHeldAtMs: held.length ? Math.min(...held.map((r) => r.timestampMs)) : null
+    };
   }
   async receivedPurchaseMsat(): Promise<number> {
     return this.received;
@@ -108,15 +143,15 @@ export class MemoryPayoutStore implements PayoutStore {
   private pause: PayoutPauseState | null = null;
   private poolLock = false;
   /** One reservation at a time in this process (the reads below are async). */
-  reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
-    const run = this.reserving.then(() => this.reserveLocked(payout, capacityMsat, limits));
+  reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits, maturedAtOrBeforeMs?: number): Promise<ReserveResult> {
+    const run = this.reserving.then(() => this.reserveLocked(payout, capacityMsat, limits, maturedAtOrBeforeMs));
     this.reserving = run.catch(() => undefined);
     return run;
   }
-  private async reserveLocked(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+  private async reserveLocked(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits, maturedAtOrBeforeMs?: number): Promise<ReserveResult> {
     if ([...this.payouts.values()].some((p) => p.paymentHash === payout.paymentHash)) return { ok: false as const, code: "duplicate_invoice" as const };
     const accountOut = [...this.payouts.values()].filter((p) => p.accountId === payout.accountId && (p.status === "paid" || p.status === "pending")).reduce((s, p) => s + rowOutflowMsat(p), 0);
-    const payable = withdrawableMsat(await this.earnedMsat(payout.accountId), accountOut, await this.creditBalance(payout.accountId));
+    const payable = withdrawableMsat(await this.earnedMsat(payout.accountId, maturedAtOrBeforeMs), accountOut, await this.creditBalance(payout.accountId));
     if (payout.amountMsat + payout.maxFeeMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
     if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(await this.payoutsTotalMsat({ statuses: ["paid", "pending"] }))) return { ok: false as const, code: "coordinator_capacity" as const };
     if (limits) {
@@ -246,13 +281,39 @@ export type PayoutResult =
   | { ok: true; payout: PayoutRecord }
   | { ok: false; code: string; detail?: string; payableMsat?: number };
 
+export interface PayoutBalance {
+  earnedMsat: number;
+  heldMsat: number;
+  maturesAtMs: number | null;
+  paidMsat: number;
+  pendingMsat: number;
+  payableMsat: number;
+  capacityMsat: number;
+}
+
 export class PayoutService {
   private readonly inflight = new Set<string>();
   constructor(private readonly d: PayoutServiceDeps) {}
 
-  async balance(accountId: string): Promise<{ earnedMsat: number; paidMsat: number; pendingMsat: number; payableMsat: number; capacityMsat: number }> {
-    const [earned, paid, pending, received, allOut, credits] = await Promise.all([
-      this.d.store.earnedMsat(accountId),
+  /** The earnings hold in force (policy.earningsHoldMs; 0 = none). */
+  get earningsHoldMs(): number {
+    return Math.max(0, this.d.policy.earningsHoldMs ?? 0);
+  }
+
+  /**
+   * Balance as shown to the account (GET /economy/payouts/:accountId):
+   * - earnedMsat: every sat ever earned (matured or still held), unchanged meaning;
+   * - heldMsat: earned but still inside the earnings hold, not yet payable;
+   * - maturesAtMs: when the oldest held earning becomes payable (null when nothing is held);
+   * - paidMsat / pendingMsat: payouts paid / in flight (amount + fee);
+   * - payableMsat: matured earnings − paid − pending, capped at the credit balance;
+   * - capacityMsat: what the coordinator can still pay out in total.
+   */
+  async balance(accountId: string): Promise<PayoutBalance> {
+    const hold = this.earningsHoldMs;
+    const cutoff = earningsMaturityCutoffMs((this.d.now ?? Date.now)(), hold);
+    const [earnings, paid, pending, received, allOut, credits] = await Promise.all([
+      this.d.store.earnings(accountId, cutoff),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["paid"] }),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["pending"] }),
       this.d.store.receivedPurchaseMsat(),
@@ -260,11 +321,14 @@ export class PayoutService {
       this.d.store.creditBalance(accountId)
     ]);
     return {
-      earnedMsat: earned,
+      earnedMsat: earnings.totalMsat,
+      heldMsat: Math.max(0, earnings.totalMsat - earnings.maturedMsat),
+      maturesAtMs: earnings.oldestHeldAtMs === null ? null : earnings.oldestHeldAtMs + hold,
       paidMsat: paid,
       pendingMsat: pending,
-      // Never more than the credit balance: earnings already spent as cSats are not withdrawable.
-      payableMsat: withdrawableMsat(earned, paid + pending, credits),
+      // Only matured earnings, and never more than the credit balance: earnings already spent as
+      // cSats are not withdrawable.
+      payableMsat: withdrawableMsat(earnings.maturedMsat, paid + pending, credits),
       capacityMsat: payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy)
     };
   }
@@ -301,7 +365,9 @@ export class PayoutService {
     const reserved = await this.d.store.reservePayout(
       payout,
       (allOut) => payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy),
-      limits ? { sinceMs: now() - PAYOUT_LIMIT_WINDOW_MS, check: (w) => checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat, ...w }, limits) } : undefined
+      limits ? { sinceMs: now() - PAYOUT_LIMIT_WINDOW_MS, check: (w) => checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat, ...w }, limits) } : undefined,
+      // Rechecked under the store's lock with the same maturity rule the balance used.
+      earningsMaturityCutoffMs(payout.createdAtMs, this.earningsHoldMs)
     );
     if (!reserved.ok) {
       if ("violation" in reserved) return this.limitRejected(accountId, kind, v.amountMsat, reserved.violation);
@@ -446,6 +512,8 @@ export class PayoutService {
 
   private async distributeFeePoolLocked(expectedHeartbeats: number): Promise<FeePoolDistribution> {
     const now = this.d.now ?? Date.now;
+    // No earnings hold on the pool's own intake: the pool is never withdrawn directly, and what it
+    // pays hosts arrives as host earn rows, which are held like any other earnings before payout.
     const poolMsat = await this.d.store.earnedMsat(this.d.feePoolAccountId);
     const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);
     const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut);

@@ -12,6 +12,7 @@ import { isRateEpochStale, normalizeRateEpoch } from "../../economy/rate-oracle.
 import { buildCapabilitySummary, type AgentCapabilityInfo } from "../../mesh/capability-gossip.js";
 import { startPruneScheduler, type PrunableStore } from "../../audit/prune-scheduler.js";
 import { app } from "./app.js";
+import { LedgerNetworkMismatchError } from "../../db/ledger-network.js";
 import {
   reservations,
   ISSUANCE_RECALC_MS,
@@ -20,6 +21,7 @@ import {
   mesh,
   protocol,
   identity,
+  BITCOIN_NETWORK,
   coordinatorKeys,
   STATS_LEDGER_SYNC_INTERVAL_MS,
   STATS_ANCHOR_INTERVAL_MS,
@@ -78,6 +80,19 @@ export async function initCoordinator(): Promise<void> {
     const storeRef = pgStore;
     const initDbState = async () => {
       await storeRef.migrate();
+      // A database recorded for another Bitcoin network (e.g. regtest balances on a coordinator now
+      // set to mainnet) must never be served: stop instead of logging and carrying on like the
+      // other startup steps (docs/going-to-mainnet.md, "Switching the database to mainnet").
+      try {
+        const ledger = await storeRef.assertLedgerNetwork(BITCOIN_NETWORK, identity.peerId);
+        app.log.info({ network: BITCOIN_NETWORK, ledger }, "ledger_network_checked");
+      } catch (error) {
+        if (error instanceof LedgerNetworkMismatchError) {
+          app.log.fatal({ error: error.message }, "ledger_network_mismatch");
+          process.exit(1);
+        }
+        throw error;
+      }
       const persistedEvents = await storeRef.listBlacklistEvents();
       for (const event of persistedEvents) {
         blacklistAuditLog.push(event);
