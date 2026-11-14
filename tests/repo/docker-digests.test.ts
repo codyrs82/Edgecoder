@@ -7,6 +7,7 @@ const DOCKERFILES = [
   "Dockerfile.anchor-proxy",
   "deploy/docker/Dockerfile.agent",
   "deploy/docker/Dockerfile.server",
+  "deploy/gpu-agent/Dockerfile.inference",
   "docker/sandbox-node.Dockerfile",
   "docker/sandbox-python.Dockerfile",
   "tests/e2e/Dockerfile.e2e"
