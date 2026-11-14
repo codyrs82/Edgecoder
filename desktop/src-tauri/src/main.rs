@@ -19,6 +19,7 @@ mod agent_settings;
 mod ide_guard;
 mod local_compute;
 mod navigation;
+mod remote_hosts;
 mod network_enrollment;
 mod terminal;
 mod token;
@@ -148,6 +149,22 @@ fn child_alive(slot: &mut Option<Child>) -> bool {
         Some(child) => matches!(child.try_wait(), Ok(None)),
         None => false,
     }
+}
+
+/// #138: save the coordinator / portal URLs from Settings so the next launch's CSP allows their
+/// exact origins. `restartNeeded` is true while the running window's CSP doesn't allow them yet.
+#[tauri::command]
+fn set_remote_hosts(
+    coordinator: Option<String>,
+    portal: Option<String>,
+    applied: tauri::State<'_, remote_hosts::AppliedHosts>,
+) -> Result<remote_hosts::HostsSaved, String> {
+    let hosts = remote_hosts::RemoteHosts::validated(coordinator, portal)?;
+    let p = remote_hosts::path().ok_or("no home directory")?;
+    if remote_hosts::load_from(&p) != hosts {
+        remote_hosts::save_to(&p, &hosts)?;
+    }
+    Ok(remote_hosts::HostsSaved { restart_needed: remote_hosts::restart_needed(&applied.0, &hosts) })
 }
 
 /// #72: "spawned", "port_occupied" or "not_started", for the UI.
@@ -610,6 +627,13 @@ fn main() {
     });
     let local_token = tokens.inference.clone();
 
+    // #138: hosts changed in Settings after the build get their exact origins added to the
+    // release CSP connect-src (Tauri applies the CSP from this runtime config).
+    let mut context = tauri::generate_context!();
+    let saved_hosts = remote_hosts::load();
+    remote_hosts::apply_to_config(context.config_mut(), &saved_hosts);
+    let applied_hosts = remote_hosts::AppliedHosts(remote_hosts::connect_src_sources(context.config()));
+
     tauri::Builder::default()
         // Must be registered first. On Windows and Linux an edgecoder:// link (the OAuth callback)
         // starts a second process: the deep-link feature hands the URL to the running app's
@@ -628,6 +652,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(LocalToken(local_token.clone()))
+        .manage(applied_hosts)
         .manage(terminal::Terminals::default())
         .invoke_handler(tauri::generate_handler![
             terminal::term_spawn,
@@ -646,6 +671,7 @@ fn main() {
             set_agent_ble,
             start_local_compute_setup,
             get_ide_token,
+            set_remote_hosts,
         ])
         .setup(move |app| {
             #[cfg(desktop)]
@@ -712,7 +738,7 @@ fn main() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error building EdgeCoder desktop app")
         .run(|app, event| {
             // Quit and the updater's relaunch end the app without destroying its window, which

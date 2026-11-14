@@ -27,6 +27,14 @@ function storage(): KV | null {
 }
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
+
+/** #136/#138: the parsed hostname is plain DNS labels (IDNs as punycode) or a bracketed IPv6. */
+function isPlainHost(hostname: string): boolean {
+  if (/^\[[0-9a-f:.]+\]$/.test(hostname)) return true;
+  if (hostname.length === 0 || hostname.length > 253) return false;
+  return hostname.split(".").every((label) => LABEL.test(label));
+}
 
 /** Normalised origin (+path, no trailing slash) or null. https only, except http on loopback. */
 export function validateEndpointUrl(raw: string | null | undefined): string | null {
@@ -39,6 +47,8 @@ export function validateEndpointUrl(raw: string | null | undefined): string | nu
     return null;
   }
   if (u.username || u.password) return null;
+  // Same rule the shell applies before adding the host to the CSP (src-tauri/src/remote_hosts.rs).
+  if (!isPlainHost(u.hostname)) return null;
   const ok = u.protocol === "https:" || (u.protocol === "http:" && LOCAL_HOSTS.has(u.hostname));
   if (!ok) return null;
   return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
@@ -105,6 +115,36 @@ export function setEndpoint(kind: EndpointKind, raw: string, s: KV | null = stor
   const v = validateEndpointUrl(raw);
   if (!v) throw new Error("Use an https:// URL (http:// is allowed only for 127.0.0.1 or localhost)");
   s?.setItem(key, v);
+}
+
+/** The user's saved overrides only (null = the build default, which the built CSP already allows). */
+export function savedEndpointOverrides(s: KV | null = storage()): Record<EndpointKind, string | null> {
+  return { coordinator: saved(s, COORDINATOR_KEY) ?? saved(s, LEGACY_SEED_KEY), portal: saved(s, PORTAL_KEY) };
+}
+
+type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+
+/**
+ * #138: the release CSP connect-src is fixed when the window loads. The desktop shell adds the
+ * exact origins of the saved overrides to it at launch (src-tauri/src/remote_hosts.rs, same host
+ * rules as the build-time gen-tauri-csp.mjs), so a host changed here needs one app restart, not a
+ * rebuild. Returns whether a restart is needed; false outside Tauri. Throws the shell's reason
+ * when it refuses a host.
+ */
+export async function syncEndpointsToShell(s: KV | null = storage(), invokeImpl?: Invoke): Promise<boolean> {
+  let invoke = invokeImpl;
+  if (!invoke) {
+    // Not running inside Tauri (dev / web build): nothing to apply.
+    if (!(globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return false;
+    invoke = (await import("@tauri-apps/api/core")).invoke as Invoke;
+  }
+  const o = savedEndpointOverrides(s);
+  try {
+    const res = await invoke<{ restartNeeded?: boolean }>("set_remote_hosts", { coordinator: o.coordinator, portal: o.portal });
+    return res?.restartNeeded === true;
+  } catch (e) {
+    throw new Error(e instanceof Error ? e.message : String(e));
+  }
 }
 
 export function resetEndpoints(s: KV | null = storage()): void {

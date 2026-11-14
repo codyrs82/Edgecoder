@@ -13,7 +13,9 @@ import {
   portalSignupUrl,
   portalUrl,
   resetEndpoints,
+  savedEndpointOverrides,
   setEndpoint,
+  syncEndpointsToShell,
   validateEndpointUrl,
 } from "../src/lib/endpoints";
 
@@ -103,5 +105,43 @@ describe("portalSignupUrl (#26 sign-up button)", () => {
 describe("portalResetPasswordUrl (Forgot password? link)", () => {
   it("points at /portal/reset-password on the configured portal", () => {
     expect(portalResetPasswordUrl(mem({ [PORTAL_KEY]: "https://portal.example.org/" }))).toBe("https://portal.example.org/portal/reset-password");
+  });
+});
+
+describe("hosts changed after the build reach the shell (#138)", () => {
+  it("only plain hostnames are accepted, as the shell's CSP rule requires", () => {
+    for (const bad of ["https://*.example.org", "https://a_b.example.org", "https://a;b.example.org", "https://-a.example.org"]) {
+      expect(validateEndpointUrl(bad), bad).toBeNull();
+    }
+    expect(validateEndpointUrl("https://BÜCHER.example")).toBe("https://xn--bcher-kva.example");
+    expect(validateEndpointUrl("http://[::1]:4310")).toBe("http://[::1]:4310");
+  });
+
+  it("sends only the saved overrides and reports when a restart is needed", async () => {
+    const calls: Array<[string, unknown]> = [];
+    const invoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      calls.push([cmd, args]);
+      return { restartNeeded: true } as T;
+    };
+    const s = mem({ [COORDINATOR_KEY]: "https://mine.example/api" });
+    expect(await syncEndpointsToShell(s, invoke)).toBe(true);
+    expect(calls).toEqual([["set_remote_hosts", { coordinator: "https://mine.example/api", portal: null }]]);
+    expect(savedEndpointOverrides(mem())).toEqual({ coordinator: null, portal: null });
+    expect(savedEndpointOverrides(mem({ [LEGACY_SEED_KEY]: "https://legacy.example" })).coordinator).toBe("https://legacy.example");
+  });
+
+  it("surfaces the shell's refusal and is a no-op outside Tauri", async () => {
+    const refuse = async <T,>(): Promise<T> => {
+      throw "Coordinator URL must be https";
+    };
+    await expect(syncEndpointsToShell(mem(), refuse)).rejects.toThrow(/https/);
+    expect(await syncEndpointsToShell(mem())).toBe(false);
+  });
+
+  it("the CSP stays a fixed list: Settings hosts are added by the shell at launch, never as wildcards", () => {
+    const rs = readFileSync(resolve(__dirname, "../src-tauri/src/remote_hosts.rs"), "utf8");
+    expect(rs).toContain("fn apply_to_config");
+    const conf = JSON.parse(readFileSync(resolve(__dirname, "../src-tauri/tauri.conf.json"), "utf8"));
+    expect(String(conf.app.security.csp["connect-src"])).not.toMatch(/(^| )https?:( |$)/);
   });
 });

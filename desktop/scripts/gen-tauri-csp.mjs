@@ -14,6 +14,8 @@
 // and similar through in hostnames, and those would break or widen the CSP, so they fail.
 // Anything else (other schemes, credentials in the URL, http to a remote host) fails the build.
 // With no VITE_* hosts set the output CSP is identical to tauri.conf.json.
+// Hosts changed later in Settings are added the same way at app launch by the shell (#138,
+// src-tauri/src/remote_hosts.rs), so they need a restart, not a rebuild.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
