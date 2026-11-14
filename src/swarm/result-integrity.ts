@@ -77,3 +77,18 @@ export function classifyResultAuth(input: {
   if (!input.hasLocalClaim && input.meshTokenConfigured && input.meshTokenValid) return "peer_forward";
   return input.requireSigned ? "reject" : "unsigned_legacy";
 }
+
+/** What an agent may POST to /result: Fastify's default body limit, unchanged by #122. */
+export const AGENT_RESULT_BODY_LIMIT_BYTES = 1024 * 1024;
+
+/**
+ * #122: /result route limit. A peer forward holds the published output (at most the agent's
+ * body) plus the agent's signed body as a JSON string, where re-escaping can at worst double it:
+ * <= 1 + 2 MiB for a max-size agent result. 4 MiB leaves room for the envelope and headers.
+ */
+export const RESULT_ROUTE_BODY_LIMIT_BYTES = 4 * 1024 * 1024;
+
+/** Only unsigned mesh-token requests (peer forwards) may use the larger route limit. */
+export function resultBodyTooLarge(bytes: number, peerForwardCandidate: boolean): boolean {
+  return bytes > (peerForwardCandidate ? RESULT_ROUTE_BODY_LIMIT_BYTES : AGENT_RESULT_BODY_LIMIT_BYTES);
+}
