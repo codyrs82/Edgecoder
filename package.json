@@ -83,6 +83,7 @@
     "@types/pg": "^8.16.0",
     "@types/web-bluetooth": "^0.0.21",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^4.1.12",
     "mermaid": "^11.12.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",

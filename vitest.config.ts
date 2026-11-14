@@ -25,9 +25,9 @@ export default defineConfig({
       // Every source file counts, including ones no test imports.
       include: ["src/**/*.ts"],
       exclude: ["src/**/__tests__/**", "src/**/*.test.ts", "src/**/*.d.ts"],
-      // Provisional floor: coverage could not be measured when this was added. On the first run,
-      // set each number to the measured value minus 2 points, and raise it as coverage grows.
-      thresholds: { statements: 40, branches: 40, functions: 40, lines: 40 }
+      // Floor: the measured value minus 2 points (2026-11-14: statements 67.6, branches 60.8,
+      // functions 65.8, lines 70.0). Raise it as coverage grows; it only ever stops a drop.
+      thresholds: { statements: 65, branches: 58, functions: 63, lines: 67 }
     }
   }
 });
