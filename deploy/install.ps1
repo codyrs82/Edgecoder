@@ -185,8 +185,12 @@ if ($FromSource) {
     } else {
         # The newest published, non-prerelease agent-v* release (GitHub's "latest" is the desktop app).
         $releases = Invoke-RestMethod -UseBasicParsing -Uri $ReleaseApiUrl
-        $r = $releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^agent-v\d+\.\d+\.\d+$' } | Select-Object -First 1
+        # Highest version, not the first listed; never below the floor (see MIN_AGENT_VERSION in install.sh).
+        $MinAgentVersion = [version]'1.0.0'
+        $r = $releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^agent-v\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]($_.tag_name -replace '^agent-v', '') } -Descending | Select-Object -First 1
         if (-not $r) { throw "no agent release found at $ReleaseApiUrl (pass --version)" }
+        if ([version]($r.tag_name -replace '^agent-v', '') -lt $MinAgentVersion) { throw "newest listed release $($r.tag_name) is older than $MinAgentVersion" }
         $Tag = $r.tag_name
     }
     $asset = "edgecoder-agent-$Tag-$Target.tar.gz"

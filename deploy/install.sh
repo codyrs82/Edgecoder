@@ -197,9 +197,18 @@ ensure_docker() {
     local tmp fpr keyring=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
     tmp="$(mktemp -d)"
     fetch https://nvidia.github.io/libnvidia-container/gpgkey "$tmp/key.asc" || die "could not download NVIDIA's repo key"
+    # Exactly one primary key, the pinned one; and only that key goes into the apt keyring (a file
+    # carrying an extra key must not get it trusted through signed-by).
+    local npub
+    npub="$(gpg --show-keys --with-colons "$tmp/key.asc" 2>/dev/null | awk -F: '$1 == "pub"' | wc -l | tr -d ' ')"
+    [ "$npub" = 1 ] || die "NVIDIA repo key file holds $npub keys, expected exactly 1"
     fpr="$(gpg --show-keys --with-colons "$tmp/key.asc" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')"
     [ "$fpr" = "$NVIDIA_REPO_FINGERPRINT" ] || die "NVIDIA repo key fingerprint is '$fpr', expected $NVIDIA_REPO_FINGERPRINT"
-    gpg --dearmor < "$tmp/key.asc" > "$keyring.new" && mv "$keyring.new" "$keyring"
+    mkdir -m 700 "$tmp/gnupg"
+    GNUPGHOME="$tmp/gnupg" gpg --batch --quiet --import "$tmp/key.asc" 2>/dev/null || die "could not read NVIDIA's repo key"
+    GNUPGHOME="$tmp/gnupg" gpg --batch --export "$NVIDIA_REPO_FINGERPRINT" > "$keyring.new"
+    [ -s "$keyring.new" ] || die "could not export the pinned NVIDIA key"
+    mv "$keyring.new" "$keyring"
     # The repo line is written here, not downloaded: the same one NVIDIA's .list file contains.
     # shellcheck disable=SC2016
     echo "deb [signed-by=$keyring] https://nvidia.github.io/libnvidia-container/stable/deb/\$(ARCH) /" > /etc/apt/sources.list.d/nvidia-container-toolkit.list
@@ -217,15 +226,24 @@ normalize_tag() {
   echo "agent-v$v"
 }
 
-# The newest published, non-prerelease agent-v* release. (GitHub's "latest" is the desktop app.)
+# Oldest agent release this installer accepts. The release listing is not signed, so whoever can
+# hide newer releases could otherwise steer installs to an old, validly signed one. Bump this (and
+# MinAgentVersion in install.ps1) at each release that fixes a security bug.
+MIN_AGENT_VERSION=1.0.0
+
+# The highest published, non-prerelease agent-v* release. (GitHub's "latest" is the desktop app.)
 latest_tag() {
   local json; json="$(mktemp)"
   fetch "$RELEASE_API_URL" "$json" || die "could not list releases at $RELEASE_API_URL (pass --version)"
   "$NODE" -e '
-    const rs = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-    const r = rs.find((r) => !r.draft && !r.prerelease && /^agent-v\d+\.\d+\.\d+$/.test(r.tag_name));
-    if (!r) process.exit(1);
-    console.log(r.tag_name);' "$json" || { rm -f "$json"; die "no agent release found at $RELEASE_API_URL"; }
+    const v = (t) => t.replace(/^agent-v/, "").split(".").map(Number);
+    const cmp = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
+    const rs = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+      .filter((r) => !r.draft && !r.prerelease && /^agent-v\d+\.\d+\.\d+$/.test(r.tag_name))
+      .sort((a, b) => cmp(v(b.tag_name), v(a.tag_name)));
+    if (!rs.length) process.exit(1);
+    if (cmp(v(rs[0].tag_name), process.argv[2].split(".").map(Number)) < 0) { console.error(`newest listed release ${rs[0].tag_name} is older than ${process.argv[2]}`); process.exit(1); }
+    console.log(rs[0].tag_name);' "$json" "$MIN_AGENT_VERSION" || { rm -f "$json"; die "no agent release at or above $MIN_AGENT_VERSION found at $RELEASE_API_URL"; }
   rm -f "$json"
 }
 
@@ -342,11 +360,19 @@ main() {
     install_release "$tag"
   fi
 
-  # A wrapper, not a symlink: dist/install/cli.js finds the app relative to its own path.
-  mkdir -p /usr/local/bin
-  rm -f /usr/local/bin/edgecoder-install
-  printf '#!/bin/sh\nexec "%s" "%s/dist/install/cli.js" "$@"\n' "$NODE" "$INSTALL_DIR" > /usr/local/bin/edgecoder-install
-  chmod 755 /usr/local/bin/edgecoder-install
+  # A wrapper, not a symlink: dist/install/cli.js finds the app relative to its own path. It is run
+  # with sudo, so it goes where only root can write: Homebrew makes /usr/local/bin user-writable on
+  # Intel Macs, in which case the wrapper lives in /opt/edgecoder/bin and /usr/local/bin is skipped.
+  local wrapper_dir=/usr/local/bin
+  mkdir -p "$wrapper_dir"
+  if [ "$(stat -c %u "$wrapper_dir" 2>/dev/null || stat -f %u "$wrapper_dir")" != 0 ] || [ -n "$(find "$wrapper_dir" -maxdepth 0 \( -perm -g=w -o -perm -o=w \))" ]; then
+    wrapper_dir=/opt/edgecoder/bin
+    mkdir -p "$wrapper_dir" && chown 0:0 "$wrapper_dir" && chmod 755 "$wrapper_dir"
+    warn "/usr/local/bin is writable by a non-root user; edgecoder-install is at $wrapper_dir/edgecoder-install"
+  fi
+  rm -f "$wrapper_dir/edgecoder-install"
+  printf '#!/bin/sh\nexec "%s" "%s/dist/install/cli.js" "$@"\n' "$NODE" "$INSTALL_DIR" > "$wrapper_dir/edgecoder-install"
+  chmod 755 "$wrapper_dir/edgecoder-install"
 
   log "Installer"
   set -- ${OLLAMA_BIN_ARG[@]+"${OLLAMA_BIN_ARG[@]}"} ${args[@]+"${args[@]}"}
