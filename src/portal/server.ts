@@ -37,6 +37,7 @@ import { z } from "zod";
 import { LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
 import { createInternalAuth } from "./internal-auth.js";
 import { coordinatorUrlAllowed, coordinatorUrlPolicyFromEnv, filterCoordinatorUrls } from "./coordinator-url-policy.js";
+import { chatCapacityOptionsFromEnv, createChatCapacityDirectory } from "./chat-capacity.js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -623,8 +624,8 @@ async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
   return filterCoordinatorUrls(await discoverCoordinatorUrlsUnfiltered(), COORDINATOR_URL_POLICY);
 }
 
-async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
-  // Try control plane API first
+/** The control plane's coordinator list, allowlisted; empty when it is not configured or did not answer. */
+async function controlPlaneCoordinatorUrls(): Promise<string[]> {
   if (CONTROL_PLANE_URL) {
     try {
       const res = await request(`${CONTROL_PLANE_URL}/network/coordinators`, {
@@ -642,13 +643,19 @@ async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
           .filter(Boolean)
           .filter((value, index, arr) => arr.indexOf(value) === index)
           .filter((value) => coordinatorUrlAllowed(value, COORDINATOR_URL_POLICY));
-        // None allowlisted: fall back to the configured discovery list below.
-        if (urls.length > 0) return urls;
+        return urls;
       }
     } catch {
       // fall through
     }
   }
+  return [];
+}
+
+async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
+  // Try control plane API first. None allowlisted: fall back to the configured discovery list below.
+  const fromControlPlane = await controlPlaneCoordinatorUrls();
+  if (fromControlPlane.length > 0) return fromControlPlane;
 
   // Fall back to the configured discovery list (#35): first healthy URL, else the first entry.
   const healthy = await pickDiscoveryCoordinator();
@@ -844,7 +851,15 @@ registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 // Chat API — conversations CRUD + streaming chat
 registerConversationRoutes(app, { store, getCurrentUser });
 
-const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
+// #39: a chat goes to a coordinator that reports capacity for it (src/portal/chat-capacity.ts):
+// the configured list in order, then the control plane's, each URL through the policy above.
+const chatCapacity = createChatCapacityDirectory({
+  candidates: async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())],
+  allowed: (url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY),
+  serviceToken: PORTAL_SERVICE_TOKEN,
+  ...chatCapacityOptionsFromEnv(),
+});
+const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, chatCapacity };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 

@@ -29,7 +29,9 @@ Consolidated reference for all environment controls. The primary config file on 
 | `COORDINATOR_REGISTRATION_TOKEN` | _(from Nodes page)_ | Required for EDGE_RUNTIME_MODE=coordinator. |
 | `COORDINATOR_PUBLIC_URL` | `https://coordinator.edgecoder.io` | Coordinator's publicly-reachable URL (used by coordinator itself). |
 | `COORDINATOR_DISCOVERY_URL` | `$CONTROL_PLANE_URL/network/coordinators` | Control-plane endpoint for coordinator autodiscovery. |
-| `COORDINATOR_DISCOVERY_URLS` | `https://edgecoder-seed-eu.fly.dev` | Portal: comma-separated coordinator URLs, tried in order. The first healthy one (`/health/runtime`) is cached for 60 s. Takes precedence over `COORDINATOR_DISCOVERY_URL` (#35). |
+| `COORDINATOR_DISCOVERY_URLS` | `https://edgecoder-seed-eu.fly.dev` | Portal: comma-separated coordinator URLs, tried in order. The first healthy one (`/health/runtime`) is cached for 60 s. Takes precedence over `COORDINATOR_DISCOVERY_URL` (#35). Chats go to the first listed coordinator that reports capacity, not just the first healthy one (#39). |
+| `PORTAL_CHAT_CAPACITY_TIMEOUT_MS` | `2000` | Portal: how long a chat waits for a coordinator to say whether it can serve it (`/health/runtime` for the default chat, `/inference/models` for a chosen network model). No answer in time counts as no capacity. Clamped to 100..30000 (#39). |
+| `PORTAL_CHAT_CAPACITY_TTL_MS` | `15000` | Portal: how long a coordinator's capacity answer is reused, so most chats start without asking. `0` asks on every chat. A "no" older than 3 s is asked again before a chat is refused with "No compute is available right now". Clamped to 0..600000 (#39). |
 | `COORDINATOR_BOOTSTRAP_URLS` | `https://coordinator.edgecoder.io` | Comma-separated fallback list. |
 | `COORDINATOR_HTTP_TIMEOUT_MS` | `15000` | HTTP timeout for coordinator API calls (ms). |
 | `COORDINATOR_POST_RETRIES` | `2` | Retry count for coordinator POST requests on transient failure. |
