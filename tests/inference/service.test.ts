@@ -358,3 +358,26 @@ describe("GET /health", () => {
     expect(body.ok).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /metrics/prometheus (#14)
+// ---------------------------------------------------------------------------
+describe("GET /metrics/prometheus", () => {
+  // The service's own auth treats the path as public; the route's loopback-or-token guard decides.
+  it("is hidden from non-loopback callers when METRICS_TOKEN is unset, even with the inference token", async () => {
+    for (const headers of [{}, AUTH_HEADER]) {
+      const res = await app.inject({ method: "GET", url: "/metrics/prometheus", remoteAddress: "203.0.113.5", headers });
+      expect(res.statusCode).toBe(404);
+      expect(res.body).not.toContain("edgecoder_");
+    }
+  });
+
+  it("serves a loopback caller the Prometheus exposition", async () => {
+    await app.inject({ method: "GET", url: "/health" });
+    const res = await app.inject({ method: "GET", url: "/metrics/prometheus" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/plain; version=0.0.4");
+    expect(res.body).toMatch(/^edgecoder_http_requests_total\{[^}]*route="\/health"[^}]*\} [1-9]/m);
+    expect(res.body).toMatch(/service="inference"/);
+  });
+});

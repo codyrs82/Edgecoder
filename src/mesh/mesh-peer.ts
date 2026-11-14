@@ -12,6 +12,9 @@ import {
 } from "../common/types.js";
 import { PeerKeys, createPeerIdentity, signPayload } from "./peer.js";
 import { MeshProtocol } from "./protocol.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("mesh-peer");
 import { GossipMesh } from "./gossip.js";
 
 export interface MeshPeerConfig {
@@ -150,9 +153,9 @@ export class MeshPeer {
           await this.registerWithPeer(entry.identity).catch(() => undefined);
         }
 
-        console.log(`[mesh-peer] bootstrapped from ${seedUrl}, ${this.peerTable.size} peers known`);
+        logger.info({ bootstrapUrl: seedUrl, peers: this.peerTable.size }, "mesh bootstrapped");
       } catch (err) {
-        console.warn(`[mesh-peer] bootstrap ${seedUrl} failed: ${(err as Error).message}`);
+        logger.warn({ bootstrapUrl: seedUrl, error: (err as Error).message }, "mesh bootstrap failed");
       }
     }
 
@@ -280,7 +283,7 @@ export class MeshPeer {
       try {
         await handler(message);
       } catch (err) {
-        console.warn(`[mesh-peer] handler error for ${message.type}: ${(err as Error).message}`);
+        logger.warn({ type: message.type, error: (err as Error).message }, "mesh handler error");
       }
     }
 

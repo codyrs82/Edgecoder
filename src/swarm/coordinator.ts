@@ -8,6 +8,7 @@ import { pullSandboxRejection } from "./sandbox-enforcement.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
+import { registerCoordinatorMetrics } from "./coordinator-metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
@@ -255,7 +256,12 @@ import { ollamaTags, listModels } from "../model/swap.js";
 
 const app = Fastify({ ...serviceLoggerOptions("coordinator") });
 exposeRequestId(app);
-registerMetrics(app, "coordinator");
+// Read at scrape time, so the sources may be declared further down this module.
+registerCoordinatorMetrics(registerMetrics(app, "coordinator"), {
+  queue: () => queue.status(),
+  connectedAgents: () => agentCapabilities.size,
+  payoutReconcile: () => payoutReconciler.last()
+});
 await registerErrorTracking(app, "coordinator");
 // #118 review: keep the exact request bytes so signed bodies (forwarded /result, agent requests)
 // are verified against what was sent, not a re-serialization.
@@ -390,7 +396,7 @@ const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
     return parsed;
   } catch (error) {
     // Fail closed, but say why before the process exits.
-    console.error(`[coordinator] FATAL: invalid MESH_PEER_ALLOWLIST: ${(error as Error).message}`);
+    app.log.fatal({ error: (error as Error).message }, "invalid MESH_PEER_ALLOWLIST");
     throw error;
   }
 })();
@@ -1660,7 +1666,9 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/register") return;
   // Health check must be unauthenticated for Fly health probes
   if (reqPath === "/health/runtime") return;
-  // #14: /metrics has its own METRICS_TOKEN check (src/common/metrics.ts)
+  // #14: /metrics is deliberately outside the mesh/admin token check so a scraper needs only its
+  // own credential. It is not public: the route itself requires a loopback caller or the
+  // METRICS_TOKEN bearer, and answers 404 when that token is unset (src/common/metrics.ts).
   if (reqPath === "/metrics") return;
   // Public read-only endpoints (peer identity & model pull status)
   if (reqPath === "/identity" || reqPath === "/model/pull/progress") return;
@@ -6411,7 +6419,7 @@ app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
     }
   }
 
-  console.log(`[ws] mesh peer connected: ${peerId}${bind.authenticated ? "" : " (unsigned bind)"}`);
+  app.log.info({ peerId, signedBind: bind.authenticated }, "mesh_ws_peer_connected");
   mesh.setWebSocketForPeer(peerId, socket);
 
   socket.on("message", async (data) => {
@@ -6434,7 +6442,7 @@ app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
       // This lets NATed agents gossip to each other through the coordinator.
       if (result.ok) relayToWsPeers(message);
     } catch (err) {
-      console.warn(`[ws] ingest error from ${peerId}: ${(err as Error).message}`);
+      app.log.warn({ peerId, error: (err as Error).message }, "mesh_ws_ingest_error");
     }
   });
 
@@ -6445,12 +6453,12 @@ app.get("/mesh/ws", { websocket: true }, async (socket, req) => {
     mesh.removeWebSocketForPeer(peerId);
   };
   socket.on("close", () => {
-    console.log(`[ws] mesh peer disconnected: ${peerId}`);
+    app.log.info({ peerId }, "mesh_ws_peer_disconnected");
     release();
   });
 
   socket.on("error", (err) => {
-    console.warn(`[ws] error from ${peerId}: ${err.message}`);
+    app.log.warn({ peerId, error: err.message }, "mesh_ws_error");
     release();
   });
 });

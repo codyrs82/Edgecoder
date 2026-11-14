@@ -1,0 +1,38 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+import type { ServiceMetrics } from "../common/metrics.js";
+import type { ReconcileResult } from "../economy/payout-reconcile.js";
+
+/*
+ * #14: coordinator gauges for /metrics. Each one reads state the coordinator already keeps in
+ * memory, at scrape time: no I/O, no new bookkeeping. Anchor state lives in Postgres only, so it
+ * is not exported here (the anchor proxy reports the node's state).
+ */
+
+export interface CoordinatorMetricSources {
+  queue: () => { queued: number; agents: number; results: number };
+  connectedAgents: () => number;
+  payoutReconcile: () => ReconcileResult | null;
+}
+
+/** ReconcileResult["status"], plus "never_run" until the first run completes. */
+export const PAYOUT_RECONCILE_STATES = ["ok", "alert", "tripped", "error", "unsupported", "never_run"] as const;
+
+export function registerCoordinatorMetrics(metrics: ServiceMetrics, sources: CoordinatorMetricSources): void {
+  metrics.gauge("edgecoder_queue_depth", "Tasks waiting in the swarm queue.", () => sources.queue().queued);
+  metrics.gauge("edgecoder_queue_results", "Task results held by the swarm queue.", () => sources.queue().results);
+  metrics.gauge("edgecoder_connected_agents", "Agents currently known to this coordinator.", sources.connectedAgents);
+  metrics.stateGauge(
+    "edgecoder_payout_reconcile_status",
+    "Outcome of the last payout reconciliation run (1 for the current state).",
+    "status",
+    PAYOUT_RECONCILE_STATES,
+    () => sources.payoutReconcile()?.status ?? "never_run"
+  );
+  metrics.gauge(
+    "edgecoder_payout_reconcile_last_run_timestamp_seconds",
+    "When payout reconciliation last ran (0 if it has not).",
+    () => (sources.payoutReconcile()?.atMs ?? 0) / 1000
+  );
+}

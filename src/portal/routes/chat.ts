@@ -10,6 +10,9 @@ import type { ChatApiRoutesDeps } from "../server.js";
 import { networkBackend } from "../../inference-api/backends.js";
 import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
+import { moduleLogger } from "../../common/logger.js";
+
+const logger = moduleLogger("portal-chat");
 
 /** Longest chat message accepted, in characters. */
 export const CHAT_MESSAGE_MAX_CHARS = 32_000;
@@ -211,7 +214,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
 
     if (!coordinatorRes) {
       // Upstream error text stays in the log; the client gets a fixed error.
-      console.warn(`[portal] chat: all ${coordinatorUrls.length} coordinators failed: ${lastError.slice(0, 500)}`);
+      logger.warn({ coordinators: coordinatorUrls.length, lastError: lastError.slice(0, 500) }, "chat: all coordinators failed");
       return reply.code(502).send({
         error: "all_coordinators_failed",
         triedCount: coordinatorUrls.length,

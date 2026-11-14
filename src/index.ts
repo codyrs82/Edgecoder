@@ -9,6 +9,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { LISTEN_HOST } from "./common/env-guard.js";
+import { createLogger, setProcessName } from "./common/logger.js";
+
+const logger = createLogger("unified-agent");
+setProcessName("unified-agent");
 
 const INFERENCE_PORT = Number(process.env.INFERENCE_PORT) || 4302;
 const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT) || 4301;
@@ -41,7 +45,7 @@ async function detectWorkerModelProvider(): Promise<void> {
     workerModelProvider = "edgecoder-local";
   }
   if (workerModelProvider === "edgecoder-local") {
-    console.warn(`[unified-agent] Ollama not reachable at ${host}; the worker uses the edgecoder-local stub and cannot do real swarm work`);
+    logger.warn({ host }, "Ollama not reachable; the worker uses the edgecoder-local stub and cannot do real swarm work");
   }
 }
 
@@ -82,12 +86,12 @@ function startWorkerProcess(): void {
   });
 
   child.on("exit", (code) => {
-    console.warn(`[unified-agent] worker process exited (code=${code}), restarting in 5s...`);
+    logger.warn({ code }, "worker process exited, restarting in 5s");
     setTimeout(startWorkerProcess, 5000);
   });
 
   child.unref();
-  console.log(`[unified-agent] worker started as pid=${child.pid} (agent=${agentId}, coordinator=${coordinatorUrl})`);
+  logger.info({ pid: child.pid, agent: agentId, coordinator: coordinatorUrl }, "worker started");
 }
 
 /** The IDE provider (:4304, OpenAI-compatible) the app's IDE and local coding agents talk to. */
@@ -103,11 +107,11 @@ function startIdeProvider(): void {
     stdio: ["ignore", "inherit", "inherit", "ipc"],
   });
   child.on("exit", (code) => {
-    console.warn(`[unified-agent] IDE provider exited (code=${code}), restarting in 5s...`);
+    logger.warn({ code }, "IDE provider exited, restarting in 5s");
     setTimeout(startIdeProvider, 5000);
   });
   child.unref();
-  console.log(`[unified-agent] IDE provider started as pid=${child.pid}`);
+  logger.info({ pid: child.pid }, "IDE provider started");
 }
 
 async function boot(): Promise<void> {
@@ -125,7 +129,7 @@ async function boot(): Promise<void> {
     throw err;
   }
 
-  console.log(`[unified-agent] coordinator=:${COORDINATOR_PORT} inference=:${INFERENCE_PORT} control-plane=:${CONTROL_PLANE_PORT}`);
+  logger.info({ coordinator: COORDINATOR_PORT, inference: INFERENCE_PORT, controlPlane: CONTROL_PLANE_PORT }, "services listening");
 
   // Initialize coordinator background tasks (intervals, peer mesh bootstrap, etc.)
   await initCoordinator();
@@ -134,7 +138,7 @@ async function boot(): Promise<void> {
   // Set DISABLE_SELF_AGENT=1 to run coordinator-only (e.g. when the self-agent
   // can't execute tasks because Docker/sandbox isn't available on this host).
   if (process.env.DISABLE_SELF_AGENT === "1") {
-    console.log("[unified-agent] self-agent disabled (DISABLE_SELF_AGENT=1)");
+    logger.info("self-agent disabled (DISABLE_SELF_AGENT=1)");
   } else {
     await detectWorkerModelProvider();
     startWorkerProcess();
@@ -146,7 +150,7 @@ boot().catch((error) => {
   if (isEaddrInUse(error)) {
     console.error(helpForPorts());
   } else {
-    console.error(error);
+    logger.fatal({ err: error }, "unified agent failed to start");
   }
   process.exit(1);
 });

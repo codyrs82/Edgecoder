@@ -4,6 +4,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Agent, request, type Dispatcher } from "undici";
 import { decodeBolt11 } from "./bolt11.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("lightning");
 
 export interface CreateInvoiceInput {
   amountSats: number;
@@ -804,6 +807,6 @@ export function createLightningProviderFromEnv(): LightningProvider {
   if (process.env.ALLOW_MOCK_LIGHTNING !== "1" && process.env.NODE_ENV !== "test") {
     throw new Error("mock_lightning_disabled: set ALLOW_MOCK_LIGHTNING=1 for local dev");
   }
-  console.warn("[lightning] using MockLightningProvider — all invoices auto-settle");
+  logger.warn("using MockLightningProvider — all invoices auto-settle");
   return new MockLightningProvider(Number(process.env.MOCK_LIGHTNING_BALANCE_SATS ?? 0) || 0);
 }

@@ -29,6 +29,9 @@
 import { request } from "undici";
 import type { Readable } from "node:stream";
 import { OllamaLocalProvider, EdgeCoderLocalProvider } from "./providers.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("router");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -219,7 +222,7 @@ export class IntelligentRouter {
         return { text: res.text, route: "ollama-local", latencyMs: elapsed };
       } catch (err) {
         this.activeConcurrent = Math.max(0, this.activeConcurrent - 1);
-        console.warn("[router] local Ollama failed, falling to swarm:", String(err));
+        logger.warn({ error: String(err) }, "local Ollama failed, falling to swarm");
       }
     }
 
@@ -229,7 +232,7 @@ export class IntelligentRouter {
         const result = await this.runViaSwarm(prompt);
         return { ...result, route: "swarm", latencyMs: Date.now() - started };
       } catch (err) {
-        console.warn("[router] swarm submission failed, falling to stub:", String(err));
+        logger.warn({ error: String(err) }, "swarm submission failed, falling to stub");
       }
     }
 
@@ -270,19 +273,19 @@ export class IntelligentRouter {
   private async isLocalViable(): Promise<boolean> {
     // Concurrency gate
     if (this.activeConcurrent >= this.cfg.localConcurrencyCap) {
-      console.log(`[router] local overloaded (${this.activeConcurrent}/${this.cfg.localConcurrencyCap} concurrent) → swarm`);
+      logger.info({ concurrent: this.activeConcurrent, cap: this.cfg.localConcurrencyCap }, "local overloaded → swarm");
       return false;
     }
     // Latency gate — only apply after we have enough samples
     const p95 = this.latency.p95EstimateMs;
     if (p95 > 0 && p95 > this.cfg.localLatencyThresholdMs) {
-      console.log(`[router] local p95 latency ${p95}ms > threshold ${this.cfg.localLatencyThresholdMs}ms → swarm`);
+      logger.info({ p95Ms: p95, thresholdMs: this.cfg.localLatencyThresholdMs }, "local p95 latency over threshold → swarm");
       return false;
     }
     // Health gate
     const healthy = await this.ollama.health();
     if (!healthy) {
-      console.log("[router] local Ollama unhealthy → swarm");
+      logger.info("local Ollama unhealthy → swarm");
     }
     return healthy;
   }
@@ -494,7 +497,7 @@ export class IntelligentRouter {
         };
       } catch (err) {
         this.activeConcurrent = Math.max(0, this.activeConcurrent - 1);
-        console.warn("[router] local Ollama chat failed, falling to swarm:", String(err));
+        logger.warn({ error: String(err) }, "local Ollama chat failed, falling to swarm");
       }
     }
 
@@ -512,7 +515,7 @@ export class IntelligentRouter {
             swarmTaskId: result.swarmTaskId,
           };
         } catch (err) {
-          console.warn("[router] swarm chat failed, falling to stub:", String(err));
+          logger.warn({ error: String(err) }, "swarm chat failed, falling to stub");
         }
       }
     }

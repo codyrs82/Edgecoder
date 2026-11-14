@@ -4,9 +4,10 @@
 import { BitcoindRpcProvider } from "./bitcoin-rpc.js";
 import type { BitcoinNetwork } from "../common/types.js";
 import { LISTEN_HOST } from "../common/env-guard.js";
-import { buildAnchorProxyApp } from "./anchor-proxy-app.js";
+import { buildAnchorProxyApp, registerAnchorProxyMetrics, type AnchorProxyStats } from "./anchor-proxy-app.js";
 import { rpcHostForLog } from "./anchor-proxy-health.js";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
+import { createLogger } from "../common/logger.js";
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
 
@@ -36,15 +37,19 @@ const BITCOIND_RPC_PASSWORD = process.env.BITCOIND_RPC_PASSWORD;
 const BITCOIND_WALLET_NAME = process.env.BITCOIND_WALLET_NAME ?? "";
 const BITCOIN_NETWORK = (process.env.BITCOIN_NETWORK ?? "signet") as BitcoinNetwork;
 
+// Startup failures happen before the Fastify app (and its logger) exists.
+const startupLog = createLogger("anchor-proxy");
+
 if (!ANCHOR_PROXY_TOKEN) {
-  console.error("FATAL: ANCHOR_PROXY_TOKEN is required");
+  startupLog.fatal("ANCHOR_PROXY_TOKEN is required");
   process.exit(1);
 }
 if (!BITCOIND_RPC_URL || !BITCOIND_RPC_USER || !BITCOIND_RPC_PASSWORD) {
-  console.error("FATAL: BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD are required");
+  startupLog.fatal("BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD are required");
   process.exit(1);
 }
 
+const stats: AnchorProxyStats = {};
 const provider = new BitcoindRpcProvider(BITCOIND_RPC_URL, BITCOIND_RPC_USER, BITCOIND_RPC_PASSWORD, BITCOIND_WALLET_NAME);
 const app = buildAnchorProxyApp({
   token: ANCHOR_PROXY_TOKEN,
@@ -52,18 +57,19 @@ const app = buildAnchorProxyApp({
   network: BITCOIN_NETWORK,
   maxBroadcastsPerMinute: Number(process.env.MAX_BROADCASTS_PER_MINUTE ?? "10"),
   maxReconcileCallsPerMinute: Number(process.env.MAX_RECONCILE_CALLS_PER_MINUTE ?? "30"),
-  serverOptions: serviceLoggerOptions("anchor-proxy")
+  serverOptions: serviceLoggerOptions("anchor-proxy"),
+  stats
 });
 // #14: request ids, Prometheus /metrics and error tracking, like the other services.
 exposeRequestId(app);
-registerMetrics(app, "anchor-proxy");
+registerAnchorProxyMetrics(registerMetrics(app, "anchor-proxy"), stats);
 await registerErrorTracking(app, "anchor-proxy");
 
 app.listen({ port: PORT, host: LISTEN_HOST }).then((address) => {
-  console.log(`[anchor-proxy] listening on ${address}`);
-  console.log(`[anchor-proxy] network=${BITCOIN_NETWORK} rpc=${rpcHostForLog(BITCOIND_RPC_URL)} wallet=${BITCOIND_WALLET_NAME}`);
+  // The RPC URL may carry user:pass; only its host is ever logged.
+  app.log.info({ address, network: BITCOIN_NETWORK, rpc: rpcHostForLog(BITCOIND_RPC_URL), wallet: BITCOIND_WALLET_NAME }, "anchor proxy listening");
 }).catch((err) => {
-  console.error("Failed to start anchor proxy:", err);
+  startupLog.fatal({ err }, "failed to start anchor proxy");
   process.exit(1);
 });
 
