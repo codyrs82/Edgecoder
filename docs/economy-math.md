@@ -23,7 +23,7 @@ compute class's base tier. Its price is quoted in msat per credit.
 ## 1. What things cost
 
 All formulas are in `src/economy/job-pricing.ts`; the coordinator applies them when a result is
-accepted (`accrueResultCredits` in `src/swarm/coordinator.ts`). What the requester pays is what the
+accepted (`accrueResultCredits` in `src/swarm/coordinator/results.ts`). What the requester pays is what the
 agent earns, minus the network fee (`NETWORK_FEE_BPS`, default 500 = 5 %), which goes to the fee
 pool (section 5). Failed work is not charged and earns nothing.
 
