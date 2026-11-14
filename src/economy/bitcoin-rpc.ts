@@ -4,6 +4,9 @@
 import { request } from "undici";
 import { createHash, randomUUID } from "node:crypto";
 import type { BitcoinNetwork } from "../common/types.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("bitcoin");
 
 /* ------------------------------------------------------------------ */
 /*  Bitcoin RPC provider – broadcasts OP_RETURN anchors and tracks    */
@@ -681,10 +684,10 @@ export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): Bit
     return new AnchorProxyClientProvider(proxyUrl, proxyToken);
   }
   if (process.env.NODE_ENV === "production") {
-    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
+    logger.fatal("BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
     process.exit(1);
   }
-  console.warn("[bitcoin] using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");
+  logger.warn("using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");
   return new MockBitcoinAnchorProvider();
 }
 

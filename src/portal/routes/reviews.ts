@@ -5,6 +5,9 @@ import type { FastifyInstance } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
 import type { ReviewRoutesDeps } from "../server.js";
+import { moduleLogger } from "../../common/logger.js";
+
+const logger = moduleLogger("portal-reviews");
 
 /**
  * Review queue API (/portal/api/reviews). Escalations are not scoped per user (the coordinator's
@@ -115,10 +118,10 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
         });
       }
       const errBody = await res.body.text().catch(() => "");
-      console.warn(`[portal] reviews: coordinator returned ${res.statusCode}: ${errBody.slice(0, 500)}`);
+      logger.warn({ status: res.statusCode, body: errBody.slice(0, 500) }, "coordinator rejected reviews request");
       return reply.code(502).send({ error: "coordinator_error" });
     } catch (err) {
-      console.warn(`[portal] reviews: coordinator request failed: ${String(err)}`);
+      logger.warn({ error: String(err) }, "coordinator reviews request failed");
       return reply.code(502).send({ error: "coordinator_request_failed" });
     }
   });
@@ -162,10 +165,10 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
         return reply.send({ ok: true });
       }
       const errBody = await res.body.text().catch(() => "");
-      console.warn(`[portal] reviews: coordinator returned ${res.statusCode}: ${errBody.slice(0, 500)}`);
+      logger.warn({ status: res.statusCode, body: errBody.slice(0, 500) }, "coordinator rejected reviews request");
       return reply.code(502).send({ error: "coordinator_error" });
     } catch (err) {
-      console.warn(`[portal] reviews: coordinator request failed: ${String(err)}`);
+      logger.warn({ error: String(err) }, "coordinator reviews request failed");
       return reply.code(502).send({ error: "coordinator_request_failed" });
     }
   });

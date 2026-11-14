@@ -1,6 +1,10 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("prune-scheduler");
+
 export interface PrunableStore {
   noncePrune(): Promise<number>;
   meshMessagePrune(): Promise<number>;
@@ -14,7 +18,7 @@ export function startPruneScheduler(
     const nonces = await store.noncePrune();
     const messages = await store.meshMessagePrune();
     if (nonces > 0 || messages > 0) {
-      console.log(`pruned ${nonces} nonces, ${messages} mesh messages`);
+      logger.info({ nonces, messages }, "pruned nonces and mesh messages");
     }
   }, intervalMs);
 }

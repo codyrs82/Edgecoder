@@ -23,6 +23,9 @@ import { extractCode } from "../model/extract.js";
 import { sanitizeEscalation } from "./client.js";
 import { createHumanEscalation } from "./human-store.js";
 import { upstreamPathSegment } from "../control-plane/path-segment.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("escalation-resolver");
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -98,10 +101,7 @@ export class EscalationResolver {
           return result;
         }
       } catch (err) {
-        console.warn(
-          `[escalation-resolver] parent coordinator failed for ${req.taskId}:`,
-          String(err)
-        );
+        logger.warn({ taskId: req.taskId, error: String(err) }, "parent coordinator failed");
       }
     }
 
@@ -115,10 +115,7 @@ export class EscalationResolver {
           return result;
         }
       } catch (err) {
-        console.warn(
-          `[escalation-resolver] cloud inference failed for ${req.taskId}:`,
-          String(err)
-        );
+        logger.warn({ taskId: req.taskId, error: String(err) }, "cloud inference failed");
       }
     }
 
@@ -275,10 +272,7 @@ export class EscalationResolver {
     } catch (err) {
       // Callback failures are non-fatal — the result is still returned
       // to the caller and stored in the escalation store.
-      console.warn(
-        `[escalation-resolver] callback notification failed for ${result.taskId}:`,
-        String(err)
-      );
+      logger.warn({ taskId: result.taskId, error: String(err) }, "callback notification failed");
     }
   }
 

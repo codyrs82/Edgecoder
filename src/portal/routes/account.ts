@@ -9,6 +9,9 @@ import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
 import { NODE_ID_PATTERN } from "../pages/escape.js";
 import { dnsLabelConflicts } from "../dns-manager.js";
+import { moduleLogger } from "../../common/logger.js";
+
+const logger = moduleLogger("portal-account");
 
 /** Credit accounts are named acct-<userId>; a node ID of that form would read that account's ledger. */
 export function isReservedNodeId(nodeId: string): boolean {
@@ -270,10 +273,10 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       const shared = dnsLabelConflicts(existing.nodeId, await store.listCoordinatorNodeIds());
       if (shared.length === 0) {
         deleteDnsRecord(existing.nodeId).catch((err) =>
-          console.error(`[portal] Failed to delete DNS for ${existing.nodeId}:`, err)
+          logger.error({ nodeId: existing.nodeId, err }, "failed to delete DNS record")
         );
       } else {
-        console.warn(`[portal] DNS record for ${existing.nodeId} kept: shared with ${shared.join(", ")}`);
+        logger.warn({ nodeId: existing.nodeId, sharedWith: shared }, "DNS record kept: shared with other nodes");
       }
     }
 

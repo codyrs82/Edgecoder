@@ -20,6 +20,9 @@ import {
   type Transport,
 } from "../../apps/ide/network-inference.js";
 import type { PortalStore } from "../store.js";
+import { moduleLogger } from "../../common/logger.js";
+
+const logger = moduleLogger("portal-compute");
 
 export interface ComputeRoutesDeps {
   store: PortalStore | undefined | null;
@@ -49,7 +52,7 @@ export function portalCoordinatorTransport(deps: Pick<ComputeRoutesDeps, "PORTAL
       return { status: res.statusCode, json: JSON.parse(text) };
     } catch {
       // A non-JSON body (a proxy error page, a stack trace) is logged, not passed to the client.
-      console.warn(`[portal] coordinator ${method} ${path} returned non-JSON (${res.statusCode}): ${text.slice(0, 200)}`);
+      logger.warn({ method, path, status: res.statusCode, body: text.slice(0, 200) }, "coordinator returned non-JSON");
       return { status: res.statusCode, json: { error: "coordinator_bad_response" } };
     }
   };
