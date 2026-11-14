@@ -20,11 +20,8 @@ import { extractCode } from "../model/extract.js";
 import type {
   BlacklistRecord,
   BlacklistReasonCode,
-  PriceEpochRecord,
   QueueEventRecord,
   MeshPeerIdentity,
-  ResourceClass,
-  WalletType,
   CapabilitySummaryPayload,
   PeerExchangePayload,
   CapabilityAnnouncePayload,
@@ -32,38 +29,20 @@ import type {
   SandboxMode
 } from "../common/types.js";
 import { signPayload } from "../mesh/peer.js";
-import { checkPeerRegistration, isAllowlistedKey, PEER_SIGNATURE_MAX_SKEW_MS } from "../mesh/peer-trust.js";
+import { checkPeerRegistration, isAllowlistedKey } from "../mesh/peer-trust.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../trust/identity-challenge.js";
 import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../trust/local-attest.js";
 import { RESPONSE_SIGNING_VERSION, registerResponseSigning } from "../trust/response-signing.js";
-import { verifyOrderingChain } from "../ledger/verify.js";
-import { reconcileLedger, type ReconcileReport } from "../ledger/reconcile.js";
-import { NETWORK_FEE_POOL_ACCOUNT, creditEngine, rewardAccountForAgent } from "../credits/store.js";
+import { creditEngine, rewardAccountForAgent } from "../credits/store.js";
 import { payoutsPausedByEnv } from "../economy/payout-safeguards.js";
-import { callbackPinStatus } from "../economy/lnurl-callback-pin.js";
-import { validateLightningAddress } from "../economy/payout-destination.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { pgStore } from "../db/store.js";
-import { computeDynamicPricePerComputeUnitSats } from "../economy/pricing.js";
-import {
-  checkPriceEpoch,
-  priceConsensusQuorum,
-  resolvePriceConsensus,
-  signPriceQuote,
-  verifyPriceQuote
-} from "../economy/price-epoch-guard.js";
+import { checkPriceEpoch } from "../economy/price-epoch-guard.js";
 import { isRateEpochStale, normalizeRateEpoch } from "../economy/rate-oracle.js";
-import {
-  ACCEPTED_COMPUTE_CLASS_IDS,
-  COMPUTE_CLASS_IDS,
-  resolveRequestedClass,
-  type ComputeClassId
-} from "../economy/compute-classes.js";
-import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../economy/market-history.js";
+import type { ComputeClassId } from "../economy/compute-classes.js";
 import { debugRoutesEnabled, isProduction, LISTEN_HOST } from "../common/env-guard.js";
-import { HOST_HEARTBEAT_MAX_SKEW_MS, verifyHostHeartbeat } from "../economy/host-attestation.js";
 import { checkpointAnchorFinality, describeAnchor } from "../economy/anchor-status.js";
 // ── Work receipts + replication (architecture step 2; src/receipts) ──
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
@@ -75,8 +54,6 @@ import {
   createInMemoryBleTransfer,
   isBleSyncAuthorized
 } from "../credits/ble-sync.js";
-import { verifyPaymentWebhookSignature } from "../economy/payment-settlement.js";
-import { createTreasuryPolicy, signKeyCustodyEvent } from "../economy/treasury.js";
 import {
   type BlacklistEvidenceInput,
   validateIncomingBlacklistRecord,
@@ -98,20 +75,11 @@ import {
   CC,
   mesh,
   MESH_AUTH_TOKEN,
-  BITCOIN_NETWORK,
-  nonceStore,
-  SECURITY_NONCE_TTL_MS,
-  securityLog,
-  peerScore,
-  MESH_PEER_ALLOWLIST,
-  PAYMENT_INTENT_TTL_MS,
-  PAYMENT_WEBHOOK_SECRET,
-  ISSUANCE_RECALC_MS,
-  ISSUANCE_WINDOW_MS,
-  ANCHOR_REQUIRED_CONFIRMATIONS,
   COORDINATOR_PUBLIC_URL,
   requestOrigin,
   PORTAL_SERVICE_URL,
+  MESH_PEER_ALLOWLIST,
+  peerScore,
   PEER_ALLOWLIST_ENFORCED,
   peerMessageWindow,
   MESH_RATE_LIMIT_PER_10S,
@@ -120,6 +88,10 @@ import {
   PEER_OFFER_BUDGET_MAX_ENTRIES,
   SUBTASK_RESERVE_TIMEOUT_MS,
   taskOriginMap,
+  nonceStore,
+  SECURITY_NONCE_TTL_MS,
+  securityLog,
+  ANCHOR_REQUIRED_CONFIRMATIONS,
   STATS_ANCHOR_MIN_CONFIRMATIONS,
   PORTAL_OUTBOUND_TOKEN,
   OLLAMA_MODEL,
@@ -129,6 +101,7 @@ import {
   coordinatorPullTracker,
   INFERENCE_AUTH_TOKEN,
   reservations,
+  ISSUANCE_RECALC_MS,
   ANCHOR_INTERVAL_MS,
   STATS_LEDGER_SYNC_INTERVAL_MS,
   STATS_ANCHOR_INTERVAL_MS,
@@ -138,10 +111,10 @@ import {
 import { mutable } from "./coordinator/mutable-state.js";
 import {
   ordering,
-  agentCapabilities,
   activeBlacklistRecord,
   appendBlacklistRecord,
   federatedCapabilities,
+  agentCapabilities,
   directWorkById,
   activeTunnels,
   blacklistByAgent,
@@ -169,88 +142,61 @@ import {
   hasMeshToken,
   hasPortalServiceToken,
   requireMeshToken,
-  requireMeshOrPortalToken,
-  requirePortalServiceToken,
-  authorizeAdmin,
-  callerAccount,
   ADMIN_API_TOKEN,
+  authorizeAdmin,
   requireAgentSelf,
   verifyAgentRequest
 } from "./coordinator/auth.js";
 import {
   isPaymentGatedRequest,
-  latestPriceEpochByResource,
-  quoteSatsPerCredit,
-  RATE_ORACLE_ENABLED,
-  RATE_RECALIBRATION_MS,
-  rateOracleConfig,
-  NETWORK_FEE_BPS,
-  orderBook,
-  MARKET_DEFAULT_BID_PREMIUM_BPS,
-  marketHistory,
-  applyMarketOrder,
-  marketOrders,
-  effectiveHardware,
-  hardwareVerifier,
-  recalibrateRateEpoch,
-  previousPriceEpochSats,
-  PRICE_EPOCH_BOUNDS,
-  PRICE_CONSENSUS_QUORUM_OVERRIDE,
-  paymentIntents,
   subtaskReserveMsat,
+  PRICE_EPOCH_BOUNDS,
+  latestPriceEpochByResource,
+  rateOracleConfig,
   syncOrderBookReference,
+  marketHistory,
+  marketOrders,
+  hardwareVerifier,
+  paymentIntents,
   repostAsk,
   recordMarketTicks,
-  MARKET_TICK_MS
+  MARKET_TICK_MS,
+  RATE_ORACLE_ENABLED,
+  recalibrateRateEpoch,
+  RATE_RECALIBRATION_MS
 } from "./coordinator/economy.js";
 import {
   ECONOMY_PAYMENTS_ENABLED,
   lightningProvider,
-  payoutService,
-  payoutStore,
-  callbackPins,
   payoutPolicy,
-  payoutLimits,
-  payoutPause,
-  memoryPayoutStore,
-  RESERVED_HOST_ACCOUNTS,
-  hostAttestor,
+  payoutService,
   runFeePoolDistribution,
   payoutReconcileConfig,
-  payoutReconciler
+  payoutReconciler,
+  payoutPause,
+  payoutLimits
 } from "./coordinator/payouts.js";
-import {
-  robotQueue,
-  receiptStore,
-  discoveryAnnouncer,
-  keyCustodyEvents,
-  appendAgentDiagnostic
-} from "./coordinator/services.js";
+import { robotQueue, receiptStore, discoveryAnnouncer, appendAgentDiagnostic } from "./coordinator/services.js";
 import { coordinatorPublicKeyById, isApprovedCoordinator, bootstrapPeerMesh } from "./coordinator/peers.js";
 import {
   anchorDeps,
-  currentAnchoringStatus,
   persistStatsLedgerRecord,
   statsQuorumThreshold,
   ingestStatsLedgerRecords,
   maybeAnchorLatestStatsCheckpoint,
   latestStatsFinality,
+  currentAnchoringStatus,
   syncStatsLedgerFromPeer,
   maybeFinalizeStatsCheckpoint,
   anchorTracker,
   reconcileAnchorRows
 } from "./coordinator/stats-ledger.js";
 import { validatePortalNode } from "./coordinator/enrollment.js";
-import { recordInfraHeartbeat, selfInfraHeartbeat } from "./coordinator/infra-hosts.js";
+import { selfInfraHeartbeat } from "./coordinator/infra-hosts.js";
 import "./coordinator/attested-keys.js";
-import {
-  runIssuanceTick,
-  appendQuorumRecord,
-  maybeFinalizeIssuanceEpoch,
-  maybeAnchorLatestFinalizedEpoch
-} from "./coordinator/issuance.js";
-import { createPaymentIntent, reconcileIntent, settleIfPaid } from "./coordinator/payments.js";
-import { classParam } from "./coordinator/schemas.js";
+import { runIssuanceTick, maybeAnchorLatestFinalizedEpoch } from "./coordinator/issuance.js";
+import { reconcileIntent } from "./coordinator/payments.js";
+import "./coordinator/schemas.js";
 import {
   finalizeFailedSubtask,
   restorePendingVerifications,
@@ -258,9 +204,15 @@ import {
 } from "./coordinator/results.js";
 import { registerInferenceRoutes } from "./coordinator/routes/inference.js";
 import { registerAccountRoutes } from "./coordinator/routes/account.js";
+import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./coordinator/ledger-verify.js";
 import { registerAgentRoutes } from "./coordinator/routes/agents.js";
 import { registerTaskRoutes } from "./coordinator/routes/tasks.js";
 import { registerStatusRoutes } from "./coordinator/routes/status.js";
+import { registerEconomyRoutes } from "./coordinator/routes/economy.js";
+import { registerMarketRoutes } from "./coordinator/routes/market.js";
+import { registerPricingRoutes } from "./coordinator/routes/pricing.js";
+import { registerPaymentRoutes } from "./coordinator/routes/payments.js";
+import { registerIssuanceRoutes } from "./coordinator/routes/issuance.js";
 
 // Read at scrape time, so the sources may be declared further down this module.
 registerCoordinatorMetrics(metrics, {
@@ -379,860 +331,11 @@ registerTaskRoutes(app);
 registerAccountRoutes(app);
 registerInferenceRoutes(app);
 registerStatusRoutes(app);
-
-app.get("/economy/price/current", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const cpu = latestPriceEpochByResource.get("cpu");
-  const gpu = latestPriceEpochByResource.get("gpu");
-  return { cpu, gpu, quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") } };
-});
-
-/** Current rate-oracle epoch (market sats per CPU/GPU hour, sources, hashprice signal) and the live credit quote. */
-app.get("/economy/rates/current", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  return {
-    enabled: RATE_ORACLE_ENABLED,
-    recalibrationMs: RATE_RECALIBRATION_MS,
-    epoch: mutable.latestRateEpoch,
-    stale: isRateEpochStale(mutable.latestRateEpoch, rateOracleConfig),
-    quote: { cpu: quoteSatsPerCredit("cpu"), gpu: quoteSatsPerCredit("gpu") },
-    config: {
-      usdPerCpuHourReference: rateOracleConfig.usdPerCpuHourReference,
-      usdPerGpuHourReference: rateOracleConfig.usdPerGpuHourReference,
-      networkMarkupBps: rateOracleConfig.networkMarkupBps,
-      maxDailyMovePct: rateOracleConfig.maxDailyMovePct,
-      maxSourceSpreadPct: rateOracleConfig.maxSourceSpreadPct,
-      minSources: rateOracleConfig.minSources,
-      btcUsdSources: rateOracleConfig.btcUsdSources.map((s) => s.name),
-      computeSources: rateOracleConfig.computeSources.map((s) => `${s.name}(${s.resourceClass ?? "cpu"})`)
-    }
-  };
-});
-
-app.get("/economy/rates/history", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const query = z.object({ limit: z.coerce.number().int().min(1).max(365).default(30) }).parse(req.query);
-  const epochs = pgStore ? await pgStore.listRateEpochs(query.limit) : mutable.latestRateEpoch ? [mutable.latestRateEpoch] : [];
-  return { epochs };
-});
-
-/** Order book per compute class: asks (agents), bids (open tasks), spread, clearing price, oracle reference. */
-// ── Payouts, infrastructure hosts and the fee pool ──
-app.get("/economy/payouts/:accountId", async (req, reply) => {
-  if (!requirePortalServiceToken(req as any, reply)) return;
-  const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const [balance, payouts, pins] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100), callbackPins.listCallbackPins(accountId)]);
-  return { accountId, balance, payouts, callbackPins: callbackPinStatus(pins), policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused() } };
-});
-app.post("/economy/payouts/withdraw", async (req, reply) => {
-  if (!requirePortalServiceToken(req as any, reply)) return;
-  const parsed = z.object({ accountId: z.string().min(1), bolt11: z.string().min(20).max(4096) }).safeParse(req.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
-  const body = parsed.data;
-  const result = await payoutService.withdraw(body.accountId, body.bolt11.trim());
-  if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : result.code === "payouts_paused" ? 503 : 400).send(result);
-  return result;
-});
-app.post("/economy/payouts/address", async (req, reply) => {
-  if (!requirePortalServiceToken(req as any, reply)) return;
-  const parsedAddr = z.object({ accountId: z.string().min(1), lightningAddress: z.string().max(256).nullable() }).safeParse(req.body ?? {});
-  if (!parsedAddr.success) return reply.code(400).send({ error: "invalid_request" });
-  const body = parsedAddr.data;
-  const address = body.lightningAddress?.trim() || null;
-  if (address && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) && !/^https:\/\//i.test(address) && !/^lnurl1/i.test(address)) {
-    return reply.code(400).send({ error: "invalid_lightning_address" });
-  }
-  if (pgStore) await pgStore.setLightningAddress(body.accountId, address, BITCOIN_NETWORK); // resets the old destination's callback pin
-  else if (memoryPayoutStore) {
-    await callbackPins.resetCallbackPins(body.accountId, address);
-    if (address) memoryPayoutStore.autoAccounts.set(body.accountId, address);
-    else memoryPayoutStore.autoAccounts.delete(body.accountId);
-  }
-  // Pin the callback host now, in the background so the portal's save is not held up by the
-  // wallet's server; if the address does not resolve, it is pinned at its first payout.
-  if (address) {
-    void payoutService.pinDestination(body.accountId, address)
-      .then((r) => app.log.info({ accountId: body.accountId, result: r.ok ? r.pinned : r.code }, "payout_callback_pin_on_save"))
-      .catch((error) => app.log.warn({ error: String(error) }, "payout_callback_pin_on_save_failed"));
-  }
-  return { accountId: body.accountId, lightningAddress: address };
-});
-// The owner confirmed (portal, emailed code) that the destination's new payment server is theirs:
-// re-pin to it and resume payouts. Only the change on record can be confirmed.
-app.post("/economy/payouts/callback/confirm", async (req, reply) => {
-  if (!requirePortalServiceToken(req as any, reply)) return;
-  const parsed = z.object({ accountId: z.string().min(1).max(128), destination: z.string().min(3).max(512), newOrigin: z.string().min(8).max(300) }).safeParse(req.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ ok: false, error: "invalid_request" });
-  const { accountId, destination, newOrigin } = parsed.data;
-  const ok = await callbackPins.confirmCallbackChange(accountId, destination, newOrigin, Date.now());
-  if (!ok) return reply.code(409).send({ ok: false, error: "callback_change_not_pending" });
-  app.log.info({ accountId, destination, newOrigin }, "payout_callback_change_confirmed");
-  return { ok: true, callbackPins: callbackPinStatus(await callbackPins.listCallbackPins(accountId)) };
-});
-// Remote infrastructure hosts: signed by the host's coordinator key (the one the mesh admitted for
-// hostId), single-use, and only attested services count (src/economy/host-attestation.ts).
-app.post("/economy/hosts/heartbeat", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const parsed = z
-    .object({
-      hostId: z.string().min(3).max(128),
-      accountId: z.string().min(1).max(128).optional(),
-      services: z.array(z.string().min(1).max(32)).min(1).max(8),
-      region: z.string().max(32).optional(),
-      coordinatorUrl: z.string().url().optional(),
-      lightningAddress: z.string().max(256).refine((v) => validateLightningAddress(v).ok, "invalid lightningAddress").optional(),
-      lightningNodeId: z.string().regex(/^0[23][0-9a-fA-F]{64}$/).optional(),
-      ports: z.object({ bitcoind: z.number().int().min(1).max(65535), lightning: z.number().int().min(1).max(65535), electrs: z.number().int().min(1).max(65535) }).partial().optional(),
-      issuedAtMs: z.number().int(),
-      signature: z.string().min(16).max(512)
-    })
-    .safeParse(req.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: "invalid_heartbeat", detail: parsed.error.issues.map((i) => i.message).join("; ") });
-  const body = parsed.data;
-  // Our own heartbeat is recorded in-process; a remote one claiming our id is an impersonation.
-  const peer = body.hostId === identity.peerId ? undefined : mesh.listPeers().find((p) => p.peerId === body.hostId);
-  const verdict = verifyHostHeartbeat(body, peer?.publicKeyPem, { reservedAccounts: RESERVED_HOST_ACCOUNTS });
-  const replayed = verdict.ok && !(await verifyNonce(nonceStore, { nonce: `host-hb:${body.signature}`, sourceId: body.hostId, timestampMs: body.issuedAtMs, maxSkewMs: HOST_HEARTBEAT_MAX_SKEW_MS, ttlMs: SECURITY_NONCE_TTL_MS })).valid;
-  if (!verdict.ok || replayed || !peer) {
-    const reason = !verdict.ok ? verdict.reason : replayed ? "replayed_heartbeat" : "host_unknown";
-    securityLog.log({
-      level: securityLog.severity("host_heartbeat_rejected"),
-      event: "host_heartbeat_rejected",
-      source: { type: "coordinator", id: body.hostId, ip: req.ip },
-      details: { reason },
-      action: "reject_request",
-      coordinatorId: identity.peerId
-    });
-    return reply.code(reason === "host_unknown" ? 403 : 401).send({ ok: false, error: reason });
-  }
-  const attestation = await hostAttestor.attest({
-    hostId: body.hostId,
-    publicKeyPem: peer.publicKeyPem,
-    coordinatorUrl: peer.coordinatorUrl,
-    services: body.services,
-    lightningNodeId: body.lightningNodeId,
-    ports: body.ports
-  });
-  // Uptime means reachable: a host whose coordinator does not answer for its key earns nothing.
-  if (!attestation.attested.includes("coordinator")) {
-    return reply.code(409).send({ ok: false, error: "coordinator_unreachable", attestation: attestation.results });
-  }
-  const { host, counted } = await recordInfraHeartbeat({
-    hostId: body.hostId,
-    accountId: body.accountId,
-    declaredServices: body.services,
-    attestation,
-    region: body.region,
-    coordinatorUrl: peer.coordinatorUrl,
-    lightningAddress: body.lightningAddress,
-    lightningNodeId: body.lightningNodeId
-  });
-  return { ok: true, counted, host, attestation: attestation.results, heartbeatMs: CC.HOST_HEARTBEAT_MS };
-});
-app.get("/economy/hosts", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req as any, reply)) return;
-  const hosts = await payoutStore.listInfrastructureHosts();
-  const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
-  return { hosts, expectedHeartbeats, distributionMs: CC.FEE_POOL_DISTRIBUTION_MS };
-});
-app.get("/economy/fee-pool", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req as any, reply)) return;
-  const [earnedMsat, distributedMsat, credits] = await Promise.all([
-    payoutStore.earnedMsat(NETWORK_FEE_POOL_ACCOUNT),
-    payoutStore.distributedMsat(NETWORK_FEE_POOL_ACCOUNT),
-    payoutStore.creditBalance(NETWORK_FEE_POOL_ACCOUNT)
-  ]);
-  return { accountId: NETWORK_FEE_POOL_ACCOUNT, earnedMsat, distributedMsat, availableMsat: Math.max(0, earnedMsat - distributedMsat), credits, networkFeeBps: NETWORK_FEE_BPS, lastDistribution: mutable.lastFeePoolDistribution };
-});
-// ── #115: credits-ledger reconciliation (src/ledger/reconcile.ts). Reads only; never corrects. ──
-/** How often the periodic reconciliation runs (one coordinator per window on a shared database); 0 = off. */
-const LEDGER_VERIFY_INTERVAL_MS = CC.LEDGER_VERIFY_INTERVAL_MS;
-type LedgerVerifyResult = ReconcileReport & { checkedAtMs: number; durationMs: number; coordinatorId: string };
-
-async function verifyCreditLedger(maxDiscrepancies: number): Promise<LedgerVerifyResult | null> {
-  if (!pgStore) return null;
-  const startedAtMs = Date.now();
-  const input = await pgStore.ledgerReconcileInput(NETWORK_FEE_POOL_ACCOUNT);
-  const report = reconcileLedger(input, { maxDiscrepancies, localCoordinatorIds: [identity.peerId], feePoolAccountId: NETWORK_FEE_POOL_ACCOUNT });
-  return { ...report, checkedAtMs: startedAtMs, durationMs: Date.now() - startedAtMs, coordinatorId: identity.peerId };
-}
-
-function alertLedgerMismatch(result: LedgerVerifyResult, trigger: "admin" | "timer"): void {
-  if (result.ok) return;
-  securityLog.log({
-    level: securityLog.severity("ledger_reconciliation_mismatch"),
-    event: "ledger_reconciliation_mismatch",
-    source: { type: "system", id: identity.peerId },
-    details: { trigger, mismatches: result.mismatches, byKind: result.byKind, discrepancies: result.discrepancies.slice(0, 5) },
-    action: "manual_review_required",
-    coordinatorId: identity.peerId
-  });
-}
-
-/** Periodic run: the first coordinator to claim the window runs it and alerts; the others skip. */
-async function runLedgerVerifyTick(nowMs = Date.now()): Promise<void> {
-  if (!pgStore || LEDGER_VERIFY_INTERVAL_MS <= 0) return;
-  const windowStartMs = Math.floor(nowMs / LEDGER_VERIFY_INTERVAL_MS) * LEDGER_VERIFY_INTERVAL_MS;
-  const r = await pgStore.withLedgerVerifyWindow(windowStartMs, identity.peerId, async () => (await verifyCreditLedger(20))!);
-  if (!r.ran) return;
-  app.log.info({ ok: r.value.ok, mismatches: r.value.mismatches, accountsChecked: r.value.accountsChecked, accrualsChecked: r.value.accrualsChecked, warnings: r.value.warnings, durationMs: r.value.durationMs }, "ledger_verify");
-  alertLedgerMismatch(r.value, "timer");
-}
-
-/**
- * Mesh token only: this process's in-memory ordering chain (hash and signature check), as before.
- * With x-admin-token (#115): the full reconciliation of the credits ledger in Postgres.
- */
-app.get("/ledger/verify", async (req, reply) => {
-  const chain = verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem);
-  if (readHeaderValue((req as any).headers ?? {}, "x-admin-token") === undefined) return { ok: chain.ok, reason: chain.reason };
-  if (!authorizeAdmin(req, reply)) return;
-  const query = z.object({ max: z.coerce.number().int().min(1).max(500).default(20) }).safeParse(req.query ?? {});
-  if (!query.success) return reply.code(400).send({ error: "invalid_query" });
-  if (!pgStore) return reply.code(503).send({ error: "ledger_verify_requires_postgres" });
-  const result = (await verifyCreditLedger(query.data.max))!;
-  alertLedgerMismatch(result, "admin");
-  return { ...result, orderingChain: { ok: chain.ok, reason: chain.reason } };
-});
-
-app.post("/economy/fee-pool/distribute", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // manual override; the daily timer runs it automatically (audit econ#3)
-  return runFeePoolDistribution({ manual: true });
-});
-
-app.get("/economy/market/book", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z.object({ computeClass: classParam.optional() }).parse(req.query);
-  const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
-  return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
-});
-
-/** Candles (OHLC of the mid, trade volume) for one class; `interval` 1m|5m|15m|1h|4h|1d. Portal-token readable. */
-app.get("/economy/market/candles", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z
-    .object({
-      computeClass: classParam.default("cpu"),
-      interval: z.enum(Object.keys(CANDLE_INTERVALS) as [string, ...string[]]).default("5m"),
-      limit: z.coerce.number().int().min(1).max(2000).default(500)
-    })
-    .parse(req.query);
-  return {
-    computeClass: query.computeClass,
-    interval: query.interval,
-    candles: marketHistory.candles(query.computeClass, CANDLE_INTERVALS[query.interval], query.limit),
-    latest: marketHistory.latest(query.computeClass) ?? null
-  };
-});
-
-app.get("/economy/market/trades", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z
-    .object({ computeClass: classParam.default("cpu"), limit: z.coerce.number().int().min(1).max(500).default(50) })
-    .parse(req.query);
-  return { computeClass: query.computeClass, trades: marketHistory.recentTrades(query.computeClass, query.limit) };
-});
-
-app.get("/economy/market/depth", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const query = z.object({ computeClass: classParam.default("cpu") }).parse(req.query);
-  const snap = orderBook.snapshot(query.computeClass);
-  return { computeClass: query.computeClass, ...MarketHistory.depth(snap.asks, snap.bids), snapshot: snap };
-});
-
-/**
- * Standing orders from the portal. buy: the account's default max bid for its tasks (msat per
- * credit). sell: the ask applied to every agent the account owns (0 = track the reference).
- */
-app.post("/economy/market/orders", async (req, reply) => {
-  // The portal names the account (it binds acct-<userId> from the session); an agent may set
-  // orders only for its own linked account. The mesh token alone is not enough.
-  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
-  const requestedAccount = (req.body as { accountId?: unknown } | undefined)?.accountId;
-  if (!(headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers))) {
-    const caller = await callerAccount(req, "/economy/market/orders", typeof requestedAccount === "string" ? requestedAccount : undefined);
-    if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-    if (caller.accountId !== requestedAccount) return reply.code(403).send({ error: "account_mismatch" });
-  }
-  const body = z
-    .object({
-      accountId: z.string().min(1).max(128),
-      side: z.enum(["buy", "sell"]),
-      computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
-      msatPerCredit: z.number().min(0).max(1e9)
-    })
-    .parse(req.body);
-  // A legacy class id maps onto its class and its price into the current unit (0 = track stays 0).
-  const resolved = resolveRequestedClass(body.computeClass, body.msatPerCredit, {}, rateOracleConfig.computeClasses);
-  const order: MarketOrder = { ...body, computeClass: resolved.computeClass as ComputeClassId | "any", msatPerCredit: resolved.msatPerCredit ?? 0, updatedAtMs: Date.now() };
-  await applyMarketOrder(order);
-  return { ok: true, order };
-});
-
-app.get("/economy/market/orders/:accountId", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const orders = ["buy", "sell"].map((side) => marketOrders.get(`${params.accountId}:${side}`)).filter(Boolean);
-  const owned = (await pgStore?.listAgentOwnershipByAccount(params.accountId)) ?? [];
-  const agents = [...new Set([...owned.map((o) => o.agentId), params.accountId])]
-    .map((agentId) => ({ agentId, capability: agentCapabilities.get(agentId), ask: orderBook.askFor(agentId) }))
-    .filter((a) => a.capability)
-    .map((a) => {
-      // tier / weight are what the agent is paid at (the verified grant); claimedTier is what it reported.
-      const eff = effectiveHardware(a.agentId, a.capability);
-      return {
-        agentId: a.agentId,
-        computeClass: eff?.computeClass ?? a.capability!.computeClass,
-        tier: eff?.tier ?? null,
-        creditsPerSecond: eff?.creditsPerSecond ?? 1,
-        claimedTier: a.capability!.hardwareClass?.tier ?? null,
-        verification: hardwareVerifier.get(a.agentId)?.status ?? "unverified",
-        reliability: hardwareVerifier.reliability(a.agentId) ?? null,
-        ask: a.ask?.msatPerCredit ?? null,
-        tracking: a.ask?.tracking ?? true
-      };
-    });
-  return { accountId: params.accountId, orders, agents };
-});
-
-/**
- * Compute class definitions (with the tier weight table) with the current oracle rate and
- * connected agents per class and per tier. `creditsPerSecond: 1` is the base tier, kept for
- * portal pages built before tiers existed.
- */
-app.get("/economy/market/classes", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const agentsByClass = new Map<string, number>();
-  const agentsByTier = new Map<string, number>();
-  /** Agents paid at the tier: verified there, or at a base tier with nothing to prove. */
-  const verifiedByTier = new Map<string, number>();
-  for (const [agentId, cap] of agentCapabilities) {
-    agentsByClass.set(cap.computeClass, (agentsByClass.get(cap.computeClass) ?? 0) + 1);
-    if (cap.hardwareClass) agentsByTier.set(cap.hardwareClass.tier, (agentsByTier.get(cap.hardwareClass.tier) ?? 0) + 1);
-    const v = hardwareVerifier.get(agentId);
-    if (v && (v.status === "verified" || v.status === "base")) verifiedByTier.set(v.granted.tier, (verifiedByTier.get(v.granted.tier) ?? 0) + 1);
-  }
-  return {
-    rateEpochId: mutable.latestRateEpoch?.epochId ?? null,
-    classes: COMPUTE_CLASS_IDS.map((id) => {
-      const spec = rateOracleConfig.computeClasses[id];
-      return {
-        ...spec,
-        creditsPerSecond: 1,
-        tiers: spec.tiers.map((t) => ({ ...t, agents: agentsByTier.get(t.id) ?? 0, verifiedAgents: verifiedByTier.get(t.id) ?? 0 })),
-        rate: mutable.latestRateEpoch?.classRates?.[id] ?? null,
-        referenceMsatPerCredit: orderBook.referenceFor(id),
-        agents: agentsByClass.get(id) ?? 0
-      };
-    })
-  };
-});
-
-/**
- * Hardware verification records (claimed vs granted tier, last measurement, rolling evidence score):
- * the seed of the published SLA / reputation score.
- */
-app.get("/economy/hardware/verifications", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  return { enabled: hardwareVerifier.config.enabled, records: hardwareVerifier.list() };
-});
-
-app.get("/economy/hardware/verifications/:agentId", async (req, reply) => {
-  if (!requireMeshOrPortalToken(req, reply)) return;
-  const params = z.object({ agentId: z.string().min(1).max(128) }).parse(req.params);
-  const record = hardwareVerifier.get(params.agentId);
-  if (!record) return reply.code(404).send({ error: "not_found" });
-  return { record };
-});
-
-/** Admin: force a recalibration now (e.g. after changing sources). Daily-move clamp still applies. */
-app.post("/economy/rates/recalibrate", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return;
-  try {
-    const epoch = await recalibrateRateEpoch();
-    return { ok: true, epoch };
-  } catch (err) {
-    return reply.code(502).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
-  }
-});
-
-app.get("/economy/credits/:accountId/quote", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const balance = pgStore ? await pgStore.creditBalance(params.accountId) : creditEngine.balance(params.accountId);
-  // The balance is in cSats: 1 cSat = 1 sat of prepaid compute.
-  return {
-    accountId: params.accountId,
-    credits: Number(balance.toFixed(3)),
-    cSats: Number(balance.toFixed(3)),
-    satsPerCredit: 1,
-    msatPerCredit: 1000,
-    estimatedSats: Math.floor(balance),
-    quotedAtMs: Date.now()
-  };
-});
-
-app.get("/economy/price/quote", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const query = z
-    .object({
-      resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
-      cpuCapacity: z.coerce.number().nonnegative().default(Math.max(1, queue.status().agents)),
-      gpuCapacity: z.coerce.number().nonnegative().default(0),
-      queuedTasks: z.coerce.number().nonnegative().default(queue.status().queued),
-      activeAgents: z.coerce.number().nonnegative().default(queue.status().agents)
-    })
-    .parse(req.query);
-  const inputs = {
-    cpuCapacity: query.cpuCapacity,
-    gpuCapacity: query.gpuCapacity,
-    queuedTasks: query.queuedTasks,
-    activeAgents: query.activeAgents
-  };
-  const computed = computeDynamicPricePerComputeUnitSats(query.resourceClass, inputs);
-  // #53: signed over the inputs and time so the asking coordinator can count it toward a quorum.
-  const issuedAtMs = Date.now();
-  const fields = { coordinatorId: identity.peerId, resourceClass: query.resourceClass, pricePerComputeUnitSats: computed, inputs, issuedAtMs };
-  return {
-    coordinatorId: identity.peerId,
-    resourceClass: query.resourceClass,
-    pricePerComputeUnitSats: computed,
-    issuedAtMs,
-    reputationWeight: peerScore.get(identity.peerId) ?? 120,
-    signature: signPriceQuote(fields, coordinatorKeys.privateKeyPem)
-  };
-});
-
-app.post("/economy/price/propose", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator: sets this coordinator's price epoch
-  const body = z
-    .object({
-      coordinatorId: z.string(),
-      cpuCapacity: z.number().nonnegative(),
-      gpuCapacity: z.number().nonnegative(),
-      queuedTasks: z.number().nonnegative(),
-      activeAgents: z.number().nonnegative()
-    })
-    .parse(req.body);
-  if (!isApprovedCoordinator(body.coordinatorId)) {
-    return reply.code(403).send({ error: "coordinator_not_approved" });
-  }
-  const now = Date.now();
-  const resources: ResourceClass[] = ["cpu", "gpu"];
-  const proposed = new Map<ResourceClass, number>();
-  // #53: an epoch outside the configured band, or moving more than the max step, is rejected whole.
-  for (const resourceClass of resources) {
-    const price = computeDynamicPricePerComputeUnitSats(resourceClass, body);
-    const check = checkPriceEpoch(price, previousPriceEpochSats(resourceClass), PRICE_EPOCH_BOUNDS[resourceClass]);
-    if (!check.ok) {
-      return reply.code(422).send({ error: "price_out_of_bounds", resourceClass, reason: check.reason, proposed: price, previous: previousPriceEpochSats(resourceClass), bounds: PRICE_EPOCH_BOUNDS[resourceClass] });
-    }
-    proposed.set(resourceClass, price);
-  }
-  const created: PriceEpochRecord[] = [];
-  for (const resourceClass of resources) {
-    const pricePerComputeUnitSats = proposed.get(resourceClass)!;
-    const payload = JSON.stringify({
-      resourceClass,
-      pricePerComputeUnitSats,
-      coordinatorId: identity.peerId,
-      createdAtMs: now
-    });
-    const epoch: PriceEpochRecord = {
-      epochId: randomUUID(),
-      coordinatorId: identity.peerId,
-      resourceClass,
-      pricePerComputeUnitSats,
-      supplyIndex: resourceClass === "gpu" ? body.gpuCapacity : body.cpuCapacity,
-      demandIndex: body.queuedTasks + body.activeAgents,
-      negotiatedWith: [body.coordinatorId],
-      signature: signPayload(payload, coordinatorKeys.privateKeyPem),
-      createdAtMs: now
-    };
-    latestPriceEpochByResource.set(resourceClass, epoch);
-    await pgStore?.upsertPriceEpoch(epoch);
-    created.push(epoch);
-  }
-  return { ok: true, epochs: created };
-});
-
-app.post("/economy/price/consensus", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator: sets this coordinator's price epoch
-  const body = z
-    .object({
-      cpuCapacity: z.number().nonnegative(),
-      gpuCapacity: z.number().nonnegative(),
-      queuedTasks: z.number().nonnegative(),
-      activeAgents: z.number().nonnegative()
-    })
-    .parse(req.body);
-  // #53: only coordinators on MESH_PEER_ALLOWLIST, presenting the allowlisted key, can sign a
-  // quote that counts; a round needs a quorum of them and the result is bounded.
-  const peers = mesh
-    .listPeers()
-    .filter((p) => isApprovedCoordinator(p.peerId) && isAllowlistedKey(MESH_PEER_ALLOWLIST, p.peerId, p.publicKeyPem));
-  const quorum = priceConsensusQuorum(MESH_PEER_ALLOWLIST.keys(), identity.peerId, PRICE_CONSENSUS_QUORUM_OVERRIDE);
-  const inputs = {
-    cpuCapacity: body.cpuCapacity,
-    gpuCapacity: body.gpuCapacity,
-    queuedTasks: body.queuedTasks,
-    activeAgents: body.activeAgents
-  };
-
-  const negotiate = async (resourceClass: ResourceClass) => {
-    const localPrice = computeDynamicPricePerComputeUnitSats(resourceClass, inputs);
-    const quotes: Array<{ coordinatorId: string; value: number }> = [{ coordinatorId: identity.peerId, value: localPrice }];
-    const rejected: Array<{ coordinatorId: string; reason: string }> = [];
-    await Promise.all(
-      peers.map(async (peer) => {
-        try {
-          const url = new URL(`${peer.coordinatorUrl}/economy/price/quote`);
-          url.searchParams.set("resourceClass", resourceClass);
-          url.searchParams.set("cpuCapacity", String(inputs.cpuCapacity));
-          url.searchParams.set("gpuCapacity", String(inputs.gpuCapacity));
-          url.searchParams.set("queuedTasks", String(inputs.queuedTasks));
-          url.searchParams.set("activeAgents", String(inputs.activeAgents));
-          const res = await request(url.toString(), {
-            method: "GET",
-            headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
-          });
-          if (res.statusCode < 200 || res.statusCode >= 300) return;
-          const quote = (await res.body.json()) as {
-            coordinatorId?: string;
-            resourceClass?: ResourceClass;
-            pricePerComputeUnitSats?: number;
-            issuedAtMs?: number;
-            signature?: string;
-          };
-          const verdict = verifyPriceQuote({
-            quote,
-            expectedCoordinatorId: peer.peerId,
-            resourceClass,
-            inputs,
-            publicKeyPem: peer.publicKeyPem,
-            nowMs: Date.now(),
-            maxSkewMs: PEER_SIGNATURE_MAX_SKEW_MS
-          });
-          if (!verdict.ok) {
-            rejected.push({ coordinatorId: peer.peerId, reason: verdict.reason });
-            return;
-          }
-          quotes.push({ coordinatorId: peer.peerId, value: quote.pricePerComputeUnitSats! });
-        } catch {
-          return;
-        }
-      })
-    );
-    const outcome = resolvePriceConsensus({
-      quotes,
-      quorum,
-      previous: previousPriceEpochSats(resourceClass),
-      bounds: PRICE_EPOCH_BOUNDS[resourceClass]
-    });
-    return { resourceClass, outcome, quotes, rejected };
-  };
-
-  const rounds = await Promise.all([negotiate("cpu"), negotiate("gpu")]);
-  const failed = rounds.find((r) => !r.outcome.ok);
-  if (failed) {
-    return reply.code(409).send({ error: "price_quorum_not_met", resourceClass: failed.resourceClass, outcome: failed.outcome, rejected: failed.rejected });
-  }
-  const now = Date.now();
-  const result: Record<string, unknown> = {};
-  for (const round of rounds) {
-    if (!round.outcome.ok) continue;
-    const { resourceClass } = round;
-    const finalPrice = round.outcome.price;
-    const payload = JSON.stringify({
-      resourceClass,
-      pricePerComputeUnitSats: finalPrice,
-      coordinatorId: identity.peerId,
-      createdAtMs: now
-    });
-    const epoch: PriceEpochRecord = {
-      epochId: randomUUID(),
-      coordinatorId: identity.peerId,
-      resourceClass,
-      pricePerComputeUnitSats: finalPrice,
-      supplyIndex: resourceClass === "gpu" ? inputs.gpuCapacity : inputs.cpuCapacity,
-      demandIndex: inputs.queuedTasks + inputs.activeAgents,
-      negotiatedWith: round.outcome.signers,
-      signature: signPayload(payload, coordinatorKeys.privateKeyPem),
-      createdAtMs: now
-    };
-    latestPriceEpochByResource.set(resourceClass, epoch);
-    await pgStore?.upsertPriceEpoch(epoch);
-    result[resourceClass] = { epoch, quotes: round.quotes, rejected: round.rejected, medianPrice: round.outcome.medianPrice, clamped: round.outcome.clamped };
-  }
-  return { ok: true, quorum, ...result };
-});
-
-app.post("/economy/payments/intents", async (req, reply) => {
-  // Operator: an invoice for any named account. Owners buy through /account/buy (callerAccount).
-  if (!authorizeAdmin(req, reply)) return;
-  const body = z
-    .object({
-      accountId: z.string(),
-      walletType: z.enum(["lightning", "onchain"]).default("lightning"),
-      amountSats: z.number().int().positive().max(100000000)
-    })
-    .parse(req.body);
-  return { ok: true, intent: await createPaymentIntent(body.accountId, body.amountSats, body.walletType as WalletType) };
-});
-
-/** Buy cSats for the signing agent's owner: returns the invoice to pay. */
-app.post("/account/buy", async (req, reply) => {
-  const { amountSats, accountId: requested } = z.object({ amountSats: z.number().int().min(100).max(1_000_000), accountId: z.string().max(200).optional() }).parse(req.body);
-  const caller = await callerAccount(req, "/account/buy", requested);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  if (!ECONOMY_PAYMENTS_ENABLED) return reply.code(503).send({ error: "payments_disabled" });
-  const accountId = caller.accountId;
-  const intent = await createPaymentIntent(accountId, amountSats);
-  return reply.send({ intentId: intent.intentId, invoice: intent.invoiceRef, amountSats: intent.amountSats, cSats: intent.quotedCredits, feeSats: intent.coordinatorFeeSats, network: intent.network, expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000) });
-});
-
-/** State of one of the owner's purchases; checks with the Lightning node while it is unpaid. */
-app.post("/account/intent", async (req, reply) => {
-  const { intentId, accountId: requested } = z.object({ intentId: z.string().min(1).max(100), accountId: z.string().max(200).optional() }).parse(req.body);
-  const caller = await callerAccount(req, "/account/intent", requested);
-  if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
-  const accountId = caller.accountId;
-  const intent = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? undefined;
-  if (!intent || intent.accountId !== accountId) return reply.code(404).send({ error: "unknown_intent" });
-  if (intent.status === "created") await reconcileIntent(intent);
-  const now = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? intent;
-  return reply.send({ intentId, status: now.status, cSats: now.quotedCredits });
-});
-
-app.get("/economy/payments/intents/:intentId", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const params = z.object({ intentId: z.string() }).parse(req.params);
-  const inMemory = paymentIntents.get(params.intentId);
-  const fromDb = await pgStore?.getPaymentIntent(params.intentId);
-  const intent = inMemory ?? fromDb;
-  if (!intent) return reply.code(404).send({ error: "intent_not_found" });
-  return { intent };
-});
-
-// #42: admin-only; caller-supplied txRef is ignored and the node is always asked.
-app.post("/economy/payments/intents/:intentId/confirm", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return;
-  const params = z.object({ intentId: z.string() }).parse(req.params);
-  const intent = paymentIntents.get(params.intentId) ?? (await pgStore?.getPaymentIntent(params.intentId));
-  if (!intent) return reply.code(404).send({ error: "intent_not_found" });
-  if (intent.status === "settled") return { ok: true, intent };
-  if (intent.status === "expired") return reply.code(409).send({ error: "intent_expired" });
-  const outcome = await settleIfPaid(intent);
-  if (outcome.status === "unpaid") return reply.code(402).send({ error: "invoice_unpaid", status: "unpaid" });
-  return { ok: true, status: outcome.status, intent: outcome.intent };
-});
-
-// #42: the webhook body is a hint only. Authenticity is an HMAC of the raw body
-// (`x-payment-signature: sha256=<hex>`); settlement is decided by the Lightning node.
-app.register(async (scope) => {
-  scope.removeContentTypeParser("application/json");
-  scope.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
-    (req as unknown as { rawBody?: string }).rawBody = body as string;
-    try {
-      done(null, (body as string).length > 0 ? JSON.parse(body as string) : {});
-    } catch (error) {
-      (error as { statusCode?: number }).statusCode = 400;
-      done(error as Error, undefined);
-    }
-  });
-  scope.post("/economy/payments/webhook", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-    if (!PAYMENT_WEBHOOK_SECRET) {
-      return reply.code(503).send({ error: "payment_webhook_not_configured" });
-    }
-    const rawBody = (req as unknown as { rawBody?: string }).rawBody;
-    const signature = (req.headers as Record<string, unknown>)["x-payment-signature"];
-    if (!verifyPaymentWebhookSignature(rawBody, signature, PAYMENT_WEBHOOK_SECRET)) {
-      return reply.code(401).send({ error: "webhook_signature_required" });
-    }
-    const body = z.object({ invoiceRef: z.string().min(8) }).passthrough().parse(req.body);
-    const match =
-      [...paymentIntents.values()].find((intent) => intent.invoiceRef === body.invoiceRef) ??
-      (await (async () => {
-        const pending = await pgStore?.listPendingPaymentIntents(500);
-        return (pending ?? []).find((intent) => intent.invoiceRef === body.invoiceRef);
-      })());
-    if (!match) return reply.code(404).send({ error: "intent_not_found" });
-    if (match.status === "settled") return reply.send({ ok: true, alreadySettled: true });
-    const outcome = await settleIfPaid(match);
-    if (outcome.status === "unpaid") return reply.send({ ok: true, ignored: true, status: "unpaid" });
-    if (outcome.status === "already") return reply.send({ ok: true, alreadySettled: true });
-    return reply.send({ ok: true, intent: outcome.intent });
-  });
-});
-
-app.post("/economy/payments/reconcile", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator
-  const pending = pgStore ? await pgStore.listPendingPaymentIntents(500) : [...paymentIntents.values()];
-  let settledCount = 0;
-  let expiredCount = 0;
-  for (const intent of pending) {
-    if (intent.status !== "created") continue;
-    const result = await reconcileIntent(intent);
-    if (result === "settled") settledCount += 1;
-    if (result === "expired") expiredCount += 1;
-  }
-  return reply.send({ ok: true, scanned: pending.length, settledCount, expiredCount });
-});
-
-app.post("/economy/treasury/policies", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator: approvedCoordinatorIds drives the issuance quorum
-  const body = z
-    .object({
-      treasuryAccountId: z.string().min(3),
-      multisigDescriptor: z.string().min(12),
-      quorumThreshold: z.number().int().positive(),
-      totalCustodians: z.number().int().positive(),
-      approvedCoordinatorIds: z.array(z.string()).default([]),
-      keyRotationDays: z.number().int().positive().default(90),
-      requestedBy: z.string().default(identity.peerId)
-    })
-    .parse(req.body);
-  if (body.quorumThreshold > body.totalCustodians) {
-    return reply.code(400).send({ error: "invalid_quorum_threshold" });
-  }
-  const created = createTreasuryPolicy(body);
-  mutable.treasuryPolicy = created;
-  await pgStore?.upsertTreasuryPolicy(created);
-  const event = signKeyCustodyEvent({
-    policyId: created.policyId,
-    actorId: body.requestedBy,
-    action: "create_policy",
-    details: `treasury=${created.treasuryAccountId};quorum=${created.quorumThreshold}/${created.totalCustodians}`,
-    privateKeyPem: coordinatorKeys.privateKeyPem
-  });
-  keyCustodyEvents.unshift(event);
-  await pgStore?.persistKeyCustodyEvent(event);
-  return reply.send({ ok: true, policy: created, event });
-});
-
-app.post("/economy/treasury/policies/:policyId/activate", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator
-  const params = z.object({ policyId: z.string() }).parse(req.params);
-  const body = z.object({ requestedBy: z.string().default(identity.peerId) }).parse(req.body);
-  if (!mutable.treasuryPolicy || mutable.treasuryPolicy.policyId !== params.policyId) {
-    return reply.code(404).send({ error: "policy_not_found" });
-  }
-  mutable.treasuryPolicy = {
-    ...mutable.treasuryPolicy,
-    status: "active",
-    updatedAtMs: Date.now()
-  };
-  await pgStore?.upsertTreasuryPolicy(mutable.treasuryPolicy);
-  const event = signKeyCustodyEvent({
-    policyId: mutable.treasuryPolicy.policyId,
-    actorId: body.requestedBy,
-    action: "activate_policy",
-    details: `policy_activated`,
-    privateKeyPem: coordinatorKeys.privateKeyPem
-  });
-  keyCustodyEvents.unshift(event);
-  await pgStore?.persistKeyCustodyEvent(event);
-  return reply.send({ ok: true, policy: mutable.treasuryPolicy, event });
-});
-
-app.get("/economy/treasury", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const policy = mutable.treasuryPolicy ?? (await pgStore?.latestTreasuryPolicy()) ?? null;
-  const events =
-    policy != null
-      ? (await pgStore?.listKeyCustodyEvents(policy.policyId, 100)) ?? keyCustodyEvents.slice(0, 100)
-      : [];
-  return reply.send({ policy, events });
-});
-
-app.post("/economy/issuance/recalculate", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator; the issuance timer runs it automatically
-  const result = await runIssuanceTick();
-  return { ok: true, epoch: result.epoch ?? null, allocations: result.allocations.length };
-});
-
-app.get("/economy/issuance/current", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const epoch = await pgStore?.latestIssuanceEpoch(false, ISSUANCE_RECALC_MS);
-  if (!epoch || !pgStore) return { epoch: null, allocations: [] };
-  const allocations = await pgStore.listIssuanceAllocations(epoch.issuanceEpochId);
-  return { epoch, allocations };
-});
-
-app.get("/economy/issuance/history", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(48) }).parse(req.query);
-  const epochs = (await pgStore?.listIssuanceEpochs(query.limit, ISSUANCE_RECALC_MS)) ?? [];
-  return { epochs };
-});
-
-app.get("/economy/issuance/rolling/:accountId", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  if (!pgStore) return { accountId: null, shares: [] };
-  const params = z.object({ accountId: z.string().min(1) }).parse(req.params);
-  const now = Date.now();
-  const shares = await pgStore.rollingContributionShares(now - ISSUANCE_WINDOW_MS, now);
-  const account = shares.find((item) => item.accountId === params.accountId) ?? null;
-  return { accountId: params.accountId, windowMs: ISSUANCE_WINDOW_MS, account };
-});
-
-app.post("/economy/issuance/quorum/vote", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return; // operator: the vote is cast with this coordinator's identity
-  const body = z
-    .object({
-      epochId: z.string(),
-      vote: z.enum(["approve", "reject"])
-    })
-    .parse(req.body);
-  const record = await appendQuorumRecord({
-    recordType: "issuance_vote",
-    epochId: body.epochId,
-    payload: {
-      vote: body.vote,
-      voterCoordinatorId: identity.peerId
-    }
-  });
-  const store = pgStore;
-  const epoch = await store?.getIssuanceEpoch(body.epochId);
-  if (epoch && store) {
-    await store.withIssuanceLock(() => maybeFinalizeIssuanceEpoch(epoch));
-  }
-  return { ok: true, record };
-});
-
-app.get("/economy/issuance/quorum/:epochId", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const params = z.object({ epochId: z.string() }).parse(req.params);
-  const records = (await pgStore?.listQuorumLedgerByEpoch(params.epochId)) ?? [];
-  return { epochId: params.epochId, records };
-});
-
-// #100: each call can spend real sats, so manual anchor triggers need the admin token
-// (a mesh token is not enough). The #46 per-checkpoint lock and daily budget still apply.
-app.post("/economy/issuance/anchor", async (req, reply) => {
-  if (!authorizeAdmin(req, reply)) return;
-  const anchor = await maybeAnchorLatestFinalizedEpoch();
-  return { ok: true, anchoring: currentAnchoringStatus(), anchor: anchor ? describeAnchor(anchor, ANCHOR_REQUIRED_CONFIRMATIONS) : null };
-});
-
-app.get("/economy/issuance/anchors", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  const anchors = (await pgStore?.listAnchors(50)) ?? [];
-  // #46: read-time view; legacy simulated rows are labelled, not returned as "anchored".
-  return { anchoring: currentAnchoringStatus(), anchors: anchors.map((a) => describeAnchor(a, ANCHOR_REQUIRED_CONFIRMATIONS)) };
-});
-
-app.post("/economy/issuance/reconcile", async (req, reply) => {
-  if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
-  if (!pgStore) return { ok: true, scannedIntents: 0, payoutEvents: 0, drift: 0 };
-  const intents = [...paymentIntents.values()];
-  const payoutEvents = await pgStore.listIssuancePayoutEvents(undefined, 2000);
-  const eventIntentIds = new Set(payoutEvents.map((item) => item.sourceIntentId).filter(Boolean));
-  const settledIntentCount = intents.filter((item) => item.status === "settled").length;
-  const drift = intents.filter((item) => item.status === "settled" && !eventIntentIds.has(item.intentId)).length;
-  return { ok: true, scannedIntents: intents.length, settledIntentCount, payoutEvents: payoutEvents.length, drift };
-});
+registerEconomyRoutes(app);
+registerMarketRoutes(app);
+registerPricingRoutes(app);
+registerPaymentRoutes(app);
+registerIssuanceRoutes(app);
 
 // `fingerprint` (sha256 of the SPKI DER) is what operators list in TRUSTED_COORDINATOR_KEYS and
 // MESH_PEER_ALLOWLIST; `legacyFingerprints` are the PEM-text forms older agent builds compare.
