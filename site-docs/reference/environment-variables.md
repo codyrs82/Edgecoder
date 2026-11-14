@@ -199,7 +199,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 
 | Variable | Default | Description |
 |---|---|---|
-| `BITCOIN_ANCHOR_PROVIDER` | `mock` | Anchoring provider: `anchor-proxy`, `bitcoind`, or `mock` (dev only). `blockstream` is rejected because it can't broadcast (#102). |
+| `BITCOIN_ANCHOR_PROVIDER` | unset | Anchoring provider: `anchor-proxy`, `bitcoind`, or `mock` (dev only; its rows are reported as simulated). Unset means anchoring is disabled and nothing is recorded as anchored. `blockstream` is rejected because it can't broadcast (#102). |
 | `BITCOIN_ANCHOR_CONFIRMATIONS` | `6` | Confirmations before an anchor counts as anchored. |
 | `BITCOIN_ANCHOR_DAILY_BUDGET_SATS` | `200000` | Daily anchoring budget: refuse a broadcast when (broadcasts in 24h + 1) × `BITCOIN_ANCHOR_MAX_FEE_SATS` exceeds it. |
 | `BITCOIN_ANCHOR_MAX_FEE_SATS` | `20000` | Absolute fee cap per anchor tx. |
@@ -211,8 +211,11 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `BITCOIND_RPC_USER` | — | RPC username. |
 | `BITCOIND_RPC_PASSWORD` | — | RPC password. |
 | `BITCOIND_WALLET_NAME` | — | Wallet name on the Bitcoin node. |
-| `ANCHOR_CONFIRMATION_POLL_MS` | `60000` | Poll interval for pending anchors (ms). |
-| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Block confirmations before promoting anchor status. |
+| `ANCHOR_CONFIRM_POLL_MS` | `600000` | Poll interval for anchor confirmations (ms, minimum 30000). |
+| `ANCHOR_REORG_WATCH_CONFIRMATIONS` | `100` | Anchored rows are re-verified for reorgs until they are this deep. |
+| `ANCHOR_POLL_RETRY_BASE_MS` | `30000` | First retry delay after a failed confirmation poll; doubles per failure. |
+| `ANCHOR_POLL_MAX_BACKOFF_MS` | `3600000` | Cap on the confirmation poll retry delay. |
+| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Extra floor for stats hard finality; the larger of this and `BITCOIN_ANCHOR_CONFIRMATIONS` applies. |
 | `ANCHOR_PROXY_PORT` | `4310` | Listen port for the anchor proxy service. |
 | `MAX_BROADCASTS_PER_MINUTE` | `10` | Rate limit for OP_RETURN broadcasts (anchor proxy). |
 

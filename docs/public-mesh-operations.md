@@ -255,11 +255,11 @@ Use staged rollout to avoid operational regressions while enabling decentralized
 ### Finality policy and anchor verification
 
 - Soft finality:
-  - `soft_finalized` means the checkpoint is quorum-committed by coordinators.
+  - `soft_finalized` means the checkpoint is quorum-committed by coordinators. With anchoring disabled (no `BITCOIN_ANCHOR_PROVIDER`, the default) this is the final state.
 - Anchor transition:
-  - `anchored_pending` means quorum finalized but Bitcoin anchor confirmation is not yet treated as complete.
+  - `anchored_pending` means quorum finalized and either a real anchor tx is waiting for confirmations or anchoring is enabled and the tx has not been broadcast yet.
 - Hard finality:
-  - `anchored_confirmed` means checkpoint anchor meets the required confirmation threshold.
+  - `anchored_confirmed` means a real anchor tx has `BITCOIN_ANCHOR_CONFIRMATIONS` confirmations (default 6). A reorg moves it back to `anchored_pending`.
 - Stale state:
   - `stale_federation` means coordinators disagree on checkpoint/finality and operators should treat stats as advisory.
 
@@ -267,6 +267,8 @@ Verifier and anchor APIs on coordinator:
 
 - `POST /stats/anchors/anchor-latest` (admin token, `x-admin-token`; it spends sats): creates/updates the latest stats checkpoint anchor record.
 - `GET /stats/anchors/verify?checkpointHash=<hash>` (mesh-auth or portal service token): verifies whether checkpoint has reached configured hard-finality threshold.
+
+Finality and anchor responses carry an `anchoring` block (`mode`: `disabled` | `simulated` | `enabled`, `provider`, `network`, `requiredConfirmations`, `detail`, and the poll loop's `tracker` state). Anchor rows are returned as views: `status` is `broadcasting`, `pending`, `anchored`, `failed`, `needs_admin` or `simulated`. A `simulated` row (written by the old simulation or the mock provider) has no `txRef`, 0 confirmations and never verifies; what was stored is in `simulatedTxRef`.
 
 ## Abuse Blacklist Coordination
 
