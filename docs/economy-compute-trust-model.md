@@ -53,7 +53,7 @@ Also open: `coordinator_earnings_projection.total_credits` is still `DOUBLE PREC
 
 Leftovers from the old wallet model, none of which generate or store keys:
 
-- `WALLET_SECRET_PEPPER` is still an optional key in `src/portal/config.ts:50` and nothing reads it. `site-docs/reference/environment-variables.md` (lines 224, 257, 410) and `site-docs/operations/role-based-runbooks.md:118` still describe it as required and in use; `docs/DEPLOYMENT.md:545` is correct ("unused").
+- `WALLET_SECRET_PEPPER` is still an optional key in `src/portal/config.ts` and nothing reads it; the docs list it as unused.
 - The legacy `seed_phrase_hash` column (`src/portal/store.ts:173`).
 - Unused seed-phrase fields and views in the iOS app (`ios/EdgeCoderIOS/EdgeCoderIOS/Core/Models.swift:30`, `Auth/AuthView.swift`, `Auth/AuthViewModel.swift`).
 

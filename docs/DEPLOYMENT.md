@@ -93,7 +93,7 @@ fly secrets set -a <seed app> \
 # Portal
 fly secrets set -a <portal app> \
   PORTAL_SERVICE_TOKEN="<same as seeds>" CONTROL_PLANE_ADMIN_TOKEN="<ADMIN_API_TOKEN of the seeds>" \
-  WALLET_SECRET_PEPPER="<secret>" RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@<your-portal-domain>" \
+  RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@<your-portal-domain>" \
   PORTAL_DATABASE_URL="postgresql://..." \
   SYSTEM_ADMIN_EMAILS="admin@example.com,ops@example.com" \
   OAUTH_GOOGLE_CLIENT_ID="<id>" OAUTH_GOOGLE_CLIENT_SECRET="<secret>" \

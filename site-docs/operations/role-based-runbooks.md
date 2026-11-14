@@ -115,15 +115,14 @@ fly secrets list -c deploy/fly/fly.portal.toml   # digest + created date changed
 
 | Order | Secret | Apps | Notes |
 | --- | --- | --- | --- |
-| 1 | `WALLET_SECRET_PEPPER` | portal | Prerequisite: `WALLET_SECRET_PEPPER_PREVIOUS` is not implemented yet. The pepper derives wallet secret refs, so a bare swap breaks every existing wallet. Before rotating, ship a verify-with-either migration (read `WALLET_SECRET_PEPPER_PREVIOUS`, verify against new then old, re-derive on success), set both, then unset `_PREVIOUS` once every active wallet has re-derived. |
-| 2 | `ADMIN_API_TOKEN` | control plane, seed nodes | Update the operator tooling that calls `/admin/*` in the same change. |
-| 3 | `MESH_AUTH_TOKEN` / `COORDINATOR_MESH_TOKEN` | seed nodes, control plane, every worker | All coordinators and workers must move together; a mixed mesh partitions. Roll seeds first, then workers. |
-| 4 | `PORTAL_SERVICE_TOKEN` | portal, seed nodes, control plane | Same value on both sides of every portal to coordinator call. |
-| 5 | OAuth client secrets (`OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_MICROSOFT_CLIENT_SECRET`) | portal | Create the new secret in the provider console, set it, then delete the old one in the console. |
-| 6 | `RESEND_API_KEY` | portal | Create a new key in Resend, set it, revoke the old one. |
-| 7 | `GODADDY_API_KEY` / `GODADDY_API_SECRET` | portal | Issue a new key pair in the GoDaddy developer portal, set both, delete the old pair. Used only by `src/portal/dns-manager.ts`. |
-| 8 | `FLY_API_TOKEN` | GitHub Actions secret (`deploy-fly.yml`) | `fly tokens create deploy -x 999999h`, update the Actions secret, revoke the old token with `fly tokens revoke`. |
-| 9 | LND macaroons (`LND_MACAROON_HEX`) / `CLN_API_TOKEN` | seed nodes | Bake a new invoice-scoped macaroon (`lncli bakemacaroon`), set it, revoke the old one with `lncli deletemacaroonid`. Never use the admin macaroon. |
+| 1 | `ADMIN_API_TOKEN` | control plane, seed nodes | Update the operator tooling that calls `/admin/*` in the same change. |
+| 2 | `MESH_AUTH_TOKEN` / `COORDINATOR_MESH_TOKEN` | seed nodes, control plane, every worker | All coordinators and workers must move together; a mixed mesh partitions. Roll seeds first, then workers. |
+| 3 | `PORTAL_SERVICE_TOKEN` | portal, seed nodes, control plane | Same value on both sides of every portal to coordinator call. |
+| 4 | OAuth client secrets (`OAUTH_GOOGLE_CLIENT_SECRET`, `OAUTH_MICROSOFT_CLIENT_SECRET`) | portal | Create the new secret in the provider console, set it, then delete the old one in the console. |
+| 5 | `RESEND_API_KEY` | portal | Create a new key in Resend, set it, revoke the old one. |
+| 6 | `GODADDY_API_KEY` / `GODADDY_API_SECRET` | portal | Issue a new key pair in the GoDaddy developer portal, set both, delete the old pair. Used only by `src/portal/dns-manager.ts`. |
+| 7 | `FLY_API_TOKEN` | GitHub Actions secret (`deploy-fly.yml`) | `fly tokens create deploy -x 999999h`, update the Actions secret, revoke the old token with `fly tokens revoke`. |
+| 8 | LND macaroons (`LND_MACAROON_HEX`) / `CLN_API_TOKEN` | seed nodes | Bake a new invoice-scoped macaroon (`lncli bakemacaroon`), set it, revoke the old one with `lncli deletemacaroonid`. Never use the admin macaroon. |
 
 After each step: watch the app logs for auth failures for a few minutes, run the
 relevant smoke check (portal login, a coordinator `/health`, a test invoice),
