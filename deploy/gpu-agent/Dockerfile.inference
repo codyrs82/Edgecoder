@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+# Inference-only GPU agent for container hosts such as Vast.ai, where Docker cannot run inside
+# the container, so no task code can be sandboxed. The agent serves model inference only:
+# SANDBOX_MODE=none and AGENT_INFERENCE_ONLY=1 (reserved; the coordinator/worker side that reads it
+# is not in this image's code yet, so today the agent registers and heartbeats but pulls no work).
+# Runs as the non-root `node` user. Runbook: deploy/gpu-agent/README.md.
+#
+# GPU: Ollama's linux-amd64 release archive ships its own CUDA runtime libraries (lib/ollama/cuda_v12
+# and cuda_v13: libcudart, libcublas, libcublasLt). The driver library (libcuda.so) and nvidia-smi
+# come from the host through the NVIDIA container runtime (`docker run --gpus all`), which the
+# NVIDIA_* variables below request, as Ollama's own image does. No CUDA base image is needed.
+#
+# Build from the repo root (amd64 only: the pinned archive and checksum are for linux-amd64):
+#   docker build --platform linux/amd64 -f deploy/gpu-agent/Dockerfile.inference -t edgecoder-agent-inference .
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ libbluetooth-dev libudev-dev && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+COPY scripts/copy-portal-assets.mjs ./scripts/
+COPY packages/tokens/dist/tokens.css ./packages/tokens/dist/
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ollama
+# Same pinned release as deploy/docker/Dockerfile.agent; bump both values together (sha256 from the
+# release's sha256sum.txt). The archive is checked before it is unpacked.
+ARG OLLAMA_VERSION=0.40.12
+ARG OLLAMA_SHA256=f8adcb7e08d272283a4bd3abc18cf581afe37e64b2aee04fda4f407f215485ba
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl zstd && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSLo /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+ && echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
+ && mkdir -p /opt/ollama && tar --zstd -C /opt/ollama -xf /tmp/ollama.tar.zst && rm /tmp/ollama.tar.zst
+
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+ENV NODE_ENV=production \
+    HOME=/data/home \
+    OLLAMA_MODELS=/data/ollama \
+    OLLAMA_HOST=http://127.0.0.1:11434 \
+    OLLAMA_MODEL=qwen3.5:9b \
+    LOCAL_MODEL_PROVIDER=ollama-local \
+    AGENT_MODE=swarm-only \
+    SANDBOX_MODE=none \
+    AGENT_INFERENCE_ONLY=1 \
+    EDGECODER_BLE=0 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini libbluetooth3 libudev1 && rm -rf /var/lib/apt/lists/*
+COPY --from=ollama /opt/ollama/ /usr/
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./
+COPY --chmod=0755 deploy/gpu-agent/inference-entrypoint.sh /usr/local/bin/inference-entrypoint.sh
+RUN mkdir -p /data/ollama /data/home && chown -R node:node /data
+# Models (several GB) and the agent's identity key live here; mount a volume to keep them.
+VOLUME ["/data"]
+USER node
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/inference-entrypoint.sh"]
+CMD ["node", "dist/cli/edgecoder.js", "agent"]

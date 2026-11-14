@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 // #9: static guards for the multi-stage images. The CI docker-build job checks the built images.
 const root = resolve(__dirname, "../..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
-const images = ["deploy/docker/Dockerfile.server", "deploy/docker/Dockerfile.agent"];
+const images = ["deploy/docker/Dockerfile.server", "deploy/docker/Dockerfile.agent", "deploy/gpu-agent/Dockerfile.inference"];
 
 describe("Docker images (#9)", () => {
   it.each(images)("%s is multi-stage, non-root, prod deps only, no tests/", (p) => {
@@ -23,12 +23,36 @@ describe("Docker images (#9)", () => {
     expect(read("deploy/docker/Dockerfile.server").replace(/^\s*#.*$/gm, "")).not.toMatch(/ollama|bluez|bluetooth/i);
   });
 
-  it("agent image pins and verifies Ollama (no curl | sh)", () => {
-    const df = read("deploy/docker/Dockerfile.agent");
-    expect(df).not.toMatch(/\|\s*sh\b/);
+  it.each(["deploy/docker/Dockerfile.agent", "deploy/gpu-agent/Dockerfile.inference"])("%s pins and verifies Ollama (no curl | sh)", (p) => {
+    const df = read(p);
+    expect(df).not.toMatch(/\|\s*(ba)?sh\b/);
     expect(df).toMatch(/ARG OLLAMA_VERSION=\d+\.\d+\.\d+/);
     expect(df).toMatch(/ARG OLLAMA_SHA256=[0-9a-f]{64}/);
+    // The archive is checked before it is unpacked.
     expect(df).toMatch(/sha256sum -c -/);
+    expect(df.indexOf("sha256sum -c -")).toBeLessThan(df.indexOf("tar --zstd"));
+  });
+
+  it("the inference image uses the agent image's Ollama pin", () => {
+    const pin = (p: string) => [...read(p).matchAll(/^ARG (OLLAMA_VERSION|OLLAMA_SHA256)=(\S+)$/gm)].map((m) => m[0]);
+    expect(pin("deploy/gpu-agent/Dockerfile.inference")).toEqual(pin("deploy/docker/Dockerfile.agent"));
+    expect(pin("deploy/docker/Dockerfile.agent")).toHaveLength(2);
+  });
+
+  it("the inference image is inference-only: no sandbox, reserved flag set, GPU requested from the runtime", () => {
+    const df = read("deploy/gpu-agent/Dockerfile.inference");
+    const runtime = df.slice(df.lastIndexOf("\nFROM "));
+    expect(runtime).toMatch(/\bSANDBOX_MODE=none\b/);
+    expect(runtime).toMatch(/\bAGENT_INFERENCE_ONLY=1\b/);
+    expect(runtime).toMatch(/\bLOCAL_MODEL_PROVIDER=ollama-local\b/);
+    expect(runtime).toMatch(/\bNVIDIA_DRIVER_CAPABILITIES=compute,utility\b/);
+    expect(runtime).not.toMatch(/docker\.io|docker-ce|\/var\/run\/docker\.sock/);
+    expect(existsSync(resolve(root, "deploy/gpu-agent/Dockerfile.inference.dockerignore"))).toBe(true);
+    for (const m of df.matchAll(/^COPY (?:--\S+ )*(deploy\/\S+) /gm)) expect(existsSync(resolve(root, m[1])), m[1]).toBe(true);
+    const entry = read("deploy/gpu-agent/inference-entrypoint.sh");
+    // It refuses a sandbox mode it cannot provide and never runs task code itself.
+    expect(entry).toMatch(/SANDBOX_MODE:-none\}" != none/);
+    expect(entry).not.toMatch(/\|\s*(ba)?sh\b/);
   });
 
   it("fly configs point at existing Dockerfiles", () => {

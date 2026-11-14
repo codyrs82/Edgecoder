@@ -1,0 +1,14 @@
+tests
+desktop
+ios
+site-docs
+docs
+assets
+node_modules
+dist
+.git
+.github
+*.md
+
+# local Fly bootstrap output (generated secrets)
+.fly-bootstrap/
