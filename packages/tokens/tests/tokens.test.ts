@@ -51,6 +51,15 @@ describe("@edgecoder/tokens (#23)", () => {
     expect(buildTheme(tokens)).toContain("--shadow-lg:");
   });
 
+  it("derived colours are mixed from two existing colour tokens", () => {
+    const css = buildCss(tokens);
+    for (const [k, v] of Object.entries<{ of: string; percent: number; into: string }>(tokens.derived)) {
+      expect(Object.keys(tokens.color)).toEqual(expect.arrayContaining([v.of, v.into]));
+      expect(css).toContain(`--${k}: color-mix(in srgb, var(--${v.of}) ${v.percent}%, var(--${v.into}));`);
+      expect(buildTheme(tokens)).toContain(`--color-${k}: var(--${k});`);
+    }
+  });
+
   it("committed dist/tokens.css and src/theme.css are up to date", () => {
     expect(norm(readFileSync(join(root, "dist/tokens.css"), "utf8"))).toBe(buildCss(tokens));
     expect(norm(readFileSync(join(root, "src/theme.css"), "utf8"))).toBe(buildTheme(tokens));

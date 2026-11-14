@@ -32,6 +32,7 @@
   --ok: var(--green);
   --warn: var(--yellow);
   --danger: var(--red);
+  --red-strong: color-mix(in srgb, var(--red) 80%, var(--text-primary));
 }
 :root {
   color-scheme: light;
