@@ -59,6 +59,9 @@ services:
       # NODE_ENV=production requires these (#5/#42/#43). PLACEHOLDERS for local scale tests only —
       # override via .env; never reuse these values anywhere real.
       - HOST=0.0.0.0
+      # Workers verify the coordinator signed the URL they dialled (src/trust/identity-challenge.ts);
+      # without this the seed signs no URL and every worker stops at challenge_coordinator_url_mismatch.
+      - COORDINATOR_PUBLIC_URL=http://seed-node:4301
       - MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN:-scale-test-placeholder-mesh-token}
       - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-scale-test-placeholder-admin-token}
       - PORTAL_SERVICE_URL=${PORTAL_SERVICE_URL:-http://portal:4310}

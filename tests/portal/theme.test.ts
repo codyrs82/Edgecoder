@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
@@ -155,7 +156,8 @@ describe("portal tokens and theme (#89)", () => {
   it("npm run build's copy step puts tokens.css where the built server reads it", () => {
     const out = mkdtempSync(join(tmpdir(), "portal-assets-"));
     try {
-      execFileSync(process.execPath, [new URL("scripts/copy-portal-assets.mjs", ROOT).pathname, out]);
+      // fileURLToPath, not .pathname: on Windows .pathname is "/D:/...", which node resolves to a doubled drive.
+      execFileSync(process.execPath, [fileURLToPath(new URL("scripts/copy-portal-assets.mjs", ROOT)), out]);
       expect(readFileSync(join(out, "tokens.css"), "utf8")).toBe(PACKAGE_TOKENS);
     } finally {
       rmSync(out, { recursive: true, force: true });
