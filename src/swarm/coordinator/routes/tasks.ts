@@ -116,7 +116,8 @@ import {
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
-import { inferenceStreams } from "./inference.js";
+import { inferenceStreams, retryInferenceElsewhere } from "./inference.js";
+import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { peerGrantAllowsClaim } from "../grants.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -591,6 +592,11 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // task id of an encrypted (envelope) task from the subtask id, so the requester's poll, which
     // matches on task id, never found the result.
     if (subtask && body.taskId !== subtask.taskId) body = { ...body, taskId: subtask.taskId };
+    // A model call that produced no text and no tool call failed, whatever the agent says (agents
+    // before this rule reported it as a success): it is not charged, and may be retried below.
+    if (subtask?.kind === "inference" && body.ok && !(body.output ?? "").trim() && !inferenceStreams.hasContent(body.subtaskId)) {
+      body = { ...body, ok: false, output: "", error: EMPTY_REPLY_ERROR };
+    }
     // Server-side duration: never more than measured since claim or the subtask timeout.
     const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
     // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
@@ -607,6 +613,12 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // BHV001 judges speed by the coordinator's clock (claim to receipt), never the reported duration.
       behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: serverMeasuredDurationMs(claim), kind: claim.subtask.kind });
       evaluateAndEnforce(body.agentId);
+    }
+
+    // A failed model call that reached the requester with nothing goes to another agent once
+    // (routes/inference.ts): no result is recorded and nothing is charged for this run.
+    if (!isPeerForward && subtask?.kind === "inference" && !body.ok && (await retryInferenceElsewhere(subtask, body.agentId, body.error))) {
+      return reply.send({ ok: true, retried: true });
     }
 
     // ── #50: sampled results are held for redundant verification ──

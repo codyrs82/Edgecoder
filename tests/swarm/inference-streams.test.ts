@@ -46,6 +46,26 @@ describe("InferenceStreams", () => {
     expect(await s.read("missing", 0, 0)).toBeNull();
   });
 
+  it("an empty final piece does not end the stream, and an empty stream can start again for another agent", () => {
+    const s = new InferenceStreams();
+    s.open("st", "t");
+    expect(s.append("st", 0, "", true)).toBe("ok");
+    expect(s.isDone("st")).toBe(false);
+    expect(s.hasContent("st")).toBe(false);
+    expect(s.reopenIfEmpty("st")).toBe(true);
+    expect(s.append("st", 0, "hi")).toBe("ok");
+    expect(s.append("st", 1, "", true)).toBe("ok");
+    expect(s.isDone("st")).toBe(true);
+    // Something reached the requester: never reopened.
+    expect(s.reopenIfEmpty("st")).toBe(false);
+    // An error ends an empty stream (the failed result decides whether it is retried).
+    s.open("e");
+    s.append("e", 0, "", true, "boom");
+    expect(s.isDone("e")).toBe(true);
+    expect(s.reopenIfEmpty("e")).toBe(true);
+    expect(s.isDone("e")).toBe(false);
+  });
+
   it("an idle poll times out without leaving listeners behind", async () => {
     const s = new InferenceStreams();
     s.open("st");
@@ -84,6 +104,43 @@ describe("runInferenceSubtask", () => {
     expect(posted.map((p) => p.delta).join("")).toBe("Hello, world");
     expect(posted.map((p) => p.seq)).toEqual(posted.map((_, i) => i));
     expect(posted.at(-1)?.done).toBe(true);
+  });
+
+  const st1 = { id: "s1", taskId: "t1", kind: "inference", timeoutMs: 5_000, requestedModel: "x", input: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) } as unknown as Subtask;
+  const listen = async (handler: Parameters<typeof createServer>[0]) => {
+    server = createServer(handler);
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  };
+
+  it("an empty reply (no text, no tool call) is a failure, with no final piece sent", async () => {
+    const host = await listen((_req, res) => {
+      res.write(JSON.stringify({ message: { content: "\n " } }) + "\n");
+      res.end(JSON.stringify({ done: true, eval_count: 1 }) + "\n");
+    });
+    const posted: Array<{ done: boolean }> = [];
+    const r = await runInferenceSubtask(st1, { agentId: "a1", ollamaHost: host, post: async (_p, b) => { posted.push(b as never); return {}; } });
+    expect(r).toMatchObject({ ok: false, output: "", error: "empty_reply" });
+    expect(posted.some((p) => p.done)).toBe(false);
+  });
+
+  it("a reply that is only a tool call is an answer", async () => {
+    const host = await listen((_req, res) => {
+      res.write(JSON.stringify({ message: { content: "", tool_calls: [{ function: { name: "read", arguments: {} } }] } }) + "\n");
+      res.end(JSON.stringify({ done: true }) + "\n");
+    });
+    const posted: Array<{ done: boolean; toolCalls?: unknown[] }> = [];
+    const r = await runInferenceSubtask(st1, { agentId: "a1", ollamaHost: host, post: async (_p, b) => { posted.push(b as never); return {}; } });
+    expect(r.ok).toBe(true);
+    expect(posted.at(-1)).toMatchObject({ done: true, toolCalls: [{ function: { name: "read" } }] });
+  });
+
+  it("a failure before any output sends no final piece (the call can be retried elsewhere)", async () => {
+    const host = await listen((_req, res) => { res.statusCode = 500; res.end(JSON.stringify({ error: "model failed to load" })); });
+    const posted: unknown[] = [];
+    const r = await runInferenceSubtask(st1, { agentId: "a1", ollamaHost: host, post: async (_p, b) => { posted.push(b); return {}; } });
+    expect(r).toMatchObject({ ok: false, error: "ollama: model failed to load" });
+    expect(posted).toEqual([]);
   });
 
   it("reports a model the agent doesn't have", async () => {

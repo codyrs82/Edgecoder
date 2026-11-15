@@ -84,6 +84,25 @@ export class SwarmQueue {
     this.leaseFailureListener = listener;
   }
 
+  /**
+   * Called whenever a subtask becomes claimable: enqueued, handed back (requeue, lease expiry,
+   * retry elsewhere). `claimableAtMs` is later than now for a subtask enqueued with a claim delay.
+   * The coordinator uses it to tell idle agents there is work (src/swarm/coordinator/dispatch.ts).
+   */
+  private readyListener?: (subtask: Subtask, claimableAtMs: number) => void;
+
+  onClaimable(listener: (subtask: Subtask, claimableAtMs: number) => void): void {
+    this.readyListener = listener;
+  }
+
+  private notifyClaimable(item: QueueItem): void {
+    try {
+      this.readyListener?.(item.subtask, item.claimableAfterMs ?? Date.now());
+    } catch {
+      // a listener error must not break queue bookkeeping
+    }
+  }
+
   /** #51: subtaskId -> agents whose lease on it expired (their late results are rejected). */
   private readonly expiredHolders = new Map<string, Set<string>>();
 
@@ -159,6 +178,7 @@ export class SwarmQueue {
       await store.persistSubtask(materialized);
       this.mergeLeaseState(item, await store.getSubtaskLeaseState(materialized.id));
     });
+    this.notifyClaimable(item);
     return materialized;
   }
 
@@ -337,7 +357,54 @@ export class SwarmQueue {
     item.leaseRenewedAt = undefined;
     const attempts = item.attempts ?? 0;
     if (wasClaimed) this.persist(subtaskId, (store) => store.markSubtaskReleased(subtaskId, attempts));
+    if (wasClaimed) this.notifyClaimable(item);
     return true;
+  }
+
+  /**
+   * Hand a claimed subtask back for another agent after its holder reported a failure that another
+   * agent may not repeat (an empty model reply). The holder may not claim it again, and is treated
+   * like a holder whose lease expired (a later result from it is refused). The attempt still
+   * counts toward the retry cap. False when `agentId` does not hold the claim.
+   */
+  releaseForRetry(subtaskId: string, agentId: string, nowMs = Date.now()): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (!item || item.claimedBy !== agentId) return false;
+    if ((item.attempts ?? 0) >= this.lease.maxAttempts) return false;
+    this.markExpired(subtaskId, agentId);
+    item.excludeAgents = [...new Set([...(item.excludeAgents ?? []), agentId])];
+    item.claimedBy = undefined;
+    item.claimedAt = undefined;
+    item.leaseRenewedAt = undefined;
+    item.claimableAfterMs = undefined;
+    const attempts = item.attempts ?? 0;
+    this.persist(subtaskId, (store) => store.markSubtaskReleased(subtaskId, attempts, { agentId, atMs: nowMs }));
+    this.notifyClaimable(item);
+    return true;
+  }
+
+  /** True while the subtask is queued and nobody holds it. */
+  isUnclaimed(subtaskId: string): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    return !!item && !item.claimedBy;
+  }
+
+  /** Agents excluded from a queued subtask (verification replicas, retries elsewhere). */
+  excludedAgents(subtaskId: string): readonly string[] {
+    return this.tasks.find((t) => t.subtask.id === subtaskId)?.excludeAgents ?? [];
+  }
+
+  /** Subtasks each agent holds now, in total and of them model calls (one pass over the queue). */
+  activeClaims(): Map<string, { all: number; inference: number }> {
+    const byAgent = new Map<string, { all: number; inference: number }>();
+    for (const t of this.tasks) {
+      if (!t.claimedBy) continue;
+      const e = byAgent.get(t.claimedBy) ?? { all: 0, inference: 0 };
+      e.all++;
+      if (t.subtask.kind === "inference") e.inference++;
+      byAgent.set(t.claimedBy, e);
+    }
+    return byAgent;
   }
 
   /** #51: lease deadline for a claimed item (ms epoch). */
@@ -438,6 +505,7 @@ export class SwarmQueue {
         }
       } else {
         requeued.push(item.subtask.id);
+        this.notifyClaimable(item);
       }
     }
     return { requeued, failed };

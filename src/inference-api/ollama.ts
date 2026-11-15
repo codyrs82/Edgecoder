@@ -25,6 +25,12 @@ export async function* ollamaChat(
   host: string,
   req: { model: string; messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number },
   signal?: AbortSignal,
+  /**
+   * How long to wait for the first byte and between pieces. Ollama answers only once the model is
+   * loaded and the prompt read, which on a CPU with a cold model and a long prompt can take minutes,
+   * so a caller with its own deadline (the abort signal) passes it here instead of a fixed limit.
+   */
+  timeoutMs = 120_000,
 ): AsyncGenerator<OllamaPiece> {
   const res = await request(`${host.replace(/\/$/, "")}/api/chat`, {
     method: "POST",
@@ -42,8 +48,8 @@ export async function* ollamaChat(
       },
     }),
     signal,
-    headersTimeout: 120_000,
-    bodyTimeout: 120_000,
+    headersTimeout: timeoutMs,
+    bodyTimeout: timeoutMs,
   });
   if (res.statusCode >= 400) {
     const text = await res.body.text();
