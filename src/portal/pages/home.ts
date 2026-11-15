@@ -7,6 +7,7 @@ import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { siteLabel } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { launchModeFromEnv } from "../../economy/launch-gate.js";
+import { TERMS_VERSION } from "../../common/legal-notices.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerHomePage(app: FastifyInstance): void {
@@ -67,6 +68,10 @@ app.get("/portal", async (_req, reply) => {
         .link-btn:hover { color: var(--brand-2); background: none; }
         @media (max-width: 860px) { .auth { grid-template-columns: 1fr; } .auth-brand { border-right: none; border-bottom: 1px solid var(--card-border); padding: 24px; } .auth-brand h1 { font-size: 24px; } }
         .brand-gap { height: 48px; }
+        .agree-row { display: flex; gap: 8px; align-items: flex-start; margin-top: 14px; font-size: 13px; color: var(--text-secondary); line-height: 1.45; cursor: pointer; }
+        .agree-row input { width: auto; min-height: 0; margin: 2px 0 0; flex: none; }
+        .agree-row a { color: var(--brand-2); text-decoration: underline; }
+        .legal-note { font-size: 11.5px; margin: 6px 0 0 24px; }
       </style>
     </head>
     <body>
@@ -83,7 +88,7 @@ app.get("/portal", async (_req, reply) => {
               <div class="prop"><span class="icon">${icon("market", 16)}</span><div><b>An open market for compute</b><span>Agents post asks, tasks carry bids, and every hardware class trades against BTC on the market page.</span></div></div>
             </div>
           </div>
-          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>&copy; 2025 EdgeCoder, LLC</span>${themeToggleButton()}</div>
+          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/acceptable-use">Acceptable Use</a><a href="/host-agreement">Host Agreement</a><span>&copy; 2025 EdgeCoder, LLC</span>${themeToggleButton()}</div>
         </section>
         <section class="auth-main">
           <div class="auth-card">
@@ -112,8 +117,10 @@ app.get("/portal", async (_req, reply) => {
               <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
               <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
               ${inviteField}
+              <label class="agree-row" for="signupAcceptTerms"><input id="signupAcceptTerms" type="checkbox" required aria-describedby="signupLegalNote" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
+              <p class="muted legal-note" id="signupLegalNote">These documents are drafts pending legal review. Accounts created with single sign-on are asked to agree on first sign-in.</p>
               <div class="row u-mt-14">
-                <button class="primary u-flex-1" id="signupBtn">Create account</button>
+                <button class="primary u-flex-1" id="signupBtn" disabled>Create account</button>
               </div>
               <p class="muted u-mt-12">We email a verification link. Nodes you enroll activate once the address is verified.</p>
             </div>
@@ -194,25 +201,39 @@ app.get("/portal", async (_req, reply) => {
         }
         // Soft launch: an invite link (/portal?invite=CODE#signup) fills the code in, and single
         // sign-on carries it to /auth/oauth/<provider>/start, which uses it only for a new account.
+        // Single sign-on also carries the Terms version the checkbox accepted (?terms=), recorded if
+        // the callback creates a new account (routes/auth.ts).
         const inviteInput = document.getElementById("signupInvite");
+        const acceptTerms = document.getElementById("signupAcceptTerms");
+        const TERMS_VERSION = ${JSON.stringify(TERMS_VERSION)};
+        const ssoLinks = [...document.querySelectorAll(".sso a")];
+        const ssoBases = ssoLinks.map((a) => a.getAttribute("href"));
+        const syncSso = () => {
+          const q = new URLSearchParams();
+          const code = inviteInput ? inviteInput.value.trim() : "";
+          if (code) q.set("invite", code);
+          if (acceptTerms.checked) q.set("terms", TERMS_VERSION);
+          const qs = q.toString();
+          ssoLinks.forEach((a, i) => a.setAttribute("href", qs ? ssoBases[i] + "?" + qs : ssoBases[i]));
+        };
         if (inviteInput) {
           const fromLink = new URLSearchParams(location.search).get("invite");
           if (fromLink) { inviteInput.value = fromLink; document.getElementById("tabSignup").click(); }
-          const ssoLinks = [...document.querySelectorAll(".sso a")];
-          const bases = ssoLinks.map((a) => a.getAttribute("href"));
-          const syncSso = () => {
-            const code = inviteInput.value.trim();
-            ssoLinks.forEach((a, i) => a.setAttribute("href", code ? bases[i] + "?invite=" + encodeURIComponent(code) : bases[i]));
-          };
           inviteInput.addEventListener("input", syncSso);
-          syncSso();
         }
+        acceptTerms.addEventListener("change", () => {
+          document.getElementById("signupBtn").disabled = !acceptTerms.checked;
+          syncSso();
+        });
+        syncSso();
         const SIGNUP_ERRORS = {
           invite_required: "EdgeCoder is in early access: enter your invite code to create an account.",
           invite_invalid: "That invite code is not valid: it may be mistyped, expired, revoked or used up.",
-          email_already_registered: "An account with this email already exists. Sign in instead."
+          email_already_registered: "An account with this email already exists. Sign in instead.",
+          terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy."
         };
         document.getElementById("signupBtn").addEventListener("click", async () => {
+          if (!acceptTerms.checked) { showToast(SIGNUP_ERRORS.terms_not_accepted, true); acceptTerms.focus(); return; }
           try {
             await api("/auth/signup", {
               method: "POST",
@@ -220,7 +241,8 @@ app.get("/portal", async (_req, reply) => {
                 email: document.getElementById("signupEmail").value,
                 password: document.getElementById("signupPassword").value,
                 displayName: document.getElementById("signupDisplayName").value || undefined,
-                inviteCode: inviteInput ? inviteInput.value.trim() || undefined : undefined
+                inviteCode: inviteInput ? inviteInput.value.trim() || undefined : undefined,
+                acceptTerms: acceptTerms.checked
               })
             });
             showToast("Signup complete. Verify your email, then sign in.");

@@ -204,7 +204,7 @@ CACHE='[
    "expression":"(starts_with(http.request.uri.path, \"/portal\") and not starts_with(http.request.uri.path, \"/portal/vendor/\")) or starts_with(http.request.uri.path, \"/auth\") or starts_with(http.request.uri.path, \"/wallet\") or starts_with(http.request.uri.path, \"/nodes\") or starts_with(http.request.uri.path, \"/me\") or starts_with(http.request.uri.path, \"/internal\")",
    "description":"Never cache authenticated or API paths","enabled":true},
   {"action":"set_cache_settings","action_parameters":{"cache":true,"edge_ttl":{"mode":"override_origin","default":300},"browser_ttl":{"mode":"override_origin","default":60}},
-   "expression":"(http.request.uri.path in {\"/\" \"/privacy\" \"/terms\"} or starts_with(http.request.uri.path, \"/portal/vendor/\"))",
+   "expression":"(http.request.uri.path in {\"/\" \"/privacy\" \"/terms\" \"/acceptable-use\" \"/host-agreement\" \"/bluetooth\"} or starts_with(http.request.uri.path, \"/portal/vendor/\"))",
    "description":"Cache the public pages and vendor assets (Always Online)","enabled":true}
 ]'
 check "cache rules" "$(put_phase http_request_cache_settings "$CACHE")" || true

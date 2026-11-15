@@ -16,6 +16,8 @@ final class AuthViewModel: ObservableObject {
     @Published var email = ""
     @Published var password = ""
     @Published var displayName = ""
+    /// Required to create an account: "I agree to the Terms, Privacy Policy and Acceptable Use Policy" (docs/legal/).
+    @Published var acceptedTerms = false
     @Published var statusMessage = ""
     @Published var isLoading = false
     @Published var latestSeedPhrase: String?
@@ -45,10 +47,15 @@ final class AuthViewModel: ObservableObject {
     func signUp(sessionStore: SessionStore) async {
         isLoading = true
         defer { isLoading = false }
+        guard acceptedTerms else {
+            statusMessage = "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy."
+            return
+        }
         struct SignupBody: Encodable {
             let email: String
             let password: String
             let displayName: String?
+            let acceptTerms: Bool
         }
         do {
             let response: SignupResponse = try await api.request(
@@ -58,7 +65,8 @@ final class AuthViewModel: ObservableObject {
                 body: SignupBody(
                     email: email.trimmingCharacters(in: .whitespacesAndNewlines),
                     password: password,
-                    displayName: displayName.isEmpty ? nil : displayName
+                    displayName: displayName.isEmpty ? nil : displayName,
+                    acceptTerms: true
                 )
             )
             latestSeedPhrase = response.walletOnboarding?.seedPhrase

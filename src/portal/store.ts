@@ -29,6 +29,14 @@ export type PortalUser = {
   verifiedAtMs?: number;
 };
 
+/** Which legal document versions an account accepted, and when (null = not accepted). */
+export type LegalAcceptance = {
+  termsVersion: string | null;
+  termsAcceptedAtMs: number | null;
+  hostAgreementVersion: string | null;
+  hostAgreementAcceptedAtMs: number | null;
+};
+
 export type NodeEnrollment = {
   nodeId: string;
   deviceId?: string;
@@ -334,6 +342,7 @@ export class PortalStore {
     await this.migratePayoutDestinations();
     await this.migrateHostRequests();
     await this.migrateAccountAdmin();
+    await this.migrateLegalAcceptance();
   }
 
   /**
@@ -603,6 +612,43 @@ export class PortalStore {
     }));
   }
 
+  /**
+   * Legal acceptance (src/common/legal-notices.ts): the version of the Terms / Privacy Policy /
+   * Acceptable Use Policy each account accepted at sign-up, and of the Host Agreement accepted on
+   * the Install agent page, with the time. NULL = never accepted (accounts created before this).
+   */
+  async migrateLegalAcceptance(): Promise<void> {
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS terms_version TEXT`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS terms_accepted_at_ms BIGINT`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS host_agreement_version TEXT`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS host_agreement_accepted_at_ms BIGINT`);
+    // Single sign-on sign-ups carry the accepted Terms version from /start to the callback.
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS terms_version TEXT`);
+  }
+
+  async recordTermsAcceptance(userId: string, version: string, atMs: number): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET terms_version = $2, terms_accepted_at_ms = $3 WHERE user_id = $1`, [userId, version, atMs]);
+  }
+
+  async recordHostAgreementAcceptance(userId: string, version: string, atMs: number): Promise<void> {
+    await this.pool.query(`UPDATE portal_users SET host_agreement_version = $2, host_agreement_accepted_at_ms = $3 WHERE user_id = $1`, [userId, version, atMs]);
+  }
+
+  async getLegalAcceptance(userId: string): Promise<LegalAcceptance | null> {
+    const r = await this.pool.query(
+      `SELECT terms_version, terms_accepted_at_ms, host_agreement_version, host_agreement_accepted_at_ms FROM portal_users WHERE user_id = $1`,
+      [userId]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      termsVersion: row.terms_version ?? null,
+      termsAcceptedAtMs: row.terms_accepted_at_ms === null || row.terms_accepted_at_ms === undefined ? null : Number(row.terms_accepted_at_ms),
+      hostAgreementVersion: row.host_agreement_version ?? null,
+      hostAgreementAcceptedAtMs: row.host_agreement_accepted_at_ms === null || row.host_agreement_accepted_at_ms === undefined ? null : Number(row.host_agreement_accepted_at_ms)
+    };
+  }
+
   /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */
   async migrateInviteCodes(): Promise<void> {
     await this.pool.query(
@@ -846,12 +892,15 @@ export class PortalStore {
     passwordHash?: string;
     displayName?: string;
     emailVerified: boolean;
+    /** The Terms / Privacy / AUP version accepted at sign-up (src/common/legal-notices.ts). */
+    termsVersion?: string;
+    termsAcceptedAtMs?: number;
   }): Promise<PortalUser> {
     const now = Date.now();
     await this.pool.query(
       `INSERT INTO portal_users (
-        user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        user_id, email, email_verified, ui_theme, password_hash, display_name, created_at_ms, verified_at_ms, terms_version, terms_accepted_at_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         input.userId,
         input.email,
@@ -860,7 +909,9 @@ export class PortalStore {
         input.passwordHash ?? null,
         input.displayName ?? null,
         now,
-        input.emailVerified ? now : null
+        input.emailVerified ? now : null,
+        input.termsVersion ?? null,
+        input.termsVersion ? (input.termsAcceptedAtMs ?? now) : null
       ]
     );
     return {
@@ -1245,21 +1296,23 @@ export class PortalStore {
     appChallenge?: string;
     /** Soft launch: the hash of the invite given at the start, redeemed if the callback creates the account. */
     inviteCodeHash?: string;
+    /** The Terms version the person accepted on the Create account form, recorded if the callback creates the account. */
+    termsVersion?: string;
   }): Promise<void> {
     await this.pruneExpired("portal_oauth_states");
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null, input.termsVersion ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version`,
       [stateId, now]
     );
     const row = result.rows[0];
@@ -1270,7 +1323,8 @@ export class PortalStore {
       ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
       ...(row.link_user_id ? { linkUserId: row.link_user_id } : {}),
       ...(row.app_challenge ? { appChallenge: row.app_challenge } : {}),
-      ...(row.invite_code_hash ? { inviteCodeHash: row.invite_code_hash } : {})
+      ...(row.invite_code_hash ? { inviteCodeHash: row.invite_code_hash } : {}),
+      ...(row.terms_version ? { termsVersion: row.terms_version } : {})
     };
   }
 

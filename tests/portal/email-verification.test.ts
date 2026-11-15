@@ -157,7 +157,7 @@ describe("email verification link", () => {
 
   it("normal flow: sign up, open the link, enter the password: verified and signed in, earlier credentials revoked", async () => {
     const ctx = build();
-    const signup = await ctx.app.inject({ method: "POST", url: "/auth/signup", payload: { email: "new@example.test", password: "correct-horse" } });
+    const signup = await ctx.app.inject({ method: "POST", url: "/auth/signup", payload: { email: "new@example.test", password: "correct-horse", acceptTerms: true } });
     expect(signup.statusCode).toBe(200);
     const userId = signup.json().userId as string;
     const token = ctx.sent[0].split(" ")[1];

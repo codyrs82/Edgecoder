@@ -15,7 +15,7 @@ export async function signUp(email: string, password: string, displayName?: stri
   const res = await fetch(`${PORTAL_URL}/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName }),
+    body: JSON.stringify({ email, password, displayName, acceptTerms: true }),
   });
   if (!res.ok) throw new Error(`signup failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<{ ok: boolean; userId: string }>;

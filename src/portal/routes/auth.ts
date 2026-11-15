@@ -23,6 +23,7 @@ import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from
 import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 import { inviteCodeHash, inviteCodeUsable, redeemInviteForNewAccount } from "../invites.js";
+import { TERMS_VERSION } from "../../common/legal-notices.js";
 
 /** Shown when an OAuth sign-in would create an account and the soft launch needs an invite. */
 const OAUTH_INVITE_REQUIRED = "EdgeCoder is in early access: creating an account needs an invite code. Enter yours under Create account, then continue with single sign-on.";
@@ -72,9 +73,13 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
         email: z.string().email(),
         password: passwordSchema,
         displayName: z.string().min(2).max(100).optional(),
-        inviteCode: z.string().max(64).optional()
+        inviteCode: z.string().max(64).optional(),
+        // Required: the "I agree to the Terms, Privacy Policy and Acceptable Use Policy" checkbox.
+        acceptTerms: z.boolean().optional()
       })
       .parse(req.body);
+    // Checked before anything else (no invite use, no account): the version accepted is stored.
+    if (body.acceptTerms !== true) return reply.code(400).send({ error: "terms_not_accepted", detail: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy." });
     const email = normalizeEmail(body.email);
     if (isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "email_not_allowed" });
     const existing = await store.getUserByEmail(email);
@@ -90,7 +95,9 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       email,
       displayName: body.displayName,
       passwordHash: hashPassword(body.password),
-      emailVerified: false
+      emailVerified: false,
+      termsVersion: TERMS_VERSION,
+      termsAcceptedAtMs: Date.now()
     });
 
     const verifyToken = randomUUID();
@@ -107,7 +114,8 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     return reply.send({
       ok: true,
       userId: user.userId,
-      emailVerification: "sent"
+      emailVerification: "sent",
+      termsVersion: TERMS_VERSION
     });
   });
 
@@ -225,7 +233,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
 
   // Shared by sign-in (/start) and connect-from-Settings (/connect): for a connect the state row
   // carries the signed-in user, and the callback checks that the same session finishes it.
-  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string }) {
+  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string }) {
     const portalStore = store!;
     const provider = oauthProviders[providerName];
     if (!provider.clientId || !provider.clientSecret) {
@@ -241,6 +249,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       ...(opts.nativeRedirect ? { nativeRedirect: opts.nativeRedirect } : {}),
       ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {}),
       ...(opts.inviteCodeHash ? { inviteCodeHash: opts.inviteCodeHash } : {}),
+      ...(opts.termsVersion ? { termsVersion: opts.termsVersion } : {}),
       // Only meaningful for a hand-off to a native app.
       ...(opts.nativeRedirect && opts.appChallenge ? { appChallenge: opts.appChallenge } : {})
     });
@@ -266,7 +275,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
     // A native app's redirect is a short fixed deep link; the length cap keeps state rows small.
-    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional(), invite: z.string().max(64).optional() }).parse(req.query);
+    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional(), invite: z.string().max(64).optional(), terms: z.string().max(64).optional() }).parse(req.query);
     // Soft launch: an invite for a possible new account is checked now and redeemed only if the
     // callback creates the account (an existing account signs in without using it).
     let invite: string | undefined;
@@ -275,7 +284,11 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       if (!usable) return reply.code(403).type("text/html").send(oauthErrorPage(OAUTH_INVITE_INVALID));
       invite = inviteCodeHash(usable);
     }
-    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge, inviteCodeHash: invite });
+    // The Create account form passes the Terms version its checkbox accepted (?terms=); recorded
+    // only if the callback creates a new account. Accounts created without it (sign-in from an app)
+    // are asked to accept on the dashboard (GET /portal/api/legal).
+    const termsVersion = query.terms === TERMS_VERSION ? TERMS_VERSION : undefined;
+    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge, inviteCodeHash: invite, termsVersion });
   });
 
   /** Connect a provider to the signed-in account, from Settings. A POST (origin-checked), so other sites can't start it. */
@@ -428,7 +441,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
           if (!state.inviteCodeHash) return refuse(403, "invite_required", OAUTH_INVITE_REQUIRED);
           if (!(await portalStore.redeemInviteCode(state.inviteCodeHash, newUserId, Date.now()))) return refuse(403, "invite_invalid", OAUTH_INVITE_INVALID);
         }
-        user = await portalStore.createUser({ userId: newUserId, email, emailVerified: profile.emailVerified, displayName: undefined });
+        user = await portalStore.createUser({ userId: newUserId, email, emailVerified: profile.emailVerified, displayName: undefined, ...(state.termsVersion ? { termsVersion: state.termsVersion, termsAcceptedAtMs: Date.now() } : {}) });
         await ensureCreditAccountForUser(user);
       }
     } else if (!user.emailVerified && provesEmailOf(user)) {

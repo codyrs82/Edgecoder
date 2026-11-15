@@ -135,6 +135,10 @@ struct SettingsView: View {
                         .background(Theme.bgInput)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+                    TermsAgreementToggle(isOn: $authViewModel.acceptedTerms)
+                        .font(.caption)
+                        .foregroundColor(Theme.textSecondary)
+
                     HStack(spacing: 10) {
                         Button {
                             Task { await authViewModel.login(sessionStore: sessionStore) }
@@ -160,7 +164,7 @@ struct SettingsView: View {
                                 .background(Theme.bgElevated)
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
-                        .disabled(authViewModel.email.isEmpty || authViewModel.password.count < 8 || authViewModel.isLoading)
+                        .disabled(authViewModel.email.isEmpty || authViewModel.password.count < 8 || authViewModel.isLoading || !authViewModel.acceptedTerms)
                     }
                 }
 

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
 import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
+import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
@@ -361,12 +362,18 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.log(`${describeHardware(hw)}\n${describePlan(plan, p)}`);
     console.log(`${opts.dryRun ? "Would write" : "Wrote"} ${result.files.length} files; services: ${result.services.join(", ")}`);
     if (opts.dryRun) console.log(result.commands.map((c) => `  $ ${c}`).join("\n"));
+    console.log(hostAgreementLine(opts.portalUrl));
     const missing = plan.instances.filter((i) => !i.env.AGENT_REGISTRATION_TOKEN).map((i) => i.agentId);
     if (missing.length) {
       console.log(`\nEnrol these node ids on ${opts.portalUrl}/portal/dashboard (Enroll node), then re-run:\n  edgecoder-install apply ${missing.map((id) => `--token ${id}=<token>`).join(" ")}`);
     }
   }
   return 0;
+}
+
+/** Printed after an install: running the agent means hosting other people's work under the Host Agreement. */
+export function hostAgreementLine(portalUrl: string): string {
+  return `\nBy running the EdgeCoder agent on this machine you agree to the Host Agreement (draft ${HOST_AGREEMENT_VERSION}, pending legal review): ${portalUrl.replace(/\/$/, "")}/host-agreement\nIt runs other people's AI and code jobs here; the sandbox reduces risk but doesn't guarantee isolation.`;
 }
 
 if (process.argv[1] && /cli\.(js|ts)$/.test(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

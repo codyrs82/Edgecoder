@@ -130,6 +130,7 @@ struct AuthView: View {
                 .textFieldStyle(.roundedBorder)
             TextField("Display name (optional)", text: $viewModel.displayName)
                 .textFieldStyle(.roundedBorder)
+            TermsAgreementToggle(isOn: $viewModel.acceptedTerms)
         }
         .cardStyle()
     }
@@ -153,7 +154,7 @@ struct AuthView: View {
                 labelRow(title: "Create Account", systemImage: "person.badge.plus")
             }
             .buttonStyle(.bordered)
-            .disabled(viewModel.isLoading || viewModel.email.isEmpty || viewModel.password.count < 8)
+            .disabled(viewModel.isLoading || viewModel.email.isEmpty || viewModel.password.count < 8 || !viewModel.acceptedTerms)
 
             Button {
                 Task { await viewModel.resendVerification() }
@@ -257,5 +258,19 @@ private extension View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
             )
+    }
+}
+
+/// Required before creating an account (docs/legal/): the portal refuses a sign-up without it.
+/// The documents are drafts pending legal review; the links open the published versions.
+struct TermsAgreementToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text("I agree to the [Terms](https://edgecoder.io/terms), [Privacy Policy](https://edgecoder.io/privacy) and [Acceptable Use Policy](https://edgecoder.io/acceptable-use)")
+                .font(.caption)
+        }
+        .accessibilityIdentifier("acceptTermsToggle")
     }
 }

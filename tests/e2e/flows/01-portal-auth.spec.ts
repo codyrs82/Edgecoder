@@ -23,6 +23,7 @@ test.describe("Portal Authentication", () => {
         email: "test@edgecoder.io",
         password: "AnotherPass123!",
         displayName: "Duplicate",
+        acceptTerms: true,
       },
     });
     expect(res.status()).toBe(409);
