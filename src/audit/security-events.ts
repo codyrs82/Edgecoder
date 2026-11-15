@@ -32,7 +32,8 @@ export type SecurityEventType =
   | "payouts_resumed"
   | "payout_reconciliation_mismatch"
   | "payout_reconciliation_error"
-  | "ledger_reconciliation_mismatch";
+  | "ledger_reconciliation_mismatch"
+  | "revenue_withdrawal";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -73,7 +74,9 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   payouts_resumed: "HIGH",
   payout_reconciliation_mismatch: "CRITICAL",
   payout_reconciliation_error: "WARN",
-  ledger_reconciliation_mismatch: "HIGH"
+  ledger_reconciliation_mismatch: "HIGH",
+  // EdgeCoder's fee revenue leaving the hot wallet (POST /admin/revenue/withdraw): always worth a look.
+  revenue_withdrawal: "HIGH"
 };
 
 export class SecurityEventLogger {

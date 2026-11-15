@@ -512,11 +512,14 @@ export class PayoutService {
 
   private async distributeFeePoolLocked(expectedHeartbeats: number): Promise<FeePoolDistribution> {
     const now = this.d.now ?? Date.now;
-    // No earnings hold on the pool's own intake: the pool is never withdrawn directly, and what it
-    // pays hosts arrives as host earn rows, which are held like any other earnings before payout.
+    // No earnings hold on the pool's own intake when distributing: what it pays hosts arrives as
+    // host earn rows, which are held like any other earnings before payout. (EdgeCoder withdrawing
+    // the pool itself, /admin/revenue/withdraw, goes through withdraw() and so does meet the hold.)
     const poolMsat = await this.d.store.earnedMsat(this.d.feePoolAccountId);
     const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);
-    const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut);
+    // What EdgeCoder withdrew from the pool (paid or in flight) is gone too: never distribute it again.
+    const withdrawnMsat = await this.d.store.payoutsTotalMsat({ accountId: this.d.feePoolAccountId, statuses: ["paid", "pending"] });
+    const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut - withdrawnMsat);
     const hosts = await this.d.store.listInfrastructureHosts();
     const shares = distributeFeePool(availableMsat, hosts, expectedHeartbeats);
     const totalMsat = shares.reduce((s, h) => s + h.msat, 0);

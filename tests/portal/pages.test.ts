@@ -69,6 +69,11 @@ describe("portal pages module (#16)", () => {
     expect(settings).toContain('href="/portal/settings/nodes"');
     // Admin tab is rendered hidden and only revealed client-side for system admins.
     expect(settings).toMatch(/class="settings-link hidden" href="\/portal\/settings\/admin" id="settingsAdminTab" data-admin-only/);
+    // Revenue (EdgeCoder's fee pool) is admin-only the same way; its page carries no data, only the shell.
+    expect(settings).toMatch(/class="settings-link hidden" href="\/portal\/settings\/revenue" data-admin-only/);
+    const revenue = (await app.inject({ url: "/portal/settings/revenue" })).body;
+    for (const id of ["revDenied", "revPayable", "revDays", "revInvoice", "revWithdrawBtn", "revPayouts"]) expect(revenue, id).toContain(`id="${id}"`);
+    expect(revenue).toContain("/portal/api/admin/revenue");
     // Cursor-like settings: sub-navigation with search, and every section on the page.
     expect(settings).toContain('id="settingsSearch"');
     for (const sec of ["general", "profile", "usage", "tools"]) expect(settings, sec).toContain(`id="sec-${sec}"`);

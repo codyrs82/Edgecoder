@@ -44,3 +44,25 @@ describe("worker registration policy", () => {
     expect(isAgentNotRegisteredError(null)).toBe(false);
   });
 });
+
+describe("429 handling (rate limit, not an auth failure)", () => {
+  it("parseRetryAfterMs reads delta seconds and HTTP dates", async () => {
+    const { parseRetryAfterMs } = await import("../../src/swarm/registration-policy.js");
+    expect(parseRetryAfterMs("12")).toBe(12_000);
+    expect(parseRetryAfterMs(["3"])).toBe(3_000);
+    expect(parseRetryAfterMs(new Date(1_000_000 + 7_000).toUTCString(), 1_000_000)).toBe(7_000);
+    expect(parseRetryAfterMs(undefined)).toBeNull();
+    expect(parseRetryAfterMs("soon")).toBeNull();
+  });
+
+  it("rateLimitWaitMs: a 429 means wait (bounded), anything else is not a rate limit", async () => {
+    const { rateLimitWaitMs, isAgentNotRegisteredError, DEFAULT_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS } = await import("../../src/swarm/registration-policy.js");
+    const limited = Object.assign(new Error("POST /pull failed (429): {\"error\":\"agent_rate_limited\"}"), { statusCode: 429, retryAfterMs: 20_000 });
+    expect(rateLimitWaitMs(limited)).toBe(20_000);
+    expect(isAgentNotRegisteredError(limited)).toBe(false); // never a reason to re-register
+    expect(rateLimitWaitMs(Object.assign(new Error("x"), { statusCode: 429 }))).toBe(DEFAULT_RATE_LIMIT_WAIT_MS);
+    expect(rateLimitWaitMs(Object.assign(new Error("x"), { statusCode: 429, retryAfterMs: 3_600_000 }))).toBe(MAX_RATE_LIMIT_WAIT_MS);
+    expect(rateLimitWaitMs(Object.assign(new Error("x"), { statusCode: 401 }))).toBeNull();
+    expect(rateLimitWaitMs(new Error("network"))).toBeNull();
+  });
+});

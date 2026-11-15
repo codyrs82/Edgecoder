@@ -3095,6 +3095,32 @@ export class PostgresStore {
   }
 
   /** Σ earn msat − Σ spend msat (pool distributions) − paid/pending payouts: sats the ledger still owes. */
+  /**
+   * An account's income from earn rows whose reason starts with `reasonPrefix` (the fee pool's
+   * `network_fee:` rows): all-time total and count, and per UTC day since `sinceMs`
+   * (day = floor(timestamp_ms / 86 400 000)).
+   */
+  async earnIncome(accountId: string, reasonPrefix: string, sinceMs: number): Promise<{ totalMsat: number; count: number; days: Array<{ day: number; msat: number; count: number }> }> {
+    const like = `${reasonPrefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const [total, days] = await Promise.all([
+      this.pool.query(
+        `SELECT COALESCE(SUM(msat), 0) AS msat, COUNT(*)::int AS n FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND reason LIKE $2`,
+        [accountId, like]
+      ),
+      this.pool.query(
+        `SELECT FLOOR(timestamp_ms / 86400000)::bigint AS day, COALESCE(SUM(msat), 0) AS msat, COUNT(*)::int AS n
+           FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND reason LIKE $2 AND timestamp_ms >= $3
+          GROUP BY 1 ORDER BY 1`,
+        [accountId, like, sinceMs]
+      )
+    ]);
+    return {
+      totalMsat: Number(total.rows[0]?.msat ?? 0),
+      count: Number(total.rows[0]?.n ?? 0),
+      days: days.rows.map((r) => ({ day: Number(r.day), msat: Number(r.msat ?? 0), count: Number(r.n ?? 0) }))
+    };
+  }
+
   async liabilitiesMsat(): Promise<number> {
     const r = await this.pool.query(
       `SELECT (SELECT COALESCE(SUM(CASE WHEN tx_type = 'earn' THEN msat ELSE -msat END), 0) FROM credit_transactions WHERE msat IS NOT NULL)
@@ -3107,13 +3133,18 @@ export class PostgresStore {
    * Solvency inputs for reconciliation: Σ credit balances of every account except the fee pool
    * (cSats as msat; a withdrawal's debit already sits in them) plus the pool's undistributed sats
    * (purchase fees reach it as sats with no cSats), and the cSats admins granted (faucet).
+   * The pool's own payouts (EdgeCoder withdrawing its revenue, /admin/revenue/withdraw) leave it
+   * through payout debit / refund / fee-excess rows that carry cSats but no msat: those count at
+   * their cSats, like any account's withdrawal, so a revenue withdrawal leaves the gap unchanged.
    * `feePoolAccountId` is NETWORK_FEE_POOL_ACCOUNT in src/credits/store.ts.
    */
   async solvencyMsat(feePoolAccountId = "network:fee_pool"): Promise<SolvencyInputs> {
     const r = await this.pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN account_id <> $1 THEN (CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END) ELSE 0 END), 0) * 1000 AS accounts_msat,
-         COALESCE(SUM(CASE WHEN account_id = $1 THEN (CASE WHEN tx_type = 'spend' THEN -COALESCE(msat, 0) ELSE COALESCE(msat, 0) END) ELSE 0 END), 0) AS pool_msat,
+         COALESCE(SUM(CASE WHEN account_id = $1 THEN (CASE WHEN tx_type = 'spend' THEN -1 ELSE 1 END)
+           * COALESCE(msat, CASE WHEN split_part(reason, ':', 1) IN ('payout', 'payout_refund', 'payout_fee_excess') THEN credits * 1000 ELSE 0 END)
+           ELSE 0 END), 0) AS pool_msat,
          COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'faucet' THEN credits ELSE 0 END), 0) * 1000 AS granted_msat
        FROM credit_transactions`,
       [feePoolAccountId]

@@ -112,4 +112,50 @@ describe("compatible routes", () => {
     expect(r.statusCode).toBe(402);
     expect(r.json().error.message).toContain("cSats");
   });
+
+  describe("no capacity (503) and keepalive", () => {
+    const busy = (afterMs = 0): ChatBackend =>
+      async function* () {
+        if (afterMs) await new Promise((r) => setTimeout(r, afterMs));
+        throw new ChatBackendError("Every machine is busy", 503, 15);
+      };
+    const makeWith = (b: ChatBackend, keepaliveMs?: number) => {
+      const app = Fastify();
+      registerCompatRoutes(app, { authenticate: async () => ({}), models: async () => [], resolve: async () => ({ backend: b, model: "m1" }), keepaliveMs });
+      return app;
+    };
+
+    it("a call that can't start is 503 with Retry-After, in each API's error shape", async () => {
+      const app = makeWith(busy());
+      const o = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } });
+      expect(o.statusCode).toBe(503);
+      expect(o.headers["retry-after"]).toBe("15");
+      expect(o.json().error).toMatchObject({ type: "no_capacity", code: 503 });
+      const a = await app.inject({ method: "POST", url: "/v1/messages", headers: { "x-api-key": "k" }, payload: { messages: [{ role: "user", content: "x" }] } });
+      expect(a.statusCode).toBe(503);
+      expect(a.headers["retry-after"]).toBe("15");
+      expect(a.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
+    });
+
+    it("a streamed call waiting for its first piece sends SSE keepalive comments, then the error event", async () => {
+      const app = makeWith(busy(250), 40);
+      const o = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });
+      expect(o.statusCode).toBe(200);
+      expect(o.headers["content-type"]).toContain("text/event-stream");
+      expect(o.body).toContain(": keepalive\n\n");
+      expect(o.body).toContain('"type":"no_capacity"');
+      expect(o.body.trim().endsWith("data: [DONE]")).toBe(true);
+      const a = await app.inject({ method: "POST", url: "/v1/messages", headers: { "x-api-key": "k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });
+      expect(a.body).toContain(": keepalive\n\n");
+      expect(a.body).toContain("event: error");
+      expect(a.body).toContain('"overloaded_error"');
+    });
+
+    it("a fast streamed call sends no keepalive", async () => {
+      const app = makeWith(backend, 40);
+      const s = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "yo" }] } });
+      expect(s.body).not.toContain("keepalive");
+      expect(s.body).toContain('"content":"echo:yo"');
+    });
+  });
 });

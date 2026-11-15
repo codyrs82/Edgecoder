@@ -38,35 +38,45 @@ describe("AnomalyDetector", () => {
     expect(detector.evaluate(stats)).toEqual([]);
   });
 
-  describe("BHV001 — Suspiciously fast", () => {
-    it("triggers when enough fast tasks and low avg", () => {
+  describe("BHV001 — Suspiciously fast (server-measured, graduated)", () => {
+    it("a few fast results only flag the agent for verification: never CRITICAL, never a strike", () => {
       const stats = baseStats({
         totalTasks: 5,
         suspiciouslyFastCount: 3,
-        avgDurationMs: 800,
+        fastResultsByKind: { single_step: { fast: 3, ok: 5 } },
+        avgDurationMs: 200,
       });
-      const events = detector.evaluate(stats);
-      const bhv001 = events.find(e => e.ruleId === "BHV001");
+      const bhv001 = detector.evaluate(stats).find(e => e.ruleId === "BHV001");
       expect(bhv001).toBeDefined();
-      expect(bhv001!.severity).toBe("CRITICAL");
+      expect(bhv001!.severity).toBe("WARN");
+      expect(bhv001!.enforcement).toBe("flag");
+    });
+
+    it("does not trigger with too few fast results", () => {
+      const stats = baseStats({ suspiciouslyFastCount: 2, fastResultsByKind: { single_step: { fast: 2, ok: 2 } }, avgDurationMs: 200 });
+      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV001")).toBeUndefined();
+    });
+
+    it("a sustained pattern of fast results the coordinator cannot verify is a HIGH strike", () => {
+      const stats = baseStats({ suspiciouslyFastCount: 20, fastResultsByKind: { inference: { fast: 20, ok: 22 } } });
+      const bhv001 = detector.evaluate(stats).find(e => e.ruleId === "BHV001");
+      expect(bhv001!.severity).toBe("HIGH");
+      expect(bhv001!.enforcement).toBeUndefined();
       expect(bhv001!.blacklistReason).toBe("forged_results");
     });
 
-    it("does not trigger when avg duration is high", () => {
-      const stats = baseStats({
-        suspiciouslyFastCount: 3,
-        avgDurationMs: 5000,
-      });
-      const events = detector.evaluate(stats);
-      expect(events.find(e => e.ruleId === "BHV001")).toBeUndefined();
+    it("no strike while fast results are a minority of the unverifiable ones", () => {
+      const stats = baseStats({ suspiciouslyFastCount: 20, fastResultsByKind: { inference: { fast: 20, ok: 40 } } });
+      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV001")!.enforcement).toBe("flag");
     });
 
-    it("does not trigger with too few fast tasks", () => {
-      const stats = baseStats({
-        suspiciouslyFastCount: 2,
-        avgDurationMs: 800,
-      });
-      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV001")).toBeUndefined();
+    it("fast results of kinds the coordinator verifies never strike, however many", () => {
+      const verifying = new AnomalyDetector({ suspiciouslyFastVerifiableKinds: ["micro_loop", "single_step"] });
+      const stats = baseStats({ suspiciouslyFastCount: 200, fastResultsByKind: { single_step: { fast: 150, ok: 150 }, micro_loop: { fast: 50, ok: 50 } } });
+      const bhv001 = verifying.evaluate(stats).find(e => e.ruleId === "BHV001");
+      expect(bhv001!.enforcement).toBe("flag");
+      // ...while with verification off the same pattern is a strike.
+      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV001")!.severity).toBe("HIGH");
     });
   });
 

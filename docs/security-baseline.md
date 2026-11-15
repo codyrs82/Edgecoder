@@ -64,5 +64,9 @@ an unsigned bind may not take the id of a registered peer coordinator.
 
 Signed agent requests whose signature does not verify are counted against the client address
 (`PREAUTH_FAILURE_MAX_PER_IP`), never against the agent id they name; only a request proven to come
-from the agent's key (a body mismatch on a valid signature, a nonce replay, its rate limit) counts
-toward that agent's behaviour checks.
+from the agent's key (a body mismatch on a valid signature, a nonce replay) counts toward that
+agent's behaviour checks. A verified request over the agent's own rate limit
+(`AGENT_RATE_LIMIT_MAX` per `AGENT_RATE_LIMIT_WINDOW_MS`) is answered `429 agent_rate_limited` with
+`Retry-After`, not 401: it is not a protocol violation and feeds no behaviour rule. Workers wait the
+`Retry-After` and carry on; they do not re-register (re-registering on refusals is what the
+registration-storm rule BHV008 punishes).

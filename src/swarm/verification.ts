@@ -381,9 +381,20 @@ export class ResultVerifier<T = unknown> {
     return Math.min(1, this.cfg.rate * (2 - this.reputation(key)));
   }
 
-  /** #104: never true for a kind that isn't enabled or has no comparator (LLM inference). */
-  shouldVerify(key: string, kind: SubtaskKind): boolean {
+  /** Whether results of this kind are sampled at all here (verification on and the kind verifiable). */
+  samplesKind(kind: SubtaskKind): boolean {
+    return this.cfg.rate > 0 && this.verifiesKind(kind);
+  }
+
+  /**
+   * #104: never true for a kind that isn't enabled or has no comparator (LLM inference).
+   * `force` (an agent flagged by BHV001, see VerificationFlags) samples the result whatever the
+   * draw, but only where verification is on (rate > 0): with it off, replicas are an expense the
+   * operator has not opted into.
+   */
+  shouldVerify(key: string, kind: SubtaskKind, opts: { force?: boolean } = {}): boolean {
     if (!this.verifiesKind(kind)) return false;
+    if (opts.force && this.cfg.rate > 0) return true;
     return this.random() < this.sampleRate(key);
   }
 
@@ -620,5 +631,55 @@ export class ResultVerifier<T = unknown> {
     this.pending.delete(originalId);
     for (const id of p.replicaIds) this.replicaToOriginal.delete(id);
     this.listener?.({ kind: "settled", originalSubtaskId: originalId });
+  }
+}
+
+/**
+ * BHV001 (suspiciously fast results, src/security/anomaly-detector.ts): agents whose next
+ * verifiable results go to verification whatever the sampling draw. Flagging again refreshes the
+ * count, so an agent that stays fast stays fully verified; an honest fast agent loses nothing
+ * but time (its results are held until the replicas agree), a forger is caught by VRF001.
+ */
+export class VerificationFlags {
+  private readonly flags = new Map<string, { remaining: number; untilMs: number }>();
+
+  constructor(
+    readonly results = 5,
+    readonly ttlMs = 60 * 60_000,
+    readonly maxEntries = 50_000,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  flag(agentId: string): void {
+    const nowMs = this.now();
+    if (!this.flags.has(agentId) && this.flags.size >= this.maxEntries) {
+      for (const [id, f] of this.flags) if (f.untilMs <= nowMs) this.flags.delete(id);
+      // Still full: drop the oldest flag rather than grow without bound.
+      if (this.flags.size >= this.maxEntries) this.flags.delete(this.flags.keys().next().value as string);
+    }
+    this.flags.delete(agentId);
+    this.flags.set(agentId, { remaining: this.results, untilMs: nowMs + this.ttlMs });
+  }
+
+  isFlagged(agentId: string): boolean {
+    const f = this.flags.get(agentId);
+    if (!f) return false;
+    if (f.untilMs <= this.now() || f.remaining <= 0) {
+      this.flags.delete(agentId);
+      return false;
+    }
+    return true;
+  }
+
+  /** Use one forced verification for this agent; false when it has none left. */
+  take(agentId: string): boolean {
+    if (!this.isFlagged(agentId)) return false;
+    const f = this.flags.get(agentId)!;
+    f.remaining -= 1;
+    return true;
+  }
+
+  clear(agentId: string): void {
+    this.flags.delete(agentId);
   }
 }
