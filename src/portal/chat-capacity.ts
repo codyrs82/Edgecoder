@@ -65,6 +65,8 @@ export function capacityFor(report: CapacityReport, need: ChatNeed): Capacity {
 
 export const CHAT_CAPACITY_DEFAULT_TIMEOUT_MS = 2_000;
 export const CHAT_CAPACITY_DEFAULT_TTL_MS = 15_000;
+/** Oldest load report a network pick uses (model slots free and calls waiting change in seconds). */
+export const LOAD_REPORT_MAX_AGE_MS = 2_000;
 /** A "no" older than this is asked again before a chat is refused for lack of compute. */
 const RECHECK_NO_AFTER_MS = 3_000;
 const CANDIDATE_LIST_TTL_MS = 60_000;
@@ -251,8 +253,10 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
    * Null when no coordinator reports load (older builds): the priority order below decides.
    */
   async function chooseByLoad(urls: string[], model: string, maxAgeMs: number): Promise<string | null> {
-    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", maxAgeMs)));
-    let best: { url: string; free: number; size: number } | null = null;
+    // Load moves in seconds: a report older than LOAD_REPORT_MAX_AGE_MS is fetched again, so calls
+    // that already finished are not still counted against a coordinator for the whole cache TTL.
+    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", Math.min(maxAgeMs, LOAD_REPORT_MAX_AGE_MS))));
+    const scored: Array<{ url: string; free: number; agents: number }> = [];
     for (let i = 0; i < urls.length; i++) {
       const r = reports[i];
       const load = r.modelLoad?.[model];
@@ -260,11 +264,16 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
       // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
       const room = load.free ?? load.idle;
-      const free = room - load.waiting - sentCount(urls[i], model, reportAt);
-      // A tie (both full, or both equally free) goes to the coordinator with more agents for the model,
-      // so a small region is not flooded just because it is listed first.
-      const size = load.agents ?? 0;
-      if (!best || free > best.free || (free === best.free && size > best.size)) best = { url: urls[i], free, size };
+      scored.push({ url: urls[i], free: room - load.waiting - sentCount(urls[i], model, reportAt), agents: Math.max(1, load.agents ?? 1) });
+    }
+    let best: (typeof scored)[number] | null = null;
+    if (scored.some((s) => s.free > 0)) {
+      // Room somewhere: the most free slots; a tie goes to the coordinator with more agents.
+      for (const s of scored) if (!best || s.free > best.free || (s.free === best.free && s.agents > best.agents)) best = s;
+    } else {
+      // Everything is busy: share the backlog in proportion to agents, so a 2-agent region does not
+      // take as many queued calls as a 7-agent one (equal absolute backlogs would).
+      for (const s of scored) if (!best || s.free / s.agents > best.free / best.agents || (s.free / s.agents === best.free / best.agents && s.agents > best.agents)) best = s;
     }
     if (best) noteSent(best.url, model, cache.get(`network|${best.url}`)?.at ?? 0);
     return best?.url ?? null;

@@ -82,4 +82,27 @@ describe("load-aware coordinator pick for network calls", () => {
     expect(eu).toBeLessThanOrEqual(3);
     expect(picks.slice(0, 8).every((u) => u === US)).toBe(true);
   });
+  // Live probe after #287: under sustained load both seeds' counts went negative (calls sent since a
+  // 15 s report were all still counted), and evening out the absolute backlog sent the 2-agent EU
+  // seed about a third of all calls (pickup p50 1.8 s there, 0.2 s on the 7-agent US seed).
+  it("when every coordinator is busy, shares calls in proportion to agents", async () => {
+    let t = 0;
+    const d = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, now: () => t, probe: async (url) => (url === EU ? slots(2, 0, 0, 4) : slots(7, 0, 0, 4)), ttlMs: 60_000 });
+    const picks: string[] = [];
+    for (let i = 0; i < 18; i++) picks.push((await d.pick({ kind: "network", model: MODEL })).url!);
+    const eu = picks.filter((u) => u === EU).length;
+    // 2 of 9 agents: about 2/9 of the calls (4 of 18), not half.
+    expect(eu).toBeGreaterThanOrEqual(2);
+    expect(eu).toBeLessThanOrEqual(5);
+  });
+
+  it("re-reads load after a couple of seconds, so finished calls stop counting", async () => {
+    let t = 0;
+    let usFree = 0;
+    const d = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, now: () => t, probe: async (url) => (url === EU ? slots(2, 0, 3) : slots(7, 0, usFree)), ttlMs: 60_000 });
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(EU);
+    usFree = 10; // the US calls finished
+    t += 2_500;
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
+  });
 });
