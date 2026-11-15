@@ -18,6 +18,7 @@ import {
   PreAuthFailureCounter
 } from "../coordinator-utils.js";
 import { SwarmQueue, leaseConfigFromEnv } from "../queue.js";
+import { RemoteGrantBook } from "../remote-grants.js";
 import type { NetworkMode, Subtask, SubtaskResult } from "../../common/types.js";
 import { createPeerIdentity, createPeerKeys } from "../../mesh/peer.js";
 import {
@@ -89,6 +90,11 @@ export const taskOriginMap = new Map<string, { coordinatorId: string; coordinato
  */
 export const peerOfferBudgetMsat = new Map<string, number>();
 export const PEER_OFFER_BUDGET_MAX_ENTRIES = 20_000;
+/** Origin side: offered subtasks granted to one peer coordinator (src/swarm/remote-grants.ts). */
+export const remoteGrants = new RemoteGrantBook();
+/** Peer side: offered subtasks the origin granted to this coordinator, and until when the grant holds (local clock). */
+export const peerGrants = new Map<string, { originId: string; deadlineMs: number }>();
+export const LEASE_CONFIG = leaseConfigFromEnv();
 /** #51: what /submit charged per task, so a task that fails permanently is refunded once. */
 /**
  * What a task's requester was charged: cSats set aside at submit (reservedMsat, the worst case),

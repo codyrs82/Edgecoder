@@ -71,6 +71,7 @@ import { runIssuanceTick, maybeAnchorLatestFinalizedEpoch } from "./issuance.js"
 import { reconcileIntent } from "./payments.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
+import { sweepGrants } from "./grants.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -133,6 +134,12 @@ export async function initCoordinator(): Promise<void> {
   {
       setInterval(() => {
         cleanupStaleTunnels();
+        // Execution grants between coordinators: lapsed grants go back on the queue (remote-grants.ts).
+        try {
+          sweepGrants();
+        } catch (error) {
+          app.log.warn({ error: String(error) }, "grant_sweep_failed");
+        }
       }, 15_000);
       // Hardware verification: expire unanswered challenges and missing witnesses, re-post changed asks.
       setInterval(() => {

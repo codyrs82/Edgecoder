@@ -5,7 +5,7 @@
  * Result handling: verification, credit accrual, task budgets, settlement and refunds.
  */
 import { request } from "undici";
-import type { SubtaskResult } from "../../common/types.js";
+import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
 import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAgent } from "../../credits/store.js";
@@ -53,7 +53,9 @@ import {
   MESH_AUTH_TOKEN,
   taskBilling,
   peerOfferBudgetMsat,
-  saveUsage
+  saveUsage,
+  remoteGrants,
+  peerGrants
 } from "./context.js";
 import { mutable } from "./mutable-state.js";
 import { autoBlacklister, agentCapabilities, ordering } from "./agent-state.js";
@@ -82,25 +84,93 @@ export function releaseDependents(subtaskId: string, output: string): void {
       "dependent_subtask_released"
     );
     // Gossip released subtasks to peer coordinators
-    const offerMsg = protocol.createMessage(
-      "task_offer",
-      identity.peerId,
-      {
-        subtaskId: releasedSubtask.id,
-        taskId: releasedSubtask.taskId,
-        kind: releasedSubtask.kind,
-        language: releasedSubtask.language,
-        input: releasedSubtask.input,
-        timeoutMs: releasedSubtask.timeoutMs,
-        snapshotRef: releasedSubtask.snapshotRef,
-        projectMeta: releasedSubtask.projectMeta,
-        originCoordinatorId: identity.peerId,
-        originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
-      },
-      coordinatorKeys.privateKeyPem,
-      60_000
-    );
-    void mesh.broadcast(offerMsg);
+    offerSubtaskToPeers(releasedSubtask);
+  }
+}
+
+/**
+ * Offer a queued subtask to peer coordinators. A peer that wants it asks for a grant (task_claim);
+ * this coordinator stays the authority on who runs it (src/swarm/remote-grants.ts).
+ */
+export function offerSubtaskToPeers(subtask: Subtask): void {
+  const offerMsg = protocol.createMessage(
+    "task_offer",
+    identity.peerId,
+    {
+      subtaskId: subtask.id,
+      taskId: subtask.taskId,
+      kind: subtask.kind,
+      language: subtask.language,
+      input: subtask.input,
+      timeoutMs: subtask.timeoutMs,
+      snapshotRef: subtask.snapshotRef,
+      projectMeta: subtask.projectMeta,
+      originCoordinatorId: identity.peerId,
+      originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+    },
+    coordinatorKeys.privateKeyPem,
+    60_000
+  );
+  void mesh.broadcast(offerMsg);
+}
+
+/** Subtasks of a task still queued, running here or on a granted peer, or held behind dependencies. */
+export function taskOpenCount(taskId: string): number {
+  return queue.openSubtaskCount(taskId) + depTracker.heldCountForTask(taskId) + remoteGrants.openCountForTask(taskId);
+}
+
+/** A subtask a peer coordinator offered us and granted to us: its requester is billed at the origin. */
+export function isPeerOffered(subtaskId: string): boolean {
+  const origin = taskOriginMap.get(subtaskId);
+  return Boolean(origin && origin.coordinatorId !== identity.peerId);
+}
+
+const FORWARD_RETRY_DELAYS_MS = [1_000, 3_000, 6_000];
+
+/**
+ * Send a result for a peer-offered subtask back to its origin and return what the origin charged its
+ * requester for it (msat): all an agent here may be paid for the work. 0 when the origin refused it
+ * (not granted to us, the grant expired, or a failure) or could not be reached.
+ */
+async function forwardResultToOrigin(origin: { coordinatorId: string; coordinatorUrl: string }, result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<number> {
+  const forwardJson = JSON.stringify(agentEnvelope ? { ...result, agentEnvelope } : result);
+  for (let attempt = 0; ; attempt++) {
+    let retry = false;
+    try {
+      const res = await request(`${origin.coordinatorUrl}/result`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+          // #52: the origin checks this against our allowlisted key (signed per attempt: replay cache).
+          ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
+        },
+        body: forwardJson,
+        signal: AbortSignal.timeout(15_000)
+      });
+      const text = await res.body.text().catch(() => "");
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        body = {};
+      }
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const charged = typeof body.chargedMsat === "number" && Number.isFinite(body.chargedMsat) ? Math.max(0, body.chargedMsat) : 0;
+        app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl, chargedMsat: charged }, "result_forwarded_to_origin");
+        return charged;
+      }
+      retry = res.statusCode === 409 && body.error === "forward_in_progress";
+      if (!retry) {
+        app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, status: res.statusCode, error: body.error }, "result_forward_refused");
+        return 0;
+      }
+    } catch (e) {
+      retry = true;
+      app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed");
+    }
+    if (!retry || attempt >= FORWARD_RETRY_DELAYS_MS.length) return 0;
+    await new Promise((r) => setTimeout(r, FORWARD_RETRY_DELAYS_MS[attempt]));
   }
 }
 
@@ -206,7 +276,7 @@ export function enqueueReplica(req: ReplicaRequest): void {
 }
 
 /** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
-export async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promise<void> {
+export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number } = {}): Promise<void> {
   const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
   noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
@@ -262,7 +332,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promi
   // What is paid is what the requester is charged: taken out of what was set aside for the task
   // (never more), before the store is awaited, so results settling together cannot both spend it.
   // Work nobody set anything aside for (an anonymous task) earns nothing.
-  const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat);
+  const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
   let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
@@ -332,10 +402,10 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>): Promi
  * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
  * for verification this runs only at settle time, with the verified output.
  */
-export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<void> {
+export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<number | undefined> {
   queue.complete(result);
   // Market: a task's bid leaves the book once its last subtask has a result.
-  if (queue.openSubtaskCount(result.taskId) === 0 && depTracker.heldCountForTask(result.taskId) === 0) orderBook.removeBid(result.taskId);
+  if (taskOpenCount(result.taskId) === 0) orderBook.removeBid(result.taskId);
   const completeRecord = ordering.append({
     eventType: "task_complete",
     taskId: result.taskId,
@@ -345,27 +415,18 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
   await pgStore?.persistLedgerRecord(completeRecord);
   await persistStatsLedgerRecord(completeRecord);
 
+  let originChargedMsat: number | undefined;
   const origin = taskOriginMap.get(result.subtaskId);
   if (origin && origin.coordinatorId !== identity.peerId) {
     taskOriginMap.delete(result.subtaskId);
+    peerGrants.delete(result.subtaskId);
     // #122: the origin verifies the agent's own signature too, not only ours.
     if (agentEnvelope) {
       const pem = agentCapabilities.get(agentEnvelope.headers["x-agent-id"])?.publicKeyPem;
       if (pem) attestAgentSigningKey(agentEnvelope.headers["x-agent-id"], pem);
     }
-    const forwardJson = JSON.stringify(agentEnvelope ? { ...result, agentEnvelope } : result);
-    void request(`${origin.coordinatorUrl}/result`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
-        // #52: the origin checks this against our allowlisted key.
-        ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
-      },
-      body: forwardJson
-    })
-      .then(() => app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl }, "result_forwarded_to_origin"))
-      .catch((e) => app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed"));
+    // Awaited: what the origin charged its requester is what the agent here may be paid.
+    originChargedMsat = await forwardResultToOrigin(origin, result, agentEnvelope);
   }
 
   void mesh.broadcast(
@@ -376,6 +437,7 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
       coordinatorKeys.privateKeyPem
     )
   );
+  return originChargedMsat;
 }
 
 /**
@@ -386,7 +448,10 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
 export async function settleVerification(outcome: VerificationOutcome<ResultMeta>): Promise<void> {
   // #114: winning replicas earn minted credits only when RESULT_VERIFICATION_MINT_REPLICA_REWARDS is on.
   const payable = payableWinners(outcome, verificationConfig);
-  for (const w of payable) await accrueResultCredits(w);
+  // A peer-offered subtask is paid only what its origin charges for it, which is known once the
+  // result is forwarded: those winners are paid after publishing (below).
+  const peerOffered = isPeerOffered(outcome.originalSubtaskId);
+  if (!peerOffered || outcome.status === "unresolved") for (const w of payable) await accrueResultCredits(w);
   for (const w of outcome.winners) {
     if (!payable.includes(w)) {
       app.log.info({ originalSubtaskId: outcome.originalSubtaskId, executedSubtaskId: w.subtaskId }, "result_verification_replica_unpaid");
@@ -442,7 +507,8 @@ export async function settleVerification(outcome: VerificationOutcome<ResultMeta
   // #122: forward the signature of the execution whose output is published (verification.ts picks
   // the original when it won, else the first winner).
   const ref = outcome.winners.find((w) => w.subtaskId === outcome.originalSubtaskId) ?? outcome.winners[0];
-  await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output }, ref?.meta.agentEnvelope);
+  const originChargedMsat = await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output }, ref?.meta.agentEnvelope);
+  if (peerOffered) for (const w of payable) await accrueResultCredits(w, { originChargedMsat });
   releaseDependents(outcome.originalSubtaskId, outcome.output);
 }
 
@@ -483,17 +549,9 @@ export async function finalizeFailedSubtask(result: SubtaskResult, opts: { recor
     const origin = taskOriginMap.get(r.subtaskId);
     if (origin && origin.coordinatorId !== identity.peerId) {
       taskOriginMap.delete(r.subtaskId);
-      const forwardJson = JSON.stringify(r);
-      void request(`${origin.coordinatorUrl}/result`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
-          // #52: the origin checks this against our allowlisted key.
-          ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
-        },
-        body: forwardJson
-      }).catch((e) => app.log.warn({ subtaskId: r.subtaskId, err: String(e) }, "result_forward_failed"));
+      peerGrants.delete(r.subtaskId);
+      peerOfferBudgetMsat.delete(r.subtaskId);
+      void forwardResultToOrigin(origin, r);
     }
     void mesh.broadcast(
       protocol.createMessage(
@@ -517,25 +575,23 @@ export async function finalizeFailedSubtask(result: SubtaskResult, opts: { recor
  * the store's primary key instead of paying twice; `refunded` is only set after the
  * grant succeeded, and the entry is pruned once settled.
  */
-/** Add a finished subtask's cost to its task's bill. */
-export function addTaskCost(taskId: string, costMsat: number): void {
-  const billing = taskBilling.get(taskId);
-  if (billing && !billing.refunded) billing.costMsat = Math.min(billing.reservedMsat, billing.costMsat + Math.max(0, costMsat));
-}
 
 /**
  * Charge a finished subtask to whoever pays for it and return how much of `wantMsat` that covers,
  * which is all the agent may earn for it:
- * - a subtask offered by a peer coordinator: up to what that coordinator set aside for it;
+ * - a subtask offered by a peer coordinator: up to what that coordinator charged its requester for it;
  * - a task billed here: up to what its requester set aside and has not yet used;
  * - anything else has no payer (an anonymous task) and covers nothing.
  */
-function takeTaskBudget(taskId: string, subtaskId: string, wantMsat: number): number {
+function takeTaskBudget(taskId: string, subtaskId: string, wantMsat: number, originChargedMsat?: number): number {
   const want = Number.isFinite(wantMsat) ? Math.max(0, wantMsat) : 0;
   const offered = peerOfferBudgetMsat.get(subtaskId);
   if (offered !== undefined) {
     peerOfferBudgetMsat.delete(subtaskId);
-    return Math.min(want, offered);
+    // Backed by the origin: never more than it charged its requester for this subtask (nothing when
+    // it refused the result, e.g. the subtask was not granted to us).
+    const charged = originChargedMsat !== undefined && Number.isFinite(originChargedMsat) ? Math.max(0, originChargedMsat) : 0;
+    return Math.min(want, offered, charged);
   }
   const billing = taskBilling.get(taskId);
   if (!billing || billing.refunded) return 0;
@@ -549,13 +605,27 @@ function takeTaskBudget(taskId: string, subtaskId: string, wantMsat: number): nu
  * that is still billed, queued or held would replace or add to someone else's bill.
  */
 export function taskIdInUse(taskId: string): boolean {
-  return taskBilling.has(taskId) || usagePending.has(taskId) || queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0;
+  return taskBilling.has(taskId) || usagePending.has(taskId) || taskOpenCount(taskId) > 0;
 }
 
 /** Undo takeTaskBudget when nothing was paid after all. */
 function returnTaskBudget(taskId: string, msat: number): void {
   const billing = taskBilling.get(taskId);
   if (billing && !billing.refunded) billing.costMsat = Math.max(0, billing.costMsat - Math.max(0, msat));
+}
+
+/**
+ * Origin side: a granted peer ran a subtask of `taskId` and asks `wantMsat` for it. Charged to the
+ * requester out of what the task set aside and has not used yet (never more); returns the charge,
+ * which is all the peer may pay its agent.
+ */
+export function chargePeerWork(taskId: string, wantMsat: number): number {
+  const billing = taskBilling.get(taskId);
+  if (!billing || billing.refunded) return 0;
+  const want = Number.isFinite(wantMsat) ? Math.max(0, wantMsat) : 0;
+  const take = Math.min(want, Math.max(0, billing.reservedMsat - billing.costMsat));
+  billing.costMsat += take;
+  return take;
 }
 
 /** Results being paid, per task: the task is not settled (its unused reserve returned) under them. */
@@ -576,7 +646,7 @@ export function holdSettlement(taskId: string): () => void {
 export async function settleTaskIfDone(taskId: string): Promise<void> {
   if (!taskBilling.has(taskId)) return;
   if (accrualsInFlight.has(taskId)) return;
-  if (queue.openSubtaskCount(taskId) > 0 || depTracker.heldCountForTask(taskId) > 0) return;
+  if (taskOpenCount(taskId) > 0) return;
   await refundTaskSubmit(taskId);
 }
 

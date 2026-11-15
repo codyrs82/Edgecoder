@@ -72,8 +72,10 @@ describe("/result body size", () => {
     expect(Buffer.byteLength(forward)).toBeGreaterThan(2 * AGENT_RESULT_BODY_LIMIT_BYTES);
     expect(Buffer.byteLength(forward)).toBeLessThan(RESULT_ROUTE_BODY_LIMIT_BYTES);
     const res = await app.inject({ method: "POST", url: "/result", remoteAddress: REMOTE, headers: { "content-type": "application/json", "x-mesh-token": MESH }, payload: forward });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
+    // Past the size limit and the agent-signature check; refused only because no peer was granted
+    // this subtask (a forward is accepted from the granted peer only, src/swarm/remote-grants.ts).
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "subtask_not_granted" });
   });
 
   test("a forward whose output differs from what the agent signed is refused", async () => {
