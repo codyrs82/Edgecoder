@@ -159,12 +159,37 @@ interface Block {
   body: string;
 }
 
-/** Fenced ```tool_call and ```plan blocks in a text-mode reply, in order. */
+/** A parameter value from a qwen3-coder XML call: numbers and booleans typed, the rest text. */
+function xmlParamValue(raw: string): unknown {
+  const v = raw.replace(/^\n/, "").replace(/\n$/, "");
+  if (/^-?\d+(?:\.\d+)?$/.test(v.trim())) return Number(v.trim());
+  if (v.trim() === "true" || v.trim() === "false") return v.trim() === "true";
+  return v;
+}
+
+/**
+ * Fenced ```tool_call and ```plan blocks in a text-mode reply, in order.
+ *
+ * Also qwen3-coder's own XML calls (`<function=read_file><parameter=path>a.ts</parameter></function>`,
+ * optionally inside `<tool_call>`): a runtime whose tool parser does not know that format passes
+ * them through as text (seen from qwen3-coder:30b on the network), and the turn would stop at
+ * the first step. They become tool_call blocks with a JSON body ({ tool, args }).
+ */
 export function parseTextBlocks(text: string): Block[] {
   const out: Block[] = [];
   for (const [kind, re] of [["tool_call", /```tool_call\s*\n([\s\S]*?)\n```/g], ["plan", /```plan\s*\n([\s\S]*?)\n```/g]] as const) {
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) out.push({ kind, start: m.index, end: m.index + m[0].length, body: m[1] });
+  }
+  const xml = /(?:<tool_call>\s*)?<function=([\w.-]+)>([\s\S]*?)<\/function>(?:\s*<\/tool_call>)?/g;
+  let m: RegExpExecArray | null;
+  while ((m = xml.exec(text)) !== null) {
+    if (out.some((b) => m!.index >= b.start && m!.index < b.end)) continue; // inside a fenced block
+    const args: Record<string, unknown> = {};
+    const param = /<parameter=([\w.-]+)>([\s\S]*?)<\/parameter>/g;
+    let p: RegExpExecArray | null;
+    while ((p = param.exec(m[2])) !== null) args[p[1]] = xmlParamValue(p[2]);
+    out.push({ kind: "tool_call", start: m.index, end: m.index + m[0].length, body: JSON.stringify({ tool: m[1], args }) });
   }
   return out.sort((a, b) => a.start - b.start);
 }
