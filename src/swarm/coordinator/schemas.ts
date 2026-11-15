@@ -88,6 +88,8 @@ export const registerSchema = z.object({
   installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
   activeModel: z.string().min(1).max(200).optional(),
   clientType: z.string().min(1).max(64).default("edgecoder-native"),
+  /** Hosting region code the agent runs in (FLY_REGION or AGENT_REGION), shown coarsely in GET /network/world. */
+  region: z.string().regex(/^[a-z0-9-]{2,24}$/).optional().catch(undefined),
   maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
   powerTelemetry: z
     .object({

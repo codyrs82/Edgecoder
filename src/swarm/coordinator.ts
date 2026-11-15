@@ -66,6 +66,7 @@ import { registerSecurityRoutes } from "./coordinator/routes/security.js";
 import { registerAgentMeshRoutes } from "./coordinator/routes/agent-mesh.js";
 import { registerPortalRoutes } from "./coordinator/routes/portal.js";
 import { registerAdminRoutes } from "./coordinator/routes/admin.js";
+import { registerNetworkWorldRoutes } from "./coordinator/routes/network-world.js";
 import { registerAdminNetworkRoutes } from "./coordinator/routes/admin-network.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
@@ -183,7 +184,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/"))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/"))
   ) {
     return;
   }
@@ -221,6 +222,8 @@ registerDebugRoutes(app);
 registerAdminRoutes(app);
 // GET /admin/network (admin token): the live network for the portal's admin page.
 registerAdminNetworkRoutes(app);
+// GET /network/world (signed agent or portal): the anonymized world view for the app's Network page.
+registerNetworkWorldRoutes(app);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {

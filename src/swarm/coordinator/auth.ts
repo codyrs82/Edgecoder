@@ -95,6 +95,8 @@ const AGENT_POST_PATTERNS: readonly RegExp[] = [/^\/orchestration\/agents\/[^/]+
 /** GET routes a signed agent may call; each scopes what it returns to the signer (see the route). */
 const AGENT_GET_PATTERNS: readonly RegExp[] = [
   /^\/inference\/models$/,
+  // The anonymized world view (routes/network-world.ts): the caller's own machines marked, others masked.
+  /^\/network\/world$/,
   /^\/agent-mesh\/peers\/[^/]+$/,
   /^\/tasks\/[^/]+\/subtasks\/[^/]+\/result$/
 ];

@@ -1,0 +1,125 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
+/*
+ * The Network page's data path: GET /v1/ide/network/world (IDE provider, IDE token) -> the agent's
+ * forwarder GET /forward/network/world (signed by the agent) -> the coordinator's world view, plus
+ * this computer's own round trip to each coordinator.
+ */
+
+const TOKEN = "test-ide-token-world-0123456789";
+const HOST = "127.0.0.1:4304";
+let fake: Server;
+let base = "";
+const seen: Array<{ url?: string; auth?: string }> = [];
+let worldStatus = 200;
+
+function world() {
+  return {
+    generatedAtMs: 1,
+    servedBy: "coord-us",
+    coordinators: [
+      { id: "coord-us", url: base, region: "iad", country: "US", continent: "NA", agents: 2, agentsOnline: 2, reachable: true, self: true },
+      { id: "coord-eu", url: "https://eu.invalid", region: "fra", country: "DE", continent: "EU", agents: 1, agentsOnline: 1, reachable: false, self: false }
+    ],
+    links: [{ from: "coord-us", to: "coord-eu", rttMs: 88 }],
+    agents: [{ id: "abcdef0123", label: "lin-•••0123", mine: false, coordinatorId: "coord-us", rttMs: 40, status: "idle" }],
+    models: [],
+    totals: { coordinators: 2, agents: 1, online: 1, busy: 0, mine: 0, models: 0, slots: 1, slotsUsed: 0 },
+    truncated: false
+  };
+}
+
+beforeAll(async () => {
+  // One fake server plays the agent's forwarder and the coordinator's public /identity.
+  fake = createServer((req, res) => {
+    seen.push({ url: req.url, auth: req.headers.authorization });
+    res.writeHead(req.url === "/forward/network/world" ? worldStatus : 200, { "content-type": "application/json" });
+    if (req.url === "/forward/network/world") return res.end(JSON.stringify(worldStatus === 200 ? world() : { error: "rate_limited" }));
+    if (req.url === "/identity") return res.end(JSON.stringify({ peerId: "coord-us" }));
+    res.end("{}");
+  });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", () => r()));
+  base = `http://127.0.0.1:${(fake.address() as AddressInfo).port}`;
+});
+afterAll(() => fake.close());
+beforeEach(async () => {
+  seen.length = 0;
+  worldStatus = 200;
+  (await import("../../src/apps/ide/network-world.js")).resetCoordinatorProbeCache();
+});
+
+describe("networkWorld (src/apps/ide/network-world.ts)", () => {
+  it("asks the forwarder with the IDE token and adds this computer's round trip to each reachable coordinator", async () => {
+    const { networkWorld } = await import("../../src/apps/ide/network-world.js");
+    const probed: string[] = [];
+    const r = await networkWorld({ forwarder: base, token: () => "ide-token", agentId: "mac-1" }, async (url) => {
+      probed.push(url);
+      return 23;
+    });
+    expect(seen[0]).toEqual({ url: "/forward/network/world", auth: "Bearer ide-token" });
+    expect(r.status).toBe(200);
+    const coords = r.json.coordinators as Array<{ id: string; myRttMs: number | null }>;
+    expect(coords.map((c) => [c.id, c.myRttMs])).toEqual([["coord-us", 23], ["coord-eu", null]]);
+    // The coordinator it could not reach is not probed either.
+    expect(probed).toEqual([base]);
+    expect(r.json.latency).toMatchObject({ measuredFrom: "this computer" });
+  });
+
+  it("passes a coordinator refusal through, and a hosted transport is not timed from the server", async () => {
+    const { networkWorld } = await import("../../src/apps/ide/network-world.js");
+    worldStatus = 429;
+    expect((await networkWorld({ forwarder: base, token: () => "t", agentId: "a" }, async () => 1)).status).toBe(429);
+    const hosted = await networkWorld({ forwarder: "", token: () => "", agentId: "a", transport: async () => ({ status: 200, json: world() as never }) }, async () => {
+      throw new Error("must not probe");
+    });
+    expect((hosted.json.coordinators as Array<{ myRttMs: unknown }>).every((c) => c.myRttMs === null)).toBe(true);
+  });
+
+  it("timedIdentityProbe times GET /identity and refuses anything but http(s)", async () => {
+    const { timedIdentityProbe } = await import("../../src/apps/ide/network-world.js");
+    const ms = await timedIdentityProbe(`${base}/some/other/path`);
+    expect(typeof ms).toBe("number");
+    expect(seen.map((s) => s.url)).toEqual(["/identity", "/identity"]);
+    expect(await timedIdentityProbe("file:///etc/passwd")).toBeNull();
+    expect(await timedIdentityProbe("not a url")).toBeNull();
+    expect(await timedIdentityProbe("http://127.0.0.1:1")).toBeNull();
+  });
+});
+
+describe("GET /v1/ide/network/world (IDE provider)", () => {
+  let app: any;
+  beforeAll(async () => {
+    process.env.IDE_PROVIDER_TOKEN = TOKEN;
+    process.env.SWARM_VIA_LOCAL_AGENT_URL = base;
+    delete process.env.IDE_PROVIDER_HOST;
+    app = (await import("../../src/apps/ide/provider-server.js")).ideProviderServer;
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app?.close();
+    delete process.env.SWARM_VIA_LOCAL_AGENT_URL;
+  });
+
+  it("needs the IDE token", async () => {
+    expect((await app.inject({ method: "GET", url: "/v1/ide/network/world", headers: { host: HOST } })).statusCode).toBe(401);
+  });
+
+  it("answers the world view with this computer's round trips", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/ide/network/world", headers: { host: HOST, authorization: `Bearer ${TOKEN}` } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.connected).toBe(true);
+    expect(body.servedBy).toBe("coord-us");
+    expect(typeof body.coordinators[0].myRttMs).toBe("number");
+    expect(seen.some((s) => s.url === "/forward/network/world" && s.auth === `Bearer ${TOKEN}`)).toBe(true);
+  });
+
+  it("reports a rate limit as such", async () => {
+    worldStatus = 429;
+    const res = await app.inject({ method: "GET", url: "/v1/ide/network/world", headers: { host: HOST, authorization: `Bearer ${TOKEN}` } });
+    expect(res.statusCode).toBe(429);
+    expect(res.json()).toMatchObject({ connected: false, reason: "rate_limited" });
+  });
+});

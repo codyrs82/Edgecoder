@@ -50,7 +50,7 @@ export function parseNetworkModel(id: string): { model: string; computeClass: st
   return rest ? { model: rest, computeClass: "any" } : null;
 }
 
-async function call(d: NetworkDeps, method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) {
+export async function call(d: NetworkDeps, method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) {
   if (d.transport) return d.transport(method, path, body, signal);
   const res = await request(`${d.forwarder}/forward${path}`, {
     method,

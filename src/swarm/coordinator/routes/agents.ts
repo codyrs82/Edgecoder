@@ -160,6 +160,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       ownerEmail: activation.ownerEmail,
       sourceIp: activation.sourceIp ?? sourceIp,
       countryCode: activation.countryCode,
+      // Self-reported hosting region (FLY_REGION or AGENT_REGION): coarse display only (GET /network/world).
+      ...(body.region ? { region: body.region } : {}),
       vpnDetected: activation.vpnDetected,
       enrollmentReason: activation.reason,
       powerTelemetry: body.powerTelemetry

@@ -111,6 +111,8 @@ const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
 const COORDINATOR_POST_RETRIES = W.COORDINATOR_POST_RETRIES;
 const MAX_CONCURRENT_TASKS = W.MAX_CONCURRENT_TASKS;
 const AGENT_CLIENT_TYPE = W.AGENT_CLIENT_TYPE;
+/** Hosting region shown (coarsely) in the network's world view: AGENT_REGION, else Fly's own FLY_REGION. */
+const AGENT_REGION = [W.AGENT_REGION, process.env.FLY_REGION].find((r) => typeof r === "string" && /^[a-z0-9-]{2,24}$/.test(r));
 const PEER_DIRECT_WORK_ITEMS = (W.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
@@ -1285,6 +1287,7 @@ async function loop(): Promise<void> {
               registrationToken: AGENT_REGISTRATION_TOKEN,
               localModelProvider: currentProvider,
               clientType: AGENT_CLIENT_TYPE,
+              ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
               maxConcurrentTasks: MAX_CONCURRENT_TASKS,
               sandboxMode: SANDBOX_MODE,
               powerTelemetry,
@@ -1786,6 +1789,7 @@ async function loop(): Promise<void> {
               registrationToken: AGENT_REGISTRATION_TOKEN,
               localModelProvider: currentProvider,
               clientType: AGENT_CLIENT_TYPE,
+              ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
               maxConcurrentTasks: MAX_CONCURRENT_TASKS,
               powerTelemetry,
               publicKeyPem: keys.publicKeyPem

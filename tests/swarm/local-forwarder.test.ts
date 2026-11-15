@@ -72,6 +72,17 @@ describe("local forwarder", () => {
     expect(seen[0].headers.authorization).toBeUndefined();
   });
 
+  it("relays the world view as a signed GET to the coordinator", async () => {
+    const res = await request(`${fwdUrl}/forward/network/world`, { headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(seen[0]).toMatchObject({ method: "GET", url: "/network/world" });
+    expect(seen[0].headers["x-signature"]).toBe("sig:/network/world:0");
+    expect(seen[0].headers.authorization).toBeUndefined();
+    // Only the agent-facing path: the coordinators' own view is not reachable through it.
+    expect((await request(`${fwdUrl}/forward/network/world/local`, { headers: auth })).statusCode).toBe(404);
+    expect((await request(`${fwdUrl}/forward/network/world`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: "{}" })).statusCode).toBe(404);
+  });
+
   it("relays result polls and rejects other paths", async () => {
     const res = await request(`${fwdUrl}/forward/tasks/t1/subtasks/s1/result`, { headers: auth });
     expect(res.statusCode).toBe(200);

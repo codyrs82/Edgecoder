@@ -75,6 +75,8 @@ export const coordinatorConfigSchema = z.object({
   MESH_PEER_ALLOWLIST: str(),
   MESH_REQUIRE_AGENT_SIGNED_RESULTS: envFlagWord(),
   MESH_WS_REQUIRE_SIGNED: envFlag({ on: ["true"], ci: true }),
+  /** WebSocket ping interval on each mesh socket, for the round trip in GET /network/world; 0 turns pings off. */
+  MESH_WS_PING_INTERVAL_MS: envInt(20_000, { min: 0 }),
   /** Outside production only; production always requires signed agent requests. */
   REQUIRE_SIGNED_AGENT_REQUESTS: envFlag({ off: ["false"], ci: true }),
   /** Comma-separated proxy addresses whose forwarded-IP headers are believed. */
