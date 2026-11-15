@@ -2990,6 +2990,20 @@ export class PostgresStore {
         [feePoolAccountId]
       );
       const projections = await client.query(`SELECT account_id, total_credits FROM coordinator_earnings_projection`);
+      // Per task with a reserve: reserved vs paid out (work + network fee) vs refunded.
+      const taskReserves = await client.query(
+        `WITH reserve AS (
+           SELECT related_task_id AS task_id, SUM(credits) AS reserved FROM credit_transactions
+            WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve') AND related_task_id IS NOT NULL GROUP BY 1),
+         work AS (
+           SELECT COALESCE(related_task_id, substring(reason FROM 13)) AS task_id, SUM(credits) AS paid FROM credit_transactions
+            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%') GROUP BY 1),
+         refund AS (
+           SELECT substring(reason FROM 20) AS task_id, SUM(credits) AS refunded FROM credit_transactions
+            WHERE tx_type = 'earn' AND reason LIKE 'task\\_submit\\_refund:%' GROUP BY 1)
+         SELECT r.task_id, r.reserved::text AS reserved, COALESCE(w.paid, 0)::text AS paid, COALESCE(f.refunded, 0)::text AS refunded
+           FROM reserve r LEFT JOIN work w ON w.task_id = r.task_id LEFT JOIN refund f ON f.task_id = r.task_id`
+      );
       const reservations = await client.query(
         `SELECT reservation_id, record_json FROM compute_reservations WHERE record_json->>'status' = 'ended'`
       );
@@ -3021,6 +3035,7 @@ export class PostgresStore {
         })),
         earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
         feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
+        taskReserves: taskReserves.rows.map((r) => ({ taskId: r.task_id, reserved: r.reserved, paid: r.paid, refunded: r.refunded })),
         projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
         reservations: reservations.rows.flatMap((r) => {
           const rec = r.record_json as { agentAccountId?: unknown; usedMsat?: unknown };
