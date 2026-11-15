@@ -47,6 +47,7 @@ import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
+import { appVersion } from "../common/app-version.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
@@ -1402,7 +1403,7 @@ async function loop(): Promise<void> {
               agentId: AGENT_ID,
               ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
               os: OS,
-              version: "0.1.0",
+              version: appVersion(),
               mode: effectiveMode,
               registrationToken: AGENT_REGISTRATION_TOKEN,
               localModelProvider: currentProvider,
@@ -1911,7 +1912,7 @@ async function loop(): Promise<void> {
             const registerBody = {
               agentId: AGENT_ID,
               ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-              os: OS, version: "0.1.0", mode: effectiveMode,
+              os: OS, version: appVersion(), mode: effectiveMode,
               registrationToken: AGENT_REGISTRATION_TOKEN,
               localModelProvider: currentProvider,
               clientType: AGENT_CLIENT_TYPE,
