@@ -88,8 +88,20 @@ cost (msat)      = seconds × rate
 - Work on your own machines is not charged.
 - An agent never earns more than the requester is charged: each result's cost is taken from what
   the task set aside and not yet used, and pays only that much. Work with nothing set aside (an
-  anonymous `/submit`) earns nothing. A subtask a peer coordinator offered earns at most the worst
-  case for one subtask, which is what the origin charges its requester for it.
+  anonymous `/submit`) earns nothing.
+- A subtask offered to peer coordinators runs on one coordinator only (`src/swarm/remote-grants.ts`):
+  a peer asks the origin for it (`task_claim`) and queues it only once granted; the origin takes its
+  own copy off its queue when it grants it. The peer prices the work as above (within the
+  requester's bid, which travels with the offer, and the worst case for one subtask) and sends that
+  cost with the forwarded result; the origin charges its requester that much out of the task's
+  reserve and answers with the charge, and the peer pays its agent (and the network fee) exactly
+  that. The rest of the reserve is refunded when the task settles. A grant whose result never
+  comes back expires and the subtask runs again at the origin; the late result is refused.
+- Billing survives a restart: a `task_billing` row is kept until the task settles. On startup a
+  task whose subtasks are all accounted for is resumed (queued ones requeued, running ones keep
+  their claimant with a fresh lease); any other (a model call, a subtask held behind dependencies,
+  a task cut off before it was split) is refunded what it did not use. Amounts come from the ledger.
+- `/ledger/verify` flags `task_overpaid`: a task whose work, fees and refund exceed its reserve.
 - A task id belongs to one requester until its task settles: `/submit` and `/inference/submit`
   answer 409 `duplicate_task` for an id that is still billed, queued or held.
 
