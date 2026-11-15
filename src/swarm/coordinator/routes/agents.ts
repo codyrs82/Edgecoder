@@ -47,7 +47,7 @@ import {
   agentOrchestration,
   blacklistByAgent
 } from "../agent-state.js";
-import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken, agentSignatureAtGate } from "../auth.js";
 import {
   rateOracleConfig,
   hardwareVerifier,
@@ -435,6 +435,11 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
 
   app.post("/agent/diagnostics", async (req, reply) => {
     const body = diagnosticsSchema.parse(req.body);
+    // An agent writes its own diagnostics only (shown to the operator); the mesh token is a coordinator's.
+    const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+    if (!hasMeshToken(headers) && agentSignatureAtGate(headers, "POST", "/agent/diagnostics") !== body.agentId) {
+      return reply.code(403).send({ error: "agent_identity_mismatch" });
+    }
     if (!agentCapabilities.has(body.agentId)) {
       return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
     }

@@ -172,3 +172,12 @@ describe("mesh WebSocket admits agents by their own key", () => {
     expect(await ws("not-registered", signMeshWsBind("not-registered", createPeerKeys("nr").privateKeyPem))).toBe(4001);
   });
 });
+
+describe("diagnostics are written by the agent itself", () => {
+  test("an agent cannot write another agent's diagnostics", async () => {
+    const forged = await signedPost(agentA, "/agent/diagnostics", { agentId: agentB.peerId, events: [{ message: "forged" }] });
+    expect(forged.statusCode).toBe(403);
+    const own = await signedPost(agentA, "/agent/diagnostics", { agentId: agentA.peerId, events: [{ message: "ok" }] });
+    expect(own.statusCode).toBe(200);
+  });
+});
