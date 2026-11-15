@@ -14,7 +14,7 @@
       "limit": 3
     }
   ],
-  "instructions": "Write `dogfood-output/ci-triage.md`: a short triage note, one `## PR #<number>` section per PR in the context below, each with one line on what failed (test name or step) and one line with the likely cause, quoting the key error line. If there is no failure, say so in one line. No speculation beyond the logs.",
+  "instructions": "Write a short triage note, one `## PR #<number>` section per PR in the context below, each with one line on what failed (test name or step) and one line with the likely cause, quoting the key error line. If there is no failure, say so in one line. No speculation beyond the logs.",
   "acceptance": [
     {
       "kind": "grep",
@@ -28,5 +28,6 @@
   ],
   "allowedPaths": [
     "dogfood-output/ci-triage.md"
-  ]
+  ],
+  "mode": "chat"
 }

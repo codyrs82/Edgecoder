@@ -74,6 +74,8 @@ interface Job {
   complexity?: "small" | "medium" | "large"; tier?: TierName; hints?: string[];
   files?: string[]; instructions: string; acceptance: Acceptance | Acceptance[]; allowedPaths: string[];
   context?: Array<{ label: string; cmd?: string[]; builtin?: "failed-ci-logs"; limit?: number }>; commit?: boolean; output?: string;
+  /** "chat": one model call without the agent's tools; the runner writes the reply to `output` (summaries on small models). */
+  mode?: "agent" | "chat";
 }
 type TierName = "cpu" | "mac" | "gpu";
 const TIERS: Record<TierName, { model: string; ideModel: string; cls: string; label: string; maxTokens?: number }> = {
@@ -130,9 +132,19 @@ async function exclusive<T>(fn: () => T | Promise<T>): Promise<T> {
 
 // ---------------------------------------------------------------------------- approvals
 type Approval = { tool: string; detail: string; approved: boolean; rewritten?: string };
-function decide(tool: string, args: any, job: Job, approvals: Approval[], st: { tsc: number }, canRewrite: boolean): { ok: boolean; args?: any } {
+/** Models often prefix a command with `cd <project root> &&`; commands already run there, so that prefix is dropped. */
+export function stripCdPrefix(cmd: string, root: string): string {
+  const m = /^cd\s+("?)([^"&;|]+)\1\s*&&\s*/.exec(cmd);
+  if (!m) return cmd;
+  const dir = m[2].trim().replace(/\/$/, "");
+  return dir === root.replace(/\/$/, "") || dir === "." ? cmd.slice(m[0].length) : cmd;
+}
+
+function decide(tool: string, args: any, job: Job, approvals: Approval[], st: { tsc: number }, canRewrite: boolean, root = ""): { ok: boolean; args?: any } {
   if (tool === "run_shell") {
-    const cmd = String(args.command ?? "").trim();
+    const original = String(args.command ?? "").trim();
+    const cmd = canRewrite ? stripCdPrefix(original, root) : original;
+    if (cmd !== original) args = { ...args, command: cmd };
     const vitest = /^(?:npx\s+)?vitest(?:\s+run)?\s+(\S+\.test\.ts)(?:\s+--?[\w=-]+)*\s*$/.exec(cmd);
     if (vitest && pathAllowed(vitest[1], job.allowedPaths)) {
       const rw = `nice -n 10 npx vitest run ${vitest[1]} --maxWorkers=2`;
@@ -144,7 +156,7 @@ function decide(tool: string, args: any, job: Job, approvals: Approval[], st: { 
       approvals.push({ tool, detail: cmd, approved: true, rewritten: rw });
       return { ok: true, args: { ...args, command: rw } };
     }
-    if (/^(ls|cat|head|tail|grep|rg|wc|git (status|diff|log|show))\b[^;&|`$<>]*$/.test(cmd)) { approvals.push({ tool, detail: cmd, approved: true }); return { ok: true }; }
+    if (/^(ls|cat|head|tail|grep|rg|wc|sed -n|git (status|diff|log|show))\b[^;&|`$<>]*$/.test(cmd)) { approvals.push({ tool, detail: original, approved: true, ...(cmd !== original ? { rewritten: cmd } : {}) }); return { ok: true, ...(cmd !== original ? { args } : {}) }; }
     approvals.push({ tool, detail: cmd, approved: false });
     return { ok: false };
   }
@@ -198,7 +210,9 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[], maxTok
         const text = (await res.text().catch(() => "")).slice(0, 300);
         let msg = text;
         try { msg = JSON.parse(text).error?.message ?? text; } catch {}
-        if ((res.status === 503 || res.status === 429) && tries < 3) { await new Promise((r) => setTimeout(r, 15_000)); continue; }
+        // Busy (503), rate limited (429), or the edge in front of the API failing (502/504): wait, ask again.
+        if ([429, 502, 503, 504].includes(res.status) && tries < 3) { await new Promise((r) => setTimeout(r, 15_000)); continue; }
+        if (/^\s*</.test(msg)) msg = `(an HTML error page from the edge, ${text.length} bytes)`;
         throw new Error(`HTTP ${res.status}: ${msg}`);
       }
       const dec = new TextDecoder();
@@ -270,7 +284,7 @@ async function runInproc(job: Job, model: string, wt: string, prompt: string, ma
     execute: (tool: string, args: any, opts: any) => executor.execute(tool, rewrites.get(JSON.stringify([tool, args])) ?? args, opts),
     sendEvent,
     waitForApproval: async (_id: string, tool: string, args: any) => {
-      const d = decide(tool, args, job, r.approvals, st, true);
+      const d = decide(tool, args, job, r.approvals, st, true, wt);
       if (d.ok && d.args) rewrites.set(JSON.stringify([tool, args]), d.args);
       return d.ok;
     },
@@ -291,6 +305,25 @@ async function runInproc(job: Job, model: string, wt: string, prompt: string, ma
       runTool,
     });
   } finally { clearTimeout(timer); }
+  return r;
+}
+
+/** One plain chat call (no tools, no IDE system prompt); the reply goes to job.output. */
+async function runChat(job: Job, model: string, wt: string, prompt: string, maxTokens?: number): Promise<AgentRun> {
+  const r: AgentRun = { calls: [], toolCalls: {}, sigs: {}, approvals: [], text: "", toolErrors: [], timedOut: false, via: "chat" };
+  const backend = publicApiBackend(model, r.calls, job.hints, maxTokens);
+  try {
+    for await (const p of backend({ messages: [{ role: "system", content: "You write short, accurate Markdown for a software team. Output only the requested Markdown file's content." }, { role: "user", content: prompt }], temperature: 0.2 }, AbortSignal.timeout(TASK_TIMEOUT_MS)) as AsyncGenerator<any>) {
+      if (p.delta) r.text += p.delta;
+    }
+    const body = r.text.replace(/^```(?:markdown|md)?\n([\s\S]*?)\n```\s*$/m, "$1").trim();
+    if (job.output && body) {
+      mkdirSync(dirname(join(wt, job.output)), { recursive: true });
+      writeFileSync(join(wt, job.output), body + "\n");
+    }
+  } catch (e) {
+    r.text += `\nError contacting model: ${(e as Error).message}`;
+  }
   return r;
 }
 
@@ -420,6 +453,9 @@ function promptFor(job: Job, wt: string, contextBlocks: string[]): string {
     return `--- ${label}${body.length > 12_000 ? " (first 12000 characters)" : ""}\n${body.slice(0, 12_000)}`;
   });
   const checks = [job.acceptance].flat().map((a) => a.kind === "vitest" ? `- The check: \`npx vitest run ${(a.args?.files ?? []).join(" ")}\` must pass (run it yourself and fix failures).` : a.kind === "tsc" ? "- The check: TypeScript must compile (`npx tsc --noEmit -p tsconfig.json`)." : a.kind === "grep" ? `- The check: ${(a.args ?? []).map((g: any) => `${g.file} ${g.absent ? "must not contain" : "must contain"} /${g.pattern}/`).join("; ")}.` : "").filter(Boolean);
+  if (job.mode === "chat") {
+    return [`# ${job.title}`, "", job.instructions, "Reply with only the Markdown, nothing before or after it.", ...(files.length ? ["", "Material:", ...files] : []), ...(contextBlocks.length ? ["", "Context:", ...contextBlocks] : [])].join("\n");
+  }
   return [
     `# ${job.title}`,
     "",
@@ -466,7 +502,7 @@ async function attempt(job: Job, tier: TierName, n: number, base: string, contex
   try {
     const prompt = promptFor(job, wt, contextBlocks);
     const via = VIA === "auto" ? ((await providerUp()) ? "provider" : "inproc") : VIA;
-    const r = via === "provider" ? await runProvider(job, tier, wt, prompt) : await runInproc(job, model, wt, prompt, TIERS[tier].maxTokens);
+    const r = job.mode === "chat" ? await runChat(job, model, wt, prompt, TIERS[tier].maxTokens) : via === "provider" ? await runProvider(job, tier, wt, prompt) : await runInproc(job, model, wt, prompt, TIERS[tier].maxTokens);
     card.via = r.via;
     card.agentMs = Date.now() - t0;
     const acc = await accept(job, wt);

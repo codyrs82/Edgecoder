@@ -13,7 +13,7 @@
     "docs/security/agent-threat-model.md#L360-L404",
     "docs/security/agent-threat-model.md#L430-L462"
   ],
-  "instructions": "Write `dogfood-output/threat-model-residuals.md`: a checklist of the residual risks in docs/security/agent-threat-model.md (the excerpts below), one `- [ ] ` line per risk, grouped under the section it comes from (`## Lateral movement`, `## Theft of bitcoin/cSats`, `## Denial of service`). Each line: the risk in under 25 words. Only risks the text states.",
+  "instructions": "Write a checklist of the residual risks in docs/security/agent-threat-model.md (the excerpts below), one `- [ ] ` line per risk, grouped under the section it comes from (`## Lateral movement`, `## Theft of bitcoin/cSats`, `## Denial of service`). Each line: the risk in under 25 words. Only risks the text states.",
   "acceptance": [
     {
       "kind": "grep",
@@ -31,5 +31,6 @@
   ],
   "allowedPaths": [
     "dogfood-output/threat-model-residuals.md"
-  ]
+  ],
+  "mode": "chat"
 }
