@@ -130,16 +130,34 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   retriedInference.set(subtask.id, nowMs);
   claimedTradePrice.delete(subtask.id);
   // The retry gets the same claim bound as a new call (never past the request's own deadline).
-  const old = claimDeadlines.get(subtask.id);
-  if (old) clearTimeout(old);
-  const deadline = setTimeout(() => {
-    claimDeadlines.delete(subtask.id);
-    void cancelUnclaimedInference(subtask.taskId, subtask.id).catch((err) => coordinatorApp.log.error({ err, taskId: subtask.taskId }, "inference_no_capacity_cancel_failed"));
-  }, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
-  deadline.unref?.();
-  claimDeadlines.set(subtask.id, deadline);
+  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
+}
+
+/** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
+function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
+  const old = claimDeadlines.get(subtaskId);
+  if (old) clearTimeout(old);
+  const deadline = setTimeout(() => {
+    claimDeadlines.delete(subtaskId);
+    void cancelUnclaimedInference(taskId, subtaskId).catch((err) => coordinatorApp.log.error({ err, taskId }, "inference_no_capacity_cancel_failed"));
+  }, Math.max(0, ms));
+  deadline.unref?.();
+  claimDeadlines.set(subtaskId, deadline);
+}
+
+/**
+ * A model call back on the queue after its holder's lease expired (the agent vanished) gets the
+ * no-capacity bound again: without it, a call nobody takes kept its reserve until some agent came.
+ * Called from the queue's claimable hook; a call with no bound armed and its time used up is
+ * cancelled now (refunded in full: nothing was charged for the lost run).
+ */
+export function onInferenceClaimable(subtask: Subtask, nowMs = Date.now()): void {
+  if (subtask.kind !== "inference" || claimDeadlines.has(subtask.id)) return;
+  const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
+  if (submittedAtMs === undefined) return;
+  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, submittedAtMs + subtask.timeoutMs - nowMs));
 }
 
 function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }) {
@@ -277,12 +295,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       },
     });
     inferenceStreams.open(subtask.id, body.taskId);
-    const deadline = setTimeout(() => {
-      claimDeadlines.delete(subtask.id);
-      void cancelUnclaimedInference(body.taskId, subtask.id).catch((err) => coordinatorApp.log.error({ err, taskId: body.taskId }, "inference_no_capacity_cancel_failed"));
-    }, INFERENCE_CLAIM_TIMEOUT_MS);
-    deadline.unref?.();
-    claimDeadlines.set(subtask.id, deadline);
+    armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
   });

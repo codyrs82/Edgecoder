@@ -147,6 +147,10 @@ export async function initCoordinator(): Promise<void> {
           orderBook.removeAsk(agentId);
           queue.forgetAgent(agentId);
         }
+        // #51 leases also expire without agent traffic (they were only checked on heartbeats and
+        // pulls), so a vanished holder's subtask is requeued, or failed at the cap, on time.
+        const leases = queue.expireLeases(now);
+        if (leases.failed.length > 0) app.log.warn({ subtaskIds: leases.failed }, "subtask_failed_max_attempts");
         // Execution grants between coordinators: lapsed grants go back on the queue (remote-grants.ts).
         try {
           sweepGrants();
