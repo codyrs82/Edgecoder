@@ -161,8 +161,13 @@ app.get("/portal/settings/install", async (req, reply) => {
     <!-- ── Hero ──────────────────────────────────────────────────────── -->
     <div class="hero-dl">
       <h1>Get EdgeCoder</h1>
-      <p>Install the agent. Join the mesh. Earn credits.</p>
+      <p>Install the agent on your machines. Run your own work on them, free.</p>
       <span class="os-badge">Detected: ${osLabels[detectedOS] || "Unknown"}</span>
+    </div>
+
+    <div class="callout" id="hostingNote">
+      <h3>Hosting for others is by request during early access</h3>
+      <div class="muted">Machines you install the agent on run your own work ("My machines", free). Taking work from other people, and being paid for it, needs an invitation while the network is in early access. <a href="/host#request">Request to host</a>.</div>
     </div>
 
     <!-- ── Feature cards ─────────────────────────────────────────────── -->
@@ -174,8 +179,8 @@ app.get("/portal/settings/install", async (req, reply) => {
       </div>
       <div class="feature-card">
         <div class="fc-icon">${icon("zap", 14)}</div>
-        <div class="fc-title">Earn Credits</div>
-        <div class="fc-desc">Contribute idle compute and earn EdgeCoder credits automatically.</div>
+        <div class="fc-title">Your machines, free</div>
+        <div class="fc-desc">Run models and code jobs on your own machines at no cost. Invited hosts also earn sats for other people's work.</div>
       </div>
       <div class="feature-card">
         <div class="fc-icon">${icon("shield", 14)}</div>
@@ -227,7 +232,7 @@ app.get("/portal/settings/install", async (req, reply) => {
   `;
 
   // The token is rendered (escaped) on the server; the script no longer rewrites it.
-  return reply.type("text/html").send(settingsPage("install", "Install the agent, join the mesh, start contributing.", content, script, { wide: true }));
+  return reply.type("text/html").send(settingsPage("install", "Install the agent on your own machines.", content, script, { wide: true }));
 });
 
 }

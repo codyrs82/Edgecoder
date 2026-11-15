@@ -371,7 +371,7 @@
       <div class="sp-row">
         <div class="sp-text">
           <span class="sp-title">Max concurrent tasks</span>
-          <span class="sp-desc">Network jobs this computer runs at once.</span>
+          <span class="sp-desc">Jobs this computer runs at once: your own, and other people's once your account is an approved host (by request during early access).</span>
         </div>
         <div class="sp-controls"><input type="number" class="num" aria-label="Max concurrent tasks" bind:value={maxConcurrentTasks} min="1" max="10" /></div>
       </div>

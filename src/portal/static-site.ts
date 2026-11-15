@@ -25,7 +25,7 @@ export interface StaticSiteOptions {
 }
 
 /** Paths that only the live portal can serve; the mirror forwards them (Cloudflare Pages `_redirects`). */
-export const MIRROR_REDIRECT_PREFIXES = ["/portal", "/auth", "/wallet", "/nodes", "/me", "/internal", "/.well-known"];
+export const MIRROR_REDIRECT_PREFIXES = ["/host", "/portal", "/auth", "/wallet", "/nodes", "/me", "/internal", "/.well-known"];
 
 /**
  * A static host sends one fixed policy, so a per-request nonce is not possible: drop the nonce

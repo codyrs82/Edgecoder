@@ -11,7 +11,7 @@ Users interact through a chat-first desktop app (Tauri + Svelte with Monaco edit
 ### Why EdgeCoder
 
 - **No cloud dependency** -- all inference runs locally on commodity hardware using Ollama or llama.cpp.
-- **Permissionless mesh** -- any device can join and contribute compute to earn credits.
+- **Open mesh, invited hosts** -- any signed-in device can run its owner's own work for free; taking other people's work (and earning for it) is by invitation during early access (`HOST_APPROVAL_REQUIRED`, see [environment variables](/reference/environment-variables)). Request to host at `/host` on the portal.
 - **Cryptographically auditable** -- every transaction is recorded in an append-only ordering chain anchored to Bitcoin via OP_RETURN.
 - **Privacy-preserving** -- task data stays on the executing node; envelope encryption is staged for activation.
 
