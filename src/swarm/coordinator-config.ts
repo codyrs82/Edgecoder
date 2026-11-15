@@ -104,7 +104,9 @@ export const coordinatorConfigSchema = z.object({
   HOST_ATTEST_ALLOW_PRIVATE: envFlag({ on: ["1"] }),
   PORTAL_PUBLIC_URL: envUrl("https://edgecoder.io"),
   REGISTRY_UPSTREAM_URL: envUrl(),
-  COORDINATOR_FEE_BPS: envInt(150, { min: 0 }),
+  // Owner decision 2026-11-15: buying cSats is free (1 sat = 1 cSat); EdgeCoder's revenue is the
+  // NETWORK_FEE_BPS share of every compute payment. Set above 0 only to charge on purchases again.
+  COORDINATOR_FEE_BPS: envInt(0, { min: 0 }),
   ROBOT_COORDINATOR_FEE_BPS: envInt(200, { min: 0 }),
   ROBOT_SWEEP_INTERVAL_MS: envInt(86400000, { min: 1 }),
   ROBOT_MIN_SWEEP_SATS: envInt(10000, { min: 0 }),
@@ -133,6 +135,9 @@ export const coordinatorConfigSchema = z.object({
   /** Infrastructure hosts heartbeat this often; the fee pool is distributed by heartbeats per window. */
   HOST_HEARTBEAT_MS: envInt(60_000, { min: 1000 }),
   FEE_POOL_DISTRIBUTION_MS: envInt(86_400_000, { min: 60_000 }),
+  // The NETWORK_FEE_BPS share of compute payments is EdgeCoder's (network:fee_pool). Paying it out to
+  // infrastructure hosts by uptime is off unless this is set (third-party coordinator operators).
+  FEE_POOL_HOST_DISTRIBUTION: envFlag({ on: ["1", "true"] }),
   /** Automatic Lightning-address payouts run this often. */
   PAYOUT_AUTO_INTERVAL_MS: envInt(21_600_000, { min: 60_000 }),
   /** Earnings hold before an earn row is withdrawable (ms). Unset: 24 h on mainnet, 0 elsewhere (earningsHoldFromEnv). */

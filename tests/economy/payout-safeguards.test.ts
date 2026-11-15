@@ -303,3 +303,13 @@ describe.skipIf(!PG_URL)("payout safeguards against real Postgres", () => {
     }
   });
 });
+
+describe("fee policy wiring (owner decision 2026-11-15)", () => {
+  it("fee-pool distribution to hosts is opt-in: the timer and the admin route skip it unless FEE_POOL_HOST_DISTRIBUTION is set", () => {
+    const src = readFileSync("src/swarm/coordinator/payouts.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function runFeePoolDistribution"));
+    const guard = fn.indexOf('if (!CC.FEE_POOL_HOST_DISTRIBUTION) return { distributedMsat: 0, hosts: [], skipped: "disabled" };');
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(fn.indexOf("payoutService.distributeFeePool("));
+  });
+});

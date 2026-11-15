@@ -11,10 +11,16 @@ import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 export function localBackend(ollamaHost: string, model: string): ChatBackend {
   return async function* (req, signal) {
     let stopped = "stop";
+    let tokens: { promptTokens?: number; outputTokens?: number } = {};
     try {
       for await (const p of ollamaChat(ollamaHost, { model, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
-        if ("doneReason" in p) stopped = p.doneReason;
-        else yield p;
+        if ("doneReason" in p) {
+          stopped = p.doneReason;
+          tokens = {
+            ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}),
+            ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {})
+          };
+        } else yield p;
       }
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
@@ -22,7 +28,7 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
       if (/not found/i.test(msg)) throw new ChatBackendError(`${model} isn't installed on this computer. Install it from Settings > Models.`, 404);
       throw new ChatBackendError(msg, 502);
     }
-    yield { done: true, cSatsSpent: 0, stopReason: stopped === "length" ? "length" : "stop" };
+    yield { done: true, cSatsSpent: 0, stopReason: stopped === "length" ? "length" : "stop", ...tokens };
   };
 }
 
@@ -34,7 +40,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
           if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, 502);
-          yield { done: true, ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}) };
+          yield { done: true, ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}) };
         }
       }
     } catch (err) {
