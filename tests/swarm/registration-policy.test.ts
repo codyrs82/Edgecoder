@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_REGISTER_REFRESH_MS,
   isAgentNotRegisteredError,
+  registeredLogLine,
   registerRefreshMsFromEnv,
   shouldRegister
 } from "../../src/swarm/registration-policy.js";
@@ -64,5 +65,20 @@ describe("429 handling (rate limit, not an auth failure)", () => {
     expect(rateLimitWaitMs(Object.assign(new Error("x"), { statusCode: 429, retryAfterMs: 3_600_000 }))).toBe(MAX_RATE_LIMIT_WAIT_MS);
     expect(rateLimitWaitMs(Object.assign(new Error("x"), { statusCode: 401 }))).toBeNull();
     expect(rateLimitWaitMs(new Error("network"))).toBeNull();
+  });
+});
+
+describe("registeredLogLine", () => {
+  it("names the agent, the coordinator and the granted class and tier", () => {
+    const line = registeredLogLine("agent-7", "https://coordinator.edgecoder.io", {
+      accepted: true,
+      hardwareVerification: { status: "verified", grantedClass: "gpu", grantedTier: "pro", claimedTier: "pro" }
+    });
+    expect(line).toBe("[agent:agent-7] registered with https://coordinator.edgecoder.io (class=gpu tier=pro verification=verified)");
+  });
+
+  it("still logs a registration when the response carries no hardware verdict", () => {
+    expect(registeredLogLine("a1", "http://127.0.0.1:4301", { accepted: true })).toBe("[agent:a1] registered with http://127.0.0.1:4301");
+    expect(registeredLogLine("a1", "http://127.0.0.1:4301", undefined)).toBe("[agent:a1] registered with http://127.0.0.1:4301");
   });
 });
