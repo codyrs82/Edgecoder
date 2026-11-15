@@ -102,6 +102,24 @@ final class APIClient {
     }
 }
 
+extension APIClient {
+    /// The status code and body, without throwing on non-2xx: for flows whose 202 / 4xx answers carry
+    /// data the screen shows (a withdrawal asking for an emailed code, a refusal with its reason).
+    func requestRaw(baseURL: URL, path: String, method: String = "GET", body: Encodable? = nil) async throws -> (status: Int, data: Data) {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = method
+        request.timeoutInterval = 15
+        request.httpShouldHandleCookies = true
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let body {
+            request.httpBody = try JSONEncoder().encode(AnyEncodable(body))
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIClientError.invalidResponse }
+        return (http.statusCode, data)
+    }
+}
+
 struct EmptyResponse: Decodable {}
 
 struct AnyEncodable: Encodable {

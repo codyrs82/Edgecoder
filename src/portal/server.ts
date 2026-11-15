@@ -27,6 +27,7 @@ import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
+import { registerWalletApiRoutes } from "./routes/wallet-api.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
@@ -874,6 +875,8 @@ registerReviewRoutes(app, reviewsRouteDeps);
 const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
+// The Wallet screens (web, desktop, iOS): one read-only overview, and a session-bound Lightning top-up.
+registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
 registerPayoutRoutes(app, marketRouteDeps, {
   store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, dailyCapSats: C.PORTAL_WITHDRAW_DAILY_CAP_SATS,
   sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare

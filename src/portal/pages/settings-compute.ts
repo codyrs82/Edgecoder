@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { MARKET_CONTENT, MARKET_SCRIPT, MARKET_SUBTITLE } from "./market.js";
 import { SETTINGS_HELPERS_SCRIPT, settingRow, settingsPage, settingsSection } from "./settings-shell.js";
+import { WALLET_CSS, WALLET_HELPERS_SCRIPT } from "./wallet.js";
 
 /**
  * Settings > Compute (/portal/settings/compute): the compute market (prices, order book, standing
@@ -29,7 +30,48 @@ const RESERVATIONS = settingsSection(
 );
 
 
-const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
+/** The price board: what a model call and a second of each class cost now, and the fees. */
+const PRICE_BOARD = settingsSection(
+  "prices",
+  "Prices now",
+  "What compute costs right now. 1 cSat = 1 sat. Model calls are priced per token by model size; code jobs and reservations per second by machine class.",
+  `${WALLET_CSS}
+    <div class="wl-head"><span class="net-badge" id="netBadge"><span class="dot"></span><span id="netBadgeText">Checking network…</span></span><span class="wl-faint" id="pbRate"></span></div>
+    <div class="pb-classes" id="pbClasses"><div class="pb-class"><div class="t">Loading…</div></div></div>
+    <div class="wl-faint u-mb-12">Per second on the base tier of each class; faster tiers cost more per second and finish sooner. The price an agent is paid comes from the order book below and is held between 0.25x and 4x of the class reference.</div>
+    <div class="set-card"><div class="set-row wide">
+      <div class="set-text"><div class="set-label">Model calls, per million tokens</div><div class="set-desc">The same price on every class; never below the electricity the machine used.</div></div>
+      <div class="wl-table-wrap"><table><thead><tr><th>Model</th><th class="num">Machines</th><th class="num">Input</th><th class="num">Output</th></tr></thead><tbody id="pbModels"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody></table></div>
+    </div></div>
+    <div class="wl-faint" id="pbFees"></div>`
+);
+
+const PRICE_BOARD_SCRIPT = WALLET_HELPERS_SCRIPT + `
+    (function () {
+      const $p = (id) => document.getElementById(id);
+      fetch("/portal/api/wallet/overview", { credentials: "include" }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status)))).then((o) => {
+        renderNetBadge(o.network);
+        $p("pbRate").textContent = o.btcUsd ? "BTC $" + fmtSats(o.btcUsd) + (o.rateStale ? " (stale)" : "") + " · rate oracle" : "";
+        const classes = Object.entries(o.classes || {});
+        $p("pbClasses").innerHTML = classes.length ? classes.map(([id, c]) => {
+          const perS = Number(c.cSatsPerSecondBaseTier) || 0;
+          const perH = perS * 3600;
+          return "<div class='pb-class'><div class='t'>" + escapeHtml(c.label || classLabel(id)) + "<small>" + escapeHtml(id) + "</small></div><div class='v'>" + escapeHtml(fmtRate(perS)) + " <small>cSats/s</small></div><div class='d'>" + escapeHtml(fmtNum(perH, perH < 10 ? 2 : 0)) + " sats/h" + (o.btcUsd ? " · " + escapeHtml(fmtUsd(perH, o.btcUsd)) + "/h" : "") + "</div></div>";
+        }).join("") : "<div class='pb-class'><div class='t'>Not connected</div><div class='d'>Prices appear when a coordinator is reachable.</div></div>";
+        const models = o.models || [];
+        $p("pbModels").innerHTML = models.length ? models.map((m) => {
+          const p = m.cSatsPerMTokens || {};
+          return "<tr><td>" + escapeHtml(m.model) + "</td><td class='num'>" + escapeHtml(m.agents) + "</td><td class='num'>" + (p.input !== undefined ? escapeHtml(fmtNum(p.input, 2)) + " cSats" : "–") + "</td><td class='num'>" + (p.output !== undefined ? escapeHtml(fmtNum(p.output, 2)) + " cSats" : "–") + "</td></tr>";
+        }).join("") : "<tr><td colspan='4' class='muted'>No machines are offering models right now.</td></tr>";
+        const f = o.fees || {};
+        const nf = f.networkFeeBps === null || f.networkFeeBps === undefined ? 500 : f.networkFeeBps;
+        const pf = f.purchaseFeeBps === null || f.purchaseFeeBps === undefined ? 0 : f.purchaseFeeBps;
+        $p("pbFees").textContent = "Fees: of every payment for compute, the machine's owner gets " + pct(10000 - nf) + " and EdgeCoder keeps " + pct(nf) + ". " + (pf > 0 ? "Buying cSats has a " + pct(pf) + " purchase fee on this coordinator." : "Buying cSats is free.") + " Your own machines are free.";
+      }).catch(() => { $p("pbClasses").innerHTML = "<div class='pb-class'><div class='t'>Prices unavailable</div><div class='d'>Try again in a minute.</div></div>"; $p("pbModels").innerHTML = "<tr><td colspan='4' class='muted'>Unavailable.</td></tr>"; });
+    })();
+`;
+
+const SCRIPT = SETTINGS_HELPERS_SCRIPT + PRICE_BOARD_SCRIPT + `
     /* ── Compute: reserve a machine, your leases ── */
     let computeData = { options: {}, reservations: [] };
     function renderReserveForm() {
@@ -128,7 +170,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
       btn.disabled = false;
       if (!res.ok) {
         const e = res.json.error;
-        showToast(e === "insufficient_credits" ? "Not enough cSats: this needs " + fmtNum(res.json.neededCSats, 1) + " cSats. Buy more under Plan & usage."
+        showToast(e === "insufficient_credits" ? "Not enough cSats: this needs " + fmtNum(res.json.neededCSats, 1) + " cSats. Add funds under Settings > Wallet."
           : e === "no_agent_available" ? "No " + classLabel(computeClass) + " machine is free right now." : "Could not reserve: " + (e || res.status), true);
         loadCompute();
         return;
@@ -143,7 +185,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
 
 export function registerSettingsComputePage(app: FastifyInstance): void {
   app.get("/portal/settings/compute", async (_req, reply) => {
-    const content = settingsSection("compute", "Compute", MARKET_SUBTITLE, MARKET_CONTENT) + RESERVATIONS;
+    const content = PRICE_BOARD + settingsSection("compute", "Market", MARKET_SUBTITLE, MARKET_CONTENT) + RESERVATIONS;
     return reply.type("text/html").send(settingsPage("compute", "Compute market and machine reservations.", content, SCRIPT + MARKET_SCRIPT, { wide: true }));
   });
 }

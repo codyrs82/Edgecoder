@@ -177,22 +177,27 @@ describe("pages escape node ids and other user or agent data", () => {
     await app.close();
   });
 
-  it("Settings > Plan & usage (the wallet): payouts, send requests and credit history", async () => {
+  it("Settings > Wallet: payouts, send requests, balance changes and top-ups", async () => {
     const app = await pagesApp();
     const html = (await app.inject({ url: "/portal/settings/plan" })).body;
     const els = await runPage(html, {
       "/me": ADMIN_ME,
-      "/wallet/payouts": { balance: {}, policy: {}, payouts: [{ kind: EVIL, status: EVIL, error: EVIL, amountMsat: 1, feeMsat: 1 }] },
+      "/portal/api/wallet/overview": {
+        connected: true, network: EVIL, cSats: 5, earnedSats: 1, btcUsd: null, fees: { purchaseFeeBps: 150, networkFeeBps: 500 },
+        recent: [{ type: EVIL, cSats: 1, reason: EVIL, atMs: 1 }],
+        payouts: { balance: {}, policy: { network: EVIL }, payouts: [{ kind: EVIL, status: EVIL, error: EVIL, amountMsat: 1, feeMsat: 1 }] },
+      },
       "/wallet/send/requests": { requests: [{ destination: EVIL, amountSats: EVIL, status: EVIL, requestId: EVIL }] },
       "/dashboard/summary": {
         user: { userId: "u1" },
-        walletSnapshot: { creditHistory: [{ type: EVIL, credits: EVIL, reason: EVIL }], wallets: [{ walletType: EVIL, payoutAddress: EVIL }], paymentIntents: [{ intentId: EVIL, status: EVIL }] },
+        walletSnapshot: { creditHistory: [{ type: EVIL, credits: EVIL, reason: EVIL }], paymentIntents: [{ intentId: EVIL, status: EVIL, amountSats: EVIL, quotedCredits: 1 }] },
       },
     });
     expectEscaped(els.get("payoutsBody")!.innerHTML);
     expectEscaped(els.get("sendRequestsBody")!.innerHTML);
     expectEscaped(els.get("creditHistoryBody")!.innerHTML);
-    expectEscaped(els.get("walletsBody")!.innerHTML);
+    expectEscaped(els.get("paymentIntentsBody")!.innerHTML);
+    expect(els.get("creditHistoryBody")!.innerHTML).toContain("&lt;img");
     await app.close();
   });
 });

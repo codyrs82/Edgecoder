@@ -210,3 +210,106 @@ struct AuthCapabilitiesPayload: Codable {
     let passkey: PasskeyPayload
     let oauth: OAuthPayload
 }
+
+// MARK: - Wallet (portal /portal/api/wallet/overview, /portal/api/wallet/topup, /wallet/payouts/withdraw)
+// docs/design/wallet-and-market.md. Every field is optional where the coordinator may not send it,
+// so an older coordinator degrades to "–" instead of failing to decode.
+
+struct WalletOverview: Decodable {
+    struct Fees: Decodable { let purchaseFeeBps: Int?; let networkFeeBps: Int? }
+    struct Topup: Decodable { let minSats: Int; let maxSats: Int }
+    struct RecentRow: Decodable, Identifiable {
+        var id: String { "\(atMs)-\(reason)" }
+        let type: String
+        let cSats: Double
+        let reason: String
+        let atMs: Double
+    }
+    struct ClassPrice: Decodable { let label: String?; let cSatsPerSecondBaseTier: Double? }
+    struct ModelPrice: Decodable, Identifiable {
+        struct PerMTokens: Decodable { let input: Double; let output: Double }
+        var id: String { model }
+        let model: String
+        let agents: Int?
+        let cSatsPerMTokens: PerMTokens?
+    }
+    struct PayoutBalance: Decodable {
+        let earnedMsat: Double
+        let heldMsat: Double
+        let maturesAtMs: Double?
+        let paidMsat: Double
+        let pendingMsat: Double
+        let payableMsat: Double
+    }
+    struct PayoutPolicy: Decodable {
+        struct Limits: Decodable { let maxSingleSats: Int?; let maxAccountDailySats: Int? }
+        let network: String?
+        let minPayoutSats: Int?
+        let maxFeeBps: Int?
+        let autoMinPayoutSats: Int?
+        let lightningEnabled: Bool?
+        let paused: Bool?
+        let limits: Limits?
+    }
+    struct PayoutRow: Decodable, Identifiable {
+        var id: String { "\(createdAtMs)-\(kind)-\(amountMsat)" }
+        let createdAtMs: Double
+        let kind: String
+        let amountMsat: Double
+        let feeMsat: Double?
+        let status: String
+        let error: String?
+    }
+    struct Payouts: Decodable {
+        let balance: PayoutBalance?
+        let policy: PayoutPolicy?
+        let payouts: [PayoutRow]
+    }
+
+    let connected: Bool
+    let network: String
+    let cSats: Double?
+    let earnedSats: Double?
+    let recent: [RecentRow]
+    let btcUsd: Double?
+    let rateStale: Bool?
+    let fees: Fees
+    let topup: Topup
+    let classes: [String: ClassPrice]
+    let models: [ModelPrice]
+    let payouts: Payouts?
+}
+
+struct TopupInvoice: Decodable {
+    let intentId: String
+    let invoice: String
+    let amountSats: Int
+    let cSats: Double
+    let feeSats: Int
+    let network: String
+    let expiresInSeconds: Int
+}
+
+struct TopupStatus: Decodable {
+    let intentId: String
+    let status: String
+    let cSats: Double?
+}
+
+struct WithdrawResponse: Decodable {
+    struct Payout: Decodable { let amountMsat: Double }
+    let ok: Bool?
+    let verificationRequired: Bool?
+    let challengeId: String?
+    let amountMsat: Double?
+    let detail: String?
+    let code: String?
+    let error: String?
+    let payout: Payout?
+}
+
+struct PayoutDestinationView: Decodable {
+    struct Destination: Decodable { let kind: String; let destination: String }
+    let network: String
+    let destination: Destination?
+}
