@@ -178,6 +178,10 @@ describe("wallet page: early access", () => {
       "Early access: up to 50,000 sats per day (30,000 left today), a balance of up to 200,000 cSats."
     );
     expect(launchText(null)).toBe("");
+    // With Fund with Bitcoin on, deposits count toward the same caps.
+    expect(launchText({ mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 0, maxPayoutSatsPerDay: 0 }, true)).toBe(
+      "Early access: up to 50,000 sats per day. Bitcoin deposits count toward these limits; a deposit over them waits for a manual review."
+    );
     expect(WALLET_SCRIPT).toContain("renderLaunch(o.launch)");
   });
 });

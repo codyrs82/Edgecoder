@@ -619,16 +619,21 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     $("retryInvoiceBtn").addEventListener("click", () => { showStep("stepAmount"); createInvoice().catch((e) => topupError(String(e.message || e))); });
 
     /* ── Early access (LAUNCH_MODE=invite on the coordinator: src/economy/launch-gate.ts) ── */
-    function launchText(l) {
+    /** \`onchainOn\`: Fund with Bitcoin is enabled, so deposits count toward the caps too. */
+    function launchText(l, onchainOn) {
       if (!l || l.mode !== "invite") return "";
       const parts = [];
       if (l.maxBuySatsPerDay > 0) parts.push("up to " + fmtSats(l.maxBuySatsPerDay) + " sats per day" + (l.boughtWindowSats ? " (" + fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats)) + " left today)" : ""));
       if (l.maxBalanceSats > 0) parts.push("a balance of up to " + fmtSats(l.maxBalanceSats) + " cSats");
       if (l.maxPayoutSatsPerDay > 0) parts.push("withdrawals of up to " + fmtSats(l.maxPayoutSatsPerDay) + " sats per day");
-      return parts.length ? "Early access: " + parts.join(", ") + "." : "";
+      if (!parts.length) return "";
+      // Bitcoin deposits count like purchases; one over a limit waits for a manual review.
+      const chain = onchainOn && (l.maxBuySatsPerDay > 0 || l.maxBalanceSats > 0) ? " Bitcoin deposits count toward these limits; a deposit over them waits for a manual review." : "";
+      return "Early access: " + parts.join(", ") + "." + chain;
     }
     function renderLaunch(l) {
-      const text = launchText(l);
+      const oc = onchainPolicy();
+      const text = launchText(l, !!(oc && oc.enabled));
       $("launchNote").classList.toggle("hidden", !text);
       $("launchNoteText").textContent = text;
     }

@@ -20,7 +20,10 @@ import { app } from "./app.js";
 import { BITCOIN_NETWORK, CC, COORDINATOR_FEE_BPS, identity, securityLog } from "./context.js";
 import { ordering } from "./agent-state.js";
 import { paymentIntents } from "./economy.js";
-import { ECONOMY_PAYMENTS_ENABLED, memoryPayoutStore, payoutLimits, payoutPause, payoutPolicy, payoutReconciler, payoutService, payoutStore } from "./payouts.js";
+import { launchUsageFor } from "./payments.js";
+import { checkLaunchBuy } from "../../economy/launch-gate.js";
+import { creditEngine } from "../../credits/store.js";
+import { ECONOMY_PAYMENTS_ENABLED, launchConfig, memoryPayoutStore, payoutLimits, payoutPause, payoutPolicy, payoutReconciler, payoutService, payoutStore } from "./payouts.js";
 
 function resolveConfig(): { config: OnchainConfig; wallet: OnchainWallet | null; disabledReason?: string } {
   const config = onchainConfigFromEnv(BITCOIN_NETWORK);
@@ -107,6 +110,15 @@ export const depositWatcher: DepositWatcher | null = onchainWallet
       purchaseFeeBps: COORDINATOR_FEE_BPS,
       log: app.log,
       onSecurityEvent: (event, details) => securityEvent(event, details, event === "onchain_deposit_reversed" ? "review_reversed_deposit" : "hold_deposit_for_review"),
+      // Soft launch (LAUNCH_MODE=invite): a deposit counts like a purchase toward the daily buy cap
+      // and the balance cap; one that would break either is held for an operator.
+      launchHold: async (deposit, netSats) => {
+        if (launchConfig.mode !== "invite") return null;
+        const usage = await launchUsageFor(deposit.accountId);
+        const balanceSats = pgStore ? await pgStore.creditBalance(deposit.accountId) : creditEngine.balance(deposit.accountId);
+        const v = checkLaunchBuy({ amountSats: deposit.amountSats, newCreditsSats: netSats, balanceSats, ...usage }, launchConfig);
+        return v ? `early access: ${v.error === "launch_buy_daily_cap" ? `above the ${v.limitSats} sat daily purchase limit` : `above the ${v.limitSats} cSat balance limit`}` : null;
+      },
       onCredited: async (deposit, credit) => {
         // A purchase fee (COORDINATOR_FEE_BPS, 0 by default) is network revenue, as for Lightning.
         if (credit.feeSats <= 0) return;

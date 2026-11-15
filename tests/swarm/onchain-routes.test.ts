@@ -20,6 +20,9 @@ beforeAll(async () => {
   process.env.ADMIN_API_TOKEN = ADMIN;
   process.env.MESH_AUTH_TOKEN = "mesh-onchain";
   process.env.BITCOIN_NETWORK = "regtest";
+  // Soft launch on: a deposit counts toward the early-access buy cap.
+  process.env.LAUNCH_MODE = "invite";
+  process.env.LAUNCH_MAX_BUY_SATS_PER_DAY = "30000";
   ({ coordinatorServer: app } = await import("../../src/swarm/coordinator.js"));
   oc = await import("../../src/swarm/coordinator/onchain.js");
   await app.ready();
@@ -27,7 +30,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  for (const k of ["ONCHAIN_ENABLED", "ONCHAIN_DEPOSIT_CONFIRMATIONS", "ONCHAIN_DEPOSIT_MIN_SATS"]) delete process.env[k];
+  for (const k of ["ONCHAIN_ENABLED", "ONCHAIN_DEPOSIT_CONFIRMATIONS", "ONCHAIN_DEPOSIT_MIN_SATS", "LAUNCH_MODE", "LAUNCH_MAX_BUY_SATS_PER_DAY"]) delete process.env[k];
 });
 
 const post = (url: string, payload: unknown, headers: Record<string, string> = portal) => app.inject({ method: "POST", url, headers, payload: JSON.stringify(payload) });
@@ -62,7 +65,19 @@ describe("Fund with Bitcoin", () => {
     const summary = (await post("/account/summary", { accountId: "acct-chain" })).json();
     expect(summary.cSats).toBe(25_000);
     // The used address is retired from display: the next request gives a fresh one.
-    expect((await post("/account/onchain/address", { accountId: "acct-chain" })).json().address).not.toBe(body.address);
+    const next = (await post("/account/onchain/address", { accountId: "acct-chain" })).json().address;
+    expect(next).not.toBe(body.address);
+
+    // Early access: 25,000 already bought today, so a 10,000 deposit would pass the 30,000 cap: held.
+    const over = wallet.receive(next, 10_000, 2);
+    await oc.depositWatcher!.tick();
+    d = (await post("/account/onchain/deposits", { accountId: "acct-chain" })).json();
+    expect(d.deposits.find((x: { txid: string }) => x.txid === over)).toMatchObject({ status: "held", detail: expect.stringMatching(/early access/) });
+    expect((await post("/account/summary", { accountId: "acct-chain" })).json().cSats).toBe(25_000);
+    // And a Lightning purchase now sees the deposit in its daily total.
+    const buy = await post("/account/buy", { accountId: "acct-chain", amountSats: 10_000 });
+    expect(buy.statusCode).toBeGreaterThanOrEqual(400);
+    expect(buy.json().error).toBe("launch_buy_daily_cap");
   });
 });
 
@@ -95,7 +110,8 @@ describe("operator routes", () => {
     expect((await app.inject({ method: "GET", url: "/admin/onchain" })).statusCode).toBe(401);
     const r = await app.inject({ method: "GET", url: "/admin/onchain", headers: { "x-admin-token": ADMIN } });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toMatchObject({ enabled: true, batches: [], heldDeposits: [] });
+    // The early-access deposit held above is waiting for review.
+    expect(r.json()).toMatchObject({ enabled: true, batches: [], heldDeposits: [expect.objectContaining({ accountId: "acct-chain", amountSats: 10_000, status: "held" })] });
     const bad = await app.inject({ method: "POST", url: "/admin/onchain/deposits/nothex/0/credit", headers: { "x-admin-token": ADMIN } });
     expect(bad.statusCode).toBe(400);
     const missing = await app.inject({ method: "POST", url: `/admin/onchain/deposits/${"ab".repeat(32)}/0/credit`, headers: { "x-admin-token": ADMIN } });

@@ -105,6 +105,11 @@ every coordinator (`src/economy/launch-gate.ts`).
   it applies to every account, the fee pool's revenue withdrawals included). `0` lifts a cap.
   Every purchase path (portal, `/v1/account/topup`, the desktop app's signed requests) ends at the
   coordinator's `/account/buy`, which enforces them. The Wallet shows them as "Early access".
+  With `ONCHAIN_ENABLED`, a Bitcoin deposit counts like a purchase toward
+  `LAUNCH_MAX_BUY_SATS_PER_DAY` and `LAUNCH_MAX_BALANCE_SATS`; a deposit that would break either is
+  held (`onchain_deposit_held`) for an operator to credit with
+  `POST /admin/onchain/deposits/:txid/:vout/credit`. On-chain payouts already sit under
+  `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` (it is layered into the payout caps they use).
 - **Going open.** Set `LAUNCH_MODE=open` (or unset it) on the portal and the coordinators and
   restart them. The invite codes stay in the database, unused.
 

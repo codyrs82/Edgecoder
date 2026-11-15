@@ -15,7 +15,9 @@ import type { FeePoolLockResult } from "./payout-service.js";
  *   pending        seen, waiting for confirmations (shown to the user with the count)
  *   credited       cSats added (a settled payment intent `onchain:<txid>:<vout>` plus its credit row)
  *   below_minimum  under ONCHAIN_DEPOSIT_MIN_SATS: kept by the node, not credited
- *   held           over a per-deposit or per-account 24 h cap: waits for an operator to credit it
+ *   held           over a per-deposit or per-account 24 h cap, or over a soft-launch cap
+ *                  (LAUNCH_MODE=invite: LAUNCH_MAX_BUY_SATS_PER_DAY, LAUNCH_MAX_BALANCE_SATS; see
+ *                  launchHold): waits for an operator to credit it
  *   dropped        left the wallet before confirming (replaced, double-spent, reorged out); a
  *                  dropped deposit that reappears goes back to pending
  *   reversed       credited, then gone from the chain (a reorg deeper than the confirmations):
@@ -198,6 +200,12 @@ export interface DepositWatcherDeps {
   purchaseFeeBps?: number;
   /** After a deposit is credited (fee-pool row for a purchase fee, ledger event). */
   onCredited?: (deposit: OnchainDeposit, credit: DepositCredit) => Promise<void>;
+  /**
+   * Extra hold rule checked after the deposit caps (the coordinator wires the soft-launch caps:
+   * a deposit counts like a purchase toward LAUNCH_MAX_BUY_SATS_PER_DAY and LAUNCH_MAX_BALANCE_SATS).
+   * Returns why the deposit is held, or null to credit it. `netSats` is what it would add.
+   */
+  launchHold?: (deposit: OnchainDeposit, netSats: number) => Promise<string | null>;
   onSecurityEvent?: (event: "onchain_deposit_held" | "onchain_deposit_reversed", details: Record<string, unknown>) => void;
   log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void };
   now?: () => number;
@@ -326,6 +334,11 @@ export class DepositWatcher {
     if (cfg.depositMaxAccountDailySats > 0) {
       const recent = await this.d.store.creditedSatsSince(d.accountId, nowMs - 24 * 60 * 60 * 1000);
       if (recent + d.amountSats > cfg.depositMaxAccountDailySats) return `above the ${cfg.depositMaxAccountDailySats} sat per-account daily cap`;
+    }
+    if (this.d.launchHold) {
+      const feeSats = Math.floor((d.amountSats * Math.max(0, Math.floor(this.d.purchaseFeeBps ?? 0))) / 10_000);
+      const reason = await this.d.launchHold(d, d.amountSats - feeSats);
+      if (reason) return reason;
     }
     return null;
   }
