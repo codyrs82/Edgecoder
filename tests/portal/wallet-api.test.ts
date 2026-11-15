@@ -29,6 +29,9 @@ async function fakeCoordinator(opts: { payouts?: boolean } = {}) {
     if ((req.body as any).intentId !== "pi-1") return reply.code(404).send({ error: "unknown_intent" });
     return { intentId: "pi-1", status: "settled", cSats: 19700 };
   });
+  const ADDR = "bcrt1pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsxs0cuf";
+  co.post("/account/onchain/address", async (req) => (note(req), { enabled: true, network: "regtest", address: ADDR, uri: `bitcoin:${ADDR.toUpperCase()}`, confirmationsRequired: 1, minSats: 10000, deposits: [] }));
+  co.post("/account/onchain/deposits", async (req) => (note(req), { enabled: true, network: "regtest", address: ADDR, confirmationsRequired: 1, minSats: 10000, deposits: [{ txid: "aa".repeat(32), vout: 0, amountSats: 50000, confirmations: 0, requiredConfirmations: 1, status: "pending" }] }));
   await co.listen({ port: 0, host: "127.0.0.1" });
   const addr = co.server.address() as { port: number };
   return { co, seen, url: `http://127.0.0.1:${addr.port}` };
@@ -118,6 +121,28 @@ describe("portal wallet API", () => {
   });
 });
 
+describe("Fund with Bitcoin", () => {
+  it("gets the session account's deposit address with a bitcoin: QR, and lists its deposits", async () => {
+    const coord = await fakeCoordinator();
+    const app = await portal(coord.url);
+    expect((await app.inject({ method: "POST", url: "/portal/api/wallet/onchain/address" })).statusCode).toBe(401);
+    const r = await app.inject({ method: "POST", url: "/portal/api/wallet/onchain/address", headers: { cookie: "session" }, payload: { accountId: "acct-other" } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ enabled: true, address: expect.stringMatching(/^bcrt1p/), confirmationsRequired: 1 });
+    expect(r.json().qrSvg).toMatch(/^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);
+    expect(coord.seen.find((s) => s.path === "/account/onchain/address")).toMatchObject({ body: { accountId: "acct-u1" }, token: "svc" });
+    const d = await app.inject({ url: "/portal/api/wallet/onchain", headers: { cookie: "session" } });
+    expect(d.json().deposits).toEqual([expect.objectContaining({ amountSats: 50000, confirmations: 0, status: "pending" })]);
+    await app.close();
+    await coord.co.close();
+  });
+
+  it("shares the top-up rate limit (an address can come from the node)", async () => {
+    const { rateLimitFor, TOPUP_RATE_LIMIT } = await import("../../src/portal/security.js");
+    expect(rateLimitFor("/portal/api/wallet/onchain/address", "POST")).toEqual(TOPUP_RATE_LIMIT);
+  });
+});
+
 describe("walletOverviewView", () => {
   it("never reports a network the coordinator did not state as coming from it", () => {
     const v = walletOverviewView({ fallbackNetwork: "bitcoin", overview: { connected: true, account: { cSats: 1 } }, rates: null, book: null, payouts: { policy: {} } });
@@ -153,6 +178,10 @@ describe("wallet page: early access", () => {
       "Early access: up to 50,000 sats per day (30,000 left today), a balance of up to 200,000 cSats."
     );
     expect(launchText(null)).toBe("");
+    // With Fund with Bitcoin on, deposits count toward the same caps.
+    expect(launchText({ mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 0, maxPayoutSatsPerDay: 0 }, true)).toBe(
+      "Early access: up to 50,000 sats per day. Bitcoin deposits count toward these limits; a deposit over them waits for a manual review."
+    );
     expect(WALLET_SCRIPT).toContain("renderLaunch(o.launch)");
   });
 });

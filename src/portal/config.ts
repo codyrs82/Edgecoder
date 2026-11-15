@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
+import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, onchainEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -63,6 +63,8 @@ export const portalConfigSchema = z.object({
   /** Required in production (no localhost fallback there). */
   DOCS_SITE_URL: envUrl(),
   WALLET_DEFAULT_NETWORK: z.enum(["bitcoin", "testnet", "signet", "regtest"], { message: "must be bitcoin, testnet, signet or regtest" }).default("signet"),
+  /** Bitcoin on-chain payout addresses can be saved (set it with the coordinator's ONCHAIN_ENABLED). */
+  ONCHAIN_ENABLED: onchainEnv.ONCHAIN_ENABLED,
   // Unused since the server stopped generating wallet seeds; still accepted so old env files parse.
   WALLET_SECRET_PEPPER: optStr,
   COORDINATOR_OPERATIONS_OWNER_EMAILS: optStr,

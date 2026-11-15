@@ -71,6 +71,7 @@ import {
 import { selfInfraHeartbeat } from "./infra-hosts.js";
 import { runIssuanceTick, maybeAnchorLatestFinalizedEpoch } from "./issuance.js";
 import { reconcileIntent } from "./payments.js";
+import { startOnchainTimers } from "./onchain.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
 import { sweepGrants } from "./grants.js";
@@ -189,6 +190,8 @@ export async function initCoordinator(): Promise<void> {
           void payoutService.runAutoPayouts().then((r) => { if (r.length) app.log.info({ results: r }, "auto_payouts"); }).catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
         }, CC.PAYOUT_AUTO_INTERVAL_MS);
       }
+      // On-chain deposits and batched payouts (ONCHAIN_ENABLED; no-op otherwise).
+      startOnchainTimers();
       setInterval(() => {
         void runFeePoolDistribution().catch((error) => app.log.warn({ error: String(error) }, "fee_pool_distribution_failed"));
       }, CC.FEE_POOL_DISTRIBUTION_MS);

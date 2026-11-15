@@ -134,6 +134,34 @@ cSats are granted only when the Lightning node reports the invoice settled
 CLN by `payment_hash` with the same checks. The grant row is `credit_purchase:<intentId>`, unique
 per intent.
 
+### Funding with Bitcoin on-chain (`ONCHAIN_ENABLED`)
+
+Same price, a different way to pay: 1 sat = 1 cSat, after the same `COORDINATOR_FEE_BPS` (0 by default).
+
+```
+deposit (txid:vout, amountSats, confirmations)
+  amountSats < ONCHAIN_DEPOSIT_MIN_SATS (10,000)               -> below_minimum, not credited
+  confirmations < ONCHAIN_DEPOSIT_CONFIRMATIONS (3 main, 1 else) -> pending, shown with "n of N"
+  over ONCHAIN_DEPOSIT_MAX_SATS or the account's 24 h cap        -> held for an operator
+  LAUNCH_MODE=invite: over LAUNCH_MAX_BUY_SATS_PER_DAY or
+    LAUNCH_MAX_BALANCE_SATS, counted like a purchase            -> held for an operator
+  otherwise                                                    -> credited: cSats = amountSats − feeSats
+```
+
+- Each account has a deposit address from the coordinator's LND wallet (`NewAddress`, Taproot by
+  default). It is shown until a deposit to it is seen, then the account gets a fresh one; older
+  addresses stay watched.
+- The watcher (`src/economy/onchain-deposits.ts`) reads LND `GetTransactions` every
+  `ONCHAIN_POLL_MS` (and before every payout reconciliation run). One coordinator watches at a time
+  (Postgres advisory lock); every step is also a compare-and-set on the deposit row.
+- Crediting is one transaction: the deposit row `pending -> credited`, a settled payment intent
+  `onchain:<txid>:<vout>` (wallet type `onchain`, so it counts in `receivedPurchaseMsat`, payout
+  capacity and solvency exactly like a Lightning purchase) and the grant row
+  `credit_purchase:onchain:<txid>:<vout>`. A txid:vout is credited at most once.
+- A pending deposit that leaves the wallet (replaced, double-spent, reorged out) becomes `dropped`;
+  if it comes back it is pending again. A credited deposit that vanishes (a reorg deeper than the
+  confirmations) becomes `reversed`, is a CRITICAL security event, and trips `balance_drop`.
+
 ### Price level: market-anchored, recalibrated daily
 
 `src/economy/rate-oracle.ts` sets the class reference prices (msat per credit) and the BTC price
@@ -370,6 +398,62 @@ Three guards sit in front of every payment out of the node (`src/economy/payout-
   result; `POST /admin/payouts/reconciliation/run` runs one now. Dedicate the node to the
   coordinator: any other spending from it trips `unknown_payments` by design.
 
+### On-chain payouts, batched (`ONCHAIN_ENABLED`)
+
+A host whose payout destination is a Bitcoin address (bech32 or bech32m with the network's HRP:
+`bc1`, `tb1`, `bcrt1`; legacy base58 is refused) is paid in batches
+(`src/economy/onchain-payouts.ts`). Every `ONCHAIN_PAYOUT_INTERVAL_MS` (6 h) at most, across all
+coordinators on the database:
+
+```
+rate      = LND fee estimate for ONCHAIN_PAYOUT_TARGET_CONF (6) blocks, sat/vB
+            no batch while rate > ONCHAIN_PAYOUT_MAX_FEE_RATE (30 main, 100 else)
+feeCap    = rate × 165 vB         (host pays; 0 when ONCHAIN_PAYOUT_FEE_PAYER=edgecoder)
+output    = floor(payable / 1000) − feeCap, clamped to PAYOUT_MAX_SINGLE_SATS − feeCap
+            paid only when output >= ONCHAIN_PAYOUT_MIN_SATS (50,000)
+```
+
+Each output is a `payouts` row (kind `onchain`) reserved through the same `reservePayout` as a
+Lightning withdrawal, so the earnings hold, the credit cap, node capacity and the 24 h caps all
+apply, and the account is debited `output + feeCap`. All outputs go in one LND `SendMany` at `rate`.
+At confirmation the transaction's actual fee is split equally across the outputs, each share
+capped at its `feeCap` (`allocateBatchFee`); the unused cap goes back to the account and any
+remainder is EdgeCoder's. EdgeCoder's part (all of the fee with `ONCHAIN_PAYOUT_FEE_PAYER=edgecoder`)
+is a `spend` row `onchain_batch_fee:<batch>` (msat) on `network:fee_pool`, written when the fee is
+known, and counted as payout outflow by reconciliation.
+
+Batch state machine (one `onchain_payout_batches` row, written before anything is sent):
+
+```
+building -> pending -> broadcast -> confirmed
+   |           |
+   +-----------+----> failed  (payouts released; the earnings go in a later batch)
+```
+
+- `building`: payouts being reserved. Interrupted -> failed (nothing was sent).
+- `pending`: outputs frozen; `send_attempted_at_ms` is stamped right before `SendMany`, which
+  carries the label `edgecoder:onchain-batch:<id>`. After a crash or a timeout the node is asked for
+  a transaction with that label: found -> broadcast; none after `ONCHAIN_BROADCAST_GRACE_MS` ->
+  failed. A clear refusal from LND (insufficient funds, bad address) fails at once.
+- `broadcast`: txid on the batch and each payout; payouts stay pending (counted at their fee cap).
+- `confirmed`: after `ONCHAIN_PAYOUT_CONFIRMATIONS`, payouts settle as paid with their fee share.
+- A failed batch whose label later appears in the node pauses all payouts (kill switch,
+  `onchain_batch_resurfaced`). Transactions are never matched by outputs: an earlier batch can pay
+  the same address the same amount.
+
+The kill switch stops new batches and a send that has not started; confirmations of a batch already
+broadcast still settle. One runner at a time (advisory lock).
+
+Reconciliation with on-chain: deposits the node holds but the ledger has not credited (pending,
+held, below the minimum) count as received for `balance_drop`; credited ones are payment intents;
+on-chain payouts are payout rows; EdgeCoder's batch fees are extra outflow. While a batch's send is
+unrecorded, `balance_drop` waits a run and keeps its baseline.
+
+Routes: `POST /account/onchain/address`, `POST /account/onchain/deposits` (signed agent or portal
+token), `POST /economy/payouts/onchain-address` (portal token), `GET /admin/onchain`,
+`POST /admin/onchain/deposits/:txid/:vout/credit`, `POST /admin/onchain/batches/run` (admin token).
+The portal exposes them as `/portal/api/wallet/onchain*` and `PUT /wallet/payout-destination`.
+
 ### The network fee pool: EdgeCoder's revenue (optionally shared with hosts)
 
 By default the pool is EdgeCoder's: nothing below runs unless `FEE_POOL_HOST_DISTRIBUTION` is set
@@ -432,9 +516,11 @@ Each ledger checkpoint is an OP_RETURN transaction. Guards (`src/economy/anchori
 | Reservations | Working; prepaid, unused time refunded |
 | Buy cSats with Lightning (LND) | Working against a node; fail-closed settlement (`ECONOMY_PAYMENTS_ENABLED=false` disables it) |
 | Buy cSats with Lightning (CLN) | Hardened; needs a regtest run before trusting it with money |
+| Fund with Bitcoin on-chain (LND) | Built, behind `ONCHAIN_ENABLED` (off by default); unit and route tests with a fake LND; needs a regtest run with real deposits before enabling |
 | Contribute-first gate for buyers | Working |
 | Price discovery | Daily oracle × compute class, a per-class ask/bid order book matched at claim time, per-token prices by model size at the oracle's BTC price |
 | Token issuance | Records only; tokens redeem for nothing |
 | Sats payouts to contributors | Working: BOLT11 withdrawals and LNURL auto payouts through the node (needs `LIGHTNING_PROVIDER=lnd|cln`); fee pool distributed to infrastructure hosts daily |
+| On-chain payouts, batched (LND) | Built, behind `ONCHAIN_ENABLED`; same caps, hold and kill switch; needs a regtest run before enabling |
 | Ledger anchoring | Working with bitcoind / anchor proxy; mock in dev |
 | Settlement model | Custodial today; pay-per-use bitcoin settlement under design (PR #195) |

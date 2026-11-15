@@ -847,7 +847,7 @@ registerPayoutCallbackRoutes(app, {
   sendCode: sendPayoutCallbackCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
 });
 registerPayoutDestinationRoutes(app, {
-  store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
+  store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
   sendCode: sendPayoutDestinationCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest),
   register: createPayoutRegistrar({ controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal })
 });

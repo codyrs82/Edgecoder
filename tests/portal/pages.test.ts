@@ -97,9 +97,12 @@ describe("portal pages module (#16)", () => {
     }
     expect(plan).toContain('"/portal/api/wallet/overview"');
     expect(plan).toContain('"/portal/api/wallet/topup"');
-    // Payout methods: Lightning is live; on-chain Bitcoin and Litecoin are labelled placeholders only.
+    // Payout methods: Lightning is live; Bitcoin on-chain is "Coming soon" until the coordinator's
+    // policy says ONCHAIN_ENABLED (the page script flips it); Litecoin is a labelled placeholder only.
     expect(plan).toMatch(/Lightning<\/span> <span class="wl-pill ok">Active<\/span>/);
-    expect(plan).toMatch(/Bitcoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
+    expect(plan).toMatch(/Bitcoin on-chain<\/span> <span class="wl-pill soon" id="methodOnchainPill">Coming soon<\/span>/);
+    expect(plan).toMatch(/id="fundBtcBtn" aria-pressed="false" disabled title="Coming soon"/);
+    expect(plan).toContain('"/portal/api/wallet/onchain/address"');
     expect(plan).toMatch(/Litecoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
     // Fees are stated, and motion stops under reduced motion.
     expect(plan).toContain("Where your sats go");

@@ -20,3 +20,15 @@ describe("invoice QR (desktop)", () => {
     for (let r = 0; r < q.size; r++) for (let c = 0; c < q.size; c++) expect(dark.has(`${c},${r}`)).toBe(ref.isDark(r, c));
   });
 });
+
+describe("Bitcoin deposit address QR", () => {
+  it("encodes a bech32 address as an upper-case bitcoin: URI and refuses anything else", async () => {
+    const { addressQr, bitcoinQrPayload } = await import("../src/lib/qr");
+    const a = "bcrt1pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsxs0cuf";
+    expect(bitcoinQrPayload(a)).toBe(`BITCOIN:${a.toUpperCase()}`);
+    expect(bitcoinQrPayload(`bitcoin:${a}`)).toBe(`BITCOIN:${a.toUpperCase()}`);
+    expect(bitcoinQrPayload("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")).toBeNull();
+    expect(addressQr(a)?.size).toBeGreaterThan(20);
+    expect(addressQr("not an address")).toBeNull();
+  });
+});

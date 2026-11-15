@@ -72,6 +72,27 @@ Consolidated reference for all environment controls. The primary config file on 
 | `LAUNCH_MAX_BALANCE_SATS` | `200000` | Invite mode only: a purchase may not bring the account's cSats (balance plus open invoices plus the new one) above this. Earnings are not capped. `0` = no cap. |
 | `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` | `50000` | Invite mode only: layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS` (the lower applies) for every account's withdrawals and automatic payouts, the fee pool's included. `0` = no extra cap. |
 
+### On-chain Bitcoin (coordinator, LND only)
+
+Fund with Bitcoin (deposit addresses from the coordinator's LND wallet, credited after confirmations) and batched on-chain payouts (LND `SendMany`). See docs/economy-math.md "On-chain" and docs/going-to-mainnet.md. The LND macaroon also needs `address:write`, `onchain:read` and `onchain:write`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ONCHAIN_ENABLED` | _(unset, off)_ | `1`/`true`/`yes`/`on` turns on Fund with Bitcoin and on-chain payouts (coordinator), and lets the portal save a Bitcoin payout address (portal: set it on both). Off by default on every network; leave it off on mainnet until the on-chain checklist in docs/going-to-mainnet.md is done. Needs `LIGHTNING_PROVIDER=lnd` (or `mock` in dev). Off: the wallets keep "Coming soon". |
+| `ONCHAIN_ADDRESS_TYPE` | `p2tr` | Deposit address type from LND `NewAddress`: `p2tr` (Taproot) or `p2wkh` (native SegWit). |
+| `ONCHAIN_DEPOSIT_CONFIRMATIONS` | mainnet `3`, else `1` | Confirmations before a deposit is credited (min 1). |
+| `ONCHAIN_DEPOSIT_MIN_SATS` | `10000` | Deposits below this are recorded but not credited (never below 546, dust). |
+| `ONCHAIN_DEPOSIT_MAX_SATS` | mainnet `1000000`, else `0` | Largest single deposit credited automatically; a larger one is held for an operator (`POST /admin/onchain/deposits/:txid/:vout/credit`). `0` = no cap. |
+| `ONCHAIN_DEPOSIT_MAX_ACCOUNT_DAILY_SATS` | mainnet `2000000`, else `0` | Deposits credited per account over a rolling 24 h; beyond it deposits are held. `0` = no cap. |
+| `ONCHAIN_POLL_MS` | `30000` | How often the deposit watcher and the batch runner tick (ms; min 5000). |
+| `ONCHAIN_PAYOUT_MIN_SATS` | `50000` | Smallest on-chain payout output; earnings below it wait (never below 546). |
+| `ONCHAIN_PAYOUT_INTERVAL_MS` | `21600000` | A new payout batch is built at most this often across every coordinator on the database (ms; min 60000). |
+| `ONCHAIN_PAYOUT_MAX_FEE_RATE` | mainnet `30`, else `100` | Fee-rate cap in sat/vB: no batch is sent while LND's estimate is above it. |
+| `ONCHAIN_PAYOUT_TARGET_CONF` | `6` | Confirmation target for LND's fee estimate. |
+| `ONCHAIN_PAYOUT_FEE_PAYER` | `host` | Who pays the network fee: `host` (taken from the payout, up to rate × 165 vB, unused part returned) or `edgecoder` (the fee pool pays it). |
+| `ONCHAIN_PAYOUT_CONFIRMATIONS` | `1` | Confirmations before an on-chain payout counts as paid. |
+| `ONCHAIN_BROADCAST_GRACE_MS` | `600000` | A batch whose SendMany outcome is unknown and that LND does not know after this long is failed and its payouts released (ms; min 60000). |
+
 ## Model provider
 
 | Variable | Values / Example | Description |

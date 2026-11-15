@@ -16,6 +16,10 @@
  *   created invoice also carries `qrSvg`, its QR code (invoice-qr.ts).
  * - `launch`: the coordinator's soft-launch caps in LAUNCH_MODE=invite (null otherwise), which
  *   the Wallet shows as "Early access: up to N sats per day".
+ * - GET /portal/api/wallet/onchain and POST /portal/api/wallet/onchain/address: Fund with Bitcoin
+ *   (ONCHAIN_ENABLED on the coordinator). The account's deposit address (with `qrSvg` for its
+ *   bitcoin: URI) and its deposits with their confirmations; the coordinator credits a deposit
+ *   once it has enough confirmations (/account/onchain/*).
  *
  * Every coordinator call goes through portalCoordinatorTransport, which binds the account to the
  * session (acct-<userId>); the client never names an account.
@@ -24,7 +28,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { computeOverview } from "../../apps/ide/network-inference.js";
-import { withInvoiceQr } from "../invoice-qr.js";
+import { withAddressQr, withInvoiceQr } from "../invoice-qr.js";
 import { accountIdFor, portalCoordinatorTransport, portalNetworkDeps, type ComputeRoutesDeps } from "./compute.js";
 
 export interface WalletApiDeps extends ComputeRoutesDeps {
@@ -118,6 +122,20 @@ export function registerWalletApiRoutes(app: FastifyInstance, deps: WalletApiDep
     const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("POST", "/account/buy", { amountSats: parsed.data.amountSats }).catch(() => unreachable);
     // qrSvg: the invoice as a QR code (invoice-qr.ts), drawn from the BOLT11 string only.
     return reply.code(r.status === 0 ? 502 : r.status).send(withInvoiceQr(r.status, r.json));
+  });
+
+  app.get("/portal/api/wallet/onchain", async (req, reply) => {
+    const user = await userOf(req, reply);
+    if (!user) return reply;
+    const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("POST", "/account/onchain/deposits", {}).catch(() => unreachable);
+    return reply.code(r.status === 0 ? 502 : r.status).send(withAddressQr(r.status, r.json));
+  });
+
+  app.post("/portal/api/wallet/onchain/address", async (req, reply) => {
+    const user = await userOf(req, reply);
+    if (!user) return reply;
+    const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("POST", "/account/onchain/address", {}).catch(() => unreachable);
+    return reply.code(r.status === 0 ? 502 : r.status).send(withAddressQr(r.status, r.json));
   });
 
   app.get("/portal/api/wallet/topup/:intentId", async (req, reply) => {

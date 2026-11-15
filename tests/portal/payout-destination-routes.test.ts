@@ -208,3 +208,70 @@ describe("createPayoutRegistrar", () => {
     expect(await down({ accountId: "a", kind: "lightning_address", destination: "x@y.com", network: "signet" })).toEqual({ controlPlane: "failed", coordinator: "failed" });
   });
 });
+
+describe("/wallet/payout-destination with ONCHAIN_ENABLED", () => {
+  const SIGNET_P2WSH = "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7";
+  async function appWith(onchainEnabled: boolean) {
+    const mem = memoryStore();
+    const register = vi.fn(async () => ({ controlPlane: "ok" as const, coordinator: "ok" as const }));
+    const app = Fastify();
+    registerPayoutDestinationRoutes(app, {
+      store: mem.store,
+      getCurrentUser: async () => ({ userId: "u1", email: "u1@mail.example" }),
+      network: "signet",
+      onchainEnabled,
+      codeTtlMs: 600_000,
+      emailConfigured: true,
+      sendCode: async () => undefined,
+      register,
+      generateSixDigitCode: () => "123456",
+      sha256Hex,
+      secureCompare
+    });
+    await app.ready();
+    return { app, mem, register };
+  }
+
+  it("saves a SegWit address on the portal's network and registers it as an on-chain destination", async () => {
+    const { app, register } = await appWith(true);
+    expect((await app.inject({ url: "/wallet/payout-destination" })).json()).toMatchObject({ onchainSupported: true, supportedKinds: ["lightning_address", "onchain"] });
+    const r = await app.inject({ method: "PUT", url: "/wallet/payout-destination", payload: { destination: SIGNET_P2WSH } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ destination: { kind: "onchain", destination: SIGNET_P2WSH } });
+    expect(register).toHaveBeenCalledWith({ accountId: "acct-u1", kind: "onchain", destination: SIGNET_P2WSH, network: "signet" });
+  });
+
+  it("still refuses a wrong-network address and legacy base58 addresses", async () => {
+    const { app, register } = await appWith(true);
+    const main = await app.inject({ method: "PUT", url: "/wallet/payout-destination", payload: { destination: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" } });
+    expect(main.json().error).toBe("address_network_mismatch");
+    const legacy = await app.inject({ method: "PUT", url: "/wallet/payout-destination", payload: { destination: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn" } });
+    expect(legacy.statusCode).toBe(400);
+    expect(legacy.json().error).toBe("unsupported_address_type");
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it("without it, on-chain addresses stay refused (Coming soon)", async () => {
+    const { app } = await appWith(false);
+    const r = await app.inject({ method: "PUT", url: "/wallet/payout-destination", payload: { destination: SIGNET_P2WSH } });
+    expect(r.statusCode).toBe(422);
+    expect(r.json().error).toBe("onchain_payouts_not_supported");
+  });
+});
+
+describe("createPayoutRegistrar for an on-chain address", () => {
+  it("registers it with the coordinator's on-chain route", async () => {
+    const seen: Array<{ url: string; body: any; svc: unknown }> = [];
+    const upstream = Fastify();
+    upstream.post("/economy/payouts/onchain-address", async (req) => (seen.push({ url: req.url, body: req.body, svc: req.headers["x-portal-service-token"] }), { ok: true }));
+    upstream.post("/economy/wallets/register", async (req) => (seen.push({ url: req.url, body: req.body, svc: undefined }), { ok: true }));
+    await upstream.listen({ port: 0, host: "127.0.0.1" });
+    const a = upstream.server.address();
+    const base = `http://127.0.0.1:${typeof a === "object" && a ? a.port : 0}`;
+    const reg = createPayoutRegistrar({ controlPlaneUrl: base, controlPlaneAdminToken: "admin", portalServiceToken: "svc", timeoutMs: 2000, discoverCoordinatorUrls: async () => [base] });
+    expect(await reg({ accountId: "acct-u1", kind: "onchain", destination: "tb1qaddr", network: "signet" })).toEqual({ controlPlane: "ok", coordinator: "ok" });
+    expect(seen.find((s) => s.url === "/economy/payouts/onchain-address")).toMatchObject({ svc: "svc", body: { accountId: "acct-u1", address: "tb1qaddr" } });
+    expect(seen.find((s) => s.url === "/economy/wallets/register")).toMatchObject({ body: { walletType: "onchain", payoutAddress: "tb1qaddr" } });
+    await upstream.close();
+  });
+});

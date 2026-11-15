@@ -16,6 +16,8 @@ import { FEE_POOL_LOCK_KEY, FEE_POOL_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY, PAY
  * accrue earnings (queue, pending verifications, task billing), and the signed/anchored history of all of that
  * (ordering and stats ledgers, quorum records, anchors, work receipts and epochs, issuance, ledger
  * verifications). A ledger chain anchored on regtest proves nothing on mainnet, so it restarts.
+ * On-chain deposit addresses, deposits, payout batches and on-chain payout destinations are wiped
+ * too: a bcrt1 address is meaningless on mainnet.
  *
  * Kept: who people and machines are and how they are configured (credit accounts, memberships,
  * agent registry, signing keys and ownership, payout destinations in wallet_accounts and their
@@ -47,7 +49,12 @@ export const WIPED_TABLES = [
   "issuance_epochs",
   "issuance_allocations",
   "issuance_payout_events",
-  "ledger_verifications"
+  "ledger_verifications",
+  // On-chain addresses, deposits, payout batches and destinations all belong to one network.
+  "onchain_deposit_addresses",
+  "onchain_deposits",
+  "onchain_payout_batches",
+  "onchain_payout_destinations"
 ] as const;
 
 export const KEPT_TABLES = [

@@ -812,8 +812,73 @@ export interface PayoutPolicyView {
   lightningEnabled?: boolean;
   paused?: boolean;
   limits?: { maxSingleSats?: number; maxAccountDailySats?: number; maxGlobalDailySats?: number };
+  /** Bitcoin on-chain (ONCHAIN_ENABLED on the coordinator); absent or enabled:false = "Coming soon". */
+  onchain?: OnchainPolicyView;
 }
-export interface PayoutRow { createdAtMs: number; kind: string; amountMsat: number; feeMsat: number; status: string; error?: string }
+export interface OnchainPolicyView {
+  enabled: boolean;
+  depositConfirmations: number;
+  depositMinSats: number;
+  depositMaxSats: number;
+  payoutMinSats: number;
+  payoutIntervalMs: number;
+  payoutMaxFeeRateSatVb: number;
+  payoutFeePayer: "host" | "edgecoder";
+  /** Most a host-paid payout is charged in network fee (0 when EdgeCoder pays). */
+  payoutMaxFeeSats: number;
+  payoutConfirmations: number;
+}
+export interface PayoutRow { createdAtMs: number; kind: string; amountMsat: number; feeMsat: number; status: string; error?: string; txid?: string; destination?: string }
+
+/** One on-chain deposit as the coordinator reports it. */
+export interface OnchainDeposit {
+  txid: string;
+  vout: number;
+  amountSats: number;
+  confirmations: number;
+  requiredConfirmations: number;
+  status: "pending" | "credited" | "below_minimum" | "held" | "dropped" | "reversed";
+  seenAtMs: number;
+  creditedAtMs: number | null;
+}
+/** Fund with Bitcoin: the account's deposit address and its deposits (portal /portal/api/wallet/onchain*). */
+export interface OnchainFunding {
+  enabled: boolean;
+  network: string;
+  address: string | null;
+  uri: string | null;
+  confirmationsRequired?: number;
+  minSats?: number;
+  maxSats?: number;
+  deposits: OnchainDeposit[];
+}
+
+async function onchainCall(method: "GET" | "POST", path: string): Promise<OnchainFunding> {
+  let res: Response;
+  try {
+    res = await fetch(`${portalBase()}${path}`, {
+      method,
+      headers: method === "POST" ? { "content-type": "application/json", ...authHeaders() } : { ...authHeaders() },
+      credentials: "include",
+      body: method === "POST" ? "{}" : undefined,
+    });
+  } catch {
+    throw new Error("Could not reach EdgeCoder. Check your connection and try again.");
+  }
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.status === 401) throw new Error("Sign in to fund with Bitcoin.");
+  if (!res.ok) throw new Error(String(body.detail ?? (body.error === "onchain_disabled" ? "Funding with Bitcoin is not enabled on this coordinator." : `Could not load your Bitcoin deposits (${body.error ?? res.status}).`)));
+  return body as unknown as OnchainFunding;
+}
+
+/** The account's deposit address (a fresh one after each deposit) and its deposits. */
+export function getOnchainAddress(): Promise<OnchainFunding> {
+  return onchainCall("POST", "/portal/api/wallet/onchain/address");
+}
+/** The account's deposits with their confirmations (no new address). */
+export function getOnchainDeposits(): Promise<OnchainFunding> {
+  return onchainCall("GET", "/portal/api/wallet/onchain");
+}
 
 /** The portal's one-call wallet view (/portal/api/wallet/overview): network, BTC/USD, both fees, payouts. */
 export interface WalletOverview {

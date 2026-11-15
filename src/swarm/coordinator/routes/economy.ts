@@ -54,6 +54,8 @@ import {
 import { recordInfraHeartbeat } from "../infra-hosts.js";
 import { launchUsageFor } from "../payments.js";
 import { launchPolicyView } from "../../../economy/launch-gate.js";
+import { onchainPolicyView } from "../../../economy/onchain.js";
+import { onchainConfig, onchainPayoutStore } from "../onchain.js";
 import { verifyCreditLedger, alertLedgerMismatch } from "../ledger-verify.js";
 
 export function registerEconomyRoutes(app: CoordinatorApp): void {
@@ -98,9 +100,21 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
   app.get("/economy/payouts/:accountId", async (req, reply) => {
     if (!requirePortalServiceToken(req as any, reply)) return;
     const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
-    const [balance, payouts, pins] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100), callbackPins.listCallbackPins(accountId)]);
+    const [balance, payouts, pins, onchainDestination] = await Promise.all([
+      payoutService.balance(accountId),
+      payoutStore.listPayouts(accountId, 100),
+      callbackPins.listCallbackPins(accountId),
+      onchainConfig.enabled ? onchainPayoutStore.getOnchainDestination(accountId) : Promise.resolve(null)
+    ]);
     const launch = launchPolicyView(launchConfig, launchConfig.mode === "invite" ? (await launchUsageFor(accountId)).boughtWindowSats : undefined);
-    return { accountId, balance, payouts, callbackPins: callbackPinStatus(pins), policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused(), launch } };
+    return {
+      accountId,
+      balance,
+      payouts,
+      callbackPins: callbackPinStatus(pins),
+      onchainDestination: onchainDestination ? { address: onchainDestination.address, updatedAtMs: onchainDestination.updatedAtMs } : null,
+      policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused(), launch, onchain: onchainPolicyView(onchainConfig) }
+    };
   });
   app.post("/economy/payouts/withdraw", async (req, reply) => {
     if (!requirePortalServiceToken(req as any, reply)) return;
@@ -126,6 +140,8 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
       if (address) memoryPayoutStore.autoAccounts.set(body.accountId, address);
       else memoryPayoutStore.autoAccounts.delete(body.accountId);
     }
+    // One payout destination per account: a Lightning address replaces an on-chain one.
+    if (address) await onchainPayoutStore.setOnchainDestination(body.accountId, null, BITCOIN_NETWORK);
     // Pin the callback host now, in the background so the portal's save is not held up by the
     // wallet's server; if the address does not resolve, it is pinned at its first payout.
     if (address) {

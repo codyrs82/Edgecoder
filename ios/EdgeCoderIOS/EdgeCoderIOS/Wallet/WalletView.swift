@@ -4,7 +4,8 @@ import SwiftUI
 import UIKit
 
 // Wallet & market (docs/design/wallet-and-market.md): balance, Add funds with a Lightning invoice
-// (QR, copy, open in wallet, live waiting state, paid and expired states), where your sats go,
+// (QR, copy, open in wallet, live waiting state, paid and expired states) or, when the coordinator
+// has ONCHAIN_ENABLED, Fund with Bitcoin to a deposit address (QR, deposits with confirmations), where your sats go,
 // prices now, earnings & withdrawals with payout methods and history. Everything comes from the
 // portal over the session cookie; the app never prices anything except the purchase-fee preview
 // before an invoice exists, which uses the coordinator's own rate and is replaced by the invoice.
@@ -30,6 +31,7 @@ enum WalletFormat {
         Date(timeIntervalSince1970: ms / 1000).formatted(.dateTime.month(.abbreviated).day().hour().minute())
     }
     static func reason(_ r: String) -> String {
+        if r.hasPrefix("credit_purchase:onchain:") { return "Bitcoin deposit" }
         let base = String(r.split(separator: ":").first ?? "")
         let map = [
             "credit_purchase": "Bought cSats", "inference_reserve": "Model call (set aside)", "inference": "Model call",
@@ -57,12 +59,14 @@ struct NetworkInfo {
     }
 }
 
-/// A QR code for a Lightning invoice, drawn with CoreImage (a system framework; no package).
+/// A QR code for a Lightning invoice (or, with `scheme: "bitcoin"`, a Bitcoin deposit address), drawn
+/// with CoreImage (a system framework; no package).
 struct InvoiceQRCode: View {
     let text: String
+    var scheme = "lightning"
 
     var body: some View {
-        if let image = Self.render(text) {
+        if let image = Self.render(text, scheme: scheme) {
             Image(uiImage: image)
                 .interpolation(.none)
                 .resizable()
@@ -70,16 +74,16 @@ struct InvoiceQRCode: View {
                 .padding(10)
                 .background(Color.white)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .accessibilityLabel("Lightning payment QR code")
+                .accessibilityLabel(scheme == "bitcoin" ? "Bitcoin deposit address QR code" : "Lightning payment QR code")
         } else {
             Image(systemName: "qrcode").font(.largeTitle).foregroundColor(Theme.textMuted)
         }
     }
 
-    static func render(_ text: String) -> UIImage? {
+    static func render(_ text: String, scheme: String = "lightning") -> UIImage? {
         let filter = CIFilter.qrCodeGenerator()
-        // Upper case fits BOLT11 into the QR alphanumeric mode (a smaller, easier to scan code).
-        filter.message = Data(("lightning:" + text).uppercased().utf8)
+        // Upper case fits BOLT11 and bech32 addresses into the QR alphanumeric mode (a smaller, easier to scan code).
+        filter.message = Data((scheme + ":" + text).uppercased().utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
               let cg = CIContext().createCGImage(output, from: output.extent) else { return nil }
@@ -110,6 +114,11 @@ struct WalletView: View {
     @State private var copied = false
     @State private var pollTask: Task<Void, Never>?
     @State private var pulse = false
+    // Fund with Bitcoin
+    @State private var onchain: OnchainFunding?
+    @State private var onchainError = ""
+    @State private var addressCopied = false
+    @State private var onchainTask: Task<Void, Never>?
 
     // Withdraw
     @State private var bolt11 = ""
@@ -119,7 +128,7 @@ struct WalletView: View {
     @State private var withdrawMessage: (ok: Bool, text: String)?
     @State private var withdrawing = false
 
-    enum Step { case amount, invoice, paid, expired }
+    enum Step { case amount, onchain, invoice, paid, expired }
 
     private var portal: URL { APIClient.shared.config.portalBaseURL }
     private var network: NetworkInfo { NetworkInfo(overview?.network ?? invoice?.network) }
@@ -128,6 +137,10 @@ struct WalletView: View {
     private var netFeeBps: Int { overview?.fees.networkFeeBps ?? 500 }
     private var chosenAmount: Int { useCustom ? (Int(customText) ?? 0) : amount }
     private var amountValid: Bool { (100...1_000_000).contains(chosenAmount) }
+    private var onchainPolicy: WalletOverview.OnchainPolicy? {
+        guard let p = overview?.payouts?.policy?.onchain, p.enabled else { return nil }
+        return p
+    }
 
     var body: some View {
         ScrollView {
@@ -155,7 +168,7 @@ struct WalletView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }
-        .onDisappear { pollTask?.cancel() }
+        .onDisappear { pollTask?.cancel(); onchainTask?.cancel() }
     }
 
     // MARK: Sections
@@ -205,6 +218,7 @@ struct WalletView: View {
         card {
             switch step {
             case .amount: amountStep
+            case .onchain: onchainStep
             case .invoice: invoiceStep
             case .paid: paidStep
             case .expired: expiredStep
@@ -218,7 +232,10 @@ struct WalletView: View {
                 Text("Buy cSats").font(.headline).foregroundColor(Theme.textPrimary)
                 pill("Lightning")
             }
-            Text("Fund with Lightning from any wallet. Your cSats arrive the moment the payment lands. Fund with Bitcoin is coming soon.")
+            fundMethodPicker
+            Text(onchainPolicy == nil
+                 ? "Fund with Lightning from any wallet. Your cSats arrive the moment the payment lands. Fund with Bitcoin is coming soon."
+                 : "Fund with Lightning from any wallet. Your cSats arrive the moment the payment lands.")
                 .font(.footnote).foregroundColor(Theme.textSecondary)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
                 ForEach(Self.presets, id: \.self) { p in
@@ -264,6 +281,109 @@ struct WalletView: View {
                     .font(.footnote).foregroundColor(Theme.yellow)
             }
         }
+    }
+
+    private var fundMethodPicker: some View {
+        HStack(spacing: 8) {
+            Button { openLightning() } label: {
+                Label("Fund with Lightning", systemImage: "bolt.fill").font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.bordered).tint(step == .amount ? Theme.accent : Theme.textSecondary)
+            .accessibilityAddTraits(step == .amount ? .isSelected : [])
+            if onchainPolicy != nil {
+                Button { Task { await openOnchain() } } label: {
+                    Label("Fund with Bitcoin", systemImage: "bitcoinsign.circle").font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered).tint(step == .onchain ? Theme.accent : Theme.textSecondary)
+                .accessibilityAddTraits(step == .onchain ? .isSelected : [])
+            } else {
+                Label("Fund with Bitcoin · Coming soon", systemImage: "bitcoinsign.circle").font(.caption.weight(.semibold))
+                    .foregroundColor(Theme.textMuted)
+                    .accessibilityLabel("Fund with Bitcoin, coming soon")
+            }
+        }
+    }
+
+    private var onchainStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Fund with Bitcoin").font(.headline).foregroundColor(Theme.textPrimary)
+                pill(network.isTest ? "\(network.short) · test sats" : "On-chain · mainnet")
+            }
+            fundMethodPicker
+            Text("Send bitcoin from any wallet to your deposit address. Your cSats arrive once the payment is confirmed on the blockchain.")
+                .font(.footnote).foregroundColor(Theme.textSecondary)
+            if !onchainError.isEmpty {
+                Text(onchainError).font(.footnote).foregroundColor(Theme.red)
+            }
+            if let o = onchain, let address = o.address {
+                InvoiceQRCode(text: address, scheme: "bitcoin")
+                    .frame(maxWidth: 240).frame(maxWidth: .infinity)
+                Text(address)
+                    .font(.system(.footnote, design: .monospaced)).foregroundColor(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Your Bitcoin deposit address \(address)")
+                HStack(spacing: 8) {
+                    Button {
+                        UIPasteboard.general.string = address
+                        addressCopied = true
+                        Task { try? await Task.sleep(nanoseconds: 1_600_000_000); addressCopied = false }
+                    } label: {
+                        Label(addressCopied ? "Copied" : "Copy address", systemImage: addressCopied ? "checkmark" : "doc.on.doc").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
+                    Button {
+                        if let url = URL(string: "bitcoin:\(address)") { openURL(url) }
+                    } label: {
+                        Label("Open in wallet", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered).tint(Theme.textPrimary)
+                }
+                let conf = o.confirmationsRequired ?? onchainPolicy?.depositConfirmations ?? 1
+                Text("Credited after \(conf) confirmation\(conf == 1 ? "" : "s"). Minimum \(WalletFormat.sats(Double(o.minSats ?? onchainPolicy?.depositMinSats ?? 0))) sats; smaller amounts are not credited.\((o.maxSats ?? 0) > 0 ? " Deposits above \(WalletFormat.sats(Double(o.maxSats ?? 0))) sats wait for a manual review." : "") You get a new address after each deposit; old ones still work.")
+                    .font(.caption).foregroundColor(Theme.textMuted)
+            } else if onchainError.isEmpty {
+                ProgressView("Getting your address…").tint(Theme.textMuted).frame(maxWidth: .infinity)
+            }
+            if network.isTest && overview != nil {
+                Label("This coordinator runs on \(network.short). Send \(network.short) coins only; these sats have no value.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundColor(Theme.yellow)
+            }
+            Text("Deposits").font(.subheadline.weight(.semibold)).foregroundColor(Theme.textPrimary)
+            let deposits = onchain?.deposits ?? []
+            if deposits.isEmpty {
+                Text("No deposits yet. They show up here as soon as the network sees them.").font(.footnote).foregroundColor(Theme.textSecondary)
+            }
+            ForEach(deposits) { d in
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(WalletFormat.sats(Double(d.amountSats))) sats").font(.subheadline).monospacedDigit().foregroundColor(Theme.textPrimary)
+                        Text(WalletFormat.time(d.seenAtMs)).font(.caption).foregroundColor(Theme.textMuted)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(Self.depositStatus(d.status)).font(.caption2.weight(.semibold))
+                            .foregroundColor(d.status == "credited" ? Theme.green : d.status == "pending" || d.status == "held" ? Theme.yellow : Theme.red)
+                        Text(d.status == "pending" ? "\(min(d.confirmations, d.requiredConfirmations)) of \(d.requiredConfirmations) confirmations" : "\(d.confirmations) confirmations")
+                            .font(.caption).monospacedDigit().foregroundColor(Theme.textMuted)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    static func depositStatus(_ s: String) -> String {
+        ["pending": "Confirming", "credited": "Added", "below_minimum": "Below minimum", "held": "Held for review", "dropped": "Dropped", "reversed": "Reversed"][s] ?? s
+    }
+
+    private func onchainPayoutText(_ p: WalletOverview.OnchainPolicy) -> String {
+        let hours = (p.payoutIntervalMs ?? 0) / 3_600_000
+        let every = hours >= 1 ? "every \(WalletFormat.num(hours, digits: 1)) h" : "every \(Int(((p.payoutIntervalMs ?? 0) / 60_000).rounded())) min"
+        let fee = p.payoutFeePayer == "edgecoder"
+            ? "EdgeCoder pays the network fee."
+            : "The network fee comes out of your payout (at most \(WalletFormat.sats(Double(p.payoutMaxFeeSats ?? 0))) sats; the unused part is returned)."
+        return "BTC to your own bc1 address. Paid in a batch \(every) once at least \(WalletFormat.sats(Double(p.payoutMinSats ?? 0))) sats are available. \(fee)"
     }
 
     @ViewBuilder private var invoiceStep: some View {
@@ -437,14 +557,23 @@ struct WalletView: View {
         }
         Text("Payout method").font(.footnote).foregroundColor(Theme.textSecondary)
         method("bolt.fill", "Lightning", "BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.", active: true)
-        method("bitcoinsign.circle", "Bitcoin on-chain", "BTC. Batched payouts above a minimum. Not available yet.", active: false)
+        if let oc = onchainPolicy {
+            method("bitcoinsign.circle", "Bitcoin on-chain", onchainPayoutText(oc), active: true, badge: "Available")
+        } else {
+            method("bitcoinsign.circle", "Bitcoin on-chain", "BTC. Batched payouts above a minimum. Not available yet.", active: false)
+        }
         method("l.circle", "Litecoin on-chain", "LTC. Batched payouts. Not available yet.", active: false)
         withdrawCard(policy: policy)
         card {
             Text("Where we pay you").font(.headline).foregroundColor(Theme.textPrimary)
-            row("Lightning address", destination?.destination?.destination ?? "Not set")
-            Text("Automatic payouts go to a Lightning address from a wallet you control. Set or change it in the portal or the desktop app.")
+            row(destination?.destination?.kind == "onchain" ? "Bitcoin address" : "Lightning address", destination?.destination?.destination ?? "Not set")
+            Text(onchainPolicy == nil
+                 ? "Automatic payouts go to a Lightning address from a wallet you control. Set or change it in the portal or the desktop app."
+                 : "Automatic payouts go to a Lightning address or a Bitcoin address (bc1…) from a wallet you control. Set or change it in the portal or the desktop app.")
                 .font(.footnote).foregroundColor(Theme.textSecondary)
+            if destination?.destination?.kind == "onchain", let oc = onchainPolicy {
+                Text(onchainPayoutText(oc)).font(.caption).foregroundColor(Theme.textMuted)
+            }
         }
         card {
             Text("Payout history").font(.headline).foregroundColor(Theme.textPrimary)
@@ -455,7 +584,9 @@ struct WalletView: View {
             ForEach(rows) { p in
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(p.kind == "auto" ? "Automatic" : "Withdrawal") · BTC · Lightning").font(.subheadline).foregroundColor(Theme.textPrimary)
+                        Text(p.kind == "onchain"
+                             ? "On-chain batch · BTC\(p.txid.map { " · \($0.prefix(10))…" } ?? "")"
+                             : "\(p.kind == "auto" ? "Automatic" : "Withdrawal") · BTC · Lightning").font(.subheadline).foregroundColor(Theme.textPrimary)
                         Text(WalletFormat.time(p.createdAtMs)).font(.caption).foregroundColor(Theme.textMuted)
                     }
                     Spacer()
@@ -614,14 +745,14 @@ struct WalletView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func method(_ icon: String, _ title: String, _ detail: String, active: Bool) -> some View {
+    private func method(_ icon: String, _ title: String, _ detail: String, active: Bool, badge: String = "Active") -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).foregroundColor(active ? Theme.accent : Theme.textMuted).frame(width: 20)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(title).font(.subheadline.weight(.semibold)).foregroundColor(Theme.textPrimary)
                     Spacer()
-                    Text(active ? "Active" : "Coming soon").font(.caption2.weight(.semibold))
+                    Text(active ? badge : "Coming soon").font(.caption2.weight(.semibold))
                         .foregroundColor(active ? Theme.green : Theme.textMuted)
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .overlay(Capsule().stroke(active ? Theme.green.opacity(0.5) : Theme.borderStrong))
@@ -676,7 +807,7 @@ struct WalletView: View {
             let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "/portal/api/wallet/topup", method: "POST", body: ["amountSats": chosenAmount])
             guard r.status == 200, let inv = try? JSONDecoder().decode(TopupInvoice.self, from: r.data) else {
                 let err = (try? JSONDecoder().decode(WithdrawResponse.self, from: r.data))?.error ?? "status \(r.status)"
-                topupError = err == "payments_disabled" ? "Buying cSats is turned off on this coordinator." : "Could not create the invoice (\(err))."
+                topupError = err == "payments_disabled" ? "Buying cSats is turned off on this coordinator." : "Could not start the payment (\(err))."
                 return
             }
             invoice = inv
@@ -684,7 +815,7 @@ struct WalletView: View {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { step = .invoice }
             startPolling(inv.intentId)
         } catch {
-            topupError = "Could not create the invoice: \(error.localizedDescription)"
+            topupError = "Could not start the payment: \(error.localizedDescription)"
         }
     }
 
@@ -706,6 +837,37 @@ struct WalletView: View {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { step = .expired }
                     return
                 }
+            }
+        }
+    }
+
+    private func openLightning() {
+        onchainTask?.cancel()
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { step = .amount }
+    }
+
+    private func openOnchain() async {
+        pollTask?.cancel()
+        onchainError = ""
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { step = .onchain }
+        do {
+            let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "/portal/api/wallet/onchain/address", method: "POST", body: [String: String]())
+            let o = try? JSONDecoder().decode(OnchainFunding.self, from: r.data)
+            guard r.status == 200, let o, o.address != nil else {
+                onchainError = o?.detail ?? "Could not get a deposit address (status \(r.status))."
+                return
+            }
+            onchain = o
+        } catch {
+            onchainError = "Could not get a deposit address: \(error.localizedDescription)"
+            return
+        }
+        onchainTask?.cancel()
+        onchainTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                if Task.isCancelled { return }
+                if let o: OnchainFunding = try? await APIClient.shared.request(baseURL: portal, path: "/portal/api/wallet/onchain"), o.enabled { onchain = o }
             }
         }
     }

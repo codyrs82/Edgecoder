@@ -3,7 +3,8 @@
 
 /**
  * Settings > Wallet (/portal/settings/plan): balance and Add funds (Lightning top-up with a live
- * invoice), where your sats go (buying is free unless the coordinator sets a purchase fee; EdgeCoder
+ * invoice, or Fund with Bitcoin on-chain to a deposit address when the coordinator has
+ * ONCHAIN_ENABLED), where your sats go (buying is free unless the coordinator sets a purchase fee; EdgeCoder
  * keeps the 5 % network fee of every compute payment), Earnings & withdrawals
  * (earned, held, available, paid; payout methods; payout history with the asset), and Activity.
  * Design: docs/design/wallet-and-market.md. All numbers come from the coordinator through
@@ -72,6 +73,10 @@ export const WALLET_CSS = `
     .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
     .wl-fund.active { border-color: var(--brand); color: var(--text); background: var(--bg-elevated); }
     .wl-fund.soon { border-style: dashed; }
+    button.wl-fund { cursor: pointer; background: transparent; }
+    button.wl-fund:disabled { cursor: default; }
+    .wl-addr { font-family: var(--font-mono); font-size: 13px; word-break: break-all; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--card-border); background: var(--bg-elevated); }
+    .wl-conf { font-variant-numeric: tabular-nums; }
     .wl-fund small { font-weight: 500; }
     .wl-invoice { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
     @media (max-width: 560px) { .wl-invoice { grid-template-columns: 1fr; } }
@@ -190,12 +195,12 @@ export const WALLET_CONTENT = `
       </div>
 
       <div class="wl-card" id="add-funds">
+        <h3 id="fundTitle">Buy cSats</h3>
+        <div class="wl-fund-methods" id="fundMethods" role="group" aria-label="How to fund">
+          <button type="button" class="wl-fund active" id="fundLnBtn" aria-pressed="true">${icon("zap", 14)}<span>Fund with Lightning</span></button>
+          <button type="button" class="wl-fund soon" id="fundBtcBtn" aria-pressed="false" disabled title="Coming soon">${icon("bitcoin", 14)}<span>Fund with Bitcoin</span><small id="fundBtcSoon">Coming soon</small></button>
+        </div>
         <div class="wl-step" id="stepAmount">
-          <h3>Buy cSats</h3>
-          <div class="wl-fund-methods" role="list" aria-label="How to fund">
-            <div class="wl-fund active" role="listitem">${icon("zap", 14)}<span>Fund with Lightning</span></div>
-            <div class="wl-fund soon" role="listitem" title="Coming soon">${icon("bitcoin", 14)}<span>Fund with Bitcoin</span><small>Coming soon</small></div>
-          </div>
           <div class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</div>
           <div class="wl-testnote hidden" id="launchNote" role="note">${icon("alert", 14)}<span id="launchNoteText"></span></div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
@@ -215,6 +220,33 @@ export const WALLET_CONTENT = `
           <button class="primary wl-primary" id="topupBtn">Fund with Lightning</button>
           <div class="wl-err hidden" id="topupError" role="alert"></div>
           <div class="wl-testnote hidden" id="topupTestNote">${icon("alert", 14)}<span id="topupTestNoteText"></span></div>
+        </div>
+
+        <div class="wl-step" id="stepOnchain" hidden>
+          <div class="wl-faint" id="onchainSummary">Send bitcoin from any wallet to your deposit address. Your cSats arrive once the payment is confirmed on the blockchain.</div>
+          <div class="wl-invoice">
+            <div>
+              <img class="wl-qr" id="onchainQr" alt="Bitcoin deposit address QR code. Scan it with your wallet." hidden />
+              <div class="wl-bolt" id="onchainQrFallback" aria-hidden="true">${icon("bitcoin", 34)}<span>Copy the address into your wallet</span></div>
+            </div>
+            <div>
+              <div class="wl-addr" id="onchainAddress" tabindex="0" aria-label="Your Bitcoin deposit address">Getting your address…</div>
+              <div class="wl-inv-actions">
+                <button class="primary" id="copyAddressBtn">${icon("copy", 14)}<span id="copyAddressLabel">Copy address</span></button>
+                <a class="btn" id="openBitcoinLink" href="#">${icon("external", 14)}Open in wallet</a>
+              </div>
+              <div class="wl-faint u-mt-6" id="onchainRules"></div>
+            </div>
+          </div>
+          <div class="wl-err hidden" id="onchainError" role="alert"></div>
+          <div class="wl-testnote hidden" id="onchainTestNote">${icon("alert", 14)}<span id="onchainTestNoteText"></span></div>
+          <div class="wl-sub">Deposits</div>
+          <div class="wl-table-wrap">
+            <table>
+              <thead><tr><th>Seen</th><th class="num">Amount (sats)</th><th class="num">Confirmations</th><th>Status</th></tr></thead>
+              <tbody id="onchainDepositsBody"><tr><td colspan="4" class="muted">No deposits yet.</td></tr></tbody>
+            </table>
+          </div>
         </div>
 
         <div class="wl-step" id="stepInvoice" hidden>
@@ -300,7 +332,7 @@ export const WALLET_CONTENT = `
     <div class="wl-sub">Payout method</div>
     <div class="wl-methods" role="list">
       <div class="wl-method active" role="listitem"><div class="t"><span class="wl-asset">${icon("zap", 15)} Lightning</span> <span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.</div></div>
-      <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
+      <div class="wl-method soon" role="listitem" id="methodOnchain"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon" id="methodOnchainPill">Coming soon</span></div><div class="d" id="methodOnchainText">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
       <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("layers", 15)} Litecoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
     </div>
 
@@ -324,7 +356,7 @@ export const WALLET_CONTENT = `
 
       <div class="wl-card" id="payoutDestinationCard">
         <h3>Where should we pay you?</h3>
-        <div class="wl-faint">Automatic payouts go to a Lightning address from a wallet you control (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.</div>
+        <div class="wl-faint" id="payoutDestLead">Automatic payouts go to a Lightning address from a wallet you control (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.</div>
         <div id="payoutDestRetired" class="hidden payout-warning">
           The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
           Nothing was ever paid to it. Your earnings are kept until you set a destination below.
@@ -346,7 +378,7 @@ export const WALLET_CONTENT = `
           <div><dt>Current</dt><dd id="payoutDestCurrent">Loading…</dd></div>
           <div><dt>Network</dt><dd id="payoutDestNetwork">–</dd></div>
         </dl>
-        <label for="payoutDestInput">Lightning address</label>
+        <label for="payoutDestInput" id="payoutDestLabel">Lightning address</label>
         <div class="row">
           <input id="payoutDestInput" type="text" autocomplete="off" spellcheck="false" placeholder="you@wallet.example" class="u-flex-1" />
           <button class="primary" id="payoutDestSaveBtn">Save</button>
@@ -358,6 +390,7 @@ export const WALLET_CONTENT = `
             <button class="primary" id="payoutDestConfirmBtn">Confirm change</button>
           </div>
         </div>
+        <div id="payoutDestOnchainNote" class="wl-faint hidden u-mt-8"></div>
         <div id="payoutDestError" role="alert" class="hidden u-mt-8 u-danger"></div>
         <div id="payoutDestInfo" class="muted hidden u-mt-8"></div>
       </div>
@@ -367,7 +400,7 @@ export const WALLET_CONTENT = `
       <h3>Payout history</h3>
       <div class="wl-table-wrap">
         <table>
-          <thead><tr><th>Time</th><th>Asset</th><th>Kind</th><th class="num">Amount (sats)</th><th class="num">Routing fee</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Asset</th><th>Kind</th><th class="num">Amount (sats)</th><th class="num">Fee</th><th>Status</th></tr></thead>
           <tbody id="payoutsBody"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
         </table>
       </div>
@@ -440,16 +473,16 @@ export const WALLET_HELPERS_SCRIPT = `
 
 export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     const $ = (id) => document.getElementById(id);
-    const state = { overview: null, amount: 20000, intent: null, poll: null, tick: null, expiresAt: 0, net: null, feeBps: null };
+    const state = { overview: null, destView: null, amount: 20000, intent: null, poll: null, tick: null, expiresAt: 0, net: null, feeBps: null };
     function fmtTime(ms) { return ms ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "–"; }
-    const KINDS = { withdraw: "Withdrawal", auto: "Automatic", fee_pool: "Host share" };
+    const KINDS = { withdraw: "Withdrawal", auto: "Automatic", fee_pool: "Host share", onchain: "On-chain batch" };
     const REASONS = {
       credit_purchase: "Bought cSats", inference_reserve: "Model call (set aside)", inference: "Model call", task_submit: "Code job (set aside)",
       task_submit_refund: "Unused set-aside returned", compute_reservation: "Reserved a machine", reservation_refund: "Reservation time returned",
       compute_contribution: "Earned running jobs", reservation_earning: "Earned from a reservation", payout: "Withdrawal",
       payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share", faucet: "Test sats grant"
     };
-    function reasonText(r) { const base = String(r || "").replace(/:.*/, ""); return REASONS[base] || base.replace(/_/g, " ") || "–"; }
+    function reasonText(r) { if (/^credit_purchase:onchain:/.test(String(r || ""))) return "Bitcoin deposit"; const base = String(r || "").replace(/:.*/, ""); return REASONS[base] || base.replace(/_/g, " ") || "–"; }
 
     /* ── Add funds ── */
     // The coordinator's purchase fee; 0 (free) is the default when it does not say.
@@ -496,7 +529,16 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       });
     }
     $("topupAmount").addEventListener("input", () => { const n = Number($("topupAmount").value); state.amount = Number.isFinite(n) ? n : 0; renderBreakdown(); });
-    function showStep(id) { for (const s of ["stepAmount", "stepInvoice", "stepPaid", "stepExpired"]) $(s).hidden = s !== id; }
+    function showStep(id) {
+      for (const s of ["stepAmount", "stepOnchain", "stepInvoice", "stepPaid", "stepExpired"]) $(s).hidden = s !== id;
+      // The method switch belongs to choosing how to pay, not to a payment in progress.
+      $("fundMethods").hidden = !(id === "stepAmount" || id === "stepOnchain");
+      $("fundTitle").textContent = id === "stepOnchain" ? "Fund with Bitcoin" : "Buy cSats";
+      const btc = id === "stepOnchain";
+      $("fundLnBtn").classList.toggle("active", !btc); $("fundLnBtn").setAttribute("aria-pressed", btc ? "false" : "true");
+      $("fundBtcBtn").classList.toggle("active", btc); $("fundBtcBtn").setAttribute("aria-pressed", btc ? "true" : "false");
+      if (!btc) stopOnchainPolling();
+    }
     function stopPolling() { clearInterval(state.poll); clearInterval(state.tick); state.poll = null; state.tick = null; }
     function topupError(text) { const e = $("topupError"); e.textContent = text || ""; e.classList.toggle("hidden", !text); }
     const TOPUP_ERRORS = {
@@ -512,7 +554,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const r = await call("/portal/api/wallet/topup", { method: "POST", body: JSON.stringify({ amountSats: state.amount }) }).catch(() => ({ ok: false, json: {} }));
       renderBreakdown();
       // A soft-launch refusal carries its own sentence (with the sats still allowed).
-      if (!r.ok || !r.json.invoice) { topupError((/^launch_/.test(r.json.error || "") && r.json.detail) || TOPUP_ERRORS[r.json.error] || "Could not create the invoice (" + (r.json.error || r.status || "network error") + ")."); return; }
+      if (!r.ok || !r.json.invoice) { topupError((/^launch_/.test(r.json.error || "") && r.json.detail) || TOPUP_ERRORS[r.json.error] || "Could not start the payment (" + (r.json.error || r.status || "network error") + ")."); return; }
       state.intent = r.json;
       state.expiresAt = Date.now() + Number(r.json.expiresInSeconds || 0) * 1000;
       const net = networkInfo(r.json.network);
@@ -577,18 +619,92 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     $("retryInvoiceBtn").addEventListener("click", () => { showStep("stepAmount"); createInvoice().catch((e) => topupError(String(e.message || e))); });
 
     /* ── Early access (LAUNCH_MODE=invite on the coordinator: src/economy/launch-gate.ts) ── */
-    function launchText(l) {
+    /** \`onchainOn\`: Fund with Bitcoin is enabled, so deposits count toward the caps too. */
+    function launchText(l, onchainOn) {
       if (!l || l.mode !== "invite") return "";
       const parts = [];
       if (l.maxBuySatsPerDay > 0) parts.push("up to " + fmtSats(l.maxBuySatsPerDay) + " sats per day" + (l.boughtWindowSats ? " (" + fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats)) + " left today)" : ""));
       if (l.maxBalanceSats > 0) parts.push("a balance of up to " + fmtSats(l.maxBalanceSats) + " cSats");
       if (l.maxPayoutSatsPerDay > 0) parts.push("withdrawals of up to " + fmtSats(l.maxPayoutSatsPerDay) + " sats per day");
-      return parts.length ? "Early access: " + parts.join(", ") + "." : "";
+      if (!parts.length) return "";
+      // Bitcoin deposits count like purchases; one over a limit waits for a manual review.
+      const chain = onchainOn && (l.maxBuySatsPerDay > 0 || l.maxBalanceSats > 0) ? " Bitcoin deposits count toward these limits; a deposit over them waits for a manual review." : "";
+      return "Early access: " + parts.join(", ") + "." + chain;
     }
     function renderLaunch(l) {
-      const text = launchText(l);
+      const oc = onchainPolicy();
+      const text = launchText(l, !!(oc && oc.enabled));
       $("launchNote").classList.toggle("hidden", !text);
       $("launchNoteText").textContent = text;
+    }
+    /* ── Fund with Bitcoin (on-chain): a deposit address, credited after N confirmations ── */
+    const DEPOSIT_STATUS = { pending: ["Confirming", "warn"], credited: ["Added", "ok"], below_minimum: ["Below minimum", "danger"], held: ["Held for review", "warn"], dropped: ["Dropped", "danger"], reversed: ["Reversed", "danger"] };
+    let onchainPoll = null;
+    function stopOnchainPolling() { clearInterval(onchainPoll); onchainPoll = null; }
+    function onchainPolicy() { const p = state.overview && state.overview.payouts && state.overview.payouts.policy; return (p && p.onchain) || null; }
+    function onchainError(text) { const e = $("onchainError"); e.textContent = text || ""; e.classList.toggle("hidden", !text); }
+    function renderOnchain(d) {
+      if (d.address) {
+        $("onchainAddress").textContent = d.address;
+        $("openBitcoinLink").setAttribute("href", "bitcoin:" + d.address);
+        const qr = typeof d.qrSvg === "string" && d.qrSvg.startsWith("<svg") ? d.qrSvg : "";
+        $("onchainQr").hidden = !qr; $("onchainQrFallback").hidden = !!qr;
+        if (qr) $("onchainQr").setAttribute("src", "data:image/svg+xml;base64," + btoa(qr)); else $("onchainQr").removeAttribute("src");
+      }
+      const conf = Number(d.confirmationsRequired || 1);
+      $("onchainRules").textContent = "Credited after " + conf + " confirmation" + (conf === 1 ? "" : "s") + ". Minimum " + fmtSats(d.minSats || 0) + " sats; smaller amounts are not credited." + (d.maxSats ? " Deposits above " + fmtSats(d.maxSats) + " sats wait for a manual review." : "") + " You get a new address after each deposit; old ones still work.";
+      const net = networkInfo(d.network);
+      $("onchainTestNote").classList.toggle("hidden", !net.test);
+      $("onchainTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Send " + net.short + " coins only; these sats have no value." : "";
+      const rows = (d.deposits || []).map((x) => {
+        const st = DEPOSIT_STATUS[x.status] || [x.status, "warn"];
+        const confText = x.status === "pending" ? Math.min(x.confirmations, x.requiredConfirmations) + " of " + x.requiredConfirmations : String(x.confirmations);
+        return "<tr><td>" + escapeHtml(fmtTime(x.seenAtMs)) + "</td><td class='num'>" + escapeHtml(fmtSats(x.amountSats)) + "</td><td class='num wl-conf'>" + escapeHtml(confText) + "</td><td>" + statusBadge(st[0], st[1]) + "</td></tr>";
+      });
+      $("onchainDepositsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='4' class='muted'>No deposits yet. They show up here as soon as the network sees them.</td></tr>";
+    }
+    const ONCHAIN_ERRORS = { onchain_disabled: "Funding with Bitcoin is not enabled on this coordinator.", onchain_address_unavailable: "The Bitcoin node could not give an address right now. Try again in a minute.", coordinator_unreachable: "No coordinator is reachable right now. Try again in a minute.", not_authenticated: "Your session ended. Sign in again." };
+    async function refreshDeposits() {
+      const r = await call("/portal/api/wallet/onchain").catch(() => null);
+      if (r && r.ok && r.json.enabled) renderOnchain(r.json);
+    }
+    async function openOnchain() {
+      onchainError("");
+      stopPolling();
+      showStep("stepOnchain");
+      const r = await call("/portal/api/wallet/onchain/address", { method: "POST", body: "{}" }).catch(() => ({ ok: false, json: {} }));
+      if (!r.ok) { onchainError(ONCHAIN_ERRORS[r.json.error] || "Could not get a deposit address (" + (r.json.error || r.status || "network error") + ")."); return; }
+      renderOnchain(r.json);
+      stopOnchainPolling();
+      onchainPoll = setInterval(() => { if (!document.hidden) refreshDeposits().catch(() => undefined); }, 15000);
+    }
+    $("fundBtcBtn").addEventListener("click", () => openOnchain().catch((e) => onchainError(String(e.message || e))));
+    $("fundLnBtn").addEventListener("click", () => { showStep("stepAmount"); renderBreakdown(); });
+    $("copyAddressBtn").addEventListener("click", async () => {
+      const a = $("onchainAddress").textContent || "";
+      if (!/^(bc|tb|bcrt)1/i.test(a)) return;
+      try { await navigator.clipboard.writeText(a); $("copyAddressLabel").textContent = "Copied"; }
+      catch { const sel = window.getSelection(); const range = document.createRange(); range.selectNodeContents($("onchainAddress")); sel.removeAllRanges(); sel.addRange(range); $("copyAddressLabel").textContent = "Press Ctrl/Cmd+C"; }
+      setTimeout(() => { $("copyAddressLabel").textContent = "Copy address"; }, 1800);
+    });
+    function renderOnchainMethods(pol) {
+      const oc = pol && pol.onchain;
+      const on = !!(oc && oc.enabled);
+      // Fund with Bitcoin: active only when the coordinator has it on.
+      $("fundBtcBtn").disabled = !on;
+      $("fundBtcBtn").classList.toggle("soon", !on);
+      $("fundBtcBtn").title = on ? "Send bitcoin to a deposit address" : "Coming soon";
+      $("fundBtcSoon").classList.toggle("hidden", on);
+      // Payout method: Bitcoin on-chain.
+      $("methodOnchain").classList.toggle("soon", !on);
+      $("methodOnchainPill").textContent = on ? "Available" : "Coming soon";
+      $("methodOnchainPill").className = "wl-pill" + (on ? " ok" : " soon");
+      $("methodOnchainText").textContent = on ? onchainPayoutText(oc) : "BTC. Batched payouts above a minimum, to your own address. Not available yet.";
+    }
+    function everyText(ms) { const h = ms / 3600000; return h >= 1 ? "every " + (Number.isInteger(h) ? h : h.toFixed(1)) + " h" : "every " + Math.round(ms / 60000) + " min"; }
+    function onchainPayoutText(oc) {
+      const fee = oc.payoutFeePayer === "edgecoder" ? "EdgeCoder pays the network fee." : "The network fee comes out of your payout (at most " + fmtSats(oc.payoutMaxFeeSats || 0) + " sats; the unused part is returned).";
+      return "BTC to your own bc1 address. Paid in a batch " + everyText(oc.payoutIntervalMs || 0) + " once at least " + fmtSats(oc.payoutMinSats || 0) + " sats are available. " + fee;
     }
 
     /* ── Overview: balance, network, fees, earnings ── */
@@ -644,7 +760,10 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
         if (pol.network) parts.push("Network: " + networkInfo(pol.network).short + ".");
       }
       $("payoutPolicyNote").textContent = parts.join(" ");
-      const rows = ((p && p.payouts) || []).map((x) => "<tr><td>" + escapeHtml(fmtTime(x.createdAtMs)) + "</td><td><span class='wl-asset'>BTC <small>Lightning</small></span></td><td>" + escapeHtml(KINDS[x.kind] || x.kind) +
+      renderOnchainMethods(p ? pol : null);
+      if (state.destView) renderPayoutDest(state.destView);
+      const asset = (x) => x.kind === "onchain" ? "BTC <small>On-chain" + (x.txid ? " · " + escapeHtml(String(x.txid).slice(0, 10)) + "…" : "") + "</small>" : "BTC <small>Lightning</small>";
+      const rows = ((p && p.payouts) || []).map((x) => "<tr><td>" + escapeHtml(fmtTime(x.createdAtMs)) + "</td><td><span class='wl-asset'>" + asset(x) + "</span></td><td>" + escapeHtml(KINDS[x.kind] || x.kind) +
         "</td><td class='num'>" + fmtMsat(x.amountMsat) + "</td><td class='num'>" + fmtMsat(x.feeMsat) + "</td><td>" + statusBadge(x.status, x.status === "paid" ? "ok" : x.status === "failed" ? "danger" : "warn") +
         (x.error ? " <span class='muted'>" + escapeHtml(x.error) + "</span>" : "") + "</td></tr>");
       $("payoutsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='6' class='muted'>No payouts yet. Earnings you withdraw show up here.</td></tr>";
@@ -736,7 +855,18 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     }
     function originHost(o) { try { return new URL(o).host; } catch { return String(o); } }
     function renderPayoutDest(v) {
+      state.destView = v;
       const current = v.destination ? v.destination.destination : null;
+      const onchainOk = v.onchainSupported === true;
+      $("payoutDestLabel").textContent = onchainOk ? "Lightning address or Bitcoin address" : "Lightning address";
+      $("payoutDestInput").placeholder = onchainOk ? "you@wallet.example or bc1…" : "you@wallet.example";
+      $("payoutDestLead").textContent = onchainOk
+        ? "Automatic payouts go to a Lightning address (name@wallet-domain.com) or a Bitcoin address (bc1…) from a wallet you control. EdgeCoder never creates or stores your wallet keys."
+        : "Automatic payouts go to a Lightning address from a wallet you control (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.";
+      const oc = onchainPolicy();
+      const isChain = v.destination && v.destination.kind === "onchain";
+      $("payoutDestOnchainNote").classList.toggle("hidden", !(isChain && oc));
+      if (isChain && oc) $("payoutDestOnchainNote").textContent = onchainPayoutText(oc);
       $("payoutDestCurrent").textContent = current || "Not set. Automatic payouts wait until you add one.";
       $("payoutDestNetwork").textContent = networkInfo(v.network).short;
       $("payoutDestRetired").classList.toggle("hidden", !(v.legacyAddressRetired && !current));
@@ -770,7 +900,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     }
     async function savePayoutDest(withCode) {
       const destination = $("payoutDestInput").value.trim();
-      if (!destination) { payoutDestMessage("error", "Enter a Lightning address from your wallet."); return; }
+      if (!destination) { payoutDestMessage("error", "Enter a Lightning address or a Bitcoin address from your wallet."); return; }
       const body = { destination };
       if (withCode) {
         const emailCode = $("payoutDestCode").value.trim();
