@@ -57,6 +57,34 @@ export function invoiceQrSvg(bolt11: string): string | null {
   );
 }
 
+/** `bitcoin:BC1...`: a BIP 21 URI for a bech32 deposit address, upper-cased for alphanumeric mode. Null for anything else. */
+export function bitcoinQrPayload(address: string): string | null {
+  const a = address.trim().replace(/^bitcoin:/i, "");
+  return /^(bc|tb|bcrt)1[02-9ac-hj-np-z]{8,87}$/i.test(a) ? `BITCOIN:${a.toUpperCase()}` : null;
+}
+
+/** An SVG QR code for a Bitcoin deposit address; null when the string is not a bech32 address. */
+export function bitcoinAddressQrSvg(address: string): string | null {
+  const payload = bitcoinQrPayload(address);
+  if (!payload) return null;
+  const { size, d } = qrPath(payload);
+  const full = size + QUIET * 2;
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${full} ${full}" width="${full * 4}" height="${full * 4}" shape-rendering="crispEdges">` +
+    `<rect width="${full}" height="${full}" fill="#ffffff"/>` +
+    `<path transform="translate(${QUIET} ${QUIET})" d="${d}" fill="#000000"/>` +
+    `</svg>`
+  );
+}
+
+/** A deposit answer with `qrSvg` added when it carries an address. */
+export function withAddressQr(status: number, json: unknown): unknown {
+  if (status !== 200 || !json || typeof json !== "object") return json;
+  const address = (json as { address?: unknown }).address;
+  const qrSvg = typeof address === "string" ? bitcoinAddressQrSvg(address) : null;
+  return qrSvg ? { ...(json as object), qrSvg } : json;
+}
+
 /** A top-up answer with `qrSvg` added when it carries an invoice (optional field; everything else unchanged). */
 export function withInvoiceQr(status: number, json: unknown): unknown {
   if (status !== 200 || !json || typeof json !== "object") return json;

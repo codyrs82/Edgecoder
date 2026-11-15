@@ -89,11 +89,18 @@ Earnings area is therefore designed for several payout methods and assets:
 | Method | Asset | State | UI |
 |---|---|---|---|
 | Lightning (invoice now, or automatic to a Lightning address) | BTC | **Active today** | Enabled |
-| Bitcoin on-chain, batched payouts above a minimum | BTC | Coming soon | Shown, disabled, labelled "Coming soon" |
+| Bitcoin on-chain, batched payouts above a minimum | BTC | Behind `ONCHAIN_ENABLED` | "Available" with minimum, schedule and fee note when the coordinator's policy says enabled; otherwise "Coming soon" |
 | Litecoin on-chain, batched | LTC | Coming soon | Shown, disabled, labelled "Coming soon" |
 
-No backend logic exists or was added for on-chain or Litecoin payouts; the two rows are UI
-placeholders only. Payout history has an **Asset** column; every row today is "BTC · Lightning".
+Bitcoin on-chain is built (docs/economy-math.md "On-chain payouts, batched") and shown as active
+only when `policy.onchain.enabled` comes back from the coordinator; Litecoin is still a UI
+placeholder with no backend. Payout history has an **Asset** column: "BTC · Lightning" or
+"BTC · On-chain" with the start of the txid.
+
+"Fund with Bitcoin" next to "Fund with Lightning" works the same way: with on-chain enabled it shows
+the account's deposit address, its `bitcoin:` QR code, the rules (confirmations, minimum, review
+above the cap) and every deposit with "n of N" confirmations and its status (Confirming, Added,
+Below minimum, Held for review, Dropped). The wording never says "invoice".
 
 ## Withdraw flow (Lightning)
 

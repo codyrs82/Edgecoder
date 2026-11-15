@@ -275,9 +275,14 @@ export interface PayoutRecord {
   payoutId: string;
   accountId: string;
   coordinatorId: string;
-  kind: "withdraw" | "auto";
+  /** withdraw / auto: Lightning. onchain: an output of a batched on-chain payout (src/economy/onchain-payouts.ts). */
+  kind: "withdraw" | "auto" | "onchain";
+  /** The BOLT11 invoice paid; empty for an on-chain payout. */
   bolt11: string;
-  /** Hex payment hash from the invoice; unique, so a retried withdrawal can't pay twice. */
+  /**
+   * Hex payment hash from the invoice; unique, so a retried withdrawal can't pay twice. An on-chain
+   * payout has no invoice: `onchain:<payoutId>` keeps the column unique.
+   */
   paymentHash: string;
   amountMsat: number;
   feeMsat: number;
@@ -285,8 +290,11 @@ export interface PayoutRecord {
   status: "pending" | "paid" | "failed";
   preimage?: string;
   error?: string;
-  /** Lightning address or LNURL the auto payout used, if any. */
+  /** Lightning address or LNURL the auto payout used, or the Bitcoin address of an on-chain payout. */
   destination?: string;
+  /** On-chain: the batch this payout is an output of, and its transaction once broadcast. */
+  batchId?: string;
+  txid?: string;
   createdAtMs: number;
   settledAtMs?: number;
 }

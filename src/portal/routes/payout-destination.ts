@@ -6,17 +6,19 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import type { BitcoinNetwork } from "../../common/types.js";
-import { PAYABLE_DESTINATION_KINDS, validatePayoutDestination } from "../../economy/payout-destination.js";
+import { payableDestinationKinds, validatePayoutDestination } from "../../economy/payout-destination.js";
+import { validateOnchainPayoutAddress } from "../../economy/onchain.js";
 import type { PayoutDestinationChallenge, PayoutDestinationRecord } from "../store.js";
 import type { CallbackChange } from "./payout-callback.js";
 
 /**
  * "Where should we pay you?" (/wallet/payout-destination). The user gives a Lightning address
- * (or, once on-chain payouts exist, an address) from their own wallet; the portal never creates
- * or holds wallet keys. The destination is saved in the portal and registered as the account's
- * payout address with the control plane (/economy/wallets/register) and the coordinator that
- * runs automatic payouts (/economy/payouts/address). On the seeds both write the same
- * wallet_accounts row that listAutoPayoutAccounts reads.
+ * or, with ONCHAIN_ENABLED, a Bitcoin address (bech32/bech32m on the portal's network) from their
+ * own wallet; the portal never creates or holds wallet keys. The destination is saved in the
+ * portal and registered as the account's payout address with the control plane
+ * (/economy/wallets/register) and the coordinator that runs payouts: /economy/payouts/address for
+ * a Lightning address (automatic LNURL payouts), /economy/payouts/onchain-address for a Bitcoin
+ * address (batched on-chain payouts). An account has one destination; setting one clears the other.
  *
  * Setting the first destination needs only the session. Changing an existing one needs a
  * one-time code sent to the account's email: PUT without a code returns 202 with a challengeId,
@@ -46,6 +48,8 @@ export interface PayoutDestinationRouteDeps {
   generateSixDigitCode: () => string;
   sha256Hex: (v: string) => string;
   secureCompare: (a: string, b: string) => boolean;
+  /** ONCHAIN_ENABLED: Bitcoin addresses can be saved as the payout destination. */
+  onchainEnabled?: boolean;
   /** The destination's pending payment-server change (routes/payout-callback.ts); omitted = not shown. */
   callbackChange?: (accountId: string, destination: string) => Promise<CallbackChange | null | undefined>;
 }
@@ -80,10 +84,14 @@ export function createPayoutRegistrar(cfg: {
         ? post(`${cfg.controlPlaneUrl.replace(/\/$/, "")}/economy/wallets/register`, { authorization: `Bearer ${cfg.controlPlaneAdminToken}` }, { accountId, walletType, network, payoutAddress: destination })
         : Promise.resolve("not_configured");
     const coordinator: Promise<RegistrationStatus> = (async () => {
-      if (kind !== "lightning_address" || !cfg.portalServiceToken) return "not_configured";
+      if ((kind !== "lightning_address" && kind !== "onchain") || !cfg.portalServiceToken) return "not_configured";
       const urls = await cfg.discoverCoordinatorUrls().catch(() => [] as string[]);
       if (!urls.length) return "not_configured";
-      return post(`${urls[0].replace(/\/$/, "")}/economy/payouts/address`, { "x-portal-service-token": cfg.portalServiceToken }, { accountId, lightningAddress: destination });
+      const base = urls[0].replace(/\/$/, "");
+      const headers = { "x-portal-service-token": cfg.portalServiceToken };
+      return kind === "onchain"
+        ? post(`${base}/economy/payouts/onchain-address`, headers, { accountId, address: destination })
+        : post(`${base}/economy/payouts/address`, headers, { accountId, lightningAddress: destination });
     })();
     return { controlPlane: await controlPlane, coordinator: await coordinator };
   };
@@ -96,6 +104,7 @@ const putBody = z.object({
 });
 
 export function registerPayoutDestinationRoutes(app: FastifyInstance, d: PayoutDestinationRouteDeps): void {
+  const payable = payableDestinationKinds(d.onchainEnabled === true);
   const view = async (userId: string) => {
     const store = d.store!;
     const [current, legacy] = await Promise.all([store.getPayoutDestination(userId), store.getWalletOnboardingByUserId(userId)]);
@@ -107,8 +116,8 @@ export function registerPayoutDestinationRoutes(app: FastifyInstance, d: PayoutD
       needsDestination: !current,
       /** The account had a server-generated address from the removed seed flow; it is never paid. */
       legacyAddressRetired: Boolean(legacy),
-      supportedKinds: [...PAYABLE_DESTINATION_KINDS],
-      onchainSupported: PAYABLE_DESTINATION_KINDS.has("onchain"),
+      supportedKinds: [...payable],
+      onchainSupported: payable.has("onchain"),
       changeRequiresEmailCode: true,
       /** The wallet's payment server (LNURL callback host) changed; payouts are held until confirmed with an email code. */
       callbackChange: change ? { previousOrigin: change.previousOrigin, newOrigin: change.newOrigin, changedAtMs: change.changedAtMs ?? null } : null
@@ -133,11 +142,16 @@ export function registerPayoutDestinationRoutes(app: FastifyInstance, d: PayoutD
 
     const v = validatePayoutDestination(body.destination, d.network);
     if (!v.ok) return reply.code(400).send({ error: v.error, detail: v.detail });
-    if (!PAYABLE_DESTINATION_KINDS.has(v.kind)) {
+    if (!payable.has(v.kind)) {
       return reply.code(422).send({
         error: "onchain_payouts_not_supported",
         detail: "That address is valid, but on-chain payouts are not supported yet. Use a Lightning address (name@domain) from your wallet."
       });
+    }
+    if (v.kind === "onchain") {
+      // Batched payouts pay SegWit and Taproot outputs only (bc1 / tb1 / bcrt1).
+      const chain = validateOnchainPayoutAddress(v.destination, d.network);
+      if (!chain.ok) return reply.code(400).send({ error: chain.error, detail: chain.detail });
     }
 
     const accountId = `acct-${user.userId}`;

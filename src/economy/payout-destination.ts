@@ -9,9 +9,10 @@ import type { BitcoinNetwork } from "../common/types.js";
  * Where a user is paid: a Lightning address from their own wallet (name@domain), or an on-chain
  * address from their own wallet. EdgeCoder never creates or holds the keys for either.
  *
- * Payouts today are Lightning only (src/economy/payout-service.ts pays BOLT11 invoices fetched
- * from a Lightning address). On-chain addresses are validated so the user gets a precise error,
- * but callers refuse to save them until an on-chain payout path exists.
+ * Lightning addresses are paid by src/economy/payout-service.ts (BOLT11 invoices fetched over
+ * LNURL-pay). On-chain addresses are paid in batches by src/economy/onchain-payouts.ts when
+ * ONCHAIN_ENABLED is set (payableDestinationKinds); otherwise they are validated so the user gets a
+ * precise error, and refused.
  */
 export type PayoutDestinationKind = "lightning_address" | "onchain";
 
@@ -130,5 +131,10 @@ export function validatePayoutDestination(raw: unknown, network: BitcoinNetwork)
   return { ok: true, kind: "onchain", destination: chain.address, network };
 }
 
-/** Payout kinds the payout service can actually pay today. */
+/** Payout kinds the payout service can pay without on-chain (Lightning only). */
 export const PAYABLE_DESTINATION_KINDS: ReadonlySet<PayoutDestinationKind> = new Set(["lightning_address"]);
+
+/** Payout kinds that can be saved: on-chain addresses too when ONCHAIN_ENABLED. */
+export function payableDestinationKinds(onchainEnabled: boolean): ReadonlySet<PayoutDestinationKind> {
+  return onchainEnabled ? new Set<PayoutDestinationKind>(["lightning_address", "onchain"]) : PAYABLE_DESTINATION_KINDS;
+}

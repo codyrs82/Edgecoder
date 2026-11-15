@@ -23,6 +23,14 @@ import type { LightningProvider, NodeBalances, NodePayment } from "./lightning.j
  *                      PAYOUT_SOLVENCY_ALLOWANCE_SATS allowance).                             -> pause
  * A node that cannot be read (HTTP error, malformed body) is an error result: alerted, not paused
  * (it cannot pay either), and the baseline is kept for the next run.
+ *
+ * On-chain (ONCHAIN_ENABLED, src/economy/onchain*.ts) extends the ledger side instead of loosening
+ * the checks: credited deposits are settled payment intents, so they are in receivedMsat like any
+ * purchase; deposits the node holds but the ledger has not credited (unconfirmed, held, below the
+ * minimum) count as received for balance_drop only, so a deposit that vanishes before it is credited
+ * is not a loss; on-chain payouts are payouts rows (outflow); the network fee EdgeCoder pays for a
+ * batch is extra outflow, recorded with its fee-pool spend row. While a batch's send outcome is not
+ * yet recorded, balance_drop waits for the next run (the baseline is kept).
  */
 
 export interface ReconcileLedger {
@@ -44,6 +52,18 @@ export interface ReconcileLedger {
 export interface SolvencyInputs {
   outstandingMsat: number;
   grantedMsat: number;
+}
+
+/** On-chain inputs to reconciliation (src/swarm/coordinator/onchain.ts wires them). */
+export interface OnchainReconcileLedger {
+  /** Sats (as msat) of deposits the node holds that are not credited: pending, held, below the minimum. */
+  uncreditedDepositMsat(): Promise<number>;
+  /** Network fees EdgeCoder paid for payout batches (msat). */
+  feeOutflowMsat(): Promise<number>;
+  /** A batch was handed to the node and its transaction or fee is not recorded yet. */
+  inFlight(): Promise<boolean>;
+  /** Bring the deposit view up to date first, so a deposit already in the node balance is known. */
+  beforeRun?(): Promise<unknown>;
 }
 
 export interface PayoutReconcileConfig {
@@ -114,6 +134,10 @@ export function evaluateReconciliation(input: {
   solvencyAllowanceSats?: number;
   previous?: ReconcileSnapshot | null;
   toleranceSats: number;
+  /** On-chain deposits in the node not credited yet (msat): received, for balance_drop only. */
+  onchainUncreditedMsat?: number;
+  /** An on-chain batch's outcome is not recorded yet: balance_drop is not evaluated this run. */
+  skipBalanceDrop?: boolean;
 }): { checks: ReconcileCheck[]; snapshot: ReconcileSnapshot } {
   const tol = input.toleranceSats * 1000;
   const checks: ReconcileCheck[] = [];
@@ -160,8 +184,9 @@ export function evaluateReconciliation(input: {
   });
 
   const nodeTotalMsat = input.balances.totalSats * 1000;
-  if (input.previous) {
-    const expected = input.previous.nodeTotalMsat + (input.receivedMsat - input.previous.receivedMsat) - (input.outflowMsat - input.previous.outflowMsat);
+  const balanceReceivedMsat = input.receivedMsat + Math.max(0, input.onchainUncreditedMsat ?? 0);
+  if (input.previous && !input.skipBalanceDrop) {
+    const expected = input.previous.nodeTotalMsat + (balanceReceivedMsat - input.previous.receivedMsat) - (input.outflowMsat - input.previous.outflowMsat);
     const drop = expected - nodeTotalMsat;
     checks.push({
       name: "balance_drop",
@@ -203,12 +228,14 @@ export function evaluateReconciliation(input: {
     });
   }
 
-  return { checks, snapshot: { atMs: input.nowMs, nodeTotalMsat, outflowMsat: input.outflowMsat, receivedMsat: input.receivedMsat } };
+  return { checks, snapshot: { atMs: input.nowMs, nodeTotalMsat, outflowMsat: input.outflowMsat, receivedMsat: balanceReceivedMsat } };
 }
 
 export interface ReconcilerDeps {
   provider: LightningProvider;
   ledger: ReconcileLedger;
+  /** On-chain deposits and batch fees, when ONCHAIN_ENABLED. */
+  onchain?: OnchainReconcileLedger;
   config: PayoutReconcileConfig;
   coordinatorId: string;
   /** Called when a pausing check fails (the coordinator's kill switch). */
@@ -253,6 +280,11 @@ export class PayoutReconciler {
     return this.lastResult;
   }
 
+  /** Add the on-chain ledger inputs after construction (the on-chain module is built after the reconciler). */
+  attachOnchain(onchain: OnchainReconcileLedger): void {
+    (this.d as { onchain?: OnchainReconcileLedger }).onchain = onchain;
+  }
+
   /** Single-flight: concurrent callers share one run. */
   run(): Promise<ReconcileResult> {
     if (!this.running) this.running = this.runOnce().finally(() => { this.running = null; });
@@ -266,19 +298,26 @@ export class PayoutReconciler {
     let result: ReconcileResult;
     try {
       const sinceMs = Math.max(0, (this.previous?.atMs ?? now - this.d.config.lookbackMs) - 60 * 60 * 1000);
+      const onchain = this.d.onchain;
+      if (onchain?.beforeRun) await onchain.beforeRun().catch((err) => this.d.log?.warn({ error: err instanceof Error ? err.message : String(err) }, "payout_reconcile_onchain_refresh_failed"));
       const [balances, list] = await Promise.all([p.getBalances(), p.listPayments({ sinceMs, limit: 1000 })]);
       if (!balances.supported || !list.supported) {
         return this.finish({ atMs: now, status: "unsupported", checks: [], error: !balances.supported ? balances.reason : !list.supported ? list.reason : undefined });
       }
-      const [ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency] = await Promise.all([
+      const [ledgerRows, payoutOutflowMsat, receivedMsat, liabilitiesMsat, solvency, onchainUncreditedMsat, onchainFeeMsat, inFlight] = await Promise.all([
         this.d.ledger.payoutsByPaymentHash([...new Set(list.payments.map((x) => x.paymentHash))]),
         this.d.ledger.payoutsOutflowMsat(),
         this.d.ledger.receivedPurchaseMsat(),
         this.d.ledger.liabilitiesMsat ? this.d.ledger.liabilitiesMsat() : Promise.resolve(undefined),
-        this.d.ledger.solvencyMsat ? this.d.ledger.solvencyMsat() : Promise.resolve(undefined)
+        this.d.ledger.solvencyMsat ? this.d.ledger.solvencyMsat() : Promise.resolve(undefined),
+        onchain ? onchain.uncreditedDepositMsat() : Promise.resolve(0),
+        onchain ? onchain.feeOutflowMsat() : Promise.resolve(0),
+        onchain ? onchain.inFlight() : Promise.resolve(false)
       ]);
-      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, previous: this.previous, toleranceSats: this.d.config.toleranceSats });
-      this.previous = snapshot;
+      const outflowMsat = payoutOutflowMsat + onchainFeeMsat;
+      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, previous: this.previous, toleranceSats: this.d.config.toleranceSats, onchainUncreditedMsat, skipBalanceDrop: inFlight });
+      // While an on-chain send is unrecorded the node balance is mid-move: keep the old baseline.
+      if (!inFlight) this.previous = snapshot;
       const tripped = checks.some((c) => !c.ok && c.pauses);
       result = {
         atMs: now,

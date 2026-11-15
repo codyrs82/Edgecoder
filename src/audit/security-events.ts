@@ -35,7 +35,11 @@ export type SecurityEventType =
   | "payout_reconciliation_mismatch"
   | "payout_reconciliation_error"
   | "ledger_reconciliation_mismatch"
-  | "revenue_withdrawal";
+  | "revenue_withdrawal"
+  | "onchain_deposit_held"
+  | "onchain_deposit_reversed"
+  | "onchain_batch_resurfaced"
+  | "onchain_batch_stuck";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -80,7 +84,13 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   payout_reconciliation_error: "WARN",
   ledger_reconciliation_mismatch: "HIGH",
   // EdgeCoder's fee revenue leaving the hot wallet (POST /admin/revenue/withdraw): always worth a look.
-  revenue_withdrawal: "HIGH"
+  revenue_withdrawal: "HIGH",
+  // On-chain (src/economy/onchain*.ts): a deposit over a cap waits for an operator; a credited
+  // deposit gone from the chain or a released batch found in the node is money at risk.
+  onchain_deposit_held: "WARN",
+  onchain_deposit_reversed: "CRITICAL",
+  onchain_batch_resurfaced: "CRITICAL",
+  onchain_batch_stuck: "HIGH"
 };
 
 export class SecurityEventLogger {

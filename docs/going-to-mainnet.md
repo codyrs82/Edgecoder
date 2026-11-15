@@ -50,7 +50,8 @@ To move a database to a new network, wipe its ledger explicitly:
       the infra bundle), so the macaroon is never sent to anything else.
 - [ ] Macaroon scoped to what the coordinator needs (invoices, payments, balance and payment
       reads: `lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write onchain:read info:read`),
-      not `admin.macaroon`. Reconciliation needs `offchain:read` + `onchain:read`.
+      not `admin.macaroon`. Reconciliation needs `offchain:read` + `onchain:read`. With
+      `ONCHAIN_ENABLED` add `address:write` (deposit addresses) and `onchain:write` (payout batches).
 - [ ] The node is dedicated to the coordinator. Any other outgoing payment trips reconciliation
       (`unknown_payments`) and pauses payouts.
 - [ ] Hot wallet holds only what a few days of payouts need; the rest sits in cold storage.
@@ -109,6 +110,40 @@ every coordinator (`src/economy/launch-gate.ts`).
 
 The desktop and iOS apps' sign-up screens do not have an invite field yet: in invite mode, new
 users sign up on the web portal.
+
+## On-chain Bitcoin (deposits and batched payouts)
+
+`ONCHAIN_ENABLED` is off by default on every network and must stay off on mainnet until this list
+is done. Design: [economy-math.md](economy-math.md) "Funding with Bitcoin on-chain" and "On-chain
+payouts, batched". LND only (checked against LND 0.20.7: `NewAddress`, `GetTransactions`,
+`EstimateFee` (walletrpc), `SendMany` with `sat_per_vbyte` and `label`).
+
+- [ ] Regtest run first (`edgecoder-lnd-test`, `ONCHAIN_ENABLED=1` on coordinator and portal):
+      deposit below the minimum (not credited), a normal deposit (pending with "n of N", then
+      credited once), a deposit above `ONCHAIN_DEPOSIT_MAX_SATS` (held, then
+      `POST /admin/onchain/deposits/:txid/:vout/credit`), an RBF-replaced unconfirmed deposit
+      (dropped), and a batch to two hosts (broadcast, confirmed, fee split, unused cap returned).
+- [ ] Crash drill on regtest: kill the coordinator between `send_attempted_at_ms` and the txid
+      being recorded (or point `LND_REST_URL` at a black hole for one batch); after restart the
+      batch must be found by its label and never sent twice.
+- [ ] Macaroon has `address:write`, `onchain:read`, `onchain:write` (see Lightning node above).
+- [ ] `ONCHAIN_DEPOSIT_CONFIRMATIONS` is at least 3 (the mainnet default).
+- [ ] Deposit caps reviewed: `ONCHAIN_DEPOSIT_MAX_SATS` (1M default on mainnet) and
+      `ONCHAIN_DEPOSIT_MAX_ACCOUNT_DAILY_SATS` (2M). Someone watches `onchain_deposit_held`.
+- [ ] Payout settings reviewed: `ONCHAIN_PAYOUT_MIN_SATS`, `ONCHAIN_PAYOUT_INTERVAL_MS`,
+      `ONCHAIN_PAYOUT_MAX_FEE_RATE` (30 sat/vB default on mainnet), `ONCHAIN_PAYOUT_FEE_PAYER`
+      (`host` default: the fee comes out of the payout, at most rate × 165 vB, and the wallets say so).
+      The payout caps (`PAYOUT_MAX_*`), earnings hold and kill switch apply to on-chain payouts too.
+- [ ] The node's on-chain wallet holds enough confirmed UTXOs for a batch (`min_confs` 1, no
+      unconfirmed spends) and the hot-wallet limit above still holds with on-chain funds counted.
+- [ ] Reconciliation `status: "ok"` with on-chain on, through one deposit and one batch.
+- [ ] Alerts route `onchain_deposit_reversed`, `onchain_batch_resurfaced` (both CRITICAL; the second
+      pauses payouts) and `onchain_batch_stuck` (a batch unconfirmed for 24 h: bump it with CPFP from
+      `lncli wallet bumpfee`, never by sending again).
+- [ ] Runbook: `GET /admin/onchain` lists batches and held deposits; a stuck `pending` batch fails
+      itself after `ONCHAIN_BROADCAST_GRACE_MS` only when LND has no transaction with its label.
+- [ ] Set `ONCHAIN_ENABLED=1` on the coordinators and the portal together (the portal flag only
+      lets users save a Bitcoin payout address; the coordinator's decides everything else).
 
 ## Withdrawing EdgeCoder revenue
 

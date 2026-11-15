@@ -49,7 +49,7 @@ Also open: `coordinator_earnings_projection.total_credits` is still `DOUBLE PREC
 - Tests: `tests/swarm/payment-settlement.test.ts` (no credit while unpaid; a webhook claiming `settled: true` does not credit while the node says unpaid; three concurrent settles credit once; a replay after restart credits nothing) and `tests/economy/lightning-lnd-settlement.test.ts` (#47, against a fake LND HTTP server).
 - PR #275 moves LND payments to `POST /v2/router/send` (#261, `lightning.ts:269-280`), because LND v0.21 removed the old endpoint.
 
-**Custody (#49): decided, non-custodial.** The server generates no keys or seed phrases. A user supplies a Lightning address from their own wallet (`src/economy/payout-destination.ts:8-15`); on-chain addresses are validated but refused until an on-chain payout path exists. The old server-side wallet routes are gone: `src/portal/routes/wallet.ts:9-27`, and the control plane answers `server_generated_wallets_retired` (`src/control-plane/server.ts:1106`).
+**Custody (#49): decided, non-custodial.** The server generates no keys or seed phrases. A user supplies a Lightning address from their own wallet (`src/economy/payout-destination.ts:8-15`); on-chain addresses (SegWit/Taproot on the coordinator's network) are accepted when `ONCHAIN_ENABLED` is set and paid in batches (`src/economy/onchain-payouts.ts`); otherwise they are validated and refused. The old server-side wallet routes are gone: `src/portal/routes/wallet.ts:9-27`, and the control plane answers `server_generated_wallets_retired` (`src/control-plane/server.ts:1106`).
 
 Leftovers from the old wallet model, none of which generate or store keys:
 
@@ -62,7 +62,7 @@ Leftovers from the old wallet model, none of which generate or store keys:
 The draft said "postponed". That is no longer true: **payouts are built and enabled by default, on `main`.**
 
 - Policy: `payoutPolicyFromEnv` (`src/economy/payouts.ts:43`); enabled unless `PAYOUTS_ENABLED=false` (`payouts.ts:52`). The withdrawable amount is bounded by earned sats, by the credit balance (`withdrawableMsat`, `payouts.ts:84`) and by what the coordinator has actually received (`payoutCapacityMsat`, `payouts.ts:124`).
-- Paths: a user withdraws to a BOLT11 invoice (`PayoutService.withdraw`, `src/economy/payout-service.ts:273`), or automatic payouts go to the saved Lightning address over LNURL-pay (`runAutoPayouts`, `payout-service.ts:352`). There is no keysend, LNURL-withdraw or on-chain path.
+- Paths: a user withdraws to a BOLT11 invoice (`PayoutService.withdraw`, `src/economy/payout-service.ts:273`), or automatic payouts go to the saved Lightning address over LNURL-pay (`runAutoPayouts`, `payout-service.ts:352`). With `ONCHAIN_ENABLED`, accounts with a Bitcoin address are paid in periodic `SendMany` batches (`OnchainPayoutService`, `src/economy/onchain-payouts.ts`) through the same reservation, caps, hold and kill switch. There is no keysend or LNURL-withdraw path.
 - Safeguards: per-payout, per-account-per-day and global-per-day limits (`src/economy/payout-safeguards.ts:30-92`), the `PAYOUTS_PAUSED` kill switch (`payout-safeguards.ts:120`), an admin pause and a reconciliation view (`src/swarm/coordinator/routes/admin.ts:159-177`). Payout routes need the portal service token (`src/swarm/coordinator/routes/economy.ts:95-146`).
 - The Fly seeds run `BITCOIN_NETWORK=regtest` with limits of 100,000 / 500,000 / 2,000,000 sats (`deploy/fly/fly.seed-node.toml:21-24`). Mainnet steps: [going-to-mainnet.md](going-to-mainnet.md).
 

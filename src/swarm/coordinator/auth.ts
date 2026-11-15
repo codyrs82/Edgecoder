@@ -77,6 +77,8 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
   "/account/usage",
   "/account/buy",
   "/account/intent",
+  "/account/onchain/address",
+  "/account/onchain/deposits",
   "/account/reservations",
   "/account/reservations/list",
   "/account/reservations/cancel",

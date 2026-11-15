@@ -19,7 +19,7 @@ import type { ReconcileInput } from "../ledger/reconcile.js";
 import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
-function rowToPayout(row: Record<string, unknown>): PayoutRecord {
+export function rowToPayout(row: Record<string, unknown>): PayoutRecord {
   return {
     payoutId: String(row.payout_id),
     accountId: String(row.account_id),
@@ -34,6 +34,8 @@ function rowToPayout(row: Record<string, unknown>): PayoutRecord {
     preimage: (row.preimage as string | null) ?? undefined,
     error: (row.error as string | null) ?? undefined,
     destination: (row.destination as string | null) ?? undefined,
+    batchId: (row.batch_id as string | null) ?? undefined,
+    txid: (row.txid as string | null) ?? undefined,
     createdAtMs: Number(row.created_at_ms),
     settledAtMs: row.settled_at_ms === null || row.settled_at_ms === undefined ? undefined : Number(row.settled_at_ms)
   };
@@ -360,6 +362,10 @@ CREATE TABLE IF NOT EXISTS payouts (
   settled_at_ms BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_payouts_account ON payouts (account_id, created_at_ms DESC);
+-- On-chain payouts (src/economy/onchain-payouts.ts): the batch a payout is an output of, and its txid.
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS batch_id TEXT;
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS txid TEXT;
+CREATE INDEX IF NOT EXISTS idx_payouts_batch ON payouts (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_payouts_created ON payouts (created_at_ms DESC);
 -- Payout kill switch and other shared payout controls (one row per key; both seeds read it).
 CREATE TABLE IF NOT EXISTS payout_controls (
@@ -789,6 +795,60 @@ CREATE TABLE IF NOT EXISTS ledger_network (
   recorded_at_ms BIGINT NOT NULL,
   recorded_by TEXT NOT NULL
 );
+
+-- On-chain Bitcoin (src/economy/onchain*.ts, src/db/onchain-store.ts). Deposit addresses come from
+-- the coordinator's LND wallet; a deposit is keyed by txid:vout so it is credited at most once.
+CREATE TABLE IF NOT EXISTS onchain_deposit_addresses (
+  address TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  network TEXT NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  used_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_onchain_deposit_addresses_account ON onchain_deposit_addresses (account_id, created_at_ms DESC);
+CREATE TABLE IF NOT EXISTS onchain_deposits (
+  txid TEXT NOT NULL,
+  vout INT NOT NULL,
+  account_id TEXT NOT NULL,
+  address TEXT NOT NULL,
+  amount_sats BIGINT NOT NULL,
+  confirmations INT NOT NULL DEFAULT 0,
+  block_height INT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  detail TEXT,
+  first_seen_at_ms BIGINT NOT NULL,
+  last_seen_at_ms BIGINT NOT NULL,
+  credited_at_ms BIGINT,
+  PRIMARY KEY (txid, vout)
+);
+CREATE INDEX IF NOT EXISTS idx_onchain_deposits_account ON onchain_deposits (account_id, first_seen_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_deposits_open ON onchain_deposits (status) WHERE status <> 'credited';
+-- Where an account's on-chain payouts go (a bc1/tb1/bcrt1 address from the user's own wallet).
+CREATE TABLE IF NOT EXISTS onchain_payout_destinations (
+  account_id TEXT PRIMARY KEY,
+  address TEXT NOT NULL,
+  network TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+-- One row per SendMany batch, written before the transaction is sent (state machine in onchain-payouts.ts).
+CREATE TABLE IF NOT EXISTS onchain_payout_batches (
+  batch_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  fee_rate_sat_vb INT NOT NULL,
+  fee_payer TEXT NOT NULL,
+  label TEXT NOT NULL UNIQUE,
+  outputs_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  txid TEXT,
+  total_fee_sats BIGINT,
+  confirmations INT NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at_ms BIGINT NOT NULL,
+  send_attempted_at_ms BIGINT,
+  broadcast_at_ms BIGINT,
+  confirmed_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_onchain_batches_state ON onchain_payout_batches (state, created_at_ms DESC);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -840,6 +900,11 @@ export class PostgresStore {
   /** Request-signing nonces (src/security/nonce-verifier.ts) on the same pool. */
   nonceStore(): PostgresNonceStore {
     return new PostgresNonceStore(this.pool);
+  }
+
+  /** A store defined in another module on this pool (src/db/onchain-store.ts), without an import cycle. */
+  withPool<T>(make: (pool: Pool) => T): T {
+    return make(this.pool);
   }
 
   /** LNURL callback pins (src/economy/lnurl-callback-pin.ts) on the same pool. */
@@ -2825,9 +2890,9 @@ export class PostgresStore {
         }
       }
       const ins = await client.query(
-        `INSERT INTO payouts (payout_id, account_id, coordinator_id, kind, bolt11, payment_hash, amount_msat, fee_msat, max_fee_msat, status, destination, created_at_ms)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,'pending',$9,$10) ON CONFLICT (payment_hash) DO NOTHING RETURNING payout_id`,
-        [payout.payoutId, payout.accountId, payout.coordinatorId, payout.kind, payout.bolt11, payout.paymentHash, payout.amountMsat, payout.maxFeeMsat, payout.destination ?? null, payout.createdAtMs]
+        `INSERT INTO payouts (payout_id, account_id, coordinator_id, kind, bolt11, payment_hash, amount_msat, fee_msat, max_fee_msat, status, destination, created_at_ms, batch_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,'pending',$9,$10,$11) ON CONFLICT (payment_hash) DO NOTHING RETURNING payout_id`,
+        [payout.payoutId, payout.accountId, payout.coordinatorId, payout.kind, payout.bolt11, payout.paymentHash, payout.amountMsat, payout.maxFeeMsat, payout.destination ?? null, payout.createdAtMs, payout.batchId ?? null]
       );
       if ((ins.rowCount ?? 0) === 0) {
         await client.query("ROLLBACK");

@@ -195,6 +195,28 @@ export const launchEnv = {
   LAUNCH_MAX_PAYOUT_SATS_PER_DAY: count()
 };
 
+/**
+ * On-chain Bitcoin through the coordinator's LND wallet (src/economy/onchain*.ts): deposits credited
+ * as cSats and batched on-chain payouts. Read by onchainConfigFromEnv, which applies the defaults
+ * (network dependent) and floors.
+ */
+export const onchainEnv = {
+  ONCHAIN_ENABLED: envFlag({ on: ["1", "true", "yes", "on"], ci: true }),
+  ONCHAIN_ADDRESS_TYPE: envEnumCi(["p2tr", "p2wkh"]),
+  ONCHAIN_DEPOSIT_CONFIRMATIONS: count(),
+  ONCHAIN_DEPOSIT_MIN_SATS: count(),
+  ONCHAIN_DEPOSIT_MAX_SATS: count(),
+  ONCHAIN_DEPOSIT_MAX_ACCOUNT_DAILY_SATS: count(),
+  ONCHAIN_POLL_MS: count(),
+  ONCHAIN_PAYOUT_MIN_SATS: count(),
+  ONCHAIN_PAYOUT_INTERVAL_MS: count(),
+  ONCHAIN_PAYOUT_MAX_FEE_RATE: count(),
+  ONCHAIN_PAYOUT_TARGET_CONF: count(),
+  ONCHAIN_PAYOUT_FEE_PAYER: envEnumCi(["host", "edgecoder"]),
+  ONCHAIN_PAYOUT_CONFIRMATIONS: count(),
+  ONCHAIN_BROADCAST_GRACE_MS: count()
+};
+
 /** bitcoind JSON-RPC access, used by the anchor proxy and by a coordinator with BITCOIN_ANCHOR_PROVIDER=bitcoind. */
 export const bitcoindEnv = {
   BITCOIND_RPC_URL: envUrl(),

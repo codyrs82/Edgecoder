@@ -30,7 +30,7 @@ The owner's three goals: an agent install must not be a path to
 | Other users' machines (code execution, files, network) | their agents, sandbox (`src/executor/docker-sandbox.ts`) |
 | Other users' prompts, code and results | queue, `/tasks/*/result`, inference streams, BLE offload |
 | cSats balances, accruals, held earnings | coordinator ledger (`src/credits`, `src/ledger`, Postgres) |
-| Bitcoin: Lightning node funds, payout destinations | `src/economy/lightning.ts`, payouts, portal wallet |
+| Bitcoin: Lightning node funds (channels and the on-chain wallet), payout destinations | `src/economy/lightning.ts`, `src/economy/onchain*.ts`, payouts, portal wallet |
 | Agent identity: agent id ↔ key ↔ owner account | `agentCapabilities`, `agent_ownership`, portal enrolments |
 | Network availability: queue, coordinator memory, honest agents' standing | queue, registries, behaviour rules/blacklist |
 | Coordinator identity and the coordinators' shared secret | coordinator keys, `MESH_AUTH_TOKEN`, `MESH_PEER_ALLOWLIST` |
@@ -328,6 +328,8 @@ Listeners on an agent install:
 | Direct-work offers: unbounded size, count and lifetime, all carried in the victim's heartbeat | see section 1 |
 | Inference streams: tool calls not counted against the size cap; a stream that never finished was never freed | 8 MB cap on everything in a stream; streams dropped 2 h after opening |
 | Lightning invoice flood: every `/account/buy` created a real invoice and an intent never pruned; the reconcile loop reads the 500 oldest | at most 5 open invoices per account |
+| On-chain deposit address flood (`/account/onchain/address`, `ONCHAIN_ENABLED`): each call could ask LND for a new address | an account keeps one address until a deposit to it is seen, so a new address needs a real on-chain payment; the portal route shares the top-up rate limit |
+| On-chain deposits: dust spam, a deposit replaced or reorged out after being shown, oversized deposits | below `ONCHAIN_DEPOSIT_MIN_SATS` never credited; credit only after `ONCHAIN_DEPOSIT_CONFIRMATIONS`, once per txid:vout; per-deposit and per-account 24 h caps hold deposits for an operator; a credited deposit that vanishes is a CRITICAL event and trips reconciliation |
 | Sybil: any number of agents per account, each auto-approved | `PORTAL_MAX_AGENTS_PER_ACCOUNT`, default 25 (proposed default) |
 | Unsigned `/agent/diagnostics` could overwrite any agent's diagnostics | the signer must be the named agent |
 | A buyer could get honest workers struck and blacklisted through BHV004 (success collapse): jobs whose programs exit non-zero (`sys.exit(1)`) counted as the worker's failures | results say whether the agent executed the job (`executed`, `exitCode`, `programError`); a program error is a correctly executed, paid job; agent failures count at most `BEHAVIOR_SUBMITTER_FAILURE_CAP` (3) per submitter account per hour; a verified-failing replica excuses the failure. See [Failed programs are not failed agents](../economy-compute-trust-model.md#failed-programs-are-not-failed-agents-bhv004) |

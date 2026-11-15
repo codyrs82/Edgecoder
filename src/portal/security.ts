@@ -99,7 +99,8 @@ const CHAT_ROUTES: RegExp[] = [/^\/portal\/api\/chat$/, /^\/portal\/api\/convers
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 // Each top-up creates a Lightning invoice on the coordinator's node: the API and the signed-in wallet page share the limit.
-const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/, /^\/portal\/api\/wallet\/topup$/];
+// A Bitcoin deposit address may ask the node for a new address: same limit.
+const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/, /^\/portal\/api\/wallet\/topup$/, /^\/portal\/api\/wallet\/onchain\/address$/];
 
 /**
  * The only legitimate cross-site POST: Apple's OAuth uses response_mode=form_post, so
