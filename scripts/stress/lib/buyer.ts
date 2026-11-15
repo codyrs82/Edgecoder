@@ -34,6 +34,7 @@ export interface TaskOutcome {
 
 export class SimBuyer {
   private submitters = new Map<string, SimAgent>();
+  private submitterStarts = new Map<string, Promise<SimAgent | null>>();
   readonly tasks: TaskOutcome[] = [];
   readonly topups: Array<{ intentId?: string; amountSats: number; outcome: string; paid: boolean; settled: boolean; settleMs?: number; paymentHashHex?: string }> = [];
 
@@ -57,8 +58,16 @@ export class SimBuyer {
 
   /** The buyer's signed identity on one coordinator (enrolled under the buyer's account, never pulls). */
   async submitter(coordinator: CoordinatorTarget): Promise<SimAgent | null> {
-    const existing = this.submitters.get(coordinator.id);
-    if (existing) return existing;
+    // One start per coordinator even when many calls race (each enrolment rotates the token).
+    let p = this.submitterStarts.get(coordinator.id);
+    if (!p) {
+      p = this.startSubmitter(coordinator);
+      this.submitterStarts.set(coordinator.id, p);
+    }
+    return p;
+  }
+
+  private async startSubmitter(coordinator: CoordinatorTarget): Promise<SimAgent | null> {
     const a = new SimAgent(
       {
         runId: this.runId,
@@ -133,7 +142,7 @@ export class SimBuyer {
       outcome.submitOutcome = "submitter_unavailable";
       return outcome;
     }
-    const r = await sub.signedPost("/submit", {
+    const body = {
       taskId,
       prompt,
       language: "python",
@@ -142,7 +151,13 @@ export class SimBuyer {
       resourceClass: "cpu",
       computeClass: "any",
       ...extra
-    });
+    };
+    let r = await sub.signedPost("/submit", body);
+    if (r.status === 401) {
+      // The coordinator restarted and forgot this identity: register again (as a real client would) and retry once.
+      this.rec.count("submitter.reregister");
+      if (await sub.register(true)) r = await sub.signedPost("/submit", body);
+    }
     outcome.submitOutcome = r.outcome;
     if (r.status !== 200) {
       outcome.status = "rejected";
@@ -191,7 +206,7 @@ export class SimBuyer {
   }
 
   async reserve(computeClass: string, minutes: number, model?: string): Promise<CallResult> {
-    return call(this.rec, "POST /v1/account/reservations [portal]", this.portal("/v1/account/reservations"), { body: { computeClass, minutes, ...(model ? { model } : {}) }, headers: this.auth() });
+    return call(this.rec, "POST /v1/account/reservations [portal]", this.portal("/v1/account/reservations"), { body: { computeClass, minutes, ...(model ? { model } : {}) }, headers: this.auth(), expected: [409] });
   }
 
   async cancelReservation(reservationId: string): Promise<CallResult> {

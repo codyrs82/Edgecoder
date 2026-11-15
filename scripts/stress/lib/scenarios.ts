@@ -409,6 +409,13 @@ const marketBurst: Scenario = {
   description: "Bursts of standing orders, racing reservations on the same agents, cancels, reserved inference and below-ask bids.",
   defaults: { agents: 20, buyers: 8, durationSec: 60, rate: 1, topupSats: 80_000, latency: { medianMs: 1_200, sigma: 0.3 } },
   async run(ctx) {
+    // Agents of an earlier run stay reservable for 60 s after they go quiet (reservableAgents):
+    // let them age out so the race is between this run's agents only (STRESS_SETTLE_SEC=0 skips).
+    const settle = Number(process.env.STRESS_SETTLE_SEC ?? 65);
+    if (settle > 0) {
+      ctx.phase(`settle ${settle}s`);
+      await sleep(settle * 1000);
+    }
     await standardSetup(ctx);
     const coords = ctx.t.profile.coordinators;
     ctx.phase("order burst");
