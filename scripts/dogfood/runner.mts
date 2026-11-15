@@ -202,6 +202,7 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[], maxTok
       for (let tries = 1; ; tries++) {
       call.retries = tries - 1;
       let busy = false;
+      try {
       const res = await fetch(`${API}/v1/chat/completions`, {
         method: "POST",
         headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json", "user-agent": "edgecoder-dogfood/1.0" },
@@ -248,6 +249,12 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[], maxTok
       if (busy) { await new Promise((r) => setTimeout(r, 15_000)); continue; }
       yield done;
       return;
+      } catch (err) {
+        // The connection dropped ("terminated", "fetch failed") before any output: ask again.
+        const m = String((err as Error).message ?? err);
+        if (call.ttftMs === null && tries < 3 && /terminated|fetch failed|ECONNRESET|socket/i.test(m) && !signal?.aborted) { await new Promise((r) => setTimeout(r, 5_000)); continue; }
+        throw err;
+      }
       }
     } catch (e) {
       call.error = String((e as Error).message ?? e).slice(0, 300);
