@@ -356,7 +356,7 @@ export function catalogEntryForTag(tag: string, catalog: CatalogModel[] = MODEL_
 export function paramSizeBillions(tag: string, catalog: CatalogModel[] = MODEL_CATALOG): number {
   // First try to find the model in the catalog
   const entry = catalogEntryForTag(tag, catalog);
-  
+
   if (entry) {
     // Parse the leading number from paramSize (e.g. "30B (3.3B active)" -> 30, "7B" -> 7, "1.5B" -> 1.5)
     const paramSize = entry.paramSize;
@@ -366,14 +366,14 @@ export function paramSizeBillions(tag: string, catalog: CatalogModel[] = MODEL_C
     }
     return 0;
   }
-  
+
   // If not in catalog, try to parse from the tag itself
   // e.g. "qwen2.5-coder:7b" -> 7, "llama3:70b-instruct" -> 70
   const match = tag.match(/:(\d+(?:\.\d+)?)b/i);
   if (match) {
     return parseFloat(match[1]);
   }
-  
+
   // If no match found, return 0
   return 0;
 }

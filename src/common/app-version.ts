@@ -1,10 +1,17 @@
-import { readFileSync } from "fs";
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
 
+import { readFileSync } from "node:fs";
+
+let cached: string | undefined;
+
+/** The agent's version from the package it runs from (src/common or dist/common -> package.json), read once. */
 export function appVersion(): string {
+  if (cached !== undefined) return cached;
   try {
-    // src/common or dist/common -> repo root package.json
-    return (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: string }).version ?? "unknown";
+    cached = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: string }).version ?? "unknown";
   } catch {
-    return "unknown";
+    cached = "unknown";
   }
+  return cached;
 }
