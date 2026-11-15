@@ -65,6 +65,11 @@ describe("bot schedules", () => {
   it("summarizes a run by its last paragraph", () => {
     expect(summarize("Looked around.\n\nFixed the  failing test in\nsrc/a.ts.")).toBe("Fixed the failing test in src/a.ts.");
     expect(summarize("x".repeat(300))).toHaveLength(238);
+    // A model that wrote its tool call as text: never show the JSON.
+    expect(summarize('{"name": "git_status", "arguments": {}}')).toBe("Ran git status");
+    expect(summarize('```json\n{"name": "read_file", "arguments": {"path": "a.ts"}}\n```\n\n{"name": "git_diff", "argu')).toBe("Ran read file, git diff");
+    expect(summarize('Checked the tree.\n\n{"name": "git_status", "arguments": {}}')).toBe("Checked the tree.");
+    expect(summarize("{not a tool call}")).toBe("{not a tool call}");
   });
 });
 

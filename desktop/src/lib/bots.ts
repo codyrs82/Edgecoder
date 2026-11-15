@@ -312,6 +312,21 @@ export function budgetText(bot: Pick<Bot, "spentTodayCSats" | "budgetCSatsPerDay
     : `${formatCSats(bot.spentTodayCSats)} of ${formatCSats(bot.budgetCSatsPerDay)} cSats today`;
 }
 
+/**
+ * A run summary as words. Older agents stored a reply that was only a tool call the model wrote
+ * as text (`{"name": "git_status", "arguments": …`, often cut off): that reads as "Ran git status".
+ * Mirrors summarize() in src/apps/ide/bots.ts, which now does this when the run ends.
+ */
+export function readableSummary(summary: string | undefined): string {
+  const s = (summary ?? "").trim();
+  const t = s.replace(/^```\w*\s*/, "").trim();
+  if (!/^[[{]/.test(t)) return s;
+  const names = [...new Set([...t.matchAll(/"(?:name|tool|function)"\s*:\s*"([\w.-]{1,64})"/g)].map((m) => m[1]))];
+  if (!names.length) return s;
+  const words = names.map((n) => n.replace(/[_.-]+/g, " ").trim());
+  return `Ran ${words.length > 3 ? `${words.slice(0, 3).join(", ")} and ${words.length - 3} more` : words.join(", ")}`;
+}
+
 /** The one line under a bot's name in the sidebar: what it is doing or last did. */
 export function botStatusLine(bot: Bot, now = Date.now()): string {
   switch (bot.status) {
@@ -325,11 +340,11 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
     case "over_budget":
       return "Paused: today's budget is spent";
     case "paused":
-      return bot.lastRun?.summary ? `Paused · ${bot.lastRun.summary}` : "Paused";
+      return bot.lastRun?.summary ? `Paused · ${readableSummary(bot.lastRun.summary)}` : "Paused";
     case "error":
-      return bot.lastRun?.summary || "Last run failed";
+      return readableSummary(bot.lastRun?.summary) || "Last run failed";
     default:
-      if (bot.lastRun?.summary) return bot.lastRun.summary;
+      if (bot.lastRun?.summary) return readableSummary(bot.lastRun.summary);
       if (bot.nextRunAtMs) return `First run ${relativeTime(bot.nextRunAtMs, now)}`;
       return "Message it or press Run now";
   }

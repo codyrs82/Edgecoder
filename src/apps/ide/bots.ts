@@ -360,8 +360,31 @@ function clip(s: string, n = MAX_EVENT_TEXT): string {
 }
 
 /** The run's summary: the last paragraph of its reply, shortened. */
+/**
+ * The tools a paragraph names when it is only a tool call a model wrote as text
+ * (`{"name": "git_status", "arguments": {…}}`, fenced or not, possibly cut off); null otherwise.
+ */
+export function toolCallNames(text: string): string[] | null {
+  const t = text.trim().replace(/^```\w*\s*/, "").replace(/\s*```$/, "").trim();
+  if (!/^[[{]/.test(t)) return null;
+  const names = [...t.matchAll(/"(?:name|tool|function)"\s*:\s*"([\w.-]{1,64})"/g)].map((m) => m[1]);
+  return names.length ? [...new Set(names)] : null;
+}
+
+/** "Ran git status" for a run whose reply was only tool calls written as text. */
+export function toolCallSummary(names: string[]): string {
+  const words = names.map((n) => n.replace(/[_.-]+/g, " ").trim());
+  return `Ran ${words.length > 3 ? `${words.slice(0, 3).join(", ")} and ${words.length - 3} more` : words.join(", ")}`;
+}
+
+/** A run's one-line summary: its last paragraph of prose (raw tool-call JSON reads as "Ran git status"). */
 export function summarize(text: string): string {
-  const paras = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const all = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const paras = all.filter((p) => !toolCallNames(p));
+  if (!paras.length) {
+    const names = all.flatMap((p) => toolCallNames(p) ?? []);
+    if (names.length) return toolCallSummary([...new Set(names)]);
+  }
   const last = paras[paras.length - 1] ?? "";
   const flat = last.replace(/\s+/g, " ");
   return flat.length > 240 ? `${flat.slice(0, 237)}…` : flat;
