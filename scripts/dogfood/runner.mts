@@ -158,7 +158,7 @@ function decide(tool: string, args: any, job: Job, approvals: Approval[], st: { 
 }
 
 // ---------------------------------------------------------------------------- the agent
-type Call = { ttftMs: number | null; totalMs: number; promptTokens: number; outputTokens: number; cSats: number; where?: string; error?: string };
+type Call = { ttftMs: number | null; totalMs: number; promptTokens: number; outputTokens: number; cSats: number; where?: string; error?: string; retries?: number };
 interface AgentRun { calls: Call[]; toolCalls: Record<string, number>; sigs: Record<string, number>; approvals: Approval[]; text: string; toolErrors: string[]; timedOut: boolean; via: string }
 
 const KEY = (() => { try { return JSON.parse(readFileSync(join(homedir(), ".config/edgecoder/e2e/accounts", `${ACCOUNT}.json`), "utf8")).apiKey as string; } catch { return ""; } })();
@@ -180,6 +180,9 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
     const call: Call = { ttftMs: null, totalMs: 0, promptTokens: 0, outputTokens: 0, cSats: 0 };
     calls.push(call);
     try {
+      for (let tries = 1; ; tries++) {
+      call.retries = tries - 1;
+      let busy = false;
       const res = await fetch(`${API}/v1/chat/completions`, {
         method: "POST",
         headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json", "user-agent": "edgecoder-dogfood/1.0" },
@@ -190,6 +193,7 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
         const text = (await res.text().catch(() => "")).slice(0, 300);
         let msg = text;
         try { msg = JSON.parse(text).error?.message ?? text; } catch {}
+        if ((res.status === 503 || res.status === 429) && tries < 3) { await new Promise((r) => setTimeout(r, 15_000)); continue; }
         throw new Error(`HTTP ${res.status}: ${msg}`);
       }
       const dec = new TextDecoder();
@@ -203,7 +207,12 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
           if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
           let j: any;
           try { j = JSON.parse(line.slice(6)); } catch { continue; }
-          if (j.error) throw new Error(`stream: ${j.error.message ?? j.error.type ?? JSON.stringify(j.error)}`);
+          if (j.error) {
+            const msg = `stream: ${j.error.message ?? j.error.type ?? JSON.stringify(j.error)}`;
+            // "Every machine ... is busy; try again in 15 s" before any output: wait and ask again (3 tries).
+            if (/no_capacity|is busy and none could start/i.test(msg) && call.ttftMs === null && tries < 3) { busy = true; break; }
+            throw new Error(msg);
+          }
           const d = j.choices?.[0]?.delta;
           if (d?.content) { call.ttftMs ??= Math.round(performance.now() - t0); yield { delta: d.content }; }
           if (d?.tool_calls?.length) {
@@ -213,8 +222,12 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
           if (j.usage) { call.promptTokens = j.usage.prompt_tokens ?? 0; call.outputTokens = j.usage.completion_tokens ?? 0; }
           if (j.edgecoder) { call.cSats = Number(j.edgecoder.cSatsSpent ?? 0); call.where = j.edgecoder.where; done = { done: true, cSatsSpent: call.cSats, where: call.where }; }
         }
+        if (busy) break;
       }
+      if (busy) { await new Promise((r) => setTimeout(r, 15_000)); continue; }
       yield done;
+      return;
+      }
     } catch (e) {
       call.error = String((e as Error).message ?? e).slice(0, 300);
       throw e;
@@ -497,6 +510,33 @@ function failedCiLogs(label: string, limit: number): string {
   return `--- ${label}\n${parts.length ? parts.join("\n\n") : "(no open PR has a failed run)"}`;
 }
 
+// ---------------------------------------------------------------------------- capacity
+/** Slots per model: the coordinators' /admin/network (admin token on this host), else /v1/models (present or not). */
+let capCache: { atMs: number; models: Record<string, { slots: number; freeSlots: number }> | null } = { atMs: 0, models: null };
+async function capacity(): Promise<Record<string, { slots: number; freeSlots: number }> | null> {
+  if (Date.now() - capCache.atMs < 60_000) return capCache.models;
+  let models: Record<string, { slots: number; freeSlots: number }> | null = null;
+  try {
+    const { fetchCapacity } = await import(join(REPO, "scripts/loadgen/capacity.mjs"));
+    models = (await fetchCapacity())?.models ?? null;
+  } catch {}
+  if (!models) {
+    try {
+      const r = await fetch(`${API}/v1/models`, { headers: { authorization: `Bearer ${KEY}`, "user-agent": "edgecoder-dogfood/1.0" }, signal: AbortSignal.timeout(20_000) });
+      const ids: string[] = ((await r.json()).data ?? []).map((m: any) => String(m.id));
+      models = Object.fromEntries(ids.filter((id) => id.startsWith("network/")).map((id) => [id.slice(8).split("@")[0], { slots: 1, freeSlots: 1 }]));
+    } catch {}
+  }
+  capCache = { atMs: Date.now(), models };
+  return models;
+}
+const tierKey = (t: TierName) => TIERS[t].ideModel;
+/** How many jobs a tier may run at once: its model's slots, at most 2; 0 when nobody holds it. */
+export function tierLimit(t: TierName, models: Record<string, { slots: number }> | null): number {
+  if (!models) return 1;
+  return Math.min(2, models[tierKey(t)]?.slots ?? 0);
+}
+
 // ---------------------------------------------------------------------------- queue
 async function main() {
   const jobsDir = join(REPO, "scripts/dogfood/jobs");
@@ -523,7 +563,7 @@ async function main() {
   };
   type Item = { job: Job; tier: TierName; n: number };
   const queue: Item[] = jobs.map((j) => ({ job: j, tier: tierFor(j), n: 1 }));
-  const busyTiers = new Set<TierName>();
+  const busyTiers = new Map<TierName, number>();
   const running = new Set<Promise<void>>();
   let stopped: string | null = null;
   const contextCache = new Map<string, string[]>();
@@ -542,14 +582,21 @@ async function main() {
   while (queue.length || running.size) {
     const busy = machineBusy();
     if (busy && !stopped) { stopped = busy; log("DOGFOOD_STOP", { reason: busy, queued: queue.map((q) => q.job.id) }); }
-    const i = stopped ? -1 : queue.findIndex((q) => !busyTiers.has(q.tier));
+    const caps = await capacity();
+    // A tier nobody serves right now: move its jobs up (not an attempt); none above: fail them.
+    for (const q of [...queue]) {
+      if (tierLimit(q.tier, caps) > 0 || process.env.DOGFOOD_AUTO === "1") continue;
+      const up = STRONGER[q.tier];
+      if (up !== q.tier) { log("DOGFOOD_REROUTE", { job: q.job.id, from: q.tier, to: up, reason: `no machine has ${tierKey(q.tier)}` }); q.tier = up; }
+    }
+    const i = stopped ? -1 : queue.findIndex((q) => (busyTiers.get(q.tier) ?? 0) < Math.max(1, tierLimit(q.tier, caps)));
     if (i >= 0 && running.size < MAX_PARALLEL) {
       const [item] = queue.splice(i, 1);
-      busyTiers.add(item.tier);
+      busyTiers.set(item.tier, (busyTiers.get(item.tier) ?? 0) + 1);
       log("DOGFOOD_JOB_START", { job: item.job.id, tier: item.tier, attempt: item.n });
       const p = (async () => {
         const card = await attempt(item.job, item.tier, item.n, base, contextFor(item.job));
-        busyTiers.delete(item.tier);
+        busyTiers.set(item.tier, (busyTiers.get(item.tier) ?? 1) - 1);
         const final = card.passed || item.n >= 2;
         card.final = final;
         if (!final) {

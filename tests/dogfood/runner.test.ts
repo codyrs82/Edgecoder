@@ -2,7 +2,7 @@
 // context commands it may run (read-only gh only). Also checks every seeded job spec is complete.
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { contextCommandAllowed, pathAllowed, tierFor } from "../../scripts/dogfood/runner.mjs";
+import { contextCommandAllowed, pathAllowed, tierFor, tierLimit } from "../../scripts/dogfood/runner.mjs";
 
 describe("dogfood runner", () => {
   it("routes jobs to tiers by type", () => {
@@ -12,6 +12,14 @@ describe("dogfood runner", () => {
     expect(tierFor({ job: "docs" })).toBe("mac");
     expect(tierFor({ job: "summarize" })).toBe("cpu");
     expect(tierFor({ job: "docs", tier: "gpu" })).toBe("gpu");
+  });
+
+  it("runs a tier as many jobs at once as its model has slots (at most 2), none when nobody holds it", () => {
+    const models = { "qwen3-coder:30b": { slots: 2 }, "qwen2.5-coder:1.5b": { slots: 18 }, "qwen2.5-coder:7b": { slots: 0 } };
+    expect(tierLimit("gpu", models)).toBe(2);
+    expect(tierLimit("cpu", models)).toBe(2);
+    expect(tierLimit("mac", models)).toBe(0);
+    expect(tierLimit("mac", null)).toBe(1);
   });
 
   it("allows exact paths and dir/** prefixes only", () => {
