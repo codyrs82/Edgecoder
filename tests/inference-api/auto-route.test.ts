@@ -21,6 +21,9 @@ describe("auto routing", () => {
     expect(paramsB("qwen2.5-coder:1.5b")).toBe(1.5);
     expect(paramsB("qwen3-coder:30b")).toBe(30);
     expect(paramsB("qwen2.5-coder:latest")).toBe(7);
+    // A tag without a size: the catalog's total parameter count, not the 7B default.
+    expect(paramsB("qwen3-coder-next:latest")).toBe(80);
+    expect(paramsB("qwen3-coder-next")).toBe(80);
   });
 
   it("uses the smallest model that meets the floor for quick tasks and capable coders for agent work", () => {

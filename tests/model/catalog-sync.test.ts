@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CATEGORY_LABELS, MODEL_CATALOG, catalogEntryForTag, defaultModelForMemory } from "../../src/model/catalog.js";
+import { CATEGORY_LABELS, MODEL_CATALOG, catalogEntryForTag, defaultModelForMemory, gpuModelForVram } from "../../src/model/catalog.js";
 import { renderDesktopCatalog } from "../../scripts/sync-model-catalog.mjs";
 
 const ROOT = resolve(__dirname, "../..");
@@ -40,6 +40,17 @@ describe("model catalog", () => {
     expect(defaultModelForMemory(16)).toBe("qwen3.5:9b");
     expect(defaultModelForMemory(32)).toBe("qwen3-coder:30b");
     expect(defaultModelForMemory(1)).toBe("qwen3.5:0.8b");
+  });
+
+  it("lists qwen3-coder-next (80B MoE, 3B active) and picks it for 80 GB of VRAM", () => {
+    const next = catalogEntryForTag("qwen3-coder-next:latest");
+    expect(next).toMatchObject({ paramSize: "80B (3B active)", diskSize: "52 GB", minMemoryGb: 60, contextTokens: 262_144, category: "large" });
+    expect(next?.capabilities).toContain("tools");
+    expect(catalogEntryForTag("qwen3-coder-next")?.modelId).toBe("qwen3-coder-next:latest");
+    expect(gpuModelForVram(80)).toBe("qwen3-coder-next:latest");
+    expect(gpuModelForVram(96)).toBe("qwen3-coder-next:latest");
+    expect(gpuModelForVram(79)).toBe("qwen3-coder:30b");
+    expect(gpuModelForVram(160)).toBe("qwen3:235b");
   });
 
   it("maps installed tags (including :latest) back to catalog entries", () => {

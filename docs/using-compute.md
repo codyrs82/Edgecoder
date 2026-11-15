@@ -170,6 +170,7 @@ The model catalog's "Large (GPU servers)" category holds models for GPU machines
 | `qwen2.5-coder:32b` | 32B | 20 GB | 24 GB |
 | `llama3.3:70b` | 70B | 43 GB | 48 GB |
 | `deepseek-r1:70b` | 70B | 43 GB | 48 GB |
+| `qwen3-coder-next:latest` | 80B (3B active) | 52 GB | 60 GB |
 | `gpt-oss:120b` | 117B (5.1B active) | 65 GB | 80 GB |
 | `deepseek-coder-v2:236b` | 236B (21B active) | 133 GB | 160 GB |
 | `qwen3:235b` | 235B (22B active) | 142 GB | 160 GB |

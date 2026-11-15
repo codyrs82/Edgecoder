@@ -124,15 +124,15 @@ describe("plan", () => {
     expect(own.instances[0].env.EDGECODER_TRUST_MODE).toBeUndefined();
   });
 
-  it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for gpt-oss:120b", () => {
+  it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for qwen3-coder-next", () => {
     const plan = planInstall(gpuBox, parseInstallArgs(["apply", "--token", "t"]), true);
     expect(plan.instances.map((i) => [i.agentId, i.env.CUDA_VISIBLE_DEVICES, i.model, i.memoryGb])).toEqual([
       ["gpu-box-local-gpu0", "0", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu1", "1", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu2", "2", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu3", "3", "qwen3-coder:30b", 48],
-      ["gpu-box-local-gpu4-5", "4,5", "gpt-oss:120b", 96],
-      ["gpu-box-local-gpu6-7", "6,7", "gpt-oss:120b", 96],
+      ["gpu-box-local-gpu4-5", "4,5", "qwen3-coder-next:latest", 96],
+      ["gpu-box-local-gpu6-7", "6,7", "qwen3-coder-next:latest", 96],
     ]);
     // The pooled instance's Ollama sees both cards.
     expect(plan.instances[4].gpus.map((g) => g.index)).toEqual([4, 5]);
