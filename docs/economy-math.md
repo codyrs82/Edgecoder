@@ -26,6 +26,9 @@ All formulas are in `src/economy/job-pricing.ts`; the coordinator applies them w
 accepted (`accrueResultCredits` in `src/swarm/coordinator/results.ts`). What the requester pays is what the
 agent earns, minus the network fee (`NETWORK_FEE_BPS`, default 500 = 5 %), which is EdgeCoder's
 revenue and is booked to `network:fee_pool` (section 5). Failed work is not charged and earns nothing.
+The fee is rounded to the nearest whole msat (`splitJobCost` in `src/economy/job-pricing.ts`); model
+calls cost a few msat, and the earlier floor kept EdgeCoder far below 5 % (a 16 msat call paid no
+fee). Accruals recorded before the change carry no `feeRounding` and are verified with the floor.
 
 **Fees, as decided by the owner on 2026-11-15:** buying cSats is free (`COORDINATOR_FEE_BPS` = 0,
 1 sat buys 1 cSat); on every compute payment (model call, job, reservation) the compute host gets

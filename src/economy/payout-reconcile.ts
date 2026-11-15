@@ -47,6 +47,14 @@ export interface ReconcileLedger {
    * (faucet). Undefined when the store cannot total them.
    */
   solvencyMsat?(): Promise<SolvencyInputs | undefined>;
+  /**
+   * The last run's snapshot, shared by every coordinator on the database (payout_controls). A
+   * restarted reconciler continues from it instead of looking back the whole lookback again, so a
+   * payment that already tripped (and was reviewed before an admin resumed) does not pause payouts
+   * again on every deploy, and the balance-drop check keeps its baseline across restarts.
+   */
+  loadReconcileSnapshot?(): Promise<ReconcileSnapshot | null>;
+  saveReconcileSnapshot?(snapshot: ReconcileSnapshot): Promise<void>;
 }
 
 export interface SolvencyInputs {
@@ -297,7 +305,13 @@ export class PayoutReconciler {
     if (!p.getBalances || !p.listPayments) return this.finish({ atMs: now, status: "unsupported", checks: [], error: "provider has no balance/payment queries" });
     let result: ReconcileResult;
     try {
-      const sinceMs = Math.max(0, (this.previous?.atMs ?? now - this.d.config.lookbackMs) - 60 * 60 * 1000);
+      if (!this.previous && this.d.ledger.loadReconcileSnapshot) {
+        this.previous = await this.d.ledger.loadReconcileSnapshot().catch((err) => {
+          this.d.log?.warn({ error: err instanceof Error ? err.message : String(err) }, "payout_reconcile_snapshot_unreadable");
+          return null;
+        });
+      }
+      const sinceMs = Math.max(0, Math.min(now, this.previous?.atMs ?? now - this.d.config.lookbackMs) - 60 * 60 * 1000);
       const onchain = this.d.onchain;
       if (onchain?.beforeRun) await onchain.beforeRun().catch((err) => this.d.log?.warn({ error: err instanceof Error ? err.message : String(err) }, "payout_reconcile_onchain_refresh_failed"));
       const [balances, list] = await Promise.all([p.getBalances(), p.listPayments({ sinceMs, limit: 1000 })]);
@@ -317,7 +331,12 @@ export class PayoutReconciler {
       const outflowMsat = payoutOutflowMsat + onchainFeeMsat;
       const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, previous: this.previous, toleranceSats: this.d.config.toleranceSats, onchainUncreditedMsat, skipBalanceDrop: inFlight });
       // While an on-chain send is unrecorded the node balance is mid-move: keep the old baseline.
-      if (!inFlight) this.previous = snapshot;
+      if (!inFlight) {
+        this.previous = snapshot;
+        await this.d.ledger.saveReconcileSnapshot?.(snapshot).catch((err) => {
+          this.d.log?.warn({ error: err instanceof Error ? err.message : String(err) }, "payout_reconcile_snapshot_save_failed");
+        });
+      }
       const tripped = checks.some((c) => !c.ok && c.pauses);
       result = {
         atMs: now,

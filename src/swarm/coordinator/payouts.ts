@@ -19,6 +19,7 @@ import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../../economy/pa
 import { launchConfigFromEnv, layerLaunchPayoutLimits } from "../../economy/launch-gate.js";
 import { earningsHoldFromEnv, payoutPolicyFromEnv } from "../../economy/payouts.js";
 import { MemoryCallbackPinStore, type CallbackPinStore } from "../../economy/lnurl-callback-pin.js";
+import { MemoryPayoutRunClaimStore, payoutTickMs, runPayoutJobIfDue, type PayoutRunClaimStore } from "../../economy/payout-schedule.js";
 import { fetchPublicJson } from "../../security/public-fetch.js";
 import { pgStore } from "../../db/store.js";
 import { HostServiceAttestor, networkServiceProbes } from "../../economy/host-attestation.js";
@@ -247,3 +248,31 @@ export const payoutReconciler = new PayoutReconciler({
     });
   }
 });
+
+// Automatic payouts run once per PAYOUT_AUTO_INTERVAL_MS across restarts and seeds: the last run is
+// claimed in payout_controls and a short tick checks whether one is due (payout-schedule.ts). A plain
+// setInterval restarted with every deploy, so on seeds deployed more often than the interval the
+// pass never ran. Paused: nothing is claimed, so the pass runs as soon as payouts resume.
+export const payoutRunClaims: PayoutRunClaimStore = pgStore ?? new MemoryPayoutRunClaimStore();
+export function startAutoPayoutSchedule(intervalMs: number, firstTickMs = 60_000): void {
+  const tick = async () => {
+    if (await payoutPause.isPaused()) return;
+    await runPayoutJobIfDue(payoutRunClaims, "auto_payouts", intervalMs, async () => {
+      const r = await payoutService.runAutoPayouts();
+      if (r.length) app.log.info({ results: r }, "auto_payouts");
+    });
+  };
+  const run = () => void tick().catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
+  setTimeout(run, firstTickMs).unref?.();
+  setInterval(run, payoutTickMs(intervalMs)).unref?.();
+}
+
+/**
+ * Settle payouts left pending (outcome never learned: transport error, timeout, restart mid-payment)
+ * from the node's payment record (PayoutService.resolvePendingPayouts). Runs after each reconciliation.
+ */
+export async function resolvePendingPayouts() {
+  const r = await payoutService.resolvePendingPayouts();
+  if (r.length) app.log.info({ results: r }, "payouts_pending_resolved");
+  return r;
+}

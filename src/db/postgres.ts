@@ -12,7 +12,7 @@ import type { HardwareVerificationRecord } from "../swarm/hardware-verification.
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { EarningsSummary, FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
 import { assertLedgerNetwork, type LedgerNetworkCheck } from "./ledger-network.js";
-import type { SolvencyInputs } from "../economy/payout-reconcile.js";
+import type { ReconcileSnapshot, SolvencyInputs } from "../economy/payout-reconcile.js";
 import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
 import type { ReconcileInput } from "../ledger/reconcile.js";
@@ -99,6 +99,8 @@ export const ISSUANCE_LOCK_KEY = 1;
 /** #115: ledger reconciliation runs one at a time across coordinators sharing this database. */
 export const LEDGER_VERIFY_LOCK_NAMESPACE = 0x45430006;
 export const LEDGER_VERIFY_LOCK_KEY = 1;
+/** Periodic task-billing sweep (swarm/billing-sweep.ts): one instance per coordinator id at a time; key = hashtext(coordinator id). */
+export const TASK_BILLING_SWEEP_LOCK_NAMESPACE = 0x45430007;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
@@ -3047,10 +3049,53 @@ export class PostgresStore {
     );
   }
 
+  /** payout-reconcile.ts: the last reconciliation snapshot, shared by every coordinator on this database. */
+  async loadReconcileSnapshot(): Promise<ReconcileSnapshot | null> {
+    const r = await this.pool.query(`SELECT value_json FROM payout_controls WHERE control_key = 'reconcile_snapshot'`);
+    const v = r.rows[0]?.value_json as ReconcileSnapshot | undefined;
+    return v && Number.isFinite(v.atMs) && Number.isFinite(v.nodeTotalMsat) && Number.isFinite(v.outflowMsat) && Number.isFinite(v.receivedMsat) ? v : null;
+  }
+
+  async saveReconcileSnapshot(snapshot: ReconcileSnapshot): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ('reconcile_snapshot', $1, $2)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE payout_controls.updated_at_ms <= EXCLUDED.updated_at_ms`,
+      [JSON.stringify(snapshot), snapshot.atMs]
+    );
+  }
+
+  /** payout-schedule.ts: claim a periodic payout job run (one row per key in payout_controls). */
+  async claimPayoutRun(key: string, nowMs: number, minIntervalMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE payout_controls.updated_at_ms <= $4
+       RETURNING control_key`,
+      [`run:${key}`, JSON.stringify({ lastRunAtMs: nowMs }), nowMs, nowMs - minIntervalMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
   /**
    * Session advisory lock on a dedicated connection; try-lock, so a second coordinator returns at
    * once instead of queueing a duplicate run. Released in finally (and by Postgres if the connection dies).
    */
+  /** billing-sweep.ts: session try-lock per coordinator id, so two instances never sweep its billing together. */
+  async withTaskBillingSweepLock<T>(coordinatorId: string, fn: () => Promise<T>): Promise<{ acquired: true; value: T } | { acquired: false }> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const r = await client.query("SELECT pg_try_advisory_lock($1, hashtext($2)) AS got", [TASK_BILLING_SWEEP_LOCK_NAMESPACE, coordinatorId]);
+      held = r.rows[0]?.got === true;
+      if (!held) return { acquired: false };
+      return { acquired: true, value: await fn() };
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, hashtext($2))", [TASK_BILLING_SWEEP_LOCK_NAMESPACE, coordinatorId]).catch(() => undefined);
+      client.release();
+    }
+  }
+
   async withFeePoolLock<T>(fn: () => Promise<T>): Promise<FeePoolLockResult<T>> {
     const client = await this.pool.connect();
     let held = false;

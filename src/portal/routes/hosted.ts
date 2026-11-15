@@ -22,6 +22,7 @@ import {
   createReservation,
   listNetworkModels,
   listReservations,
+  NETWORK_PREFIX,
   parseNetworkModel,
   type NetworkDeps,
 } from "../../apps/ide/network-inference.js";
@@ -69,9 +70,10 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
    * (chat-capacity.ts); inference runs where it is submitted, so this is what spreads API traffic
    * across seeds. Calls on your own machines or a lease stay with the default coordinator.
    */
-  const networkForCall = async (accountId: string, target: { model: string; target?: "mine"; reservationId?: string }): Promise<NetworkDeps> => {
+  const networkForCall = async (accountId: string, target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string }): Promise<NetworkDeps> => {
     if (target.target === "mine" || target.reservationId) return networkFor(accountId);
-    const { url } = await capacity.pick({ kind: "network", model: target.model }).catch(() => ({ url: null }));
+    // A classed call (network/<model>@<class>) goes to a coordinator with an agent of that class.
+    const { url } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }).catch(() => ({ url: null }));
     return url ? portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId) : networkFor(accountId);
   };
   // Balance, reservations and the chat compute picker for signed-in users.
@@ -96,7 +98,13 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
   // ── The endpoint ──
   registerCompatRoutes(app, {
     authenticate,
-    models: async (ctx) => [AUTO_MODEL_ID, ...(await listNetworkModels(networkFor(ctx.accountId)).catch(() => [])).map((m) => m.id)],
+    // What online agents hold on every coordinator, and @class only for classes some agent holds the
+    // model in (calls are routed across seeds, so one coordinator's list is not what can run).
+    models: async (ctx) => {
+      const all = await capacity.networkModels().catch(() => []);
+      if (all.length === 0) return [AUTO_MODEL_ID, ...(await listNetworkModels(networkFor(ctx.accountId)).catch(() => [])).map((m) => m.id)];
+      return [AUTO_MODEL_ID, ...all.flatMap((m) => [`${NETWORK_PREFIX}${m.model}`, ...m.classes.map((c) => `${NETWORK_PREFIX}${m.model}@${c}`)])];
+    },
     resolve: async (ctx, model) => {
       // "auto": the cheapest place that fits each request: a reservation you hold, your own machines (free), then the network.
       if (model === AUTO_MODEL_ID) {

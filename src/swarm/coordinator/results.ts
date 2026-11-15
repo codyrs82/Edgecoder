@@ -15,7 +15,8 @@ import {
   jobCostMsat,
   msatToCSats,
   ratePerSecondMsat,
-  splitJobCost
+  splitJobCost,
+  FEE_ROUNDING
 } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { pgStore } from "../../db/store.js";
@@ -416,6 +417,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         ratePerSecondMsat: rateMsat,
         msatPerCredit: valuation?.msatPerCredit,
         networkFeeBps: valuation?.networkFeeBps,
+        feeRounding: FEE_ROUNDING,
         computeClass,
         hardwareTier: eff?.tier ?? cap?.hardwareClass?.tier,
         claimedTier: cap?.hardwareClass?.tier,

@@ -1,0 +1,22 @@
+# Regtest-only test helper: Lightning-address server + alert-webhook catcher (server.mjs). Created and destroyed
+# by scripts/regtest-money-loop.mjs; invoices come from the edgecoder-lnd-test payee over 6PN.
+app = "edgecoder-regtest-lnurl"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PUBLIC_URL = "https://edgecoder-regtest-lnurl.fly.dev"
+  PAYEE_REST_URL = "https://payee.process.edgecoder-lnd-test.internal:8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

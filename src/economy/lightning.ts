@@ -128,6 +128,8 @@ export interface NodePayment {
   valueMsat: number;
   feeMsat: number;
   createdAtMs: number;
+  /** Hex preimage of a succeeded payment, when the node reports it. */
+  preimage?: string;
 }
 
 export interface NodePaymentList {
@@ -555,6 +557,7 @@ export interface LndPayment {
   status?: string;
   creation_time_ns?: string;
   creation_date?: string;
+  payment_preimage?: string;
 }
 
 function paymentHashField(value: unknown): string {
@@ -568,7 +571,8 @@ export function interpretLndPayments(body: { payments?: LndPayment[] }): NodePay
   return body.payments.map((p) => {
     const status = p.status === "SUCCEEDED" ? "succeeded" : p.status === "FAILED" ? "failed" : "in_flight"; // IN_FLIGHT, INITIATED, UNKNOWN: money may still move
     const createdAtMs = p.creation_time_ns !== undefined ? nsToMs(p.creation_time_ns) : optionalSats(p.creation_date, "creation_date") * 1000;
-    return { paymentHash: paymentHashField(p.payment_hash), status, valueMsat: satsField(p.value_msat, "value_msat"), feeMsat: optionalSats(p.fee_msat, "fee_msat"), createdAtMs };
+    const preimage = status === "succeeded" ? lndBytesToHex(p.payment_preimage, 32) : undefined;
+    return { paymentHash: paymentHashField(p.payment_hash), status, valueMsat: satsField(p.value_msat, "value_msat"), feeMsat: optionalSats(p.fee_msat, "fee_msat"), createdAtMs, ...(preimage && !/^0+$/.test(preimage) ? { preimage } : {}) };
   });
 }
 

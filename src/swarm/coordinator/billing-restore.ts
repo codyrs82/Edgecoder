@@ -23,6 +23,7 @@
  */
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import type { PostgresStore } from "../../db/postgres.js";
+import { sweepStaleTaskBilling, type OpenTaskBillingRow } from "../billing-sweep.js";
 import { refundTxId } from "../../credits/store.js";
 import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { capabilityConstraints } from "../../economy/order-book.js";
@@ -38,7 +39,14 @@ export interface BillingRestoreSummary {
 }
 
 export async function restoreTaskBilling(store: PostgresStore, nowMs = Date.now()): Promise<BillingRestoreSummary> {
-  const rows = await store.listOpenTaskBilling(identity.peerId);
+  return restoreTaskBillingRows(store, await store.listOpenTaskBilling(identity.peerId), nowMs);
+}
+
+/**
+ * Resume or refund these open billing rows (startup, and the periodic sweep for rows an instance
+ * that is gone left open: billing-sweep.ts). Rows a task in this process holds are skipped.
+ */
+export async function restoreTaskBillingRows(store: PostgresStore, rows: OpenTaskBillingRow[], nowMs = Date.now()): Promise<BillingRestoreSummary> {
   const summary: BillingRestoreSummary = { resumed: 0, refunded: 0, subtasksRestored: 0 };
   if (rows.length === 0) return summary;
   const totals = await store.taskLedgerTotals(rows.map((r) => ({ taskId: r.taskId, refundTxId: refundTxId(r.taskId) })));
@@ -90,4 +98,10 @@ export async function restoreTaskBilling(store: PostgresStore, nowMs = Date.now(
   }
   if (summary.resumed + summary.refunded > 0) app.log.info(summary, "task_billing_restored");
   return summary;
+}
+
+/** The periodic sweep (billing-sweep.ts) wired to this coordinator. */
+export async function sweepTaskBilling(store: PostgresStore): Promise<void> {
+  const r = await sweepStaleTaskBilling({ store, coordinatorId: identity.peerId, isLive: (taskId) => taskBilling.has(taskId), restore: (rows) => restoreTaskBillingRows(store, rows) });
+  if (r.swept > 0) app.log.warn({ ...r }, "task_billing_swept");
 }

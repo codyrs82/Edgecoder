@@ -56,10 +56,11 @@ import {
 import {
   ECONOMY_PAYMENTS_ENABLED,
   payoutPolicy,
-  payoutService,
   runFeePoolDistribution,
   payoutReconcileConfig,
-  payoutReconciler
+  payoutReconciler,
+  resolvePendingPayouts,
+  startAutoPayoutSchedule
 } from "./payouts.js";
 import { bootstrapPeerMesh } from "./peers.js";
 import {
@@ -76,7 +77,8 @@ import { startOnchainTimers } from "./onchain.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
 import { sweepGrants } from "./grants.js";
-import { restoreTaskBilling } from "./billing-restore.js";
+import { restoreTaskBilling, sweepTaskBilling } from "./billing-restore.js";
+import { TASK_BILLING_SWEEP_INTERVAL_MS } from "../billing-sweep.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -129,6 +131,10 @@ export async function initCoordinator(): Promise<void> {
       // Stress finding 2: tasks billed here and not settled before the restart are resumed or refunded
       // (after the verifications, which own the subtasks they hold).
       await restoreTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_restore_failed"));
+      // ...and rows an outgoing instance left open after that (deploy overlap): swept periodically.
+      setInterval(() => {
+        void sweepTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_sweep_failed"));
+      }, TASK_BILLING_SWEEP_INTERVAL_MS).unref?.();
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([
@@ -190,11 +196,7 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
       }, CC.HOST_HEARTBEAT_MS);
-      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) {
-        setInterval(() => {
-          void payoutService.runAutoPayouts().then((r) => { if (r.length) app.log.info({ results: r }, "auto_payouts"); }).catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
-        }, CC.PAYOUT_AUTO_INTERVAL_MS);
-      }
+      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) startAutoPayoutSchedule(CC.PAYOUT_AUTO_INTERVAL_MS);
       // On-chain deposits and batched payouts (ONCHAIN_ENABLED; no-op otherwise).
       startOnchainTimers();
       setInterval(() => {
@@ -208,10 +210,15 @@ export async function initCoordinator(): Promise<void> {
       }
       // Ledger vs Lightning node; a mismatch pauses payouts (payout-reconcile.ts).
       if (ECONOMY_PAYMENTS_ENABLED && payoutReconcileConfig.intervalMs > 0) {
-        void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
-        setInterval(() => {
-          void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
-        }, payoutReconcileConfig.intervalMs);
+        // Then settle payouts stuck in pending from the node's payment record (nothing is sent).
+        const reconcileAndResolve = () =>
+          void payoutReconciler
+            .run()
+            .catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"))
+            .then(() => resolvePendingPayouts())
+            .catch((error) => app.log.warn({ error: String(error) }, "payout_resolve_pending_failed"));
+        reconcileAndResolve();
+        setInterval(reconcileAndResolve, payoutReconcileConfig.intervalMs);
       }
       if (RATE_ORACLE_ENABLED) {
         if (isRateEpochStale(mutable.latestRateEpoch, rateOracleConfig)) {

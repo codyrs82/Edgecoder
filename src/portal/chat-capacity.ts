@@ -36,7 +36,12 @@ import { request } from "undici";
 export type Capacity = "yes" | "unknown" | "unlisted" | "no";
 
 /** A default chat (the coordinator's own model) or a chat on network compute for one model. */
-export type ChatNeed = { kind: "chat" } | { kind: "network"; model: string };
+/**
+ * `computeClass` (cpu, apple, gpu, gpu.dc; omitted or "any" = any class): a classed call must go
+ * to a coordinator with an agent of that class for the model. Classes are separate markets
+ * (compute-classes.ts: own reference price and order book), so gpu.dc does not stand in for gpu.
+ */
+export type ChatNeed = { kind: "chat" } | { kind: "network"; model: string; computeClass?: string };
 
 /** What one coordinator said when asked. */
 export interface CapacityReport {
@@ -49,7 +54,20 @@ export interface CapacityReport {
   /** kind "network": per model, idle agents and calls waiting (coordinators that report them). */
   /** agents: holding the model; idle: holding nothing; free: model slots free now (newer coordinators); waiting: calls queued. */
   modelLoad?: Record<string, { agents?: number; idle: number; free?: number; waiting: number }>;
+  /** kind "network": per model, the compute classes of the agents holding it (coordinators that report them). */
+  modelClasses?: Record<string, string[]>;
 }
+
+/** A model the network can run now, across coordinators: agents holding it and their classes. */
+export interface NetworkModelSummary {
+  model: string;
+  agents: number;
+  classes: string[];
+}
+
+const wantsClass = (need: ChatNeed): string | undefined => (need.kind === "network" && need.computeClass && need.computeClass !== "any" ? need.computeClass : undefined);
+/** False when the report says which classes hold the model and `cls` is not among them. */
+const classOk = (report: CapacityReport, model: string, cls: string | undefined) => !cls || !report.modelClasses?.[model] || report.modelClasses[model].includes(cls);
 
 export type CapacityProbe = (url: string, kind: ChatNeed["kind"]) => Promise<CapacityReport>;
 
@@ -60,7 +78,7 @@ export function capacityFor(report: CapacityReport, need: ChatNeed): Capacity {
     return report.ownModelCount > 0 ? "yes" : "no";
   }
   if (report.agentModels === undefined) return "unknown";
-  return report.agentModels.includes(need.model) ? "yes" : "unlisted";
+  return report.agentModels.includes(need.model) && classOk(report, need.model, wantsClass(need)) ? "yes" : "unlisted";
 }
 
 export const CHAT_CAPACITY_DEFAULT_TIMEOUT_MS = 2_000;
@@ -122,16 +140,18 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       if (!json || !Array.isArray(json.models)) return { reachable: true };
       const agentModels: string[] = [];
       const modelLoad: Record<string, { agents?: number; idle: number; free?: number; waiting: number }> = {};
+      const modelClasses: Record<string, string[]> = {};
       const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown }>) {
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
+          if (Array.isArray(m.classes)) modelClasses[m.model] = m.classes.filter((c): c is string => typeof c === "string");
           if (num(m.idleAgents)) {
             modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0 };
           }
         }
       }
-      return { reachable: true, agentModels, ...(Object.keys(modelLoad).length ? { modelLoad } : {}) };
+      return { reachable: true, agentModels, ...(Object.keys(modelLoad).length ? { modelLoad } : {}), ...(Object.keys(modelClasses).length ? { modelClasses } : {}) };
     } catch {
       return { reachable: false };
     }
@@ -163,6 +183,11 @@ export interface ChatCapacityDirectory {
   pick(need: ChatNeed, exclude?: readonly string[]): Promise<ChatCapacityPick>;
   /** A chat sent to `url` failed before it produced anything: prefer the others for a while. */
   markFailed(url: string): void;
+  /**
+   * Models online agents hold across every reachable coordinator, with the classes they hold them
+   * in (what /v1/models may advertise as network/<model>@<class>). Empty when none reports.
+   */
+  networkModels(): Promise<NetworkModelSummary[]>;
 }
 
 interface CacheEntry {
@@ -252,7 +277,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
    * breaks ties. Inference runs where it is submitted, so this is what spreads calls across seeds.
    * Null when no coordinator reports load (older builds): the priority order below decides.
    */
-  async function chooseByLoad(urls: string[], model: string, maxAgeMs: number): Promise<string | null> {
+  async function chooseByLoad(urls: string[], model: string, cls: string | undefined, maxAgeMs: number): Promise<string | null> {
     // Load moves in seconds: a report older than LOAD_REPORT_MAX_AGE_MS is fetched again, so calls
     // that already finished are not still counted against a coordinator for the whole cache TTL.
     const reports = await Promise.all(urls.map((u) => reportOf(u, "network", Math.min(maxAgeMs, LOAD_REPORT_MAX_AGE_MS))));
@@ -260,7 +285,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     for (let i = 0; i < urls.length; i++) {
       const r = reports[i];
       const load = r.modelLoad?.[model];
-      if (!r.reachable || !load || recentlyFailed(urls[i]) || !r.agentModels?.includes(model)) continue;
+      if (!r.reachable || !load || recentlyFailed(urls[i]) || !r.agentModels?.includes(model) || !classOk(r, model, cls)) continue;
       const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
       // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
       const room = load.free ?? load.idle;
@@ -281,7 +306,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
 
   async function choose(urls: string[], need: ChatNeed, maxAgeMs: number): Promise<string | null> {
     if (need.kind === "network") {
-      const byLoad = await chooseByLoad(urls, need.model, maxAgeMs);
+      const byLoad = await chooseByLoad(urls, need.model, wantsClass(need), maxAgeMs);
       if (byLoad) return byLoad;
     }
     // Start every probe now so the wait is one timeout at most, then read them in priority order.
@@ -314,6 +339,21 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     },
     markFailed(url) {
       failedAt.set(url.replace(/\/+$/, ""), now());
+    },
+    async networkModels() {
+      const urls = await knownUrls();
+      const reports = await Promise.all(urls.map((u) => reportOf(u, "network", ttlMs)));
+      const byModel = new Map<string, { agents: number; classes: Set<string> }>();
+      for (const r of reports) {
+        if (!r.reachable) continue;
+        for (const model of r.agentModels ?? []) {
+          const e = byModel.get(model) ?? { agents: 0, classes: new Set<string>() };
+          e.agents += Math.max(1, r.modelLoad?.[model]?.agents ?? 1);
+          for (const c of r.modelClasses?.[model] ?? []) e.classes.add(c);
+          byModel.set(model, e);
+        }
+      }
+      return [...byModel.entries()].map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes].sort() })).sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model));
     },
   };
 }
