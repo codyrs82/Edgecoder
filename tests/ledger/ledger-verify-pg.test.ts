@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction } from "../../src/common/types.js";
-import { jobCostMsat, splitJobCost } from "../../src/economy/job-pricing.js";
+import { FEE_ROUNDING, jobCostMsat, splitJobCost } from "../../src/economy/job-pricing.js";
 import { OrderingChain } from "../../src/ledger/chain.js";
 import { reconcileLedger } from "../../src/ledger/reconcile.js";
 import { createPeerKeys } from "../../src/mesh/peer.js";
@@ -45,7 +45,7 @@ async function accrue(store: PostgresStore, chain: OrderingChain, coordinatorId:
     coordinatorId,
     payloadJson: JSON.stringify({
       sourceAgentId: `agent-of-${o.account}`, accountId: o.account, credits: tx.credits, msat: agentMsat, costMsat, feeMsat, pricingBasis: "per_second",
-      ratePerSecondMsat: rate, msatPerCredit: o.msatPerCredit, networkFeeBps: FEE_BPS, computeClass: "cpu", creditsPerSecond: o.cps, durationMs: o.durationMs, ok: true, resourceClass: "cpu"
+      ratePerSecondMsat: rate, msatPerCredit: o.msatPerCredit, networkFeeBps: FEE_BPS, feeRounding: FEE_ROUNDING, computeClass: "cpu", creditsPerSecond: o.cps, durationMs: o.durationMs, ok: true, resourceClass: "cpu"
     })
   });
   await store.persistLedgerRecord(record);
