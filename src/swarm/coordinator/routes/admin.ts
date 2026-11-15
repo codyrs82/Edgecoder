@@ -11,7 +11,7 @@ import type { CoordinatorApp } from "../app.js";
 import { queue, mesh } from "../context.js";
 import { agentCapabilities, behaviorTracker, anomalyDetector, autoBlacklister } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
-import { payoutPause, payoutLimits, payoutReconcileConfig, payoutReconciler } from "../payouts.js";
+import { payoutPause, payoutLimits, payoutReconcileConfig, payoutReconciler, resolvePendingPayouts } from "../payouts.js";
 import { revenueReport, withdrawRevenue } from "../revenue.js";
 import { payoutRefusalStatus } from "../../../economy/revenue.js";
 
@@ -179,6 +179,11 @@ export function registerAdminRoutes(app: CoordinatorApp): void {
   admin.post("/admin/payouts/reconciliation/run", async (req, reply) => {
     if (!authorizeAdmin(req, reply)) return;
     return payoutReconciler.run();
+  });
+  // Settle payouts stuck in pending from the node's payment record (also runs after each reconciliation).
+  admin.post("/admin/payouts/resolve-pending", async (req, reply) => {
+    if (!authorizeAdmin(req, reply)) return;
+    return { results: await resolvePendingPayouts() };
   });
 
   // EdgeCoder's revenue: the network fee pool (network:fee_pool). Withdrawals go through

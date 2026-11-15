@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../common/types.js";
-import { payFailureIsFinal, type LightningProvider } from "./lightning.js";
+import { payFailureIsFinal, type LightningProvider, type NodePayment } from "./lightning.js";
 import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
 import type { ReconcileLedger } from "./payout-reconcile.js";
 import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck } from "./lnurl-callback-pin.js";
@@ -78,6 +78,8 @@ export interface PayoutStore extends ReconcileLedger, PayoutPauseStore {
   ): Promise<ReserveResult>;
   settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void>;
   listPayouts(accountId: string, limit?: number): Promise<PayoutRecord[]>;
+  /** Payout rows still `pending`, oldest first. */
+  listPendingPayouts(limit?: number): Promise<PayoutRecord[]>;
   listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>>;
   listInfrastructureHosts(): Promise<InfrastructureHost[]>;
   resetHostHeartbeatWindow(): Promise<void>;
@@ -185,6 +187,9 @@ export class MemoryPayoutStore implements PayoutStore {
   async listPayouts(accountId: string, limit = 50) {
     return [...this.payouts.values()].filter((p) => p.accountId === accountId).sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, limit);
   }
+  async listPendingPayouts(limit = 100) {
+    return [...this.payouts.values()].filter((p) => p.status === "pending").sort((a, b) => a.createdAtMs - b.createdAtMs).slice(0, limit);
+  }
   async listAutoPayoutAccounts() {
     return [...this.autoAccounts.entries()].map(([accountId, lightningAddress]) => ({ accountId, lightningAddress }));
   }
@@ -269,6 +274,20 @@ export interface PayoutServiceDeps {
 }
 
 export type CallbackChangedResult = { ok: false; code: "callback_changed"; detail: string; previousOrigin: string; newOrigin: string };
+
+/** What resolvePendingPayouts did with one pending row (see there). */
+export type PendingResolution = {
+  payoutId: string;
+  accountId: string;
+  paymentHash: string;
+  outcome: "paid" | "failed" | "in_flight" | "unknown" | "mismatch";
+  reason?: string;
+};
+
+/** Pending rows younger than this are left alone: their payment may still be running in some process. */
+export const PENDING_RESOLVE_MIN_AGE_MS = 10 * 60_000;
+/** A pending row the node has no payment for is failed only after this long (it was never sent). */
+export const PENDING_NOT_SENT_AFTER_MS = 30 * 60_000;
 
 export type FeePoolDistribution = {
   distributedMsat: number;
@@ -406,6 +425,69 @@ export class PayoutService {
     } finally {
       this.inflight.delete(payout.paymentHash);
     }
+  }
+
+  /**
+   * Settle Lightning payouts left `pending` because the coordinator never learned the outcome (transport
+   * error, proxy timeout, a payment still in flight past the pay timeout, a restart mid-payment),
+   * from the node's own payment record. Nothing is sent here, so it also runs while payouts are paused.
+   * - node says succeeded for the row's amount: paid (fee and preimage from the node), onPaid fires;
+   * - node says failed: failed, the credit debit comes back and the account can be paid again;
+   * - node has the payment in flight, or reports a different amount: left pending (reported);
+   * - node has no payment for the hash: failed as `not_sent` once the row is PENDING_NOT_SENT_AFTER_MS
+   *   old and the node's list was complete; otherwise left pending.
+   * Rows younger than `minAgeMs`, or being paid by this process right now, are skipped. Settling is
+   * conditional on the row still being pending, so two coordinators resolving together are harmless.
+   */
+  async resolvePendingPayouts(opts: { minAgeMs?: number; notSentAfterMs?: number; limit?: number } = {}): Promise<PendingResolution[]> {
+    const list = this.d.provider.listPayments;
+    if (!list) return [];
+    const now = (this.d.now ?? Date.now)();
+    const minAge = opts.minAgeMs ?? PENDING_RESOLVE_MIN_AGE_MS;
+    const notSentAfter = Math.max(minAge, opts.notSentAfterMs ?? PENDING_NOT_SENT_AFTER_MS);
+    // Lightning payouts only: an on-chain payout (kind "onchain", onchain-payouts.ts) is pending
+    // while its transaction confirms and has no Lightning payment; its own tracker settles it.
+    const pending = (await this.d.store.listPendingPayouts(opts.limit ?? 200)).filter((p) => p.kind !== "onchain" && now - p.createdAtMs >= minAge && !this.inflight.has(p.paymentHash));
+    if (pending.length === 0) return [];
+    const sinceMs = Math.max(0, Math.min(...pending.map((p) => p.createdAtMs)) - 60 * 60_000);
+    const node = await list.call(this.d.provider, { sinceMs, limit: 10_000 });
+    if (!node.supported) return [];
+    const byHash = new Map<string, NodePayment[]>();
+    for (const np of node.payments) {
+      const k = np.paymentHash.toLowerCase();
+      byHash.set(k, [...(byHash.get(k) ?? []), np]);
+    }
+    const out: PendingResolution[] = [];
+    for (const p of pending) {
+      const base = { payoutId: p.payoutId, accountId: p.accountId, paymentHash: p.paymentHash };
+      const attempts = byHash.get(p.paymentHash.toLowerCase()) ?? [];
+      const ok = attempts.find((a) => a.status === "succeeded");
+      if (ok) {
+        if (ok.valueMsat !== p.amountMsat || (ok.preimage && !preimageMatches(p.paymentHash, ok.preimage))) {
+          this.d.log?.warn({ payoutId: p.payoutId, nodeValueMsat: ok.valueMsat, amountMsat: p.amountMsat }, "payout_resolve_mismatch");
+          out.push({ ...base, outcome: "mismatch", reason: `node paid ${ok.valueMsat} msat, row is ${p.amountMsat} msat` });
+          continue;
+        }
+        const feeMsat = Math.max(0, Math.floor(ok.feeMsat));
+        await this.d.store.settlePayout(p.payoutId, { status: "paid", feeMsat, preimage: ok.preimage });
+        await this.d.onPaid?.({ ...p, status: "paid", feeMsat, preimage: ok.preimage, settledAtMs: now });
+        this.d.log?.info({ payoutId: p.payoutId, accountId: p.accountId, amountMsat: p.amountMsat, feeMsat }, "payout_resolved_paid");
+        out.push({ ...base, outcome: "paid" });
+      } else if (attempts.some((a) => a.status === "in_flight")) {
+        out.push({ ...base, outcome: "in_flight" });
+      } else if (attempts.length > 0) {
+        await this.d.store.settlePayout(p.payoutId, { status: "failed", error: "node_reported_failed" });
+        this.d.log?.warn({ payoutId: p.payoutId, accountId: p.accountId }, "payout_resolved_failed");
+        out.push({ ...base, outcome: "failed", reason: "node_reported_failed" });
+      } else if (!node.truncated && now - p.createdAtMs >= notSentAfter) {
+        await this.d.store.settlePayout(p.payoutId, { status: "failed", error: "not_sent" });
+        this.d.log?.warn({ payoutId: p.payoutId, accountId: p.accountId }, "payout_resolved_not_sent");
+        out.push({ ...base, outcome: "failed", reason: "not_sent" });
+      } else {
+        out.push({ ...base, outcome: "unknown", reason: node.truncated ? "node payment list truncated" : "no node payment yet" });
+      }
+    }
+    return out;
   }
 
   private limitRejected(accountId: string, kind: PayoutRecord["kind"], amountMsat: number, v: PayoutLimitViolation): PayoutResult {

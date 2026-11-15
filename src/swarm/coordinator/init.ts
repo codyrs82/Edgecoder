@@ -55,10 +55,11 @@ import {
 import {
   ECONOMY_PAYMENTS_ENABLED,
   payoutPolicy,
-  payoutService,
   runFeePoolDistribution,
   payoutReconcileConfig,
-  payoutReconciler
+  payoutReconciler,
+  resolvePendingPayouts,
+  startAutoPayoutSchedule
 } from "./payouts.js";
 import { bootstrapPeerMesh } from "./peers.js";
 import {
@@ -185,11 +186,7 @@ export async function initCoordinator(): Promise<void> {
       setInterval(() => {
         void selfInfraHeartbeat().catch((error) => app.log.warn({ error: String(error) }, "infra_heartbeat_failed"));
       }, CC.HOST_HEARTBEAT_MS);
-      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) {
-        setInterval(() => {
-          void payoutService.runAutoPayouts().then((r) => { if (r.length) app.log.info({ results: r }, "auto_payouts"); }).catch((error) => app.log.warn({ error: String(error) }, "auto_payouts_failed"));
-        }, CC.PAYOUT_AUTO_INTERVAL_MS);
-      }
+      if (ECONOMY_PAYMENTS_ENABLED && payoutPolicy.enabled) startAutoPayoutSchedule(CC.PAYOUT_AUTO_INTERVAL_MS);
       // On-chain deposits and batched payouts (ONCHAIN_ENABLED; no-op otherwise).
       startOnchainTimers();
       setInterval(() => {
@@ -203,10 +200,15 @@ export async function initCoordinator(): Promise<void> {
       }
       // Ledger vs Lightning node; a mismatch pauses payouts (payout-reconcile.ts).
       if (ECONOMY_PAYMENTS_ENABLED && payoutReconcileConfig.intervalMs > 0) {
-        void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
-        setInterval(() => {
-          void payoutReconciler.run().catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"));
-        }, payoutReconcileConfig.intervalMs);
+        // Then settle payouts stuck in pending from the node's payment record (nothing is sent).
+        const reconcileAndResolve = () =>
+          void payoutReconciler
+            .run()
+            .catch((error) => app.log.warn({ error: String(error) }, "payout_reconcile_failed"))
+            .then(() => resolvePendingPayouts())
+            .catch((error) => app.log.warn({ error: String(error) }, "payout_resolve_pending_failed"));
+        reconcileAndResolve();
+        setInterval(reconcileAndResolve, payoutReconcileConfig.intervalMs);
       }
       if (RATE_ORACLE_ENABLED) {
         if (isRateEpochStale(mutable.latestRateEpoch, rateOracleConfig)) {

@@ -2985,6 +2985,18 @@ export class PostgresStore {
     );
   }
 
+  /** payout-schedule.ts: claim a periodic payout job run (one row per key in payout_controls). */
+  async claimPayoutRun(key: string, nowMs: number, minIntervalMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE payout_controls.updated_at_ms <= $4
+       RETURNING control_key`,
+      [`run:${key}`, JSON.stringify({ lastRunAtMs: nowMs }), nowMs, nowMs - minIntervalMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
   /**
    * Session advisory lock on a dedicated connection; try-lock, so a second coordinator returns at
    * once instead of queueing a duplicate run. Released in finally (and by Postgres if the connection dies).
