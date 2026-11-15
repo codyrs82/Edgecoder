@@ -220,3 +220,44 @@ describe("AgentBehaviorTracker", () => {
     });
   });
 });
+
+describe("output-content rules ignore model calls (live regtest, 2026-11-15)", () => {
+  // Short factual answers ("Paris", "3") from honest agents tripped BHV010 (tiny outputs) and BHV003
+  // (identical outputs) and blacklisted every agent on the network for an hour.
+  it("short and repeated model-call answers do not trip BHV002, BHV003 or BHV010", async () => {
+    const { AnomalyDetector } = await import("../../src/security/anomaly-detector.js");
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    for (let i = 0; i < 12; i++) tracker.recordTaskResult("honest", { ok: true, output: i % 2 ? "Paris" : "Paris", durationMs: 1500, kind: "inference" }, now + i * 1000);
+    const stats = tracker.getStats("honest", now + 20_000)!;
+    expect(stats.outputTasks).toBe(0);
+    expect(stats.identicalOutputCount).toBe(0);
+    const rules = new AnomalyDetector().evaluate(stats).map((e) => e.ruleId);
+    expect(rules).not.toContain("BHV003");
+    expect(rules).not.toContain("BHV010");
+    expect(rules).not.toContain("BHV002");
+  });
+
+  it("the same pattern on code results is still caught", async () => {
+    const { AnomalyDetector } = await import("../../src/security/anomaly-detector.js");
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    for (let i = 0; i < 12; i++) tracker.recordTaskResult("forger", { ok: true, output: "ok", durationMs: 1500, kind: "single_step" }, now + i * 1000);
+    const stats = tracker.getStats("forger", now + 20_000)!;
+    expect(stats.outputTasks).toBe(12);
+    const rules = new AnomalyDetector().evaluate(stats).map((e) => e.ruleId);
+    expect(rules).toContain("BHV003");
+    expect(rules).toContain("BHV010");
+  });
+
+  it("mixed traffic: only the code results count toward the output rules", () => {
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    for (let i = 0; i < 6; i++) tracker.recordTaskResult("mixed", { ok: true, output: "Mars", durationMs: 1500, kind: "inference" }, now + i * 1000);
+    for (let i = 0; i < 4; i++) tracker.recordTaskResult("mixed", { ok: true, output: `def f${i}(x):\n    return x * ${i}\n`, durationMs: 4000, kind: "single_step" }, now + 10_000 + i * 1000);
+    const stats = tracker.getStats("mixed", now + 30_000)!;
+    expect(stats.outputTasks).toBe(4);
+    expect(stats.identicalOutputCount).toBe(0);
+    expect(stats.avgOutputLength).toBeGreaterThan(20);
+  });
+});

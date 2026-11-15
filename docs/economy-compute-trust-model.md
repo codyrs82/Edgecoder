@@ -110,6 +110,16 @@ This replaces the draft's "daily merkle root of ledger records", which is **not 
 | Behaviour rules | Per-agent anomaly rules (BHV001-BHV010, `src/security/anomaly-detector.ts`) over a one-hour window of each agent's results and protocol events; strikes lead to an automatic, expiring blacklist (`src/security/auto-blacklister.ts`). | **Done.** BHV001 ("suspiciously fast") is described below. |
 | Spend caps | IDE swarm requests are capped per request and per session. | **Done (#71).** `src/apps/ide/swarm-budget.ts`, `src/apps/ide/provider-server.ts:117`. |
 
+### Output-content rules (BHV002, BHV003, BHV010) look at code results only
+
+BHV002 (mostly empty outputs), BHV003 (consecutive identical outputs) and BHV010 (tiny average
+output) count only code results (`single_step`, `micro_loop`). A model call's output is whatever
+the requester's prompt asks for: a one-word or repeated answer ("Paris", "3") is often the right
+one. On the live regtest network (2026-11-15) a probe of short factual questions tripped BHV010 and
+BHV003 on every honest agent and blacklisted the whole network for an hour. Model calls are covered
+by BHV001 (below) and result verification instead. `AgentBehaviorStats.outputTasks` is the number of
+results these rules look at.
+
 ### BHV001: suspiciously fast results
 
 A result that arrives impossibly soon after its claim suggests the agent did not do the work.

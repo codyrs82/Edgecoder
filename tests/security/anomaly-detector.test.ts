@@ -26,6 +26,8 @@ function baseStats(overrides: Partial<AgentBehaviorStats> = {}): AgentBehaviorSt
     heartbeatGapMaxMs: 0,
     windowStartMs: Date.now() - 3600_000,
     windowEndMs: Date.now(),
+    // Code results by default, as before model calls were left out of the output-content rules.
+    outputTasks: overrides.totalTasks ?? 0,
     ...overrides,
   };
 }
