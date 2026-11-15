@@ -293,3 +293,14 @@ export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, at] of nudgedAt) if (nowMs - at > READY_KEEP_MS) nudgedAt.delete(id);
 }
 setInterval(() => pruneDispatch(), 60_000).unref?.();
+
+/** What an agent last reported with its pull (admin network view); undefined when it reports nothing. */
+export function agentLoadReport(agentId: string): { slots: number; reportedFree?: number; wake: boolean; contextWindow?: number; atMs: number } | undefined {
+  const load = loads.get(agentId);
+  return load ? { ...load } : undefined;
+}
+
+/** An authenticated mesh WebSocket is open for the agent (admin network view). */
+export function agentSocketConnected(agentId: string): boolean {
+  return transport?.connected(agentId) ?? false;
+}

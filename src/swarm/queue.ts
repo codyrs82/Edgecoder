@@ -550,6 +550,17 @@ export class SwarmQueue {
     return n;
   }
 
+  /** Unclaimed inference subtasks by requested model, in one pass (admin network view). */
+  waitingInferenceByModel(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const t of this.tasks) {
+      if (t.claimedBy || t.subtask.kind !== "inference") continue;
+      const model = t.subtask.requestedModel ?? "";
+      out.set(model, (out.get(model) ?? 0) + 1);
+    }
+    return out;
+  }
+
   status(): { queued: number; agents: number; results: number } {
     return {
       queued: this.tasks.length,
