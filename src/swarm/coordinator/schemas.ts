@@ -231,7 +231,9 @@ export const pullSchema = z.object({
   /** The context window (tokens) the agent serves every model call with; longer calls go elsewhere. */
   contextWindow: z.number().int().min(2048).max(131_072).optional(),
   /** The agent pulls at once on a work_available frame over its mesh WebSocket (dispatch.ts). */
-  wake: z.boolean().optional()
+  wake: z.boolean().optional(),
+  /** AGENT_ALLOW_RESTRICTED_MODELS=1: the owner lets this agent take restricted-model calls (counts only signed). */
+  allowRestrictedModels: z.boolean().optional()
 });
 export const resultSchema = z.object({
   subtaskId: z.string(),

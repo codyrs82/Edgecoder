@@ -75,7 +75,8 @@
     for (const m of overview?.account?.machines ?? []) if (m.online && m.agentId !== overview?.selfAgentId) for (const model of m.models) counts.set(model, (counts.get(model) ?? 0) + 1);
     return [...counts.entries()].map(([model, machines]) => ({ model, machines })).filter((x) => match(x.model));
   });
-  let networkModels = $derived((overview?.models ?? []).filter((m) => match(m.model)));
+  // Restricted (security research) models run only on your own or reserved machines: never offered as network compute.
+  let networkModels = $derived((overview?.models ?? []).filter((m) => !m.restricted && match(m.model)));
   let localMatches = $derived(localModels.filter(match));
   let leaseModels = $derived(
     leases.flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),

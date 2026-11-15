@@ -17,6 +17,7 @@ import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, pay
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
 import type { ReconcileInput } from "../ledger/reconcile.js";
 import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
+import { PostgresRestrictedCallStore } from "./restricted-call-store.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
 export function rowToPayout(row: Record<string, unknown>): PayoutRecord {
@@ -907,6 +908,11 @@ export class PostgresStore {
   /** A store defined in another module on this pool (src/db/onchain-store.ts), without an import cycle. */
   withPool<T>(make: (pool: Pool) => T): T {
     return make(this.pool);
+  }
+
+  /** Restricted-model call log (src/db/restricted-call-store.ts) on the same pool. */
+  restrictedCallStore(): PostgresRestrictedCallStore {
+    return new PostgresRestrictedCallStore(this.pool);
   }
 
   /** LNURL callback pins (src/economy/lnurl-callback-pin.ts) on the same pool. */

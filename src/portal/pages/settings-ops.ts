@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { settingRow, settingsPage } from "./settings-shell.js";
 import { machinesPageScript, machinesSectionHtml } from "./settings-machines.js";
+import { securityResearchScript, securityResearchSectionHtml } from "./settings-security-research.js";
 
 /** Settings > Nodes (/portal/settings/nodes) and Settings > Admin (/portal/settings/admin). */
 export function registerSettingsOpsPages(app: FastifyInstance): void {
@@ -210,6 +211,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       </table>
     </div>
     </div>
+    ${securityResearchSectionHtml}
     <div id="userMgmtSection" class="hidden">
     <div class="card">
       <h2 class="u-mt-0">User management</h2>
@@ -538,6 +540,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       }
     });
 
+    ${securityResearchScript}
     /* ── User management (admin only; routes/admin-users.ts) ── */
     const userView = { filter: "all", q: "", page: 1, pages: 1, selfUserId: "" };
     const STATUS_TONE = { verified: "ok", unverified: "warn", agent: "info" };
@@ -691,6 +694,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       loadInvites();
       document.getElementById("hostRequestSection").classList.remove("hidden");
       loadHostRequests();
+      document.getElementById("securityResearchSection").classList.remove("hidden");
+      loadSecurityResearch();
       document.getElementById("userMgmtSection").classList.remove("hidden");
       document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
       loadUserManagement();

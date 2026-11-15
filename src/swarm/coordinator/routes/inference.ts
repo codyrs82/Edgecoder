@@ -32,7 +32,18 @@ import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
 import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity, securityLog } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
-import { resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
+import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
+import { readHeaderValue } from "../../coordinator-utils.js";
+import {
+  RESTRICTED_LOG_PROMPTS,
+  accountHoldsTier,
+  admitRestrictedCall,
+  agentMayHostTier,
+  restrictedCalls,
+  restrictedCatalog,
+  restrictedSubmitGate,
+  setRestrictedCanceller
+} from "../restricted.js";
 import {
   effectiveHardware,
   rateOracleConfig,
@@ -41,6 +52,7 @@ import {
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS
 } from "../economy.js";
+import { registerRestrictedRoutes } from "./restricted.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -159,6 +171,7 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
+  restrictedCalls.ended(subtaskId, "no_capacity");
   orderBook.removeBid(taskId);
   // Nothing ran, so nothing was spent: the refund is the whole reserve (refundTaskSubmit is idempotent).
   await refundTaskSubmit(taskId);
@@ -257,6 +270,41 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
     });
 }
 
+/** Whose /inference/models this is: the account the portal names, or the signing agent's owner. */
+async function modelViewerAccount(req: { headers: Record<string, unknown> }): Promise<string | undefined> {
+  const h = (req.headers ?? {}) as Record<string, unknown>;
+  if (h["x-portal-service-token"] !== undefined && hasPortalServiceToken(h)) return readHeaderValue(h, "x-edgecoder-account") || undefined;
+  const agentId = agentSignatureAtGate(h, "GET", "/inference/models");
+  if (!agentId) return undefined;
+  return (await pgStore?.getAgentOwnership(agentId))?.accountId ?? agentId;
+}
+
+/**
+ * Security research tier: a suspended or revoked entitlement cancels the call at once, claimed or
+ * not. The requester's stream ends with the reason, the subtask is settled as failed (the agent's
+ * later chunks and result are refused: it no longer holds a claim), and anything set aside is refunded.
+ */
+/** Restricted calls cancelled by a suspension: the requester's stream read answers with the reason. */
+const restrictedCancelled = new Map<string, { accountId: string; reason: string; atMs: number }>();
+setInterval(() => {
+  const cutoff = Date.now() - NO_CAPACITY_KEEP_MS;
+  for (const [taskId, c] of restrictedCancelled) if (c.atMs < cutoff) restrictedCancelled.delete(taskId);
+}, 60_000).unref?.();
+
+setRestrictedCanceller(async (call, reason) => {
+  restrictedCancelled.set(call.taskId, { accountId: call.accountId, reason, atMs: Date.now() });
+  const timer = claimDeadlines.get(call.subtaskId);
+  if (timer) clearTimeout(timer);
+  claimDeadlines.delete(call.subtaskId);
+  if (queue.getSubtask(call.subtaskId)) {
+    queue.complete({ subtaskId: call.subtaskId, taskId: call.taskId, agentId: "coordinator", ok: false, output: "", error: reason, durationMs: 0 });
+  }
+  inferenceStreams.finish(call.subtaskId, reason);
+  orderBook.removeBid(call.taskId);
+  await refundTaskSubmit(call.taskId);
+  coordinatorApp.log.warn({ taskId: call.taskId, subtaskId: call.subtaskId, agentId: call.agentId, reason }, "restricted_call_cancelled");
+});
+
 const inferenceSubmitSchema = z.object({
   taskId: z.string().min(1).max(200),
   submitterAccountId: z.string().min(1).max(200),
@@ -288,9 +336,13 @@ const inferenceSubmitSchema = z.object({
 });
 
 export function registerInferenceRoutes(app: CoordinatorApp): void {
+  // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
+  registerRestrictedRoutes(app);
   /** Models agents on the network can run now, with how many agents and the price per class. */
-  app.get("/inference/models", async () => {
+  app.get("/inference/models", async (req) => {
     const now = Date.now();
+    // Security research tier: a restricted model is listed only to an account entitled to it.
+    const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
     const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId> }>();
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
@@ -298,6 +350,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
       for (const m of new Set(routableModels(cap))) {
+        const tier = restrictedCatalog.tierOf(m);
+        if (tier && !accountHoldsTier(viewer, tier, now)) continue;
         const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>() };
         e.agents++;
         if (queue.agentClaims(id) === 0) e.idle++;
@@ -315,7 +369,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // idleAgents / freeSlots / waiting: how busy this coordinator is for the model, so the portal can
         // send new calls where a slot is free (inference runs where it was submitted; it is never relayed).
         // freeSlots counts parallel model slots, so two half-busy coordinators still compare by room left.
-        .map(([model, e]) => ({ model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
+        .map(([model, e]) => {
+          const restricted = restrictedCatalog.tierOf(model);
+          // restricted: runs only on your own machines or a lease you hold, never as a network call.
+          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(restricted ? { restricted } : {}) };
+        })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
     };
@@ -341,6 +399,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       body.computeClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(chosen.computeClass) ? (chosen.computeClass as typeof body.computeClass) : "any";
       routed = { job, result, summary };
     }
+    // Security research tier: a restricted model needs an entitlement and your own or leased machines.
+    const gate = await restrictedSubmitGate(accountId, body.model, { target: body.target, reservationId: body.reservationId });
+    if (!gate.ok) return reply.code(gate.status).send(gate.body);
+    const restrictedTier = gate.tier;
     const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
     // Unbilled targets: a lease you already paid for, or your own machines.
     let onlyAccountId: string | undefined;
@@ -351,11 +413,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (!lease || lease.accountId !== accountId || lease.status !== "active" || Date.now() >= lease.endMs) return reply.code(404).send({ error: "reservation_not_active" });
       const cap = agentCapabilities.get(lease.agentId);
       if (!agentHasModel(cap, body.model)) return reply.code(409).send({ error: "reserved_agent_lacks_model", model: body.model, models: cap?.localModelCatalog ?? [] });
+      if (restrictedTier && !agentMayHostTier(lease.agentId, restrictedTier, lease.agentAccountId)) return reply.code(409).send({ error: "no_restricted_host", model: body.model, reason: "reserved_agent_not_approved_to_host" });
       reservationId = lease.id;
     } else if (body.target === "mine") {
       let own = 0;
-      for (const [id] of holders) if ((await rewardAccountForAgent(id)) === accountId) own++;
+      let approved = 0;
+      for (const [id] of holders) {
+        if ((await rewardAccountForAgent(id)) !== accountId) continue;
+        own++;
+        if (restrictedTier && agentMayHostTier(id, restrictedTier, accountId)) approved++;
+      }
       if (own === 0) return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model });
+      if (restrictedTier && approved === 0) return reply.code(409).send({ error: "no_restricted_host", model: body.model, reason: "no_own_agent_approved_to_host" });
       onlyAccountId = accountId;
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
       return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
@@ -424,6 +493,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
       recordDecision(body.taskId, subtask.id, routed.job, routed.result);
     }
+    if (restrictedTier) {
+      admitRestrictedCall({
+        subtaskId: subtask.id, taskId: body.taskId, accountId, model: body.model, tier: restrictedTier,
+        placement: reservationId ? "reserved" : "mine", ...(reservationId ? { reservationId } : {}),
+      });
+    }
     inferenceStreams.open(subtask.id, body.taskId);
     armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
@@ -449,6 +524,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const claim = queue.getClaim(body.subtaskId);
     if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
     const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
+    // Security research tier: the call log records how a restricted call ended (prompts only if configured).
+    if (r === "ok" && body.done && restrictedCalls.get(body.subtaskId)) {
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0, maxTokensOf(claim.subtask.input));
+      restrictedCalls.ended(body.subtaskId, body.error ? "failed" : "ok", {
+        ...(body.promptTokens !== undefined ? { promptTokens: bounded.promptTokens } : {}),
+        ...(body.outputTokens !== undefined ? { outputTokens: bounded.outputTokens } : {}),
+        ...(RESTRICTED_LOG_PROMPTS ? { prompt: claim.subtask.input, output: inferenceStreams.replyText(body.subtaskId) ?? "" } : {}),
+      });
+    }
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
     if (r === "ok" && body.done && inferenceStreams.isDone(body.subtaskId) && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
@@ -474,12 +558,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
     const billing = taskBilling.get(body.taskId);
     // A call cancelled for lack of capacity was refunded (its billing entry is gone): its owner is kept with the cancellation.
-    const owner = billing?.accountId ?? noCapacity.get(body.taskId)?.accountId;
+    const owner = billing?.accountId ?? noCapacity.get(body.taskId)?.accountId ?? restrictedCancelled.get(body.taskId)?.accountId;
     const reader = await resolveSubmitterAccount(req as any, owner ?? "", "/inference/stream");
     if ("error" in reader || !owner || reader.accountId !== owner) return reply.code(403).send({ error: "not_requester" });
     // The subtask must be one of this task's: owning a task gives no read of another's stream.
     if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
     if (noCapacity.has(body.taskId)) return noCapacityReply(reply, noCapacity.get(body.taskId));
+    const cancelled = restrictedCancelled.get(body.taskId);
+    if (cancelled) return reply.code(403).send({ error: cancelled.reason, message: "Security research access for this account was suspended; the call was cancelled." });
     if (!billing) return reply.code(403).send({ error: "not_requester" });
     const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
     if (!r) return reply.code(404).send({ error: "unknown_stream" });

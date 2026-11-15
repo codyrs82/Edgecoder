@@ -1523,7 +1523,8 @@ export interface ComputeOverview {
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
   /** Network models; model calls are priced per token (cSats per million tokens in / out). */
-  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
+  /** restricted: a security research tier model, listed only to entitled accounts; never a network call. */
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
 }

@@ -41,6 +41,7 @@ import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
+import { restrictedClaimAllowed } from "./restricted.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -116,13 +117,15 @@ export function forgetAgentLoad(agentId: string): void {
 
 /**
  * The claim rule /pull applies (besides the queue's own exclusions): sandbox, peer grant, model,
- * reservation or own-machine placement, market match and capability. `pullerAccount` undefined
+ * reservation or own-machine placement, market match, capability and restricted models. `pullerAccount` undefined
  * means "not known here" (nudge targeting): an own-machines-only job is then not ruled out.
  */
 export function claimRule(agentId: string, capability: Capability | undefined, pullerAccount: string | undefined, nowMs = Date.now()): (subtask: Subtask) => boolean {
   const lease = reservations.activeForAgent(agentId, nowMs);
   return (subtask) => {
     if (!agentMayClaim(capability, subtask)) return false;
+    // Security research tier: a restricted model runs only where its admitted call allows (restricted.ts).
+    if (!restrictedClaimAllowed(agentId, capability, pullerAccount, lease, subtask, nowMs)) return false;
     // A model call longer than the window the agent serves with goes to an agent with a bigger one.
     if (subtask.kind === "inference" && !fitsContextWindow(agentId, subtask)) return false;
     // A subtask granted to us by its origin: only while enough of the grant is left to run it.

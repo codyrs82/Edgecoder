@@ -111,7 +111,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         const d = networkFor(ctx.accountId);
         const inputs = async () => {
           const [ov, leases] = await Promise.all([computeOverview(d).catch(() => null), listReservations(d).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => [])]);
-          return routeInputsFrom({ localModels: [], machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+          return routeInputsFrom({ localModels: [], machines: ov?.account?.machines, networkModels: ov?.models?.filter((m) => !m.restricted), classes: ov?.classes, leases });
         };
         // The client-side plan: free places (a lease you hold, your own machines), and the fallback
         // for coordinators that do not route "auto" themselves.

@@ -507,3 +507,59 @@ changes both). `num_ctx` and `keep_alive` are sent with each request.
 **Not changed here (protected paths):** `deploy/**`, `Dockerfile*`, `.github/**`. Proposed:
 
 - make https mandatory for non-loopback coordinator URLs in the installer.
+
+## 5. Security research tier (restricted models)
+
+Restricted models are listed by the operator in `RESTRICTED_MODELS_JSON` on the coordinators. The
+list is empty by default, and no model is named here. The policy and the operator steps are in
+[docs/security-research-tier.md](../security-research-tier.md). This section covers the attacker
+of this document: someone who installs the agent and controls their machine.
+
+**Assets.** The restricted models' outputs. The tier's promise to an entitled organisation: its
+calls run only on machines it owns or reserved, and are logged.
+
+**Controls (all enforced on the coordinator)**
+
+- **The list is the operator's.** No agent report, peer gossip or request field can make a model
+  open or restricted. Tags are compared normalised: lower case, `:latest` added when no tag is
+  named.
+- **Listing.** `GET /inference/models` and the `/v1/models` lists built on it leave out a
+  restricted model unless the viewer holds a valid `security_research` entitlement. The viewer is
+  the account the portal names (portal service token) or the owner of the signing agent. A
+  mesh-token or anonymous caller never sees one.
+- **Auto.** `model: "auto"` (client-side plans and the coordinator's best-fit routing) never
+  chooses a restricted model, and the submit gate runs again on the model auto resolved to.
+- **Submit.** `/inference/submit` refuses a restricted model with `403 restricted_model` when the
+  account holds no valid entitlement, and also when it asks for the open network. Code work
+  (`/submit`) naming one is always refused. A per-account rate limit applies.
+- **Claim.** `claimRule` (`src/swarm/coordinator/dispatch.ts`) calls `restrictedClaimAllowed` right after the sandbox rule.
+  The model a subtask runs on is checked: the named model, or for code work the agent's active
+  model. A restricted subtask is claimable only if all of these hold:
+  - it was admitted at submit on this coordinator. A gossiped, replayed, restored or forged
+    subtask has no admitted call, so it is never claimable, whatever its `onlyAccountId` or
+    `reservationId` say;
+  - the requester is still entitled;
+  - the puller's signed `/pull` carried `allowRestrictedModels` (`AGENT_ALLOW_RESTRICTED_MODELS=1`)
+    within the last 5 minutes;
+  - the puller's owner holds a valid `security_research_host` entitlement;
+  - placement: the puller is the requester's own machine, or it is held by the lease the call
+    named, and that lease belongs to the requester.
+- **Fail closed.** The coordinator honours an entitlement only while the portal has confirmed it
+  within `RESTRICTED_ACCESS_MAX_STALE_MS`. A suspension or revocation is pushed at once. The
+  account's calls in flight are then cancelled: the stream is closed, the subtask is settled as
+  failed, and the agent's later chunks and result are refused.
+
+**What the attacker can still do**
+
+- **A host keeps the weights and sees the prompts it runs.** An approved host is trusted with both.
+  That is why hosting needs an admin-approved entitlement, and why the intended hosts are the
+  entitled organisation's own machines or reserved machines whose owners were approved. An
+  ordinary agent, and an agent that lies about its opt-in flag without the owner's entitlement,
+  never gets the work.
+- **A host can run the model locally, outside the network.** Nothing here stops anyone who
+  downloaded a model from running it. The tier controls what the network distributes and routes,
+  not what a machine owner does with their own files.
+- **An entitled account can misuse outputs.** The controls for that are eligibility, the signed
+  authorization agreement, logging, the rate limit and instant suspension, not technology.
+- **A cancelled call keeps running on the agent until it notices.** The coordinator stops relaying
+  and accepting the call, but cannot force a remote process to stop.

@@ -311,6 +311,7 @@ Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
 | `SANDBOX_MODE` | `docker` (swarm-only), else `none` | `docker` or `none`. Any other value is treated as `none` with a warning, and the node takes no swarm tasks. |
 | `SANDBOX_REQUIRED` | unset | `true` refuses to run a task without a sandbox. |
 | `AGENT_INFERENCE_ONLY` | unset | `1` or `true` with `SANDBOX_MODE=none`: the agent pulls from the coordinator and gets inference subtasks only (a model on text, never task code). For GPU container hosts that cannot run Docker. Ignored when a sandbox is configured. |
+| `AGENT_ALLOW_RESTRICTED_MODELS` | unset | `1` or `true`: this machine may take restricted-model calls (security research tier). The coordinator also needs the owner's admin-approved host entitlement; without both it never gets them. See `docs/security-research-tier.md` in the repository. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `1048576` | Cap on captured output per stream. |
 | `SANDBOX_SECCOMP_PROFILE` | unset | Path of a seccomp profile passed to `docker run`. |
 | `EDGECODER_UNSAFE_HOST_EXECUTION` | unset | `1` allows running code on the host without a sandbox (local use only). |
@@ -607,6 +608,11 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `INFERENCE_DEFAULT_MAX_TOKENS` | integer tokens, 16 to 32768 (output cap for a network model call that sets no `maxTokens`; an agent is never paid for output past a call's cap) | `4096` |
+| `RESTRICTED_MODELS_JSON` | JSON object of model tag to tier, `{"<tag>": "security_research"}`; the operator's list of restricted models (listed and served only to entitled accounts, only on their own or leased machines). An unreadable value stops the coordinator | unset (no restricted models) |
+| `RESTRICTED_MODEL_LOG_PROMPTS` | `true` or `false`: keep prompts and outputs of restricted-model calls in the call log (`false`: account, model, agent, times and token counts only) | `false` |
+| `RESTRICTED_MODEL_RATE_LIMIT_PER_MIN` | integer, 1 to 10000: restricted-model calls per account per minute (`429 restricted_model_rate_limited` past it) | `20` |
+| `RESTRICTED_ACCESS_SYNC_MS` | integer ms, 5000 to 3600000: how often the coordinator re-reads security research entitlements from the portal | `60000` |
+| `RESTRICTED_ACCESS_MAX_STALE_MS` | integer ms, 30000 to 86400000: an entitlement the portal has not confirmed for this long is no longer honoured (fail closed) | `600000` |
 | `PREAUTH_FAILURE_MAX_PER_IP` | integer ≥ 1 | `120` |
 | `AUTO_BLACKLIST_TTL_MS` | integer ≥ 0 | `3600000` |
 | `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |

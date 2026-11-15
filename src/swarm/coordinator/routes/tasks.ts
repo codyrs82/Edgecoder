@@ -119,6 +119,7 @@ import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
 import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
+import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
 /**
@@ -153,6 +154,12 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId);
     if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
     body.submitterAccountId = submitter.accountId;
+    // Security research tier: code work runs on the open pool, so a restricted model is refused here
+    // (restricted calls go through /inference/submit on your own or leased machines).
+    if (body.requestedModel) {
+      const gate = await restrictedSubmitGate(body.submitterAccountId, body.requestedModel, { codeTask: true });
+      if (!gate.ok) return reply.code(gate.status).send(gate.body);
+    }
     if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
     if (body.submitterAccountId !== "anonymous") {
       const policy = await enforceContributionFirstPolicy(body.submitterAccountId);
@@ -383,6 +390,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const pullerAccount = await rewardAccountForAgent(body.agentId);
     // Fast dispatch (dispatch.ts): the agent's model slots, and whether it takes work_available nudges.
     noteAgentPull(body.agentId, body);
+    // Security research tier: only a signed pull can opt this agent in to restricted models.
+    noteRestrictedOptIn(body.agentId, Boolean(verified), body.allowRestrictedModels, pullerAccount);
     const canTake = claimRule(body.agentId, capability, pullerAccount);
     const claims = queue.activeClaims();
     const nowMs = Date.now();
@@ -399,6 +408,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR)
     );
     if (task) noteClaimed(task.id);
+    if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);
     if (task) {
       // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
       const match = orderBook.canMatch(body.agentId, task.taskId);

@@ -1560,7 +1560,9 @@ async function loop(): Promise<void> {
 
         // Our model slots (the coordinator hands a call only to an agent with one free) and that we take nudges.
         const freeInferenceSlots = Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size);
-        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true };
+        // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
+        // research tier; the coordinator also needs the owner's admin-approved host entitlement).
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
