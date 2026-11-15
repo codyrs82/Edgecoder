@@ -66,6 +66,7 @@ import { registerSecurityRoutes } from "./coordinator/routes/security.js";
 import { registerAgentMeshRoutes } from "./coordinator/routes/agent-mesh.js";
 import { registerPortalRoutes } from "./coordinator/routes/portal.js";
 import { registerAdminRoutes } from "./coordinator/routes/admin.js";
+import { registerAdminNetworkRoutes } from "./coordinator/routes/admin-network.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
 import { onInferenceClaimable } from "./coordinator/routes/inference.js";
@@ -218,6 +219,8 @@ registerEscalationRoutes(app);
 registerBleSyncRoutes(app);
 registerDebugRoutes(app);
 registerAdminRoutes(app);
+// GET /admin/network (admin token): the live network for the portal's admin page.
+registerAdminNetworkRoutes(app);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {

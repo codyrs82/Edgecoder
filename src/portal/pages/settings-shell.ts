@@ -16,7 +16,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
  * /portal/settings/. Admin is revealed client-side for system admins only; its APIs enforce
  * authorization server-side.
  */
-export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue";
+export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue" | "network";
 
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
   { key: "general", label: "General", icon: "layers", href: "/portal/settings#general" },
@@ -28,7 +28,8 @@ export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: st
   { key: "nodes", label: "Nodes", icon: "server", href: "/portal/settings/nodes" },
   { key: "install", label: "Install agent", icon: "download", href: "/portal/settings/install" },
   { key: "admin", label: "Admin", icon: "shield", href: "/portal/settings/admin", adminOnly: true },
-  { key: "revenue", label: "Revenue", icon: "wallet", href: "/portal/settings/revenue", adminOnly: true }
+  { key: "revenue", label: "Revenue", icon: "wallet", href: "/portal/settings/revenue", adminOnly: true },
+  { key: "network", label: "Network", icon: "globe", href: "/portal/settings/network", adminOnly: true }
 ];
 
 /**
