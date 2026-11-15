@@ -610,6 +610,7 @@ Every service writes one JSON object per line to stdout (pino): `level`, `time`,
 | `process_*`, `nodejs_*` | none | every service (CPU, memory, event loop lag, GC, open handles) |
 | `edgecoder_queue_depth`, `edgecoder_queue_results` | `service` | coordinator |
 | `edgecoder_connected_agents` | `service` | coordinator |
+| `edgecoder_dispatch_pickup_p50_ms`, `edgecoder_dispatch_pickup_p90_ms`, `edgecoder_dispatch_nudges_sent` | `service` | coordinator: time from a subtask becoming claimable to an agent claiming it (last 1000 claims), and `work_available` nudges sent |
 | `edgecoder_payout_reconcile_status` | `service`, `status` (`ok`, `alert`, `tripped`, `error`, `unsupported`, `never_run`; 1 for the current one) | coordinator |
 | `edgecoder_payout_reconcile_last_run_timestamp_seconds` | `service` | coordinator |
 | `edgecoder_anchor_proxy_bitcoind_reachable`, `edgecoder_anchor_proxy_block_height`, `edgecoder_anchor_proxy_last_health_check_timestamp_seconds` | `service` | anchor proxy (updated by its health check) |

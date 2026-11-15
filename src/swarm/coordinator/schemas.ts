@@ -219,7 +219,14 @@ export const taskSchema = z.object({
   minReliability: z.number().positive().max(1).optional()
 });
 
-export const pullSchema = z.object({ agentId: z.string() });
+export const pullSchema = z.object({
+  agentId: z.string(),
+  /** Parallel model calls the agent runs (AGENT_PARALLEL_INFERENCE) and how many are free now. */
+  inferenceSlots: z.number().int().min(1).max(16).optional(),
+  freeInferenceSlots: z.number().int().min(0).max(16).optional(),
+  /** The agent pulls at once on a work_available frame over its mesh WebSocket (dispatch.ts). */
+  wake: z.boolean().optional()
+});
 export const resultSchema = z.object({
   subtaskId: z.string(),
   taskId: z.string(),

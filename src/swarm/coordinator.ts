@@ -67,14 +67,19 @@ import { registerAgentMeshRoutes } from "./coordinator/routes/agent-mesh.js";
 import { registerPortalRoutes } from "./coordinator/routes/portal.js";
 import { registerAdminRoutes } from "./coordinator/routes/admin.js";
 import { initCoordinator } from "./coordinator/init.js";
+import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
 
 // Read at scrape time.
 registerCoordinatorMetrics(metrics, {
   queue: () => queue.status(),
   connectedAgents: () => connectedAgentCount(),
   knownAgents: () => agentCapabilities.size,
-  payoutReconcile: () => payoutReconciler.last()
+  payoutReconcile: () => payoutReconciler.last(),
+  dispatch: () => pickupStats()
 });
+
+// Fast dispatch: a subtask that becomes claimable is announced to idle eligible agents (dispatch.ts).
+queue.onClaimable(onClaimable);
 
 // #51: subtasks failed at the retry cap go through finalizeFailedSubtask (coordinator/results.ts).
 queue.onLeaseFailure((result) => {

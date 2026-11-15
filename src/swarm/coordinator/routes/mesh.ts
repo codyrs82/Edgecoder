@@ -15,6 +15,7 @@ import type {
   SandboxMode
 } from "../../../common/types.js";
 import { checkPeerRegistration, isAllowlistedKey } from "../../../mesh/peer-trust.js";
+import { setNudgeTransport } from "../dispatch.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../../../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../../../trust/identity-challenge.js";
@@ -432,6 +433,27 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
 // displace an authenticated one, and every message must come from the bound peer.
 const MESH_WS_REQUIRE_SIGNED = CC.MESH_WS_REQUIRE_SIGNED;
 const meshWsBindings = new Map<string, { socket: unknown; authenticated: boolean }>();
+
+// Fast dispatch (../dispatch.ts): work_available nudges go only down a socket whose bind proved the
+// agent's registered key, and only to registered agents (never to a peer coordinator's socket).
+setNudgeTransport({
+  connected: (agentId) => {
+    const b = meshWsBindings.get(agentId);
+    return !!b && b.authenticated && agentCapabilities.has(agentId) && (b.socket as { readyState?: number }).readyState === 1;
+  },
+  send: (agentId, frame) => {
+    const b = meshWsBindings.get(agentId);
+    if (!b || !b.authenticated || !agentCapabilities.has(agentId)) return false;
+    const ws = b.socket as { readyState?: number; send: (data: string) => void };
+    if (ws.readyState !== 1) return false;
+    try {
+      ws.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+});
 
 export function registerMeshRoutes(app: CoordinatorApp): void {
   app.get("/identity", async () => ({

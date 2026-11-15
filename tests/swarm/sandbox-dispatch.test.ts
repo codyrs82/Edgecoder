@@ -51,7 +51,11 @@ describe("coordinator /pull sandbox rule", () => {
   it("the /pull handler applies the rule inside claim(), before every other eligibility check", () => {
     const src = readFileSync("src/swarm/coordinator/routes/tasks.ts", "utf8");
     expect(src).not.toContain("pullSandboxRejection");
-    expect(src).toMatch(/\(subtask\) => \{\s*if \(!agentMayClaim\(capability, subtask\)\) return false;/);
+    // The claim rule lives in dispatch.ts (shared with nudge targeting) and is applied inside claim().
+    expect(src).toMatch(/const canTake = claimRule\(body\.agentId, capability, pullerAccount\);/);
+    expect(src).toMatch(/\(subtask\) => canTake\(subtask\) && mayTakeNow\(/);
+    const rule = readFileSync("src/swarm/coordinator/dispatch.ts", "utf8");
+    expect(rule).toMatch(/return \(subtask\) => \{\s*if \(!agentMayClaim\(capability, subtask\)\) return false;/);
   });
 });
 
