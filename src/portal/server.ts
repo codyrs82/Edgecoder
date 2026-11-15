@@ -28,6 +28,7 @@ import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
+import { registerNetworkAdminRoutes } from "./routes/network-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
@@ -888,6 +889,22 @@ registerRevenueRoutes(
   { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, buildAccessContext },
   { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare }
 );
+
+// Settings > Network for system admins: every coordinator's GET /admin/network, merged, agents joined to accounts.
+registerNetworkAdminRoutes(app, {
+  coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "",
+  EXTERNAL_HTTP_TIMEOUT_MS,
+  coordinatorUrls: async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY)),
+  getCurrentUser,
+  buildAccessContext,
+  lookupOwners: async (agentIds, userIds) => {
+    const [nodes, users] = store ? await Promise.all([store.listNodeOwnersByIds(agentIds), store.listUserEmailsByIds(userIds)]) : [[], []];
+    return {
+      nodeOwners: new Map(nodes.map((n) => [n.nodeId, { userId: n.ownerUserId, email: n.ownerEmail }])),
+      userEmails: new Map(users.map((u) => [u.userId, u.email]))
+    };
+  }
+});
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

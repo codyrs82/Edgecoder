@@ -1105,6 +1105,23 @@ export class PortalStore {
     return result.rows.map((row: any) => String(row.node_id));
   }
 
+  /** Owner (user id and email) of each of these nodes that is enrolled (admin network view). */
+  async listNodeOwnersByIds(nodeIds: string[]): Promise<Array<{ nodeId: string; ownerUserId: string; ownerEmail: string }>> {
+    if (!nodeIds.length) return [];
+    const result = await this.pool.query(
+      `SELECT node_id, owner_user_id, owner_email FROM portal_node_enrollments WHERE node_id = ANY($1::text[])`,
+      [nodeIds]
+    );
+    return result.rows.map((row: any) => ({ nodeId: String(row.node_id), ownerUserId: String(row.owner_user_id), ownerEmail: String(row.owner_email) }));
+  }
+
+  /** Email of each of these users that exists (admin network view). */
+  async listUserEmailsByIds(userIds: string[]): Promise<Array<{ userId: string; email: string }>> {
+    if (!userIds.length) return [];
+    const result = await this.pool.query(`SELECT user_id, email FROM portal_users WHERE user_id = ANY($1::text[])`, [userIds]);
+    return result.rows.map((row: any) => ({ userId: String(row.user_id), email: String(row.email) }));
+  }
+
   async listNodesByOwner(userId: string): Promise<NodeEnrollment[]> {
     const result = await this.pool.query(
       `SELECT

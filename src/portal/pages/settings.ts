@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { registerSettingsComputePage } from "./settings-compute.js";
 import { registerSettingsOpsPages } from "./settings-ops.js";
 import { registerSettingsRevenuePage } from "./settings-revenue.js";
+import { registerSettingsNetworkPage } from "./settings-network.js";
 import { LEGACY_SETTINGS_REDIRECTS, SETTINGS_HELPERS_SCRIPT, redirectKeepingQuery, settingRow, settingsPage } from "./settings-shell.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 
@@ -346,6 +347,7 @@ export function registerSettingsPages(app: FastifyInstance): void {
   registerSettingsComputePage(app);
   registerSettingsOpsPages(app);
   registerSettingsRevenuePage(app);
+  registerSettingsNetworkPage(app);
   // The old top-level pages (Wallet, Market, Install agent, Nodes, Coordinator ops) live in Settings now.
   for (const [from, to] of Object.entries(LEGACY_SETTINGS_REDIRECTS)) app.get(from, redirectKeepingQuery(to));
 }

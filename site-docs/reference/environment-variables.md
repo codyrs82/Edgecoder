@@ -496,7 +496,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `PORTAL_EXTERNAL_HTTP_TIMEOUT_MS` | integer ≥ 100 | `7000` |
 | `RESEND_FROM_EMAIL` | string | unset |
 | `CONTROL_PLANE_ADMIN_TOKEN` | string (also the credential `/internal/nodes/:nodeId/approval` requires, as `x-admin-token` or Bearer) | unset |
-| `COORDINATOR_ADMIN_TOKEN` | string: the coordinators' `ADMIN_API_TOKEN`, for Settings > Revenue (EdgeCoder's fee pool report and withdrawals); sent server-side only, to allowlisted coordinators | unset (the page reports it is not configured) |
+| `COORDINATOR_ADMIN_TOKEN` | string: the coordinators' `ADMIN_API_TOKEN`, for Settings > Revenue (EdgeCoder's fee pool report and withdrawals) and Settings > Network (each coordinator's `GET /admin/network`); sent server-side only, to allowlisted coordinators | unset (the page reports it is not configured) |
 | `PORTAL_COORDINATOR_TOKEN` | string | unset |
 | `PORTAL_COORDINATOR_HOSTS` | comma list | hosts of `COORDINATOR_DISCOVERY_URLS` |
 | `PORTAL_SESSION_TTL_MS` | integer ms, 1000 to 31 days | `604800000` |
