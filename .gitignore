@@ -51,3 +51,6 @@ deploy/infra/secrets/
 
 # bundled agent runtime copied in by scripts/bundle-agent-resources.sh at build time
 desktop/src-tauri/resources/agent/
+
+# Stress harness run artifacts and per-run throwaway secrets (scripts/stress/)
+.stress-runs/

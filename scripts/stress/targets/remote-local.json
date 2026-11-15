@@ -1,0 +1,21 @@
+{
+  "name": "remote-local",
+  "kind": "remote",
+  "coordinators": [
+    { "id": "coord-a", "url": "http://ec-stress-coord-a:4301" },
+    { "id": "coord-b", "url": "http://ec-stress-coord-b:4301" }
+  ],
+  "portalUrl": "http://ec-stress-portal:4310",
+  "credentialsFile": "/stress/credentials.json",
+  "settingsFile": "/stress/stack-settings.json",
+  "allowedScenarios": ["smoke", "ramp", "soak", "churn", "coordinator-kill", "malicious", "market-burst"],
+  "allowDatabase": false,
+  "allowDocker": false,
+  "allowAdminWrites": false,
+  "limits": { "maxAgents": 200, "maxBuyers": 30, "maxDurationSec": 1800, "maxTopupSats": 100000 },
+  "inferenceModel": "stress-sim:1b",
+  "lndServername": "ec-stress-lnd-payee",
+  "operatorNotes": [
+    "remote-local is the local cluster reached by URL only from inside the docker network (scripts/stress/remote-smoke.sh): it exercises the bundled load generator and the HTTP-only invariant checks exactly as on live."
+  ]
+}
