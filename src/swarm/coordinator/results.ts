@@ -551,6 +551,9 @@ export async function settleVerification(outcome: VerificationOutcome<ResultMeta
   );
   if (peerOffered) for (const w of payable) await accrueResultCredits(w, { originChargedMsat });
   releaseDependents(outcome.originalSubtaskId, outcome.output);
+  // The verified result was the task's last open subtask: return what it set aside and did not use
+  // (/result returns early for held results, so nothing else settles it).
+  await settleTaskIfDone(original.meta.taskId);
 }
 
 /**
