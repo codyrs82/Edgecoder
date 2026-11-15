@@ -530,3 +530,33 @@ describe("#104: per-kind opt-in and comparators", () => {
     expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false, kinds: ["micro_loop"] })).toMatch(/micro_loop.*inference is never verified/);
   });
 });
+
+describe("BHV001 forced verification (VerificationFlags)", () => {
+  it("force samples a verifiable kind whatever the draw, only with verification on, never inference", async () => {
+    const never = () => 0.999999;
+    const on = new ResultVerifier({ rate: 0.01 }, never);
+    expect(on.shouldVerify("a", "single_step")).toBe(false);
+    expect(on.shouldVerify("a", "single_step", { force: true })).toBe(true);
+    expect(on.shouldVerify("a", "inference", { force: true })).toBe(false);
+    expect(on.samplesKind("micro_loop")).toBe(true);
+    const off = new ResultVerifier({ rate: 0 }, never);
+    expect(off.shouldVerify("a", "single_step", { force: true })).toBe(false);
+    expect(off.samplesKind("single_step")).toBe(false);
+  });
+
+  it("a flag covers the next N results, refreshes when raised again, and expires", async () => {
+    const { VerificationFlags } = await import("../../src/swarm/verification.js");
+    let now = 1_000;
+    const flags = new VerificationFlags(2, 10_000, 100, () => now);
+    expect(flags.take("a")).toBe(false);
+    flags.flag("a");
+    expect(flags.take("a")).toBe(true);
+    flags.flag("a"); // refreshed to 2
+    expect(flags.take("a")).toBe(true);
+    expect(flags.take("a")).toBe(true);
+    expect(flags.take("a")).toBe(false);
+    flags.flag("b");
+    now += 10_001;
+    expect(flags.isFlagged("b")).toBe(false);
+  });
+});

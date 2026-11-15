@@ -50,6 +50,16 @@ export function creditedDurationMs(reportedMs: number, claim: ClaimRecord, now =
   return Math.max(0, Math.min(reported, measuredMs, timeout));
 }
 
+/**
+ * The coordinator's own measurement of a result: claim to receipt. Used by the behaviour rules
+ * (BHV001 "suspiciously fast"), which must never trust the duration the agent reports. A claim
+ * without a recorded time counts as taking the whole subtask timeout (never "fast").
+ */
+export function serverMeasuredDurationMs(claim: ClaimRecord, now = Date.now()): number {
+  if (typeof claim.claimedAt === "number" && Number.isFinite(claim.claimedAt)) return Math.max(0, now - claim.claimedAt);
+  return Number.isFinite(claim.subtask.timeoutMs) && claim.subtask.timeoutMs > 0 ? claim.subtask.timeoutMs : 0;
+}
+
 /** Deterministic report id so a re-posted result can never accrue twice. */
 export function resultReportId(subtaskId: string): string {
   return `result:${subtaskId}`;

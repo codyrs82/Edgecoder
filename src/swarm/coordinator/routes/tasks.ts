@@ -24,7 +24,8 @@ import {
   classifyResultAuth,
   creditedDurationMs,
   RESULT_ROUTE_BODY_LIMIT_BYTES,
-  resultBodyTooLarge
+  resultBodyTooLarge,
+  serverMeasuredDurationMs
 } from "../../result-integrity.js";
 import { executorKey, type ExecutionResult, type VerificationOutcome } from "../../verification.js";
 import { resultModelMismatch, subtaskModelEligible } from "../../model-catalog.js";
@@ -75,7 +76,8 @@ import {
   ENVELOPE_KEY_TTL_MS,
   REQUIRE_SIGNED_AGENT_REQUESTS,
   meshBlacklistReason,
-  evaluateAndEnforce
+  evaluateAndEnforce,
+  fastResultVerificationFlags
 } from "../agent-state.js";
 import { resolveSubmitterAccount, verifyAgentRequest, extractSignedHeaders, hasMeshToken } from "../auth.js";
 import {
@@ -588,8 +590,9 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     }
 
     // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
-    if (!isPeerForward) {
-      behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: body.durationMs });
+    if (!isPeerForward && claim) {
+      // BHV001 judges speed by the coordinator's clock (claim to receipt), never the reported duration.
+      behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: serverMeasuredDurationMs(claim), kind: claim.subtask.kind });
       evaluateAndEnforce(body.agentId);
     }
 
@@ -615,7 +618,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         const r = resultVerifier.recordReplica(body.subtaskId, execution);
         if (r && r.status === "pending") enqueueReplica(r.next);
         else if (r) verificationOutcome = r;
-      } else if (resultVerifier.shouldVerify(executorKey(execution), subtask.kind)) {
+      } else if (resultVerifier.shouldVerify(executorKey(execution), subtask.kind, { force: resultVerifier.samplesKind(subtask.kind) && fastResultVerificationFlags.take(body.agentId) })) {
         verificationHold = true;
         enqueueReplica(resultVerifier.start(subtask, execution));
         app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "result_held_for_verification");

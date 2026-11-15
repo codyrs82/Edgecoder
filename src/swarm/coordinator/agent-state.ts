@@ -22,6 +22,7 @@ import type { AgentPowerTelemetry } from "../power-policy.js";
 import { buildBlacklistEventHash } from "../../security/blacklist.js";
 import { AgentBehaviorTracker } from "../../security/behavior-tracker.js";
 import { AnomalyDetector } from "../../security/anomaly-detector.js";
+import { VerificationFlags, verificationConfigFromEnv } from "../verification.js";
 import { AutoBlacklister, type BlacklistAction } from "../../security/auto-blacklister.js";
 import { ReleaseManifestCache } from "../../security/release-manifest-cache.js";
 import { app } from "./app.js";
@@ -122,7 +123,15 @@ export const blacklistAuditLog: BlacklistRecord[] = [];
 
 // ── Behavioral monitoring ──
 export const behaviorTracker = new AgentBehaviorTracker();
-export const anomalyDetector = new AnomalyDetector();
+// BHV001 never strikes on speed for kinds this coordinator verifies by re-execution: it flags
+// the agent (fastResultVerificationFlags) and verification decides. With verification off
+// (RESULT_VERIFICATION_RATE=0) nothing is verifiable, so a sustained pattern can strike.
+const behaviourVerification = verificationConfigFromEnv();
+export const anomalyDetector = new AnomalyDetector({
+  suspiciouslyFastVerifiableKinds: behaviourVerification.rate > 0 ? [...behaviourVerification.kinds] : [],
+});
+/** Agents whose next verifiable results are verified whatever the sampling draw (BHV001 flags). */
+export const fastResultVerificationFlags = new VerificationFlags();
 /** Append a blacklist record this coordinator issues itself (signed with its key) and gossip it. */
 export function issueCoordinatorBlacklistRecord(input: {
   agentId: string;
@@ -211,6 +220,8 @@ export function evaluateAndEnforce(agentId: string): void {
         coordinatorId: identity.peerId,
       });
     }
+    // Flags are not strikes: BHV001's first stage sends the agent's next results to verification.
+    if (anomalies.some((a) => a.enforcement === "flag" && a.ruleId === "BHV001")) fastResultVerificationFlags.flag(agentId);
     autoBlacklister.processAnomalies(agentId, anomalies);
   }
 }

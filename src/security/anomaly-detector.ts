@@ -12,12 +12,28 @@ export interface AnomalyEvent {
   blacklistReason: BlacklistReasonCode;
   description: string;
   stats: Record<string, unknown>;
+  /**
+   * "flag": not a strike and never a blacklist on its own. The coordinator logs it and acts on it
+   * otherwise (BHV001: the agent's next verifiable results are sent to verification).
+   * Absent: a strike (CRITICAL blacklists at once, HIGH/WARN accumulate; AutoBlacklister).
+   */
+  enforcement?: "flag";
 }
 
 export interface AnomalyConfig {
-  // BHV001
+  // BHV001 (fast-result thresholds per kind: FAST_RESULT_THRESHOLD_MS in behavior-tracker.ts)
+  /** Fast successful results in the window that flag the agent for verification. */
   suspiciouslyFastMinCount: number;
-  suspiciouslyFastAvgThresholdMs: number;
+  /** Fast results of kinds the coordinator cannot verify that make a sustained pattern (a strike). */
+  suspiciouslyFastSustainedCount: number;
+  /** ...when they are at least this share of that agent's successful results of those kinds. */
+  suspiciouslyFastSustainedRatio: number;
+  /**
+   * Kinds whose results the coordinator verifies by re-execution (result verification on and a
+   * comparator for the kind). Fast results of these kinds are only ever sent to verification, and
+   * a forged one is then caught by the verification-mismatch rule (VRF001), never by speed alone.
+   */
+  suspiciouslyFastVerifiableKinds: string[];
   // BHV002
   massEmptyMinCount: number;
   massEmptyRatioThreshold: number;
@@ -48,7 +64,9 @@ export interface AnomalyConfig {
 
 export const DEFAULT_ANOMALY_CONFIG: AnomalyConfig = {
   suspiciouslyFastMinCount: 3,
-  suspiciouslyFastAvgThresholdMs: 1000,
+  suspiciouslyFastSustainedCount: 20,
+  suspiciouslyFastSustainedRatio: 0.8,
+  suspiciouslyFastVerifiableKinds: [],
   massEmptyMinCount: 5,
   massEmptyRatioThreshold: 0.6,
   duplicateForgeryConsecutiveMin: 3,
@@ -70,18 +88,44 @@ export const DEFAULT_ANOMALY_CONFIG: AnomalyConfig = {
 
 type AnomalyRule = (stats: AgentBehaviorStats, config: AnomalyConfig) => AnomalyEvent | null;
 
+/**
+ * BHV001, on coordinator-measured durations (claim to result receipt) against a per-kind threshold.
+ * Graduated: a few fast results only flag the agent (its next verifiable results go to
+ * verification); a strike needs a sustained pattern of fast results the coordinator cannot check
+ * by re-execution. Fast results of verifiable kinds never strike: verification decides those.
+ */
 const bhv001SuspiciouslyFast: AnomalyRule = (stats, config) => {
+  const verifiable = new Set(config.suspiciouslyFastVerifiableKinds);
+  let unverifiableFast = 0;
+  let unverifiableOk = 0;
+  for (const [kind, counts] of Object.entries(stats.fastResultsByKind ?? {})) {
+    if (verifiable.has(kind)) continue;
+    unverifiableFast += counts.fast;
+    unverifiableOk += counts.ok;
+  }
   if (
-    stats.suspiciouslyFastCount >= config.suspiciouslyFastMinCount &&
-    stats.avgDurationMs < config.suspiciouslyFastAvgThresholdMs
+    unverifiableFast >= config.suspiciouslyFastSustainedCount &&
+    unverifiableOk > 0 &&
+    unverifiableFast / unverifiableOk >= config.suspiciouslyFastSustainedRatio
   ) {
     return {
       ruleId: "BHV001",
       ruleName: "Suspiciously fast",
-      severity: "CRITICAL",
+      severity: "HIGH",
       blacklistReason: "forged_results",
-      description: `${stats.suspiciouslyFastCount} tasks completed in <500ms with avg ${Math.round(stats.avgDurationMs)}ms`,
-      stats: { suspiciouslyFastCount: stats.suspiciouslyFastCount, avgDurationMs: stats.avgDurationMs },
+      description: `${unverifiableFast}/${unverifiableOk} unverifiable results returned faster than their kind's minimum (server-measured)`,
+      stats: { suspiciouslyFastCount: stats.suspiciouslyFastCount, unverifiableFast, unverifiableOk, fastResultsByKind: stats.fastResultsByKind },
+    };
+  }
+  if (stats.suspiciouslyFastCount >= config.suspiciouslyFastMinCount) {
+    return {
+      ruleId: "BHV001",
+      ruleName: "Suspiciously fast",
+      severity: "WARN",
+      blacklistReason: "forged_results",
+      description: `${stats.suspiciouslyFastCount} results returned faster than their kind's minimum (server-measured); flagged for verification`,
+      stats: { suspiciouslyFastCount: stats.suspiciouslyFastCount, fastResultsByKind: stats.fastResultsByKind },
+      enforcement: "flag",
     };
   }
   return null;

@@ -86,8 +86,9 @@ agents), `STRESS_TOPUP_SATS`, plus `STRESS_RAMP_MAX_RATE`, `STRESS_CHURN_FRACTIO
 Simulated agents never execute code. An honest agent returns `stress-ok <sha256(input)[:24]>`, so
 two honest executions agree under the verifier's comparator (exit status + normalized stdout,
 `src/swarm/verification.ts`); a wrong output is a genuine mismatch. Work time is log-normal with a
-median of ≥ 1.2 s by default: the coordinator's BHV001 rule blacklists an agent after three
-results it reports as faster than 500 ms.
+median of ≥ 1.2 s by default. The coordinator's BHV001 rule measures claim to result receipt
+itself; three results faster than 300 ms (code) or 100 ms (inference) send the agent's results to
+verification (docs/economy-compute-trust-model.md, "BHV001").
 
 ## Invariants
 

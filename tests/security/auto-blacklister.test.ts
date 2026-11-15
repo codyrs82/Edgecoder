@@ -159,4 +159,13 @@ describe("AutoBlacklister", () => {
     expect(blacklister.getStrikeCount("agent-1", now)).toBe(1);
     expect(blacklister.getStrikeCount("agent-2", now)).toBe(1);
   });
+
+  it("never strikes or blacklists on a flag (BHV001 first stage), however often it fires", () => {
+    const onBlacklist = vi.fn();
+    const blacklister = new AutoBlacklister(onBlacklist);
+    const flag = makeAnomaly({ ruleId: "BHV001", severity: "WARN", blacklistReason: "forged_results", enforcement: "flag" });
+    for (let i = 0; i < 50; i++) expect(blacklister.processAnomalies("agent-f", [flag])).toBeNull();
+    expect(blacklister.getStrikeCount("agent-f")).toBe(0);
+    expect(onBlacklist).not.toHaveBeenCalled();
+  });
 });
