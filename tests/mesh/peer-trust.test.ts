@@ -3,6 +3,7 @@ import { createPeerKeys } from "../../src/mesh/peer.js";
 import { GossipMesh } from "../../src/mesh/gossip.js";
 import {
   admitPeer,
+  bootstrapAdmissionOutcome,
   checkPeerRegistration,
   ReplayCache,
   parsePeerAllowlist,
@@ -193,6 +194,38 @@ describe("peer table admission (#118 review)", () => {
     m.onBroadcast((msg) => seen.push(msg.type));
     await m.broadcast({ id: "1", type: "task_offer", fromPeerId: "me", issuedAtMs: 0, ttlMs: 1, payload: { subtaskId: "s" }, signature: "x" });
     expect(seen).toEqual(["task_offer"]);
+  });
+});
+
+describe("bootstrap admission outcome (stress finding 6)", () => {
+  const mk = (keys = A) => ({ peerId: keys.peerId, publicKeyPem: keys.publicKeyPem, coordinatorUrl: "https://a.example", networkMode: "public_mesh" as const });
+  const fpA = publicKeyFingerprint(A.publicKeyPem);
+  const allowlist = parsePeerAllowlist(`coord-a:${fpA}@https://a.example`);
+  const pins = parsePeerUrlPins(`coord-a:${fpA}@https://a.example`);
+  const mesh = () => {
+    const m = new GossipMesh();
+    m.setAdmission((peer, existing, opts) => admitPeer({ allowlist, pins, production: true, peer, existing, authoritative: opts.authoritative, source: opts.source }));
+    return m;
+  };
+
+  it("a peer already admitted is 'known' on the next bootstrap round, not refused", () => {
+    const m = mesh();
+    expect(bootstrapAdmissionOutcome(m.addPeer(mk(), { source: "bootstrap" }), undefined, mk())).toBe("admitted");
+    const existing = m.listPeers().find((p) => p.peerId === "coord-a");
+    // The second round's non-authoritative refresh is refused by admitPeer (already trusted) ...
+    const again = m.addPeer(mk(), { source: "bootstrap" });
+    expect(again).toBe(false);
+    // ... which is "already known", not "not allowlisted".
+    expect(bootstrapAdmissionOutcome(again, existing, mk())).toBe("known");
+  });
+
+  it("the same id with another key, or an unknown peer, is refused", () => {
+    const m = mesh();
+    m.addPeer(mk(), { source: "bootstrap" });
+    const existing = m.listPeers()[0];
+    expect(bootstrapAdmissionOutcome(m.addPeer(mk(EVIL), { source: "bootstrap" }), existing, mk(EVIL))).toBe("refused");
+    const x = createPeerKeys("coord-x");
+    expect(bootstrapAdmissionOutcome(m.addPeer(mk(x), { source: "bootstrap" }), undefined, mk(x))).toBe("refused");
   });
 });
 

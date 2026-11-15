@@ -9,7 +9,7 @@ import { dirname } from "node:path";
 import { request } from "undici";
 import { normalizeUrl } from "../coordinator-utils.js";
 import type { NetworkMode } from "../../common/types.js";
-import { signRegistration } from "../../mesh/peer-trust.js";
+import { bootstrapAdmissionOutcome, signRegistration } from "../../mesh/peer-trust.js";
 import { app } from "./app.js";
 import {
   COORDINATOR_PEER_CACHE_FILE,
@@ -138,6 +138,7 @@ export async function bootstrapPeerMesh(): Promise<void> {
       // otherwise on the URL we reached it at (e.g. a bootstrap fly.dev host).
       let gossipUrl = normalizedPeerUrl ?? effectiveUrl;
       if (normalizedRemoteUrl && normalizedRemoteUrl !== normalizedPeerUrl && (await peerAnswersAs(normalizedRemoteUrl, remote.peerId))) gossipUrl = normalizedRemoteUrl;
+      const existing = mesh.listPeers().find((p) => p.peerId === remote.peerId);
       const admitted = mesh.addPeer(
         {
           peerId: remote.peerId,
@@ -148,12 +149,16 @@ export async function bootstrapPeerMesh(): Promise<void> {
         // Dev without an allowlist keeps the old refresh-on-bootstrap behaviour.
         { authoritative: !PEER_ALLOWLIST_ENFORCED, source: "bootstrap" }
       );
-      if (!admitted) {
+      const outcome = bootstrapAdmissionOutcome(admitted, existing, remote);
+      if (outcome === "refused") {
         app.log.warn({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_not_allowlisted");
         continue;
       }
+      // Already in the table with this key: nothing to change here, but register with it again
+      // (it may have restarted and lost us).
+      if (outcome === "known") app.log.debug?.({ peerUrl, remotePeerId: remote.peerId }, "mesh_bootstrap_peer_known");
       peerScore.set(remote.peerId, peerScore.get(remote.peerId) ?? 100);
-      discoveredForCache.add(gossipUrl!);
+      discoveredForCache.add(outcome === "known" ? existing!.coordinatorUrl : gossipUrl!);
 
       const selfUrl = normalizeUrl(COORDINATOR_PUBLIC_URL) ?? COORDINATOR_PUBLIC_URL;
       const registerRes = await request(`${peerUrl}/mesh/register-peer`, {

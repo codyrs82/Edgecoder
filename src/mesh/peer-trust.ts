@@ -204,6 +204,23 @@ export function admitPeer<P extends { peerId: string; publicKeyPem: string; coor
   return { ...peer, coordinatorUrl: url };
 }
 
+/**
+ * Stress finding 6: bootstrap logged "peer not allowlisted" for a peer that was already admitted
+ * (admitPeer answers null for a non-authoritative refresh of a trusted entry). What bootstrap's
+ * addPeer outcome means: "admitted" (added or refreshed), "known" (refused only because the same
+ * peer, same key, is already in the table: bootstrap goes on and re-registers with it, which keeps
+ * the peer's table in step after it restarts) or "refused" (allowlist, key or URL pin).
+ */
+export function bootstrapAdmissionOutcome(
+  admitted: boolean,
+  existing: { peerId: string; publicKeyPem: string } | undefined,
+  remote: { peerId: string; publicKeyPem: string }
+): "admitted" | "known" | "refused" {
+  if (admitted) return "admitted";
+  if (existing && existing.peerId === remote.peerId && existing.publicKeyPem === remote.publicKeyPem) return "known";
+  return "refused";
+}
+
 /** Seen-signature cache for forwarded results; entries expire with the signature skew window. */
 export class ReplayCache {
   private seen = new Map<string, number>();
