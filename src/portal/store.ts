@@ -3,6 +3,7 @@
 
 import type { InviteRecord } from "./invites.js";
 import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecord, HostRequestStatus, ComputeHardware } from "./host-requests.js";
+import type { SecurityResearchEntitlement } from "./security-research.js";
 import { Pool } from "pg";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { randomUUID } from "node:crypto";
@@ -343,6 +344,7 @@ export class PortalStore {
     await this.migrateHostRequests();
     await this.migrateAccountAdmin();
     await this.migrateLegalAcceptance();
+    await this.migrateSecurityResearch();
   }
 
   /**
@@ -647,6 +649,69 @@ export class PortalStore {
       hostAgreementVersion: row.host_agreement_version ?? null,
       hostAgreementAcceptedAtMs: row.host_agreement_accepted_at_ms === null || row.host_agreement_accepted_at_ms === undefined ? null : Number(row.host_agreement_accepted_at_ms)
     };
+  }
+
+  /** Security research access (src/portal/security-research.ts): one row per account and kind. */
+  async migrateSecurityResearch(): Promise<void> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_security_research_entitlements (
+         user_id TEXT NOT NULL, kind TEXT NOT NULL, org_name TEXT NOT NULL, verification_notes TEXT NOT NULL,
+         agreement_ref TEXT NOT NULL, agreement_accepted_at_ms BIGINT NOT NULL, expires_at_ms BIGINT NOT NULL,
+         granted_by TEXT NOT NULL, granted_at_ms BIGINT NOT NULL, status TEXT NOT NULL,
+         status_changed_by TEXT, status_changed_at_ms BIGINT, PRIMARY KEY (user_id, kind))`
+    );
+  }
+
+  // ── Security research access (src/portal/security-research.ts) ──
+
+  private securityResearchRow(row: Record<string, unknown>): SecurityResearchEntitlement {
+    return {
+      userId: String(row.user_id),
+      kind: row.kind as SecurityResearchEntitlement["kind"],
+      orgName: String(row.org_name),
+      verificationNotes: String(row.verification_notes),
+      agreementRef: String(row.agreement_ref),
+      agreementAcceptedAtMs: Number(row.agreement_accepted_at_ms),
+      expiresAtMs: Number(row.expires_at_ms),
+      grantedBy: String(row.granted_by),
+      grantedAtMs: Number(row.granted_at_ms),
+      status: row.status as SecurityResearchEntitlement["status"],
+      statusChangedBy: row.status_changed_by === null || row.status_changed_by === undefined ? null : String(row.status_changed_by),
+      statusChangedAtMs: row.status_changed_at_ms === null || row.status_changed_at_ms === undefined ? null : Number(row.status_changed_at_ms),
+    };
+  }
+
+  /** A new grant (or a re-grant) replaces the account's row for that kind. */
+  async upsertRestrictedEntitlement(r: SecurityResearchEntitlement): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_security_research_entitlements (user_id, kind, org_name, verification_notes, agreement_ref, agreement_accepted_at_ms,
+         expires_at_ms, granted_by, granted_at_ms, status, status_changed_by, status_changed_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (user_id, kind) DO UPDATE SET org_name = EXCLUDED.org_name, verification_notes = EXCLUDED.verification_notes,
+         agreement_ref = EXCLUDED.agreement_ref, agreement_accepted_at_ms = EXCLUDED.agreement_accepted_at_ms, expires_at_ms = EXCLUDED.expires_at_ms,
+         granted_by = EXCLUDED.granted_by, granted_at_ms = EXCLUDED.granted_at_ms, status = EXCLUDED.status,
+         status_changed_by = EXCLUDED.status_changed_by, status_changed_at_ms = EXCLUDED.status_changed_at_ms`,
+      [r.userId, r.kind, r.orgName, r.verificationNotes, r.agreementRef, r.agreementAcceptedAtMs, r.expiresAtMs, r.grantedBy, r.grantedAtMs, r.status, r.statusChangedBy, r.statusChangedAtMs]
+    );
+  }
+
+  async getRestrictedEntitlement(userId: string, kind: SecurityResearchEntitlement["kind"]): Promise<SecurityResearchEntitlement | null> {
+    const r = await this.pool.query(`SELECT * FROM portal_security_research_entitlements WHERE user_id = $1 AND kind = $2`, [userId, kind]);
+    return r.rows[0] ? this.securityResearchRow(r.rows[0]) : null;
+  }
+
+  async listRestrictedEntitlements(limit: number): Promise<SecurityResearchEntitlement[]> {
+    const r = await this.pool.query(`SELECT * FROM portal_security_research_entitlements ORDER BY granted_at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.map((row) => this.securityResearchRow(row));
+  }
+
+  async setRestrictedEntitlementStatus(userId: string, kind: SecurityResearchEntitlement["kind"], status: SecurityResearchEntitlement["status"], by: string, nowMs: number): Promise<SecurityResearchEntitlement | null> {
+    const r = await this.pool.query(
+      `UPDATE portal_security_research_entitlements SET status = $3, status_changed_by = $4, status_changed_at_ms = $5
+       WHERE user_id = $1 AND kind = $2 AND status <> 'revoked' RETURNING *`,
+      [userId, kind, status, by, nowMs]
+    );
+    return r.rows[0] ? this.securityResearchRow(r.rows[0]) : null;
   }
 
   /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */

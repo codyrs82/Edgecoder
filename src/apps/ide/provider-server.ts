@@ -153,7 +153,7 @@ async function routeInputsHere(): Promise<RouteInputs> {
         listReservations(networkDeps).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => []),
       ])
     : [null, []];
-  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases, balanceCSats: ov?.account?.cSats });
+  const inputs = routeInputsFrom({ localModels, selfAgentId: networkDeps?.agentId, machines: ov?.account?.machines, networkModels: ov?.models?.filter((m) => !m.restricted), classes: ov?.classes, leases, balanceCSats: ov?.account?.cSats });
   routeCache = { at: Date.now(), inputs };
   return inputs;
 }

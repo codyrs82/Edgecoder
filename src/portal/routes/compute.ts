@@ -41,7 +41,8 @@ export function portalCoordinatorTransport(deps: Pick<ComputeRoutesDeps, "PORTAL
     const payload = body !== undefined && path.startsWith("/account/") ? { ...(body as object), accountId } : body;
     const res = await request(`${base.replace(/\/$/, "")}${path}`, {
       method,
-      headers: { ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}), ...(payload !== undefined ? { "content-type": "application/json" } : {}) },
+      // x-edgecoder-account: whose view a read is (GET /inference/models lists restricted models only to entitled accounts).
+      headers: { ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}), "x-edgecoder-account": accountId, ...(payload !== undefined ? { "content-type": "application/json" } : {}) },
       body: payload !== undefined ? JSON.stringify(payload) : undefined,
       headersTimeout: 70_000,
       bodyTimeout: 70_000,
@@ -100,7 +101,8 @@ export function timeLeft(endMs: number, nowMs: number): string {
 
 const fmtRate = (n: number) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : n.toPrecision(2));
 
-export interface NetworkModelEntry { model: string; agents: number; classes: string[] }
+/** restricted: a security research tier model (listed only to entitled accounts); never offered as a network call. */
+export interface NetworkModelEntry { model: string; agents: number; classes: string[]; restricted?: string }
 export interface ReservationEntry { id: string; computeClass: string; model?: string; status: string; endMs: number; cSatsPerSecond?: number; models?: string[] }
 export interface ComputeOption { id: string; group: "network" | "mine" | "reserved"; label: string; detail: string; compute: ChatCompute }
 
@@ -122,6 +124,8 @@ export function computeOptions(
   }
   const rate = (cls: string) => classes[cls]?.cSatsPerSecondBaseTier;
   for (const m of models) {
+    // A restricted model runs only on your own machines or a lease you hold (docs/security-research-tier.md).
+    if (m.restricted) continue;
     const agents = `${m.agents} machine${m.agents === 1 ? "" : "s"}`;
     const cheapest = m.classes.map(rate).filter((n): n is number => typeof n === "number").sort((a, b) => a - b)[0];
     add("network", { target: "network", model: m.model, computeClass: "any" }, `${agents}${cheapest !== undefined ? ` · from ${fmtRate(cheapest)} cSats/s` : ""}`);
@@ -131,7 +135,7 @@ export function computeOptions(
       add("network", { target: "network", model: m.model, computeClass: cls as (typeof COMPUTE_CLASSES)[number] }, r !== undefined ? `${fmtRate(r)} cSats/s` : classLabel(cls));
     }
   }
-  for (const m of models) add("mine", { target: "mine", model: m.model }, "Free · runs only on your own machines");
+  for (const m of models) add("mine", { target: "mine", model: m.model }, m.restricted ? "Security research · runs only on your own approved machines" : "Free · runs only on your own machines");
   return out;
 }
 

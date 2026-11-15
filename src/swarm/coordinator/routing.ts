@@ -24,6 +24,7 @@ import { FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from 
 import { agentContextWindow, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
+import { restrictedCatalog } from "./restricted.js";
 
 export const bestFitConfig: BestFitConfig = bestFitConfigFromEnv();
 export const complexityWeights: ComplexityWeights = complexityWeightsFromEnv();
@@ -182,6 +183,18 @@ export function rememberSession(key: string, memo: SessionMemo): void {
   while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value as string);
 }
 
+/** Agents as best-fit may use them: restricted models taken out (an agent left with none is dropped). */
+export function withoutRestrictedModels(agents: AgentView[]): AgentView[] {
+  if (restrictedCatalog.size === 0) return agents;
+  const out: AgentView[] = [];
+  for (const a of agents) {
+    const models = a.models.filter((m) => !restrictedCatalog.tierOf(m));
+    if (!models.length) continue;
+    out.push({ ...a, models, activeModel: a.activeModel && restrictedCatalog.tierOf(a.activeModel) ? null : a.activeModel });
+  }
+  return out;
+}
+
 // ── Resolution ───────────────────────────────────────────────────────────────────────────
 
 export interface Resolution {
@@ -193,7 +206,8 @@ export interface Resolution {
 /** Score `job` on the live network. `peers`: also consider peer coordinators' agents. */
 export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string } = {}, nowMs = Date.now()): Promise<Resolution> {
   const views = opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : [];
-  const agents = [...localAgentViews(nowMs, rttSource), ...peerAgentViews(views, nowMs)];
+  // Security research tier: a restricted model is never chosen by auto, for anyone (restricted.ts).
+  const agents = withoutRestrictedModels([...localAgentViews(nowMs, rttSource), ...peerAgentViews(views, nowMs)]);
   const view: NetworkView = {
     // A class the client named limits the choice to it.
     agents: opts.computeClass ? agents.filter((a) => a.computeClass === opts.computeClass) : agents,

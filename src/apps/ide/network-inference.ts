@@ -75,9 +75,14 @@ export async function call(d: NetworkDeps, method: "GET" | "POST", path: string,
 export async function listNetworkModels(d: NetworkDeps): Promise<NetworkModel[]> {
   const { status, json } = await call(d, "GET", "/inference/models");
   if (status !== 200) return [];
-  const models = (json.models as Array<{ model: string; agents: number; classes: string[] }>) ?? [];
+  const models = (json.models as Array<{ model: string; agents: number; classes: string[]; restricted?: string }>) ?? [];
   const out: NetworkModel[] = [];
   for (const m of models) {
+    // A restricted model (security research tier) is offered only on your own machines, never as a network call.
+    if (m.restricted) {
+      out.push({ id: `mine/${m.model}`, model: m.model, agents: m.agents, classes: m.classes });
+      continue;
+    }
     out.push({ id: `${NETWORK_PREFIX}${m.model}`, model: m.model, agents: m.agents, classes: m.classes });
     for (const c of m.classes) out.push({ id: `${NETWORK_PREFIX}${m.model}@${c}`, model: m.model, agents: m.agents, classes: [c] });
   }
@@ -235,7 +240,7 @@ export interface ComputeOverview {
     coordinator?: { peerId: string; url: string };
   };
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
-  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
+  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this machine's agent chose its coordinator (signed registry + latency), from /forward/health. */
   steering?: CoordinatorSteeringView | null;
 }

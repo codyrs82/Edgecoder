@@ -80,6 +80,7 @@ import { nativeRedirectMatches } from "./native-app-auth.js";
 import { registerInviteAdminRoutes } from "./invites.js";
 import { hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
 import { renderHostFormResult } from "./pages/host.js";
+import { pushToCoordinators, registerSecurityResearchInternalRoute, registerSecurityResearchRoutes } from "./security-research.js";
 import { launchModeFromEnv } from "../economy/launch-gate.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
@@ -922,6 +923,20 @@ await registerHostRequestRoutes(app, {
   log: app.log
 });
 const hostApprovedFor = (email: string | null | undefined) => isApprovedHost(email, HOST_APPROVAL_POLICY, store);
+// Settings > Admin > Security research access: entitlements for the restricted-model tier (src/portal/security-research.ts).
+registerSecurityResearchRoutes(app, {
+  store,
+  getCurrentUser,
+  buildAccessContext,
+  findUser: async (account) => (store ? (account.includes("@") ? store.getUserByEmail(account) : store.getUserById(account)) : null),
+  emailsFor: async (userIds) => new Map((store ? await store.listUserEmailsByIds(userIds) : []).map((u) => [u.userId, u.email])),
+  notifyCoordinators: async (change) =>
+    pushToCoordinators(
+      [...new Set([...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())])].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY)),
+      PORTAL_SERVICE_TOKEN,
+      change
+    ),
+});
 
 // Settings > Network for system admins: every coordinator's GET /admin/network, merged, agents joined to accounts.
 registerNetworkAdminRoutes(app, {
@@ -967,6 +982,7 @@ export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
   registerPayoutCallbackNotifyRoute(internal, { store, client: payoutCallbackClient, sendNotice: sendPayoutCallbackChangedEmail });
+  registerSecurityResearchInternalRoute(internal, { store });
 }); // end /internal plugin (#40)
 
 registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry

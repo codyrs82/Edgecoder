@@ -102,6 +102,9 @@ export const workerConfigSchema = z.object({
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),
+  // Security research tier: this agent may take restricted-model calls (its owner also needs an
+  // admin-approved host entitlement; docs/security-research-tier.md). Off by default.
+  AGENT_ALLOW_RESTRICTED_MODELS: envFlag({ on: ["1", "true"] }),
   SNAPSHOT_ENFORCEMENT: envEnumCi(["strict", "warn", "off"]),
 
   // ---- hardware profile and pricing ----

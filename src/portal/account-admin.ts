@@ -60,6 +60,10 @@ export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   // to take other accounts' work.
   { table: "portal_host_requests", column: "email", by: "email" },
   { table: "portal_host_approvals", column: "email", by: "email" },
+  // Security research access (src/portal/security-research.ts) goes with the account: an address that
+  // signs up again must be verified and granted again. The signed agreement itself is kept in the
+  // company's records (agreement_ref points there) and each call stays in the coordinators' log.
+  { table: "portal_security_research_entitlements", column: "user_id", by: "userId" },
   // Deletion is refused while machines are enrolled; this only matters for a row added mid-way.
   { table: "portal_node_enrollments", column: "owner_user_id", by: "userId" },
   { table: "portal_users", column: "user_id", by: "userId" }
@@ -78,6 +82,8 @@ export const RETAINED_USER_COLUMNS: Readonly<Record<string, string>> = {
   "portal_invite_codes.created_by": "the creating admin's email; admins cannot be deleted",
   "portal_host_requests.updated_by": "the admin who last changed the request (same row as email)",
   "portal_host_approvals.approved_by": "the approving admin or 'migration' (same row as email)",
+  "portal_security_research_entitlements.granted_by": "the granting admin's email (same row as user_id)",
+  "portal_security_research_entitlements.status_changed_by": "the admin who last suspended, reinstated or revoked it (same row as user_id)",
   "portal_deleted_accounts.user_id": "the tombstone, kept by design",
   "portal_deleted_accounts.email_hash": "the tombstone, kept by design",
   "portal_deleted_accounts.deleted_by": "the acting admin, kept by design",

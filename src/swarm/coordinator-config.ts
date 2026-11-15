@@ -28,6 +28,7 @@ import {
   trustEnv,
   verificationEnv
 } from "../config/shared.js";
+import { parseRestrictedModels } from "./restricted-models.js";
 
 /*
  * #15: coordinator (port 4301) configuration. Every numeric, boolean, enum and URL setting the
@@ -194,6 +195,25 @@ export const coordinatorConfigSchema = z.object({
   REQUIRE_VERIFIED_AGENTS: envBool(false),
   BITCOIN_NETWORK: z.enum(["bitcoin", "testnet", "signet", "regtest"], { message: "must be bitcoin, testnet, signet or regtest" }).default("testnet"),
   LOCAL_MODEL_PROVIDER: z.enum(["edgecoder-local", "ollama-local"], { message: "must be edgecoder-local or ollama-local" }).default("edgecoder-local"),
+  // Security research tier (docs/security-research-tier.md). RESTRICTED_MODELS_JSON is the operator's
+  // list of restricted model tags, {"<tag>": "security_research"}; empty by default. A restricted model
+  // is listed and served only to entitled accounts, only on their own or leased machines.
+  RESTRICTED_MODELS_JSON: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      try {
+        parseRestrictedModels(v);
+      } catch (err) {
+        ctx.addIssue({ code: "custom", message: err instanceof Error ? err.message : String(err) });
+      }
+    }),
+  // Keep prompts and outputs of restricted-model calls in the call log (off: metadata only).
+  RESTRICTED_MODEL_LOG_PROMPTS: envBool(false),
+  RESTRICTED_MODEL_RATE_LIMIT_PER_MIN: envInt(20, { min: 1, max: 10_000 }),
+  // How often the coordinator re-reads entitlements from the portal, and how long an unconfirmed one is honoured.
+  RESTRICTED_ACCESS_SYNC_MS: envInt(60_000, { min: 5_000, max: 3_600_000 }),
+  RESTRICTED_ACCESS_MAX_STALE_MS: envInt(600_000, { min: 30_000, max: 86_400_000 }),
   COORDINATOR_PUBLIC_URL: envUrl("http://127.0.0.1:4301"),
   INFERENCE_URL: envUrl("http://127.0.0.1:4302"),
   CONTROL_PLANE_URL: envUrl(),
