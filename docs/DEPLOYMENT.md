@@ -661,7 +661,7 @@ Even for code tasks, generated programs can print differently between honest run
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_RATE_LIMIT_MAX` | `300` | Max signed requests per agent per window (counted only once the signature verifies) |
+| `AGENT_RATE_LIMIT_MAX` | `300` | Max signed requests per agent per window (counted only once the signature verifies); over it the agent gets `429 agent_rate_limited` with `Retry-After` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window |
 | `PREAUTH_FAILURE_MAX_PER_IP` | `120` | Signed requests per client address per window whose signature fails (bad signature, clock skew); past it the address is refused for the rest of the window. Such failures are never counted against the agent id the request names. Behind a reverse proxy other than Fly, set `COORDINATOR_TRUST_PROXY` so the client address is known |
 | `SECURITY_NONCE_TTL_MS` | `300000` | Nonce TTL for signed requests |
