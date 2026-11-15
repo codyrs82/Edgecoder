@@ -109,6 +109,8 @@ import {
   chargePeerWork,
   taskOpenCount,
   offerSubtaskToPeers,
+  isPeerOffered,
+  peerWorkCostMsat,
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
@@ -639,33 +641,32 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     let chargedMsat = 0;
     let recorded = false;
     try {
-      // For a subtask a peer offered us, what its origin charged for it (the forward's answer).
-      const originChargedMsat = await publishResult(body, agentEnvelope);
+      // For a subtask a peer offered us: its cost here goes to the origin with the result, and what the
+      // origin charged for it (the forward's answer) is what the agent may be paid.
+      const execution: ExecutionResult<ResultMeta> | undefined = subtask
+        ? { subtaskId: body.subtaskId, agentId: body.agentId, ok: body.ok, output: body.output ?? "", meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask } }
+        : undefined;
+      const peerCostMsat = execution && isPeerOffered(body.subtaskId) ? peerWorkCostMsat(execution) : undefined;
+      const originChargedMsat = await publishResult(body, agentEnvelope, peerCostMsat);
       recorded = true;
       inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
       // ── Dependency tracking: store output and release dependent subtasks ──
       releaseDependents(body.subtaskId, body.output ?? "");
       if (grantedForward) {
-        // Ran on the granted peer: its cost isn't measured here, so it is charged at the worst case for
-        // one subtask, out of what the task set aside. Failed work is not charged. The answer tells the
-        // peer what it may pay its agent.
-        chargedMsat = body.ok ? chargePeerWork(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0) : 0;
+        // Ran on the granted peer: charged what the peer says it cost (its pricing, signed with the
+        // forward), never more than the worst case for one subtask nor than what the task has left;
+        // a peer that sends no cost (older build) is charged the worst case, as before. Failed work is
+        // not charged. The answer tells the peer what it may pay its agent; the unused rest of the
+        // reserve goes back to the requester when the task settles.
+        const worstCase = taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0;
+        const reported = (rawBody as { peerCostMsat?: unknown }).peerCostMsat;
+        const peerCost = typeof reported === "number" && Number.isFinite(reported) && reported >= 0 ? reported : worstCase;
+        chargedMsat = body.ok ? chargePeerWork(body.taskId, Math.min(peerCost, worstCase)) : 0;
         remoteGrants.settle(body.subtaskId, chargedMsat, Date.now());
         if (taskOpenCount(body.taskId) === 0) orderBook.removeBid(body.taskId);
       }
 
-      if (subtask) {
-        await accrueResultCredits(
-          {
-            subtaskId: body.subtaskId,
-            agentId: body.agentId,
-            ok: body.ok,
-            output: body.output ?? "",
-            meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
-          },
-          { originChargedMsat }
-        );
-      }
+      if (execution) await accrueResultCredits(execution, { originChargedMsat });
     } finally {
       // Nothing recorded: the granted peer may send the result again.
       if (grantedForward && !recorded) remoteGrants.release(body.subtaskId);

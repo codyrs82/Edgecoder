@@ -180,6 +180,32 @@ describe("origin: a subtask offered to peers runs on one coordinator only", () =
     expect(spent).toBe(Math.round(charged));
   }, 20_000);
 
+  test("stress finding 3: the requester is charged what the peer's work cost, not the worst case, and refunded the rest", async () => {
+    const taskId = randomUUID();
+    const balance0 = await creditBalance(requester.peerId);
+    const { subtasks } = await submit(taskId);
+    const reservedMsat = Math.round((balance0 - (await creditBalance(requester.peerId))) * 1000);
+    expect(reservedMsat).toBeGreaterThan(1_000);
+    await sleep(50);
+    expect((await fromPeer("task_claim", { subtaskId: subtasks[0], taskId, claimedByCoordinator: PEER_ID })).json()).toMatchObject({ granted: true });
+    const res = await forward({ subtaskId: subtasks[0], taskId, agentId: "agent-on-peer", ok: true, output: "1\n", durationMs: 1200, peerCostMsat: 7 });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().chargedMsat).toBe(7);
+    await sleep(50);
+    expect(Math.round((balance0 - (await creditBalance(requester.peerId))) * 1000)).toBe(7);
+  });
+
+  test("a peer cannot charge more than the worst case for one subtask", async () => {
+    const taskId = randomUUID();
+    const balance0 = await creditBalance(requester.peerId);
+    const { subtasks } = await submit(taskId);
+    const reservedMsat = Math.round((balance0 - (await creditBalance(requester.peerId))) * 1000);
+    await sleep(50);
+    await fromPeer("task_claim", { subtaskId: subtasks[0], taskId, claimedByCoordinator: PEER_ID });
+    const res = await forward({ subtaskId: subtasks[0], taskId, agentId: "agent-on-peer", ok: true, output: "1\n", durationMs: 1200, peerCostMsat: 1e12 });
+    expect(res.json().chargedMsat).toBe(reservedMsat);
+  });
+
   test("a forwarded result for a subtask that was never granted to the peer is refused", async () => {
     const taskId = randomUUID();
     const { subtasks } = await submit(taskId);
@@ -233,7 +259,7 @@ describe("peer: an offered subtask is run only once granted, and paid only what 
     expect((await earnedMsat(worker.peerId)) - before).toBe(0);
   });
 
-  test("granted and charged: the agent earns at most the charge (minus the network fee)", async () => {
+  test("granted and charged: the agent earns at most the charge (minus the network fee)", { timeout: 10_000 }, async () => {
     peerState.chargedMsat = 3;
     const subtaskId = randomUUID();
     const taskId = randomUUID();
@@ -241,9 +267,14 @@ describe("peer: an offered subtask is run only once granted, and paid only what 
     await sleep(200);
     const st = await pull();
     expect(st?.id).toBe(subtaskId);
+    await sleep(1_500); // server-measured duration: priced time since the claim
     const before = await earnedMsat(worker.peerId);
     expect((await post("/result", { subtaskId, taskId, agentId: worker.peerId, ok: true, output: "2\n", durationMs: 30_000 }, worker)).statusCode).toBe(200);
     const earned = (await earnedMsat(worker.peerId)) - before;
     expect(earned).toBeLessThanOrEqual(3);
+    // The cost here travels with the forwarded result (finding 3): what the origin charges.
+    const fwd = peerState.forwarded.find((f) => f.subtaskId === subtaskId);
+    expect(typeof fwd?.peerCostMsat).toBe("number");
+    expect(fwd!.peerCostMsat).toBeGreaterThan(0);
   });
 });

@@ -132,8 +132,15 @@ const FORWARD_RETRY_DELAYS_MS = [1_000, 3_000, 6_000];
  * requester for it (msat): all an agent here may be paid for the work. 0 when the origin refused it
  * (not granted to us, the grant expired, or a failure) or could not be reached.
  */
-async function forwardResultToOrigin(origin: { coordinatorId: string; coordinatorUrl: string }, result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<number> {
-  const forwardJson = JSON.stringify(agentEnvelope ? { ...result, agentEnvelope } : result);
+async function forwardResultToOrigin(
+  origin: { coordinatorId: string; coordinatorUrl: string },
+  result: SubtaskResult,
+  agentEnvelope?: AgentResultEnvelope,
+  peerCostMsat?: number
+): Promise<number> {
+  // peerCostMsat: what the work cost here by the pricing formulas, which the origin charges its
+  // requester (never more than it set aside); covered by our forward signature.
+  const forwardJson = JSON.stringify({ ...result, ...(agentEnvelope ? { agentEnvelope } : {}), ...(peerCostMsat !== undefined ? { peerCostMsat } : {}) });
   for (let attempt = 0; ; attempt++) {
     let retry = false;
     try {
@@ -275,20 +282,15 @@ export function enqueueReplica(req: ReplicaRequest): void {
   );
 }
 
-/** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
-export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number } = {}): Promise<void> {
-  const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
-  const rewardAccountId = await rewardAccountForAgent(r.agentId);
-  noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
-  // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
-  // records the credits actually accrued by the pricing formula, so balances reconcile.
-  if (!r.ok) return;
-  // A reserved agent is paid by its lease (endReservation); your own machine isn't paid by you.
-  if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return;
+/**
+ * What an accepted execution costs by the pricing formulas (job-pricing.ts), before it is capped by
+ * what its payer set aside. Reads, never consumes, the trade price agreed at claim.
+ */
+export function priceExecution(r: ExecutionResult<ResultMeta>) {
+  const { subtask, durationMs, taskId } = r.meta;
   const cap = agentCapabilities.get(r.agentId);
   const eff = effectiveHardware(r.agentId, cap);
   const trade = claimedTradePrice.get(r.subtaskId);
-  claimedTradePrice.delete(r.subtaskId);
   // Throughput: the agent's verified tier mints creditsPerSecond credits per measured second (weight
   // 1 on a class's base tier), so credits × the class's flat price per credit is the tier's hour price.
   // The trade carries the grant at claim time; a grant that moved since (demotion mid-task) wins, and
@@ -329,6 +331,35 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
           perSecondCostMsat,
         })
       : { costMsat: perSecondCostMsat, basis: "per_second" as const };
+  return { cap, eff, computeClass, hardwareWeight, modelParamSizeB, perCredit, rateMsat, priced };
+}
+
+/**
+ * Peer side: what an execution of a peer-offered subtask costs, capped by the most its origin set
+ * aside for one subtask. The origin charges its requester this (never more than its reserve) and
+ * answers with the charge, which is then what the agent is paid.
+ */
+export function peerWorkCostMsat(r: ExecutionResult<ResultMeta>): number {
+  const { subtask } = r.meta;
+  if (!r.ok || subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return 0;
+  const budget = peerOfferBudgetMsat.get(r.subtaskId);
+  if (budget === undefined) return 0;
+  const cost = priceExecution(r).priced.costMsat;
+  return Number.isFinite(cost) ? Math.max(0, Math.min(Math.ceil(cost), budget)) : 0;
+}
+
+/** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
+export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number } = {}): Promise<void> {
+  const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
+  const rewardAccountId = await rewardAccountForAgent(r.agentId);
+  noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
+  // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
+  // records the credits actually accrued by the pricing formula, so balances reconcile.
+  if (!r.ok) return;
+  // A reserved agent is paid by its lease (endReservation); your own machine isn't paid by you.
+  if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return;
+  const { cap, eff, computeClass, hardwareWeight, modelParamSizeB, perCredit, rateMsat, priced } = priceExecution(r);
+  claimedTradePrice.delete(r.subtaskId);
   // What is paid is what the requester is charged: taken out of what was set aside for the task
   // (never more), before the store is awaited, so results settling together cannot both spend it.
   // Work nobody set anything aside for (an anonymous task) earns nothing.
@@ -402,7 +433,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
  * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
  * for verification this runs only at settle time, with the verified output.
  */
-export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope): Promise<number | undefined> {
+export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope, peerCostMsat?: number): Promise<number | undefined> {
   queue.complete(result);
   // Market: a task's bid leaves the book once its last subtask has a result.
   if (taskOpenCount(result.taskId) === 0) orderBook.removeBid(result.taskId);
@@ -426,7 +457,7 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
       if (pem) attestAgentSigningKey(agentEnvelope.headers["x-agent-id"], pem);
     }
     // Awaited: what the origin charged its requester is what the agent here may be paid.
-    originChargedMsat = await forwardResultToOrigin(origin, result, agentEnvelope);
+    originChargedMsat = await forwardResultToOrigin(origin, result, agentEnvelope, result.ok ? peerCostMsat ?? 0 : 0);
   }
 
   void mesh.broadcast(
@@ -507,7 +538,14 @@ export async function settleVerification(outcome: VerificationOutcome<ResultMeta
   // #122: forward the signature of the execution whose output is published (verification.ts picks
   // the original when it won, else the first winner).
   const ref = outcome.winners.find((w) => w.subtaskId === outcome.originalSubtaskId) ?? outcome.winners[0];
-  const originChargedMsat = await publishResult({ ...original.meta.report, ok: outcome.ok, output: outcome.output }, ref?.meta.agentEnvelope);
+  // A peer-offered subtask: the origin is asked for what the paid original execution cost (replicas
+  // have no budget here, results.ts takeTaskBudget).
+  const paidOriginal = peerOffered ? payable.find((w) => w.subtaskId === outcome.originalSubtaskId) : undefined;
+  const originChargedMsat = await publishResult(
+    { ...original.meta.report, ok: outcome.ok, output: outcome.output },
+    ref?.meta.agentEnvelope,
+    peerOffered ? (paidOriginal ? peerWorkCostMsat(paidOriginal) : 0) : undefined
+  );
   if (peerOffered) for (const w of payable) await accrueResultCredits(w, { originChargedMsat });
   releaseDependents(outcome.originalSubtaskId, outcome.output);
 }
@@ -551,7 +589,7 @@ export async function finalizeFailedSubtask(result: SubtaskResult, opts: { recor
       taskOriginMap.delete(r.subtaskId);
       peerGrants.delete(r.subtaskId);
       peerOfferBudgetMsat.delete(r.subtaskId);
-      void forwardResultToOrigin(origin, r);
+      void forwardResultToOrigin(origin, r, undefined, 0);
     }
     void mesh.broadcast(
       protocol.createMessage(
