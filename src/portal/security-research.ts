@@ -23,6 +23,7 @@ import { request } from "undici";
 import { z } from "zod";
 import { moduleLogger } from "../common/logger.js";
 import { ENTITLEMENT_KINDS, type EntitlementKind } from "../swarm/restricted-models.js";
+import type { PortalStore } from "./store.js";
 
 const logger = moduleLogger("portal-security-research");
 
@@ -134,6 +135,25 @@ function dayMs(d: string): number {
  * And for the signed-in user (the chat page's model picker):
  *   GET  /portal/api/security-research/me                            -> { securityResearch, host }
  */
+/**
+ * The portal server's wiring (kept here so src/portal/server.ts stays under its size limit): user
+ * lookups from the store, and pushes to every allowed coordinator with the service token.
+ */
+export function registerSecurityResearchForPortal(
+  app: FastifyInstance,
+  deps: Pick<SecurityResearchDeps, "getCurrentUser" | "buildAccessContext"> & { store: PortalStore | null; coordinatorUrls: () => Promise<string[]>; serviceToken: string | undefined }
+): void {
+  const { store } = deps;
+  registerSecurityResearchRoutes(app, {
+    store,
+    getCurrentUser: deps.getCurrentUser,
+    buildAccessContext: deps.buildAccessContext,
+    findUser: async (account) => (store ? (account.includes("@") ? store.getUserByEmail(account) : store.getUserById(account)) : null),
+    emailsFor: async (userIds) => new Map((store ? await store.listUserEmailsByIds(userIds) : []).map((u) => [u.userId, u.email])),
+    notifyCoordinators: async (change) => pushToCoordinators(await deps.coordinatorUrls(), deps.serviceToken, change),
+  });
+}
+
 export function registerSecurityResearchRoutes(app: FastifyInstance, deps: SecurityResearchDeps): void {
   const now = deps.now ?? Date.now;
   async function admin(req: unknown, reply: { code: (n: number) => { send: (b: unknown) => unknown } }) {
