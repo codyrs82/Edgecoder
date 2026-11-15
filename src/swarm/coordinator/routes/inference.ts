@@ -141,6 +141,18 @@ function holderClasses(model: string, nowMs = Date.now(), includeReserved = fals
   }
   return out;
 }
+/**
+ * The largest context window among the agents that could take a call, when every one of them is
+ * smaller than the call needs (null otherwise, or when none could take it at all). Only agents in
+ * the requested class count: a bigger window on another class's machine (an apple Mac holding the
+ * same model as the CPU fleet) cannot serve an @cpu call, which would otherwise wait out the claim
+ * bound and come back as no_capacity. Agents that report no window take any size.
+ */
+export function contextTooLong(holders: Array<{ contextWindow?: number; computeClass: string }>, neededTokens: number, taskClass: string): number | null {
+  const eligible = taskClass === "any" ? holders : holders.filter((h) => h.computeClass === taskClass);
+  if (!eligible.length || !eligible.every((h) => (h.contextWindow ?? Infinity) < neededTokens)) return null;
+  return Math.max(...eligible.map((h) => h.contextWindow ?? 0));
+}
 const claimDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
 
 function pruneNoCapacity(now = Date.now()): void {
@@ -429,15 +441,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
       return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
     }
-    // Every agent with the model serves a smaller context window than this call needs: say so now
-    // rather than wait for the no-capacity bound (agents that report no window take any size).
     // Every call has an output cap: what an agent can bill for a reply is bounded by it.
     const maxTokens = body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS;
     const needTokens = contextNeeded(body.messages as ChatMessage[], body.tools, maxTokens);
-    if (holders.length > 0 && holders.every(([id]) => (agentContextWindow(id) ?? Infinity) < needTokens)) {
-      const largest = Math.max(...holders.map(([id]) => agentContextWindow(id) ?? 0));
-      return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model });
-    }
     if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
     const billed = !reservationId && !onlyAccountId;
     const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
@@ -449,6 +455,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (capacityGap(taskClass, classes) === "none_in_class") {
         return reply.code(409).send({ error: "no_agent_in_class", model: body.model, computeClass: taskClass, availableClasses: [...new Set(classes)].sort() });
       }
+    }
+    // Every agent that could take the call (holds the model, in the requested class) serves a
+    // smaller context window than it needs: say so now rather than wait for the no-capacity bound.
+    const largest = contextTooLong(
+      holders.map(([id, cap]) => ({ contextWindow: agentContextWindow(id), computeClass: (effectiveHardware(id, cap)?.computeClass ?? "cpu") as string })),
+      needTokens,
+      taskClass,
+    );
+    if (largest !== null) {
+      return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}) });
     }
     const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
     const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
