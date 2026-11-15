@@ -119,7 +119,16 @@ export const taskBilling = new Map<string, TaskBilling>();
 /** Usage records being filled in (keyed by task) until the task settles; then saved. */
 export const usagePending = new Map<string, UsageRecord>();
 export const memoryUsage = new MemoryUsageStore();
+/** Told of every usage record as it is saved (best-fit routing's decision log reads the cost). */
+export const usageListeners: Array<(r: UsageRecord) => void> = [];
 export async function saveUsage(r: UsageRecord): Promise<void> {
+  for (const l of usageListeners) {
+    try {
+      l(r);
+    } catch {
+      // A listener never stops the save.
+    }
+  }
   if (pgStore) await pgStore.insertUsage(r).catch((err) => app.log.warn({ err, id: r.id }, "usage_save_failed"));
   else memoryUsage.add(r);
 }

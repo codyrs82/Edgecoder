@@ -73,7 +73,8 @@ describe("GET /admin/network", () => {
     expect(res.statusCode, res.body).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
     const r = res.json();
-    expect(Object.keys(r).sort()).toEqual(["agents", "coordinator", "dispatch", "gaps", "latency", "models", "queue", "series", "totals"]);
+    expect(Object.keys(r).sort()).toEqual(["agents", "coordinator", "dispatch", "gaps", "latency", "models", "queue", "routing", "series", "totals"]);
+    expect(r.routing).toMatchObject({ decisions: expect.any(Array), config: { weights: expect.any(Object), preferMs: expect.any(Number) }, complexityWeights: expect.any(Object) });
 
     const live = r.agents.find((a: { agentId: string }) => a.agentId === "agent-live");
     expect(live).toMatchObject({

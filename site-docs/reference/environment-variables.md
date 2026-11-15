@@ -415,6 +415,26 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | `CLOUD_INFERENCE_URL` | unset | Cloud inference endpoint used when no parent takes an escalation. An http(s) URL. |
 | `CLOUD_INFERENCE_TOKEN` | `INFERENCE_AUTH_TOKEN` | Token for the cloud inference endpoint. |
 
+## Coordinator: best-fit routing (model `auto`)
+
+A request with `model: "auto"` is routed by the coordinator: it describes the job (type, complexity 0 to 1, tools, context, reply length; hints in the request's `edgecoder` object or `x-edgecoder-*` headers), scores every model and class available now on quality, latency, price and reliability, and prefers the best agent for a moment. The formula is described in `src/swarm/coordinator/best-fit.ts`; Settings > Network shows recent decisions. A value outside the reader's range uses the default.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BEST_FIT_W_QUALITY` | `0.4` | Base weight of capability fit (model size against what the job needs, coder bonus, right-sizing). 0 to 10; the four weights are normalised. |
+| `BEST_FIT_W_LATENCY` | `0.3` | Base weight of expected time (wait for a slot, RTT, prefill and decode from measured tok/s). |
+| `BEST_FIT_W_PRICE` | `0.15` | Base weight of the estimated cost (token price by size, never below the class power floor). |
+| `BEST_FIT_W_RELIABILITY` | `0.15` | Base weight of reliability (verifier score, verification, recent failures). |
+| `BEST_FIT_COMPLEXITY_SHIFT` | `1` | How far job complexity moves weight from latency and price to quality and reliability (0 to 2; 0 turns it off). |
+| `BEST_FIT_LATENCY_TARGET_MS` | `8000` | Interactive calls: the total time at which the latency score is 0.5. |
+| `BEST_FIT_BATCH_LATENCY_TARGET_MS` | `120000` | The same for `latency: batch` calls. |
+| `BEST_FIT_PRICE_REF_CSATS` | `1` | The estimated cost (cSats) at which the price score is 0.5. |
+| `BEST_FIT_PREFER_MS` | `400` | How long dispatch keeps a routed call for the chosen agent before any eligible agent may take it (0 to 10000; 0 turns the preference off). |
+| `BEST_FIT_SESSION_TTL_MS` | `1800000` | How long a session remembers the agent of its last turn (session affinity). |
+| `BEST_FIT_OVERSIZE_PENALTY` | `0.25` | Quality taken off a model more than 4x the size the job wants, so big-model slots stay free for jobs that need them (0 to 1). |
+| `BEST_FIT_PEERS` | on | `0` or `false` scores only this coordinator's agents (no `route_elsewhere` to a peer). |
+| `BEST_FIT_COMPLEXITY_WEIGHTS_JSON` | built-in table | JSON object of complexity signal weights (0 to 1 each), for example `{"reasoning": 0.25, "files": 0.15}`. Signals: `length`, `turns`, `code`, `files`, `languages`, `diff`, `trace`, `tools`, `agentSteps`, `reasoning`, `output`, `simple` (subtracted). |
+
 ## Coordinator: pricing, payout and anchoring limits
 
 Amounts must be numbers of 0 or more. A value the reader's own limit rejects (noted per row) uses the default.

@@ -24,6 +24,11 @@
  *
  * The rule this gives: a request does not wait behind another request on one agent while another
  * eligible agent is idle.
+ *
+ * 3. Preference. Best-fit routing (best-fit.ts) may name the agent a model call suits best (its
+ *    session's cache, its speed). For a short while (preferAgent's `ms`, BEST_FIT_PREFER_MS) other
+ *    agents leave the call to it while it is live and has room, and it is nudged first; after that
+ *    anyone eligible may take it, as before.
  */
 
 import type { Subtask } from "../../common/types.js";
@@ -80,6 +85,8 @@ const readyAt = new Map<string, number>();
 /** agentId -> when it was last nudged and has not pulled since. */
 const nudgedAt = new Map<string, number>();
 const pickups: number[] = [];
+/** subtaskId -> the agent best-fit routing prefers, until when. */
+const preferred = new Map<string, { agentId: string; untilMs: number }>();
 let nudgesSent = 0;
 
 export function setNudgeTransport(t: NudgeTransport | undefined): void {
@@ -207,10 +214,33 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   if (subtask.kind !== "inference") return true;
   const free = freeSlots(agentId, claims, true);
   if (free !== undefined && free <= 0) return false;
+  if (leftForPreferred(agentId, subtask, claims, nowMs)) return false;
   if ((claims.get(agentId)?.all ?? 0) === 0) return true;
   const ready = readyAt.get(subtask.id);
   if (ready === undefined || nowMs - ready >= DEFER_MS) return true;
   return !idleTakerExists(subtask, claims, nowMs, agentId);
+}
+
+/** Soft preference: keep `subtaskId` for `agentId` for `ms` (other agents leave it while that agent can take it). */
+export function preferAgent(subtaskId: string, agentId: string, ms: number, nowMs = Date.now()): void {
+  if (!(ms > 0)) return;
+  preferred.set(subtaskId, { agentId, untilMs: nowMs + ms });
+  // Agents turned away meanwhile are told again as soon as the call is open to all.
+  setTimeout(() => nudge(subtaskId), ms + 50).unref?.();
+}
+
+/** The agent a subtask is kept for right now, if any. */
+export function preferredAgentFor(subtaskId: string, nowMs = Date.now()): string | undefined {
+  const p = preferred.get(subtaskId);
+  return p && nowMs < p.untilMs ? p.agentId : undefined;
+}
+
+/** Another agent is preferred for this call, and it is live, not excluded and has room for it. */
+function leftForPreferred(agentId: string, subtask: Subtask, claims: Claims, nowMs: number): boolean {
+  const pref = preferredAgentFor(subtask.id, nowMs);
+  if (!pref || pref === agentId) return false;
+  if (queue.excludedAgents(subtask.id).includes(pref)) return false;
+  return liveAgent(pref, agentCapabilities.get(pref), nowMs) && hasRoomFor(pref, subtask, claims);
 }
 
 function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except: string): boolean {
@@ -230,6 +260,7 @@ function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except
 export function noteClaimed(subtaskId: string, nowMs = Date.now()): void {
   const ready = readyAt.get(subtaskId);
   readyAt.delete(subtaskId);
+  preferred.delete(subtaskId);
   if (ready === undefined) return;
   pickups.push(Math.max(0, nowMs - ready));
   if (pickups.length > PICKUP_SAMPLES) pickups.splice(0, pickups.length - PICKUP_SAMPLES);
@@ -254,6 +285,10 @@ export function nudgeTargets(subtask: Subtask, nowMs = Date.now(), claims: Claim
     candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0 });
   }
   candidates.sort((a, b) => a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
+  // The preferred agent (best-fit routing) is nudged first.
+  const pref = preferredAgentFor(subtask.id, nowMs);
+  const at = pref ? candidates.findIndex((c) => c.id === pref) : -1;
+  if (at > 0) candidates.unshift(...candidates.splice(at, 1));
   return candidates.slice(0, NUDGE_FANOUT).map((c) => c.id);
 }
 
@@ -291,6 +326,7 @@ export function onClaimable(subtask: Subtask, claimableAtMs: number): void {
 /** Drop bookkeeping for subtasks long gone and agents that stopped pulling. */
 export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, at] of readyAt) if (nowMs - at > READY_KEEP_MS) readyAt.delete(id);
+  for (const [id, p] of preferred) if (nowMs >= p.untilMs) preferred.delete(id);
   for (const id of neededTokens.keys()) if (!queue.getSubtask(id)) neededTokens.delete(id);
   for (const [id, load] of loads) if (nowMs - load.atMs > READY_KEEP_MS) loads.delete(id);
   for (const [id, at] of nudgedAt) if (nowMs - at > READY_KEEP_MS) nudgedAt.delete(id);

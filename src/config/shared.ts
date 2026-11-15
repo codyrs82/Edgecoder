@@ -270,6 +270,23 @@ export const hardwareVerificationEnv = {
   HARDWARE_TIER_MIN_JSON: envJson()
 };
 
+/** Best-fit routing for model "auto" (src/swarm/coordinator/best-fit.ts, src/inference-api/job-complexity.ts). */
+export const bestFitEnv = {
+  BEST_FIT_W_QUALITY: envNumber(undefined, { min: 0, max: 10 }),
+  BEST_FIT_W_LATENCY: envNumber(undefined, { min: 0, max: 10 }),
+  BEST_FIT_W_PRICE: envNumber(undefined, { min: 0, max: 10 }),
+  BEST_FIT_W_RELIABILITY: envNumber(undefined, { min: 0, max: 10 }),
+  BEST_FIT_COMPLEXITY_SHIFT: envNumber(undefined, { min: 0, max: 2 }),
+  BEST_FIT_LATENCY_TARGET_MS: envNumber(undefined, { min: 100 }),
+  BEST_FIT_BATCH_LATENCY_TARGET_MS: envNumber(undefined, { min: 100 }),
+  BEST_FIT_PRICE_REF_CSATS: envNumber(undefined, { min: 0.001 }),
+  BEST_FIT_PREFER_MS: envNumber(undefined, { min: 0, max: 10_000 }),
+  BEST_FIT_SESSION_TTL_MS: amount(),
+  BEST_FIT_OVERSIZE_PENALTY: fraction(),
+  BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
+  BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson()
+};
+
 /** Claim leases on queued subtasks (src/swarm/queue.ts). */
 export const leaseEnv = {
   CLAIM_LEASE_GRACE_MS: amount(),

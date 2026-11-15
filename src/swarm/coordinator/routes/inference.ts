@@ -11,7 +11,11 @@ import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../econom
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, freeModelSlots } from "../dispatch.js";
+import { agentContextWindow, freeModelSlots, preferAgent } from "../dispatch.js";
+import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
+import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
+import type { BestFitResult } from "../best-fit.js";
+import { bestFitConfig, complexityWeights, recordDecision, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
 import { pgStore } from "../../../db/store.js";
@@ -274,6 +278,13 @@ const inferenceSubmitSchema = z.object({
   reservationId: z.string().min(1).max(100).optional(),
   /** What sent it, for the usage page (a connection, "EdgeCoder chat", ...). */
   source: z.string().max(80).optional(),
+  /**
+   * model "auto": what the client says about the job (job, quality, maxCSats, latency, needsTools,
+   * minContext, complexity, sessionId; src/inference-api/job-descriptor.ts). Malformed fields are dropped.
+   */
+  routing: z.record(z.string(), z.unknown()).optional(),
+  /** model "auto": the caller can resubmit to a peer coordinator when the best fit is there (route_elsewhere). */
+  routeRedirect: z.boolean().default(false),
 });
 
 export function registerInferenceRoutes(app: CoordinatorApp): void {
@@ -316,6 +327,20 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
     if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
     const accountId = submitter.accountId;
+    // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
+    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
+    if (body.model === AUTO_MODEL_ID) {
+      if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
+      const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, cleanHints(body.routing), complexityWeights);
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
+      const summary = routingSummary(job, result);
+      if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
+      if (elsewhere) return reply.code(409).send({ error: "route_elsewhere", coordinatorId: elsewhere.coordinatorId, coordinatorUrl: elsewhere.url, routing: summary });
+      const chosen = result.chosen;
+      body.model = chosen.model;
+      body.computeClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(chosen.computeClass) ? (chosen.computeClass as typeof body.computeClass) : "any";
+      routed = { job, result, summary };
+    }
     const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
     // Unbilled targets: a lease you already paid for, or your own machines.
     let onlyAccountId: string | undefined;
@@ -376,6 +401,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
       model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),
+      ...(routed ? { routing: routed.summary.line.slice(0, 300) } : {}),
     });
     const marketBid = billed ? orderBook.postBid(body.taskId, taskClass, resolved.msatPerCredit, MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), {}) : undefined;
     const subtask = queue.enqueueSubtask({
@@ -393,10 +419,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         ...(reservationId ? { reservationId } : {}),
       },
     });
+    if (routed) {
+      // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it.
+      if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
+      recordDecision(body.taskId, subtask.id, routed.job, routed.result);
+    }
     inferenceStreams.open(subtask.id, body.taskId);
     armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
-    return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
+    return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
 
   app.post("/inference/chunks", async (req, reply) => {

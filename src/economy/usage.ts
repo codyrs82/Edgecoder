@@ -29,6 +29,8 @@ export interface UsageRecord {
   /** Tokens the model read and wrote (inference, when the agent reported them). */
   promptTokens?: number;
   outputTokens?: number;
+  /** For a `model: "auto"` call: "routed to <model> on <class> because <reason>". */
+  routing?: string;
 }
 
 export interface UsageSlice {

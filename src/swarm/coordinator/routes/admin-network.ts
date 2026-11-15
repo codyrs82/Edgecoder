@@ -25,6 +25,7 @@ import { agentContextWindow, agentLoadReport, agentSocketConnected, freeModelSlo
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { inferenceCancelledForCapacity } from "./inference.js";
+import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions } from "../routing.js";
 import {
   InferenceTracker,
   RingBuffer,
@@ -277,6 +278,8 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
     },
     models,
     gaps: { windowMs: GAP_WINDOW_MS, missingModels, saturatedModels, staleAgents },
+    // Best-fit routing (model "auto"): recent decisions, estimate against what happened.
+    routing: { decisions: recentDecisions(50), config: bestFitConfig, complexityWeights },
     series: { range, bucketMs: seriesBucketMs(range), points: series }
   };
 }
@@ -295,12 +298,15 @@ export function observeInference(url: string | undefined, status: number, body: 
       return;
     }
     if (status !== 200 || !text) return;
-    const r = JSON.parse(text) as { taskId?: unknown; subtaskId?: unknown };
-    if (typeof r.taskId === "string" && typeof r.subtaskId === "string") inferenceTracker.submitted(r.taskId, r.subtaskId, model, nowMs);
+    const r = JSON.parse(text) as { taskId?: unknown; subtaskId?: unknown; model?: unknown };
+    // model "auto" was resolved: count the model that runs.
+    if (typeof r.taskId === "string" && typeof r.subtaskId === "string") inferenceTracker.submitted(r.taskId, r.subtaskId, typeof r.model === "string" ? r.model : model, nowMs);
     return;
   }
   if (status !== 200 || !text.includes('"ok"') || typeof b.subtaskId !== "string") return;
-  inferenceTracker.chunk(b.subtaskId, b.done === true, typeof b.error === "string" && b.error ? b.error : undefined, nowMs);
+  const error = typeof b.error === "string" && b.error ? b.error : undefined;
+  inferenceTracker.chunk(b.subtaskId, b.done === true, error, nowMs);
+  noteRoutedChunk(b.subtaskId, queue.getClaim(b.subtaskId)?.claimedBy, b.done === true, error, nowMs);
 }
 
 const querySchema = z.object({ range: z.enum(["1h", "6h", "24h"]).default("1h") });
