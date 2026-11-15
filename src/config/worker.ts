@@ -65,6 +65,17 @@ export const workerConfigSchema = z.object({
   OLLAMA_AUTO_INSTALL: envFlag({ on: ["true"] }),
   /** 1-16 concurrent model calls; unset or out of range = by installed memory (src/swarm/parallelism.ts). */
   AGENT_PARALLEL_INFERENCE: envInt(undefined, { min: 0 }),
+  /**
+   * How long Ollama keeps a model loaded after a network call (Ollama keep_alive): a duration such
+   * as "30m" or "1h", seconds, or "-1" for never unload. Default "30m", and "-1" for an
+   * inference-only agent (a dedicated host). The agent also loads OLLAMA_MODEL at startup and after
+   * a model switch, so the first call does not wait for a cold load.
+   */
+  AGENT_MODEL_KEEP_ALIVE: z
+    .string()
+    .trim()
+    .regex(/^(-?\d+(\.\d+)?|-?(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/, "a duration such as 30m, 1h or 300s, a number of seconds, or -1")
+    .optional(),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),

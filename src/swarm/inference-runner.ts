@@ -31,6 +31,8 @@ export async function runInferenceSubtask(
   deps: {
     agentId: string;
     ollamaHost: string;
+    /** How long Ollama keeps the model loaded after the call (AGENT_MODEL_KEEP_ALIVE). */
+    keepAlive?: string;
     /** Signed POST to the coordinator. */
     post: (path: string, body: unknown) => Promise<unknown>;
   },
@@ -71,7 +73,7 @@ export async function runInferenceSubtask(
   const deadlineMs = Math.max(5_000, st.timeoutMs);
   const timer = setTimeout(() => abort.abort(), deadlineMs);
   try {
-    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal, deadlineMs + 1_000)) {
+    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive }, abort.signal, deadlineMs + 1_000)) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
       else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens };
       else if ("delta" in piece) {

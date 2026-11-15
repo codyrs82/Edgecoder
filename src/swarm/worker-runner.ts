@@ -12,6 +12,7 @@ import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxM
 import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
+import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
@@ -169,6 +170,23 @@ if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
   console.warn(`[agent] AGENT_INFERENCE_ONLY is ignored with SANDBOX_MODE=${SANDBOX_MODE}: this agent takes code and inference work`);
 }
 const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
+/** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
+const MODEL_KEEP_ALIVE = W.AGENT_MODEL_KEEP_ALIVE ?? (INFERENCE_ONLY ? "-1" : "30m");
+/**
+ * Load the network model before taking work, so the first call does not pay a cold load (about
+ * 4-5 s on a CPU, and a headers timeout under parallel calls). Bounded: a missing model or a
+ * stopped Ollama only logs, and the agent goes on (the call then fails and is retried elsewhere).
+ */
+async function warmNetworkModel(model: string, why: string): Promise<void> {
+  const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const started = Date.now();
+  try {
+    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000 });
+    console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, keep_alive ${MODEL_KEEP_ALIVE}`);
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
+  }
+}
 let warnedNoSandbox = false;
 const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
 const PORTAL_URL = W.PORTAL_URL ?? "";
@@ -821,6 +839,8 @@ async function loop(): Promise<void> {
     role: "agent",
     host: OLLAMA_HOST
   });
+  // Before the first pull (registration waits a few seconds at most): the network model is loaded.
+  if (PULLS_FROM_COORDINATOR && (PROVIDER === "ollama-local" || INFERENCE_ONLY)) await warmNetworkModel(OLLAMA_MODEL, "startup");
 
   const providers = new ProviderRegistry();
   let currentProvider = PROVIDER;
@@ -1311,6 +1331,7 @@ async function loop(): Promise<void> {
             );
             currentProvider = hb.orchestration.provider;
             providers.use(currentProvider);
+            if (hb.orchestration.provider === "ollama-local") await warmNetworkModel(switchModel, "model switch");
             await reportStatus("done", "Model switch complete.");
             try {
               await post(
@@ -1421,7 +1442,7 @@ async function loop(): Promise<void> {
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
             const run = st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
               : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);

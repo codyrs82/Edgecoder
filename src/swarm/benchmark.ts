@@ -29,6 +29,7 @@ import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import { request } from "undici";
 import { catalogEntryForTag } from "../model/catalog.js";
+import { MIN_CONTEXT_WINDOW } from "../inference-api/ollama.js";
 
 /** scrypt cost of one CPU work unit. Changing it changes every tier minimum; bump the prefix with it. */
 export const CPU_WORK = { N: 2048, r: 8, p: 1, keylen: 16, prefix: "edgecoder-bench-v1:" } as const;
@@ -340,7 +341,9 @@ export async function ollamaGenerate(input: { host?: string; model: string; prom
       prompt: input.prompt,
       stream: false,
       think: false,
-      options: { temperature: 0, top_k: 1, seed: input.seed, num_predict: input.numPredict }
+      // The context window network calls use, so a benchmark does not leave the model loaded with
+      // another size (Ollama would reload it for the next call: a cold start).
+      options: { temperature: 0, top_k: 1, seed: input.seed, num_predict: input.numPredict, num_ctx: MIN_CONTEXT_WINDOW }
     })
   });
   const text = await res.body.text();
