@@ -339,7 +339,10 @@ const payoutStorm: Scenario = {
       const bal = (afterHold[acct] as { payableMsat?: number; withdrawableMsat?: number } | null) ?? {};
       const payable = Math.floor(Number(bal.withdrawableMsat ?? bal.payableMsat ?? 0) / 1000);
       // Mixed sizes: most at a third of payable (several fit, the rest must be refused), one over the single cap.
-      const amounts = Array.from({ length: perAccount }, (_, i) => (i === 0 && single ? single + 5 : Math.max(11, Math.floor(payable / 3))));
+      // Most fit the single cap with their fee cap (10 sats floor), so the account / global daily
+      // caps and the payable balance are what must stop them; the first one breaks the single cap.
+      const fitting = single ? Math.max(11, single - 11) : Number.POSITIVE_INFINITY;
+      const amounts = Array.from({ length: perAccount }, (_, i) => (i === 0 && single ? single + 5 : Math.max(11, Math.min(Math.floor(payable / 3), fitting))));
       for (const amt of amounts) {
         jobs.push(
           (async () => {
