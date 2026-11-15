@@ -15,10 +15,12 @@ Nothing here is wired into CI.
 |---|---|
 | `cluster.sh` | the local cluster (plain `docker run`, no compose plugin needed): Postgres, portal, inference (decompose fallback), coordinators `coord-a` and `coord-b` (NODE_ENV=production, peered by key with `MESH_PEER_ALLOWLIST` @url pins), bitcoind + LND hub + LND payee on regtest from `deploy/lnd-test` |
 | `up.sh` / `down.sh` | bring the cluster up (secrets, channel payee→hub with push, accounts, API keys) / remove every `ec-stress-*` container, volume and network |
+| `reconfigure.sh` | restart both coordinators with new `STRESS_*` settings (payout caps, hold, verification) keeping DB, LND and accounts |
 | `run.ts` | entry point: `--target <profile> --scenario <name>`; writes `results.json`, `report.json`, `report.md` |
 | `report.ts` | merge results from several load generators (regions) into one report |
 | `bundle.sh` | single-file ESM bundle of `run.ts` / `report.ts` (esbuild from node_modules) + `remote/stress-run.sh` wrapper + target profiles |
 | `remote-smoke.sh` | the remote path end to end against the local cluster (bundle in two containers, URLs only, merged report) |
+| `remote/fly-loadgen.sh` | operator helper for the live phase: load-generator machines per Fly region (prints the flyctl commands unless `DRY_RUN=0`) |
 | `repro/dup-execution.ts` | minimal reproduction of the cross-coordinator duplicate execution finding |
 | `targets/*.json` | target profiles: `local`, `remote-local`, `live-regtest` |
 | `lib/` | agents, buyers, LND client, metrics, invariants, scenarios, report |
@@ -39,6 +41,12 @@ scripts/stress/down.sh
 `STRESS_PAYOUT_MAX_ACCOUNT_DAILY_SATS` (600), `STRESS_PAYOUT_MAX_GLOBAL_DAILY_SATS` (1500),
 `STRESS_REBUILD=1` to rebuild the images from the current tree. Host ports 56001/56002 (coordinators),
 56010 (Postgres), 56020 (portal), 56030/56031 (LND hub/payee REST), all on 127.0.0.1.
+
+Local load ceiling: from the host the cluster is reached through the docker VM's port
+forwarder. On colima/lima that is one ssh master with a 256-file limit; past ~130 tasks/s
+(≈ 500 req/s with 300 agents) it died and took every forward with it, including the docker socket.
+The harness caps sockets per origin (`STRESS_HTTP_CONNECTIONS`, 64). For more load run the bundled
+generator inside the docker network (`remote-smoke.sh` does this), which bypasses the forwarder.
 
 Accounts: providers and buyers sign up through the portal; their email is marked verified in SQL,
 standing in for clicking the emailed link (the same shortcut as `scripts/e2e/scale-nonroot.sh` and
@@ -132,3 +140,24 @@ find a replica executor on another account; with one, sampled results wait for t
 timeout and are then accepted unverified. Buyer accounts top up through `/v1/account/topup`,
 paid by the payee node. Withdrawals are not automated on remote targets: the portal sends an
 emailed code first (by design).
+
+## Live phase (operator)
+
+Nothing in this repo contacts Fly or edgecoder.io by itself. The live run is driven with
+`remote/fly-loadgen.sh`, which prints every flyctl command unless `DRY_RUN=0`:
+
+```sh
+scripts/stress/bundle.sh                                   # .stress-runs/bundle/
+export LG_APP=ec-stress-loadgen LG_ORG=<org> REGIONS="fra iad sin"
+export IMAGE=registry.fly.io/<app>@sha256:<digest>          # the agent image the seed runs: fly image show -a edgecoder-seed
+export CREDS=/secure/credentials.json                      # see "Remote targets"
+scripts/stress/remote/fly-loadgen.sh setup                 # review, then: DRY_RUN=0 scripts/stress/remote/fly-loadgen.sh setup
+STRESS_AGENTS=20 STRESS_BUYERS=2 STRESS_RUN_ID=$(date -u +%y%m%d%H%M) DRY_RUN=0 scripts/stress/remote/fly-loadgen.sh run smoke
+DRY_RUN=0 scripts/stress/remote/fly-loadgen.sh collect <run-id>   # .stress-runs/live/<run-id>/merged/report.md
+DRY_RUN=0 scripts/stress/remote/fly-loadgen.sh teardown
+```
+
+Check `targets/live-regtest.json` first (coordinator and portal URLs, limits). `coordinator-kill`
+on live prints the `fly machine stop/start` commands for the operator; `db-slowdown` and
+`payout-storm` are refused. Agents enrolled during a live run stay listed under the owner's
+account in the portal (node ids `stress-<run>-<region>-a<n>`).
