@@ -33,7 +33,8 @@ export default withMermaid(defineConfig({
           { text: "Model Provider Abstraction", link: "/guide/model-provider-abstraction" },
           { text: "Executor Sandbox and Isolation", link: "/guide/executor-sandbox-isolation" },
           { text: "BLE Local Mesh", link: "/guide/ble-local-mesh" },
-          { text: "Model Management", link: "/guide/model-management" }
+          { text: "Model Management", link: "/guide/model-management" },
+          { text: "Changing Models from the Portal", link: "/guide/remote-model-control" }
         ]
       },
       {
