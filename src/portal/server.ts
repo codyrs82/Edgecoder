@@ -73,6 +73,8 @@ import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
+import { registerInviteAdminRoutes } from "./invites.js";
+import { launchModeFromEnv } from "../economy/launch-gate.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
 // (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
@@ -185,6 +187,8 @@ const PASSKEY_ALLOWED_ORIGINS = (() => {
 // (same env + defaults); C still validates both at startup (DOCS_SITE_URL is required in production).
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./pages/urls.js";
 const WALLET_DEFAULT_NETWORK = C.WALLET_DEFAULT_NETWORK;
+/** Soft launch (src/economy/launch-gate.ts): "invite" makes new accounts need an invite code. */
+const LAUNCH_MODE = launchModeFromEnv();
 const NODE_ENV = C.NODE_ENV;
 const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
   (C.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
@@ -889,6 +893,9 @@ registerRevenueRoutes(
   { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, buildAccessContext },
   { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare }
 );
+
+// Settings > Admin > Early access: system admins mint, list and revoke invite codes (src/portal/invites.ts).
+registerInviteAdminRoutes(app, { store, launchMode: LAUNCH_MODE, getCurrentUser, buildAccessContext });
 
 // Settings > Network for system admins: every coordinator's GET /admin/network, merged, agents joined to accounts.
 registerNetworkAdminRoutes(app, {

@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import type { InviteRecord } from "./invites.js";
 import { Pool } from "pg";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 
@@ -317,7 +318,82 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_node_enrollments_token_idx ON portal_node_enrollments (registration_token_hash)`);
+    await this.migrateInviteCodes();
     await this.migratePayoutDestinations();
+  }
+
+  /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */
+  async migrateInviteCodes(): Promise<void> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_invite_codes (
+         code_id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, label TEXT,
+         max_uses INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, expires_at_ms BIGINT,
+         created_by TEXT NOT NULL, created_at_ms BIGINT NOT NULL, revoked_at_ms BIGINT)`
+    );
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_invite_redemptions (
+         code_id TEXT NOT NULL, user_id TEXT NOT NULL, redeemed_at_ms BIGINT NOT NULL, PRIMARY KEY (code_id, user_id))`
+    );
+    // OAuth sign-ups carry the invite from /start to the callback (hash only).
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS invite_code_hash TEXT`);
+  }
+
+  // ── Soft-launch invite codes (src/portal/invites.ts) ──
+
+  async createInviteCode(input: { codeId: string; codeHash: string; prefix: string; label: string | null; maxUses: number; expiresAtMs: number | null; createdBy: string; createdAtMs: number }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_invite_codes (code_id, code_hash, prefix, label, max_uses, uses, expires_at_ms, created_by, created_at_ms)
+       VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8)`,
+      [input.codeId, input.codeHash, input.prefix, input.label, input.maxUses, input.expiresAtMs, input.createdBy, input.createdAtMs]
+    );
+  }
+
+  async listInviteCodes(limit: number): Promise<InviteRecord[]> {
+    const r = await this.pool.query(
+      `SELECT code_id, prefix, label, max_uses, uses, expires_at_ms, created_by, created_at_ms, revoked_at_ms
+       FROM portal_invite_codes ORDER BY created_at_ms DESC LIMIT $1`,
+      [limit]
+    );
+    return r.rows.map((row) => ({
+      codeId: row.code_id,
+      prefix: row.prefix,
+      label: row.label ?? null,
+      maxUses: Number(row.max_uses),
+      uses: Number(row.uses),
+      expiresAtMs: row.expires_at_ms === null ? null : Number(row.expires_at_ms),
+      createdBy: row.created_by,
+      createdAtMs: Number(row.created_at_ms),
+      revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms)
+    }));
+  }
+
+  async revokeInviteCode(codeId: string, nowMs: number): Promise<boolean> {
+    const r = await this.pool.query(`UPDATE portal_invite_codes SET revoked_at_ms = $2 WHERE code_id = $1 AND revoked_at_ms IS NULL`, [codeId, nowMs]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async inviteCodeRedeemable(codeHash: string, nowMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `SELECT 1 FROM portal_invite_codes
+       WHERE code_hash = $1 AND revoked_at_ms IS NULL AND (expires_at_ms IS NULL OR expires_at_ms > $2) AND uses < max_uses`,
+      [codeHash, nowMs]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** One statement: takes a use only while the code is live and not used up, and records who took it. */
+  async redeemInviteCode(codeHash: string, userId: string, nowMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `WITH taken AS (
+         UPDATE portal_invite_codes SET uses = uses + 1
+         WHERE code_hash = $1 AND revoked_at_ms IS NULL AND (expires_at_ms IS NULL OR expires_at_ms > $2) AND uses < max_uses
+         RETURNING code_id)
+       INSERT INTO portal_invite_redemptions (code_id, user_id, redeemed_at_ms)
+       SELECT code_id, $3, $2 FROM taken
+       RETURNING code_id`,
+      [codeHash, nowMs, userId]
+    );
+    return (r.rowCount ?? 0) > 0;
   }
 
   /**
