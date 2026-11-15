@@ -78,6 +78,8 @@ export async function validatePortalNode(input: {
   sourceIp?: string;
   countryCode?: string;
   vpnDetected?: boolean;
+  /** The portal's host approval for the node's owner; undefined when the portal did not say. */
+  hostApproved?: boolean;
 }> {
   const appendValidationEvent = async (outcome: { allowed: boolean; reason?: string; ownerEmail?: string }) => {
     try {
@@ -176,6 +178,7 @@ export async function validatePortalNode(input: {
         sourceIp?: string;
         countryCode?: string;
         vpnDetected?: boolean;
+        hostApproved?: boolean;
       };
     };
     if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -221,7 +224,8 @@ export async function validatePortalNode(input: {
       ownerEmail: payload.node?.ownerEmail,
       sourceIp: payload.node?.sourceIp,
       countryCode: payload.node?.countryCode,
-      vpnDetected: payload.node?.vpnDetected
+      vpnDetected: payload.node?.vpnDetected,
+      ...(typeof payload.node?.hostApproved === "boolean" ? { hostApproved: payload.node.hostApproved } : {})
     };
   } catch {
     // If portal validation is temporarily unavailable, allow agents we already know that prove
@@ -235,4 +239,53 @@ export async function validatePortalNode(input: {
     await appendValidationEvent(outcome);
     return outcome;
   }
+}
+
+/** How often agents the portal reported as not approved hosts are looked up again. */
+export const HOST_APPROVAL_REFRESH_MS = 2 * 60_000;
+
+/**
+ * Host approval changes (an admin approves or revokes a host in Settings > Admin) reach agents
+ * that are already registered: every agent whose owner was not an approved host is looked up
+ * again, and so is every approved one, in batches through the portal's /internal/nodes/lookup.
+ * Returns the agents whose approval changed. Best effort: a failed lookup changes nothing.
+ */
+export async function refreshHostApprovals(
+  lookup: (nodeIds: string[]) => Promise<Array<{ nodeId: string; hostApproved?: boolean }>> = portalLookup
+): Promise<string[]> {
+  const ids = [...agentCapabilities.entries()].filter(([, cap]) => typeof cap.hostApproved === "boolean").map(([id]) => id);
+  const changed: string[] = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    let nodes: Array<{ nodeId: string; hostApproved?: boolean }>;
+    try {
+      nodes = await lookup(ids.slice(i, i + 200));
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "host_approval_refresh_failed");
+      return changed;
+    }
+    for (const n of nodes) {
+      const cap = agentCapabilities.get(n.nodeId);
+      if (!cap || typeof n.hostApproved !== "boolean" || cap.hostApproved === n.hostApproved) continue;
+      cap.hostApproved = n.hostApproved;
+      changed.push(n.nodeId);
+    }
+  }
+  if (changed.length) app.log.info({ agents: changed.length }, "host_approval_changed");
+  return changed;
+}
+
+async function portalLookup(nodeIds: string[]): Promise<Array<{ nodeId: string; hostApproved?: boolean }>> {
+  if (!PORTAL_SERVICE_URL || nodeIds.length === 0) return [];
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
+  const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/lookup`, {
+    method: "POST",
+    headers,
+    headersTimeout: 5_000,
+    bodyTimeout: 5_000,
+    body: JSON.stringify({ nodeIds })
+  });
+  const payload = (await res.body.json()) as { nodes?: Array<{ nodeId: string; hostApproved?: boolean }> };
+  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`portal_lookup_failed_${res.statusCode}`);
+  return payload.nodes ?? [];
 }
