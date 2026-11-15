@@ -13,6 +13,11 @@ export function buildCss(tokens) {
   const shared = [
     ...Object.entries(tokens.space).map(([k, v]) => `  --space-${k}: ${v};`),
     ...Object.entries(tokens.radius).map(([k, v]) => `  --radius-${k}: ${v};`),
+    // Type scale, line heights and control heights (#desktop-polish): one scale for the whole UI.
+    // `--fs-*`, not `--text-*`, which Tailwind and the colour tokens already use.
+    ...Object.entries(tokens.type).map(([k, v]) => `  --fs-${k}: ${v};`),
+    ...Object.entries(tokens.leading).map(([k, v]) => `  --lh-${k}: ${v};`),
+    ...Object.entries(tokens.control).map(([k, v]) => `  --control-${k}: ${v};`),
     // Elevation is neutral black in both themes, so it is not a per-mode colour (and not mirrored in iOS).
     ...Object.entries(tokens.shadow).map(([k, v]) => `  --shadow-${k}: ${v};`),
     `  --scrim: ${tokens.scrim};`,

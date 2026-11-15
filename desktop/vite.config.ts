@@ -1,9 +1,21 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
+import { fileURLToPath } from "node:url";
+
+// The design tokens are always this checkout's packages/tokens, even when node_modules is a link
+// to another checkout (its @edgecoder/tokens link would resolve to that checkout's copy).
+const tokens = (p: string) => fileURLToPath(new URL(`../packages/tokens/${p}`, import.meta.url));
 
 export default defineConfig({
   plugins: [tailwindcss(), svelte()],
+  resolve: {
+    alias: {
+      "@edgecoder/tokens/tokens.css": tokens("dist/tokens.css"),
+      "@edgecoder/tokens/theme.css": tokens("src/theme.css"),
+      "@edgecoder/tokens/tokens.json": tokens("src/tokens.json"),
+    },
+  },
   clearScreen: false,
   server: {
     port: 1420,
