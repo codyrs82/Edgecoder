@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,12 +11,17 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-/** A fake `gh` that prints a device code like gh does, then exits with `code` after `waitMs`. */
-function fakeGh(lines: string, code: number, waitMs = 100): string {
-  const p = join(dir, "gh");
-  writeFileSync(p, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(lines)} >&2\nsleep ${waitMs / 1000}\nexit ${code}\n`);
-  chmodSync(p, 0o755);
-  return p;
+/**
+ * A fake `gh` (a Node script, so it runs on every OS) that prints a device code like gh does,
+ * then exits with `code` after `waitMs`. The real gh on PATH and any GitHub login are never used.
+ */
+function fakeGh(lines: string, code: number, waitMs = 100) {
+  const script = join(dir, "gh.mjs");
+  writeFileSync(script, `process.stderr.write(${JSON.stringify(lines + "\n")}); setTimeout(() => process.exit(${code}), ${waitMs});\n`);
+  return {
+    gh: () => "gh",
+    spawn: ((_cmd: string, args: string[], opts: object) => spawn(process.execPath, [script, ...args], opts)) as unknown as typeof spawn,
+  };
 }
 
 const until = async (check: () => boolean, ms = 5000) => {
@@ -35,7 +41,7 @@ describe("GitHub device sign-in", () => {
   });
 
   it("shows the code, then reports the signed-in login when gh finishes", async () => {
-    const logins = new GitHubDeviceLogins({ gh: () => fakeGh("! One-time code (7642-9A80) copied to clipboard", 0, 300), status: async () => ({ ghInstalled: true, loggedIn: true, login: "octocat" }) });
+    const logins = new GitHubDeviceLogins({ ...fakeGh("! One-time code (7642-9A80) copied to clipboard", 0, 300), status: async () => ({ ghInstalled: true, loggedIn: true, login: "octocat" }) });
     const l = await logins.start();
     expect(l).toMatchObject({ state: "waiting", code: "7642-9A80", url: "https://github.com/login/device" });
     // A second start while one waits returns the same sign-in.
@@ -45,10 +51,10 @@ describe("GitHub device sign-in", () => {
   });
 
   it("reports gh failing, a missing gh, and cancelling", async () => {
-    const failing = new GitHubDeviceLogins({ gh: () => fakeGh("error connecting to github.com", 1, 0) });
+    const failing = new GitHubDeviceLogins({ ...fakeGh("error connecting to github.com", 1, 0) });
     expect(await failing.start()).toMatchObject({ state: "error", message: expect.stringContaining("error connecting") });
     expect(await new GitHubDeviceLogins({ gh: () => null }).start()).toMatchObject({ state: "error", message: expect.stringContaining("isn't installed") });
-    const slow = new GitHubDeviceLogins({ gh: () => fakeGh("! First copy your one-time code: AAAA-BBBB", 0, 5000) });
+    const slow = new GitHubDeviceLogins({ ...fakeGh("! First copy your one-time code: AAAA-BBBB", 0, 5000) });
     const l = await slow.start();
     expect(slow.cancel(l.id)?.state).toBe("cancelled");
   });

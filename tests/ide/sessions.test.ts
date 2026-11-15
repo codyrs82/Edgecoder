@@ -48,7 +48,8 @@ describe("SessionHub", () => {
     expect(snap.session.transcript.map((t) => [t.role, t.content])).toEqual([["user", "hi there"], ["assistant", "Hello from the model."]]);
     expect(model.requests[0].messages.at(-1)).toEqual({ role: "user", content: "hi there" });
     const file = join(dir, `${s.id}.json`);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // POSIX permissions only (Windows has no mode bits).
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
     // A new hub (the provider restarted) loads it.
     const again = makeHub([], { dir }).hub;
     again.load();

@@ -54,7 +54,8 @@ describe("provider: shared sessions and GitHub sign-in", () => {
     expect((await app.inject({ method: "GET", url: "/v1/ide/sessions/00000000-0000-4000-8000-000000000000", headers })).statusCode).toBe(404);
   });
 
-  it("starts gh's device flow and returns the code", async () => {
+  // The fake gh here is a shell script (EDGECODER_GH_BIN); the device flow itself is covered on every OS in github-device.test.ts.
+  it.skipIf(process.platform === "win32")("starts gh's device flow and returns the code", async () => {
     const res = await app.inject({ method: "POST", url: "/v1/ide/github/login", headers, payload: {} });
     expect(res.json()).toMatchObject({ state: "waiting", code: "ABCD-1234", url: "https://github.com/login/device" });
     const status = await app.inject({ method: "GET", url: `/v1/ide/github/login/${res.json().id}`, headers });

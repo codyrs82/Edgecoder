@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
@@ -254,6 +254,11 @@ export class SessionHub {
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
     renameSync(tmp, file);
+    try {
+      chmodSync(file, 0o600); // whatever the umask (and a file that existed with looser bits)
+    } catch {
+      // no POSIX modes here (Windows)
+    }
   }
 
   private liveOf(id: string): Live {

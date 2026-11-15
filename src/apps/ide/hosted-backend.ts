@@ -14,8 +14,6 @@ import { readFileSync } from "node:fs";
 import { request } from "undici";
 import { ChatBackendError, type ChatBackend, type ChatMessage, type ToolCall } from "../../inference-api/types.js";
 
-export const DEFAULT_HOSTED_URL = "https://edgecoder.io";
-
 export interface HostedConfig {
   /** Origin of the hosted endpoint, without /v1. */
   baseUrl: string;
@@ -35,7 +33,8 @@ export function hostedConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Hoste
   };
   const key = () => env.EDGECODER_API_KEY?.trim() || fromFile();
   if (!key()) return null;
-  const raw = (env.EDGECODER_URL?.trim() || DEFAULT_HOSTED_URL).replace(/\/+$/, "").replace(/\/v1$/, "");
+  // EDGECODER_URL overrides the hosted endpoint (a self-hosted portal).
+  const raw = (env.EDGECODER_URL || "https://edgecoder.io").trim().replace(/\/+$/, "").replace(/\/v1$/, "");
   // The key goes only to https (or a local test server).
   if (!/^https:\/\//.test(raw) && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(raw)) return null;
   return { baseUrl: raw, apiKey: key };
