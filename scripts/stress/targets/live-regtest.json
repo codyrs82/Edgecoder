@@ -1,0 +1,21 @@
+{
+  "name": "live-regtest",
+  "kind": "remote",
+  "coordinators": [
+    { "id": "edgecoder-seed", "url": "https://edgecoder-seed.fly.dev", "flyApp": "edgecoder-seed" },
+    { "id": "edgecoder-seed-eu", "url": "https://edgecoder-seed-eu.fly.dev", "flyApp": "edgecoder-seed-eu" }
+  ],
+  "portalUrl": "https://edgecoder.io",
+  "credentialsFile": "/stress/credentials.json",
+  "allowedScenarios": ["smoke", "ramp", "soak", "churn", "coordinator-kill", "malicious", "market-burst"],
+  "allowDatabase": false,
+  "allowDocker": false,
+  "allowAdminWrites": false,
+  "limits": { "maxAgents": 100, "maxBuyers": 10, "maxDurationSec": 1800, "maxTopupSats": 20000 },
+  "inferenceModel": "stress-sim:1b",
+  "operatorNotes": [
+    "Credentials: /stress/credentials.json on each load-gen VM (mode 600), shaped like .stress-runs/local/credentials.json: provider accounts are the owner's verified account(s) with a portal API key; buyer accounts likewise; lnd.payee is the regtest payee node's REST URL, macaroon and cert (reachable from the VM, e.g. through `fly proxy`); tokens.admin is optional (enables /ledger/verify and /admin/payouts/reconciliation evidence).",
+    "coordinator-kill on live only prints the fly machine stop/start commands; the operator runs them.",
+    "db-slowdown and payout-storm are local only (direct Postgres; payout-storm calls the coordinator payout route with the portal service token, which on live sits behind the portal's emailed-code step)."
+  ]
+}
