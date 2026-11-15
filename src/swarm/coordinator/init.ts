@@ -76,7 +76,8 @@ import { startOnchainTimers } from "./onchain.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
 import { sweepGrants } from "./grants.js";
-import { restoreTaskBilling } from "./billing-restore.js";
+import { restoreTaskBilling, sweepTaskBilling } from "./billing-restore.js";
+import { TASK_BILLING_SWEEP_INTERVAL_MS } from "../billing-sweep.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -129,6 +130,10 @@ export async function initCoordinator(): Promise<void> {
       // Stress finding 2: tasks billed here and not settled before the restart are resumed or refunded
       // (after the verifications, which own the subtasks they hold).
       await restoreTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_restore_failed"));
+      // ...and rows an outgoing instance left open after that (deploy overlap): swept periodically.
+      setInterval(() => {
+        void sweepTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_sweep_failed"));
+      }, TASK_BILLING_SWEEP_INTERVAL_MS).unref?.();
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([
