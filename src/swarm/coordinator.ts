@@ -31,7 +31,7 @@ import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import { app, metrics } from "./coordinator/app.js";
 import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN } from "./coordinator/context.js";
 import "./coordinator/mutable-state.js";
-import { agentCapabilities } from "./coordinator/agent-state.js";
+import { agentCapabilities, connectedAgentCount } from "./coordinator/agent-state.js";
 import { hasMeshToken, hasPortalServiceToken, requireMeshToken } from "./coordinator/auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
@@ -71,7 +71,8 @@ import { initCoordinator } from "./coordinator/init.js";
 // Read at scrape time.
 registerCoordinatorMetrics(metrics, {
   queue: () => queue.status(),
-  connectedAgents: () => agentCapabilities.size,
+  connectedAgents: () => connectedAgentCount(),
+  knownAgents: () => agentCapabilities.size,
   payoutReconcile: () => payoutReconciler.last()
 });
 

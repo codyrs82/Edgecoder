@@ -165,6 +165,8 @@ export const coordinatorConfigSchema = z.object({
   DIRECT_WORK_OFFERS_PER_10S: envInt(20, { min: 0 }),
   PAYMENT_INTENT_EXPIRY_GRACE_MS: envInt(120000, { min: 1 }),
   AGENT_ORCHESTRATION_ONLINE_WINDOW_MS: envInt(120000, { min: 1 }),
+  /** Agents not seen this long are dropped from the in-memory registry (they re-register as after a restart). */
+  AGENT_CAPABILITY_TTL_MS: envInt(3_600_000, { min: 60_000 }),
   // Work receipts: epoch close/anchor cadence and peer replication pull interval (docs/receipts-and-trust.md).
   RECEIPT_EPOCH_MS: envInt(3600000, { min: 1 }),
   RECEIPT_REPLICATION_MS: envInt(60000, { min: 1 }),

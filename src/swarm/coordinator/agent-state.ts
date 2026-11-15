@@ -94,6 +94,32 @@ export const agentCapabilities = new Map<
     hardwareClass?: HardwareClassification;
   }
 >();
+/** Agents seen this recently count as connected (/metrics edgecoder_connected_agents, the account page). */
+export const AGENT_CONNECTED_WINDOW_MS = 2 * 60_000;
+
+/** Agents seen within the connected window. */
+export function connectedAgentCount(nowMs = Date.now()): number {
+  let n = 0;
+  for (const cap of agentCapabilities.values()) if (nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS) n++;
+  return n;
+}
+
+/**
+ * Stress finding 5: agentCapabilities was never pruned (233 entries with 40 live agents). Entries not
+ * seen for `ttlMs` are dropped, except those `keep` says are still needed (an agent holding a
+ * reservation). A dropped agent that comes back re-registers exactly as after a coordinator restart
+ * (signed /register, portal validation). Returns the dropped ids so callers can drop their own state.
+ */
+export function pruneStaleAgentCapabilities(nowMs: number, ttlMs: number, keep: (agentId: string) => boolean = () => false): string[] {
+  const dropped: string[] = [];
+  for (const [agentId, cap] of agentCapabilities) {
+    if (nowMs - cap.lastSeenMs <= ttlMs || keep(agentId)) continue;
+    agentCapabilities.delete(agentId);
+    lastTaskAssignedByAgent.delete(agentId);
+    dropped.push(agentId);
+  }
+  return dropped;
+}
 export const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
 export const ENVELOPE_KEY_TTL_MS = 60 * 60 * 1000; // 1 hour
 export const federatedCapabilities = new Map<string, CapabilitySummaryPayload>();

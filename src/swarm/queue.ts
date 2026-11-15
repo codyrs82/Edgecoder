@@ -115,6 +115,12 @@ export class SwarmQueue {
       .catch(() => undefined);
   }
 
+  /** Drop an agent's registry entry (it re-registers when it comes back). */
+  forgetAgent(agentId: string): void {
+    this.agents.delete(agentId);
+    this.agentClaimCount.delete(agentId);
+  }
+
   heartbeat(agentId: string): void {
     const current = this.agents.get(agentId);
     if (!current) return;
