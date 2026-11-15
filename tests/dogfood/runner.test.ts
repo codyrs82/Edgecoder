@@ -2,7 +2,7 @@
 // context commands it may run (read-only gh only). Also checks every seeded job spec is complete.
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { contextCommandAllowed, pathAllowed, tierFor, tierLimit } from "../../scripts/dogfood/runner.mjs";
+import { contextCommandAllowed, parsePorcelainZ, pathAllowed, tierFor, tierLimit } from "../../scripts/dogfood/runner.mjs";
 
 describe("dogfood runner", () => {
   it("routes jobs to tiers by type", () => {
@@ -20,6 +20,12 @@ describe("dogfood runner", () => {
     expect(tierLimit("cpu", models)).toBe(2);
     expect(tierLimit("mac", models)).toBe(0);
     expect(tierLimit("mac", null)).toBe(1);
+  });
+
+  it("reads changed paths from git status without eating the first character", () => {
+    expect(parsePorcelainZ(" M src/swarm/worker-runner.ts\0?? src/common/app-version.ts\0")).toEqual(["src/swarm/worker-runner.ts", "src/common/app-version.ts"]);
+    expect(parsePorcelainZ("R  new.ts\0old.ts\0A  t.ts\0")).toEqual(["new.ts", "t.ts"]);
+    expect(parsePorcelainZ("")).toEqual([]);
   });
 
   it("allows exact paths and dir/** prefixes only", () => {

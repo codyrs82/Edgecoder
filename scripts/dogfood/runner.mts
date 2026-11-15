@@ -76,8 +76,8 @@ interface Job {
   context?: Array<{ label: string; cmd?: string[]; builtin?: "failed-ci-logs"; limit?: number }>; commit?: boolean; output?: string;
 }
 type TierName = "cpu" | "mac" | "gpu";
-const TIERS: Record<TierName, { model: string; ideModel: string; cls: string; label: string }> = {
-  cpu: { model: "network/qwen2.5-coder:1.5b@cpu", ideModel: "qwen2.5-coder:1.5b", cls: "cpu", label: "CPU fleet, qwen2.5-coder:1.5b" },
+const TIERS: Record<TierName, { model: string; ideModel: string; cls: string; label: string; maxTokens?: number }> = {
+  cpu: { model: "network/qwen2.5-coder:1.5b@cpu", ideModel: "qwen2.5-coder:1.5b", cls: "cpu", label: "CPU fleet, qwen2.5-coder:1.5b", maxTokens: 1024 },
   mac: { model: "network/qwen2.5-coder:7b", ideModel: "qwen2.5-coder:7b", cls: "any", label: "Mac, qwen2.5-coder:7b" },
   gpu: { model: "network/qwen3-coder:30b@gpu.dc", ideModel: "qwen3-coder:30b", cls: "gpu.dc", label: "datacenter GPU, qwen3-coder:30b" },
 };
@@ -164,7 +164,12 @@ interface AgentRun { calls: Call[]; toolCalls: Record<string, number>; sigs: Rec
 const KEY = (() => { try { return JSON.parse(readFileSync(join(homedir(), ".config/edgecoder/e2e/accounts", `${ACCOUNT}.json`), "utf8")).apiKey as string; } catch { return ""; } })();
 const IDE_TOKEN = (() => { try { return readFileSync(join(homedir(), ".edgecoder/ide-token"), "utf8").trim(); } catch { return ""; } })();
 
-function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
+/**
+ * maxTokens: a reply cap. The CPU agents serve an 8192-token window and the coordinator sizes a
+ * call as prompt + reply cap (default 4096): the IDE system prompt and tool list alone are ~4.5K
+ * tokens, so CPU-tier calls must cap the reply or no CPU agent can take them.
+ */
+function publicApiBackend(model: string, calls: Call[], hints?: string[], maxTokens?: number) {
   return async function* (req: any, signal?: AbortSignal) {
     const msgs: any[] = [];
     let pending: string[] = [];
@@ -186,7 +191,7 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
       const res = await fetch(`${API}/v1/chat/completions`, {
         method: "POST",
         headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json", "user-agent": "edgecoder-dogfood/1.0" },
-        body: JSON.stringify({ model, stream: true, messages: msgs, ...(req.tools ? { tools: req.tools } : {}), ...(req.temperature !== undefined ? { temperature: req.temperature } : {}), ...(model === "auto" && hints?.length ? { edgecoder: { hints } } : {}) }),
+        body: JSON.stringify({ model, stream: true, messages: msgs, ...(req.tools ? { tools: req.tools } : {}), ...(req.temperature !== undefined ? { temperature: req.temperature } : {}), ...(maxTokens ? { max_tokens: maxTokens } : {}), ...(model === "auto" && hints?.length ? { edgecoder: { hints } } : {}) }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(600_000)]) : AbortSignal.timeout(600_000),
       });
       if (!res.ok || !res.body) {
@@ -237,7 +242,7 @@ function publicApiBackend(model: string, calls: Call[], hints?: string[]) {
   };
 }
 
-async function runInproc(job: Job, model: string, wt: string, prompt: string): Promise<AgentRun> {
+async function runInproc(job: Job, model: string, wt: string, prompt: string, maxTokens?: number): Promise<AgentRun> {
   const { runAgentLoop, makeToolRunner, toolSchemas, backendChat } = await import(`${SRC}/apps/ide/agent-loop.ts`);
   const { ToolExecutor } = await import(`${SRC}/apps/ide/tool-executor.ts`);
   const { readProjectRules } = await import(`${SRC}/apps/ide/project-fs.ts`);
@@ -277,7 +282,7 @@ async function runInproc(job: Job, model: string, wt: string, prompt: string): P
   const rules = readProjectRules(wt);
   try {
     await runAgentLoop({
-      chat: backendChat(publicApiBackend(model, r.calls, job.hints), undefined, abort.signal),
+      chat: backendChat(publicApiBackend(model, r.calls, job.hints, maxTokens), undefined, abort.signal),
       systemPrompt: (format: "native" | "text") => buildIdeAgentSystemPrompt(promptCtx, wt, rules, format),
       messages: [{ role: "user", content: prompt }],
       sendEvent,
@@ -345,9 +350,24 @@ async function runProvider(job: Job, tier: TierName, wt: string, prompt: string)
 }
 
 // ---------------------------------------------------------------------------- acceptance
+/** Paths changed in a worktree (porcelain v1 -z: "XY path", not trimmed: a leading space is the X column). */
+export function parsePorcelainZ(out: string): string[] {
+  const parts = out.split("\0").filter(Boolean);
+  const files: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    files.push(entry.slice(3));
+    if (entry[0] === "R" || entry[0] === "C") i++; // a rename's second path (the source) follows
+  }
+  return files;
+}
+function changedFiles(wt: string): string[] {
+  return parsePorcelainZ(execFileSync("git", ["status", "--porcelain", "-z", "--untracked-files=all"], { cwd: wt, encoding: "utf8" }));
+}
+
 async function accept(job: Job, wt: string): Promise<{ passed: boolean; changed: string[]; checks: any[]; reason?: string }> {
   return exclusive(() => {
-    const changed = git(wt, "status", "--porcelain", "--untracked-files=all").split("\n").filter(Boolean).map((l) => l.slice(3).replace(/^"|"$/g, ""));
+    const changed = changedFiles(wt);
     const checks: any[] = [];
     const outside = changed.filter((f) => !pathAllowed(f, job.allowedPaths));
     if (outside.length) return { passed: false, changed, checks, reason: `changed files outside allowedPaths: ${outside.join(", ")}` };
@@ -446,7 +466,7 @@ async function attempt(job: Job, tier: TierName, n: number, base: string, contex
   try {
     const prompt = promptFor(job, wt, contextBlocks);
     const via = VIA === "auto" ? ((await providerUp()) ? "provider" : "inproc") : VIA;
-    const r = via === "provider" ? await runProvider(job, tier, wt, prompt) : await runInproc(job, model, wt, prompt);
+    const r = via === "provider" ? await runProvider(job, tier, wt, prompt) : await runInproc(job, model, wt, prompt, TIERS[tier].maxTokens);
     card.via = r.via;
     card.agentMs = Date.now() - t0;
     const acc = await accept(job, wt);
