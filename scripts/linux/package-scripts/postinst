@@ -2,6 +2,30 @@
 
 set -euo pipefail
 
+# True when PATH resolves to a file that root alone can change: it and every directory above it
+# are owned by root and not group- or world-writable (the same rule as src/install/binaries.ts).
+# Package scripts run as root and must never execute a binary another user could swap
+# (Homebrew under /opt/homebrew or /usr/local, nvm under $HOME, /Applications).
+root_controlled() {
+  local p="$1" st
+  [[ -e "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then p="$(realpath "$p")" || return 1
+  elif [[ -L "$p" ]]; then return 1; fi
+  while :; do
+    st="$(stat -c '%u %a' "$p" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    (( (8#${st##* } & 8#022) == 0 )) || return 1
+    [[ "$p" == / ]] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
+# This runs as root: only a node that root alone can change (preinst checked the same).
+NODE_BIN=""
+for candidate in "$(command -v node 2>/dev/null || true)" /usr/bin/node /usr/local/bin/node; do
+  if [[ -n "$candidate" && -x "$candidate" ]] && root_controlled "$candidate"; then NODE_BIN="$candidate"; break; fi
+done
+
 LOG_DIR="/var/log/edgecoder"
 ENV_EXAMPLE="/etc/edgecoder/edgecoder.env.example"
 ENV_FILE="/etc/edgecoder/edgecoder.env"
@@ -19,7 +43,8 @@ fi
 
 ln -sf /usr/lib/edgecoder/bin/edgecoder-configure.sh /usr/local/bin/edgecoder
 # The shared installer (same options on macOS, Linux and Windows): detects GPUs, one agent per GPU.
-printf '#!/bin/sh\nexec node /usr/lib/edgecoder/app/dist/install/cli.js "$@"\n' > /usr/local/bin/edgecoder-install
+rm -f /usr/local/bin/edgecoder-install
+printf '#!/bin/sh\nexec "%s" /usr/lib/edgecoder/app/dist/install/cli.js "$@"\n' "${NODE_BIN:-/usr/bin/node}" > /usr/local/bin/edgecoder-install
 chmod 755 /usr/local/bin/edgecoder-install
 
 if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running --quiet 2>/dev/null || true; then
@@ -35,7 +60,9 @@ fi
 
 # Plan and create per-GPU services non-interactively; tokens are added later with
 # `edgecoder-install apply --token <agent-id>=<token>`.
-node /usr/lib/edgecoder/app/dist/install/cli.js apply --from-package --app-dir /usr/lib/edgecoder/app || true
+if [[ -n "$NODE_BIN" ]]; then
+  "$NODE_BIN" /usr/lib/edgecoder/app/dist/install/cli.js apply --from-package --app-dir /usr/lib/edgecoder/app --node-bin "$NODE_BIN" || true
+fi
 
 echo ""
 echo "EdgeCoder installed successfully."

@@ -1,13 +1,17 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
+  import { Popover, Tabs } from "bits-ui";
+  import { Settings as SettingsIcon, MessageSquare } from "@lucide/svelte";
+  import { notify } from "../lib/toast";
   import FileTree from "../components/FileTree.svelte";
+  import Select from "../components/ui/Select.svelte";
   import QuickOpen from "../components/QuickOpen.svelte";
   import TerminalPanel from "../components/TerminalPanel.svelte";
   import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
   import ConnectRepo from "../components/ConnectRepo.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, ideProjectTrust, ideSetProjectTrust, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
   import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
@@ -41,7 +45,6 @@
   let gitBranch: string | null = $state(null);
   let gitFiles: Record<string, string> = $state({});
   let treeRefresh = $state(0);
-  let notice: { kind: "error" | "info"; text: string } | null = $state(null);
   let explorerWidth = $state(240);
 
   let chatPanelWidth = $state(380);
@@ -130,6 +133,39 @@
   let checking = $state(false);
   const CHECKED = /\.((m|c)?[jt]sx?|py|rs)$/;
 
+  // Workspace trust: the project's own checkers (tsc, cargo) run code from the folder, so the IDE
+  // server skips them until the user trusts it. null = not known (older server, no project yet).
+  let projectTrusted = $state<boolean | null>(null);
+  /** The trust notice is showing; "Not now" hides it for this folder until it is opened again. */
+  let trustPrompt = $state(false);
+  let trustDeclined = false;
+  let trustBusy = $state(false);
+
+  async function refreshTrust(root: string) {
+    try {
+      const t = await ideProjectTrust();
+      if (projectRoot !== root || t.projectRoot === null) return;
+      projectTrusted = t.trusted;
+      if (!t.trusted && !trustDeclined) trustPrompt = true;
+    } catch {
+      // older IDE server without trust, or no project yet: nothing to show
+    }
+  }
+
+  async function setTrust(trusted: boolean) {
+    trustBusy = true;
+    try {
+      const t = await ideSetProjectTrust(trusted);
+      projectTrusted = t.trusted;
+      trustPrompt = false;
+      if (t.trusted) void runDiagnostics(files.map((f) => f.path));
+    } catch (e) {
+      showNotice(`Couldn't change folder trust: ${(e as Error).message ?? String(e)}`);
+    } finally {
+      trustBusy = false;
+    }
+  }
+
   /** Run the checkers for these files and show their problems on every open file. */
   async function runDiagnostics(paths: string[]) {
     if (!editorSettings.diagnostics) return;
@@ -138,6 +174,10 @@
     checking = true;
     try {
       const r = await ideDiagnostics(targets);
+      if (r.untrusted?.length) {
+        projectTrusted = false;
+        if (!trustDeclined) trustPrompt = true;
+      }
       // A whole-project checker (tsc) reports every file: the count is the project's, and the
       // checked files' old problems are replaced by this run's.
       const next: Record<string, Diagnostic[]> = { ...problems };
@@ -190,9 +230,9 @@
   /** Suppresses the dirty flag while the editor itself loads content into a model. */
   let applyingExternal = false;
 
+  /** One editor message at a time: a new one replaces the last (#24: a toast, not a banner). */
   function showNotice(text: string, kind: "error" | "info" = "error") {
-    notice = { kind, text };
-    if (kind === "info") setTimeout(() => { if (notice?.text === text) notice = null; }, 4000);
+    notify(text, kind, "editor-notice");
   }
 
   onMount(async () => {
@@ -268,7 +308,13 @@
     const root = projectRoot;
     if (root === loadedRoot) return;
     loadedRoot = root;
-    untrack(() => resetForProject(root));
+    untrack(() => {
+      projectTrusted = null;
+      trustPrompt = false;
+      trustDeclined = false;
+      resetForProject(root);
+      if (root) void refreshTrust(root);
+    });
   });
 
   function resetForProject(root: string | null) {
@@ -635,37 +681,44 @@
 <div class="editor-layout" class:resizing={isResizing}>
   <div class="explorer-panel" style="width: {explorerWidth}px">
     {#if projectRoot}
-      <div class="sidebar-tabs" role="tablist">
-        <button role="tab" aria-selected={sidebarView === "files"} class:active={sidebarView === "files"} onclick={() => (sidebarView = "files")}>Files</button>
-        <button role="tab" aria-selected={sidebarView === "git"} class:active={sidebarView === "git"} onclick={() => (sidebarView = "git")}>
-          Source Control{#if changeCount}<span class="count">{changeCount}</span>{/if}
-        </button>
-      </div>
-    {/if}
-    {#if projectRoot && sidebarView === "git"}
-      <div class="sidebar-body">
-        <SourceControl
-          refreshKey={treeRefresh}
-          onOpen={(p) => void openPath(p)}
-          onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
-          onError={(m) => showNotice(m)}
-          onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
-          onProjectOpened={(root) => onProjectOpened?.(root)}
-        />
-      </div>
-    {:else if projectRoot}
-      <div class="sidebar-body">
-      <FileTree
-        {projectRoot}
-        activePath={activeFilePath}
-        {gitFiles}
-        refreshKey={treeRefresh}
-        onOpen={(p) => void openPath(p)}
-        onRenamed={handleRenamed}
-        onDeleted={handleDeleted}
-        onError={(m) => showNotice(m)}
-      />
-      </div>
+      <!-- #24: bits-ui Tabs. Only the open view is mounted, as before. -->
+      <Tabs.Root class="contents" bind:value={sidebarView}>
+        <Tabs.List aria-label="Sidebar">
+          {#snippet child({ props })}
+            <div {...props} class="sidebar-tabs">
+              <Tabs.Trigger value="files">Files</Tabs.Trigger>
+              <Tabs.Trigger value="git">Source Control{#if changeCount}<span class="count">{changeCount}</span>{/if}</Tabs.Trigger>
+            </div>
+          {/snippet}
+        </Tabs.List>
+        <Tabs.Content value={sidebarView} tabindex={-1}>
+          {#snippet child({ props })}
+            <div {...props} class="sidebar-body">
+              {#if sidebarView === "git"}
+                <SourceControl
+                  refreshKey={treeRefresh}
+                  onOpen={(p) => void openPath(p)}
+                  onChanged={() => { onAgentChangedFiles(); void refreshGit(); }}
+                  onError={(m) => showNotice(m)}
+                  onInfo={(m) => { showNotice(m, "info"); void refreshGit(); }}
+                  onProjectOpened={(root) => onProjectOpened?.(root)}
+                />
+              {:else}
+                <FileTree
+                  {projectRoot}
+                  activePath={activeFilePath}
+                  {gitFiles}
+                  refreshKey={treeRefresh}
+                  onOpen={(p) => void openPath(p)}
+                  onRenamed={handleRenamed}
+                  onDeleted={handleDeleted}
+                  onError={(m) => showNotice(m)}
+                />
+              {/if}
+            </div>
+          {/snippet}
+        </Tabs.Content>
+      </Tabs.Root>
     {:else}
       <div class="no-project">
         <p>No folder open</p>
@@ -702,20 +755,28 @@
         <button class="ac-toggle" class:on={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} onclick={() => (splitPath ? closeSplit() : openSplit())}>Split</button>
       {/if}
       <button class="ac-toggle" class:on={terminalOpen} title="Terminal (Ctrl+`)" onclick={toggleTerminal}>Terminal</button>
-      <div class="settings-wrap">
-        <button class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
-        {#if settingsOpen}
-          <div class="settings-pop" role="dialog" aria-label="Editor settings">
+      <!-- #24: a bits-ui Popover: closes on Escape or a click away and returns focus to the button. -->
+      <Popover.Root bind:open={settingsOpen}>
+        <Popover.Trigger>
+          {#snippet child({ props })}
+            <button {...props} class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings"><SettingsIcon size={13} /></button>
+          {/snippet}
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content class="ui-popup settings-pop" role="dialog" aria-label="Editor settings" align="end" sideOffset={6} collisionPadding={8}>
             <label>Font size <input type="number" min="10" max="28" value={editorSettings.fontSize} onchange={(e) => updateSettings({ fontSize: Number((e.target as HTMLInputElement).value) })} /></label>
             <label>Tab size <input type="number" min="1" max="8" value={editorSettings.tabSize} onchange={(e) => updateSettings({ tabSize: Number((e.target as HTMLInputElement).value) })} /></label>
             <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
             <label class="check"><input type="checkbox" checked={editorSettings.minimap} onchange={(e) => updateSettings({ minimap: (e.target as HTMLInputElement).checked })} /> Minimap</label>
             <label class="check"><input type="checkbox" checked={editorSettings.diagnostics} onchange={(e) => updateSettings({ diagnostics: (e.target as HTMLInputElement).checked })} /> Check files on open and save</label>
+            {#if projectRoot && projectTrusted !== null}
+              <label class="check" title="Lets this folder's own TypeScript and Rust checkers run. They run code from the folder."><input type="checkbox" checked={projectTrusted} disabled={trustBusy} onchange={(e) => void setTrust((e.target as HTMLInputElement).checked)} /> Trust this folder (run its own checkers)</label>
+            {/if}
             <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
             <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
-          </div>
-        {/if}
-      </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
       <button
         class="ac-toggle"
         class:on={autocompleteOn}
@@ -728,15 +789,16 @@
         onclick={toggleChatPanel}
         title={chatPanelVisible ? "Hide chat" : "Show chat"}
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-        </svg>
+        <MessageSquare size={16} />
       </button>
     </div>
-    {#if notice}
-      <div class="notice" class:error={notice.kind === "error"} role="status">
-        <span>{notice.text}</span>
-        <button aria-label="Dismiss" onclick={() => (notice = null)}>×</button>
+    {#if trustPrompt && projectRoot}
+      <div class="notice" role="status" data-testid="trust-notice">
+        <span>TypeScript/Rust checks are off for this folder because they would run code from it. Trust this folder?</span>
+        <span class="notice-actions">
+          <button disabled={trustBusy} onclick={() => void setTrust(true)}>Trust</button>
+          <button disabled={trustBusy} onclick={() => { trustDeclined = true; trustPrompt = false; }}>Not now</button>
+        </span>
       </div>
     {/if}
     {#if activeFile?.diskChanged}
@@ -757,16 +819,21 @@
             <button title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}>×</button>
           </div>
           {#key previewNonce}
-            <iframe class="preview-frame" title="Preview" src={previewUrl}></iframe>
+            <!-- Project content: it may run scripts, but never navigate or take over the app window. -->
+            <iframe class="preview-frame" title="Preview" src={previewUrl} sandbox="allow-scripts allow-forms allow-same-origin allow-modals"></iframe>
           {/key}
         </div>
       {/if}
       {#if splitPath}
         <div class="split-pane">
           <div class="split-bar">
-            <select aria-label="File in split view" value={splitPath} onchange={(e) => (splitPath = (e.target as HTMLSelectElement).value)}>
-              {#each files as f (f.path)}<option value={f.path}>{tabName(f.path)}{f.dirty ? " ●" : ""}</option>{/each}
-            </select>
+            <Select
+              class="ui-select--sm ui-select--fill"
+              ariaLabel="File in split view"
+              value={splitPath ?? undefined}
+              onChange={(p) => (splitPath = p)}
+              options={files.map((f) => ({ value: f.path, label: `${tabName(f.path)}${f.dirty ? " ●" : ""}` }))}
+            />
             <button title="Close split" aria-label="Close split" onclick={closeSplit}>×</button>
           </div>
           <div class="split-editor" bind:this={splitContainer}></div>
@@ -845,7 +912,7 @@
     border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
   }
-  .sidebar-tabs button {
+  .sidebar-tabs :global(button) {
     border: none;
     background: none;
     color: var(--text-muted);
@@ -857,7 +924,7 @@
     align-items: center;
     gap: 4px;
   }
-  .sidebar-tabs button.active {
+  .sidebar-tabs :global(button[data-state="active"]) {
     color: var(--text-primary);
     border-bottom-color: var(--accent);
   }
@@ -974,58 +1041,53 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .settings-wrap {
-    position: relative;
+  .ac-toggle :global(svg) {
+    vertical-align: -2px;
   }
-  .settings-pop {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 8px;
-    z-index: 40;
-    width: 270px;
-    padding: 10px 12px;
-    background: var(--bg-elevated);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  .settings-pop label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .settings-pop label.check {
-    justify-content: flex-start;
-  }
-  .settings-pop input[type="number"] {
-    width: 56px;
-  }
-  .settings-pop input[type="text"] {
-    width: 140px;
-  }
-  .settings-pop input[type="number"],
-  .settings-pop input[type="text"] {
-    background: var(--bg-base);
-    color: var(--text-primary);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 2px 6px;
-    font-size: 12px;
-  }
-  .settings-note {
-    margin: 0;
-    font-size: 11px;
-    color: var(--text-muted);
+  /* Portalled to <body> by bits-ui, outside this component's scope. */
+  :global {
+    .settings-pop {
+      width: min(270px, calc(100vw - 16px));
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .settings-pop label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .settings-pop label.check {
+      justify-content: flex-start;
+    }
+    .settings-pop input[type="number"] {
+      width: 56px;
+    }
+    .settings-pop input[type="text"] {
+      width: 140px;
+    }
+    .settings-pop input[type="number"],
+    .settings-pop input[type="text"] {
+      background: var(--bg-base);
+      color: var(--text-primary);
+      border: 0.5px solid var(--border-control);
+      border-radius: var(--radius-sm);
+      padding: 2px 6px;
+      font-size: 12px;
+    }
+    .settings-pop .settings-note {
+      margin: 0;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
   }
   .ac-toggle.problems {
-    color: var(--warning, #d29922);
-    border-color: var(--warning, #d29922);
+    color: var(--yellow);
+    border-color: var(--yellow);
   }
   .ac-toggle.on {
     color: var(--accent);
@@ -1064,8 +1126,10 @@
     border-bottom: 0.5px solid var(--border);
     color: var(--text-secondary);
   }
-  .notice.error {
-    color: var(--danger, #f85149);
+  .notice-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .notice button {
     border: 0.5px solid var(--border);
@@ -1140,16 +1204,6 @@
     border-bottom: 0.5px solid var(--border);
     background: var(--bg-surface);
   }
-  .split-bar select {
-    flex: 1;
-    min-width: 0;
-    font-size: 12px;
-    background: var(--bg-base);
-    color: var(--text-primary);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 2px 4px;
-  }
   .split-bar button {
     border: none;
     background: none;
@@ -1168,6 +1222,7 @@
     flex: 1;
     width: 100%;
     border: none;
+    /* Pages without their own background expect the browser's white canvas, in either theme. */
     background: #fff;
   }
   .split-editor {
@@ -1186,6 +1241,8 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
+    /* Keeps the repository form off the pane edges when the pane is narrow. */
+    padding: 0 12px;
     color: var(--text-muted);
     font-size: 13px;
     background: var(--bg-base);
@@ -1212,5 +1269,10 @@
     overflow: hidden;
     background: var(--bg-base);
     position: relative;
+  }
+  /* #29: the side panels keep their dragged widths until the window is too narrow for all three. */
+  @media (max-width: 860px) {
+    .explorer-panel { max-width: 26vw; }
+    .chat-panel { max-width: 40vw; }
   }
 </style>

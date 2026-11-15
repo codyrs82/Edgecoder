@@ -9,13 +9,14 @@
 #   2. creates one Fly Postgres cluster <prefix>-pg and attaches it:
 #        seeds  -> DATABASE_URL          (database <prefix>_seed)
 #        portal -> PORTAL_DATABASE_URL   (database <prefix>_portal)
-#   3. creates the Ollama model volumes (ollama_data in ord, ollama_data_eu in cdg)
+#   3. creates the Ollama model volume of every seed whose config mounts /data/ollama
+#      (ollama_data_eu in cdg; the US seed is coordinator-only since #39 and has none)
 #   4. generates every shared secret the services require in production (NODE_ENV=production
 #      fails fast without them, see src/common/env-guard.ts and src/*/config.ts) and sets them;
 #      values are written once to .fly-bootstrap/<org>.env (chmod 600, git-ignored)
 #   5. renders deploy/fly/*.toml for the prefix/domain into .fly-bootstrap/<org>/ and deploys
 #      seeds first, then the portal, then (optionally) the anchor proxy
-#   6. runs the #9 post-deploy step on each seed (chown the volume to uid 1000, restart)
+#   6. runs the #9 post-deploy step on each seed that has that volume (chown to uid 1000, restart)
 #   7. smoke-tests /health/runtime, /status, /capacity on the seeds and /health on the portal
 #
 # Inputs (environment):
@@ -173,9 +174,12 @@ ensure_volume() { # app name region
     fly volumes create "$2" -a "$1" --region "$3" --size "${OLLAMA_VOLUME_GB:-20}" --yes
   fi
 }
+# #39: only a seed whose Fly config mounts /data/ollama runs a model. Read from the config so the
+# coordinator-only US seed gets no volume and no chown, and re-adding the mount needs no edit here.
+seed_mounts_ollama() { grep -q 'destination = "/data/ollama"' "deploy/fly/$1"; }
 log "Volumes"
-ensure_volume "$SEED" ollama_data ord
-ensure_volume "$SEED_EU" ollama_data_eu cdg
+if seed_mounts_ollama fly.seed-node.toml; then ensure_volume "$SEED" ollama_data ord; else echo "$SEED: coordinator-only, no Ollama volume"; fi
+if seed_mounts_ollama fly.seed-eu.toml; then ensure_volume "$SEED_EU" ollama_data_eu cdg; else echo "$SEED_EU: coordinator-only, no Ollama volume"; fi
 
 # ---------------------------------------------------------------- secrets ----
 log "Secrets"
@@ -191,9 +195,19 @@ SEED_SECRETS=(
 if [ "$WITH_ANCHOR" = 1 ]; then
   SEED_SECRETS+=("BITCOIN_ANCHOR_PROVIDER=anchor-proxy" "ANCHOR_PROXY_URL=${ANCHOR_URL}" "ANCHOR_PROXY_TOKEN=${ANCHOR_PROXY_TOKEN}")
 fi
+# Secrets go to flyctl on stdin (`fly secrets import`), never as arguments: argv is visible to
+# every local user. printf is a builtin, so the values do not reach any argv either.
+fly_stage_secrets() { # app NAME=value...
+  local app="$1"; shift
+  local kv
+  for kv in "$@"; do
+    case "$kv" in *$'\n'*|*$'\r'*) echo "secret ${kv%%=*} must be a single line" >&2; exit 1 ;; esac
+  done
+  printf '%s\n' "$@" | fly secrets import -a "$app" --stage
+}
 # Each seed bootstraps its mesh from the other one.
-fly secrets set -a "$SEED"    --stage "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_EU_URL}"
-fly secrets set -a "$SEED_EU" --stage "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_URL}"
+fly_stage_secrets "$SEED"    "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_EU_URL}"
+fly_stage_secrets "$SEED_EU" "${SEED_SECRETS[@]}" "COORDINATOR_BOOTSTRAP_URLS=${SEED_URL}"
 
 PORTAL_SECRETS=(
   "PORTAL_SERVICE_TOKEN=${PORTAL_SERVICE_TOKEN}"
@@ -206,10 +220,10 @@ PORTAL_SECRETS=(
 for v in OAUTH_GOOGLE_CLIENT_ID OAUTH_GOOGLE_CLIENT_SECRET OAUTH_MICROSOFT_CLIENT_ID OAUTH_MICROSOFT_CLIENT_SECRET SYSTEM_ADMIN_EMAILS PORTAL_EDGE PORTAL_ORIGIN_LOCK_TOKEN; do
   [ -n "${!v:-}" ] && PORTAL_SECRETS+=("$v=${!v}")
 done
-fly secrets set -a "$PORTAL" --stage "${PORTAL_SECRETS[@]}"
+fly_stage_secrets "$PORTAL" "${PORTAL_SECRETS[@]}"
 
 if [ "$WITH_ANCHOR" = 1 ]; then
-  fly secrets set -a "$ANCHOR" --stage \
+  fly_stage_secrets "$ANCHOR" \
     "ANCHOR_PROXY_TOKEN=${ANCHOR_PROXY_TOKEN}" \
     "BITCOIND_RPC_URL=${BITCOIND_RPC_URL}" "BITCOIND_RPC_USER=${BITCOIND_RPC_USER}" \
     "BITCOIND_RPC_PASSWORD=${BITCOIND_RPC_PASSWORD}" "BITCOIND_WALLET_NAME=${BITCOIND_WALLET_NAME:-}"
@@ -250,7 +264,8 @@ deploy() { # app toml
   fly deploy --config "$RENDER_DIR/$2" --app "$1" --remote-only --wait-timeout 600
   fly status --app "$1"
 }
-post_deploy_seed() { # app
+post_deploy_seed() { # app toml
+  seed_mounts_ollama "$2" || return 0
   # #9: Fly volumes are root-owned and hide the image's chown; Ollama (uid 1000) needs the dir writable.
   log "Post-deploy (#9) for $1: chown /data/ollama, restart"
   fly ssh console --app "$1" -C "chown -R 1000:1000 /data/ollama" || echo "  chown failed (machine still starting?) - rerun: fly ssh console -a $1 -C 'chown -R 1000:1000 /data/ollama'"
@@ -261,8 +276,8 @@ smoke() { # url
   echo "  FAIL $1"; return 1
 }
 
-deploy "$SEED" fly.seed-node.toml;  post_deploy_seed "$SEED"
-deploy "$SEED_EU" fly.seed-eu.toml; post_deploy_seed "$SEED_EU"
+deploy "$SEED" fly.seed-node.toml;  post_deploy_seed "$SEED" fly.seed-node.toml
+deploy "$SEED_EU" fly.seed-eu.toml; post_deploy_seed "$SEED_EU" fly.seed-eu.toml
 deploy "$PORTAL" fly.portal.toml
 # Multi-region portal: one machine per listed region behind the app's anycast IP.
 PORTAL_REGIONS="${PORTAL_REGIONS:-ord}"
@@ -305,6 +320,6 @@ $( [ "$WITH_ANCHOR" = 1 ] && echo "  Anchor proxy  $ANCHOR_URL" )
 
 $( [ -z "${SYSTEM_ADMIN_EMAILS:-}" ] && echo "No portal admins set yet: fly secrets set SYSTEM_ADMIN_EMAILS=you@example.com -a $PORTAL" )
 Next: enrol a node in the portal (Nodes page), start a worker with the registration token and
-MESH_AUTH_TOKEN, and watch $SEED_URL/capacity. Ollama pulls OLLAMA_MODEL on first use.
+MESH_AUTH_TOKEN, and watch $SEED_URL/capacity. A seed that runs Ollama pulls OLLAMA_MODEL on first use.
 EOF
 exit $rc

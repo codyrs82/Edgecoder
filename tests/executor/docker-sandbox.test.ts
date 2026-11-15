@@ -40,6 +40,14 @@ describe("buildDockerArgs hardening (#45)", () => {
     expect(args.slice(-2)).toEqual(["img:test", "code"]);
   });
 
+  it("never pulls the sandbox image from a registry and caps swap at the memory limit", () => {
+    const args = buildDockerArgs("img:test", "code", { memoryMB: 128 });
+    expect(args).toContain("--pull=never");
+    expect(args).toContain("--memory=128m");
+    expect(args).toContain("--memory-swap=128m");
+    expect(args.indexOf("--pull=never")).toBeLessThan(args.indexOf("img:test"));
+  });
+
   it("adds a seccomp profile only when SANDBOX_SECCOMP_PROFILE is set", () => {
     const prev = process.env.SANDBOX_SECCOMP_PROFILE;
     try {

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { validatePythonAst } from "../../src/executor/ast-python.js";
 import { validateJavaScriptAst } from "../../src/executor/ast-javascript.js";
+import { PYTHON_TEST_TIMEOUT_MS, skipWithoutPython } from "../helpers/python.js";
 
-describe("Python AST validation", () => {
+describe.skipIf(skipWithoutPython)("Python AST validation", { timeout: PYTHON_TEST_TIMEOUT_MS }, () => {
   it("allows safe code", async () => {
     const result = await validatePythonAst("x = 1 + 2\nprint(x)");
     expect(result.safe).toBe(true);

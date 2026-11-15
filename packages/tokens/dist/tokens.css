@@ -15,6 +15,10 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 10px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.4);
+  --scrim: rgba(0, 0, 0, 0.45);
   --font-sans: "Inter Variable", Inter, system-ui, -apple-system, sans-serif;
   --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
   /* Portal-compatible aliases — keeps portal-authored CSS working unchanged */
@@ -28,6 +32,7 @@
   --ok: var(--green);
   --warn: var(--yellow);
   --danger: var(--red);
+  --red-strong: color-mix(in srgb, var(--red) 80%, var(--text-primary));
 }
 :root {
   color-scheme: light;

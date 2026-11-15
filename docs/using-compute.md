@@ -35,9 +35,11 @@ Every connection serves the same routes:
 | `POST /v1/chat/completions` | OpenAI chat, streamed or not. |
 | `POST /v1/messages` | Anthropic Messages, streamed or not. |
 | `POST /v1/messages/count_tokens` | Anthropic token count. |
-| `GET /health` | Connection name and model. |
+| `GET /health` | `{"ok": true}`, no key needed. |
 
 Send the key as `Authorization: Bearer <key>` (OpenAI clients, Claude Code's auth token) or `x-api-key: <key>` (Anthropic SDKs).
+
+Requests must use a loopback host (`127.0.0.1`, `localhost` or `[::1]` with the connection's port), and requests from web pages (an `http(s)://` `Origin` header) are refused, so a website can't use a connection from your browser.
 
 ```sh
 curl http://127.0.0.1:4311/v1/chat/completions \
@@ -134,7 +136,7 @@ The hosted endpoint serves the same OpenAI and Anthropic routes and suits server
 
 `GET /v1/models` lists what's available. With the same key, `GET /v1/account` returns your balance and recent usage, `GET /v1/account/usage?days=N` the usage records, and `/v1/account/reservations` lists, creates and cancels reservations.
 
-On the desktop, `http://localhost:4304/v1` with this computer's key (under "Other ways in") reaches every model on one address, chosen by the same model names plus local model tags.
+On the desktop, `http://127.0.0.1:4304/v1` with this computer's key (under "Other ways in") reaches every model on one address, chosen by the same model names plus local model tags.
 
 ## Persistent bots
 

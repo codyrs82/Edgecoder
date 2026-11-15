@@ -3,8 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "../routes/password-reset.js";
-import { BASE_CSS, TOKENS_CSS, brandMark } from "./design-system.js";
-import { CSP_NONCE } from "../csp-nonce.js";
+import { portalCardPageHtml } from "./layout.js";
 
 /**
  * /portal/reset-password: without ?token it asks for the email (POST /auth/password/forgot);
@@ -13,31 +12,9 @@ import { CSP_NONCE } from "../csp-nonce.js";
  */
 export function registerResetPasswordPage(app: FastifyInstance): void {
   app.get("/portal/reset-password", async (_req, reply) => {
-    const html = `<!doctype html>
-  <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <meta name="referrer" content="no-referrer" />
-      <title>EdgeCoder Portal | Reset password</title>
-      <style>
-        ${TOKENS_CSS}
-        ${BASE_CSS}
-        .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 36px 16px; }
-        .reset-card { width: min(420px, 100%); }
-        .reset-card .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 24px; }
-        .reset-card h2 { font-size: 20px; margin-bottom: 4px; }
-        .reset-card .sub { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-        .reset-card button.primary { width: 100%; margin-top: 14px; }
-        .msg { margin-top: 14px; }
-      </style>
-    </head>
-    <body>
-      <div class="wrap">
-        <div class="reset-card">
-          <div class="brand">${brandMark(28)}<span>EdgeCoder</span></div>
-
-          <form id="requestForm" class="hidden">
+    const html = portalCardPageHtml({
+      title: "EdgeCoder Portal | Reset password",
+      content: `<form id="requestForm" class="hidden">
             <h2>Forgot your password?</h2>
             <div class="sub">Enter your account email and we will send you a link to choose a new one.</div>
             <label for="resetEmail">Email</label>
@@ -53,23 +30,13 @@ export function registerResetPasswordPage(app: FastifyInstance): void {
             <label for="confirmPassword">Confirm new password</label>
             <input id="confirmPassword" type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="${PASSWORD_MAX_LENGTH}" required />
             <button class="primary" type="submit" id="resetBtn">Save new password</button>
-          </form>
-
-          <div id="msg" class="callout msg hidden"></div>
-          <p class="muted" style="margin-top:16px;"><a href="/portal">Back to sign in</a></p>
-        </div>
-      </div>
-      <script nonce="${CSP_NONCE}">
+          </form>`,
+      script: `
         const MIN = ${PASSWORD_MIN_LENGTH};
         const MAX = ${PASSWORD_MAX_LENGTH};
         const params = new URLSearchParams(location.search);
         const token = params.get("token");
         if (token) history.replaceState(null, "", location.pathname);
-        const msg = document.getElementById("msg");
-        function show(text, kind) {
-          msg.textContent = text;
-          msg.className = "callout msg " + (kind || "");
-        }
         async function post(path, body) {
           const res = await fetch(path, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
           let payload = null;
@@ -106,9 +73,8 @@ export function registerResetPasswordPage(app: FastifyInstance): void {
             show("This reset link has expired or was already used. Request a new one below.", "danger");
           }
         });
-      </script>
-    </body>
-  </html>`;
+      `
+    });
     return reply.header("cache-control", "no-store").type("text/html").send(html);
   });
 }

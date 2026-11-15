@@ -34,6 +34,12 @@ Examples use placeholders. Replace them with your deployment's hosts:
   - `clientType` on `/register` (for example `openclaw`, `claude-local`, `edgecoder-native`)
   - `os` as any descriptive string (for example `macos`, `linux-arm64`, `windows`)
 - Register peer identities between coordinators with `POST /mesh/register-peer`.
+- Agents run a small mesh server of their own (`src/mesh/mesh-http-server.ts`). A `POST /mesh/register-peer`
+  to an agent cannot replace an existing entry (the coordinator's included), is recorded as role
+  `agent`, is capped at 256 entries, and never becomes a gossip target. An agent gossips, and sends the
+  mesh token, only to its coordinator and the peers that coordinator listed. It queues a `task_offer`
+  only when the message is signed with the key its coordinator proved at verification, and the queue
+  is bounded (32 offers).
 - Monitor peer reputation with `GET /mesh/reputation`.
 - For installer/runtime bootstrap, fetch coordinator candidates from `GET /network/coordinators` on control plane.
 - Full install runbook (self-hosted agents + extra coordinators): `docs/agent-and-coordinator-install.md`.
@@ -53,7 +59,7 @@ Control-plane discovery API:
 - `POST /mesh/register-peer` - bootstrap peer discovery.
 - `POST /mesh/ingest` - signed gossip ingress.
 - `GET /features` - mode flags (`public_mesh`, `enterprise_overlay`).
-- `GET /capacity` - total capacity, connected agents, mode counts, and tunnel count (includes per-agent `powerPolicy` decision).
+- `GET /capacity` - total capacity, connected agents, mode counts, and tunnel count (includes per-agent `powerPolicy` decision; owner email and network location are not included).
 - `GET /agent-mesh/peers/:agentId` - peer candidates for reverse-tunnel links.
 - `POST /agent-mesh/connect` - create secure reverse-tunnel token.
 - `POST /agent-mesh/accept` - accept reverse-tunnel invite.
@@ -101,7 +107,7 @@ Core APIs:
 
 - `GET /economy/price/current` - current signed price epochs (CPU/GPU sats per compute unit).
 - `POST /economy/price/propose` - approved coordinators propose demand/supply metrics to negotiate new epochs.
-- `POST /economy/price/consensus` - computes weighted-median price epochs across coordinator peers.
+- `POST /economy/price/consensus` - computes the median price epoch over quotes signed by `MESH_PEER_ALLOWLIST` coordinators (one vote each). Needs a quorum (majority of the allowlist plus self, `PRICE_CONSENSUS_QUORUM` can raise it); the result is clamped to `PRICE_EPOCH_{CPU,GPU}_{MIN,MAX}_SATS` and `PRICE_EPOCH_MAX_CHANGE_BPS` (default 2500 = 25% per epoch).
 - `POST /economy/wallets/register` - attach a wallet identity to a credit account.
 - `POST /economy/payments/intents` - create purchase intent and invoice reference.
 - `POST /economy/payments/intents/:intentId/confirm` - settle intent and mint credits to the account.
@@ -229,7 +235,7 @@ Model access boundary:
 - Even after email verification, nodes require coordinator approval to become active.
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.
 - Portal UI route: `GET /portal` (signup/login, OAuth starts, verification status, node enrollment, credits/wallet panels).
-- Portal users can select a persisted theme profile (`midnight`, `emerald`, `light`) from the dashboard.
+- Portal users can pick System, Light or Dark (Settings → General, or the theme button in the top bar). The choice is stored in the browser (`localStorage` key `edgecoder-theme`, the same key the desktop app uses) and defaults to Dark.
 
 ## Coordinator Stats Ledger Rollout
 
@@ -249,11 +255,11 @@ Use staged rollout to avoid operational regressions while enabling decentralized
 ### Finality policy and anchor verification
 
 - Soft finality:
-  - `soft_finalized` means the checkpoint is quorum-committed by coordinators.
+  - `soft_finalized` means the checkpoint is quorum-committed by coordinators. With anchoring disabled (no `BITCOIN_ANCHOR_PROVIDER`, the default) this is the final state.
 - Anchor transition:
-  - `anchored_pending` means quorum finalized but Bitcoin anchor confirmation is not yet treated as complete.
+  - `anchored_pending` means quorum finalized and either a real anchor tx is waiting for confirmations or anchoring is enabled and the tx has not been broadcast yet.
 - Hard finality:
-  - `anchored_confirmed` means checkpoint anchor meets the required confirmation threshold.
+  - `anchored_confirmed` means a real anchor tx has `BITCOIN_ANCHOR_CONFIRMATIONS` confirmations (default 6). A reorg moves it back to `anchored_pending`.
 - Stale state:
   - `stale_federation` means coordinators disagree on checkpoint/finality and operators should treat stats as advisory.
 
@@ -261,6 +267,8 @@ Verifier and anchor APIs on coordinator:
 
 - `POST /stats/anchors/anchor-latest` (admin token, `x-admin-token`; it spends sats): creates/updates the latest stats checkpoint anchor record.
 - `GET /stats/anchors/verify?checkpointHash=<hash>` (mesh-auth or portal service token): verifies whether checkpoint has reached configured hard-finality threshold.
+
+Finality and anchor responses carry an `anchoring` block (`mode`: `disabled` | `simulated` | `enabled`, `provider`, `network`, `requiredConfirmations`, `detail`, and the poll loop's `tracker` state). Anchor rows are returned as views: `status` is `broadcasting`, `pending`, `anchored`, `failed`, `needs_admin` or `simulated`. A `simulated` row (written by the old simulation or the mock provider) has no `txRef`, 0 confirmations and never verifies; what was stored is in `simulatedTxRef`.
 
 ## Abuse Blacklist Coordination
 

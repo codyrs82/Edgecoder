@@ -100,14 +100,14 @@
 
   {#if mood === "needs"}
     <g class="badge">
-      <circle cx="40" cy="9" r="7" fill="var(--warning, #d29922)" stroke="var(--bg-deep, #111)" stroke-width="1.5" />
-      <path d="M40 5.5 v4.2" stroke="#1d1d1f" stroke-width="2" stroke-linecap="round" />
-      <circle cx="40" cy="12.4" r="1.1" fill="#1d1d1f" />
+      <circle cx="40" cy="9" r="7" fill="var(--yellow)" stroke="var(--bg-deep)" stroke-width="1.5" />
+      <path d="M40 5.5 v4.2" stroke="var(--on-accent)" stroke-width="2" stroke-linecap="round" />
+      <circle cx="40" cy="12.4" r="1.1" fill="var(--on-accent)" />
     </g>
   {:else if mood === "failed"}
     <g class="badge">
-      <circle cx="40" cy="9" r="6.5" fill="var(--danger, #e5484d)" stroke="var(--bg-deep, #111)" stroke-width="1.5" />
-      <path d="M37.8 6.8 l4.4 4.4 M42.2 6.8 l-4.4 4.4" stroke="#fff" stroke-width="1.8" stroke-linecap="round" />
+      <circle cx="40" cy="9" r="6.5" fill="var(--danger)" stroke="var(--bg-deep)" stroke-width="1.5" />
+      <path d="M37.8 6.8 l4.4 4.4 M42.2 6.8 l-4.4 4.4" stroke="var(--on-accent)" stroke-width="1.8" stroke-linecap="round" />
     </g>
   {/if}
 </svg>

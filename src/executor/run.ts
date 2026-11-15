@@ -5,8 +5,9 @@ import { spawn } from "node:child_process";
 import vm from "node:vm";
 import { Language, RunResult } from "../common/types.js";
 import { checkSubset } from "./subset.js";
-import { isDockerAvailable, runInDockerSandbox, type DockerSandboxOptions } from "./docker-sandbox.js";
+import { ensureSandboxImages, isDockerAvailable, runInDockerSandbox, type DockerSandboxOptions } from "./docker-sandbox.js";
 import { log } from "../common/logger.js";
+import { PYTHON_NOT_FOUND, resolvePython } from "./python-interpreter.js";
 
 function baseResult(language: Language, durationMs: number): RunResult {
   return {
@@ -18,6 +19,17 @@ function baseResult(language: Language, durationMs: number): RunResult {
     durationMs,
     queueForCloud: false
   };
+}
+
+/**
+ * Opt-in for running the local user's code on the host when Docker is not available.
+ * The subset validators are a filter, not a sandbox: node:vm is not a security boundary and
+ * `python3 -c` runs with the user's privileges and environment. So local code runs in the Docker
+ * sandbox, and on the host only when EDGECODER_UNSAFE_HOST_EXECUTION=1 is set (or a caller passes
+ * sandbox "host" with origin "local" explicitly). Remote-origin work never runs on the host.
+ */
+export function unsafeHostExecutionAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.EDGECODER_UNSAFE_HOST_EXECUTION === "1";
 }
 
 export async function runCode(
@@ -47,14 +59,26 @@ export async function runCode(
   if (sandbox === "docker") {
     const dockerOk = await isDockerAvailable();
     if (dockerOk) {
+      if (origin === "local") {
+        // The worker builds the images at startup; an IDE-only install may not have them yet.
+        const images = await ensureSandboxImages();
+        if (!images.ok) {
+          return { ...baseResult(language, Date.now() - start), stderr: `sandbox_unavailable: ${images.error}` };
+        }
+      }
       return runInDockerSandbox(language, code, timeoutMs, dockerOptions);
     }
-    log.error("Docker sandbox required but Docker is not available — rejecting task");
-    return {
-      ...baseResult(language, Date.now() - start),
-      stderr: "sandbox_unavailable: Docker is required for swarm task execution but is not running",
-      ok: false,
-    };
+    if (origin !== "local" || !unsafeHostExecutionAllowed()) {
+      log.error("Docker sandbox required but Docker is not available — rejecting task");
+      return {
+        ...baseResult(language, Date.now() - start),
+        stderr: origin === "local"
+          ? "sandbox_unavailable: Docker is required to run code. Start Docker, or set EDGECODER_UNSAFE_HOST_EXECUTION=1 to run it unsandboxed on this machine"
+          : "sandbox_unavailable: Docker is required for swarm task execution but is not running",
+        ok: false,
+      };
+    }
+    log.warn("Docker is not available; running local code on the host (EDGECODER_UNSAFE_HOST_EXECUTION=1)");
   }
 
   if (language === "python") {
@@ -65,14 +89,25 @@ export async function runCode(
 }
 
 async function runPython(code: string, timeoutMs: number, start: number): Promise<RunResult> {
+  const python = await resolvePython();
+  if (!python) return { ...baseResult("python", Date.now() - start), stderr: PYTHON_NOT_FOUND };
   return new Promise<RunResult>((resolve) => {
-    const proc = spawn("python3", ["-c", code], {
-      stdio: ["ignore", "pipe", "pipe"]
+    const proc = spawn(python.command, [...python.args, "-c", code], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
     });
 
     let stdout = "";
     let stderr = "";
     let settled = false;
+
+    // A spawn failure is an 'error' event; unhandled, it would kill the process.
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...baseResult("python", Date.now() - start), stderr: `could not run ${python.command}: ${err.message}` });
+    });
 
     const timer = setTimeout(() => {
       if (!settled) {

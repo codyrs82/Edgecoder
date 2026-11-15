@@ -12,6 +12,8 @@ let app: any;
 
 beforeAll(async () => {
   process.env.MESH_AUTH_TOKEN = "mesh-secret-test";
+  // The challenge answer must name the URL the agent addresses as the coordinator's own.
+  process.env.COORDINATOR_PUBLIC_URL = "https://coordinator.example";
   ({ coordinatorServer: app } = await import("../../src/swarm/coordinator.js"));
   await app.ready();
 }, 60_000);

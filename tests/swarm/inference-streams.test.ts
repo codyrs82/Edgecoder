@@ -1,10 +1,27 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { InferenceStreams } from "../../src/swarm/inference-streams.js";
+import { InferenceStreams, OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE, boundTokenCounts } from "../../src/swarm/inference-streams.js";
 import { runInferenceSubtask } from "../../src/swarm/inference-runner.js";
 import type { Subtask } from "../../src/common/types.js";
 
 describe("InferenceStreams", () => {
+  it("takes nothing after the final piece, and counts the reply's bytes", () => {
+    const s = new InferenceStreams();
+    s.open("st", "task-1");
+    expect(s.taskOf("st")).toBe("task-1");
+    expect(s.append("st", 0, "héllo")).toBe("ok");
+    expect(s.append("st", 1, "", true)).toBe("ok");
+    expect(s.append("st", 2, "more", true)).toBe("closed");
+    expect(s.append("st", 1, "", true)).toBe("duplicate");
+    expect(s.replyBytes("st")).toBe(6);
+  });
+
+  it("bounds reported token counts by the request and reply sizes", () => {
+    expect(boundTokenCounts({ promptTokens: 10_000_000, outputTokens: 10_000_000 }, 100, 50)).toEqual({ promptTokens: 100 + PROMPT_TOKEN_ALLOWANCE, outputTokens: 50 + OUTPUT_TOKEN_ALLOWANCE });
+    expect(boundTokenCounts({ promptTokens: 12, outputTokens: 3 }, 100, 50)).toEqual({ promptTokens: 12, outputTokens: 3 });
+    expect(boundTokenCounts({ outputTokens: 3 }, 100, 50)).toEqual({ promptTokens: undefined, outputTokens: 3 });
+  });
+
   it("applies pieces in order, ignores duplicates, refuses gaps", () => {
     const s = new InferenceStreams();
     s.open("st");

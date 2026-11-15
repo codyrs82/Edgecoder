@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
-import { enforceSandboxPolicy, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
+import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
@@ -24,17 +24,20 @@ import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
-import { BleRequestGuard } from "../mesh/ble/ble-request-guard.js";
+import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
 import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
+import { BleCosignProvider } from "../mesh/ble/ble-cosign.js";
+import { ledgerRowToTransaction, settledBleTxIds } from "../mesh/ble/offline-ledger.js";
 import { localStore } from "../db/local-store.js";
 import { hashRequestBody, signRequest } from "../security/request-signing.js";
 import { generateX25519KeyPair, decryptTaskEnvelope, encryptResult, type TaskEnvelope } from "../security/envelope.js";
 import { MeshPeer } from "../mesh/mesh-peer.js";
+import { MeshTaskQueue } from "../mesh/mesh-task-queue.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
@@ -43,10 +46,15 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
+import { loadConfigOrExit } from "../common/config.js";
+import { workerConfigSchema } from "../config/worker.js";
+
+// #15: validated once; a malformed value exits here with a message naming the variable.
+const W = loadConfigOrExit("worker", workerConfigSchema);
 
 const platformInfo: PlatformInfo = detectPlatform();
-const PLATFORM_CONFIG_DIR = process.env.EDGECODER_CONFIG_DIR ?? getConfigDir();
-const PLATFORM_LOG_DIR = process.env.EDGECODER_LOG_DIR ?? getLogDir();
+const PLATFORM_CONFIG_DIR = W.EDGECODER_CONFIG_DIR ?? getConfigDir();
+const PLATFORM_LOG_DIR = W.EDGECODER_LOG_DIR ?? getLogDir();
 // Pinned-key trust (architecture step 4): TRUSTED_COORDINATOR_KEYS / EDGECODER_TRUST_FILE / EDGECODER_TRUST_MODE.
 // On the edgecoder.io network the default is strict with the seeds' keys (src/trust/seed-keys.ts).
 const TRUST_ENV = withNetworkTrustDefaults(process.env);
@@ -56,7 +64,7 @@ const coordinatorTrustStore = PinnedKeyStore.fromEnv(TRUST_ENV, { pinFile: `${PL
 const coordinatorTrust = new CoordinatorTrustGate({
   store: coordinatorTrustStore,
   challenge: challengePolicyFromEnv(TRUST_ENV, coordinatorTrustStore.mode),
-  reverifyMs: Number(process.env.EDGECODER_TRUST_REVERIFY_MS) > 0 ? Number(process.env.EDGECODER_TRUST_REVERIFY_MS) : DEFAULT_TRUST_REVERIFY_MS
+  reverifyMs: W.EDGECODER_TRUST_REVERIFY_MS || DEFAULT_TRUST_REVERIFY_MS
 });
 {
   // Strict mode with nothing listed would refuse every coordinator: say so once and stop.
@@ -70,30 +78,28 @@ const coordinatorTrust = new CoordinatorTrustGate({
 // Forked by the all-in-one agent: exit with it rather than linger as an orphan.
 if (process.send) process.on("disconnect", () => process.exit(0));
 
-const COORDINATOR_BOOTSTRAP_URL = process.env.COORDINATOR_URL ?? "http://127.0.0.1:4301";
-const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(process.env.SNAPSHOT_ENFORCEMENT);
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "";
+const COORDINATOR_BOOTSTRAP_URL = W.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(W.SNAPSHOT_ENFORCEMENT);
+const CONTROL_PLANE_URL = W.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
   process.env.COORDINATOR_DISCOVERY_URL ??
   (CONTROL_PLANE_URL ? `${CONTROL_PLANE_URL.replace(/\/$/, "")}/network/coordinators` : "");
 // #96: default to a per-host id so N replicas without AGENT_ID (docker compose --scale) don't all register as "worker-1".
-const AGENT_ID = process.env.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
-const MODE = (process.env.AGENT_MODE ?? "swarm-only") as "swarm-only" | "ide-enabled";
-const OS = (process.env.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
-const PROVIDER = (process.env.LOCAL_MODEL_PROVIDER ?? "edgecoder-local") as
-  | "edgecoder-local"
-  | "ollama-local";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
-const OLLAMA_HOST = process.env.OLLAMA_HOST;
-const OLLAMA_AUTO_INSTALL = process.env.OLLAMA_AUTO_INSTALL === "true";
+const AGENT_ID = W.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
+const MODE = W.AGENT_MODE;
+const OS = (W.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
+const PROVIDER = W.LOCAL_MODEL_PROVIDER;
+const OLLAMA_MODEL = W.OLLAMA_MODEL;
+const OLLAMA_HOST = W.OLLAMA_HOST;
+const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
 const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
 const inflightInference = new Set<Promise<void>>();
-let meshAuthToken = process.env.MESH_AUTH_TOKEN ?? "";
-const COORDINATOR_HTTP_TIMEOUT_MS = Number(process.env.COORDINATOR_HTTP_TIMEOUT_MS ?? "15000");
-const COORDINATOR_POST_RETRIES = Number(process.env.COORDINATOR_POST_RETRIES ?? "2");
-const MAX_CONCURRENT_TASKS = Number(process.env.MAX_CONCURRENT_TASKS ?? "1");
-const AGENT_CLIENT_TYPE = process.env.AGENT_CLIENT_TYPE ?? "edgecoder-native";
-const PEER_DIRECT_WORK_ITEMS = (process.env.PEER_DIRECT_WORK_ITEMS ??
+let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
+const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
+const COORDINATOR_POST_RETRIES = W.COORDINATOR_POST_RETRIES;
+const MAX_CONCURRENT_TASKS = W.MAX_CONCURRENT_TASKS;
+const AGENT_CLIENT_TYPE = W.AGENT_CLIENT_TYPE;
+const PEER_DIRECT_WORK_ITEMS = (W.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
 const hardwareProbe: Probe = (cmd, args) => {
@@ -113,16 +119,16 @@ const hardwareProbe: Probe = (cmd, args) => {
  */
 function buildHardwareProfile(): Record<string, unknown> {
   const hw = detectHardware({ probe: hardwareProbe });
-  const gpuModel = process.env.AGENT_GPU_MODEL?.trim();
-  const gpuVram = Number(process.env.AGENT_GPU_VRAM_GB);
+  const gpuModel = W.AGENT_GPU_MODEL;
+  const gpuVram = W.AGENT_GPU_VRAM_GB ?? Number.NaN;
   if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
     return {
       ...hardwareProfileFor(hw, undefined),
       gpu: {
-        vendor: process.env.AGENT_GPU_VENDOR?.trim() || undefined,
+        vendor: W.AGENT_GPU_VENDOR,
         model: gpuModel || undefined,
         vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
-        datacenter: process.env.AGENT_GPU_DATACENTER === "1"
+        datacenter: W.AGENT_GPU_DATACENTER
       },
       overridden: true
     };
@@ -136,8 +142,8 @@ const HARDWARE_PROFILE = buildHardwareProfile();
  * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
  * (the agent then earns at its class base tier).
  */
-const BENCHMARK_ENABLED = process.env.AGENT_BENCHMARK !== "0";
-const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, Number(process.env.AGENT_BENCHMARK_INTERVAL_MS ?? 6 * 60 * 60_000) || 6 * 60 * 60_000);
+const BENCHMARK_ENABLED = W.AGENT_BENCHMARK;
+const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, W.AGENT_BENCHMARK_INTERVAL_MS || 6 * 60 * 60_000);
 let lastBenchmark: AgentBenchmarkReport | undefined;
 let benchmarkDueAtMs = 0;
 let benchmarkUnreported = false;
@@ -149,17 +155,25 @@ function challengeAcceptable(c: BenchmarkChallenge): boolean {
 }
 /** Minimum price this agent works for, msat per credit; unset = track the coordinator's class reference. */
 const ASK_MSAT_PER_CREDIT = (() => {
-  const n = Number(process.env.AGENT_ASK_MSAT_PER_CREDIT);
+  const n = W.AGENT_ASK_MSAT_PER_CREDIT ?? Number.NaN;
   return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
 })();
-const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
+const SANDBOX_REQUIRED = W.SANDBOX_REQUIRED;
 // #45: without a sandbox this node contributes no swarm compute (no /pull, no mesh/BLE/peer code execution).
 const SWARM_EXECUTION_ENABLED = swarmExecutionEnabled(SANDBOX_MODE);
+// Inference-only mode: with no sandbox, AGENT_INFERENCE_ONLY=1 lets the agent pull from the coordinator,
+// which then hands it inference subtasks only (a model on text, never task code). Mesh, BLE and
+// peer-direct code execution stay off. With a sandbox the flag is ignored: the agent takes all work.
+const INFERENCE_ONLY = SANDBOX_MODE === "none" && W.AGENT_INFERENCE_ONLY === true;
+if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
+  console.warn(`[agent] AGENT_INFERENCE_ONLY is ignored with SANDBOX_MODE=${SANDBOX_MODE}: this agent takes code and inference work`);
+}
+const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
 let warnedNoSandbox = false;
-const AGENT_REGISTRATION_TOKEN = process.env.AGENT_REGISTRATION_TOKEN ?? "";
-const PORTAL_URL = process.env.PORTAL_URL ?? "";
+const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
+const PORTAL_URL = W.PORTAL_URL ?? "";
 const AGENT_DEVICE_ID = (() => {
-  const explicit = (process.env.AGENT_DEVICE_ID ?? process.env.IOS_DEVICE_ID ?? "").trim();
+  const explicit = W.AGENT_DEVICE_ID ?? W.IOS_DEVICE_ID ?? "";
   if (explicit) return explicit;
   if (OS === "ios") return AGENT_ID.replace(/^ios-|^iphone-/i, "").trim();
   return "";
@@ -167,7 +181,7 @@ const AGENT_DEVICE_ID = (() => {
 const keys = createPeerKeys(AGENT_ID);
 const envelopeKeys = generateX25519KeyPair();
 const peerTunnels = new Map<string, string>();
-const peerOfferCooldownMs = Number(process.env.PEER_OFFER_COOLDOWN_MS ?? "20000");
+const peerOfferCooldownMs = W.PEER_OFFER_COOLDOWN_MS;
 const lastOfferAtByPeer = new Map<string, number>();
 let peerWorkCursor = 0;
 async function discoverCoordinatorFromPortal(): Promise<string | null> {
@@ -225,10 +239,10 @@ const coordinatorClient = createCoordinatorClient({
  */
 const REGISTRY_PUBLIC_KEYS = registryPublicKeysFromEnv(process.env);
 const STEERING_ENABLED =
-  !["off", "0", "false"].includes((process.env.EDGECODER_STEERING ?? "").trim().toLowerCase()) &&
+  W.EDGECODER_STEERING &&
   !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL) &&
   REGISTRY_PUBLIC_KEYS.length > 0;
-const STEERING_INTERVAL_MS = Math.max(60_000, Number(process.env.EDGECODER_STEERING_INTERVAL_MS ?? "600000") || 600_000);
+const STEERING_INTERVAL_MS = Math.max(60_000, W.EDGECODER_STEERING_INTERVAL_MS || 600_000);
 const coordinatorSteering = STEERING_ENABLED
   ? createCoordinatorSteering({
       registryUrls: registryUrlsFor(COORDINATOR_BOOTSTRAP_URL, PORTAL_URL || undefined),
@@ -268,7 +282,7 @@ async function steerCoordinator(): Promise<SteeringResult | null> {
 // is awaited and before anything talks to a coordinator), so it cannot swap the URL mid-iteration.
 const startupDiscovery: Promise<{ url: string; source: string } | null> = (async () => {
   let pick: { url: string; source: string } | null = null;
-  if (!process.env.COORDINATOR_URL || process.env.EDGECODER_DISCOVERY === "1") {
+  if (!W.COORDINATOR_URL || W.EDGECODER_DISCOVERY) {
     // Strict trust: never pick an announced coordinator whose key is not listed (key-less
     // candidates are still checked against /identity by the trust gate before registering).
     const acceptCandidate =
@@ -336,7 +350,7 @@ let sandboxImagesReady = SANDBOX_MODE !== "docker";
 let sandboxImagesBuilding = false;
 
 // The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
-const LOCAL_FORWARD_PORT = Number(process.env.LOCAL_FORWARD_PORT ?? "");
+const LOCAL_FORWARD_PORT = W.LOCAL_FORWARD_PORT ?? 0;
 if (LOCAL_FORWARD_PORT > 0) {
   let forwardToken: string | undefined;
   createLocalForwarder({
@@ -362,6 +376,16 @@ async function listInstalledModels(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+/** #54: installed models, re-read at most once a minute; reported (signed) with register and heartbeats. */
+const INSTALLED_MODELS_REFRESH_MS = 60_000;
+let installedModelsCache: { models: string[]; atMs: number } | undefined;
+async function installedModelsCached(nowMs = Date.now()): Promise<string[]> {
+  if (!installedModelsCache || nowMs - installedModelsCache.atMs >= INSTALLED_MODELS_REFRESH_MS) {
+    installedModelsCache = { models: await listInstalledModels(), atMs: nowMs };
+  }
+  return installedModelsCache.models;
 }
 
 function backoffMs(): number {
@@ -535,7 +559,7 @@ async function resolveCoordinatorUrl(): Promise<{ url: string; source: "steering
  * #51: while a claimed subtask runs, heartbeat every LEASE_HEARTBEAT_MS so the
  * coordinator renews the claim lease (it expires after CLAIM_LEASE_LIVENESS_MS of silence).
  */
-const LEASE_HEARTBEAT_MS = Math.max(1_000, Number(process.env.LEASE_HEARTBEAT_MS ?? "15000") || 15_000);
+const LEASE_HEARTBEAT_MS = Math.max(1_000, W.LEASE_HEARTBEAT_MS || 15_000);
 /**
  * #51: lease-only renewal while a claimed subtask runs. `leaseOnly` tells the
  * coordinator to renew leases without draining tunnel invites / close notices /
@@ -661,23 +685,15 @@ async function flushOfflineLedger(): Promise<void> {
   if (unsynced.length === 0) return;
   console.log(`[agent:${AGENT_ID}] flushing ${unsynced.length} BLE credit transaction(s)`);
   try {
-    const transactions = unsynced.map(row => ({
-      txId: row.txId,
-      requesterId: row.requesterId,
-      providerId: row.providerId,
-      requesterAccountId: row.requesterId,
-      providerAccountId: row.providerId,
-      credits: row.credits,
-      cpuSeconds: row.cpuSeconds,
-      taskHash: row.taskHash,
-      timestamp: row.createdAt * 1000,
-      requesterSignature: row.requesterSig,
-      providerSignature: row.providerSig,
-    }));
+    const transactions = unsynced.map(ledgerRowToTransaction);
     const bleSyncBody = { transactions };
-    await post("/credits/ble-sync", bleSyncBody, { signed: true });
-    localStore.markBLECreditsSynced(unsynced.map(tx => tx.txId));
-    console.log(`[agent:${AGENT_ID}] BLE credits synced`);
+    const result = await post("/credits/ble-sync", bleSyncBody, { signed: true });
+    // #63: only stop retrying what settled (or can never settle); the rest stays in the ledger.
+    const settled = settledBleTxIds(result);
+    localStore.markBLECreditsSynced(settled);
+    const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+    if (skipped.length) console.warn(`[agent:${AGENT_ID}] BLE credit sync skipped ${skipped.length}: ${JSON.stringify(skipped.slice(0, 5))}`);
+    console.log(`[agent:${AGENT_ID}] BLE credits synced (${Array.isArray(result?.applied) ? result.applied.length : 0} applied)`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] BLE credit flush failed (will retry): ${String(e)}`);
   }
@@ -702,7 +718,7 @@ async function learnCoordinatorPeer(peer: MeshPeer, coordinatorUrl: string, from
     const id = (await res.body.json()) as { peerId?: string; publicKeyPem?: string; networkMode?: string };
     if (id.peerId !== fromPeerId || typeof id.publicKeyPem !== "string") return;
     if (!coordinatorTrustStore.wouldTrust(id.peerId, id.publicKeyPem)) return;
-    peer.addPeer({ peerId: id.peerId, publicKeyPem: id.publicKeyPem, coordinatorUrl, networkMode: id.networkMode === "enterprise_overlay" ? "enterprise_overlay" : "public_mesh" }, "coordinator");
+    peer.addPeer({ peerId: id.peerId, publicKeyPem: id.publicKeyPem, coordinatorUrl, networkMode: id.networkMode === "enterprise_overlay" ? "enterprise_overlay" : "public_mesh" }, "coordinator", { trusted: true });
   } catch {
     // unknown sender stays unknown; its messages are dropped
   }
@@ -747,7 +763,8 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
             peer.gossip.setWebSocketForPeer(message.fromPeerId, ws as any);
             console.log(`[agent:${AGENT_ID}] registered WS for outbound gossip to ${message.fromPeerId}`);
           }
-          if (typeof message.fromPeerId === "string" && !peer.getPeer(message.fromPeerId)) {
+          // Also when the id is held by an untrusted (self-registered) entry: a trusted add replaces it.
+          if (typeof message.fromPeerId === "string" && !peer.getPeer(message.fromPeerId)?.trusted) {
             await learnCoordinatorPeer(peer, coordinatorUrl, message.fromPeerId);
           }
           await peer.handleIngest(message);
@@ -818,8 +835,16 @@ async function loop(): Promise<void> {
   // ── Initialize HTTP mesh peer (BitTorrent-style P2P) ──
   let meshPeer: MeshPeer | null = null;
   let meshServer: MeshHttpServer | null = null;
-  const meshTaskQueue: Array<{ subtask: Subtask; fromPeerId: string }> = [];
-  const meshClaimedTasks = new Set<string>();
+  // Bounded queue and claimed-id memory (src/mesh/mesh-task-queue.ts).
+  const meshTaskQueue = new MeshTaskQueue();
+  /** The identity the coordinator proved in its challenge; null until verified. */
+  const verifiedCoordinatorIdentity = (): { peerId: string; publicKeyPem: string } | null => {
+    try {
+      return coordinator.requireVerifiedIdentity().identity;
+    } catch {
+      return null;
+    }
+  };
   try {
     const localIp = getLocalIpAddress();
     meshPeer = new MeshPeer({
@@ -850,8 +875,14 @@ async function loop(): Promise<void> {
         snapshotRef?: string; projectMeta?: Subtask["projectMeta"];
         originCoordinatorId?: string;
       };
+      // Work is taken only from the coordinator this worker registered with: the sender's id and
+      // the key its signature was checked against must be the identity the coordinator proved.
+      if (!meshPeer!.isFromIdentity(msg, verifiedCoordinatorIdentity())) {
+        console.warn(`[agent:${AGENT_ID}] mesh task_offer ignored: sender ${msg.fromPeerId} is not the verified coordinator`);
+        return;
+      }
       if (!p.subtaskId || !p.taskId || !p.input) return;
-      if (meshClaimedTasks.has(p.subtaskId)) return;
+      if (meshTaskQueue.hasClaimed(p.subtaskId)) return;
       // Same execution policy as pulled work: don't claim what we would refuse to run.
       const offerPolicy = checkSnapshotPolicy({ id: p.subtaskId, kind: (p.kind as Subtask["kind"]) ?? "single_step", snapshotRef: p.snapshotRef }, SNAPSHOT_ENFORCEMENT);
       if (!offerPolicy.run) {
@@ -862,7 +893,7 @@ async function loop(): Promise<void> {
       if (p.originCoordinatorId === AGENT_ID) return;
       // #45 review: a node without a sandbox never drains this queue, so don't fill it.
       if (!SWARM_EXECUTION_ENABLED) return;
-      meshTaskQueue.push({
+      const queued = meshTaskQueue.push({
         subtask: {
           id: p.subtaskId,
           taskId: p.taskId,
@@ -875,22 +906,25 @@ async function loop(): Promise<void> {
         },
         fromPeerId: msg.fromPeerId,
       });
+      if (!queued) {
+        console.warn(`[agent:${AGENT_ID}] mesh task_offer ignored: queue full (${meshTaskQueue.length})`);
+        return;
+      }
       // Broadcast claim
       await meshPeer!.broadcast("task_claim", {
         subtaskId: p.subtaskId,
         claimedByCoordinator: AGENT_ID,
       });
-      meshClaimedTasks.add(p.subtaskId);
       console.log(`[agent:${AGENT_ID}] mesh task_offer queued: ${p.subtaskId}`);
     });
 
     // Handle task_claim: remove tasks claimed by other peers
     meshPeer.on("task_claim", async (msg: MeshMessage) => {
       const p = msg.payload as { subtaskId?: string; claimedByCoordinator?: string };
-      if (p.subtaskId && p.claimedByCoordinator !== AGENT_ID) {
-        const idx = meshTaskQueue.findIndex(t => t.subtask.id === p.subtaskId);
-        if (idx >= 0) {
-          meshTaskQueue.splice(idx, 1);
+      // Only peers the coordinator told us about can cancel queued work.
+      if (!meshPeer!.getPeer(msg.fromPeerId)?.trusted) return;
+      if (typeof p.subtaskId === "string" && p.claimedByCoordinator !== AGENT_ID) {
+        if (meshTaskQueue.remove(p.subtaskId)) {
           console.log(`[agent:${AGENT_ID}] mesh task claimed by ${p.claimedByCoordinator}: ${p.subtaskId}`);
         }
       }
@@ -937,14 +971,31 @@ async function loop(): Promise<void> {
     }
     startMeshUplink();
   }
+  /** #63: the reward account the coordinator resolves for this agent (both BLE tx sides sign it). */
+  let rewardAccountId = AGENT_ID;
+  function adoptRewardAccount(accountId: unknown): void {
+    if (typeof accountId === "string" && accountId.length > 0 && !accountId.includes("\n")) {
+      rewardAccountId = accountId;
+      bleMesh?.setAccountId(accountId);
+    }
+  }
   const bleGuard = new BleRequestGuard();
   // EDGECODER_BLE=0: the user turned BLE peer discovery off in the app.
-  if (OS === "macos" && process.env.EDGECODER_BLE === "0") console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
-  if (OS === "macos" && process.env.EDGECODER_BLE !== "0") {
+  if (OS === "macos" && !W.EDGECODER_BLE) console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
+  if (OS === "macos" && W.EDGECODER_BLE) {
     try {
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
-      bleMesh = new BLEMeshManager(AGENT_ID, AGENT_ID, bleTransport, localStore);
+      bleMesh = new BLEMeshManager(AGENT_ID, rewardAccountId, bleTransport, localStore, { privateKeyPem: keys.privateKeyPem });
+      // #63: provider side of the co-sign step for tasks this agent serves over BLE.
+      const transportForCosign = bleTransport;
+      const bleCosigner = new BleCosignProvider({
+        agentId: AGENT_ID,
+        accountId: () => rewardAccountId,
+        privateKeyPem: keys.privateKeyPem,
+        modelParamSize: () => transportForCosign.currentAdvertisement()?.modelParamSize ?? 0,
+      });
+      bleTransport.onCosignRequest((req) => bleCosigner.handle(req));
       bleMesh.setOwnTokenHash(computeMeshTokenHash());
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
@@ -960,15 +1011,17 @@ async function loop(): Promise<void> {
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
-        // Admission: no mesh token here means no remote BLE work at all; otherwise the requester
-        // must advertise the same token hash, within size and rate limits. BLE adverts carry no
-        // public key, so requesterSignature cannot be verified against an identity.
-        const requesterPeer = bleTransport!.discoveredPeers().find(p => p.agentId === req.requesterId);
+        // Admission: no mesh token here means no remote BLE work at all; otherwise the request must
+        // carry a proof keyed with the mesh token (the advertised hash is public, not a
+        // credential), within size and rate limits. See src/mesh/ble/ble-request-guard.ts.
+        const proof = req as typeof req & { requesterProof?: unknown; requesterIssuedAtMs?: unknown };
         const admission = bleGuard.admit({
-          ownTokenHash: computeMeshTokenHash(),
-          requesterTokenHash: requesterPeer?.meshTokenHash,
+          ownMeshToken: meshAuthToken,
+          requestId: String(req.requestId ?? ""),
           requesterId: String(req.requesterId ?? ""),
-          task: req.task
+          task: req.task,
+          requesterProof: proof.requesterProof,
+          requesterIssuedAtMs: proof.requesterIssuedAtMs
         });
         if (!admission.ok) {
           console.warn(`[BLE] rejecting task from ${req.requesterId}: ${admission.reason}`);
@@ -991,13 +1044,16 @@ async function loop(): Promise<void> {
           const durationMs = Date.now() - started;
           try { localStore.recordTaskComplete(subtaskId, response.text, durationMs); } catch (e) { console.warn(`[db] BLE task complete write failed: ${e}`); }
           const taskHash = computeTaskHash(req.task);
+          // #63: credits are settled by the co-sign step that follows; remember what we served.
+          bleCosigner.recordServed(req.requestId, String(req.requesterId ?? ""), taskHash, durationMs);
           return {
             requestId: req.requestId,
             providerId: AGENT_ID,
+            providerAccountId: rewardAccountId,
             status: "completed" as const,
             output: response.text,
             cpuSeconds: durationMs / 1000,
-            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "completed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
+            providerSignature: "",
           };
         } catch (e) {
           const durationMs = Date.now() - started;
@@ -1009,7 +1065,7 @@ async function loop(): Promise<void> {
             status: "failed" as const,
             output: String(e),
             cpuSeconds: durationMs / 1000,
-            providerSignature: signPayload(JSON.stringify({ providerId: AGENT_ID, status: "failed", cpuSeconds: durationMs / 1000, taskHash }), keys.privateKeyPem),
+            providerSignature: "",
           };
         }
       });
@@ -1093,7 +1149,8 @@ async function loop(): Promise<void> {
           }
         }
         if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
-          const installedModels = currentProvider === "ollama-local" ? await listInstalledModels() : [];
+          if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
+          const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
           const registerBody = {
             ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
             agentId: AGENT_ID,
@@ -1120,14 +1177,18 @@ async function loop(): Promise<void> {
           })) as {
             accepted?: boolean;
             meshToken?: string;
+            rewardAccountId?: string;
           };
           registeredWithUrl = coordinator.url;
           lastRegisteredAtMs = Date.now();
           adoptMeshToken(registerResponse.meshToken);
+          adoptRewardAccount(registerResponse.rewardAccountId);
         }
 
         const hbStart = Date.now();
-        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+        // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
+        const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
         const hb = (await post("/heartbeat", hbBody, { signed: true })) as {
           ok?: boolean;
           blacklisted?: boolean;
@@ -1268,11 +1329,14 @@ async function loop(): Promise<void> {
         }
 
         const pullBody = { agentId: AGENT_ID };
-        if (!SWARM_EXECUTION_ENABLED && !warnedNoSandbox) {
+        if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
-          console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute)`);
+          console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
+        } else if (INFERENCE_ONLY && !warnedNoSandbox) {
+          warnedNoSandbox = true;
+          console.log(`[agent:${AGENT_ID}] inference-only: pulling inference subtasks only (no sandbox, no task code is run)`);
         }
-        const pulled = (SWARM_EXECUTION_ENABLED && !sandboxDown
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -1309,6 +1373,19 @@ async function loop(): Promise<void> {
 
         if (pulled.subtask) {
           const st = pulled.subtask;
+
+          // Inference-only: never run task code, whatever the coordinator sent.
+          const inferenceOnlyRefusal = inferenceOnlyRejection(INFERENCE_ONLY, st);
+          if (inferenceOnlyRefusal) {
+            console.error(`[agent:${AGENT_ID}] refused subtask ${st.id}: ${inferenceOnlyRefusal}`);
+            try {
+              await post("/result", {
+                subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
+                ok: false, output: "", error: inferenceOnlyRefusal, durationMs: 0,
+              }, { signed: true });
+            } catch { /* best effort */ }
+            continue;
+          }
 
           // ── Frozen snapshot enforcement (Design Decision #8; same check for every source) ──
           const snapshotPolicy = checkSnapshotPolicy(st, SNAPSHOT_ENFORCEMENT);
@@ -1387,6 +1464,10 @@ async function loop(): Promise<void> {
               if (sealed.encrypted) console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
               else console.error(`[agent:${AGENT_ID}] result encryption failed for ${result.subtaskId}; reporting failure without output: ${sealed.error}`);
             }
+            // #54: say which model produced the result (inside the signed request); the coordinator
+            // rejects a result whose model isn't the one the subtask requested.
+            const ranModel = st.kind === "inference" ? st.requestedModel : currentProvider === "ollama-local" ? OLLAMA_MODEL : undefined;
+            if (ranModel) resultPayload.model = ranModel;
             // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
             const finishedAtMs = Date.now();
             resultPayload.receipt = signReceiptAsAgent(
@@ -1587,8 +1668,9 @@ async function loop(): Promise<void> {
             };
             // Keep the mesh token from this register too: an agent that went offline before its first
             // registration has none, and without it every heartbeat is refused (mesh_unauthorized).
-            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string };
+            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string; rewardAccountId?: string };
             adoptMeshToken(probeRegister.meshToken);
+            adoptRewardAccount(probeRegister.rewardAccountId);
             const probeBody = { agentId: AGENT_ID, powerTelemetry };
             await post("/heartbeat", probeBody, { retries: 0, timeoutMs: 5000, signed: true });
             const probeLatency = Date.now() - probeStart;
@@ -1623,6 +1705,8 @@ async function loop(): Promise<void> {
               task: task.prompt,
               language: task.language as Language,
               requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(task.prompt) }), keys.privateKeyPem),
+              // Admission proof keyed with the mesh token (providers no longer accept the public hash).
+              ...bleRequestProof(meshAuthToken, { requestId: task.id, requesterId: AGENT_ID, task: task.prompt }),
             };
             try {
               const resp = await bleMesh.routeTask(bleReq, 0);
@@ -1665,13 +1749,13 @@ async function loop(): Promise<void> {
 
       // ═══ BLE peer discovery — only in offline mode or when explicitly enabled ═══
       // BLE is a last-resort transport; HTTP mesh is primary for task distribution.
-      if (bleTransport && (!coordinatorOnline || process.env.BLE_TEST_ENABLED === "true")) {
+      if (bleTransport && (!coordinatorOnline || W.BLE_TEST_ENABLED)) {
         const blePeers = bleTransport.discoveredPeers();
         if (blePeers.length > 0) {
           try { for (const p of blePeers) { localStore.upsertBLEPeer(p.agentId, p.model, p.modelParamSize, p.deviceType, p.rssi); } } catch (e) { console.warn(`[db] BLE peer write failed: ${e}`); }
           console.log(`[agent:${AGENT_ID}] BLE peers (offline): ${blePeers.map(p => `${p.agentId}(rssi:${p.rssi})`).join(", ")}`);
 
-          if (!bleTaskTestDone && process.env.BLE_TEST_ENABLED === "true") {
+          if (!bleTaskTestDone && W.BLE_TEST_ENABLED) {
             bleTaskTestDone = true;
             const peer = blePeers[0];
             console.log(`[BLE-TEST] will send test task to ${peer.agentId} in 5s...`);
@@ -1679,12 +1763,14 @@ async function loop(): Promise<void> {
               try {
                 console.log(`[BLE-TEST] sending test task to ${peer.agentId} over BLE...`);
                 const testTask = "Write a Python function called is_palindrome(s) that checks if a string is a palindrome, ignoring case and non-alphanumeric characters. Include a docstring.";
+                const testRequestId = `ble-test-${Date.now()}`;
                 const testReq = {
-                  requestId: `ble-test-${Date.now()}`,
+                  requestId: testRequestId,
                   requesterId: AGENT_ID,
                   task: testTask,
                   language: "python" as const,
                   requesterSignature: signPayload(JSON.stringify({ requesterId: AGENT_ID, taskHash: computeTaskHash(testTask) }), keys.privateKeyPem),
+                  ...bleRequestProof(meshAuthToken, { requestId: testRequestId, requesterId: AGENT_ID, task: testTask }),
                 };
                 const resp = await bleTransport!.sendTaskRequest(peer.agentId, testReq);
                 console.log(`[BLE-TEST] response from ${peer.agentId}: status=${resp.status}, output=${(resp.output ?? "").substring(0, 200)}`);

@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 /// Signed agent request headers understood by the coordinator (`verifyAgentRequest` in
-/// src/swarm/coordinator.ts) for `/heartbeat`, `/pull`, `/result` and `/credits/ble-sync`.
+/// src/swarm/coordinator/auth.ts) for `/heartbeat`, `/pull`, `/result` and `/credits/ble-sync`.
 ///
 /// This mirrors `signRequest` in src/security/request-signing.ts exactly:
 ///   canonical = "\(timestampMs)\n\(nonce)\n\(method)\n\(path)\n\(bodySha256Hex)"

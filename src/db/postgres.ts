@@ -10,8 +10,12 @@ import type { Reservation } from "../economy/reservations.js";
 import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
-import type { FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import type { EarningsSummary, FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
+import { assertLedgerNetwork, type LedgerNetworkCheck } from "./ledger-network.js";
+import type { SolvencyInputs } from "../economy/payout-reconcile.js";
+import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
+import type { ReconcileInput } from "../ledger/reconcile.js";
 import type { CallbackPin, CallbackPinStore } from "../economy/lnurl-callback-pin.js";
 import { normalizeLegacyOrder, normalizeLegacyTicks, normalizeLegacyTrades, type MarketOrder, type MarketTick, type MarketTrade } from "../economy/market-history.js";
 
@@ -36,6 +40,7 @@ function rowToPayout(row: Record<string, unknown>): PayoutRecord {
 }
 import {
   AccountMembership,
+  BitcoinNetwork,
   AgentOwnership,
   BitcoinAnchorRecord,
   BlacklistRecord,
@@ -89,12 +94,22 @@ export const STATS_CHECKPOINT_LOCK_KEY = 1;
 /** Issuance epochs: coordinators sharing a database compute each window's epoch one at a time. */
 export const ISSUANCE_LOCK_NAMESPACE = 0x45430005;
 export const ISSUANCE_LOCK_KEY = 1;
+/** #115: ledger reconciliation runs one at a time across coordinators sharing this database. */
+export const LEDGER_VERIFY_LOCK_NAMESPACE = 0x45430006;
+export const LEDGER_VERIFY_LOCK_KEY = 1;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
 export const STATS_CHECKPOINT_EVENT_TYPES = ["stats_checkpoint_signature", "stats_checkpoint_commit"] as const;
 /** What a payout row has or may still move: pending rows count at their fee cap. */
 const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fee_msat, max_fee_msat) ELSE fee_msat END`;
+/**
+ * The one SQL definition of a matured credit_transactions row (earnings hold, PAYOUT_EARNINGS_HOLD_MS).
+ * `param` is the cutoff placeholder: NULL = no hold, every row matured. In-memory twin:
+ * earnRowMatured (src/economy/payouts.ts); cutoff from earningsMaturityCutoffMs.
+ */
+export const EARN_MATURED_SQL = (param: string): string => `(${param}::bigint IS NULL OR timestamp_ms <= ${param}::bigint)`;
+const EARNED_MSAT_SQL = `SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND ${EARN_MATURED_SQL("$2")}`;
 
 export const SCHEMA_SQL = `
 SELECT pg_advisory_xact_lock(${SCHEMA_LOCK_NAMESPACE}, ${SCHEMA_LOCK_KEY});
@@ -172,7 +187,7 @@ CREATE TABLE IF NOT EXISTS node_status_projection (
 CREATE TABLE IF NOT EXISTS coordinator_earnings_projection (
   account_id TEXT PRIMARY KEY,
   owner_email TEXT,
-  total_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+  total_credits NUMERIC(30, 6) NOT NULL DEFAULT 0,
   task_count BIGINT NOT NULL DEFAULT 0,
   updated_at_ms BIGINT NOT NULL
 );
@@ -197,6 +212,18 @@ CREATE TABLE IF NOT EXISTS agent_registry (
   last_seen_ms BIGINT NOT NULL,
   active_model TEXT,
   active_model_param_size DOUBLE PRECISION
+);
+
+-- #122: agent request-signing keys accepted at /register by any coordinator on this database.
+-- The origin of a peer-forwarded result verifies the agent's own signature against these, so the
+-- key never comes from the forwarding coordinator. Every key an agent registered stays listed.
+CREATE TABLE IF NOT EXISTS agent_signing_keys (
+  agent_id TEXT NOT NULL,
+  public_key_pem TEXT NOT NULL,
+  coordinator_id TEXT NOT NULL,
+  first_seen_ms BIGINT NOT NULL,
+  last_seen_ms BIGINT NOT NULL,
+  PRIMARY KEY (agent_id, public_key_pem)
 );
 
 CREATE TABLE IF NOT EXISTS blacklist_events (
@@ -515,7 +542,12 @@ ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS last_checked_at_ms B
 -- #103: reconciliation attempts for broadcasting / stuck rows.
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS abandoned_at_ms BIGINT;
+-- #46: which provider broadcast the row; 'mock' rows are reported as simulated. NULL on older rows.
+ALTER TABLE bitcoin_anchor_records ADD COLUMN IF NOT EXISTS anchor_provider TEXT;
 CREATE INDEX IF NOT EXISTS idx_anchor_records_status ON bitcoin_anchor_records (status);
+-- #101: the epoch-anchor guard looks anchors up by epoch id and by checkpoint hash.
+CREATE INDEX IF NOT EXISTS idx_anchor_records_epoch ON bitcoin_anchor_records (epoch_id, created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_anchor_records_checkpoint ON bitcoin_anchor_records (checkpoint_hash, created_at_ms DESC);
 
 CREATE TABLE IF NOT EXISTS issuance_payout_events (
   payout_event_id TEXT PRIMARY KEY,
@@ -592,6 +624,17 @@ BEGIN
     ALTER TABLE payment_intents ALTER COLUMN quoted_credits TYPE NUMERIC(30, 6) USING round(quoted_credits::numeric, 6);
   END IF;
 END $$;
+-- #153: coordinator_earnings_projection.total_credits to NUMERIC(30,6), same rules again. The sum is
+-- accumulated in SQL (incrementCoordinatorEarningsProjection), so a float column collects rounding error.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'coordinator_earnings_projection'
+               AND column_name = 'total_credits'
+               AND (data_type <> 'numeric' OR numeric_precision IS DISTINCT FROM 30 OR numeric_scale IS DISTINCT FROM 6)) THEN
+    ALTER TABLE coordinator_earnings_projection ALTER COLUMN total_credits TYPE NUMERIC(30, 6) USING round(total_credits::numeric, 6);
+  END IF;
+END $$;
 -- #42: payment hash proof per intent (additive migration)
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS payment_hash TEXT;
 -- Sats value locked on credit rows (earn: payable msat at accrual, at the market/oracle rate of that moment).
@@ -620,6 +663,16 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_ledger_records_issued_at ON ledger_records (issued_at_ms ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_blacklist_events_agent ON blacklist_events (agent_id, timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_tasks_status ON queue_tasks (project_id, priority DESC, created_at_ms ASC);
+-- #99: claim attempts survive a coordinator restart (the retry cap is not reset), and agents whose
+-- lease on a subtask expired stay recorded so their late results are rejected on any coordinator
+-- sharing this database. Rows for a subtask are removed once its result is recorded.
+ALTER TABLE queue_tasks ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS queue_expired_holders (
+  subtask_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  expired_at_ms BIGINT NOT NULL,
+  PRIMARY KEY (subtask_id, agent_id)
+);
 -- Signed work receipts (architecture step 2): replicated between coordinators, batched into
 -- Merkle epochs whose roots are anchored on Bitcoin. receipt_json keeps the full signed
 -- receipt (PEM keys and both signatures); the columns are for indexing.
@@ -681,6 +734,46 @@ CREATE TABLE IF NOT EXISTS payout_callback_pins (
   notified_at_ms BIGINT,
   PRIMARY KEY (account_id, destination)
 );
+-- #115: one periodic ledger reconciliation per window across coordinators sharing this database
+-- (the first to claim a window runs it and alerts; the others skip). Read-only audit trail.
+CREATE TABLE IF NOT EXISTS ledger_verifications (
+  window_start_ms BIGINT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  finished_at_ms BIGINT,
+  ok BOOLEAN,
+  mismatches INT,
+  summary_json JSONB
+);
+
+-- Result verification (#105, #162; src/swarm/verification.ts). Reputation is per reward account
+-- and shared by every coordinator on this database: updates are atomic deltas, clamped to [0, 1].
+CREATE TABLE IF NOT EXISTS verification_reputation (
+  account_id TEXT PRIMARY KEY,
+  reputation DOUBLE PRECISION NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+-- Results held for verification. Each row belongs to the coordinator that holds it (its queue has
+-- the replicas); only that coordinator writes it or restores it after a restart.
+CREATE TABLE IF NOT EXISTS pending_verifications (
+  original_subtask_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  state_json JSONB NOT NULL,
+  started_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_verifications_coordinator ON pending_verifications (coordinator_id, started_at_ms);
+
+-- The Bitcoin network this database's ledger belongs to (src/db/ledger-network.ts). One row, written
+-- by the first coordinator start that checks it (assertLedgerNetwork); a coordinator configured for
+-- another network refuses to start. Changed only by scripts/ledger-reset-network.ts, which wipes
+-- the money rows in the same transaction, so regtest balances can never become mainnet sats.
+CREATE TABLE IF NOT EXISTS ledger_network (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  network TEXT NOT NULL,
+  recorded_at_ms BIGINT NOT NULL,
+  recorded_by TEXT NOT NULL
+);
 `;
 
 /** See PostgresStore.invalidateServerSeedWallets. A Lightning wallet row holding an on-chain address is the same flow's output. */
@@ -693,6 +786,9 @@ export const INVALIDATE_SERVER_SEED_WALLETS_SQL = `UPDATE wallet_accounts
 const BALANCE_CHECK_SQL = `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
          COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) >= round($2::numeric, 6) AS enough
          FROM credit_transactions WHERE account_id = $1`;
+
+const ANCHOR_COLUMNS =
+  "anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms, anchor_provider";
 
 export class PostgresStore {
   constructor(private readonly pool: Pool) {}
@@ -759,16 +855,64 @@ export class PostgresStore {
     );
   }
 
-  async markSubtaskClaimed(subtaskId: string, agentId: string, claimedAtMs: number): Promise<void> {
+  /**
+   * #99: record a claim with its attempt number. GREATEST keeps a concurrent write from moving the
+   * count backwards. A re-claim by an agent whose earlier lease expired clears its expired mark.
+   */
+  async markSubtaskClaimed(subtaskId: string, agentId: string, claimedAtMs: number, attempts?: number): Promise<void> {
     await this.pool.query(
-      `UPDATE queue_tasks SET claimed_by = $2, claimed_at_ms = $3 WHERE subtask_id = $1`,
-      [subtaskId, agentId, claimedAtMs]
+      `WITH upd AS (
+         UPDATE queue_tasks
+            SET claimed_by = $2, claimed_at_ms = $3, attempts = GREATEST(attempts, COALESCE($4::int, attempts + 1))
+          WHERE subtask_id = $1
+          RETURNING subtask_id
+       )
+       DELETE FROM queue_expired_holders WHERE subtask_id = $1 AND agent_id = $2`,
+      [subtaskId, agentId, claimedAtMs, attempts ?? null]
     );
+  }
+
+  /**
+   * #99: a claim ended without a result. With `expiredHolder` the lease expired and that agent is
+   * recorded (late results from it are rejected); without it the coordinator handed the claim back
+   * and `attempts` is the decremented count.
+   */
+  async markSubtaskReleased(subtaskId: string, attempts: number, expiredHolder?: { agentId: string; atMs: number }): Promise<void> {
+    await this.pool.query(
+      `WITH upd AS (
+         UPDATE queue_tasks SET claimed_by = NULL, claimed_at_ms = NULL, attempts = $2 WHERE subtask_id = $1
+         RETURNING subtask_id
+       )
+       INSERT INTO queue_expired_holders (subtask_id, agent_id, expired_at_ms)
+       SELECT $1, $3::text, $4::bigint WHERE $3::text IS NOT NULL
+       ON CONFLICT (subtask_id, agent_id) DO UPDATE SET expired_at_ms = EXCLUDED.expired_at_ms`,
+      [subtaskId, attempts, expiredHolder?.agentId ?? null, expiredHolder?.atMs ?? null]
+    );
+  }
+
+  /** #99: persisted attempts and expired holders for a subtask (zero/empty when unknown). */
+  async getSubtaskLeaseState(subtaskId: string): Promise<{ attempts: number; expiredHolders: string[] }> {
+    const r = await this.pool.query(
+      `SELECT COALESCE((SELECT attempts FROM queue_tasks WHERE subtask_id = $1), 0) AS attempts,
+              COALESCE((SELECT array_agg(agent_id) FROM queue_expired_holders WHERE subtask_id = $1), '{}') AS holders`,
+      [subtaskId]
+    );
+    return { attempts: Number(r.rows[0]?.attempts ?? 0), expiredHolders: r.rows[0]?.holders ?? [] };
+  }
+
+  /** #99: true when `agentId`'s lease on `subtaskId` expired (recorded by any coordinator on this database). */
+  async isExpiredLeaseHolder(subtaskId: string, agentId: string): Promise<boolean> {
+    const r = await this.pool.query(
+      `SELECT 1 FROM queue_expired_holders WHERE subtask_id = $1 AND agent_id = $2`,
+      [subtaskId, agentId]
+    );
+    return (r.rowCount ?? 0) > 0;
   }
 
   async persistResult(result: SubtaskResult): Promise<void> {
     await this.pool.query(
-      `INSERT INTO queue_results (
+      `WITH cleared AS (DELETE FROM queue_expired_holders WHERE subtask_id = $1)
+       INSERT INTO queue_results (
          subtask_id, task_id, agent_id, ok, output, error, duration_ms, report_nonce, report_signature, created_at_ms
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (subtask_id) DO UPDATE SET
@@ -1092,7 +1236,7 @@ export class PostgresStore {
     await this.pool.query(
       `INSERT INTO coordinator_earnings_projection (
         account_id, owner_email, total_credits, task_count, updated_at_ms
-      ) VALUES ($1,$2,$3,$4,$5)
+      ) VALUES ($1,$2,round($3::numeric, 6),$4,$5)
       ON CONFLICT (account_id) DO UPDATE SET
         owner_email = COALESCE(EXCLUDED.owner_email, coordinator_earnings_projection.owner_email),
         total_credits = coordinator_earnings_projection.total_credits + EXCLUDED.total_credits,
@@ -1174,10 +1318,39 @@ export class PostgresStore {
     return Number(r.rows[0]?.msat ?? 0);
   }
 
-  /** Sats (msat) earned by an account, as locked on its earn rows. */
-  async earnedMsat(accountId: string): Promise<number> {
-    const r = await this.pool.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [accountId]);
+  /**
+   * Sats (msat) earned by an account, as locked on its earn rows. With `maturedAtOrBeforeMs`, only
+   * rows matured at that cutoff (the earnings hold); without it, every earn row.
+   */
+  async earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number> {
+    const r = await this.pool.query(EARNED_MSAT_SQL, [accountId, maturedAtOrBeforeMs ?? null]);
     return Number(r.rows[0]?.msat ?? 0);
+  }
+
+  /** Total and matured earnings plus the oldest held row, in one read (PayoutService.balance). */
+  async earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary> {
+    const matured = EARN_MATURED_SQL("$2");
+    const r = await this.pool.query(
+      `SELECT COALESCE(SUM(msat), 0) AS total_msat,
+              COALESCE(SUM(msat) FILTER (WHERE ${matured}), 0) AS matured_msat,
+              MIN(timestamp_ms) FILTER (WHERE NOT ${matured} AND msat > 0) AS oldest_held_ms
+         FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`,
+      [accountId, maturedAtOrBeforeMs ?? null]
+    );
+    const row = r.rows[0] ?? {};
+    return {
+      totalMsat: Number(row.total_msat ?? 0),
+      maturedMsat: Number(row.matured_msat ?? 0),
+      oldestHeldAtMs: row.oldest_held_ms === null || row.oldest_held_ms === undefined ? null : Number(row.oldest_held_ms)
+    };
+  }
+
+  /**
+   * Refuse to run against a ledger recorded for another Bitcoin network (src/db/ledger-network.ts).
+   * The coordinator calls this at startup, after migrate() and before serving.
+   */
+  async assertLedgerNetwork(configured: BitcoinNetwork, recordedBy?: string): Promise<LedgerNetworkCheck> {
+    return assertLedgerNetwork(this.pool, configured, recordedBy);
   }
 
   /**
@@ -1689,8 +1862,8 @@ export class PostgresStore {
   async upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO bitcoin_anchor_records (
-        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms, anchor_provider
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT (anchor_id) DO UPDATE SET
         tx_ref = EXCLUDED.tx_ref,
         status = EXCLUDED.status,
@@ -1700,7 +1873,8 @@ export class PostgresStore {
         block_height = EXCLUDED.block_height,
         last_checked_at_ms = EXCLUDED.last_checked_at_ms,
         reconcile_attempts = EXCLUDED.reconcile_attempts,
-        abandoned_at_ms = EXCLUDED.abandoned_at_ms`,
+        abandoned_at_ms = EXCLUDED.abandoned_at_ms,
+        anchor_provider = COALESCE(EXCLUDED.anchor_provider, bitcoin_anchor_records.anchor_provider)`,
       [
         record.anchorId,
         record.epochId,
@@ -1715,7 +1889,8 @@ export class PostgresStore {
         record.blockHeight ?? null,
         record.lastCheckedAtMs ?? null,
         record.reconcileAttempts ?? 0,
-        record.abandonedAtMs ?? null
+        record.abandonedAtMs ?? null,
+        record.anchorProvider ?? null
       ]
     );
   }
@@ -1735,13 +1910,14 @@ export class PostgresStore {
       blockHeight: row.block_height !== undefined && row.block_height !== null ? Number(row.block_height) : undefined,
       lastCheckedAtMs: row.last_checked_at_ms ? Number(row.last_checked_at_ms) : undefined,
       reconcileAttempts: row.reconcile_attempts !== undefined && row.reconcile_attempts !== null ? Number(row.reconcile_attempts) : 0,
-      abandonedAtMs: row.abandoned_at_ms !== undefined && row.abandoned_at_ms !== null ? Number(row.abandoned_at_ms) : undefined
+      abandonedAtMs: row.abandoned_at_ms !== undefined && row.abandoned_at_ms !== null ? Number(row.abandoned_at_ms) : undefined,
+      anchorProvider: row.anchor_provider ?? undefined
     };
   }
 
   async latestAnchor(): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT 1`
@@ -1752,7 +1928,7 @@ export class PostgresStore {
 
   async listAnchors(limit = 100): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        ORDER BY created_at_ms DESC
        LIMIT $1`,
@@ -1792,7 +1968,7 @@ export class PostgresStore {
   /** #103: rows to reconcile: in-flight broadcasts, and pending rows older than `pendingBeforeMs`. */
   async listAnchorsToReconcile(pendingBeforeMs: number, limit = 50, abandonedSinceMs?: number): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE status = 'broadcasting' OR (status = 'pending' AND created_at_ms < $1)
           OR (status = 'failed' AND abandoned_at_ms IS NOT NULL AND abandoned_at_ms >= $3)
@@ -1806,7 +1982,7 @@ export class PostgresStore {
   /** #46: anchors awaiting confirmation depth (or re-confirmation after a reorg). */
   async listPendingAnchors(limit = 50): Promise<BitcoinAnchorRecord[]> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE status = 'pending'
        ORDER BY created_at_ms ASC
@@ -1816,9 +1992,57 @@ export class PostgresStore {
     return result.rows.map((row) => this.anchorFromRow(row));
   }
 
+  /**
+   * #46: confirmed anchors still inside the reorg watch window (fewer than `belowConfirmations`),
+   * least recently checked first, so every one of them is re-verified, not only the newest rows.
+   */
+  async listAnchorsToReverify(belowConfirmations: number, limit = 50): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT ${ANCHOR_COLUMNS}
+       FROM bitcoin_anchor_records
+       WHERE status = 'anchored' AND tx_ref ~ '^[0-9a-f]{64}$' AND confirmations < $1
+       ORDER BY last_checked_at_ms ASC NULLS FIRST
+       LIMIT $2`,
+      [belowConfirmations, limit]
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
+  /** #101: newest anchor row for an epoch id (issuance epochs, `stats:<h>`, `receipts:<id>`). */
+  async latestAnchorByEpoch(epochId: string): Promise<BitcoinAnchorRecord | null> {
+    const result = await this.pool.query(
+      `SELECT ${ANCHOR_COLUMNS}
+       FROM bitcoin_anchor_records
+       WHERE epoch_id = $1
+       ORDER BY created_at_ms DESC
+       LIMIT 1`,
+      [epochId]
+    );
+    const row = result.rows[0];
+    return row ? this.anchorFromRow(row) : null;
+  }
+
+  /**
+   * #101: the newest live (non-failed, real txid) anchor of each kind (stats checkpoints,
+   * receipt epochs, issuance epochs), so reorg re-checks cover every kind even when one kind
+   * fills the newest rows.
+   */
+  async latestLiveAnchorPerKind(): Promise<BitcoinAnchorRecord[]> {
+    const result = await this.pool.query(
+      `SELECT DISTINCT ON (kind) ${ANCHOR_COLUMNS}
+       FROM (
+         SELECT *, CASE WHEN epoch_id LIKE 'stats:%' THEN 'stats' WHEN epoch_id LIKE 'receipts:%' THEN 'receipts' ELSE 'issuance' END AS kind
+         FROM bitcoin_anchor_records
+         WHERE status <> 'failed' AND tx_ref ~ '^[0-9a-f]{64}$'
+       ) a
+       ORDER BY kind, created_at_ms DESC`
+    );
+    return result.rows.map((row) => this.anchorFromRow(row));
+  }
+
   async latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null> {
     const result = await this.pool.query(
-      `SELECT anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms
+      `SELECT ${ANCHOR_COLUMNS}
        FROM bitcoin_anchor_records
        WHERE checkpoint_hash = $1
        ORDER BY created_at_ms DESC
@@ -1956,34 +2180,35 @@ export class PostgresStore {
   }
 
   async listBlacklistEvents(): Promise<BlacklistRecord[]> {
+    const result = await this.pool.query(`SELECT ${BLACKLIST_COLUMNS} FROM blacklist_events ORDER BY timestamp_ms ASC`);
+    return result.rows.map(blacklistRow);
+  }
+
+  /** #122: newest blacklist event for an agent, written by any coordinator on this database. */
+  async latestBlacklistEvent(agentId: string): Promise<BlacklistRecord | null> {
     const result = await this.pool.query(
-      `SELECT
-        event_id, agent_id, reason_code, reason, evidence_hash_sha256, reporter_id,
-        reporter_public_key_pem, reporter_signature, evidence_signature_verified, evidence_ref,
-        source_coordinator_id, reported_by, timestamp_ms, expires_at_ms, prev_event_hash,
-        event_hash, coordinator_signature
-       FROM blacklist_events
-       ORDER BY timestamp_ms ASC`
+      `SELECT ${BLACKLIST_COLUMNS} FROM blacklist_events WHERE agent_id = $1 ORDER BY timestamp_ms DESC LIMIT 1`,
+      [agentId]
     );
-    return result.rows.map((row) => ({
-      eventId: row.event_id,
-      agentId: row.agent_id,
-      reasonCode: row.reason_code,
-      reason: row.reason,
-      evidenceHashSha256: row.evidence_hash_sha256,
-      reporterId: row.reporter_id,
-      reporterPublicKeyPem: row.reporter_public_key_pem ?? undefined,
-      reporterSignature: row.reporter_signature ?? undefined,
-      evidenceSignatureVerified: Boolean(row.evidence_signature_verified),
-      evidenceRef: row.evidence_ref ?? undefined,
-      sourceCoordinatorId: row.source_coordinator_id,
-      reportedBy: row.reported_by,
-      timestampMs: Number(row.timestamp_ms),
-      expiresAtMs: row.expires_at_ms ? Number(row.expires_at_ms) : undefined,
-      prevEventHash: row.prev_event_hash,
-      eventHash: row.event_hash,
-      coordinatorSignature: row.coordinator_signature
-    }));
+    return result.rows.length ? blacklistRow(result.rows[0]) : null;
+  }
+
+  /** #122: remember an agent signing key accepted at /register (shared by all coordinators). */
+  async recordAgentSigningKey(agentId: string, publicKeyPem: string, coordinatorId: string, nowMs = Date.now()): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO agent_signing_keys (agent_id, public_key_pem, coordinator_id, first_seen_ms, last_seen_ms)
+       VALUES ($1,$2,$3,$4,$4)
+       ON CONFLICT (agent_id, public_key_pem) DO UPDATE SET last_seen_ms = EXCLUDED.last_seen_ms`,
+      [agentId, publicKeyPem, coordinatorId, nowMs]
+    );
+  }
+
+  async listAgentSigningKeys(agentId: string): Promise<string[]> {
+    const result = await this.pool.query(
+      `SELECT public_key_pem FROM agent_signing_keys WHERE agent_id = $1 ORDER BY last_seen_ms DESC`,
+      [agentId]
+    );
+    return result.rows.map((row) => String(row.public_key_pem));
   }
 
   async upsertCreditAccount(account: CreditAccount): Promise<void> {
@@ -2536,11 +2761,18 @@ export class PostgresStore {
   }
 
   /**
-   * Reserve a payout atomically: under a per-account advisory lock, recheck payable
-   * (earned − paid/pending) and the coordinator's capacity, then insert the pending row.
+   * Reserve a payout atomically: under the payout locks and the account's credit lock, recheck
+   * payable (earned − paid/pending, capped at the credit balance) against amount + fee cap and the
+   * coordinator's capacity, then insert the pending row and its credit debit together.
    * A duplicate payment hash is rejected by the unique index, so one invoice is never paid twice.
+   * Earned counts only rows matured at `maturedAtOrBeforeMs` (earnings hold; undefined = all).
    */
-  async reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+  async reservePayout(
+    payout: PayoutRecord,
+    capacityMsat: (paidOrPendingAllMsat: number) => number,
+    limits?: ReservationLimits,
+    maturedAtOrBeforeMs?: number
+  ): Promise<ReserveResult> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -2548,10 +2780,15 @@ export class PostgresStore {
       // and 24 h cap sums exact across concurrent requests and coordinators sharing this database.
       await client.query("SELECT pg_advisory_xact_lock($1, $2)", [PAYOUT_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY]);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`payout:${payout.accountId}`]);
-      const earned = await client.query(`SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`, [payout.accountId]);
-      const spent = await client.query(`SELECT COALESCE(SUM(amount_msat + fee_msat), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
-      const payable = Number(earned.rows[0]?.msat ?? 0) - Number(spent.rows[0]?.msat ?? 0);
-      if (payout.amountMsat > payable) {
+      // The account's credit lock last (debitCredits and applyBleTransfer take only this one), so a
+      // spend cannot slip between the balance read below and the payout's debit row.
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, payout.accountId]);
+      const earned = await client.query(EARNED_MSAT_SQL, [payout.accountId, maturedAtOrBeforeMs ?? null]);
+      const spent = await client.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
+      const bal = await client.query(BALANCE_CHECK_SQL, [payout.accountId, "0"]);
+      const payable = withdrawableMsat(Number(earned.rows[0]?.msat ?? 0), Number(spent.rows[0]?.msat ?? 0), Number(bal.rows[0]?.balance ?? 0));
+      // Amount and the routing-fee cap both come out of payable, as the debit row below takes both.
+      if (payout.amountMsat + payout.maxFeeMsat > payable) {
         await client.query("ROLLBACK");
         return { ok: false, code: "insufficient_payable", payableMsat: Math.max(0, payable) };
       }
@@ -2581,6 +2818,14 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return { ok: false, code: "duplicate_invoice" };
       }
+      // The withdrawal consumes the credit balance (amount + fee cap) in the same transaction;
+      // settlePayout gives back what the payout did not use. msat stays NULL: the payouts row is
+      // already what lowers earned-minus-paid, so the sats are not counted out twice.
+      await client.query(
+        `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, timestamp_ms)
+         VALUES ($1,$2,'spend',$3,$4,$5)`,
+        [payoutDebitTxId(payout.payoutId), payout.accountId, msatToCredits(payout.amountMsat + payout.maxFeeMsat), payoutDebitTxId(payout.payoutId), payout.createdAtMs]
+      );
       await client.query("COMMIT");
       return { ok: true };
     } catch (err) {
@@ -2591,16 +2836,53 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * Settle a pending payout and, in the same transaction, give back the part of its reservation
+   * debit it did not use (all of it on failure, the unused fee cap when paid). Only a row that is
+   * still pending changes, and the adjustment rows have fixed tx ids, so a repeat is a no-op.
+   * Rows reserved before payouts debited credits have no debit row and get no adjustment.
+   */
   async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void> {
-    if (outcome.status === "paid") {
-      await this.pool.query(`UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending'`, [
-        payoutId,
-        Math.max(0, Math.floor(outcome.feeMsat)),
-        outcome.preimage ?? null,
-        Date.now()
-      ]);
-    } else {
-      await this.pool.query(`UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending'`, [payoutId, outcome.error.slice(0, 500), Date.now()]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const now = Date.now();
+      const feeMsat = outcome.status === "paid" ? Math.max(0, Math.floor(outcome.feeMsat)) : 0;
+      const upd =
+        outcome.status === "paid"
+          ? await client.query(
+              `UPDATE payouts SET status = 'paid', fee_msat = $2, preimage = $3, settled_at_ms = $4, error = NULL WHERE payout_id = $1 AND status = 'pending' RETURNING account_id, amount_msat`,
+              [payoutId, feeMsat, outcome.preimage ?? null, now]
+            )
+          : await client.query(
+              `UPDATE payouts SET status = 'failed', error = $2, settled_at_ms = $3 WHERE payout_id = $1 AND status = 'pending' RETURNING account_id, amount_msat`,
+              [payoutId, outcome.error.slice(0, 500), now]
+            );
+      const row = upd.rows[0];
+      if (row) {
+        const debit = await client.query(`SELECT credits FROM credit_transactions WHERE tx_id = $1 AND tx_type = 'spend'`, [payoutDebitTxId(payoutId)]);
+        if (debit.rows[0]) {
+          const debitMsat = creditsToMsat(Number(debit.rows[0].credits));
+          const back = payoutSettlementRefundMsat(
+            debitMsat,
+            outcome.status === "paid" ? { status: "paid", amountMsat: Number(row.amount_msat), feeMsat } : { status: "failed" }
+          );
+          if (back !== 0) {
+            const txId = back > 0 ? payoutRefundTxId(payoutId) : payoutFeeExcessTxId(payoutId);
+            await client.query(
+              `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, timestamp_ms)
+               VALUES ($1,$2,$3,$4,$1,$5) ON CONFLICT (tx_id) DO NOTHING`,
+              [txId, row.account_id, back > 0 ? "earn" : "spend", msatToCredits(Math.abs(back)), now]
+            );
+          }
+        }
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
     }
   }
 
@@ -2641,6 +2923,125 @@ export class PostgresStore {
     }
   }
 
+  /**
+   * #115: run the periodic ledger reconciliation for one window at most once across every
+   * coordinator on this database: a session try-lock serialises runs, and the window row makes a
+   * second coordinator (or a later timer tick in the same window) skip instead of alerting again.
+   */
+  async withLedgerVerifyWindow<T extends { ok: boolean; mismatches: number }>(
+    windowStartMs: number,
+    coordinatorId: string,
+    fn: () => Promise<T>
+  ): Promise<{ ran: false; reason: "locked" | "already_ran" } | { ran: true; value: T }> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const r = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [LEDGER_VERIFY_LOCK_NAMESPACE, LEDGER_VERIFY_LOCK_KEY]);
+      held = r.rows[0]?.got === true;
+      if (!held) return { ran: false, reason: "locked" };
+      const claimed = await client.query(
+        `INSERT INTO ledger_verifications (window_start_ms, coordinator_id, started_at_ms) VALUES ($1, $2, $3) ON CONFLICT (window_start_ms) DO NOTHING`,
+        [windowStartMs, coordinatorId, Date.now()]
+      );
+      if ((claimed.rowCount ?? 0) === 0) return { ran: false, reason: "already_ran" };
+      const value = await fn();
+      await client.query(
+        `UPDATE ledger_verifications SET finished_at_ms = $2, ok = $3, mismatches = $4, summary_json = $5 WHERE window_start_ms = $1`,
+        [windowStartMs, Date.now(), value.ok, value.mismatches, JSON.stringify(value)]
+      );
+      return { ran: true, value };
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, $2)", [LEDGER_VERIFY_LOCK_NAMESPACE, LEDGER_VERIFY_LOCK_KEY]).catch(() => undefined);
+      client.release();
+    }
+  }
+
+  /**
+   * #115: everything the ledger reconciliation (src/ledger/reconcile.ts) reads, in one
+   * REPEATABLE READ READ ONLY snapshot so concurrent accruals can't show up half-written.
+   */
+  async ledgerReconcileInput(feePoolAccountId: string): Promise<ReconcileInput> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const balances = await client.query(
+        `SELECT account_id,
+                COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN 0 ELSE credits END), 0)::text AS earned,
+                COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN credits ELSE 0 END), 0)::text AS spent,
+                COUNT(*)::int AS rows
+           FROM credit_transactions GROUP BY account_id`
+      );
+      const reports = await client.query(`SELECT report_id, account_id, task_id FROM compute_contribution_reports`);
+      const accruals = await client.query(
+        `SELECT id, subtask_id, task_id, actor_id, coordinator_id, payload_json FROM stats_ledger_records WHERE event_type = 'earnings_accrual'`
+      );
+      const earn = await client.query(
+        `SELECT account_id, related_task_id, COUNT(*)::int AS rows, SUM(credits)::text AS credits,
+                SUM(msat)::text AS msat, COUNT(msat)::int AS msat_rows
+           FROM credit_transactions
+          WHERE tx_type = 'earn' AND reason = 'compute_contribution'
+          GROUP BY account_id, related_task_id`
+      );
+      const fees = await client.query(
+        `SELECT substring(reason FROM 13) AS task_id, COUNT(*)::int AS rows, SUM(msat)::text AS msat
+           FROM credit_transactions
+          WHERE account_id = $1 AND tx_type = 'earn' AND reason LIKE 'network\_fee:%'
+          GROUP BY reason`,
+        [feePoolAccountId]
+      );
+      const projections = await client.query(`SELECT account_id, total_credits FROM coordinator_earnings_projection`);
+      const reservations = await client.query(
+        `SELECT reservation_id, record_json FROM compute_reservations WHERE record_json->>'status' = 'ended'`
+      );
+      const chainCount = await client.query(`SELECT COUNT(*)::int AS n FROM ledger_records`);
+      const forks = await client.query(
+        `SELECT prev_hash, COUNT(*)::int AS n FROM ledger_records WHERE prev_hash <> 'GENESIS' GROUP BY prev_hash HAVING COUNT(*) > 1 LIMIT 1000`
+      );
+      const dupHashes = await client.query(`SELECT hash, COUNT(*)::int AS n FROM ledger_records GROUP BY hash HAVING COUNT(*) > 1 LIMIT 1000`);
+      const breaks = await client.query(
+        `SELECT r.id, r.sequence, p.sequence AS prev_sequence
+           FROM ledger_records r JOIN ledger_records p ON p.hash = r.prev_hash
+          WHERE r.sequence <> p.sequence + 1 LIMIT 1000`
+      );
+      const gaps = await client.query(
+        `SELECT COUNT(*)::int AS n FROM ledger_records r
+          WHERE r.prev_hash <> 'GENESIS' AND NOT EXISTS (SELECT 1 FROM ledger_records p WHERE p.hash = r.prev_hash)`
+      );
+      await client.query("COMMIT");
+      return {
+        balances: balances.rows.map((r) => ({ accountId: r.account_id, earned: r.earned, spent: r.spent, rows: r.rows })),
+        reports: reports.rows.map((r) => ({ reportId: r.report_id, accountId: r.account_id, taskId: r.task_id })),
+        accrualRecords: accruals.rows.map((r) => ({
+          id: r.id,
+          subtaskId: r.subtask_id ?? null,
+          taskId: r.task_id,
+          actorId: r.actor_id,
+          coordinatorId: r.coordinator_id ?? null,
+          payload: r.payload_json && typeof r.payload_json === "object" ? (r.payload_json as Record<string, unknown>) : null
+        })),
+        earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
+        feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
+        projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
+        reservations: reservations.rows.flatMap((r) => {
+          const rec = r.record_json as { agentAccountId?: unknown; usedMsat?: unknown };
+          return typeof rec?.agentAccountId === "string" ? [{ id: r.reservation_id, agentAccountId: rec.agentAccountId, usedMsat: Number(rec.usedMsat ?? 0) }] : [];
+        }),
+        chain: {
+          records: chainCount.rows[0]?.n ?? 0,
+          forks: forks.rows.map((r) => ({ prevHash: r.prev_hash, count: r.n })),
+          duplicateHashes: dupHashes.rows.map((r) => ({ hash: r.hash, count: r.n })),
+          sequenceBreaks: breaks.rows.map((r) => ({ id: r.id, sequence: Number(r.sequence), prevSequence: Number(r.prev_sequence) })),
+          gaps: gaps.rows[0]?.n ?? 0
+        }
+      };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async lastPoolDistributionMs(accountId: string): Promise<number | null> {
     const r = await this.pool.query(
       `SELECT MAX(timestamp_ms) AS ts FROM credit_transactions WHERE account_id = $1 AND tx_type = 'spend' AND reason LIKE 'fee_pool_distribution%'`,
@@ -2670,6 +3071,28 @@ export class PostgresStore {
             - (SELECT COALESCE(SUM(amount_msat + fee_msat), 0) FROM payouts WHERE status IN ('paid','pending')) AS msat`
     );
     return Math.max(0, Number(r.rows[0]?.msat ?? 0));
+  }
+
+  /**
+   * Solvency inputs for reconciliation: Σ credit balances of every account except the fee pool
+   * (cSats as msat; a withdrawal's debit already sits in them) plus the pool's undistributed sats
+   * (purchase fees reach it as sats with no cSats), and the cSats admins granted (faucet).
+   * `feePoolAccountId` is NETWORK_FEE_POOL_ACCOUNT in src/credits/store.ts.
+   */
+  async solvencyMsat(feePoolAccountId = "network:fee_pool"): Promise<SolvencyInputs> {
+    const r = await this.pool.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN account_id <> $1 THEN (CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END) ELSE 0 END), 0) * 1000 AS accounts_msat,
+         COALESCE(SUM(CASE WHEN account_id = $1 THEN (CASE WHEN tx_type = 'spend' THEN -COALESCE(msat, 0) ELSE COALESCE(msat, 0) END) ELSE 0 END), 0) AS pool_msat,
+         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'faucet' THEN credits ELSE 0 END), 0) * 1000 AS granted_msat
+       FROM credit_transactions`,
+      [feePoolAccountId]
+    );
+    const row = r.rows[0] ?? {};
+    return {
+      outstandingMsat: Math.round(Number(row.accounts_msat ?? 0)) + Math.max(0, Math.round(Number(row.pool_msat ?? 0))),
+      grantedMsat: Math.round(Number(row.granted_msat ?? 0))
+    };
   }
 
   async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {
@@ -2851,6 +3274,54 @@ export class PostgresStore {
   async listHardwareVerifications(limit = 100_000): Promise<HardwareVerificationRecord[]> {
     const r = await this.pool.query(`SELECT record_json FROM hardware_verifications ORDER BY updated_at_ms DESC LIMIT $1`, [limit]);
     return r.rows.map((row) => (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as HardwareVerificationRecord);
+  }
+
+  // ── Result verification (#105, #162) ──
+  /** Reputation of a reward account, or undefined when it has none stored yet. */
+  async getVerificationReputation(accountId: string): Promise<number | undefined> {
+    const r = await this.pool.query(`SELECT reputation FROM verification_reputation WHERE account_id = $1`, [accountId]);
+    return r.rows[0] ? Number(r.rows[0].reputation) : undefined;
+  }
+
+  /**
+   * Move a reward account's reputation by `delta` in one statement (a new account starts at
+   * `initial`), clamped to [0, 1]; returns the stored value. Two coordinators adjusting the same
+   * account at once both apply: the row lock serializes the read-modify-write.
+   */
+  async adjustVerificationReputation(accountId: string, delta: number, initial: number): Promise<number> {
+    const r = await this.pool.query(
+      `INSERT INTO verification_reputation (account_id, reputation, updated_at_ms)
+       VALUES ($1, GREATEST(0, LEAST(1, $3::double precision + $2::double precision)), $4)
+       ON CONFLICT (account_id) DO UPDATE
+         SET reputation = GREATEST(0, LEAST(1, verification_reputation.reputation + $2::double precision)),
+             updated_at_ms = EXCLUDED.updated_at_ms
+       RETURNING reputation`,
+      [accountId, delta, initial, Date.now()]
+    );
+    return Number(r.rows[0].reputation);
+  }
+
+  /** Save a held verification; a row held by another coordinator is left alone (returns false). */
+  async upsertPendingVerification(coordinatorId: string, originalSubtaskId: string, state: unknown, startedAtMs: number): Promise<boolean> {
+    const r = await this.pool.query(
+      `INSERT INTO pending_verifications (original_subtask_id, coordinator_id, state_json, started_at_ms, updated_at_ms)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (original_subtask_id) DO UPDATE SET state_json = EXCLUDED.state_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE pending_verifications.coordinator_id = EXCLUDED.coordinator_id`,
+      [originalSubtaskId, coordinatorId, JSON.stringify(state), startedAtMs, Date.now()]
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async deletePendingVerification(coordinatorId: string, originalSubtaskId: string): Promise<boolean> {
+    const r = await this.pool.query(`DELETE FROM pending_verifications WHERE original_subtask_id = $1 AND coordinator_id = $2`, [originalSubtaskId, coordinatorId]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** The verifications this coordinator held before a restart, oldest first. */
+  async listPendingVerifications<S = unknown>(coordinatorId: string): Promise<S[]> {
+    const r = await this.pool.query(`SELECT state_json FROM pending_verifications WHERE coordinator_id = $1 ORDER BY started_at_ms ASC`, [coordinatorId]);
+    return r.rows.map((row) => (typeof row.state_json === "string" ? JSON.parse(row.state_json) : row.state_json) as S);
   }
 
   // ── Reserved capacity ──
@@ -3323,5 +3794,32 @@ function mapIssuanceEpochRow(row: any): IssuanceEpochRecord {
     contributionCount: Number(row.contribution_count),
     finalized: Boolean(row.finalized),
     createdAtMs: Number(row.created_at_ms)
+  };
+}
+
+const BLACKLIST_COLUMNS = `event_id, agent_id, reason_code, reason, evidence_hash_sha256, reporter_id,
+  reporter_public_key_pem, reporter_signature, evidence_signature_verified, evidence_ref,
+  source_coordinator_id, reported_by, timestamp_ms, expires_at_ms, prev_event_hash,
+  event_hash, coordinator_signature`;
+
+function blacklistRow(row: Record<string, any>): BlacklistRecord {
+  return {
+    eventId: row.event_id,
+    agentId: row.agent_id,
+    reasonCode: row.reason_code,
+    reason: row.reason,
+    evidenceHashSha256: row.evidence_hash_sha256,
+    reporterId: row.reporter_id,
+    reporterPublicKeyPem: row.reporter_public_key_pem ?? undefined,
+    reporterSignature: row.reporter_signature ?? undefined,
+    evidenceSignatureVerified: Boolean(row.evidence_signature_verified),
+    evidenceRef: row.evidence_ref ?? undefined,
+    sourceCoordinatorId: row.source_coordinator_id,
+    reportedBy: row.reported_by,
+    timestampMs: Number(row.timestamp_ms),
+    expiresAtMs: row.expires_at_ms ? Number(row.expires_at_ms) : undefined,
+    prevEventHash: row.prev_event_hash,
+    eventHash: row.event_hash,
+    coordinatorSignature: row.coordinator_signature
   };
 }

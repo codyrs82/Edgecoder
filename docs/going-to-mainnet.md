@@ -5,6 +5,44 @@ Work through it per seed; both seeds share one database, so the shared items (pa
 caps, fee-pool lock) only need checking once. Mechanics are in
 [economy-math.md](economy-math.md) section 5 ("Hot-wallet safeguards").
 
+## Switching the database to mainnet
+
+The ledger records the Bitcoin network it belongs to (table `ledger_network`, written by the first
+coordinator start). A coordinator whose `BITCOIN_NETWORK` differs refuses to start with
+`ledger_network_mismatch`, naming both networks. Any change refuses, not only regtest to mainnet:
+one database, one network. A database from before the network was recorded is adopted by the
+first start only if nothing contradicts it: its payment intents must all be on the configured
+network, and on mainnet it must hold no credit, payout or payment rows at all (their origin cannot
+be proven, so a database used on regtest can never quietly become mainnet).
+
+To move a database to a new network, wipe its ledger explicitly:
+
+1. Stop every coordinator on the database and take a backup.
+2. Dry run: `DATABASE_URL=... npx tsx scripts/ledger-reset-network.ts --confirm-wipe-ledger regtest --to bitcoin --dry-run`
+   (`--confirm-wipe-ledger` must name the recorded network, or `unrecorded`). It prints the rows
+   per table it would delete.
+3. Run it without `--dry-run`. In one transaction it deletes, and records `bitcoin`:
+   - money: `credit_transactions` (every cSat balance, earning and spend), `payment_intents`,
+     `coordinator_fee_events`, `payouts`, `usage_records`, `compute_reservations`;
+   - what reconciliation checks those against: `coordinator_earnings_projection`,
+     `compute_contribution_reports`;
+   - work that could still accrue earnings: `queue_tasks`, `queue_results`,
+     `queue_expired_holders`, `pending_verifications`;
+   - the signed and anchored history of all of it: `ledger_records`, `stats_ledger_records`,
+     `quorum_ledger_records`, `bitcoin_anchor_records`, `work_receipts`, `receipt_epochs`,
+     `issuance_epochs`, `issuance_allocations`, `issuance_payout_events`, `ledger_verifications`.
+
+   It keeps accounts and machines (`credit_accounts`, `account_memberships`, `agent_registry`,
+   `agent_signing_keys`, `agent_ownership`), payout destinations and their LNURL pins
+   (`wallet_accounts`, `payout_callback_pins`; a regtest on-chain address will not validate on
+   mainnet, Lightning addresses carry over), `infrastructure_hosts`, safety state
+   (`payout_controls` incl. the pause flag, `blacklist_events`, `verification_reputation`,
+   `hardware_verifications`, `request_nonces`, `ble_synced_tx` so old BLE transfers cannot be
+   replayed), and network-independent reference data (price/rate epochs, market history and
+   orders, treasury, key custody, rollouts, node status). The lists are `WIPED_TABLES` /
+   `KEPT_TABLES` in `src/db/ledger-reset.ts`; a test fails if a new table is in neither.
+4. Start the coordinators with `BITCOIN_NETWORK=bitcoin`.
+
 ## Lightning node
 
 - [ ] `LIGHTNING_PROVIDER=lnd` (or `cln`) with `LND_REST_URL` on a private network or loopback.
@@ -26,6 +64,13 @@ caps, fee-pool lock) only need checking once. Mechanics are in
       2M for the coordinator per 24 h. Set `PAYOUT_MAX_SINGLE_SATS`,
       `PAYOUT_MAX_ACCOUNT_DAILY_SATS`, `PAYOUT_MAX_GLOBAL_DAILY_SATS` explicitly; the global cap
       should not exceed what you can lose from the hot wallet in a day.
+- [ ] Earnings hold reviewed. Unset on mainnet, `PAYOUT_EARNINGS_HOLD_MS` is 24 h: an earn row is
+      withdrawable only once it is that old, so a bad result caught by spot checks or a
+      blacklisting can be handled (pause payouts, correct the ledger) before its sats leave. The
+      payout balance shows the held part as `heldMsat` and `maturesAtMs`. A shorter value
+      (including `0`) is honoured but reported as `mainnet_earnings_hold_disabled` /
+      `mainnet_earnings_hold_below_default` at startup. The hold should cover at least the time
+      verification verdicts and blacklist reports take to arrive.
 - [ ] `GET /admin/payouts/pause` shows `paused: false` and the limits you expect.
 - [ ] Kill-switch drill: `POST /admin/payouts/pause {"paused": true, "reason": "drill"}`, confirm a
       withdrawal returns `503 payouts_paused` while a purchase invoice still settles, then resume
@@ -35,6 +80,8 @@ caps, fee-pool lock) only need checking once. Mechanics are in
       admin token is compromised; it cannot be lifted over the API.
 - [ ] Reconciliation runs: `GET /admin/payouts/reconciliation` shows a recent `status: "ok"` (not
       `unsupported` or `error`). `PAYOUT_RECONCILE_TOLERANCE_SATS` fits your routing-fee noise.
+      The `solvency` check passes with `PAYOUT_SOLVENCY_ALLOWANCE_SATS` at 0 (a gap left by payouts
+      made before withdrawals debited cSats is corrected in the data, not carried into mainnet).
 - [ ] `PAYOUT_ALERT_WEBHOOK_URL` points at an alerting channel someone watches; trigger one alert
       on a staging coordinator to see it arrive.
 - [ ] Runbook for a trip: payouts stay paused until an admin resumes. Read the failed checks,
@@ -56,6 +103,70 @@ caps, fee-pool lock) only need checking once. Mechanics are in
 - [ ] Both seeds point at the same `DATABASE_URL` (the fee-pool advisory lock and the global
       payout lock only coordinate instances that share a database).
 - [ ] Logs with `security:payout_*` events are retained and searchable.
+
+## Ledger anchoring
+
+Anchoring is off until a provider with a funded wallet is configured. With `BITCOIN_ANCHOR_PROVIDER`
+unset the coordinator records no anchor rows and the status endpoints say
+`anchoring.mode: "disabled"`; finality stops at `soft_finalized` (quorum commit). Mechanics are in
+[economy-compute-trust-model.md](economy-compute-trust-model.md) section 5.
+
+- [ ] `BITCOIN_ANCHOR_PROVIDER` is `anchor-proxy` (recommended) or `bitcoind`, with its credentials
+      (`ANCHOR_PROXY_URL` + `ANCHOR_PROXY_TOKEN`, or `BITCOIND_RPC_URL` / `_USER` / `_PASSWORD` /
+      `BITCOIND_WALLET_NAME`). `mock`, `blockstream`, a typo or missing credentials do not fall back
+      to anything: the coordinator logs `bitcoin_anchoring_disabled` with the `problem` and
+      anchors nothing.
+- [ ] The anchor wallet is a separate hot wallet holding only what `BITCOIN_ANCHOR_DAILY_BUDGET_SATS`
+      can spend in a few weeks; `BITCOIN_ANCHOR_MAX_FEE_SATS` and `BITCOIN_ANCHOR_MIN_FEE_SAT_VB`
+      are reviewed against current fees.
+- [ ] `BITCOIN_ANCHOR_CONFIRMATIONS` (default 6) is the depth you want before a checkpoint counts
+      as hard-finalized. `STATS_ANCHOR_MIN_CONFIRMATIONS` can raise it for stats, never lower it.
+- [ ] `BITCOIN_ANCHOR_MAINNET=1` is set only after the signet run below has passed.
+- [ ] `GET /economy/issuance/anchors` shows `anchoring.mode: "enabled"`, and no row you rely on has
+      `status: "simulated"` (rows the pre-#46 simulation wrote, kept for audit, never confirmed).
+
+### Signet validation (run once before mainnet)
+
+This has not been run: it needs a funded signet wallet. Do it on a staging coordinator with its own
+database, not on a production seed.
+
+1. Fund a signet wallet (a signet faucet; 100k sats is plenty) on a bitcoind with the wallet loaded,
+   and wait for the funding tx to confirm (`getwalletinfo` shows a non-zero `balance`).
+2. Start the coordinator with:
+
+   ```bash
+   BITCOIN_NETWORK=signet
+   BITCOIN_ANCHOR_PROVIDER=bitcoind          # or anchor-proxy + ANCHOR_PROXY_URL / ANCHOR_PROXY_TOKEN
+   BITCOIND_RPC_URL=http://127.0.0.1:38332
+   BITCOIND_RPC_USER=...  BITCOIND_RPC_PASSWORD=...  BITCOIND_WALLET_NAME=anchor
+   BITCOIN_ANCHOR_CONFIRMATIONS=6
+   ANCHOR_CONFIRM_POLL_MS=60000              # default is 10 min; faster makes the run shorter
+   ```
+
+   The log must not contain `bitcoin_anchoring_disabled`, and `GET $COORD/economy/issuance/anchors`
+   (mesh token) must show `anchoring.mode: "enabled"`, `anchoring.network: "signet"`.
+3. Trigger one anchor: `curl -X POST -H "x-admin-token: $ADMIN_API_TOKEN" $COORD/stats/anchors/anchor-latest`.
+   Expect `anchor.status: "pending"`, `anchor.confirmations: 0` and `anchor.txRef` a 64-hex txid.
+4. Explorer check: open `https://mempool.space/signet/tx/<txRef>`. The tx must have one `OP_RETURN`
+   output whose data is 35 bytes: `4543` (`EC`), `01`, then the checkpoint hash
+   (`anchor.checkpointHash` from step 3), plus a change output back to the wallet. The fee must be
+   at or above `BITCOIN_ANCHOR_MIN_FEE_SAT_VB` and below `BITCOIN_ANCHOR_MAX_FEE_SATS`.
+5. Watch `GET $COORD/stats/anchors/verify?checkpointHash=<hash>` (mesh token). `anchor.confirmations`
+   must follow the explorer's count, `anchor.blockHash` must match the explorer's block, and
+   `anchor.status` must stay `pending` (with `verified: false`) until 6 confirmations, then become
+   `anchored` with `verified: true`. On signet that is about an hour.
+6. Restart the coordinator while the anchor is still pending. After restart the row must keep the
+   same `anchorId` and `txRef`, the wallet must still show a single anchor tx for that checkpoint
+   (`listtransactions`), and the row must still reach `anchored`.
+7. Outage: stop bitcoind for a few polls. `anchoring.tracker.consecutiveFailures` climbs,
+   `nextPollDelayMs` doubles from `ANCHOR_POLL_RETRY_BASE_MS`, the row keeps its status, and
+   polling recovers by itself when the node is back.
+8. Optional, needs two wallets or regtest: evict the tx (`abandontransaction` after restarting the
+   node with an empty mempool) and check for `bitcoin_anchor_rebroadcast` with a new txid for the
+   same checkpoint. A reorg cannot be forced on public signet; that path is covered by
+   `tests/economy/anchor-tracker.test.ts` only.
+
+Record the txid and the explorer link in the release notes.
 
 ## Request signing and trust
 

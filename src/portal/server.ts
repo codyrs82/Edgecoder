@@ -8,6 +8,7 @@ import Fastify from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../common/http-logging.js";
 import { registerMetrics } from "../common/metrics.js";
 import { registerErrorTracking } from "../common/error-tracking.js";
+import { isRequestValidationError, registerRequestValidationErrors } from "./validation-errors.js";
 import { registerPortalPages } from "./pages/index.js";
 import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
 import { coordinatorPricingSource } from "./public-pricing.js";
@@ -37,6 +38,7 @@ import { z } from "zod";
 import { LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
 import { createInternalAuth } from "./internal-auth.js";
 import { coordinatorUrlAllowed, coordinatorUrlPolicyFromEnv, filterCoordinatorUrls } from "./coordinator-url-policy.js";
+import { chatCapacityOptionsFromEnv, createChatCapacityDirectory } from "./chat-capacity.js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -64,7 +66,7 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { edgeModeFrom, parseOriginList, registerPortalSecurity } from "./security.js";
+import { parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
@@ -74,7 +76,9 @@ import { nativeRedirectMatches } from "./native-app-auth.js";
 const app = Fastify({ ...serviceLoggerOptions("portal"), trustProxy: false });
 exposeRequestId(app);
 registerMetrics(app, "portal");
-await registerErrorTracking(app, "portal");
+// A malformed request body is a 400, not a 500, and is not reported as a server error.
+await registerErrorTracking(app, "portal", { ignore: isRequestValidationError });
+registerRequestValidationErrors(app);
 
 const DESKTOP_ORIGINS = [...DESKTOP_APP_ORIGINS];
 await app.register(cors, {
@@ -82,32 +86,34 @@ await app.register(cors, {
   credentials: true,
 });
 
+// #15: validated once at import; invalid values exit with every problem listed.
+const C = loadConfigOrExit("portal", portalConfigSchema);
 const store = PortalStore.fromEnv();
 
 // #10: helmet (enforced CSP with per-request script nonces), CSRF origin check, rate limits.
 // Registered before any route so per-route rate limits attach.
 await registerPortalSecurity(app, {
+  // Per-user chat limits (security.ts CHAT_RATE_LIMIT).
+  rateLimitUserId: async (req) => (await getCurrentUser(req as any))?.userId,
   publicOrigin: (() => {
     try {
-      return new URL(process.env.PORTAL_PUBLIC_URL ?? "http://127.0.0.1:4310").origin;
+      return new URL(C.PORTAL_PUBLIC_URL).origin;
     } catch {
       return "http://127.0.0.1:4310";
     }
   })(),
-  trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(process.env.PORTAL_TRUSTED_ORIGINS)],
-  connectOrigins: parseOriginList(process.env.PORTAL_CONNECT_ORIGINS),
-  enforceCsp: !["0", "false"].includes(process.env.PORTAL_CSP_ENFORCE ?? ""),
+  trustedOrigins: [...DESKTOP_ORIGINS, ...parseOriginList(C.PORTAL_TRUSTED_ORIGINS)],
+  connectOrigins: parseOriginList(C.PORTAL_CONNECT_ORIGINS),
+  enforceCsp: C.PORTAL_CSP_ENFORCE,
   // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
-  edge: edgeModeFrom(process.env.PORTAL_EDGE),
-  originLockToken: process.env.PORTAL_ORIGIN_LOCK_TOKEN || undefined,
-  serviceToken: process.env.PORTAL_SERVICE_TOKEN || undefined,
-  coordinatorToken: process.env.PORTAL_COORDINATOR_TOKEN?.trim() || undefined,
+  edge: C.PORTAL_EDGE,
+  originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN,
+  serviceToken: C.PORTAL_SERVICE_TOKEN,
+  coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
   // Shared Postgres rate-limit counters across portal machines (memory store without a database).
   rateLimitPool: store?.pool,
 });
 
-// #15: validated once at import; invalid values exit with every problem listed.
-const C = loadConfigOrExit("portal", portalConfigSchema);
 const PORTAL_SERVICE_TOKEN = C.PORTAL_SERVICE_TOKEN ?? "";
 const EXTERNAL_HTTP_TIMEOUT_MS = C.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS;
 const RESEND_API_KEY = C.RESEND_API_KEY ?? "";
@@ -621,8 +627,8 @@ async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
   return filterCoordinatorUrls(await discoverCoordinatorUrlsUnfiltered(), COORDINATOR_URL_POLICY);
 }
 
-async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
-  // Try control plane API first
+/** The control plane's coordinator list, allowlisted; empty when it is not configured or did not answer. */
+async function controlPlaneCoordinatorUrls(): Promise<string[]> {
   if (CONTROL_PLANE_URL) {
     try {
       const res = await request(`${CONTROL_PLANE_URL}/network/coordinators`, {
@@ -640,13 +646,19 @@ async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
           .filter(Boolean)
           .filter((value, index, arr) => arr.indexOf(value) === index)
           .filter((value) => coordinatorUrlAllowed(value, COORDINATOR_URL_POLICY));
-        // None allowlisted: fall back to the configured discovery list below.
-        if (urls.length > 0) return urls;
+        return urls;
       }
     } catch {
       // fall through
     }
   }
+  return [];
+}
+
+async function discoverCoordinatorUrlsUnfiltered(): Promise<string[]> {
+  // Try control plane API first. None allowlisted: fall back to the configured discovery list below.
+  const fromControlPlane = await controlPlaneCoordinatorUrls();
+  if (fromControlPlane.length > 0) return fromControlPlane;
 
   // Fall back to the configured discovery list (#35): first healthy URL, else the first entry.
   const healthy = await pickDiscoveryCoordinator();
@@ -842,7 +854,15 @@ registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 // Chat API — conversations CRUD + streaming chat
 registerConversationRoutes(app, { store, getCurrentUser });
 
-const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store };
+// #39: a chat goes to a coordinator that reports capacity for it (src/portal/chat-capacity.ts):
+// the configured list in order, then the control plane's, each URL through the policy above.
+const chatCapacity = createChatCapacityDirectory({
+  candidates: async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())],
+  allowed: (url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY),
+  serviceToken: PORTAL_SERVICE_TOKEN,
+  ...chatCapacityOptionsFromEnv(),
+});
+const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, chatCapacity };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 

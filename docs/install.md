@@ -154,6 +154,12 @@ links `/opt/homebrew/opt/*` dylibs), so on macOS `install.sh` installs the self-
 nodejs.org build into `/opt/edgecoder/node`. Re-run `apply` after upgrading Ollama to refresh
 the copy. `/etc/edgecoder` and its env files (tokens) stay root's, mode 0600.
 
+On Windows, `C:\ProgramData\EdgeCoder` is owned by Administrators, does not inherit the
+ProgramData ACL (Administrators and SYSTEM full control, the task user read), and is locked before
+any token is written. If that folder, or its `ollama`, `logs` or `state` subfolder, already exists
+and is owned by an account other than Administrators, SYSTEM or the installing user, or is a
+junction, `apply` stops: another user may have created it. Inspect and remove it, then re-run.
+
 The Linux units are sandboxed: `NoNewPrivileges`, `ProtectSystem=strict` (only the paths above
 are writable), `ProtectHome`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`,
 `ProtectControlGroups`, `RestrictSUIDSGID`, `LockPersonality`. GPUs (`/dev/nvidia*`) and the V8
@@ -178,6 +184,16 @@ Every instance needs a registration token from the portal (Dashboard → Enroll 
 the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repeatable), a
 `--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
 rewrites the env files and restarts the services; nothing else changes.
+
+Tokens (`--token`, `--tokens-file`, `--mesh-token` and the ones the portal returns to `--enroll`)
+may only contain `A-Z a-z 0-9 . _ ~ + / = -`, and `--portal-url` / `--coordinator-url` must be
+`https://` (plain `http://` is accepted only for `localhost`, `127.x.x.x` and `[::1]`). `plan` and
+`apply` refuse anything else before they change the host.
+
+Command-line arguments are visible to every local user in the process list. Prefer
+`--tokens-file` (mode 0600) or the `EDGECODER_REGISTRATION_TOKEN` / `EDGECODER_MESH_TOKEN`
+environment variables over `--token` / `--mesh-token` on shared machines. `--json` output shows
+token values as `<redacted>`.
 
 To do it in one run, create a portal API key (edgecoder.io → Settings → API keys, it starts
 with `eck_`) and pass it as `--enroll <api-key>`, or better, in the `EDGECODER_API_KEY`

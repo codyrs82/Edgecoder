@@ -41,12 +41,15 @@ import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js
 import { AUTO_MODEL_ID, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
+import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
+import { loadConfigOrExit } from "../../common/config.js";
+import { ideProviderConfigSchema } from "../../config/ide-provider.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -59,8 +62,10 @@ await registerErrorTracking(app, "ide-provider");
 // #4: loopback bind + bearer token (except /health) + web-Origin / foreign-Host rejection.
 // No import-time side effects: the token file is read/created on first authenticated
 // request, and the bind address is validated only when the server is started.
-const ideHost = (process.env.IDE_PROVIDER_HOST ?? "").trim() || "127.0.0.1";
-const idePort = Number(process.env.IDE_PROVIDER_PORT ?? 4304) || 4304;
+// #15: the environment is validated here (a pure read); per-request reads below stay live.
+const C = loadConfigOrExit("ide-provider", ideProviderConfigSchema);
+const ideHost = C.IDE_PROVIDER_HOST;
+const idePort = C.IDE_PROVIDER_PORT || 4304;
 let ideToken: string | undefined;
 const ideOrigins = allowedOrigins();
 app.addHook(
@@ -95,7 +100,7 @@ const providers = new ProviderRegistry();
 function projectHeadCommit(): string | undefined {
   if (!activeProjectRoot) return undefined;
   try {
-    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"]), {
+    const head = execFileSync("git", hardenedGitArgs(["-C", activeProjectRoot, "rev-parse", "HEAD"], activeProjectRoot), {
         env: gitExecEnv(),
       encoding: "utf8",
       timeout: 3_000,
@@ -127,8 +132,8 @@ const pendingApprovals = new Map<string, ApprovalEntry>();
 // --- OpenAI-compatible endpoints ---
 
 /** This machine's agent forwarder, when the machine is on the network (network models need it). */
-const networkDeps: NetworkDeps | null = process.env.SWARM_VIA_LOCAL_AGENT_URL
-  ? { forwarder: process.env.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: process.env.AGENT_ACCOUNT_ID ?? process.env.AGENT_ID ?? "local-agent" }
+const networkDeps: NetworkDeps | null = C.SWARM_VIA_LOCAL_AGENT_URL
+  ? { forwarder: C.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: C.AGENT_ACCOUNT_ID ?? C.AGENT_ID ?? "local-agent" }
   : null;
 
 // --- Auto: each request at the cheapest place that fits it (src/inference-api/auto-route.ts) ---
@@ -433,7 +438,7 @@ app.post("/v1/ide/project", async (req, reply) => {
     return reply.status(400).send({ error: "Not a valid directory" });
   }
   activeProjectRoot = body.projectRoot;
-  return reply.send({ ok: true, projectRoot: activeProjectRoot });
+  return reply.send({ ok: true, projectRoot: activeProjectRoot, trusted: isProjectTrusted(activeProjectRoot) });
 });
 
 app.get("/v1/ide/project", async (_req, reply) => {
@@ -772,11 +777,24 @@ app.post("/v1/ide/diagnostics", async (req, reply) => {
   const { paths } = z.object({ paths: z.array(z.string().max(4096)).min(1).max(200) }).parse(req.body);
   const fs = new ProjectFs(activeProjectRoot);
   const inside = paths.filter((p) => { try { fs.resolve(p); return true; } catch { return false; } });
-  return reply.send(await checkProject(activeProjectRoot, inside));
+  return reply.send(await checkProject(activeProjectRoot, inside, { trusted: isProjectTrusted(activeProjectRoot) }));
+});
+
+// Whether the open folder is trusted to run its own tooling (workspace-trust.ts). Untrusted by default.
+app.get("/v1/ide/project/trust", async (_req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  return reply.send({ projectRoot: activeProjectRoot, trusted: isProjectTrusted(activeProjectRoot) });
+});
+app.post("/v1/ide/project/trust", async (req, reply) => {
+  if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });
+  const b = z.object({ trusted: z.boolean() }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  setProjectTrusted(activeProjectRoot, b.data.trusted);
+  return reply.send({ projectRoot: activeProjectRoot, trusted: isProjectTrusted(activeProjectRoot) });
 });
 
 // Live preview of web projects (preview-server.ts), on its own loopback origin.
-const previewPort = Number(process.env.IDE_PREVIEW_PORT ?? PREVIEW_DEFAULT_PORT) || PREVIEW_DEFAULT_PORT;
+const previewPort = C.IDE_PREVIEW_PORT || PREVIEW_DEFAULT_PORT;
 const preview = createPreviewServer(() => activeProjectRoot);
 app.get("/v1/ide/preview", async (req, reply) => {
   if (!activeProjectRoot) return reply.status(409).send({ error: "no_project", message: "Open a project folder first" });

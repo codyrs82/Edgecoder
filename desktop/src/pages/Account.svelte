@@ -92,9 +92,9 @@
         <div class="sp-row">
           <div class="sp-text"><span class="sp-title">Email</span><span class="sp-desc">{display.email}</span></div>
           {#if display.emailVerified}
-            <span class="sp-pill" style="color: var(--success, #3fb950)">Verified</span>
+            <span class="sp-pill" style="color: var(--green)">Verified</span>
           {:else}
-            <span class="sp-pill" style="color: var(--warning, #d29922)">Not verified</span>
+            <span class="sp-pill" style="color: var(--yellow)">Not verified</span>
           {/if}
         </div>
       </div>

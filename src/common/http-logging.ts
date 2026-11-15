@@ -1,63 +1,31 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as undici from "undici";
 import type { Dispatcher } from "undici";
-import type { FastifyInstance, FastifyServerOptions } from "fastify";
-import { redactMeta, SECRET_KEY_RE } from "./logger.js";
+import type { FastifyBaseLogger, FastifyInstance, FastifyServerOptions } from "fastify";
+import { HAS_REQUEST_ID, loggerOptions, nameProcessService } from "./logger.js";
+import { currentRequestId, runWithRequestContext } from "./request-context.js";
+
+export { REDACT_PATHS, redactUrl } from "./redaction.js";
+export { currentRequestId } from "./request-context.js";
 
 /*
  * #14: one logging setup for every Fastify service.
- * - pino JSON logs tagged with the service name and a per-request id.
+ * - pino JSON logs tagged with the service name and a per-request id, built from the shared
+ *   options in logger.ts (level, redaction, serializers).
  * - Incoming `x-request-id` is kept when it looks sane, otherwise a UUID is generated; it is
  *   echoed back, and forwarded on outbound undici/fetch calls to the other EdgeCoder services
  *   (installRequestIdForwarding below), so one id follows a request across services.
- * - Secrets are redacted before anything is written: pino `redact` paths for known headers, plus
- *   the deep, case-insensitive `redactMeta` rule (logger.ts) as the `formatters.log` hook.
- * - Query-string values for secret-looking keys are masked in the logged `url` (e.g. ?token=).
+ * - Secrets are redacted before anything is written (redaction.ts), and request bodies are not
+ *   logged: Fastify's request lines carry only method, url (query secrets masked), host and peer.
  */
 
 export const REQUEST_ID_HEADER = "x-request-id";
+// Strict on purpose: the id is echoed in a response header and written to every log line, so it
+// must not be able to carry header/log injection or unbounded data.
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{8,128}$/;
-
-const SECRET_HEADERS = [
-  "authorization",
-  "cookie",
-  "set-cookie",
-  "x-mesh-token",
-  "x-inference-token",
-  "x-admin-token",
-  "x-portal-service-token",
-  "x-payment-signature",
-  "x-coordinator-signature"
-];
-const SECRET_FIELDS = [
-  "password", "Password", "token", "accessToken", "refreshToken", "apiToken", "meshToken", "sessionToken",
-  "secret", "privateKey", "privateKeyPem", "mnemonic", "seed", "seedPhrase", "apiKey", "api_key", "xprv", "wif"
-];
-
-/** Paths that must never reach a log line: secret headers wherever headers are logged, and secret body fields. */
-export const REDACT_PATHS = [
-  ...SECRET_HEADERS.flatMap((h) => [`req.headers["${h}"]`, `res.headers["${h}"]`, `headers["${h}"]`, `*.headers["${h}"]`]),
-  ...SECRET_FIELDS.flatMap((f) => [f, `*.${f}`, `*.*.${f}`, `*.*.*.${f}`])
-];
-
-/** Mask query values whose key looks secret (`?token=abc` -> `?token=[redacted]`). */
-export function redactUrl(url: string): string {
-  const q = url.indexOf("?");
-  if (q < 0) return url;
-  const params = new URLSearchParams(url.slice(q + 1));
-  let changed = false;
-  for (const key of [...params.keys()]) {
-    if (SECRET_KEY_RE.test(key)) {
-      params.set(key, "[redacted]");
-      changed = true;
-    }
-  }
-  return changed ? `${url.slice(0, q)}?${params.toString()}` : url;
-}
 
 export function requestIdFrom(header: unknown): string {
   const v = Array.isArray(header) ? header[0] : header;
@@ -66,34 +34,20 @@ export function requestIdFrom(header: unknown): string {
 
 export function serviceLoggerOptions(service: string, env: NodeJS.ProcessEnv = process.env): Pick<
   FastifyServerOptions,
-  "logger" | "genReqId" | "requestIdLogLabel"
+  "logger" | "genReqId" | "requestIdLogLabel" | "childLoggerFactory"
 > {
+  nameProcessService(service);
   return {
-    logger: {
-      level: env.LOG_LEVEL?.trim() || "info",
-      base: { service },
-      redact: { paths: REDACT_PATHS, censor: "[redacted]" },
-      formatters: { log: (obj: Record<string, unknown>) => redactMeta(obj) as Record<string, unknown> },
-      serializers: {
-        req: (req: { method?: string; url?: string; hostname?: string; ip?: string; socket?: { remotePort?: number } }) => ({
-          method: req.method,
-          url: redactUrl(req.url ?? ""),
-          host: req.hostname,
-          remoteAddress: req.ip,
-          remotePort: req.socket?.remotePort
-        })
-      }
-    },
+    logger: loggerOptions(service, env),
     genReqId: (req) => requestIdFrom(req.headers[REQUEST_ID_HEADER]),
-    requestIdLogLabel: "requestId"
+    requestIdLogLabel: "requestId",
+    // Fastify binds the request id on this child; mark it so the logger mixin does not repeat it.
+    childLoggerFactory: (logger, bindings, opts) => {
+      const child = logger.child(bindings, opts) as FastifyBaseLogger & { [HAS_REQUEST_ID]?: boolean };
+      child[HAS_REQUEST_ID] = true;
+      return child;
+    }
   };
-}
-
-const requestContext = new AsyncLocalStorage<{ requestId: string }>();
-
-/** The id of the request being handled, if any (undefined outside a request). */
-export function currentRequestId(): string | undefined {
-  return requestContext.getStore()?.requestId;
 }
 
 /** Internal service origins that get x-request-id forwarded. Third-party APIs never do. */
@@ -166,8 +120,9 @@ export function installRequestIdForwarding(env: NodeJS.ProcessEnv = process.env)
  */
 export function exposeRequestId(app: FastifyInstance): void {
   installRequestIdForwarding();
+  const service = (app.log as { bindings?: () => Record<string, unknown> }).bindings?.().service;
   app.addHook("onRequest", (req, _reply, done) => {
-    requestContext.run({ requestId: String(req.id) }, done);
+    runWithRequestContext({ requestId: String(req.id), service: typeof service === "string" ? service : undefined }, done);
   });
   app.addHook("onSend", async (req, reply) => {
     reply.header(REQUEST_ID_HEADER, req.id);

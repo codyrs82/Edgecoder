@@ -7,6 +7,11 @@ import {
   payableWinners,
   verificationStartupWarning,
   DEFAULT_VERIFICATION,
+  ReputationBook,
+  executionResultKey,
+  parseVerificationKinds,
+  verificationKindsWarning,
+  VERIFIABLE_KINDS,
   type ExecutionResult,
   type ReplicaRequest
 } from "../../src/swarm/verification.js";
@@ -53,7 +58,7 @@ function harness(rate: number, workers: Record<string, Worker>, random = () => 0
         r.winners.forEach(earn);
         if (r.status !== "unresolved") released.push({ id: r.originalSubtaskId, output: r.output });
       }
-    } else if (verifier.shouldVerify(agentId)) {
+    } else if (verifier.shouldVerify(agentId, st.kind)) {
       enqueue(verifier.start(st, exec));
     } else {
       earn(exec);
@@ -76,8 +81,8 @@ function harness(rate: number, workers: Record<string, Worker>, random = () => 0
 
 describe("ResultVerifier (#50)", () => {
   it("rate 0 never samples; rate 1 always; lower reputation samples more", () => {
-    expect(new ResultVerifier({ rate: 0 }).shouldVerify("a")).toBe(false);
-    expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a")).toBe(true);
+    expect(new ResultVerifier({ rate: 0 }).shouldVerify("a", "single_step")).toBe(false);
+    expect(new ResultVerifier({ rate: 1 }, () => 0.999).shouldVerify("a", "single_step")).toBe(true);
     const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5, initialReputation: 1 }, () => 0);
     expect(v.sampleRate("a")).toBeCloseTo(0.1);
     const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "bad", meta: null });
@@ -139,7 +144,7 @@ describe("ResultVerifier (#50)", () => {
     expect(verificationConfigFromEnv({}).rate).toBe(0);
     const v = new ResultVerifier<null>(verificationConfigFromEnv({}), () => 0);
     expect(v.sampleRate("anyone")).toBe(0);
-    expect(v.shouldVerify("anyone")).toBe(false);
+    expect(v.shouldVerify("anyone", "single_step")).toBe(false);
   });
 
   it("replicas exclude the original's reward account; a second agent id on it can't vote", () => {
@@ -197,14 +202,14 @@ describe("verification hardening (#106)", () => {
     expect(v.expire()).toMatchObject([{ status: "unresolved", winners: [], abandonedBy: ["accomplice"] }]);
   });
 
-  it("a stalled replica claim is penalized and reassigned once, excluding the abandoner", () => {
+  it("a stalled replica claim is penalized and reassigned, excluding the abandoner", () => {
     let now = 0;
     const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, abandonPenalty: 0.25 }, () => 0, () => now);
     const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", ok: true, output: "1", meta: null });
     v.markReplicaClaimed(r1.subtask.id, "lazy");
     now = 1001;
     const { replacements, abandoned } = v.reassignStalled();
-    expect(abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy" }]);
+    expect(abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy", accountId: "lazy" }]);
     expect(v.reputation("lazy")).toBeCloseTo(0.25);
     expect(replacements).toHaveLength(1);
     const next = replacements[0].request;
@@ -235,7 +240,7 @@ describe("verification hardening (#106)", () => {
     now = 3003;
     const third = v.reassignStalled();
     expect(third.replacements).toHaveLength(0);
-    expect(third.abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy3" }]);
+    expect(third.abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy3", accountId: "lazy3" }]);
 
     const zero = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, maxReassignments: 0 }, () => 0, () => now);
     const z1 = zero.start(subtask("z", "x"), { subtaskId: "z", agentId: "a", ok: true, output: "1", meta: null });
@@ -339,5 +344,189 @@ describe("replica reward minting (#114)", () => {
     expect(verificationStartupWarning({ rate: 0, mintReplicaRewards: false })).toBeNull();
     expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false })).toMatch(/NOT paid/);
     expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: true })).toMatch(/minted/);
+  });
+});
+
+const exec = (subtaskId: string, agentId: string, output: string, accountId?: string): ExecutionResult<null> => ({
+  subtaskId, agentId, ...(accountId ? { accountId } : {}), ok: true, output, meta: null
+});
+
+// #162: abandonment and reputation follow the reward account, not the agent id.
+describe("account-keyed reputation and abandonment (#162)", () => {
+  it("a rotated agent id on the same account keeps the abandon penalty and stays excluded", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 60 * 60_000, replicaClaimTimeoutMs: 1000, abandonPenalty: 0.25 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), exec("s", "a", "1", "acct-a"));
+    v.markReplicaClaimed(r1.subtask.id, "lazy-1", "acct-lazy");
+    now = 1001;
+    const { replacements, abandoned } = v.reassignStalled();
+    expect(abandoned).toEqual([{ originalSubtaskId: "s", agentId: "lazy-1", accountId: "acct-lazy" }]);
+    expect(v.reputation("acct-lazy")).toBeCloseTo(0.25);
+    expect(v.reputation("lazy-1")).toBe(0.5); // nothing keyed on the throwaway id
+    expect(v.reputation("lazy-2")).toBe(0.5);
+    const next = replacements[0].request;
+    expect(next.excludeAccounts).toEqual(expect.arrayContaining(["acct-a", "acct-lazy"]));
+    expect(next.excludeAgents).toEqual(expect.arrayContaining(["a", "lazy-1"]));
+    // Same account under a new agent id abandons again: penalized once per subtask only.
+    v.markReplicaClaimed(next.subtask.id, "lazy-2", "acct-lazy");
+    now = 2002;
+    v.reassignStalled();
+    expect(v.reputation("acct-lazy")).toBeCloseTo(0.25);
+  });
+
+  it("sampling uses the account's reputation, so a fresh agent id on a caught account is still sampled more", () => {
+    const v = new ResultVerifier<null>({ rate: 0.1, mismatchPenalty: 0.5, initialReputation: 1 }, () => 0);
+    const r1 = v.start(subtask("s", "x"), exec("s", "evil-1", "bad", "acct-evil"));
+    const r2 = v.recordReplica(r1.subtask.id, exec(r1.subtask.id, "h1", "good", "acct-h1"));
+    if (r2?.status !== "pending") throw new Error("expected pending");
+    v.recordReplica(r2.next.subtask.id, exec(r2.next.subtask.id, "h2", "good", "acct-h2"));
+    expect(v.reputation("acct-evil")).toBe(0.5);
+    expect(v.sampleRate("acct-evil")).toBeCloseTo(0.15);
+  });
+
+  it("disagreeing results with an abandoned tie-breaker: the abandoner is penalized too", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 10_000, replicaClaimTimeoutMs: 1000, abandonPenalty: 0.25, mismatchPenalty: 0.2 }, () => 0, () => now);
+    const r1 = v.start(subtask("s", "x"), exec("s", "a", "1", "acct-a"));
+    const r2 = v.recordReplica(r1.subtask.id, exec(r1.subtask.id, "b", "2", "acct-b"));
+    if (r2?.status !== "pending") throw new Error("expected pending");
+    v.markReplicaClaimed(r2.next.subtask.id, "c", "acct-c");
+    now = 10_001; // the tie-breaker never reports and the deadline passes before a reassignment tick
+    const [out] = v.expire();
+    expect(out).toMatchObject({ status: "unresolved", winners: [], abandonedBy: ["c"] });
+    expect(v.reputation("acct-c")).toBeCloseTo(0.25);
+    expect(v.reputation("acct-a")).toBeCloseTo(0.4);
+  });
+});
+
+// #117: stalled replicas are reassigned until the overall deadline, not a fixed number of times.
+describe("reassignment until the overall timeout (#117)", () => {
+  it("keeps reassigning while more than one claim window remains, excluding every abandoner", () => {
+    let now = 0;
+    const v = new ResultVerifier<null>({ rate: 1, timeoutMs: 10_000, replicaClaimTimeoutMs: 2_000 }, () => 0, () => now);
+    let current = v.start(subtask("s", "x"), exec("s", "a", "1", "acct-a")).subtask.id;
+    const abandoners: string[] = [];
+    for (let i = 1; i < 20; i += 1) {
+      v.markReplicaClaimed(current, `lazy${i}`, `acct-lazy${i}`);
+      abandoners.push(`acct-lazy${i}`);
+      now += 2_001;
+      const { replacements, abandoned } = v.reassignStalled();
+      expect(abandoned).toHaveLength(1);
+      if (replacements.length === 0) break;
+      expect(replacements[0].request.excludeAccounts).toEqual(expect.arrayContaining(["acct-a", ...abandoners]));
+      current = replacements[0].request.subtask.id;
+    }
+    // Stalls at 2001, 4002, 6003 are reassigned; at 8004 only 1996ms (< one claim window) is left.
+    expect(abandoners).toHaveLength(4);
+    expect(now).toBe(8_004);
+    // Reassignment does not extend the deadline.
+    now = 10_001;
+    expect(v.expire()).toMatchObject([{ status: "unresolved", winners: [] }]);
+  });
+
+  it("maxReassignments is unlimited by default and can still cap it", () => {
+    expect(DEFAULT_VERIFICATION.maxReassignments).toBe(Number.POSITIVE_INFINITY);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_MAX_REASSIGNMENTS: "2" }).maxReassignments).toBe(2);
+  });
+});
+
+// #105: held verifications and reputation survive a restart; the reputation cache is bounded.
+describe("verifier persistence (#105)", () => {
+  it("emits pending/settled/reputation changes and restores a held verification with its deadline", () => {
+    let now = 0;
+    const cfg = { rate: 1, timeoutMs: 10_000, replicaClaimTimeoutMs: 2_000 };
+    const v = new ResultVerifier<{ n: number }>(cfg, () => 0, () => now);
+    const stored = new Map<string, unknown>();
+    const deltas: Array<[string, number]> = [];
+    v.onChange((c) => {
+      if (c.kind === "pending") stored.set(c.originalSubtaskId, JSON.parse(JSON.stringify(c.snapshot)));
+      else if (c.kind === "settled") stored.delete(c.originalSubtaskId);
+      else deltas.push([c.key, c.delta]);
+    });
+    const r1 = v.start(subtask("s", "x"), { subtaskId: "s", agentId: "a", accountId: "acct-a", ok: true, output: "1", meta: { n: 1 } });
+    v.markReplicaClaimed(r1.subtask.id, "b", "acct-b"); // still open at the "restart": not an abandoner
+    now = 3_000;
+
+    const after = new ResultVerifier<{ n: number }>(cfg, () => 0, () => now);
+    const next = after.restore(stored.get("s") as any);
+    expect(next).not.toBeNull();
+    expect(next!.subtask.id).not.toBe(r1.subtask.id);
+    expect(next!.excludeAccounts).toEqual(["acct-a"]);
+    expect(after.isReplica(r1.subtask.id)).toBe(false); // the old claim died with the old queue
+    expect(after.restore(stored.get("s") as any)).toBeNull();
+    // The original deadline holds: no replica reported, nobody abandoned -> unverified accept at 10s.
+    now = 10_001;
+    expect(after.expire()).toMatchObject([{ status: "timeout", output: "1", winners: [{ meta: { n: 1 } }] }]);
+
+    // A verdict emits reputation deltas keyed on accounts, and the settled row is removed.
+    const r2 = v.recordReplica(r1.subtask.id, { subtaskId: r1.subtask.id, agentId: "b", accountId: "acct-b", ok: true, output: "1", meta: { n: 2 } });
+    expect(r2).toMatchObject({ status: "verified" });
+    expect(stored.has("s")).toBe(false);
+    expect(deltas).toEqual([["acct-a", 0.02], ["acct-b", 0.02]]);
+  });
+
+  it("the reputation cache is bounded and evicts trusted entries before penalized ones", () => {
+    const book = new ReputationBook(0.5, 3);
+    book.set("cheater", 0);
+    for (let i = 0; i < 10; i += 1) book.set(`new${i}`, 0.52);
+    expect(book.size).toBe(3);
+    expect(book.get("cheater")).toBe(0);
+    expect(book.get("new0")).toBe(0.5); // evicted: back to the initial value, never higher
+
+    const v = new ResultVerifier<null>({ rate: 1, reputationCacheMax: 100 }, () => 0);
+    for (let i = 0; i < 500; i += 1) v.primeReputation(`acct${i}`, 0.9);
+    expect(v.reputationCacheSize()).toBe(100);
+  });
+});
+
+describe("#104: per-kind opt-in and comparators", () => {
+  const inference = (id: string): Subtask => ({ ...subtask(id, "write a haiku"), kind: "inference", requestedModel: "m" });
+  const exec = (agentId: string, id: string, output: string, ok = true): ExecutionResult<null> => ({ subtaskId: id, agentId, ok, output, meta: null });
+
+  it("LLM inference is never sampled, even at rate 1 and even if listed", () => {
+    const v = new ResultVerifier<null>({ rate: 1, kinds: ["inference", "single_step"] as any }, () => 0);
+    expect(v.shouldVerify("a", "inference")).toBe(false);
+    expect(v.verifiesKind("inference")).toBe(false);
+    expect(v.shouldVerify("a", "single_step")).toBe(true);
+    expect(() => v.start(inference("s1"), exec("a", "s1", "x"))).toThrow(/not enabled/);
+    expect(() => resultKey({ ok: true, output: "x" }, "inference")).toThrow(/no result comparator/);
+  });
+
+  it("only configured kinds are sampled", () => {
+    const v = new ResultVerifier<null>({ rate: 1, kinds: ["micro_loop"] }, () => 0);
+    expect(v.shouldVerify("a", "micro_loop")).toBe(true);
+    expect(v.shouldVerify("a", "single_step")).toBe(false);
+    expect(new ResultVerifier<null>({ rate: 1, kinds: [] }, () => 0).shouldVerify("a", "micro_loop")).toBe(false);
+  });
+
+  it("RESULT_VERIFICATION_KINDS parsing: default = code kinds, inference and unknown kinds dropped", () => {
+    expect(VERIFIABLE_KINDS).toEqual(["micro_loop", "single_step"]);
+    expect(DEFAULT_VERIFICATION.kinds).toEqual(["micro_loop", "single_step"]);
+    expect(verificationConfigFromEnv({}).kinds).toEqual(["micro_loop", "single_step"]);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_KINDS: "single_step" }).kinds).toEqual(["single_step"]);
+    expect(verificationConfigFromEnv({ RESULT_VERIFICATION_KINDS: "none" }).kinds).toEqual([]);
+    expect(parseVerificationKinds(" inference, micro_loop ,bogus,micro_loop")).toEqual({ kinds: ["micro_loop"], rejected: ["inference", "bogus"] });
+    expect(verificationKindsWarning({ RESULT_VERIFICATION_KINDS: "inference" })).toMatch(/ignoring \[inference\]/);
+    expect(verificationKindsWarning({})).toBeNull();
+  });
+
+  it("execution comparator: exit status + stdout, formatting noise ignored, values not", () => {
+    expect(executionResultKey({ ok: true, output: "42  \r\n7\t\n\n" })).toBe(executionResultKey({ ok: true, output: "\n42\n7" }));
+    expect(executionResultKey({ ok: true, output: "42" })).not.toBe(executionResultKey({ ok: false, output: "42" }));
+    expect(executionResultKey({ ok: true, output: "42" })).not.toBe(executionResultKey({ ok: true, output: "43" }));
+    expect(executionResultKey({ ok: true, output: "4 2" })).not.toBe(executionResultKey({ ok: true, output: "42" }));
+    expect(resultKey({ ok: true, output: "a \nb" }, "micro_loop")).toBe(executionResultKey({ ok: true, output: "a\nb" }));
+  });
+
+  it("code-kind replicas that differ only in trailing whitespace verify", () => {
+    const v = new ResultVerifier<null>({ rate: 1, initialReputation: 1 }, () => 0);
+    const st = { ...subtask("c1", "print(6*7)"), kind: "micro_loop" as const };
+    const req = v.start(st, exec("a", "c1", "42\n"));
+    const out = v.recordReplica(req.subtask.id, exec("b", req.subtask.id, "42   \r\n"));
+    expect(out?.status).toBe("verified");
+  });
+
+  it("the startup warning names the verified kinds", () => {
+    expect(verificationStartupWarning({ rate: 0.1, mintReplicaRewards: false, kinds: ["micro_loop"] })).toMatch(/micro_loop.*inference is never verified/);
   });
 });

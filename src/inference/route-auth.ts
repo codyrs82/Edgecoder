@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { safeTokenEqual } from "../common/crypto-utils.js";
+
 /**
  * #119 review: which inference-service routes skip the token check.
  * - "public": health, metrics (JSON and Prometheus, #14), the dashboard, and the read-only model GETs the desktop polls.
@@ -10,6 +12,15 @@
  * - "full": everything else (token, plus coordinator signatures when configured).
  */
 export type InferenceRouteAuth = "public" | "token" | "full";
+
+/**
+ * The x-inference-token check: constant-time, and never satisfied when the configured token is
+ * empty (an unset/empty INFERENCE_AUTH_TOKEN must not let an empty header through).
+ */
+export function inferenceTokenValid(provided: unknown, expected: string): boolean {
+  if (typeof provided !== "string" || expected.length === 0) return false;
+  return safeTokenEqual(provided, expected);
+}
 
 const PUBLIC_MODEL_GETS = new Set(["/model/status", "/model/list", "/model/pull/progress"]);
 

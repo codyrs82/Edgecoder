@@ -16,4 +16,7 @@ EXPOSE 4311
 
 # #5: services default to 127.0.0.1; containers must listen on all interfaces.
 ENV HOST=0.0.0.0
+# Holds the bitcoind RPC credentials: run unprivileged, like Dockerfile.agent and Dockerfile.server
+# (the app files stay root-owned, so the process cannot change its own code).
+USER node
 CMD ["node", "dist/economy/anchor-proxy-service.js"]

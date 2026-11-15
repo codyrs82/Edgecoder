@@ -8,6 +8,7 @@ import {
   anchorEpoch,
   closeEpoch,
   proofForReceipt,
+  repointEpochAnchor,
   verifyEpochSignature
 } from "../../src/receipts/epochs.js";
 import {
@@ -179,6 +180,49 @@ describe("anchorEpoch", () => {
     // Same root again (epoch without anchorTxRef): anchorCheckpoint returns the existing record, no re-broadcast.
     await anchorEpoch(closed!.epoch, { provider, network: "signet", store: anchors, policy, now: () => 1_000 });
     expect(broadcasts).toHaveLength(1);
+  });
+
+  it("keeps a mock provider's made-up txid off the epoch (#46)", async () => {
+    const store = new MemoryReceiptStore();
+    await store.append(receiptFor(coordA, "m1", 1_000));
+    const closed = await closeEpoch(store, { coordinatorId: coordA.peerId, coordinatorPrivateKeyPem: coordA.privateKeyPem, untilMs: 2_000 });
+    const anchors = anchorMemStore();
+    const policy = { dailyBudgetSats: 1_000_000, maxFeeSats: 20_000, mainnetEnabled: false };
+    const result = await anchorEpoch(
+      closed!.epoch,
+      { provider: mockProvider().provider, network: "signet", store: anchors, policy, now: () => 1_000, providerName: "mock" },
+      store
+    );
+    expect(result.epoch.anchorTxRef).toBeUndefined();
+    expect((await store.getEpoch(closed!.epoch.epochId))!.anchorTxRef).toBeUndefined();
+    expect([...anchors.rows.values()][0]).toMatchObject({ anchorProvider: "mock", txRef: TXID });
+  });
+
+  it("repointEpochAnchor follows a re-broadcast to the new txid (#46)", async () => {
+    const store = new MemoryReceiptStore();
+    await store.append(receiptFor(coordA, "p1", 1_000));
+    const closed = await closeEpoch(store, { coordinatorId: coordA.peerId, coordinatorPrivateKeyPem: coordA.privateKeyPem, untilMs: 2_000 });
+    const anchored = await anchorEpoch(closed!.epoch, { provider: mockProvider().provider, network: "signet" }, store);
+    const NEW_TXID = "ef".repeat(32);
+    const replacement: BitcoinAnchorRecord = {
+      anchorId: "a2",
+      epochId: `${RECEIPT_ANCHOR_EPOCH_PREFIX}${anchored.epoch.epochId}`,
+      checkpointHash: anchored.epoch.merkleRoot,
+      anchorNetwork: "signet",
+      txRef: NEW_TXID,
+      status: "pending",
+      createdAtMs: 2_000
+    };
+    expect(await repointEpochAnchor(store, replacement)).toBe(true);
+    expect(await store.getEpoch(anchored.epoch.epochId)).toMatchObject({ anchorTxRef: NEW_TXID, anchorNetwork: "signet" });
+    // Already pointing there: nothing to do.
+    expect(await repointEpochAnchor(store, replacement)).toBe(false);
+    // Not a receipt anchor, a different root, a failed row, or a mock row: the epoch is left alone.
+    expect(await repointEpochAnchor(store, { ...replacement, txRef: TXID, epochId: "stats:1" })).toBe(false);
+    expect(await repointEpochAnchor(store, { ...replacement, txRef: TXID, checkpointHash: "00".repeat(32) })).toBe(false);
+    expect(await repointEpochAnchor(store, { ...replacement, txRef: TXID, status: "failed" })).toBe(false);
+    expect(await repointEpochAnchor(store, { ...replacement, txRef: TXID, anchorProvider: "mock" })).toBe(false);
+    expect((await store.getEpoch(anchored.epoch.epochId))!.anchorTxRef).toBe(NEW_TXID);
   });
 
   it("surfaces provider failures", async () => {

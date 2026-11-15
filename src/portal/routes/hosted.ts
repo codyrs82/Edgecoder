@@ -37,7 +37,7 @@ export const hashApiKey = (key: string) => createHash("sha256").update(key).dige
 
 export interface HostedRoutesDeps {
   store: PortalStore | undefined | null;
-  getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null>;
+  getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string; emailVerified?: boolean } | null>;
   PORTAL_SERVICE_TOKEN: string | undefined;
   EXTERNAL_HTTP_TIMEOUT_MS: number;
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
@@ -190,6 +190,8 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await deps.getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    // An unverified account holds no long-lived credentials (routes/auth.ts, verify-email).
+    if (user.emailVerified === false) return reply.code(403).send({ error: "email_not_verified" });
     const { name } = z.object({ name: z.string().trim().min(1).max(60) }).parse(req.body ?? {});
     if ((await store.countApiKeys(user.userId)) >= MAX_KEYS) return reply.code(409).send({ error: "too_many_keys", max: MAX_KEYS });
     const key = `${API_KEY_PREFIX}${randomBytes(32).toString("base64url")}`;

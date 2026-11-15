@@ -8,101 +8,51 @@
  * Direction: an infrastructure / trading console. Graphite surfaces, hairline borders, one
  * accent (Bitcoin orange) reserved for primary actions and the active nav item, semantic
  * green/red only for money and status, tabular monospace numerals, no gradients, no blur,
- * no hover-lift, no emoji. Everything is inline (CSP: script-src 'self', style-src inline).
+ * no hover-lift, no emoji. Page styles are <style> blocks that carry the request's CSP nonce and
+ * scripts are nonce'd or external. There are no style attributes: the policy has no
+ * 'unsafe-inline', so an attribute would be dropped by the browser. Use a class (the u-* utilities
+ * below for one-off spacing), or set el.style from a script, which the policy allows.
+ *
+ * #89: colors come from the shared @edgecoder/tokens stylesheet (/assets/tokens.css, see
+ * ../assets.ts), the same tokens as the desktop app, with light and dark values selected by
+ * <html data-theme>. Its portal aliases (--bg, --text, --brand, --ok, --danger, ...) are the names
+ * used here. TOKENS_CSS below only adds the few portal-only tokens, derived from the shared ones.
  */
 
-export const THEME_PALETTES: Record<string, Record<string, string>> = {
-  // Default. Named "warm" for backwards compatibility with stored user preferences.
-  warm: {
-    "--bg": "#0d1014",
-    "--bg-soft": "#12161c",
-    "--bg-surface": "#171c23",
-    "--bg-elevated": "#1e242d",
-    "--bg-input": "#0f1318",
-    "--card": "#12161c",
-    "--card-border": "rgba(255,255,255,0.08)",
-    "--border-strong": "rgba(255,255,255,0.16)",
-    "--text": "#e8ecf1",
-    "--text-secondary": "#aab3c0",
-    "--muted": "#7c8794",
-    "--brand": "#f7931a",
-    "--brand-2": "#ffad4a",
-    "--brand-soft": "rgba(247,147,26,0.12)",
-    "--brand-border": "rgba(247,147,26,0.35)",
-    "--ok": "#3ecf8e",
-    "--danger": "#f0616d",
-    "--yellow": "#e9b949",
-    "--info": "#5aa9ff"
-  },
-  midnight: {
-    "--bg": "#0a0d1a",
-    "--bg-soft": "#0f1324",
-    "--bg-surface": "#141a2e",
-    "--bg-elevated": "#1b2238",
-    "--bg-input": "#0c1020",
-    "--card": "#0f1324",
-    "--card-border": "rgba(160,176,255,0.1)",
-    "--border-strong": "rgba(160,176,255,0.2)",
-    "--text": "#e6e9f5",
-    "--text-secondary": "#aab2cf",
-    "--muted": "#7b84a6",
-    "--brand": "#f7931a",
-    "--brand-2": "#ffad4a",
-    "--brand-soft": "rgba(247,147,26,0.12)",
-    "--brand-border": "rgba(247,147,26,0.35)",
-    "--ok": "#3ecf8e",
-    "--danger": "#f0616d",
-    "--yellow": "#e9b949",
-    "--info": "#5aa9ff"
-  },
-  emerald: {
-    "--bg": "#0b1210",
-    "--bg-soft": "#101916",
-    "--bg-surface": "#15201c",
-    "--bg-elevated": "#1c2a25",
-    "--bg-input": "#0d1512",
-    "--card": "#101916",
-    "--card-border": "rgba(160,255,208,0.08)",
-    "--border-strong": "rgba(160,255,208,0.16)",
-    "--text": "#e6f0ea",
-    "--text-secondary": "#a9bcb2",
-    "--muted": "#7a8f85",
-    "--brand": "#f7931a",
-    "--brand-2": "#ffad4a",
-    "--brand-soft": "rgba(247,147,26,0.12)",
-    "--brand-border": "rgba(247,147,26,0.35)",
-    "--ok": "#3ecf8e",
-    "--danger": "#f0616d",
-    "--yellow": "#e9b949",
-    "--info": "#5aa9ff"
-  }
-};
-
-export const THEME_LABELS: Record<string, string> = { warm: "Graphite", midnight: "Midnight", emerald: "Evergreen" };
-
-function rootVars(palette: Record<string, string>): string {
-  return Object.entries(palette)
-    .map(([k, v]) => `${k}: ${v};`)
-    .join(" ");
-}
-
-/** :root tokens (default palette) plus the non-color scale. */
+/**
+ * Portal-only tokens on top of /assets/tokens.css (which must be linked first): tints derived from
+ * the shared colors, so they follow light/dark, plus the portal's layout scale.
+ */
 export const TOKENS_CSS = `
 :root {
-  ${rootVars(THEME_PALETTES.warm)}
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --brand-soft: color-mix(in srgb, var(--brand) 12%, transparent);
+  --brand-border: color-mix(in srgb, var(--brand) 35%, transparent);
+  --info: var(--accent-secondary);
+  --hover-wash: color-mix(in srgb, var(--text) 4%, transparent);
+  /* the shared stack plus fallbacks that exist on the web (SF Mono is not exposed to pages) */
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
   --sidebar-w: 232px;
   --topbar-h: 56px;
   --content-max: 1320px;
   --transition-fast: 0.12s ease;
   --transition-med: 0.2s ease;
+  /* #27: text on a tint of its own color. Plain --danger on a 10-12% danger tint is under 4.5:1 in
+     both themes; mixing in a fifth of the text color brings it to 5:1 or better. */
+  --danger-ink: color-mix(in srgb, var(--danger) 80%, var(--text));
+  /* Shadows and the mobile-nav scrim are the only raw colors in the portal CSS; they live here so
+     the page modules stay on tokens. Light values first (tokens.css defaults to light). */
+  --shadow-1: 0 1px 2px rgba(0,0,0,0.08);
+  --shadow-2: 0 8px 24px rgba(0,0,0,0.14);
+  --shadow-up: 0 -6px 28px rgba(0,0,0,0.16);
+  --scrim: rgba(0,0,0,0.35);
+}
+/* theme.js always resolves <html data-theme> to light or dark, and pages render dark by default. */
+[data-theme=dark] {
   --shadow-1: 0 1px 2px rgba(0,0,0,0.3);
   --shadow-2: 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-up: 0 -6px 28px rgba(0,0,0,0.45);
+  --scrim: rgba(0,0,0,0.5);
 }`;
 
 /** Base styles shared by every page: reset, type, buttons, inputs, tables, cards, badges, KPIs, utilities. */
@@ -143,12 +93,12 @@ button, .btn {
 }
 button:hover, .btn:hover { background: var(--bg-surface); border-color: var(--text-secondary); color: var(--text); }
 button:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
-button.primary, .btn.primary, .dl-btn { background: var(--brand); border-color: var(--brand); color: #111; font-weight: 600; }
-button.primary:hover, .btn.primary:hover, .dl-btn:hover { background: var(--brand-2); border-color: var(--brand-2); color: #111; }
+button.primary, .btn.primary, .dl-btn { background: var(--brand); border-color: var(--brand); color: var(--on-accent); font-weight: 600; }
+button.primary:hover, .btn.primary:hover, .dl-btn:hover { background: var(--brand-2); border-color: var(--brand-2); color: var(--on-accent); }
 button.ghost, .btn.ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
 button.ghost:hover, .btn.ghost:hover { background: var(--bg-elevated); color: var(--text); }
-button.danger { border-color: rgba(240,97,109,0.5); color: var(--danger); background: transparent; }
-button.danger:hover { background: rgba(240,97,109,0.12); }
+button.danger { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger-ink); background: transparent; }
+button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 button.sm, .btn.sm { padding: 4px 9px; min-height: 26px; font-size: 12px; }
 button svg, .btn svg { width: 14px; height: 14px; flex: none; }
 
@@ -195,7 +145,7 @@ label { display: block; margin: var(--sp-3) 0 var(--sp-1); font-size: 11px; font
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-bottom: 1px solid var(--card-border); text-align: left; padding: 8px 10px; vertical-align: middle; }
 th { color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
-tbody tr:hover { background: rgba(255,255,255,0.02); }
+tbody tr:hover { background: var(--hover-wash); }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .table-controls { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin: 0 0 var(--sp-3); }
 .table-controls input, .table-controls select { width: auto; min-width: 160px; }
@@ -206,12 +156,18 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
   border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
   border: 1px solid var(--border-strong); background: var(--bg-elevated); color: var(--text-secondary);
 }
-.status-badge.ok { color: var(--ok); border-color: rgba(62,207,142,0.4); background: rgba(62,207,142,0.1); }
-.status-badge.warn { color: var(--yellow); border-color: rgba(233,185,73,0.4); background: rgba(233,185,73,0.1); }
-.status-badge.danger { color: var(--danger); border-color: rgba(240,97,109,0.4); background: rgba(240,97,109,0.1); }
-.status-badge.info { color: var(--info); border-color: rgba(90,169,255,0.4); background: rgba(90,169,255,0.1); }
+.status-badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.status-badge.warn { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: color-mix(in srgb, var(--yellow) 10%, transparent); }
+.status-badge.danger { color: var(--danger-ink); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.status-badge.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); background: color-mix(in srgb, var(--info) 10%, transparent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
 .dot.green { background: var(--ok); } .dot.yellow { background: var(--yellow); } .dot.red { background: var(--danger); } .dot.gray { background: var(--muted); }
+
+/* Brand mark (brandMark()) and the theme toggle (assets.ts themeToggleButton()) */
+.mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 6px; background: var(--brand); color: var(--on-accent); }
+.mark-24 { width: 24px; height: 24px; border-radius: 5px; }
+.mark-30 { width: 30px; height: 30px; border-radius: 7px; }
+.theme-toggle [data-theme-label] { font-size: 12px; }
 
 /* Misc */
 .token-box { border: 1px dashed var(--brand-border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg-input); word-break: break-all; font-family: var(--font-mono); font-size: 12px; }
@@ -228,6 +184,24 @@ td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-
 }
 .empty { color: var(--muted); font-size: 13px; padding: var(--sp-6); text-align: center; border: 1px dashed var(--card-border); border-radius: var(--radius-sm); }
 @media (max-width: 920px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+/* Utilities. Pages have no style attributes (the CSP has no 'unsafe-inline' for styles), so the
+   one-off spacing and alignment tweaks are classes. !important keeps the precedence an inline
+   style had. .u-m-0 comes first so that "u-m-0 u-mb-8" reads as margin: 0 0 8px. */
+.u-m-0 { margin: 0 !important; }
+.u-mt-0 { margin-top: 0 !important; } .u-mt-4 { margin-top: 4px !important; } .u-mt-6 { margin-top: 6px !important; }
+.u-mt-8 { margin-top: 8px !important; } .u-mt-10 { margin-top: 10px !important; } .u-mt-12 { margin-top: 12px !important; }
+.u-mt-14 { margin-top: 14px !important; }
+.u-mb-4 { margin-bottom: 4px !important; } .u-mb-6 { margin-bottom: 6px !important; } .u-mb-8 { margin-bottom: 8px !important; }
+.u-mb-10 { margin-bottom: 10px !important; } .u-mb-12 { margin-bottom: 12px !important; }
+.u-ml-8 { margin-left: 8px !important; } .u-ml-auto { margin-left: auto !important; } .u-mr-6 { margin-right: 6px !important; }
+.u-pad-12 { padding: 12px !important; }
+.u-flex-1 { flex: 1 !important; } .u-between { justify-content: space-between !important; }
+.u-w-full { width: 100% !important; } .u-w-34 { width: 34% !important; }
+.u-center { text-align: center !important; } .u-left { text-align: left !important; } .u-break-all { word-break: break-all !important; }
+.u-fs-10 { font-size: 10px !important; } .u-fs-12 { font-size: 12px !important; } .u-fs-13 { font-size: 13px !important; }
+.u-font-ui { font-family: system-ui !important; } .u-font-mono { font-family: var(--font-mono) !important; }
+.u-muted { color: var(--muted) !important; } .u-brand-2 { color: var(--brand-2) !important; } .u-danger { color: var(--danger) !important; }
 `;
 
 /** Inline SVG icons (24x24 viewBox, stroke-based, currentColor). */
@@ -283,18 +257,7 @@ export function icon(name: string, size = 16, className = ""): string {
 }
 
 /** The brand mark: an orange square with a monogram, no gradient. */
-export function brandMark(size = 28): string {
-  const r = Math.round(size * 0.22);
-  return `<span class="mark" style="width:${size}px;height:${size}px;border-radius:${r}px;" aria-hidden="true"><svg width="${Math.round(size * 0.6)}" height="${Math.round(size * 0.6)}" viewBox="0 0 24 24" fill="none" stroke="#111" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h14"/><path d="M4 12h10"/><path d="M4 18h14"/><path d="M20 10l-3 2 3 2"/></svg></span>`;
+export function brandMark(size: 24 | 28 | 30 = 28): string {
+  // The box size is a class (BASE_CSS .mark, .mark-24, .mark-30): the CSP allows no style attributes.
+  return `<span class="mark${size === 28 ? "" : ` mark-${size}`}" aria-hidden="true"><svg width="${Math.round(size * 0.6)}" height="${Math.round(size * 0.6)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h14"/><path d="M4 12h10"/><path d="M4 18h14"/><path d="M20 10l-3 2 3 2"/></svg></span>`;
 }
-
-/** Client-side theme switcher shared by the shell and the legacy page; applies a palette to :root. */
-export const THEME_SCRIPT = `
-  const themePalettes = ${JSON.stringify(THEME_PALETTES)};
-  function applyTheme(theme) {
-    const palette = themePalettes[theme] || themePalettes.warm;
-    for (const [key, value] of Object.entries(palette)) document.documentElement.style.setProperty(key, value);
-    try { localStorage.setItem("edgecoder.theme", theme in themePalettes ? theme : "warm"); } catch {}
-  }
-  try { const saved = localStorage.getItem("edgecoder.theme"); if (saved && saved !== "warm") applyTheme(saved); } catch {}
-`;

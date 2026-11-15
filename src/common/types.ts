@@ -499,6 +499,12 @@ export interface BitcoinAnchorRecord {
    * failed. The txid is kept and watched; if it confirms anyway the row is re-marked anchored.
    */
   abandonedAtMs?: number;
+  /**
+   * #46: provider that broadcast this row ("bitcoind" | "anchor-proxy" | "mock"). Unset on rows
+   * written before the column existed. "mock" rows carry a made-up txid and are reported as
+   * simulated at read time (anchor-status.ts).
+   */
+  anchorProvider?: string;
 }
 
 export interface CoordinatorFeeEvent {
@@ -608,6 +614,38 @@ export interface BLETaskResponse {
   output?: string;
   cpuSeconds: number;
   providerSignature: string;
+  /** #63: the account the provider will sign as `providerAccountId` in the co-sign step. */
+  providerAccountId?: string;
+}
+
+/**
+ * #63: co-sign step. After a completed task the requester sends the final transaction (canonical v3
+ * fields, see src/credits/ble-tx-v3.ts) to the provider over the task-request characteristic with
+ * `type: "cosign"`; the provider checks it against what it served and answers on the task-response
+ * characteristic with its signature over the canonical bytes.
+ */
+export interface BLECosignRequest {
+  type: "cosign";
+  requestId: string;
+  tx: {
+    txId: string;
+    requesterId: string;
+    requesterAccountId: string;
+    providerId: string;
+    providerAccountId: string;
+    taskHash: string;
+    cpuMillis: number;
+    creditMillis: number;
+  };
+}
+
+export interface BLECosignResponse {
+  type: "cosign_result";
+  requestId: string;
+  txId: string;
+  status: "signed" | "rejected";
+  providerSignature: string;
+  reason?: string;
 }
 
 export interface BLECreditTransaction {

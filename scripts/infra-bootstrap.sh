@@ -302,7 +302,8 @@ wait_for "lnd REST on $rest" 300 lnd_rest_up || die "lnd REST did not answer on 
 state=$(lnd_state)
 log "lnd wallet state: $state"
 wallet_pw_b64=$(printf '%s' "$(cat "$WALLET_PW_FILE")" | base64 | tr -d '\n')
-post_json() { curl -sk --max-time 120 -X POST -H 'content-type: application/json' --data "$2" "$rest$1"; }
+# The body (wallet password, seed words) goes to curl on stdin, not in its argv.
+post_json() { printf '%s' "$2" | curl -sk --max-time 120 -X POST -H 'content-type: application/json' --data-binary @- "$rest$1"; }
 
 if [ "$state" = "NON_EXISTING" ]; then
   recovery=""

@@ -31,6 +31,8 @@ export function requiredConfirmationsFromEnv(
 export interface AnchorStore {
   upsertBitcoinAnchor(record: BitcoinAnchorRecord): Promise<void>;
   latestAnchorByCheckpoint(checkpointHash: string): Promise<BitcoinAnchorRecord | null>;
+  /** #101: newest anchor row recorded for an epoch id (any checkpoint hash). */
+  latestAnchorByEpoch?(epochId: string): Promise<BitcoinAnchorRecord | null>;
   listPendingAnchors(limit?: number): Promise<BitcoinAnchorRecord[]>;
   /** Cross-instance lock for one checkpoint (Postgres advisory lock). */
   withCheckpointLock?<T>(checkpointHash: string, fn: () => Promise<T>): Promise<T>;
@@ -38,6 +40,10 @@ export interface AnchorStore {
   listAnchorsToReconcile?(pendingBeforeMs: number, limit?: number, abandonedSinceMs?: number): Promise<BitcoinAnchorRecord[]>;
   /** Broadcast attempts (real txids or in-flight "broadcasting" rows) created since `sinceMs`. */
   countAnchorBroadcastsSince?(sinceMs: number): Promise<number>;
+  /** #101: newest live anchor of each kind (stats / receipts / issuance). */
+  latestLiveAnchorPerKind?(): Promise<BitcoinAnchorRecord[]>;
+  /** #46: anchored rows still shallower than `belowConfirmations`, least recently checked first. */
+  listAnchorsToReverify?(belowConfirmations: number, limit?: number): Promise<BitcoinAnchorRecord[]>;
 }
 
 /** #46 review: spend guards. Every broadcast can cost up to `maxFeeSats`. */
@@ -69,6 +75,8 @@ export interface AnchorDeps {
   now?: () => number;
   /** Defaults to anchorPolicyFromEnv(). */
   policy?: AnchorPolicy;
+  /** #46: recorded on every row this provider broadcasts (BitcoinAnchorRecord.anchorProvider). */
+  providerName?: string;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -113,20 +121,59 @@ export async function anchorCheckpoint(
   deps: AnchorDeps,
   input: { epochId: string; checkpointHash: string }
 ): Promise<BitcoinAnchorRecord> {
+  return (await anchorCheckpointWithOutcome(deps, input)).record;
+}
+
+/** Like anchorCheckpoint, but says whether this call broadcast (`broadcast: true`) or found a live anchor. */
+export async function anchorCheckpointWithOutcome(
+  deps: AnchorDeps,
+  input: { epochId: string; checkpointHash: string }
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
   const run = () => anchorCheckpointLocked(deps, input);
   return withLocalLock(input.checkpointHash, () =>
     deps.store.withCheckpointLock ? deps.store.withCheckpointLock(input.checkpointHash, run) : run()
   );
 }
 
+/** A real broadcast that must not be re-sent: pending or anchored with a txid. */
+export function isLiveAnchor(record: BitcoinAnchorRecord | null | undefined): boolean {
+  return Boolean(record) && record!.status !== "failed" && isTxid(record!.txRef);
+}
+
+/**
+ * #101: anchor an epoch's checkpoint at most once. The guard looks the anchor up by epoch id
+ * (store.latestAnchorByEpoch), then by checkpoint hash under the lock, instead of "the newest
+ * anchor row" (usually a stats anchor), so a tick for an already-anchored or in-flight epoch
+ * does no work. `computeCheckpointHash` runs only when the epoch still needs anchoring, and
+ * `onBroadcast` (e.g. the ledger checkpoint record) runs only after this call actually broadcast.
+ */
+export async function anchorEpochOnce(
+  deps: AnchorDeps,
+  input: {
+    epochId: string;
+    computeCheckpointHash: () => Promise<string>;
+    onBroadcast?: (record: BitcoinAnchorRecord) => Promise<void>;
+  }
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
+  const byEpoch = deps.store.latestAnchorByEpoch ? await deps.store.latestAnchorByEpoch(input.epochId) : null;
+  // Live, or a broadcast still being reconciled (#103): never start a second one for the epoch.
+  if (byEpoch && (isLiveAnchor(byEpoch) || byEpoch.status === "broadcasting" || byEpoch.status === "needs_admin")) {
+    return { record: byEpoch, broadcast: false };
+  }
+  const checkpointHash = await input.computeCheckpointHash();
+  const outcome = await anchorCheckpointWithOutcome(deps, { epochId: input.epochId, checkpointHash });
+  if (outcome.broadcast && input.onBroadcast) await input.onBroadcast(outcome.record);
+  return outcome;
+}
+
 async function anchorCheckpointLocked(
   deps: AnchorDeps,
   input: { epochId: string; checkpointHash: string }
-): Promise<BitcoinAnchorRecord> {
+): Promise<{ record: BitcoinAnchorRecord; broadcast: boolean }> {
   const now = deps.now ?? Date.now;
   const policy = deps.policy ?? anchorPolicyFromEnv();
   const existing = await deps.store.latestAnchorByCheckpoint(input.checkpointHash);
-  if (existing && existing.status !== "failed" && isTxid(existing.txRef)) return existing;
+  if (existing && isLiveAnchor(existing)) return { record: existing, broadcast: false };
   if (existing?.status === "broadcasting" || existing?.status === "needs_admin") {
     throw new Error(`anchor_broadcast_unreconciled:${existing.anchorId}`);
   }
@@ -157,7 +204,8 @@ async function anchorCheckpointLocked(
     confirmations: 0,
     blockHash: undefined,
     blockHeight: undefined,
-    lastCheckedAtMs: now()
+    lastCheckedAtMs: now(),
+    anchorProvider: deps.providerName
   };
   await deps.store.upsertBitcoinAnchor(base);
   if (!deps.store.countAnchorBroadcastsSince) localBroadcastTimes.push(base.createdAtMs);
@@ -188,7 +236,7 @@ async function anchorCheckpointLocked(
 
   const record: BitcoinAnchorRecord = { ...base, txRef: normalized, status: "pending", lastCheckedAtMs: now() };
   await deps.store.upsertBitcoinAnchor(record);
-  return record;
+  return { record, broadcast: true };
 }
 
 export type ConfirmationEvent = "confirmed" | "progress" | "reorg" | "unchanged" | "unknown" | "conflicted";
@@ -417,11 +465,12 @@ export async function reconcileAnchors(
   deps: AnchorDeps,
   required: number,
   cfg: ReconcileConfig
-): Promise<Array<{ anchorId: string; event: ReconcileEvent }>> {
+): Promise<Array<{ anchorId: string; event: ReconcileEvent; record: BitcoinAnchorRecord }>> {
   if (!deps.store.listAnchorsToReconcile) return [];
   const nowMs = (deps.now ?? Date.now)();
   const rows = await deps.store.listAnchorsToReconcile(nowMs - cfg.stuckAfterMs, 50, nowMs - cfg.abandonWatchMs);
-  const out: Array<{ anchorId: string; event: ReconcileEvent }> = [];
+  // `record` is the row as listed (before this pass changed it), so callers know what it was.
+  const out: Array<{ anchorId: string; event: ReconcileEvent; record: BitcoinAnchorRecord }> = [];
   for (const row of rows) {
     // Same per-checkpoint lock as anchorCheckpoint, so reconcile never races a broadcast.
     // #109 review: re-read under the lock and skip the row if anything moved since listing.
@@ -439,7 +488,7 @@ export async function reconcileAnchors(
       return reconcileAnchor(deps, fresh, required, cfg);
     };
     const event = deps.store.withCheckpointLock ? await deps.store.withCheckpointLock(row.checkpointHash, run) : await run();
-    out.push({ anchorId: row.anchorId, event });
+    out.push({ anchorId: row.anchorId, event, record: row });
   }
   return out;
 }

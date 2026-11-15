@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { marked } from "marked";
+  import { open as openShell } from "@tauri-apps/plugin-shell";
+  import { renderMarkdown, safeLinkUrl } from "../lib/markdown";
 
   interface Props {
     source: string;
@@ -7,46 +8,19 @@
   }
   let { source, onOpenInEditor }: Props = $props();
 
-  const renderer = new marked.Renderer();
-  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  // A plan a model wrote as text (```plan with a JSON step list) reads as a checklist, not JSON.
-  function planHtml(text: string): string | null {
-    try {
-      const steps = JSON.parse(text);
-      if (!Array.isArray(steps) || steps.length === 0) return null;
-      const items = steps.map((s: { description?: unknown; status?: unknown }) => {
-        const done = s.status === 'completed';
-        return `<li class="${done ? 'done' : ''}"><span class="plan-box">${done ? '✓' : ''}</span>${esc(String(s.description ?? ''))}</li>`;
-      });
-      return `<div class="plan-list"><div class="plan-title">Plan</div><ol>${items.join('')}</ol></div>`;
-    } catch {
-      return null;
-    }
-  }
-  renderer.code = function({ text, lang }) {
-    if (lang === 'plan') {
-      const html = planHtml(text);
-      if (html) return html;
-    }
-    const escapedCode = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<div class="code-block-wrapper">
-      <div class="code-block-header">
-        <span class="code-lang">${lang || ''}</span>
-        <button class="open-in-editor-btn" data-lang="${lang || 'plaintext'}">Open in Editor</button>
-      </div>
-      <pre><code class="language-${lang || ''}">${escapedCode}</code></pre>
-    </div>`;
-  };
-
-  marked.setOptions({
-    breaks: true,
-    gfm: true,
-  });
-
-  let html = $derived(marked.parse(source, { renderer, async: false }) as string);
+  // Model output: raw HTML is escaped and URLs are scheme-checked in renderMarkdown.
+  let html = $derived(renderMarkdown(source));
 
   function handleClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
+    // A link never navigates the app window: http(s)/mailto open in the system browser.
+    const link = target.closest("a");
+    if (link) {
+      e.preventDefault();
+      const url = safeLinkUrl(link.getAttribute("href"));
+      if (url) void openShell(url).catch(() => {});
+      return;
+    }
     if (target.classList.contains('open-in-editor-btn')) {
       const wrapper = target.closest('.code-block-wrapper');
       const codeEl = wrapper?.querySelector('code');
@@ -76,7 +50,7 @@
   }
   .markdown :global(pre) {
     background: var(--bg-deep);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     padding: 12px 16px;
     overflow-x: auto;
     margin: 0.75em 0;
@@ -144,7 +118,7 @@
   }
   .markdown :global(.code-block-wrapper pre) {
     margin: 0;
-    border-radius: 0 0 var(--radius-sm, 6px) var(--radius-sm, 6px);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
     border: 0.5px solid var(--border);
     border-top: none;
   }
@@ -154,7 +128,7 @@
     align-items: center;
     padding: 4px 12px;
     background: var(--bg-elevated);
-    border-radius: var(--radius-sm, 6px) var(--radius-sm, 6px) 0 0;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
     border: 0.5px solid var(--border);
     border-bottom: none;
   }

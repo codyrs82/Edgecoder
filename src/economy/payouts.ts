@@ -8,7 +8,10 @@ import { bolt11IsExpired, decodeBolt11, type DecodedBolt11 } from "./bolt11.js";
 /**
  * Sats payouts: the rules that turn an account's earned msat into a Lightning payment.
  *
- * Payable balance = Σ earn msat (locked at accrual) − Σ payouts that are paid or still pending.
+ * Payable balance = Σ matured earn msat (locked at accrual) − Σ payouts that are paid or still
+ * pending, capped at the account's credit balance (withdrawableMsat). An earn row matures once it is
+ * older than the earnings hold (PAYOUT_EARNINGS_HOLD_MS, see earningsHoldFromEnv). A payout debits the credit balance
+ * by amount + routing-fee cap when it is reserved and gives back what it did not use at settlement.
  * A payout is either a `withdraw` (the account posts a BOLT11 invoice for its own wallet) or
  * `auto` (the account registered a Lightning address; the coordinator fetches an invoice over
  * LNURL-pay each tick and pays it). Both go through validatePayoutRequest and the coordinator's
@@ -27,6 +30,12 @@ export interface PayoutPolicy {
   /** Share of received sats kept back as a routing/fee reserve, never paid out. */
   reserveBps: number;
   network: BitcoinNetwork;
+  /**
+   * Earnings hold (ms): an earn row becomes withdrawable only once it is this old, so a bad result
+   * caught by spot checks or a blacklisting can be acted on (pause, correction) before its sats
+   * leave. 0 or unset = no hold. See earningsHoldFromEnv.
+   */
+  earningsHoldMs?: number;
 }
 
 export const DEFAULT_PAYOUT_POLICY: Omit<PayoutPolicy, "network"> = {
@@ -37,6 +46,51 @@ export const DEFAULT_PAYOUT_POLICY: Omit<PayoutPolicy, "network"> = {
   autoMinPayoutSats: 10_000,
   reserveBps: 200
 };
+
+/** Earnings hold applied on mainnet when PAYOUT_EARNINGS_HOLD_MS is unset: 24 h. */
+export const MAINNET_DEFAULT_EARNINGS_HOLD_MS = 24 * 60 * 60 * 1000;
+
+export interface EarningsHoldConfig {
+  holdMs: number;
+  /** "env" when PAYOUT_EARNINGS_HOLD_MS was set, "default" otherwise. */
+  source: "default" | "env";
+  /**
+   * Set when mainnet runs with a shorter hold than the default (an explicit override): the
+   * coordinator should log it at startup so the choice is visible. null otherwise.
+   */
+  warning: null | "mainnet_earnings_hold_disabled" | "mainnet_earnings_hold_below_default";
+}
+
+/**
+ * PAYOUT_EARNINGS_HOLD_MS: default 24 h on BITCOIN_NETWORK=bitcoin, 0 elsewhere (regtest/signet
+ * end-to-end runs pay out at once). Any explicit value is honoured, including 0 on mainnet, but
+ * then `warning` is set.
+ */
+export function earningsHoldFromEnv(network: BitcoinNetwork, env: NodeJS.ProcessEnv = process.env): EarningsHoldConfig {
+  const fallback = network === "bitcoin" ? MAINNET_DEFAULT_EARNINGS_HOLD_MS : 0;
+  const raw = env.PAYOUT_EARNINGS_HOLD_MS;
+  if (raw === undefined || raw.trim() === "") return { holdMs: fallback, source: "default", warning: null };
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error("[payouts] PAYOUT_EARNINGS_HOLD_MS must be a whole number of ms >= 0");
+  let warning: EarningsHoldConfig["warning"] = null;
+  if (network === "bitcoin" && n < MAINNET_DEFAULT_EARNINGS_HOLD_MS) warning = n === 0 ? "mainnet_earnings_hold_disabled" : "mainnet_earnings_hold_below_default";
+  return { holdMs: n, source: "env", warning };
+}
+
+/**
+ * The newest earn-row timestamp that counts as matured at `nowMs`, or undefined when there is no
+ * hold (every row counts; no clock comparison, so a row stamped a few ms ahead by another
+ * coordinator is not hidden). Stores compare with earnRowMatured / EARN_MATURED_SQL.
+ */
+export function earningsMaturityCutoffMs(nowMs: number, holdMs: number | undefined): number | undefined {
+  if (!holdMs || holdMs <= 0) return undefined;
+  return nowMs - holdMs;
+}
+
+/** In-memory definition of a matured earn row; the Postgres twin is EARN_MATURED_SQL (src/db/postgres.ts). */
+export function earnRowMatured(timestampMs: number, maturedAtOrBeforeMs: number | undefined): boolean {
+  return maturedAtOrBeforeMs === undefined || timestampMs <= maturedAtOrBeforeMs;
+}
 
 export function payoutPolicyFromEnv(network: BitcoinNetwork, env: NodeJS.ProcessEnv = process.env): PayoutPolicy {
   const num = (k: string, d: number) => {
@@ -53,12 +107,62 @@ export function payoutPolicyFromEnv(network: BitcoinNetwork, env: NodeJS.Process
     minFeeFloorSats: num("PAYOUT_MIN_FEE_FLOOR_SATS", DEFAULT_PAYOUT_POLICY.minFeeFloorSats),
     autoMinPayoutSats: num("PAYOUT_AUTO_MIN_SATS", DEFAULT_PAYOUT_POLICY.autoMinPayoutSats),
     reserveBps: num("PAYOUT_RESERVE_BPS", DEFAULT_PAYOUT_POLICY.reserveBps),
-    network
+    network,
+    earningsHoldMs: earningsHoldFromEnv(network, env).holdMs
   };
 }
 
 export function payableMsat(earnedMsat: number, paidOrPendingMsat: number): number {
   return Math.max(0, Math.floor(earnedMsat) - Math.floor(paidOrPendingMsat));
+}
+
+/** A credit balance (cSats, 1 cSat = 1 sat, up to 6 decimals) as whole msat, rounded down; negative counts as 0. */
+export function creditsToMsat(credits: number): number {
+  if (!Number.isFinite(credits) || credits <= 0) return 0;
+  return Math.floor(Math.round(credits * 1_000_000) / 1000);
+}
+
+/** msat as cSats (1 cSat = 1 sat). Whole msat fit the ledger's 6 decimals exactly. */
+export function msatToCredits(msat: number): number {
+  return Number((Math.round(msat) / 1000).toFixed(6));
+}
+
+/**
+ * What an account may withdraw: earned sats not yet paid out, never more than its credit balance.
+ * Earnings are also spendable cSats. A withdrawal debits the credit balance and a spend lowers it,
+ * so capping by the balance keeps one sat from leaving twice (once paid out, once spent as cSats
+ * that become someone else's earnings). Purchased cSats raise the balance but not the earned sats,
+ * so they stay non-withdrawable.
+ */
+export function withdrawableMsat(earnedMsat: number, paidOrPendingMsat: number, creditBalance: number): number {
+  return Math.min(payableMsat(earnedMsat, paidOrPendingMsat), creditsToMsat(creditBalance));
+}
+
+/** Spend row written with the reservation: amount + routing-fee cap, taken from the credit balance. */
+export function payoutDebitTxId(payoutId: string): string {
+  return `payout:${payoutId}`;
+}
+
+/** Earn row (no msat) giving back the unused part of the reservation debit when the payout settles. */
+export function payoutRefundTxId(payoutId: string): string {
+  return `payout_refund:${payoutId}`;
+}
+
+/** Spend row (no msat) for routing fee the node charged above the cap the debit covered. */
+export function payoutFeeExcessTxId(payoutId: string): string {
+  return `payout_fee_excess:${payoutId}`;
+}
+
+/**
+ * msat the reservation debit gives back at settlement: all of it when the payout failed, the
+ * unused fee cap when it was paid. Negative when the node charged more than the debit covered.
+ */
+export function payoutSettlementRefundMsat(
+  debitMsat: number,
+  outcome: { status: "paid"; amountMsat: number; feeMsat: number } | { status: "failed" }
+): number {
+  if (outcome.status === "failed") return debitMsat;
+  return debitMsat - (outcome.amountMsat + Math.max(0, Math.floor(outcome.feeMsat)));
 }
 
 export function maxFeeMsatFor(amountMsat: number, policy: PayoutPolicy): number {
@@ -97,8 +201,11 @@ export function validatePayoutRequest(
   if (decoded.amountMsat === undefined) return { ok: false, code: "amountless_invoice" };
   const amountMsat = decoded.amountMsat;
   if (amountMsat < policy.minPayoutSats * 1000) return { ok: false, code: "below_minimum", detail: `${amountMsat} msat < ${policy.minPayoutSats} sats` };
-  if (amountMsat > input.payableMsat) return { ok: false, code: "insufficient_payable", detail: `${amountMsat} msat > payable ${input.payableMsat}` };
   const maxFeeMsat = maxFeeMsatFor(amountMsat, policy);
+  // The routing fee comes out of the account too, so the fee cap must fit inside payable.
+  if (amountMsat + maxFeeMsat > input.payableMsat) {
+    return { ok: false, code: "insufficient_payable", detail: `${amountMsat} msat + fee cap ${maxFeeMsat} msat > payable ${input.payableMsat}` };
+  }
   if (amountMsat + maxFeeMsat > input.capacityMsat) return { ok: false, code: "coordinator_capacity", detail: `node can pay out at most ${input.capacityMsat} msat right now` };
   return { ok: true, decoded, amountMsat, maxFeeMsat };
 }

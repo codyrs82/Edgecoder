@@ -35,14 +35,16 @@ describe("chat view on tokens (#25)", () => {
 });
 
 describe("chat view keyboard access (#25)", () => {
-  it("conversation rows are focusable and open on Enter/Space", () => {
+  it("conversation rows are real buttons, with the menu button beside them (not inside)", () => {
+    // #161: the row used to be a role="button" div wrapping the kebab button and its menu.
+    // Behaviour is covered by component-tests/ConversationSidebar.test.ts.
     const src = read("components/ConversationSidebar.svelte");
-    expect(src).toContain('role="button"');
-    expect(src).toContain('tabindex="0"');
-    expect(src).toContain("onkeydown={(e) => handleItemKeydown(e, convo.id)}");
-    expect(src).toMatch(/e\.key === "Enter" \|\| e\.key === " "/);
+    expect(src).not.toContain('role="button"');
+    expect(src).toMatch(/<button\s+class="convo-select"/);
+    expect(src).toContain("onclick={() => handleSelect(convo.id)}");
     expect(src).toContain('aria-haspopup="menu"');
     expect(src).toContain('role="menuitem"');
+    expect(src).toContain("use:menu={");
     expect(src).not.toContain("a11y_click_events_have_key_events -->\n        <!-- svelte-ignore a11y_no_static_element_interactions -->\n        <div\n          class=\"conversation-item\"");
   });
 

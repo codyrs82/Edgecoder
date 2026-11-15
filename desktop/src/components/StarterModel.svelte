@@ -87,7 +87,7 @@
 <style>
   .starter {
     position: fixed; right: 16px; bottom: 16px; z-index: 90; width: 320px; padding: 14px 16px;
-    background: var(--bg-elevated, var(--bg-surface)); border: 0.5px solid var(--border); border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    background: var(--bg-elevated); border: 0.5px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg);
   }
   .title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
   .desc { font-size: 12px; color: var(--text-secondary); margin-top: 3px; line-height: 1.45; }

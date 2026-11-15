@@ -311,7 +311,7 @@ This section was merged in from the old `README.dev.md` (#21). See [CONTRIBUTING
 - `GET /portal` -- portal frontend
 - `POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`
 - `GET /auth/oauth/:provider/start` for `google`, `microsoft`, `github`
-- `GET /auth/verify-email`, `POST /auth/resend-verification`
+- `GET /auth/verify-email` (confirmation page) + `POST /auth/verify-email` (needs the account's session or password), `POST /auth/resend-verification`
 - `POST /auth/passkey/register/options` + `/verify`, `POST /auth/passkey/login/options` + `/verify`
 - `POST /nodes/enroll`, `GET /dashboard/summary`, `POST /me/theme`
 - `GET /ios/dashboard`; `GET`/`PUT /wallet/payout-destination`
@@ -409,4 +409,4 @@ tests/            - test suites
 
 ## License
 
-Business Source License 1.1 ([LICENSE](LICENSE)).
+Business Source License 1.1 ([LICENSE](LICENSE)), SPDX `BUSL-1.1`, for everything in this repository: the services, the desktop app, the iOS app, the VS Code extension and the packages under `packages/`. You may copy, modify and run it, except to offer a competing hosted service. On 2030-02-25 each version converts to Apache-2.0. The decision is recorded in [docs/adrs/0003-license-busl-1.1.md](docs/adrs/0003-license-busl-1.1.md).

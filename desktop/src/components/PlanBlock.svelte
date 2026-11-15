@@ -50,7 +50,7 @@
 <style>
   .plan-block {
     border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
@@ -114,7 +114,7 @@
   }
 
   .step-number {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 500;
     color: var(--text-muted);

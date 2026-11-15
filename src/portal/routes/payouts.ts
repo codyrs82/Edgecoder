@@ -8,6 +8,9 @@ import { z } from "zod";
 import { decodeBolt11 } from "../../economy/bolt11.js";
 import type { MarketRoutesDeps } from "../server.js";
 import type { WithdrawChallenge } from "../store.js";
+import { moduleLogger } from "../../common/logger.js";
+
+const logger = moduleLogger("portal-payouts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Withdrawal codes one account can request per hour (each one sends an email). */
@@ -74,7 +77,7 @@ export function registerPayoutRoutes(
       });
       return { status: res.statusCode, text: await res.body.text() };
     } catch (error) {
-      console.warn(`[portal] payouts: coordinator request failed: ${error instanceof Error ? error.message : String(error)}`);
+      logger.warn({ error: error instanceof Error ? error.message : String(error) }, "coordinator payouts request failed");
       return { error: { status: 502, body: { error: "coordinator_unreachable" } } };
     }
   }

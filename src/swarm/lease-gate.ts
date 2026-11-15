@@ -15,3 +15,15 @@ export function lateResultRejection(
 ): { statusCode: 409; body: { error: "lease_expired" } } | null {
   return queue.leaseExpiredFor(subtaskId, agentId) ? { statusCode: 409, body: { error: "lease_expired" } } : null;
 }
+
+/**
+ * #99: lateResultRejection that also consults expired holders persisted in Postgres, so a late
+ * result is still rejected after a coordinator restart or on another coordinator sharing the database.
+ */
+export async function lateResultRejectionDurable(
+  queue: Pick<SwarmQueue, "leaseExpiredForDurable">,
+  subtaskId: string,
+  agentId: string
+): Promise<{ statusCode: 409; body: { error: "lease_expired" } } | null> {
+  return (await queue.leaseExpiredForDurable(subtaskId, agentId)) ? { statusCode: 409, body: { error: "lease_expired" } } : null;
+}

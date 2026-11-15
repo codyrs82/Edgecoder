@@ -2,6 +2,7 @@
   "name": "edgecoder-desktop",
   "private": true,
   "version": "1.0.0",
+  "license": "BUSL-1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -25,9 +26,11 @@
     "@tauri-apps/plugin-updater": "^2.14.1",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
+    "bits-ui": "2.20.2",
     "idb": "^8.0.3",
     "marked": "^17.0.3",
-    "monaco-editor": "^0.57.0"
+    "monaco-editor": "^0.57.0",
+    "svelte-sonner": "1.2.2"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
@@ -37,6 +40,7 @@
     "@tauri-apps/cli": "^2.12.4",
     "@testing-library/svelte": "5.2.8",
     "@testing-library/user-event": "14.6.1",
+    "axe-core": "4.14.0",
     "jsdom": "26.1.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",

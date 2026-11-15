@@ -238,7 +238,7 @@ describe("POST /nodes/enroll node id validation", () => {
 
 describe("enforced CSP with per-request script nonces", () => {
   const PAGES = [
-    "/portal", "/portal-legacy", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/settings/plan",
+    "/portal", "/portal/reset-password", "/portal/chat", "/portal/dashboard", "/portal/settings/plan",
     "/portal/settings", "/portal/settings/nodes", "/portal/settings/admin", "/portal/settings/install", "/portal/reviews", "/portal/settings/compute",
     "/", "/privacy", "/terms",
   ];
@@ -252,7 +252,9 @@ describe("enforced CSP with per-request script nonces", () => {
     expect(csp).toMatch(/script-src 'self' 'nonce-[A-Za-z0-9+/=]{20,}'/);
     expect(csp).toContain("script-src-attr 'none'");
     expect(csp).toContain("upgrade-insecure-requests");
-    expect(csp).not.toContain("unsafe-inline' 'nonce"); // style-src keeps unsafe-inline without a nonce
+    // #27: styles are held to the same nonce; nothing in the policy allows inline without it
+    expect(csp).toMatch(/style-src 'self' 'nonce-[A-Za-z0-9+/=]{20,}'/);
+    expect(csp).not.toContain("unsafe-inline");
     const nonceA = csp.match(/'nonce-([^']+)'/)![1];
     const nonceB = String(b.headers["content-security-policy"]).match(/'nonce-([^']+)'/)![1];
     expect(nonceA).not.toBe(nonceB);
@@ -269,7 +271,11 @@ describe("enforced CSP with per-request script nonces", () => {
       expect(nonce, url).toBeTruthy();
       expect(res.body, url).not.toContain(CSP_NONCE);
       const tags = [...res.body.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
-      for (const tag of tags) expect(tag, url).toBe(`<script nonce="${nonce}">`);
+      // #89: plus the same-origin theme script, which needs no nonce under script-src 'self'.
+      for (const tag of tags) {
+        if (/^<script src="\/assets\/theme\.js\?v=[0-9a-f]+">$/.test(tag)) continue;
+        expect(tag, url).toBe(`<script nonce="${nonce}">`);
+      }
       // And each one still parses (the handler rewrites didn't break the page scripts).
       for (const m of res.body.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new vm.Script(m[1]), url).not.toThrow();
       expect(res.body, url).not.toMatch(/<[^>]+\son[a-z]+\s*=/i);
@@ -286,6 +292,23 @@ describe("enforced CSP with per-request script nonces", () => {
     expect(res.headers["content-security-policy"]).toBeUndefined();
     expect(String(res.headers["content-security-policy-report-only"])).toContain("'nonce-");
     expect(String(res.headers["content-security-policy-report-only"])).not.toContain("upgrade-insecure-requests");
+    await app.close();
+  });
+});
+
+describe("Settings > Nodes / Admin data attributes", () => {
+  it("encodeAttr also encodes the single quote that delimits the attribute, and round-trips", async () => {
+    const app = await pagesApp();
+    for (const url of ["/portal/settings/nodes", "/portal/settings/admin"]) {
+      const body = (await app.inject({ url })).body;
+      const src = body.match(/function encodeAttr\(v\) \{[^\n]*\}/)?.[0];
+      expect(src, url).toBeDefined();
+      const ctx = vm.createContext({});
+      vm.runInContext(src!, ctx);
+      const out = vm.runInContext(`encodeAttr(${JSON.stringify(EVIL)})`, ctx) as string;
+      expect(out).not.toMatch(/['"<>\s]/);
+      expect(decodeURIComponent(out)).toBe(EVIL);
+    }
     await app.close();
   });
 });

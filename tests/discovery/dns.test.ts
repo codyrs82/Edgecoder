@@ -58,6 +58,22 @@ describe("resolveDnsSeeds", () => {
     ]);
   });
 
+  it("carries the fp= pin into the candidate and drops plain-http seeds for remote hosts", async () => {
+    const fp = "cd".repeat(32);
+    const resolver: DnsResolver = {
+      resolveTxt: async () => [[`v=ec1 url=https://pinned.example fp=${fp}`], ["v=ec1 url=http://plain.example"], ["v=ec1 url=http://127.0.0.1:4301"]],
+      resolveSrv: async () => []
+    };
+    const seeds = await resolveDnsSeeds({ domain: "example.org", resolver });
+    expect(seeds.map((s) => s.url)).toEqual(["https://pinned.example", "http://127.0.0.1:4301"]);
+    expect(seeds[0].publicKeyFingerprint).toBe(fp);
+    const srvOnly: DnsResolver = {
+      resolveTxt: async () => [],
+      resolveSrv: async () => [{ name: "web.example", port: 80, priority: 0, weight: 0 }, { name: "tls.example", port: 443, priority: 1, weight: 0 }]
+    };
+    expect((await resolveDnsSeeds({ domain: "example.org", resolver: srvOnly })).map((s) => s.url)).toEqual(["https://tls.example"]);
+  });
+
   it("falls back to SRV ordered by priority then weight when TXT yields nothing", async () => {
     const resolver: DnsResolver = {
       resolveTxt: async () => {

@@ -10,11 +10,13 @@
  * from live asks/bids, the trade tape, and a panel to place standing buy/sell orders.
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
+import { CSP_NONCE } from "../csp-nonce.js";
+
 export const MARKET_SUBTITLE =
   "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.";
 
 export const MARKET_CONTENT = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .mkt-top { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
       .mkt-pair { font-size:20px; font-weight:700; letter-spacing:0.01em; }
       .mkt-stat { display:flex; flex-direction:column; min-width:110px; }
@@ -26,7 +28,7 @@ export const MARKET_CONTENT = `
       .mkt-depth { height:160px; width:100%; }
       .mkt-toolbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
       .mkt-toolbar button { padding:4px 10px; font-size:12px; }
-      .mkt-toolbar button.active { background:var(--brand); color:#111; border-color:var(--brand); }
+      .mkt-toolbar button.active { background:var(--brand); color:var(--on-accent); border-color:var(--brand); }
       .book { font-family:var(--font-mono); font-size:12px; }
       .book table { width:100%; border-collapse:collapse; }
       .book td, .book th { padding:3px 6px; text-align:right; }
@@ -40,8 +42,8 @@ export const MARKET_CONTENT = `
       .order-tabs button { flex:1; border-radius:0; }
       .order-tabs button:first-child { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
       .order-tabs button:last-child { border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
-      .order-tabs button.buy.active { background:var(--ok); color:#000; border-color:var(--ok); }
-      .order-tabs button.sell.active { background:var(--danger); color:#000; border-color:var(--danger); }
+      .order-tabs button.buy.active { background:var(--ok); color:var(--on-accent); border-color:var(--ok); }
+      .order-tabs button.sell.active { background:var(--danger); color:var(--on-accent); border-color:var(--danger); }
       .field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
       .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
       .field input { font-family:var(--font-mono); }
@@ -49,10 +51,12 @@ export const MARKET_CONTENT = `
       .pos { color:var(--ok); } .neg { color:var(--danger); }
       .agents-list { font-size:12px; }
       .agents-list div { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid var(--card-border); }
+      select.pair-select { width:auto; min-width:260px; font-size:14px; font-weight:600; }
+      .hint.depth-label { margin:8px 0 4px; }
     </style>
 
     <div class="mkt-top">
-      <select id="pairSelect" style="width:auto;min-width:260px;font-size:14px;font-weight:600;"></select>
+      <select id="pairSelect" class="pair-select"></select>
       <div class="mkt-pair" id="pairLabel">…/BTC</div>
       <div class="mkt-stat"><span class="k">Last</span><span class="v" id="statLast">–</span></div>
       <div class="mkt-stat"><span class="k">24h change</span><span class="v" id="statChange">–</span></div>
@@ -66,24 +70,24 @@ export const MARKET_CONTENT = `
 
     <div class="mkt-grid">
       <div>
-        <div class="card" style="padding:12px;">
+        <div class="card u-pad-12">
           <div class="mkt-toolbar">
-            <span class="hint" style="margin-right:6px;">Interval</span>
+            <span class="hint u-mr-6">Interval</span>
             ${["1m", "5m", "15m", "1h", "4h", "1d"].map((i) => `<button data-interval="${i}" class="${i === "5m" ? "active" : ""}">${i}</button>`).join("")}
-            <span class="hint" style="margin-left:auto;" id="chartMeta">msat per credit · 1 credit = 1 measured second on the base tier of this class</span>
+            <span class="hint u-ml-auto" id="chartMeta">msat per credit · 1 credit = 1 measured second on the base tier of this class</span>
           </div>
           <div id="priceChart" class="mkt-chart"></div>
-          <div class="hint" style="margin:8px 0 4px;">Depth (cumulative agents asking / tasks bidding)</div>
+          <div class="hint depth-label">Depth (cumulative agents asking / tasks bidding)</div>
           <div id="depthChart" class="mkt-depth"></div>
         </div>
-        <div class="card" style="padding:12px;margin-top:12px;">
-          <h3 style="margin:0 0 8px;">Recent trades</h3>
+        <div class="card u-pad-12 u-mt-12">
+          <h3 class="u-m-0 u-mb-8">Recent trades</h3>
           <div class="tape" id="tape"><div class="hint">No trades yet on this class.</div></div>
         </div>
       </div>
       <div>
-        <div class="card book" style="padding:12px;">
-          <h3 style="margin:0 0 8px;font-family:system-ui;">Order book</h3>
+        <div class="card book u-pad-12">
+          <h3 class="u-m-0 u-mb-8 u-font-ui">Order book</h3>
           <table>
             <thead><tr><th>Price (msat/credit)</th><th>Agents</th><th>Cum.</th></tr></thead>
             <tbody id="asksBody"></tbody>
@@ -94,15 +98,15 @@ export const MARKET_CONTENT = `
             <tfoot><tr><th>Price (msat/credit)</th><th>Tasks</th><th>Cum.</th></tr></tfoot>
           </table>
         </div>
-        <div class="card book" style="padding:12px;margin-top:12px;">
-          <h3 style="margin:0 0 4px;font-family:system-ui;">Hardware tiers</h3>
-          <div class="hint" id="tierExplain" style="font-family:system-ui;margin-bottom:6px;"></div>
+        <div class="card book u-pad-12 u-mt-12">
+          <h3 class="u-m-0 u-mb-4 u-font-ui">Hardware tiers</h3>
+          <div class="hint u-font-ui u-mb-6" id="tierExplain"></div>
           <table>
-            <thead><tr><th style="text-align:left;">Tier</th><th>Credits/s</th><th>sats/h</th><th>Agents</th></tr></thead>
+            <thead><tr><th class="u-left">Tier</th><th>Credits/s</th><th>sats/h</th><th>Agents</th></tr></thead>
             <tbody id="tiersBody"></tbody>
           </table>
         </div>
-        <div class="card" style="padding:12px;margin-top:12px;">
+        <div class="card u-pad-12 u-mt-12">
           <div class="order-tabs">
             <button class="buy active" id="tabBuy">Buy compute</button>
             <button class="sell" id="tabSell">Sell compute</button>
@@ -116,11 +120,11 @@ export const MARKET_CONTENT = `
             <label>Class</label>
             <select id="orderClass"><option value="any">Any (match by class of the chart)</option></select>
           </div>
-          <div class="hint" id="orderExplain" style="margin-bottom:10px;"></div>
-          <button class="primary" id="placeOrder" style="width:100%;">Place standing bid</button>
-          <div class="hint" id="orderStatus" style="margin-top:8px;"></div>
-          <div id="myOrders" class="hint" style="margin-top:10px;"></div>
-          <div id="myAgents" class="agents-list" style="margin-top:10px;"></div>
+          <div class="hint u-mb-10" id="orderExplain"></div>
+          <button class="primary u-w-full" id="placeOrder">Place standing bid</button>
+          <div class="hint u-mt-8" id="orderStatus"></div>
+          <div id="myOrders" class="hint u-mt-10"></div>
+          <div id="myAgents" class="agents-list u-mt-10"></div>
         </div>
       </div>
     </div>`;
@@ -144,17 +148,54 @@ export const MARKET_SCRIPT = `
         }
 
         function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+        // #89: chart colors come from the theme tokens (hex), with alpha, since the chart library
+        // does not resolve CSS variables or color-mix().
+        function alpha(name, a) {
+          var h = css(name).replace("#", "");
+          if (h.length === 3) h = h.replace(/./g, "$&$&");
+          var n = parseInt(h.slice(0, 6), 16);
+          if (!/^[0-9a-fA-F]{6}/.test(h) || isNaN(n)) return css(name);
+          return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+        }
+
+        // Every color the charts use, read from the current theme's tokens.
+        function chartColors() {
+          return {
+            chart: { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: alpha("--text", 0.04) }, horzLines: { color: alpha("--text", 0.04) } }, timeScale: { borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") } },
+            candles: { upColor: css("--ok"), downColor: css("--danger"), borderUpColor: css("--ok"), borderDownColor: css("--danger"), wickUpColor: css("--ok"), wickDownColor: css("--danger") },
+            volume: { color: alpha("--brand", 0.5) },
+            bids: { lineColor: css("--ok"), topColor: alpha("--ok", 0.35), bottomColor: alpha("--ok", 0.02) },
+            asks: { lineColor: css("--danger"), topColor: alpha("--danger", 0.35), bottomColor: alpha("--danger", 0.02) }
+          };
+        }
 
         function buildCharts() {
           var LWC = window.LightweightCharts;
-          var common = { layout: { background: { color: "transparent" }, textColor: css("--text-secondary") }, grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } }, timeScale: { timeVisible: true, secondsVisible: false, borderColor: css("--card-border") }, rightPriceScale: { borderColor: css("--card-border") }, crosshair: { mode: 0 } };
+          var c = chartColors();
+          var common = { timeScale: { timeVisible: true, secondsVisible: false }, crosshair: { mode: 0 } };
+          var price = { priceFormat: { type: "price", precision: 0, minMove: 1 } };
           state.chart = LWC.createChart($("priceChart"), Object.assign({ autoSize: true }, common));
-          state.candles = state.chart.addCandlestickSeries({ upColor: css("--ok"), downColor: css("--danger"), borderUpColor: css("--ok"), borderDownColor: css("--danger"), wickUpColor: css("--ok"), wickDownColor: css("--danger"), priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.volume = state.chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol", color: "rgba(193,120,80,0.5)" });
+          state.candles = state.chart.addCandlestickSeries(Object.assign({}, price, c.candles));
+          state.volume = state.chart.addHistogramSeries(Object.assign({ priceFormat: { type: "volume" }, priceScaleId: "vol" }, c.volume));
           state.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
           state.depth = LWC.createChart($("depthChart"), Object.assign({ autoSize: true }, common, { timeScale: { visible: false }, handleScroll: false, handleScale: false }));
-          state.bidSeries = state.depth.addAreaSeries({ lineColor: css("--ok"), topColor: "rgba(74,222,128,0.35)", bottomColor: "rgba(74,222,128,0.02)", priceFormat: { type: "price", precision: 0, minMove: 1 } });
-          state.askSeries = state.depth.addAreaSeries({ lineColor: css("--danger"), topColor: "rgba(248,113,113,0.35)", bottomColor: "rgba(248,113,113,0.02)", priceFormat: { type: "price", precision: 0, minMove: 1 } });
+          state.bidSeries = state.depth.addAreaSeries(Object.assign({}, price, c.bids));
+          state.askSeries = state.depth.addAreaSeries(Object.assign({}, price, c.asks));
+          themeCharts();
+          // #27: the library holds resolved colors, so re-read the tokens when the theme toggle
+          // (or the system setting, in "system" mode) flips <html data-theme>.
+          if (window.MutationObserver) new MutationObserver(themeCharts).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+        }
+
+        function themeCharts() {
+          if (!state.chart) return;
+          var c = chartColors();
+          state.chart.applyOptions(c.chart);
+          state.depth.applyOptions(c.chart);
+          state.candles.applyOptions(c.candles);
+          state.volume.applyOptions(c.volume);
+          state.bidSeries.applyOptions(c.bids);
+          state.askSeries.applyOptions(c.asks);
         }
 
         function classSpec(id) { for (var i = 0; i < state.classes.length; i++) if (state.classes[i].id === id) return state.classes[i]; return null; }
@@ -178,11 +219,11 @@ export const MARKET_SCRIPT = `
         // Weight table: one price per credit in the class; a tier's hour is the credit-hour × its weight.
         function renderTiers(spec, refMsat) {
           var tiers = spec.tiers || [];
-          if (!tiers.length) { $("tiersBody").innerHTML = "<tr><td colspan='4' class='hint' style='text-align:center'>one tier</td></tr>"; $("tierExplain").textContent = ""; return; }
+          if (!tiers.length) { $("tiersBody").innerHTML = "<tr><td colspan='4' class='hint u-center'>one tier</td></tr>"; $("tierExplain").textContent = ""; return; }
           var top = tiers[tiers.length - 1];
           $("tierExplain").textContent = "Same price per credit for every tier. Faster hardware earns more credits per second, so one hour of " + top.label + " costs " + top.creditsPerSecond + " " + spec.label + " credit-hours. Tasks can require minVramGb / minMemoryGb; under-spec agents cannot fill them.";
           $("tiersBody").innerHTML = tiers.map(function (t) {
-            return "<tr><td style='text-align:left;'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + esc(t.creditsPerSecond) + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + esc(t.agents || 0) + "</td></tr>";
+            return "<tr><td class='u-left'>" + esc(t.label) + " <span class='hint'>" + esc(t.id) + "</span></td><td>" + esc(t.creditsPerSecond) + "×</td><td>" + fmt(satsHour(refMsat, t.creditsPerSecond), 1) + "</td><td>" + esc(t.agents || 0) + "</td></tr>";
           }).join("");
         }
 
@@ -191,11 +232,11 @@ export const MARKET_SCRIPT = `
           var totalA = 0; for (var i = 0; i < book.asks.length; i++) totalA += book.asks[i].count;
           cum = totalA;
           for (var a = 0; a < asks.length; a++) { rows.push("<tr><td class='ask'>" + fmt(asks[a].msatPerCredit) + "</td><td>" + esc(asks[a].count) + "</td><td>" + esc(cum) + "</td></tr>"); cum -= asks[a].count; }
-          $("asksBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no asks</td></tr>";
+          $("asksBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint u-center'>no asks</td></tr>";
           $("bookMid").textContent = fmt(book.midMsatPerCredit) + " msat · clearing " + fmt(book.clearingMsatPerCredit);
           cum = 0; rows = [];
           for (var b = 0; b < book.bids.length; b++) { cum += book.bids[b].count; rows.push("<tr><td class='bid'>" + fmt(book.bids[b].msatPerCredit) + "</td><td>" + esc(book.bids[b].count) + "</td><td>" + esc(cum) + "</td></tr>"); }
-          $("bidsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint' style='text-align:center'>no bids (open tasks)</td></tr>";
+          $("bidsBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='hint u-center'>no bids (open tasks)</td></tr>";
         }
 
         function renderDepth(depth) {
@@ -216,7 +257,7 @@ export const MARKET_SCRIPT = `
         function renderCandles(data) {
           var c = data.candles.map(function (k) { return { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }; });
           state.candles.setData(c);
-          state.volume.setData(data.candles.map(function (k) { return { time: k.time, value: k.volume, color: k.close >= k.open ? "rgba(74,222,128,0.5)" : "rgba(248,113,113,0.5)" }; }));
+          state.volume.setData(data.candles.map(function (k) { return { time: k.time, value: k.volume, color: k.close >= k.open ? alpha("--ok", 0.5) : alpha("--danger", 0.5) }; }));
           if (c.length) state.chart.timeScale().fitContent();
           if (c.length >= 2) {
             var first = c[Math.max(0, c.length - Math.round(86400 / (secondsOf(state.interval))))], lastC = c[c.length - 1];

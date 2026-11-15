@@ -26,14 +26,47 @@ control plane.
 
 | Config File | App Name | Region | Entrypoint | Port | VM |
 |-------------|----------|--------|------------|------|-----|
-| `fly.seed-node.toml` | `edgecoder-seed` | `ord` | `node dist/index.js` (+ Ollama via the agent image entrypoint) | 4301 | 16 GB, 2 perf CPUs |
-| `fly.seed-eu.toml` | `edgecoder-seed-eu` | `cdg` | `node dist/index.js` (+ Ollama) | 4301 | 8 GB, 2 perf CPUs |
+| `fly.seed-node.toml` | `edgecoder-seed` | `ord` | `node dist/index.js` (coordinator-only, no model) | 4301 | 16 GB, 2 perf CPUs |
+| `fly.seed-eu.toml` | `edgecoder-seed-eu` | `cdg` | `node dist/index.js` (+ Ollama via the agent image entrypoint) | 4301 | 8 GB, 2 perf CPUs |
 | `fly.portal.toml` | `edgecoder-portal` | `ord` | `node dist/portal/server.js` | 4310 | 1 GB, shared |
 | `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | `ord` | `node dist/economy/anchor-proxy-service.js` | 4311 | 256 MB, shared |
 
 Both seeds set `DISABLE_SELF_AGENT=1` (#39): Fly machines have no Docker, so the embedded worker
-could never pass the `SANDBOX_MODE=docker` check. Seeds coordinate and serve Ollama chat; swarm
-compute comes from enrolled agents.
+could never pass the `SANDBOX_MODE=docker` check. Swarm compute comes from enrolled agents.
+
+**The US seed is coordinator-only (#39, owner decision).** `edgecoder-seed` runs no model: it sets
+`SKIP_OLLAMA=true`, leaves `LOCAL_MODEL_PROVIDER` / `OLLAMA_*` unset and mounts no Ollama volume.
+It registers agents, schedules work, settles the economy and gossips with the mesh. A chat that
+needs a coordinator-hosted model is served by a seed that has one (`edgecoder-seed-eu`, which keeps
+Ollama and its `ollama_data_eu` volume):
+
+- The portal checks capacity before it sends a chat (`src/portal/chat-capacity.ts`). For each vetted
+  coordinator it reads `GET /health/runtime` (is the coordinator's own Ollama reachable, and does it
+  hold a model) and, for chats on network compute, `GET /inference/models` (which models connected
+  agents can run). It prefers the first coordinator in `COORDINATOR_DISCOVERY_URLS`, falls over to
+  the next one that reports capacity, retries once on another coordinator when the chosen one fails
+  before any token was streamed, and answers "No compute is available right now" at once when no
+  coordinator can serve the request. Answers are cached for `PORTAL_CHAT_CAPACITY_TTL_MS`.
+- Only coordinators that pass the portal's URL policy (`PORTAL_COORDINATOR_HOSTS` plus the hosts of
+  `COORDINATOR_DISCOVERY_URLS` / `CONTROL_PLANE_URL`) are probed or sent a chat.
+- Callers that reach the US seed's `/portal/chat` directly still get an answer while a mesh peer
+  with a model is up: the coordinator forwards the chat to it (`tryMeshPeerChat`), else it answers
+  `502 no_models_available`.
+
+What the unset variables change on the US seed: `LOCAL_MODEL_PROVIDER` defaults to
+`edgecoder-local`, so the coordinator skips the model pull at boot and `/escalate` goes straight to
+the inference service and the escalation resolver; `/health/runtime` stays `200` (the Fly check
+does not depend on Ollama) and reports `ollama.reachable: false`.
+
+**The old `ollama_data` volume.** Removing `[mounts]` from the config detaches the volume but does
+not delete it, and Fly keeps billing for it. Keep it until the coordinator-only seed has run
+cleanly (it is the fast way back: restore the `[mounts]` block and the Ollama variables, redeploy,
+and the pulled model is still there), then remove it:
+
+```bash
+fly volumes list -a edgecoder-seed
+fly volumes destroy <volume-id> -a edgecoder-seed
+```
 
 ### Fresh Fly organization (one command)
 
@@ -93,7 +126,7 @@ fly secrets set -a <seed app> \
 # Portal
 fly secrets set -a <portal app> \
   PORTAL_SERVICE_TOKEN="<same as seeds>" CONTROL_PLANE_ADMIN_TOKEN="<ADMIN_API_TOKEN of the seeds>" \
-  WALLET_SECRET_PEPPER="<secret>" RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@<your-portal-domain>" \
+  RESEND_API_KEY="<key>" RESEND_FROM_EMAIL="noreply@<your-portal-domain>" \
   PORTAL_DATABASE_URL="postgresql://..." \
   SYSTEM_ADMIN_EMAILS="admin@example.com,ops@example.com" \
   OAUTH_GOOGLE_CLIENT_ID="<id>" OAUTH_GOOGLE_CLIENT_SECRET="<secret>" \
@@ -110,26 +143,31 @@ forwards it when you export it before running.
 
 ### Seed Node Configuration
 
-The seed node TOML (`fly.seed-node.toml`) sets these environment variables:
+The US seed TOML (`fly.seed-node.toml`) is coordinator-only (#39) and sets these environment
+variables (payment and identity settings omitted):
 
 ```toml
 [env]
   NODE_ENV = "production"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
-  COORDINATOR_PUBLIC_URL = "https://edgecoder-seed.fly.dev"
-  LOCAL_MODEL_PROVIDER = "ollama-local"
-  OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen3.5:9b"
+  COORDINATOR_PUBLIC_URL = "https://coordinator.edgecoder.io"
   DISABLE_SELF_AGENT = "1"
+  SKIP_OLLAMA = "true"
 ```
 
-It mounts persistent storage for Ollama model data (owned by uid 1000 after the #9 post-deploy step):
+It has no `[mounts]` section. The EU seed (`fly.seed-eu.toml`) is the seed that runs a model:
 
 ```toml
+[env]
+  LOCAL_MODEL_PROVIDER = "ollama-local"
+  OLLAMA_AUTO_INSTALL = "true"
+  OLLAMA_MODEL = "qwen3.5:4b"
+  DISABLE_SELF_AGENT = "1"
+
 [mounts]
-  source = "ollama_data"
-  destination = "/data/ollama"
+  source = "ollama_data_eu"
+  destination = "/data/ollama" # owned by uid 1000 after the #9 post-deploy step
 ```
 
 ### Portal Configuration
@@ -199,13 +237,13 @@ docker run -p 4301:4301 -p 4302:4302 -p 4303:4303 edgecoder-agent
 
 The root `Dockerfile` has been removed. `Dockerfile.anchor-proxy` is unchanged. The docs site is published only to GitHub Pages (`deploy-docs.yml`); the Fly docs app and `Dockerfile.docs` were dropped (#33).
 
-**Volumes (after the first deploy).** Fly volumes are root-owned, and the volume mount hides the image's own `chown`, so the `node` user (uid 1000) can't write to `/data/ollama` at first. The seed mounts moved from `/root/.ollama` to `/data/ollama`, so that path only exists *after* the new image is deployed. The correct sequence is:
+**Volumes (after the first deploy).** This applies to a seed that mounts `/data/ollama` (the EU seed; the US seed is coordinator-only and has no volume). Fly volumes are root-owned, and the volume mount hides the image's own `chown`, so the `node` user (uid 1000) can't write to `/data/ollama` at first. The seed mounts moved from `/root/.ollama` to `/data/ollama`, so that path only exists *after* the new image is deployed. The correct sequence is:
 
 1. Deploy the new image.
 2. `fly ssh console` (runs as root), then `chown -R 1000:1000 /data/ollama`.
 3. Restart the machine, then smoke-test the portal.
 
-`scripts/fly-post-deploy.sh <toml>` does steps 2 and 3. The deploy workflow runs it after each seed deploy. Like the deploy, it refuses to run unless `DEPLOY_ENABLED=true` (deploys are disabled until #31). If the models dir isn't writable, the entrypoint logs a clear error and doesn't start Ollama.
+`scripts/fly-post-deploy.sh <toml>` does steps 2 and 3 when the config mounts `/data/ollama` and skips them otherwise. The deploy workflow runs it after each seed deploy. Like the deploy, it refuses to run unless `DEPLOY_ENABLED=true` (deploys are disabled until #31). If the models dir isn't writable, the entrypoint logs a clear error and doesn't start Ollama.
 
 **Bluetooth.** Running the agent image as non-root on hardware with a Bluetooth radio needs `--cap-add=NET_RAW --cap-add=NET_ADMIN` (and `--net=host`) for raw HCI sockets. This doesn't matter on Fly, which has no radio.
 
@@ -483,7 +521,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADMIN_API_TOKEN` | | Admin API token for control plane |
+| `ADMIN_API_TOKEN` | | Admin API token for control plane (at least 32 characters when `NODE_ENV=production`; the control plane refuses to start otherwise) |
 | `ALLOWED_ADMIN_IPS` | | Comma-separated IP allowlist for admin |
 | `ALLOWED_UI_IPS` | | Comma-separated IP allowlist for UI |
 | `INFERENCE_AUTH_TOKEN` | | Token for inference service access |
@@ -507,7 +545,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `PORTAL_COOKIE_SECURE` | unset (on when `NODE_ENV=production`) | `1` forces `Secure` + `__Host-` session cookies outside production (#10). Renaming the cookie logs everyone out once. |
 | `PORTAL_CONNECT_ORIGINS` | | Comma list of extra CSP `connect-src` origins (#10) |
 | `PORTAL_TRUSTED_ORIGINS` | | Comma list of extra origins allowed to send state-changing requests (CSRF check). The desktop origins are always allowed (#10) |
-| `PORTAL_CSP_ENFORCE` | unset | The CSP is enforced, with a per-request nonce on the pages' inline scripts. `0` sends it as `Content-Security-Policy-Report-Only` instead, for diagnosing a page the policy breaks (#10) |
+| `PORTAL_CSP_ENFORCE` | unset | The CSP is enforced, with a per-request nonce on the pages' inline scripts and `<style>` blocks (no `'unsafe-inline'`, #27). `0` sends it as `Content-Security-Policy-Report-Only` instead, for diagnosing a page the policy breaks (#10) |
 | `PORTAL_TRUST_PROXY_HOPS` | `1` | Proxy hops to trust for the client IP (Fly = 1). Used by rate limits (#10) |
 
 ### Passkey / WebAuthn
@@ -561,6 +599,10 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `COORDINATOR_FEE_BPS` | `150` | Coordinator fee in basis points |
 | `COORDINATOR_FEE_ACCOUNT` | `coordinator-fee:default` | Fee collection account |
 | `APPROVED_COORDINATOR_IDS` | | Comma-separated approved coordinator peer IDs |
+| `PRICE_EPOCH_CPU_MIN_SATS` / `PRICE_EPOCH_CPU_MAX_SATS` | `10` / `120` | Band for the legacy CPU price epoch (sats per compute unit) |
+| `PRICE_EPOCH_GPU_MIN_SATS` / `PRICE_EPOCH_GPU_MAX_SATS` | `42` / `480` | Band for the legacy GPU price epoch |
+| `PRICE_EPOCH_MAX_CHANGE_BPS` | `2500` | Largest move of a price epoch from the previous one, in basis points |
+| `PRICE_CONSENSUS_QUORUM` | majority | Signed allowlisted coordinators a price consensus needs (can only raise the majority) |
 | `LIGHTNING_PROVIDER` | `mock` | Lightning provider: `mock`, `lnd`, `cln` |
 | `PAYMENT_INTENT_TTL_MS` | `900000` (15 min) | Payment intent expiry |
 | `PAYMENT_WEBHOOK_SECRET` | | Webhook secret for payment notifications |
@@ -582,20 +624,45 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `ISSUANCE_RESERVE_SHARE` | `0.05` | Reserve share of issuance (5%) |
 | `ANCHOR_INTERVAL_MS` | `7200000` (2h) | Bitcoin anchoring interval |
 
+### Result Verification
+
+Sampled redundant execution of worker results (`src/swarm/verification.ts`, #50). A sampled result is re-run by an agent on a different reward account, and credits wait until two executions agree. Off by default.
+
+Only subtask kinds with a comparator can be verified (#104):
+
+- `micro_loop` and `single_step` (code tasks) compare the **execution result**: the exit status (`ok`) plus stdout, with CRLF, trailing whitespace on each line, and leading or trailing blank lines ignored. Any other difference is a mismatch.
+- `inference` (LLM text generation) is **never verified**. Two honest generations differ, and fuzzy text similarity could be gamed. Inference results are paid unverified. Listing `inference` in `RESULT_VERIFICATION_KINDS` is ignored with a startup warning.
+
+Even for code tasks, generated programs can print differently between honest runs, so turn the rate on gradually and watch the `result_verification_mismatch` security events.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESULT_VERIFICATION_RATE` | `0` (off) | Base fraction of eligible results re-executed (0..1). Effective rate is `min(1, rate * (2 - reputation))` |
+| `RESULT_VERIFICATION_KINDS` | `micro_loop,single_step` | Comma-separated subtask kinds eligible for sampling; `none` disables every kind. `inference` and unknown kinds are ignored |
+| `RESULT_VERIFICATION_MAX_EXECUTIONS` | `3` | Total executions, including the original, before a subtask is unresolved (2..3) |
+| `RESULT_VERIFICATION_MISMATCH_PENALTY` | `0.25` | Reputation lost on a mismatch (0..1) |
+| `RESULT_VERIFICATION_TIMEOUT_MS` | `900000` (15 min) | Hold time before a result no replica picked up is released unverified |
+| `RESULT_VERIFICATION_INITIAL_REPUTATION` | `0.5` | Reputation of an agent never seen before (0..1) |
+| `RESULT_VERIFICATION_ABANDON_PENALTY` | `0.25` | Reputation lost for claiming a replica and never reporting it (0..1) |
+| `RESULT_VERIFICATION_REPLICA_CLAIM_TIMEOUT_MS` | `300000` (5 min) | A claimed replica with no report after this long is reassigned |
+| `RESULT_VERIFICATION_MAX_REASSIGNMENTS` | `1` | How many times one sampled subtask's stalled replicas are reassigned (0..10) |
+| `RESULT_VERIFICATION_MINT_REPLICA_REWARDS` | `false` | Pay winning replicas from newly minted credits. The original execution is always paid |
+
 ### Stats and Audit
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATS_LEDGER_SYNC_INTERVAL_MS` | `10000` | Stats ledger sync interval |
 | `STATS_ANCHOR_INTERVAL_MS` | `600000` (10 min) | Stats anchor interval |
-| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Min Bitcoin confirmations for anchors |
+| `STATS_ANCHOR_MIN_CONFIRMATIONS` | `1` | Extra floor for stats hard finality; the effective depth is the larger of this and `BITCOIN_ANCHOR_CONFIRMATIONS` (default 6) |
 
 ### Rate Limiting
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_RATE_LIMIT_MAX` | `30` | Max requests per agent per window |
+| `AGENT_RATE_LIMIT_MAX` | `300` | Max signed requests per agent per window (counted only once the signature verifies) |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window |
+| `PREAUTH_FAILURE_MAX_PER_IP` | `120` | Signed requests per client address per window whose signature fails (bad signature, clock skew); past it the address is refused for the rest of the window. Such failures are never counted against the agent id the request names. Behind a reverse proxy other than Fly, set `COORDINATOR_TRUST_PROXY` so the client address is known |
 | `SECURITY_NONCE_TTL_MS` | `300000` | Nonce TTL for signed requests |
 | `SECURITY_MAX_SKEW_MS` | `120000` | Max clock skew for signed requests |
 
@@ -624,7 +691,7 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | | PostgreSQL connection string |
+| `DATABASE_URL` | | PostgreSQL connection string. Required for a coordinator in production (#55) |
 
 ### UI Links
 

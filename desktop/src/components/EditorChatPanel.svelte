@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { ChevronDown, Plus } from "@lucide/svelte";
+  import { menu } from "../lib/menu";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
@@ -59,6 +61,7 @@
 
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
+  let pickerTrigger: HTMLButtonElement | undefined = $state();
 
   /** Whether to stream via the portal API when no local agent is available */
   let usePortalChat = $state(false);
@@ -320,38 +323,45 @@
 
 <div class="editor-chat-panel">
   <div class="panel-header">
-    <button class="conversation-selector" onclick={() => { showPicker = !showPicker; }}>
+    <button
+      bind:this={pickerTrigger}
+      class="conversation-selector"
+      aria-haspopup="menu"
+      aria-expanded={showPicker}
+      onclick={() => { showPicker = !showPicker; }}
+    >
       <span class="convo-title-text">{conversation.title}</span>
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="6 9 12 15 18 9"/>
-      </svg>
+      <ChevronDown size={12} />
     </button>
     <ComputePicker selected={$computeChoice} up={false} onSelect={(id) => computeChoice.set(id)} />
-    <button class="new-chat-btn" onclick={newChat} title="New coding chat">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 5v14M5 12h14"/>
-      </svg>
+    <button class="new-chat-btn" onclick={newChat} title="New coding chat" aria-label="New coding chat">
+      <Plus size={16} />
     </button>
   </div>
 
   {#if showPicker}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="picker-backdrop" onclick={() => { showPicker = false; }}></div>
-    <div class="conversation-picker">
-      {#if recentConversations.length === 0}
-        <div class="picker-empty">No previous coding chats</div>
+    <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
+    <div
+      class="conversation-picker"
+      role="menu"
+      aria-label="Recent coding chats"
+      tabindex="-1"
+      use:menu={{ trigger: pickerTrigger, onClose: (returnFocus) => { showPicker = false; if (returnFocus) pickerTrigger?.focus(); } }}
+    >
+      {#each recentConversations.slice(0, 10) as convo (convo.id)}
+        <button
+          class="picker-item"
+          class:active={convo.id === conversation.id}
+          role="menuitem"
+          aria-current={convo.id === conversation.id ? "true" : undefined}
+          onclick={() => switchConversation(convo.id)}
+        >
+          <span class="picker-title">{convo.title}</span>
+          <span class="picker-time">{formatTime(convo.updatedAt)}</span>
+        </button>
       {:else}
-        {#each recentConversations.slice(0, 10) as convo (convo.id)}
-          <button
-            class="picker-item"
-            class:active={convo.id === conversation.id}
-            onclick={() => switchConversation(convo.id)}
-          >
-            <span class="picker-title">{convo.title}</span>
-            <span class="picker-time">{formatTime(convo.updatedAt)}</span>
-          </button>
-        {/each}
-      {/if}
+        <div class="picker-empty" role="menuitem" aria-disabled="true">No previous coding chats</div>
+      {/each}
     </div>
   {/if}
 
@@ -489,12 +499,6 @@
     color: var(--text-primary);
   }
 
-  .picker-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 9;
-  }
-
   .conversation-picker {
     position: absolute;
     top: 44px;
@@ -503,7 +507,7 @@
     background: var(--bg-elevated);
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-lg);
     z-index: 10;
     max-height: 320px;
     overflow-y: auto;

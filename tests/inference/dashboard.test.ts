@@ -16,6 +16,21 @@ describe("Agent Dashboard", () => {
     expect(res.body).toContain("/model/swap");
   });
 
+  it("escapes Ollama-supplied model fields instead of inlining them into HTML or handlers", async () => {
+    const app = Fastify();
+    buildDashboardRoutes(app, { activeModel: "m", activeModelParamSize: 1 });
+    const res = await app.inject({ method: "GET", url: "/dashboard" });
+    expect(res.body).not.toContain("onclick=\"swapModel(");
+    expect(res.body).toContain("esc(m.modelId)");
+    expect(res.body).toContain("esc(entry.from)");
+    const src = /function esc\(v\) \{[\s\S]*?\n\}/.exec(res.body)?.[0];
+    expect(src).toBeTruthy();
+    const esc = new Function(`${src}; return esc;`)() as (v: unknown) => string;
+    expect(esc(`x'); alert(1); ('<img src=x onerror=alert(1)>"`)).toBe("x&#39;); alert(1); (&#39;&lt;img src=x onerror=alert(1)&gt;&quot;");
+    expect(esc(undefined)).toBe("");
+    await app.close();
+  });
+
   it("returns overview API data", async () => {
     const app = Fastify();
     const state = { activeModel: "test-model:3b", activeModelParamSize: 3.0 };

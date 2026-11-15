@@ -6,8 +6,9 @@ import { describe, expect, it } from "vitest";
 // #29: WCAG AA contrast for the colour tokens, both themes: 4.5:1 for every text colour on
 // every background, and for on-accent text on accent fills (buttons, selected rows).
 const here = dirname(fileURLToPath(import.meta.url));
-const { color } = JSON.parse(readFileSync(join(here, "../src/tokens.json"), "utf8")) as {
+const { color, derived } = JSON.parse(readFileSync(join(here, "../src/tokens.json"), "utf8")) as {
   color: Record<string, { dark: string; light: string }>;
+  derived: Record<string, { of: string; percent: number; into: string }>;
 };
 
 function rgb(hex: string): [number, number, number] {
@@ -21,6 +22,11 @@ function luminance(hex: string): number {
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+// color-mix(in srgb, a p%, b), as the browser computes it for opaque colours.
+function mix(a: string, percent: number, b: string): string {
+  const [x, y] = [rgb(a), rgb(b)];
+  return "#" + x.map((v, i) => Math.round((v * percent + y[i] * (100 - percent)) / 100).toString(16).padStart(2, "0")).join("");
 }
 export function contrast(a: string, b: string): number {
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
@@ -62,6 +68,17 @@ describe("token contrast meets WCAG AA (#29)", () => {
   it.each(["dark", "light"] as const)("%s: text-primary on selection is at least 4.5:1", (mode) => {
     expect(contrast(color["text-primary"][mode], color["selection"][mode])).toBeGreaterThanOrEqual(4.5);
   });
+
+  // Badges and inline errors put red text on a red tint of the surface. Plain red is below
+  // 4.5:1 there, so they use red-strong; this holds for tints up to 15%.
+  it.each((["dark", "light"] as const).flatMap((mode) => BACKGROUNDS.map((bg) => [mode, bg] as const)))(
+    "%s: red-strong on a 15% red tint of %s is at least 4.5:1",
+    (mode, bg) => {
+      const d = derived["red-strong"];
+      const text = mix(color[d.of][mode], d.percent, color[d.into][mode]);
+      expect(contrast(text, mix(color.red[mode], 15, color[bg][mode]))).toBeGreaterThanOrEqual(4.5);
+    },
+  );
 
   it("every colour token is either checked or listed as decorative", () => {
     const checked = new Set([...BACKGROUNDS, ...TEXT, ...UI, "on-accent", "selection"]);

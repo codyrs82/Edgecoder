@@ -3,15 +3,23 @@
 
 import { randomUUID } from "node:crypto";
 import type { CreditTransaction, InfrastructureHost, PayoutRecord } from "../common/types.js";
-import type { LightningProvider } from "./lightning.js";
+import { payFailureIsFinal, type LightningProvider } from "./lightning.js";
 import { PAYOUT_LIMIT_WINDOW_MS, checkPayoutLimits, payoutLimitsActive, type PayoutLimitCode, type PayoutLimits, type PayoutLimitViolation, type PayoutPauseControl, type PayoutPauseState, type PayoutPauseStore } from "./payout-safeguards.js";
 import type { ReconcileLedger } from "./payout-reconcile.js";
 import { callbackOrigin, checkCallbackPin, type CallbackPinStore, type PinCheck } from "./lnurl-callback-pin.js";
 import {
+  creditsToMsat,
   distributeFeePool,
-  payableMsat,
+  earningsMaturityCutoffMs,
+  earnRowMatured,
+  msatToCredits,
   payoutCapacityMsat,
+  payoutDebitTxId,
+  payoutFeeExcessTxId,
+  payoutRefundTxId,
+  payoutSettlementRefundMsat,
   preimageMatches,
+  withdrawableMsat,
   requestLnurlInvoice,
   resolveLnurlCallback,
   validatePayoutRequest,
@@ -39,15 +47,35 @@ export type ReserveResult =
 
 export type FeePoolLockResult<T> = { acquired: true; value: T } | { acquired: false };
 
+/** An account's earnings split by the earnings hold (see earningsMaturityCutoffMs). */
+export interface EarningsSummary {
+  /** Every earn row's msat (matured or not). */
+  totalMsat: number;
+  /** Earn rows at or before the cutoff: the only earnings payable counts. */
+  maturedMsat: number;
+  /** Timestamp of the oldest earn row (with msat) still held, or null when none is held or unknown. */
+  oldestHeldAtMs: number | null;
+}
+
 export interface PayoutStore extends ReconcileLedger, PayoutPauseStore {
-  earnedMsat(accountId: string): Promise<number>;
+  /** msat on the account's earn rows; with a cutoff, only rows matured at it (timestamp <= cutoff). */
+  earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number>;
+  /** Total and matured earnings in one read (balance reporting). */
+  earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary>;
   receivedPurchaseMsat(): Promise<number>;
   payoutsTotalMsat(filter: { accountId?: string; statuses: Array<PayoutRecord["status"]> }): Promise<number>;
   /**
    * Insert the pending row if payable, capacity and (when given) the 24 h caps all hold. Postgres
    * serialises every reservation under one advisory lock so the global cap and capacity are exact.
+   * `maturedAtOrBeforeMs`: payable counts only earn rows matured at this cutoff (earnings hold);
+   * undefined = no hold.
    */
-  reservePayout(payout: PayoutRecord, capacityMsat: (paidOrPendingAllMsat: number) => number, limits?: ReservationLimits): Promise<ReserveResult>;
+  reservePayout(
+    payout: PayoutRecord,
+    capacityMsat: (paidOrPendingAllMsat: number) => number,
+    limits?: ReservationLimits,
+    maturedAtOrBeforeMs?: number
+  ): Promise<ReserveResult>;
   settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }): Promise<void>;
   listPayouts(accountId: string, limit?: number): Promise<PayoutRecord[]>;
   listAutoPayoutAccounts(): Promise<Array<{ accountId: string; lightningAddress: string }>>;
@@ -79,9 +107,30 @@ export class MemoryPayoutStore implements PayoutStore {
   readonly autoAccounts = new Map<string, string>();
   readonly rows: CreditTransaction[] = [];
   received = 0;
-  constructor(private readonly earned: (accountId: string) => number) {}
-  async earnedMsat(accountId: string): Promise<number> {
-    return this.earned(accountId) + this.rows.filter((r) => r.accountId === accountId && r.type === "earn").reduce((s, r) => s + (r.msat ?? 0), 0);
+  private reserving: Promise<unknown> = Promise.resolve();
+  /**
+   * `earned`: msat earned outside this store's rows; given a cutoff it should count only earnings
+   * matured at it (a callback that ignores it applies no hold to those earnings). `credits`: credit
+   * balance held outside the rows (added to the rows' balance); a subclass may override creditBalance instead.
+   */
+  constructor(
+    private readonly earned: (accountId: string, maturedAtOrBeforeMs?: number) => number,
+    private readonly credits: (accountId: string) => number = () => 0
+  ) {}
+  private earnRows(accountId: string): CreditTransaction[] {
+    return this.rows.filter((r) => r.accountId === accountId && r.type === "earn");
+  }
+  async earnedMsat(accountId: string, maturedAtOrBeforeMs?: number): Promise<number> {
+    const own = this.earnRows(accountId).filter((r) => earnRowMatured(r.timestampMs, maturedAtOrBeforeMs)).reduce((s, r) => s + (r.msat ?? 0), 0);
+    return this.earned(accountId, maturedAtOrBeforeMs) + own;
+  }
+  async earnings(accountId: string, maturedAtOrBeforeMs: number | undefined): Promise<EarningsSummary> {
+    const held = this.earnRows(accountId).filter((r) => (r.msat ?? 0) > 0 && !earnRowMatured(r.timestampMs, maturedAtOrBeforeMs));
+    return {
+      totalMsat: await this.earnedMsat(accountId),
+      maturedMsat: await this.earnedMsat(accountId, maturedAtOrBeforeMs),
+      oldestHeldAtMs: held.length ? Math.min(...held.map((r) => r.timestampMs)) : null
+    };
   }
   async receivedPurchaseMsat(): Promise<number> {
     return this.received;
@@ -93,10 +142,17 @@ export class MemoryPayoutStore implements PayoutStore {
   }
   private pause: PayoutPauseState | null = null;
   private poolLock = false;
-  async reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits): Promise<ReserveResult> {
+  /** One reservation at a time in this process (the reads below are async). */
+  reservePayout(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits, maturedAtOrBeforeMs?: number): Promise<ReserveResult> {
+    const run = this.reserving.then(() => this.reserveLocked(payout, capacityMsat, limits, maturedAtOrBeforeMs));
+    this.reserving = run.catch(() => undefined);
+    return run;
+  }
+  private async reserveLocked(payout: PayoutRecord, capacityMsat: (all: number) => number, limits?: ReservationLimits, maturedAtOrBeforeMs?: number): Promise<ReserveResult> {
     if ([...this.payouts.values()].some((p) => p.paymentHash === payout.paymentHash)) return { ok: false as const, code: "duplicate_invoice" as const };
-    const payable = payableMsat(await this.earnedMsat(payout.accountId), await this.payoutsTotalMsat({ accountId: payout.accountId, statuses: ["paid", "pending"] }));
-    if (payout.amountMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
+    const accountOut = [...this.payouts.values()].filter((p) => p.accountId === payout.accountId && (p.status === "paid" || p.status === "pending")).reduce((s, p) => s + rowOutflowMsat(p), 0);
+    const payable = withdrawableMsat(await this.earnedMsat(payout.accountId, maturedAtOrBeforeMs), accountOut, await this.creditBalance(payout.accountId));
+    if (payout.amountMsat + payout.maxFeeMsat > payable) return { ok: false as const, code: "insufficient_payable" as const, payableMsat: payable };
     if (payout.amountMsat + payout.maxFeeMsat > capacityMsat(await this.payoutsTotalMsat({ statuses: ["paid", "pending"] }))) return { ok: false as const, code: "coordinator_capacity" as const };
     if (limits) {
       // Synchronous from here to the insert, so concurrent in-process reservations cannot both pass.
@@ -108,13 +164,23 @@ export class MemoryPayoutStore implements PayoutStore {
       if (violation) return { ok: false as const, code: violation.code, violation };
     }
     this.payouts.set(payout.payoutId, { ...payout, status: "pending" });
+    const debit = payoutDebitTxId(payout.payoutId);
+    this.rows.push({ txId: debit, accountId: payout.accountId, type: "spend", credits: msatToCredits(payout.amountMsat + payout.maxFeeMsat), reason: debit, timestampMs: payout.createdAtMs });
     return { ok: true as const };
   }
   async settlePayout(payoutId: string, outcome: { status: "paid"; feeMsat: number; preimage?: string } | { status: "failed"; error: string }) {
     const p = this.payouts.get(payoutId);
     if (!p || p.status !== "pending") return;
-    if (outcome.status === "paid") Object.assign(p, { status: "paid", feeMsat: outcome.feeMsat, preimage: outcome.preimage, settledAtMs: Date.now() });
-    else Object.assign(p, { status: "failed", error: outcome.error, settledAtMs: Date.now() });
+    const now = Date.now();
+    if (outcome.status === "paid") Object.assign(p, { status: "paid", feeMsat: Math.max(0, Math.floor(outcome.feeMsat)), preimage: outcome.preimage, settledAtMs: now });
+    else Object.assign(p, { status: "failed", error: outcome.error, settledAtMs: now });
+    const debit = this.rows.find((r) => r.txId === payoutDebitTxId(payoutId));
+    if (!debit) return;
+    const back = payoutSettlementRefundMsat(creditsToMsat(debit.credits), outcome.status === "paid" ? { status: "paid", amountMsat: p.amountMsat, feeMsat: p.feeMsat } : { status: "failed" });
+    if (back === 0) return;
+    const txId = back > 0 ? payoutRefundTxId(payoutId) : payoutFeeExcessTxId(payoutId);
+    if (this.rows.some((r) => r.txId === txId)) return;
+    this.rows.push({ txId, accountId: p.accountId, type: back > 0 ? "earn" : "spend", credits: msatToCredits(Math.abs(back)), reason: txId, timestampMs: now });
   }
   async listPayouts(accountId: string, limit = 50) {
     return [...this.payouts.values()].filter((p) => p.accountId === accountId).sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, limit);
@@ -132,7 +198,7 @@ export class MemoryPayoutStore implements PayoutStore {
     this.rows.push(...rows);
   }
   async creditBalance(accountId: string) {
-    return this.rows.filter((r) => r.accountId === accountId).reduce((s, r) => s + (r.type === "spend" ? -r.credits : r.credits), 0);
+    return this.credits(accountId) + this.rows.filter((r) => r.accountId === accountId).reduce((s, r) => s + (r.type === "spend" ? -r.credits : r.credits), 0);
   }
   async distributedMsat(accountId: string) {
     return this.rows.filter((r) => r.accountId === accountId && r.type === "spend").reduce((s, r) => s + (r.msat ?? 0), 0);
@@ -215,23 +281,54 @@ export type PayoutResult =
   | { ok: true; payout: PayoutRecord }
   | { ok: false; code: string; detail?: string; payableMsat?: number };
 
+export interface PayoutBalance {
+  earnedMsat: number;
+  heldMsat: number;
+  maturesAtMs: number | null;
+  paidMsat: number;
+  pendingMsat: number;
+  payableMsat: number;
+  capacityMsat: number;
+}
+
 export class PayoutService {
   private readonly inflight = new Set<string>();
   constructor(private readonly d: PayoutServiceDeps) {}
 
-  async balance(accountId: string): Promise<{ earnedMsat: number; paidMsat: number; pendingMsat: number; payableMsat: number; capacityMsat: number }> {
-    const [earned, paid, pending, received, allOut] = await Promise.all([
-      this.d.store.earnedMsat(accountId),
+  /** The earnings hold in force (policy.earningsHoldMs; 0 = none). */
+  get earningsHoldMs(): number {
+    return Math.max(0, this.d.policy.earningsHoldMs ?? 0);
+  }
+
+  /**
+   * Balance as shown to the account (GET /economy/payouts/:accountId):
+   * - earnedMsat: every sat ever earned (matured or still held), unchanged meaning;
+   * - heldMsat: earned but still inside the earnings hold, not yet payable;
+   * - maturesAtMs: when the oldest held earning becomes payable (null when nothing is held);
+   * - paidMsat / pendingMsat: payouts paid / in flight (amount + fee);
+   * - payableMsat: matured earnings − paid − pending, capped at the credit balance;
+   * - capacityMsat: what the coordinator can still pay out in total.
+   */
+  async balance(accountId: string): Promise<PayoutBalance> {
+    const hold = this.earningsHoldMs;
+    const cutoff = earningsMaturityCutoffMs((this.d.now ?? Date.now)(), hold);
+    const [earnings, paid, pending, received, allOut, credits] = await Promise.all([
+      this.d.store.earnings(accountId, cutoff),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["paid"] }),
       this.d.store.payoutsTotalMsat({ accountId, statuses: ["pending"] }),
       this.d.store.receivedPurchaseMsat(),
-      this.d.store.payoutsTotalMsat({ statuses: ["paid", "pending"] })
+      this.d.store.payoutsTotalMsat({ statuses: ["paid", "pending"] }),
+      this.d.store.creditBalance(accountId)
     ]);
     return {
-      earnedMsat: earned,
+      earnedMsat: earnings.totalMsat,
+      heldMsat: Math.max(0, earnings.totalMsat - earnings.maturedMsat),
+      maturesAtMs: earnings.oldestHeldAtMs === null ? null : earnings.oldestHeldAtMs + hold,
       paidMsat: paid,
       pendingMsat: pending,
-      payableMsat: payableMsat(earned, paid + pending),
+      // Only matured earnings, and never more than the credit balance: earnings already spent as
+      // cSats are not withdrawable.
+      payableMsat: withdrawableMsat(earnings.maturedMsat, paid + pending, credits),
       capacityMsat: payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy)
     };
   }
@@ -268,7 +365,9 @@ export class PayoutService {
     const reserved = await this.d.store.reservePayout(
       payout,
       (allOut) => payoutCapacityMsat({ receivedMsat: received, paidOrPendingMsat: allOut }, this.d.policy),
-      limits ? { sinceMs: now() - PAYOUT_LIMIT_WINDOW_MS, check: (w) => checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat, ...w }, limits) } : undefined
+      limits ? { sinceMs: now() - PAYOUT_LIMIT_WINDOW_MS, check: (w) => checkPayoutLimits({ amountMsat: v.amountMsat, maxFeeMsat: v.maxFeeMsat, ...w }, limits) } : undefined,
+      // Rechecked under the store's lock with the same maturity rule the balance used.
+      earningsMaturityCutoffMs(payout.createdAtMs, this.earningsHoldMs)
     );
     if (!reserved.ok) {
       if ("violation" in reserved) return this.limitRejected(accountId, kind, v.amountMsat, reserved.violation);
@@ -284,11 +383,16 @@ export class PayoutService {
       }
       const res = await this.d.provider.payInvoice({ bolt11, maxFeeSats: Math.ceil(v.maxFeeMsat / 1000), timeoutSeconds: 60 });
       if (res.status !== "succeeded") {
-        // Transport errors may leave an in-flight HTLC; the row stays pending for reconciliation.
-        const transport = /transport/.test(res.error ?? "");
-        if (!transport) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
-        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, transport }, "payout_failed");
-        return { ok: false, code: transport ? "payout_unconfirmed" : "payout_failed", detail: res.error };
+        // Only a failure the node reported as final frees the balance. Anything else may leave an
+        // HTLC in flight, so the row (and its credit debit) stays pending for reconciliation.
+        const final = payFailureIsFinal(res.error);
+        if (final) await this.d.store.settlePayout(payout.payoutId, { status: "failed", error: res.error ?? "pay_failed" });
+        this.d.log?.warn({ accountId, payoutId: payout.payoutId, error: res.error, final }, "payout_failed");
+        return { ok: false, code: final ? "payout_failed" : "payout_unconfirmed", detail: res.error };
+      }
+      if (res.paymentHash && res.paymentHash.toLowerCase() !== payout.paymentHash.toLowerCase()) {
+        this.d.log?.warn({ payoutId: payout.payoutId, nodePaymentHash: res.paymentHash }, "payout_hash_mismatch");
+        return { ok: false, code: "payout_unconfirmed", detail: "node paid a different payment hash than the invoice's; left pending for reconciliation" };
       }
       if (res.preimage && !preimageMatches(payout.paymentHash, res.preimage)) {
         this.d.log?.warn({ payoutId: payout.payoutId }, "payout_preimage_mismatch");
@@ -408,20 +512,24 @@ export class PayoutService {
 
   private async distributeFeePoolLocked(expectedHeartbeats: number): Promise<FeePoolDistribution> {
     const now = this.d.now ?? Date.now;
-    const [poolCredits, poolMsat] = await Promise.all([this.d.store.creditBalance(this.d.feePoolAccountId), this.d.store.earnedMsat(this.d.feePoolAccountId)]);
+    // No earnings hold on the pool's own intake: the pool is never withdrawn directly, and what it
+    // pays hosts arrives as host earn rows, which are held like any other earnings before payout.
+    const poolMsat = await this.d.store.earnedMsat(this.d.feePoolAccountId);
     const alreadyOut = this.d.poolDistributedMsat ? this.d.poolDistributedMsat() : await this.d.store.distributedMsat(this.d.feePoolAccountId);
     const availableMsat = Math.max(0, Math.floor(poolMsat) - alreadyOut);
     const hosts = await this.d.store.listInfrastructureHosts();
     const shares = distributeFeePool(availableMsat, hosts, expectedHeartbeats);
     const totalMsat = shares.reduce((s, h) => s + h.msat, 0);
     if (shares.length === 0 || totalMsat <= 0) return { distributedMsat: 0, hosts: [] };
-    // Purchase fees arrive as sats without credits; accrual fees carry both. Credits follow the sats pro rata.
-    const creditsPerMsat = poolCredits > 0 ? poolCredits / Math.max(1, availableMsat) : 0;
+    // Hosts get cSats equal to the sats they are paid (1 cSat = 1 sat). Withdrawals are capped at the
+    // credit balance, so a host paid sats without matching cSats could not withdraw them. Purchase
+    // fees reach the pool as sats without cSats, so the pool's own cSat balance may go below zero;
+    // its sats (earn msat − spend msat) stay the measure of what it holds.
     const ts = now();
     const rows: CreditTransaction[] = [];
-    rows.push({ txId: randomUUID(), accountId: this.d.feePoolAccountId, type: "spend", credits: Number((totalMsat * creditsPerMsat).toFixed(6)), reason: `fee_pool_distribution:${ts}`, timestampMs: ts, msat: totalMsat });
+    rows.push({ txId: randomUUID(), accountId: this.d.feePoolAccountId, type: "spend", credits: msatToCredits(totalMsat), reason: `fee_pool_distribution:${ts}`, timestampMs: ts, msat: totalMsat });
     for (const h of shares) {
-      rows.push({ txId: randomUUID(), accountId: h.accountId, type: "earn", credits: Number((h.msat * creditsPerMsat).toFixed(6)), reason: `fee_pool_distribution:${ts}:${h.hostId}`, timestampMs: ts, msat: h.msat });
+      rows.push({ txId: randomUUID(), accountId: h.accountId, type: "earn", credits: msatToCredits(h.msat), reason: `fee_pool_distribution:${ts}:${h.hostId}`, timestampMs: ts, msat: h.msat });
     }
     await this.d.store.recordCreditTransactions(rows);
     await this.d.store.resetHostHeartbeatWindow();

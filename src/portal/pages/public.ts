@@ -5,9 +5,11 @@ import type { FastifyInstance } from "fastify";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
+import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPricing } from "../public-pricing.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL, supportEmail } from "./urls.js";
 import { escapeHtml } from "./escape.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 /** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
 function priceCell(c: { satsPerHour?: number; usdPerHour: number }): string {
@@ -43,7 +45,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
     ? "Sats per hour are today's rate epoch: the class's USD reference divided by the BTC/USD median of four exchanges, plus the network markup. Agents' asks and requesters' bids trade around it on the Market page."
     : "Reference USD prices per class. The live sats rate is recalibrated daily from four BTC/USD sources and shown on the portal.";
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -52,14 +54,14 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
         name="description"
         content="EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Contribute idle CPU and GPU time for sats, or buy compute at a daily market rate."
       />
-      <style>
+      ${themeHeadTags()}
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -136,6 +138,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
@@ -145,7 +148,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
       <main class="shell">
         <section class="hero">
           <div>
-            <div class="eyebrow" style="color:var(--brand-2);">Decentralized compute · settled in Bitcoin</div>
+            <div class="eyebrow u-brand-2">Decentralized compute · settled in Bitcoin</div>
             <h1>A global market for AI compute, priced in sats.</h1>
             <p class="lead">
               EdgeCoder turns idle machines into a coding swarm. Agents sell measured seconds of CPU and GPU time,
@@ -189,10 +192,10 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             <div class="formula">
               <div><b>btcUsd</b> = median(Coinbase, Kraken, Bitstamp, mempool.space)</div>
               <div><b>satsPerCreditHour</b> = usdPerHour(class) / btcUsd × 1e8 × (1 + markup)</div>
-              <div><b>satsPerCredit</b> = satsPerCreditHour / 3600 <span style="color:var(--muted);">(flat within a class)</span></div>
-              <div><b>credits</b> = seconds × weight(tier) <span style="color:var(--muted);">(base tier 1)</span></div>
-              <div style="margin-top:8px;color:var(--muted);">× model size (≤3B 1.0 … &gt;35B 4.0) × modality (vision, thinking) × scarcity</div>
-              <div style="margin-top:8px;"><b>trade</b> = agent ask ≤ task bid → priced at the ask, locked on the ledger</div>
+              <div><b>satsPerCredit</b> = satsPerCreditHour / 3600 <span class="u-muted">(flat within a class)</span></div>
+              <div><b>credits</b> = seconds × weight(tier) <span class="u-muted">(base tier 1)</span></div>
+              <div class="u-mt-8 u-muted">× model size (≤3B 1.0 … &gt;35B 4.0) × modality (vision, thinking) × scarcity</div>
+              <div class="u-mt-8"><b>trade</b> = agent ask ≤ task bid → priced at the ask, locked on the ledger</div>
             </div>
             <div class="classes">
               <table>
@@ -242,7 +245,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
         <footer class="footer">
           <div class="shell footer-inner">
             <div>
-              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok" style="margin-left:8px;">online</span></div>
+              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok u-ml-8">online</span></div>
               <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every ledger checkpoint is anchored on-chain.</div>
               <div class="footer-legal"><span>&copy; 2025 EdgeCoder, LLC</span><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a></div>
             </div>
@@ -256,20 +259,20 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
 export function privacyPolicyHtml(): string {
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>Privacy Policy | EdgeCoder</title>
       <meta name="description" content="EdgeCoder Privacy Policy — how we collect, use, and protect your data." />
-      <style>
+      ${themeHeadTags()}
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -305,6 +308,7 @@ export function privacyPolicyHtml(): string {
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
@@ -376,14 +380,14 @@ export function privacyPolicyHtml(): string {
 
           <h2>Contact</h2>
           <p>If you have questions about this Privacy Policy, contact us at <a href="mailto:${supportEmail()}">${supportEmail()}</a>.</p>
-          <p style="margin-top: 4px;">EdgeCoder, LLC</p>
+          <p class="u-mt-4">EdgeCoder, LLC</p>
         </div>
 
 
         <footer class="footer">
           <div class="shell footer-inner">
             <div>
-              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok" style="margin-left:8px;">online</span></div>
+              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok u-ml-8">online</span></div>
               <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every ledger checkpoint is anchored on-chain.</div>
               <div class="footer-legal"><span>&copy; 2025 EdgeCoder, LLC</span><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a></div>
             </div>
@@ -397,20 +401,20 @@ export function privacyPolicyHtml(): string {
 
 export function termsOfServiceHtml(): string {
   return `<!doctype html>
-  <html lang="en">
+  ${htmlOpenTag()}
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>Terms of Service | EdgeCoder</title>
       <meta name="description" content="EdgeCoder Terms of Service — the rules governing use of the EdgeCoder platform." />
-      <style>
+      ${themeHeadTags()}
+      <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
         .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
         .nav { position: sticky; top: 0; z-index: 30; background: var(--bg); border-bottom: 1px solid var(--card-border); }
         .nav-inner { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
-        .mark { display: inline-flex; align-items: center; justify-content: center; background: var(--brand); }
         .nav-links { display: flex; align-items: center; gap: 4px; }
         .nav-links a { padding: 7px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; font-weight: 500; }
         .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -446,6 +450,7 @@ export function termsOfServiceHtml(): string {
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
             <div class="nav-actions">
+              ${themeToggleButton()}
               <a class="btn" href="/portal">Sign in</a>
               <a class="btn primary" href="/portal#signup">Get started</a>
             </div>
@@ -508,14 +513,14 @@ export function termsOfServiceHtml(): string {
 
           <h2>13. Contact</h2>
           <p>If you have questions about these Terms, contact us at <a href="mailto:${supportEmail()}">${supportEmail()}</a>.</p>
-          <p style="margin-top: 4px;">EdgeCoder, LLC</p>
+          <p class="u-mt-4">EdgeCoder, LLC</p>
         </div>
 
 
         <footer class="footer">
           <div class="shell footer-inner">
             <div>
-              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok" style="margin-left:8px;">online</span></div>
+              <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok u-ml-8">online</span></div>
               <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every ledger checkpoint is anchored on-chain.</div>
               <div class="footer-legal"><span>&copy; 2025 EdgeCoder, LLC</span><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a></div>
             </div>

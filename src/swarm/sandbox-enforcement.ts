@@ -54,13 +54,32 @@ export function swarmExecutionEnabled(sandboxMode: SandboxMode): boolean {
 }
 
 /**
- * #45: coordinator /pull gate, evaluated BEFORE queue.claim() so a task is
- * never claimed (and requeued) for an agent without a sandbox.
+ * #45: what an agent may claim at /pull, evaluated inside queue.claim() so nothing is claimed
+ * (and requeued) for an agent that may not run it. An agent without a sandbox (sandboxMode
+ * "none", or none reported) may claim only `kind: "inference"` subtasks: those run a model on
+ * text and never execute task code (worker-runner runs them through runInferenceSubtask, not
+ * runCode). Code subtasks (single_step, micro_loop) still need a docker or vm sandbox.
  */
-export function pullSandboxRejection(
-  capability: { sandboxMode?: SandboxMode } | undefined
-): { subtask: null; sandboxRequired: true; reason: "agent_lacks_sandbox_capability" } | null {
+export function agentMayClaim(
+  capability: { sandboxMode?: SandboxMode } | undefined,
+  subtask: { kind: string }
+): boolean {
   const mode: SandboxMode = capability?.sandboxMode ?? "none";
-  if (mode === "none") return { subtask: null, sandboxRequired: true, reason: "agent_lacks_sandbox_capability" };
-  return null;
+  if (mode !== "none") return true;
+  return subtask.kind === "inference";
+}
+
+/** True when an agent can only claim inference work (no sandbox reported). */
+export function inferenceOnlyAgent(capability: { sandboxMode?: SandboxMode } | undefined): boolean {
+  return (capability?.sandboxMode ?? "none") === "none";
+}
+
+/**
+ * Worker-side guard for inference-only agents: the error to report for a subtask this agent must
+ * not run (anything but inference), or null to run it. The coordinator already filters these out;
+ * this keeps an agent without a sandbox from running task code even if a coordinator sends some.
+ */
+export function inferenceOnlyRejection(inferenceOnly: boolean, subtask: { kind: string }): string | null {
+  if (!inferenceOnly || subtask.kind === "inference") return null;
+  return "inference_only_agent: this agent has no sandbox and runs inference subtasks only";
 }

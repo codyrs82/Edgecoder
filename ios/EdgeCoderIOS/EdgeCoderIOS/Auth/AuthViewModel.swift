@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import AuthenticationServices
+import CryptoKit
+import Security
 import UIKit
 import ObjectiveC
 
@@ -195,7 +197,13 @@ final class AuthViewModel: ObservableObject {
             guard var startURL = URL(string: "\(api.config.portalBaseURL.absoluteString)/auth/oauth/\(provider.rawValue)/start") else {
                 throw APIClientError.invalidURL
             }
-            startURL.append(queryItems: [URLQueryItem(name: "appRedirect", value: callbackURL)])
+            // Bind the one-time mobile token to this sign-in: the portal stores sha256(verifier) and
+            // only redeems the token together with the verifier, which never leaves this app.
+            let verifier = try Self.makeOAuthVerifier()
+            startURL.append(queryItems: [
+                URLQueryItem(name: "appRedirect", value: callbackURL),
+                URLQueryItem(name: "appChallenge", value: Self.oauthChallenge(for: verifier)),
+            ])
 
             let redirected = try await runWebAuthSession(startURL: startURL, callbackScheme: callbackScheme)
             guard
@@ -212,12 +220,12 @@ final class AuthViewModel: ObservableObject {
                 throw APIClientError.serverError("OAuth token missing from callback.")
             }
 
-            struct CompleteBody: Encodable { let token: String }
+            struct CompleteBody: Encodable { let token: String; let verifier: String }
             _ = try await api.request(
                 baseURL: api.config.portalBaseURL,
                 path: "/auth/oauth/mobile/complete",
                 method: "POST",
-                body: CompleteBody(token: token)
+                body: CompleteBody(token: token, verifier: verifier)
             ) as AuthResponse
 
             await sessionStore.refreshSession()
@@ -232,6 +240,27 @@ final class AuthViewModel: ObservableObject {
                 statusMessage = displayMessage(for: error)
             }
         }
+    }
+
+    /// RFC 7636 verifier: 32 random bytes, base64url without padding (43 characters).
+    static func makeOAuthVerifier() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw APIClientError.serverError("Could not start sign-in.")
+        }
+        return base64URL(Data(bytes))
+    }
+
+    /// base64url(sha256(verifier)), the `appChallenge` the portal binds the mobile token to.
+    static func oauthChallenge(for verifier: String) -> String {
+        base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     private func runWebAuthSession(startURL: URL, callbackScheme: String) async throws -> URL {

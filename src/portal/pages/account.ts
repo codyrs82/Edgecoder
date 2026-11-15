@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { icon } from "./design-system.js";
 import { displayEnrollmentToken, escapeHtml } from "./escape.js";
 import { settingsPage, settingsSection } from "./settings-shell.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
@@ -21,57 +22,57 @@ export function registerAccountPages(app: FastifyInstance): void {
 app.get("/portal/settings/plan", async (_req, reply) => {
   const content = `
     <div class="card" id="payoutDestinationCard">
-      <h2 style="margin-top:0;">Where should we pay you?</h2>
-      <p class="muted" style="margin-top:0;">
+      <h2 class="u-mt-0">Where should we pay you?</h2>
+      <p class="muted u-mt-0">
         Earnings are paid to a wallet you control. Enter the Lightning address your wallet gives you
         (it looks like name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.
         On-chain Bitcoin addresses are not supported for payouts yet.
       </p>
-      <div id="payoutDestRetired" class="hidden" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
+      <div id="payoutDestRetired" class="hidden payout-warning">
         The address EdgeCoder generated for this account earlier has been retired because no one holds its keys.
         Nothing was ever paid to it. Your earnings are kept until you set a destination below.
       </div>
-      <div id="payoutCallbackChanged" class="hidden" role="alert" style="margin:8px 0;padding:8px 10px;border:1px solid var(--warn, #b45309);border-radius:6px;">
-        <p style="margin:0 0 6px;"><strong id="payoutCallbackText"></strong></p>
-        <p class="muted" style="margin:0 0 6px;">Payouts to this address are paused and your earnings are kept. Confirm only if your wallet provider moved its servers; otherwise change your address to a wallet you trust.</p>
+      <div id="payoutCallbackChanged" class="hidden payout-warning" role="alert">
+        <p class="u-m-0 u-mb-6"><strong id="payoutCallbackText"></strong></p>
+        <p class="muted u-m-0 u-mb-6">Payouts to this address are paused and your earnings are kept. Confirm only if your wallet provider moved its servers; otherwise change your address to a wallet you trust.</p>
         <div class="row"><button class="primary" id="payoutCallbackSendBtn">Email me a code</button></div>
-        <div id="payoutCallbackCodeWrap" class="hidden" style="margin-top:8px;">
+        <div id="payoutCallbackCodeWrap" class="hidden u-mt-8">
           <label for="payoutCallbackCode">Email code</label>
           <div class="row">
-            <input id="payoutCallbackCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+            <input id="payoutCallbackCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" class="u-flex-1" />
             <button class="primary" id="payoutCallbackConfirmBtn">Confirm payment server</button>
           </div>
         </div>
-        <div id="payoutCallbackMsg" class="muted hidden" style="margin-top:6px;"></div>
+        <div id="payoutCallbackMsg" class="muted hidden u-mt-6"></div>
       </div>
       <table>
         <tbody>
-          <tr><th style="width:34%;">Current destination</th><td id="payoutDestCurrent">Loading...</td></tr>
+          <tr><th class="u-w-34">Current destination</th><td id="payoutDestCurrent">Loading...</td></tr>
           <tr><th>Network</th><td id="payoutDestNetwork">-</td></tr>
         </tbody>
       </table>
       <label for="payoutDestInput">Lightning address</label>
       <div class="row">
-        <input id="payoutDestInput" type="text" autocomplete="off" spellcheck="false" placeholder="you@wallet.example" style="flex:1;" />
+        <input id="payoutDestInput" type="text" autocomplete="off" spellcheck="false" placeholder="you@wallet.example" class="u-flex-1" />
         <button class="primary" id="payoutDestSaveBtn">Save</button>
       </div>
-      <div id="payoutDestCodeWrap" class="hidden" style="margin-top:8px;">
+      <div id="payoutDestCodeWrap" class="hidden u-mt-8">
         <label for="payoutDestCode">Email code</label>
         <div class="row">
-          <input id="payoutDestCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+          <input id="payoutDestCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" class="u-flex-1" />
           <button class="primary" id="payoutDestConfirmBtn">Confirm change</button>
         </div>
       </div>
-      <div id="payoutDestError" role="alert" class="hidden" style="margin-top:8px;color:var(--danger, #dc2626);"></div>
-      <div id="payoutDestInfo" class="muted hidden" style="margin-top:8px;"></div>
+      <div id="payoutDestError" role="alert" class="hidden u-mt-8 u-danger"></div>
+      <div id="payoutDestInfo" class="muted hidden u-mt-8"></div>
     </div>
     <div class="grid2">
       <div class="card">
-        <h3 style="margin-top:0;">Deposit details</h3>
+        <h3 class="u-mt-0">Deposit details</h3>
         <div class="muted">Use these public wallet details to send BTC into EdgeCoder credits.</div>
         <table>
           <tbody>
-            <tr><th style="width:34%;">Account</th><td id="depositAccountValue">-</td></tr>
+            <tr><th class="u-w-34">Account</th><td id="depositAccountValue">-</td></tr>
             <tr><th>Network</th><td id="depositNetworkValue">-</td></tr>
             <tr><th>Lightning node pubkey</th><td id="depositLnPubkeyValue">Not configured</td></tr>
             <tr><th>XPUB</th><td id="depositXpubValue">Not configured</td></tr>
@@ -80,7 +81,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
         </table>
       </div>
       <div class="card">
-        <h3 style="margin-top:0;">Send bitcoin (MFA required)</h3>
+        <h3 class="u-mt-0">Send bitcoin (MFA required)</h3>
         <div class="muted">
           Every send request requires email code + passkey verification. Requests are queued for secure processing.
         </div>
@@ -90,7 +91,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
         <div class="row">
           <button class="primary" id="startSendMfaBtn">Start secure send</button>
         </div>
-        <div id="sendMfaWrap" class="hidden" style="margin-top:10px;">
+        <div id="sendMfaWrap" class="hidden u-mt-10">
           <div class="muted">Step 2: Enter email code and approve passkey challenge.</div>
           <label>Email code</label><input id="sendEmailCode" type="text" placeholder="6-digit code" />
           <div class="row">
@@ -101,42 +102,42 @@ app.get("/portal/settings/plan", async (_req, reply) => {
     </div>
     <div class="grid2">
       <div class="card">
-        <h3 style="margin-top:0;">Withdraw sats</h3>
-        <p class="muted" style="margin-top:0;">Sats earned by your agents, paid from the coordinator's Lightning node. Withdrawals need an invoice for an exact amount; automatic payouts go to a Lightning address once the balance passes the minimum.</p>
-        <div class="kpis" style="margin-bottom:12px;">
+        <h3 class="u-mt-0">Withdraw sats</h3>
+        <p class="muted u-mt-0">Sats earned by your agents, paid from the coordinator's Lightning node. Withdrawals need an invoice for an exact amount; automatic payouts go to a Lightning address once the balance passes the minimum.</p>
+        <div class="kpis u-mb-12">
           <div class="kpi"><div class="k">Earned</div><div class="v" id="payoutEarned">–</div></div>
           <div class="kpi"><div class="k">Paid out</div><div class="v" id="payoutPaid">–</div></div>
           <div class="kpi"><div class="k">Available</div><div class="v" id="payoutPayable">–</div></div>
         </div>
         <label>BOLT11 invoice (amount in sats, from your wallet)</label>
-        <textarea id="withdrawInvoice" rows="3" placeholder="lnbc…" style="font-family:var(--font-mono);font-size:12px;"></textarea>
-        <div class="row" style="margin-top:8px;">
+        <textarea id="withdrawInvoice" rows="3" placeholder="lnbc…" class="u-font-mono u-fs-12"></textarea>
+        <div class="row u-mt-8">
           <button class="primary" id="withdrawBtn">Pay invoice</button>
           <span class="muted" id="payoutPolicyNote"></span>
         </div>
-        <div id="withdrawCodeWrap" class="hidden" style="margin-top:8px;">
+        <div id="withdrawCodeWrap" class="hidden u-mt-8">
           <label for="withdrawCode">Email code</label>
           <div class="row">
-            <input id="withdrawCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="flex:1;" />
+            <input id="withdrawCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" class="u-flex-1" />
             <button class="primary" id="withdrawConfirmBtn">Confirm withdrawal</button>
           </div>
-          <div class="muted" id="withdrawCodeInfo" style="margin-top:6px;"></div>
+          <div class="muted u-mt-6" id="withdrawCodeInfo"></div>
         </div>
-        <p class="muted" style="margin:14px 0 0;">Automatic payouts go to the Lightning address under "Where should we pay you?".</p>
-        <table style="margin-top:14px;">
+        <p class="muted u-m-0 u-mt-14">Automatic payouts go to the Lightning address under "Where should we pay you?".</p>
+        <table class="u-mt-14">
           <thead><tr><th>Time</th><th>Kind</th><th>Sats</th><th>Fee</th><th>Status</th></tr></thead>
           <tbody id="payoutsBody"></tbody>
         </table>
       </div>
       <div class="card">
-        <h3 style="margin-top:0;">Credit ledger</h3>
+        <h3 class="u-mt-0">Credit ledger</h3>
         <table>
           <thead><tr><th>Time</th><th>Type</th><th>Credits</th><th>Reason</th></tr></thead>
           <tbody id="creditHistoryBody"></tbody>
         </table>
       </div>
       <div class="card">
-        <h3 style="margin-top:0;">Wallets and payment intents</h3>
+        <h3 class="u-mt-0">Wallets and payment intents</h3>
         <table>
           <thead><tr><th>Wallet type</th><th>Network</th><th>Payout</th><th>Node/Xpub</th></tr></thead>
           <tbody id="walletsBody"></tbody>
@@ -161,7 +162,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
       </div>
     </div>
     <div class="card">
-      <h3 style="margin-top:0;">Send request history</h3>
+      <h3 class="u-mt-0">Send request history</h3>
       <div class="table-controls">
         <select id="sendRequestStatusFilter">
           <option value="all">All statuses</option>
@@ -297,7 +298,7 @@ app.get("/portal/settings/plan", async (_req, reply) => {
       const el = document.getElementById("payoutCallbackMsg");
       el.textContent = text || "";
       el.classList.toggle("hidden", !text);
-      el.style.color = isError ? "var(--danger, #dc2626)" : "";
+      el.style.color = isError ? "var(--danger)" : "";
     }
     async function confirmPayoutCallback(withCode) {
       const body = {};
@@ -542,20 +543,20 @@ app.get("/portal/settings/install", async (req, reply) => {
           `<div class="step"><span class="step-num">${i + 1}</span><div class="step-content">${s}</div></div>`
       )
       .join("");
-    return `<div class="${cls}" id="card-${id}">${badge}<h3 style="margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon}</span>${title}</h3>${stepsHtml}</div>`;
+    return `<div class="${cls}" id="card-${id}">${badge}<h3 class="wz-title"><span class="wz-icon">${icon}</span>${title}</h3>${stepsHtml}</div>`;
   }
 
   /* ── platform card builders ──────────────────────────────────────── */
   const macCard = wizardCard("macos", icon("apple", 15), "macOS", [
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_aarch64.dmg">Download Desktop App (.dmg)</a>
-     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
+     <a href="${GH_RELEASES_PAGE}" target="_blank" class="wz-more">All releases</a>`,
     `Open the <strong>.dmg</strong> and drag EdgeCoder to Applications. The app bundles the agent — no separate install needed.`,
     `Sign in with your EdgeCoder account. The app auto-discovers local models and connects to the mesh.`
   ], detectedOS === "macos");
 
   const winCard = wizardCard("windows", icon("windows", 15), "Windows", [
     `<a class="dl-btn" href="${GH_RELEASE_BASE}/EdgeCoder_x64-setup.exe">Download installer (.exe)</a>
-     <a href="${GH_RELEASES_PAGE}" target="_blank" style="font-size:11px;color:var(--brand);margin-left:8px;">All releases</a>`,
+     <a href="${GH_RELEASES_PAGE}" target="_blank" class="wz-more">All releases</a>`,
     `Run the installer. Allow admin access if prompted.`,
     `Sign in with your EdgeCoder account to connect to the mesh.`
   ], detectedOS === "windows");
@@ -570,14 +571,14 @@ app.get("/portal/settings/install", async (req, reply) => {
 
   const iosCard = wizardCard("ios", icon("phone", 15), "iOS (iPhone / iPad)", [
     `<a class="dl-btn" href="#">Download from App Store</a>
-     <span style="font-size:10px;color:var(--muted);margin-left:8px;">TestFlight available now</span>`,
+     <span class="wz-aside u-ml-8">TestFlight available now</span>`,
     `Sign in with your <strong>EdgeCoder account</strong>.`,
-    `Go to <strong>Settings</strong> and paste your token: <div class="code-block" id="ios-token" style="margin-top:6px;"><code>${tokenDisplay}</code><button class="copy-btn" data-copy="ios-token">Copy</button></div>`
+    `Go to <strong>Settings</strong> and paste your token: <div class="code-block u-mt-6" id="ios-token"><code>${tokenDisplay}</code><button class="copy-btn" data-copy="ios-token">Copy</button></div>`
   ], detectedOS === "ios");
 
   const vscodeCard = wizardCard("vscode", icon("code", 15), "VS Code Extension", [
     `<div class="code-block" id="vscode-cmd"><code>ext install edgecoder.edgecoder</code><button class="copy-btn" data-copy="vscode-cmd">Copy</button></div>
-     <span style="font-size:10px;color:var(--muted);">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
+     <span class="wz-aside">Run in the VS Code command line, or search "EdgeCoder" in the Extensions panel.</span>`,
     `Open the Command Palette (<kbd>Ctrl+Shift+P</kbd> / <kbd>Cmd+Shift+P</kbd>) &rarr; <strong>EdgeCoder: Configure</strong>.`
   ], false);
 
@@ -591,18 +592,18 @@ app.get("/portal/settings/install", async (req, reply) => {
   const primaryKey = (detectedOS === "unknown") ? "macos" : detectedOS;
   const primaryCard = allCards[primaryKey];
   // One installer for every platform (docs/install.md): detects GPUs, one agent per GPU.
-  const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 style="margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:10px;"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
-    <p style="margin:0 0 12px;font-size:13px;color:var(--muted);">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
+  const universalCard = `<div class="wizard-card secondary" id="card-universal"><h3 class="wz-title tight"><span class="wz-icon">${icon("server", 15)}</span>Servers and GPU hosts: one-line install (Linux, macOS, Windows)</h3>
+    <p class="wz-lede">Detects every GPU and runs one agent per card with a model sized to its memory. Same options on all three platforms; the packages above run the same installer.</p>
     <div class="code-block" id="install-sh"><code>curl -fsSLo install.sh ${portalBase}/install.sh && sudo bash install.sh --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-sh">Copy</button></div>
-    <div class="code-block" id="install-ps1" style="margin-top:8px;"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-ps1">Copy</button></div>
-    <div style="font-size:12px;color:var(--muted);margin-top:8px;">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
+    <div class="code-block u-mt-8" id="install-ps1"><code>irm ${portalBase}/install.ps1 -OutFile install.ps1; .\\install.ps1 -- --token ${tokenDisplay}</code><button class="copy-btn" data-copy="install-ps1">Copy</button></div>
+    <div class="wz-after">Then <code>sudo edgecoder-install plan</code> shows the node ids to enrol; pass each token with <code>--token &lt;node-id&gt;=&lt;token&gt;</code>.</div></div>`;
   const secondaryCards = universalCard + Object.entries(allCards)
     .filter(([k]) => k !== primaryKey)
     .map(([, v]) => v)
     .join("");
 
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .hero-dl{padding:4px 0 20px;}
       .hero-dl h1{font-size:22px;font-weight:600;margin:0 0 6px;color:var(--text);letter-spacing:-0.02em;}
       .hero-dl p{font-size:14px;color:var(--muted);margin:0 0 10px;}
@@ -616,13 +617,13 @@ app.get("/portal/settings/install", async (req, reply) => {
       .wz-icon{width:28px;height:28px;border-radius:var(--radius-sm);border:1px solid var(--card-border);background:var(--bg-surface);display:inline-flex;align-items:center;justify-content:center;color:var(--brand-2);flex:none;}
       .wizard-card{position:relative;background:var(--card);border:1px solid var(--brand-border);border-radius:var(--radius-md);padding:22px 20px;margin-bottom:18px;}
       .wizard-card.secondary{border:1px solid var(--card-border);}
-      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:#111;font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.04em;}
+      .rec-badge{position:absolute;top:-10px;left:16px;background:var(--brand);color:var(--on-accent);font-size:10px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.04em;}
       .step{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
       .step:last-child{margin-bottom:0;}
-      .step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--brand);color:#111;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-top:1px;font-family:var(--font-mono);}
+      .step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--brand);color:var(--on-accent);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-top:1px;font-family:var(--font-mono);}
       .step-content{font-size:13px;color:var(--text);line-height:1.55;flex:1;}
       .step-content strong{font-weight:600;}
-      .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:linear-gradient(140deg,var(--brand),var(--brand-2));color:#fff;text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
+      .dl-btn{display:inline-block;padding:8px 18px;border-radius:8px;background:var(--brand);color:var(--on-accent);text-decoration:none;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:opacity .15s;}
       .dl-btn:hover{opacity:.88;}
       .code-block{position:relative;background:var(--bg-input);border:1px solid var(--card-border);border-radius:var(--radius-sm);padding:9px 60px 9px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;line-height:1.55;}
       .code-block code{background:none;padding:0;font-size:inherit;color:inherit;}
@@ -635,6 +636,12 @@ app.get("/portal/settings/install", async (req, reply) => {
       .other-platforms.show{display:block;}
       .other-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
       @media(max-width:720px){.other-grid{grid-template-columns:1fr;}}
+      .wizard-card .wz-title{margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:10px;}
+      .wizard-card .wz-title.tight{margin-bottom:6px;}
+      .wizard-card .wz-lede{margin:0 0 12px;font-size:13px;color:var(--muted);}
+      .wz-more{font-size:11px;color:var(--brand);margin-left:8px;}
+      .wz-aside{font-size:10px;color:var(--muted);}
+      .wz-after{font-size:12px;color:var(--muted);margin-top:8px;}
     </style>
 
     <!-- ── Hero ──────────────────────────────────────────────────────── -->

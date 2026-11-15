@@ -19,14 +19,27 @@ import {
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
 import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
-import { passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
+import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
+
+/** Verification emails per account per window (signup's own email counts); on top of the per-IP route limit. */
+export const EMAIL_VERIFY_MAX_PER_WINDOW = 4;
+export const EMAIL_VERIFY_WINDOW_MS = 60 * 60 * 1000;
+/** The only answer /auth/resend-verification gives, whatever the state of the address. */
+export const RESEND_VERIFICATION_RESPONSE = {
+  ok: true,
+  message: "If an unverified account exists for that email, we sent it a verification link."
+} as const;
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
 export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
+  // Login checks a password against this when the account is missing or has no password, so the
+  // response takes as long as a real check and does not reveal which accounts exist.
+  let dummyPasswordHash: string | undefined;
   app.get("/auth/capabilities", async () => {
     const oauthGoogleConfigured = Boolean(oauthProviders.google.clientId && oauthProviders.google.clientSecret);
     const oauthMicrosoftConfigured = Boolean(oauthProviders.microsoft.clientId && oauthProviders.microsoft.clientSecret);
@@ -89,7 +102,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ email: z.string().email(), password: z.string().min(1) }).parse(req.body);
     const user = await store.getUserByEmail(normalizeEmail(body.email));
-    if (!user || !user.passwordHash || !verifyPassword(body.password, user.passwordHash)) {
+    if (!user || !user.passwordHash) {
+      dummyPasswordHash ??= hashPassword(randomUUID());
+      verifyPassword(body.password, dummyPasswordHash);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+    if (!verifyPassword(body.password, user.passwordHash)) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
@@ -100,50 +118,84 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   app.post("/auth/logout", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
-    const sessionToken = readCookie(cookies, "edgecoder_portal_session");
-    if (sessionToken) {
-      await store.deleteSessionByTokenHash(sha256Hex(sessionToken));
+    // Both ways a session is presented (getCurrentUser): the browser cookie and the desktop
+    // app's Authorization: Bearer token. Each one sent is ended.
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    const tokens = new Set([readCookie(cookies, "edgecoder_portal_session"), auth.startsWith("Bearer ") ? auth.slice(7) : undefined]);
+    for (const sessionToken of tokens) {
+      if (sessionToken) await store.deleteSessionByTokenHash(sha256Hex(sessionToken));
     }
     reply.header("set-cookie", clearCookies("edgecoder_portal_session"));
     return reply.send({ ok: true });
   });
 
-  app.get("/auth/verify-email", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const query = z.object({ token: z.string().min(10) }).parse(req.query);
-    const consumed = await store.consumeEmailVerification(sha256Hex(query.token));
-    if (!consumed) {
-      return reply
-        .code(400)
-        .type("text/html")
-        .send(`<!doctype html><html><body><p>Invalid or expired verification token.</p><p><a href="/portal">Return to portal</a></p></body></html>`);
-    }
-    await store.markUserEmailVerified(consumed.userId);
-    const user = await store.getUserById(consumed.userId);
-    if (user) await ensureCreditAccountForUser(user);
-    return reply
-      .type("text/html")
-      .send(
-        `<!doctype html><html><body><p>Email verified. Your account and enrolled nodes can now be activated.</p><p><a href="/portal">Open portal dashboard</a></p></body></html>`
-      );
+  // The emailed link only opens a confirmation page: a GET (or a mail scanner prefetching it)
+  // changes nothing. The page POSTs the token back, and the address is marked verified only for
+  // someone who already holds the account: its session in this browser, or its password. Someone
+  // who registered another person's address therefore cannot have it verified by that person
+  // clicking the link; the real owner instead uses "Forgot password", which revokes every other
+  // way in (routes/password-reset.ts).
+  app.get("/auth/verify-email", async (_req, reply) => {
+    return reply.header("cache-control", "no-store").type("text/html").send(verifyEmailPage());
   });
 
-  app.post("/auth/resend-verification", async (req, reply) => {
+  app.post("/auth/verify-email", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const body = z.object({ email: z.string().email() }).parse(req.body);
-    const user = await store.getUserByEmail(normalizeEmail(body.email));
+    const parsed = z.object({ token: z.string().min(10).max(200), password: z.string().max(PASSWORD_MAX_LENGTH).optional() }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "verify_link_invalid" });
+    const tokenHash = sha256Hex(parsed.data.token);
+    const pending = await store.findEmailVerification(tokenHash);
+    const user = pending ? await store.getUserById(pending.userId) : null;
+    if (!pending || !user) return reply.code(400).send({ error: "verify_link_invalid" });
+    const current = await getCurrentUser(req as any);
+    const password = parsed.data.password;
+    const proven =
+      current?.userId === user.userId ||
+      Boolean(password && user.passwordHash && verifyPassword(password, user.passwordHash));
+    if (!proven) {
+      return reply.code(401).send({ error: user.passwordHash ? "verify_password_required" : "verify_sign_in_required" });
+    }
+    if (!(await store.consumeEmailVerification(tokenHash))) return reply.code(400).send({ error: "verify_link_invalid" });
+    if (!user.emailVerified) {
+      // Nothing set up before the address was proven survives: sessions, API keys and passkeys are
+      // revoked, and on a password account linked sign-in providers and the GitHub token too. A
+      // passwordless account keeps its provider link, since that is how the confirmer signed in.
+      await store.deleteSessionsForUser(user.userId);
+      await store.revokeAllApiKeys(user.userId);
+      await store.deletePasskeysForUser(user.userId);
+      if (user.passwordHash) {
+        await store.deleteOauthLinksForUser(user.userId);
+        await store.deleteGitHubToken(user.userId);
+      }
+      await store.markUserEmailVerified(user.userId);
+      await ensureCreditAccountForUser(user);
+    }
+    const sessionToken = await createSessionForUser(user.userId, reply);
+    return reply.send({ ok: true, sessionToken });
+  });
+
+  async function handleResend(email: string): Promise<void> {
+    const user = await store!.getUserByEmail(email);
     // Agent accounts have no deliverable email.
-    if (!user || isAgentPlaceholderEmail(user.email)) return reply.send({ ok: true });
-    if (user.emailVerified) return reply.send({ ok: true, alreadyVerified: true });
+    if (!user || user.emailVerified || isAgentPlaceholderEmail(user.email)) return;
+    if ((await store!.countRecentEmailVerifications(user.userId, Date.now() - EMAIL_VERIFY_WINDOW_MS)) >= EMAIL_VERIFY_MAX_PER_WINDOW) return;
     const verifyToken = randomUUID();
-    await store.createEmailVerification({
+    await store!.createEmailVerification({
       tokenId: randomUUID(),
       userId: user.userId,
       tokenHash: sha256Hex(verifyToken),
       expiresAtMs: Date.now() + EMAIL_VERIFY_TTL_MS
     });
     await sendVerificationEmail(user.email, verifyToken);
-    return reply.send({ ok: true });
+  }
+
+  app.post("/auth/resend-verification", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const body = z.object({ email: z.string().email() }).parse(req.body);
+    // Same answer, and same timing (not awaited), whether the address has an account, is already
+    // verified or has reached its per-account limit.
+    handleResend(normalizeEmail(body.email)).catch((err) => req.log.error({ err }, "verification resend failed"));
+    return reply.send(RESEND_VERIFICATION_RESPONSE);
   });
 
   app.get("/auth/oauth/apple/start", async (_req, reply) => {
@@ -199,7 +251,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
   app.get("/auth/oauth/:provider/start", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
-    const query = z.object({ appRedirect: z.string().optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
+    // A native app's redirect is a short fixed deep link; the length cap keeps state rows small.
+    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
     return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge });
   });
 
@@ -327,6 +380,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       const current = await getCurrentUser(req as any);
       if (!current || current.userId !== state.linkUserId) return refuse(403, "oauth_connect_session_mismatch", oauthErrorMessage("connect_session", providerName));
       if (linked && linked.userId !== current.userId) return refuse(409, "oauth_identity_linked_elsewhere", oauthErrorMessage("already_linked", providerName));
+      // An unverified account gains no sign-in method, except one that proves its address.
+      if (!current.emailVerified && !provesEmailOf(current)) return refuse(403, "email_not_verified", oauthErrorMessage("connect_unverified", providerName));
       await linkTo(current.userId);
       await saveGithubToken(current.userId);
       if (!current.emailVerified && provesEmailOf(current)) {

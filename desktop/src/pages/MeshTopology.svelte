@@ -19,7 +19,7 @@
 
   let peers: MeshPeer[] = $state([]);
   let reputations: PeerReputation[] = $state([]);
-  let identity: NodeIdentity | null = $state(null);
+  let identity = $state<NodeIdentity | null>(null);
   let loading: boolean = $state(true);
   let error: string = $state("");
 
@@ -52,9 +52,17 @@
   let nodeById = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
   let graphEl: SVGSVGElement | undefined = $state(undefined);
 
+  /** Text drawn under a peer in the graph. */
+  function nodeText(id: string): string {
+    return truncate(id, 8);
+  }
+
   function nodeLabel(id: string, self: boolean): string {
     const score = reputationMap.get(id);
-    return `${self ? "This node" : "Peer"}${id ? ` ${truncate(id, 12)}` : ""}${score !== undefined ? `, reputation ${score}` : ""}`;
+    // The name has to contain the text drawn under the node. The end of the id follows it,
+    // because peer ids share their first characters and would otherwise all be named alike.
+    const name = self ? `This node${id ? ` ${truncate(id, 12)}` : ""}` : `Peer ${nodeText(id)}${id.slice(Math.max(8, id.length - 4))}`;
+    return `${name}${score !== undefined ? `, reputation ${score}` : ""}`;
   }
 
   function onNodeKey(e: KeyboardEvent, i: number, id: string) {
@@ -218,7 +226,7 @@
             onkeydown={(e) => onNodeKey(e, i, node.id)}
           >
             <circle r={node.self ? 22 : 16} />
-            <text y={node.self ? 38 : 30} text-anchor="middle" aria-hidden="true">{node.self ? "This node" : truncate(node.id, 8)}</text>
+            <text y={node.self ? 38 : 30} text-anchor="middle" aria-hidden="true">{node.self ? "This node" : nodeText(node.id)}</text>
           </g>
         {/each}
       </svg>
@@ -317,40 +325,39 @@
     margin-bottom: 1.25rem;
   }
 
-  .view-toggle { display: inline-flex; margin-top: 0.6rem; border: 1px solid var(--border, #1e1e3f); border-radius: var(--radius-sm, 6px); overflow: hidden; }
-  .view-toggle button { background: none; border: none; color: var(--text-secondary, #94a3b8); padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.8rem; }
-  .view-toggle button[aria-pressed="true"] { background: var(--accent, #3b82f6); color: var(--on-accent, #fff); }
-  .view-toggle button:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: -2px; }
+  .view-toggle { display: inline-flex; margin-top: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .view-toggle button { background: none; border: none; color: var(--text-secondary); padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.8rem; }
+  .view-toggle button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+  .view-toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   .graph-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 1rem; align-items: start; }
   @media (max-width: 760px) { .graph-wrap { grid-template-columns: 1fr; } }
-  .mesh-graph { width: 100%; max-height: 70vh; background: var(--bg-surface, #1a1a2e); border-radius: var(--radius-md, 10px); }
-  .edge { stroke: var(--border-strong, rgba(255, 255, 255, 0.15)); stroke-width: 1.5; }
-  .edge-active { stroke: var(--accent, #3b82f6); stroke-width: 2.5; }
+  .mesh-graph { width: 100%; max-height: 70vh; background: var(--bg-surface); border-radius: var(--radius-md); }
+  .edge { stroke: var(--border-strong); stroke-width: 1.5; }
+  .edge-active { stroke: var(--accent); stroke-width: 2.5; }
   .node { cursor: pointer; outline: none; }
-  .node circle { fill: var(--bg-elevated, #2a2a40); stroke-width: 3; stroke: var(--text-muted, #64748b); }
-  .node text { fill: var(--text-secondary, #94a3b8); font-size: 11px; pointer-events: none; }
-  .node.rep-green circle { stroke: var(--green, #4ade80); }
-  .node.rep-yellow circle { stroke: var(--yellow, #facc15); }
-  .node.rep-red circle { stroke: var(--red, #f87171); }
-  .node-self circle { fill: var(--accent, #3b82f6); stroke: var(--accent, #3b82f6); }
-  .node-selected circle, .node:focus-visible circle { stroke: var(--text-primary, #e2e8f0); stroke-width: 4; }
-  .graph-details { background: var(--bg-surface, #1a1a2e); border-radius: var(--radius-md, 10px); padding: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .node circle { fill: var(--bg-elevated); stroke-width: 3; stroke: var(--text-muted); }
+  .node text { fill: var(--text-secondary); font-size: 11px; pointer-events: none; }
+  .node.rep-green circle { stroke: var(--green); }
+  .node.rep-yellow circle { stroke: var(--yellow); }
+  .node.rep-red circle { stroke: var(--red); }
+  .node-self circle { fill: var(--accent); stroke: var(--accent); }
+  .node-selected circle, .node:focus-visible circle { stroke: var(--text-primary); stroke-width: 4; }
+  .graph-details { background: var(--bg-surface); border-radius: var(--radius-md); padding: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .graph-details h2 { margin: 0; font-size: 1rem; }
-  .muted-hint { margin: 0; color: var(--text-secondary, #94a3b8); font-size: 0.85rem; }
+  .muted-hint { margin: 0; color: var(--text-secondary); font-size: 0.85rem; }
 
   .page-header h1 {
     margin: 0 0 0.25rem;
     font-size: 1.5rem;
     font-weight: 700;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .subtitle {
     margin: 0;
     font-size: 0.9rem;
-    opacity: 0.6;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-secondary);
   }
 
   /* ------------------------------------------------------------------
@@ -366,8 +373,8 @@
      Peer card
   ------------------------------------------------------------------ */
   .peer-card {
-    background: var(--bg-surface, #1a1a2e);
-    border: 1px solid var(--border-card, rgba(255, 255, 255, 0.06));
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.15rem;
     display: flex;
@@ -377,15 +384,15 @@
   }
 
   .peer-card:hover {
-    border-color: var(--border-hover, rgba(255, 255, 255, 0.12));
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-md);
   }
 
   /* Self-node highlight */
   .peer-card.self-node {
-    border-color: var(--color-self, #3b82f6);
-    box-shadow: 0 0 0 1px var(--color-self, #3b82f6),
-      0 2px 16px rgba(59, 130, 246, 0.15);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent),
+      0 2px 16px color-mix(in srgb, var(--accent) 15%, transparent);
   }
 
   /* Skeleton placeholder cards */
@@ -404,10 +411,10 @@
   }
 
   .peer-id {
-    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-family: var(--font-mono);
     font-size: 0.95rem;
     font-weight: 600;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
     letter-spacing: 0.02em;
   }
 
@@ -416,9 +423,9 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--color-self, #3b82f6);
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     padding: 0.15rem 0.5rem;
     border-radius: 4px;
     white-space: nowrap;
@@ -441,15 +448,15 @@
   }
 
   .mode-public {
-    color: #4ade80;
-    background: rgba(74, 222, 128, 0.1);
-    border: 1px solid rgba(74, 222, 128, 0.25);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
   }
 
   .mode-enterprise {
-    color: #a78bfa;
-    background: rgba(167, 139, 250, 0.1);
-    border: 1px solid rgba(167, 139, 250, 0.25);
+    color: var(--accent-secondary);
+    background: color-mix(in srgb, var(--accent-secondary) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-secondary) 25%, transparent);
   }
 
   /* ------------------------------------------------------------------
@@ -470,14 +477,12 @@
   }
 
   .detail-label {
-    color: var(--text-secondary, #94a3b8);
-    opacity: 0.7;
+    color: var(--text-secondary);
     flex-shrink: 0;
   }
 
   .detail-value {
-    color: var(--text-primary, #e2e8f0);
-    opacity: 0.85;
+    color: var(--text-primary);
     text-align: right;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -486,7 +491,7 @@
   }
 
   .detail-value.mono {
-    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-family: var(--font-mono);
     font-size: 0.78rem;
   }
 
@@ -499,7 +504,7 @@
     gap: 0.45rem;
     margin-top: auto;
     padding-top: 0.5rem;
-    border-top: 1px solid var(--border-card, rgba(255, 255, 255, 0.06));
+    border-top: 1px solid var(--border);
   }
 
   .rep-badge {
@@ -515,32 +520,30 @@
   }
 
   .rep-green {
-    color: #4ade80;
-    background: rgba(74, 222, 128, 0.12);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
   }
 
   .rep-yellow {
-    color: #facc15;
-    background: rgba(250, 204, 21, 0.12);
+    color: var(--yellow);
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
   }
 
   .rep-red {
-    color: #f87171;
-    background: rgba(248, 113, 113, 0.12);
+    color: var(--red-strong);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
   }
 
   .rep-unknown {
-    color: var(--text-secondary, #94a3b8);
-    background: rgba(148, 163, 184, 0.1);
-    opacity: 0.6;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--text-muted) 10%, transparent);
   }
 
   .rep-label {
     font-size: 0.75rem;
-    color: var(--text-secondary, #94a3b8);
-    opacity: 0.6;
+    color: var(--text-secondary);
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
   .machines {
     margin-bottom: 16px;
   }
@@ -568,15 +571,15 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--text-muted, #666);
+    background: var(--text-muted);
     flex-shrink: 0;
   }
   .machine.online .dot {
-    background: var(--success, #3fb950);
+    background: var(--green);
   }
   .mname {
     font-size: 13px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .mmeta {
     font-size: 12px;

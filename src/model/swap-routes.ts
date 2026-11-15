@@ -5,9 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { swapModel, getModelStatus, listModels, pullModel } from "./swap.js";
 import { PullTracker } from "./pull-tracker.js";
 import { CATEGORY_LABELS, MODEL_CATALOG, MODEL_CATALOG_VERSION } from "./catalog.js";
-
-/** Ollama model names: `name[:tag]`, optionally `namespace/name`; no segment starts with ".". */
-const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._\-]*(\/(?!\.)[A-Za-z0-9._\-]+)*(:[A-Za-z0-9._\-]+)?$/;
+import { isOllamaLibraryModelName } from "./ollama-installer.js";
 
 export interface ModelSwapState {
   activeModel: string;
@@ -21,10 +19,13 @@ export function buildModelSwapRoutes(
   state: ModelSwapState,
 ): void {
   app.post("/model/swap", async (req, reply) => {
-    const { model } = req.body as { model: string };
-    if (!model || typeof model !== "string") {
+    const model = (req.body as { model?: unknown } | undefined)?.model;
+    if (typeof model !== "string" || model.length === 0) {
       return reply.code(400).send({ error: "model_required" });
     }
+    // Ollama library names only: a swap pulls a missing model, and another registry host would be
+    // an arbitrary download source.
+    if (!isOllamaLibraryModelName(model)) return reply.code(400).send({ error: "model_name_rejected" });
 
     const result = await swapModel(model, state.activeModel, state.pullTracker);
 
@@ -55,9 +56,10 @@ export function buildModelSwapRoutes(
   // #37: the desktop Model Manager's "pull" button. Starts the download only; /model/swap switches.
   app.post("/model/pull", async (req, reply) => {
     const model = (req.body as { model?: unknown } | undefined)?.model;
-    if (typeof model !== "string" || model.length > 200 || !MODEL_NAME_RE.test(model)) {
+    if (typeof model !== "string" || model.length === 0) {
       return reply.code(400).send({ error: "model_required" });
     }
+    if (!isOllamaLibraryModelName(model)) return reply.code(400).send({ error: "model_name_rejected" });
     // Claim synchronously, before any await, so concurrent requests can't both start a pull.
     if (!state.pullTracker.tryStart(model)) {
       return reply.code(409).send({ error: "pull_in_progress", progress: state.pullTracker.getProgress() });

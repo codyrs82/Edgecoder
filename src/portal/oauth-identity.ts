@@ -9,6 +9,7 @@
  */
 
 import { claimIsTrue } from "./portal-utils.js";
+import { messagePage } from "./assets.js";
 
 export type OauthProvider = "google" | "microsoft" | "github";
 
@@ -93,7 +94,7 @@ export function decideUnlinkedOauthLogin(profile: OauthProfile, existing: Existi
   return { kind: "use_existing" };
 }
 
-export function oauthErrorMessage(kind: "account_exists" | "account_unclaimed" | "already_linked" | "connect_session", provider: OauthProvider): string {
+export function oauthErrorMessage(kind: "account_exists" | "account_unclaimed" | "already_linked" | "connect_session" | "connect_unverified", provider: OauthProvider): string {
   const p = OAUTH_PROVIDER_LABEL[provider];
   switch (kind) {
     case "account_exists":
@@ -102,6 +103,8 @@ export function oauthErrorMessage(kind: "account_exists" | "account_unclaimed" |
       return `An account with this email already exists, but its email address has not been verified. If it is yours, verify it or use "Forgot password" (the link goes to this address), sign in, then connect ${p} from Settings.`;
     case "already_linked":
       return `This ${p} account is already connected to a different EdgeCoder account.`;
+    case "connect_unverified":
+      return `Verify your email address before connecting ${p}: open the link we sent you, or connect a ${p} account that uses this same address.`;
     case "connect_session":
       return `Your session changed while connecting ${p}. Sign in again and retry from Settings.`;
   }
@@ -109,5 +112,5 @@ export function oauthErrorMessage(kind: "account_exists" | "account_unclaimed" |
 
 export function oauthErrorPage(message: string): string {
   const safe = message.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in not completed</title></head><body><p>${safe}</p><p><a href="/portal">Return to sign in</a></p></body></html>`;
+  return messagePage("Sign-in not completed", `<p>${safe}</p><p><a href="/portal">Return to sign in</a></p>`);
 }

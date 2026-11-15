@@ -242,8 +242,8 @@
     font-size: 0.72rem;
     font-weight: 600;
     padding: 2px 8px;
-    border-radius: var(--radius-sm, 4px);
-    background: rgba(193, 120, 80, 0.1);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
     color: var(--accent);
     white-space: nowrap;
   }
@@ -252,7 +252,7 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
-  .info-banner { display: flex; align-items: center; background: rgba(59,130,246,0.1); color: var(--accent-secondary, #4a90d9); padding: 0.75rem 1rem; border-radius: var(--radius-md, 8px); margin-bottom: 1rem; font-size: 0.9rem; }
+  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
 
   .agent-list, .peer-list { list-style: none; margin: 0; padding: 0; }
   @media (max-width: 720px) {

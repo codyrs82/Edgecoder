@@ -6,6 +6,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ServerResponse } from "node:http";
+import { chartLibStyleHashes } from "./chart-lib.js";
 import { applyCspNonce, newCspNonce } from "./csp-nonce.js";
 import { createPgRateLimitStore, type PgRateLimitStoreOptions, type RateLimitPool } from "./rate-limit-store.js";
 
@@ -24,10 +25,12 @@ export function edgeModeFrom(raw: string | undefined): EdgeMode {
  * Origin lock: a Cloudflare Transform Rule sets this header to PORTAL_ORIGIN_LOCK_TOKEN on every
  * request it forwards. When the token is configured the portal refuses requests without it, so the
  * Fly hostname cannot be used to go around the WAF and rate limits. Exempt: /health (Fly's checks
- * reach the machine directly) and callers that present the portal service token (coordinators).
+ * reach the machine directly), /metrics (#14: scrapers also reach the machine directly, and the
+ * route has its own loopback-or-METRICS_TOKEN guard) and callers that present the portal service
+ * token (coordinators).
  */
 export const ORIGIN_LOCK_HEADER = "x-edgecoder-origin";
-const ORIGIN_LOCK_EXEMPT_PATHS = new Set(["/health"]);
+const ORIGIN_LOCK_EXEMPT_PATHS = new Set(["/health", "/metrics"]);
 
 function headerEquals(value: unknown, expected: string): boolean {
   if (typeof value !== "string" || !expected) return false;
@@ -73,8 +76,11 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/signup$/,
   /^\/auth\/login$/,
   /^\/auth\/resend-verification$/,
+  /^\/auth\/verify-email$/,
   /^\/auth\/passkey\//,
-  /^\/auth\/oauth\/[^/]+\/callback$/,
+  /^\/auth\/oauth\/[^/]+\/(start|callback|connect)$/,
+  // Logout needs no credential and runs a delete per token sent; limit it like sign-in.
+  /^\/auth\/logout$/,
   /^\/auth\/oauth\/mobile\/complete$/,
   // AI agent signup by public key (routes/agents.ts): unauthenticated, creates accounts.
   /^\/agents\/(challenge|signup)$/,
@@ -84,6 +90,12 @@ const AUTH_ROUTES: RegExp[] = [
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
 // Withdraw (the code request and the confirm) shares the wallet bucket.
 const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/, /^\/wallet\/payout-destination\/callback\/confirm$/];
+/**
+ * Chat messages and new conversations (each chat turn is stored and sent to a coordinator):
+ * 20 per minute per signed-in user (keyed on the user when known, else the client IP).
+ */
+export const CHAT_RATE_LIMIT = { max: 20, timeWindow: "1 minute" } as const;
+const CHAT_ROUTES: RegExp[] = [/^\/portal\/api\/chat$/, /^\/portal\/api\/conversations$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
@@ -104,6 +116,7 @@ export function rateLimitFor(url: string, method: string | string[] = "POST"): {
   if (methods.includes("PUT") && url === "/wallet/payout-destination") return WALLET_RATE_LIMIT;
   if (methods.includes("POST") && TOPUP_ROUTES.some((r) => r.test(url))) return TOPUP_RATE_LIMIT;
   if (methods.includes("POST") && PASSWORD_RESET_ROUTES.some((r) => r.test(url))) return PASSWORD_RESET_RATE_LIMIT;
+  if (methods.includes("POST") && CHAT_ROUTES.some((r) => r.test(url))) return CHAT_RATE_LIMIT;
   if (AUTH_ROUTES.some((r) => r.test(url))) return AUTH_RATE_LIMIT;
   return undefined;
 }
@@ -169,6 +182,8 @@ export interface PortalSecurityOptions {
   rateLimitStoreOptions?: Omit<PgRateLimitStoreOptions, "log">;
   /** Environment for PORTAL_TRUST_FLY_CLIENT_IP / FLY_APP_NAME (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** The signed-in user's id for a request, if any: per-user rate limits (CHAT_RATE_LIMIT) key on it. */
+  rateLimitUserId?: (req: FastifyRequest) => Promise<string | null | undefined>;
 }
 
 export type RateLimitKeySource = "cf-connecting-ip (origin lock on)" | "fly-client-ip" | "socket address";
@@ -188,11 +203,19 @@ type NonceResponse = ServerResponse & { cspNonce?: string };
  * per-route rate-limit config.
  */
 export async function registerPortalSecurity(app: FastifyInstance, opts: PortalSecurityOptions): Promise<void> {
+  const ipKey = (req: FastifyRequest) => clientIp(req, { ...(opts.env ?? process.env), edge: opts.edge, originLockToken: opts.originLockToken });
+  // Per-user limits key on the signed-in user, so users behind one address do not share a bucket
+  // and one user cannot multiply the limit by holding several sessions.
+  const userKey = async (req: FastifyRequest) => {
+    const userId = opts.rateLimitUserId ? await opts.rateLimitUserId(req).catch(() => null) : null;
+    return userId ? `user:${userId}` : ipKey(req);
+  };
   // Runs before @fastify/rate-limit's own onRoute hook (registered next), so the config is seen.
   app.addHook("onRoute", (route) => {
     const limit = rateLimitFor(route.url ?? route.path ?? "", route.method);
     if (limit && !(route.config as { rateLimit?: unknown } | undefined)?.rateLimit) {
-      route.config = { ...(route.config ?? {}), rateLimit: limit } as typeof route.config;
+      const rateLimit = limit === CHAT_RATE_LIMIT ? { ...limit, keyGenerator: userKey } : limit;
+      route.config = { ...(route.config ?? {}), rateLimit } as typeof route.config;
     }
   });
   if (opts.edge === "cloudflare" && !opts.originLockToken) {
@@ -253,7 +276,9 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
         // Inline scripts run only with this request's nonce; inline event handlers
         // (script-src-attr 'none', a helmet default) and injected <script> tags do not.
         "script-src": ["'self'", (_req, res) => `'nonce-${(res as NonceResponse).cspNonce ?? ""}'`],
-        "style-src": ["'self'", "'unsafe-inline'"],
+        // #27: no 'unsafe-inline'. <style> blocks carry the same nonce, pages have no style
+        // attributes, and the one stylesheet the chart library injects is allowed by hash.
+        "style-src": ["'self'", (_req, res) => `'nonce-${(res as NonceResponse).cspNonce ?? ""}'`, ...chartLibStyleHashes()],
         "img-src": ["'self'", "data:", "https:"],
         "connect-src": ["'self'", ...(opts.connectOrigins ?? [])],
         "frame-ancestors": ["'none'"],

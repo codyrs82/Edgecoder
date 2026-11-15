@@ -72,7 +72,7 @@ function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
     execFile(
       cmd,
       // gh runs git itself; it gets the same hardening through the environment.
-      cmd === "git" ? hardenedGitArgs(args) : args,
+      cmd === "git" ? hardenedGitArgs(args, opts.cwd) : args,
       { cwd: opts.cwd, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, env: gitExecEnv({ GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" }) },
       (err, stdout, stderr) => {
         if (err) reject(new GitSetupError((stderr || err.message).trim()));

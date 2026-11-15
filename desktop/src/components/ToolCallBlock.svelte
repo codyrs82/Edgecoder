@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ToolArgs from "./ToolArgs.svelte";
+
   interface Props {
     id: string;
     tool: string;
@@ -48,6 +50,10 @@
     return "var(--yellow)";
   });
 
+  /** Waiting for the user's Allow / Deny: the whole call is shown, nothing shortened. */
+  let asking = $derived(status === "pending" && requiresApproval);
+
+  // One-line summary for the header of a call that is not waiting for approval.
   let mainArg = $derived.by(() => {
     const keys = ["path", "file_path", "command", "pattern", "query", "url"];
     for (const key of keys) {
@@ -95,14 +101,19 @@
         <span class="dot" style="background: {borderColor}"></span>
       {/if}
       <span class="tool-name">{tool}</span>
-      {#if mainArg}
+      {#if mainArg && !asking}
         <span class="main-arg">{mainArg}</span>
       {/if}
     </span>
     <span class="chevron" class:open={expanded} aria-hidden="true">&#9656;</span>
   </button>
 
-  {#if status === "pending" && requiresApproval}
+  {#if asking}
+    <!-- Everything the user is about to approve, always open: full command, full arguments,
+         the content an edit writes. Never shortened (the header summary is hidden meanwhile). -->
+    <div class="approval-details" data-testid="approval-details">
+      <ToolArgs {tool} {args} />
+    </div>
     <div class="approval-bar">
       <span class="approval-label">Approve this action?</span>
       <div class="approval-actions">
@@ -118,10 +129,15 @@
 
   {#if expanded}
     <div class="body">
+      {#if !asking}
+        <div class="body-args"><ToolArgs {tool} {args} /></div>
+      {/if}
       {#if error}
-        <pre class="output error-output">{error}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output error-output" tabindex="0" aria-label="Tool error">{error}</pre>
       {:else if truncatedResult}
-        <pre class="output">{truncatedResult}</pre>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="output" tabindex="0" aria-label="Tool result">{truncatedResult}</pre>
       {:else if status === "executing"}
         <span class="placeholder">Running...</span>
       {:else}
@@ -134,7 +150,7 @@
 <style>
   .tool-call-block {
     border-left: 3px solid var(--accent-secondary);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     margin: 6px 0;
     overflow: hidden;
@@ -196,14 +212,14 @@
   }
 
   .tool-name {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-weight: 600;
     white-space: nowrap;
   }
 
   .main-arg {
     color: var(--text-muted);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
@@ -219,6 +235,14 @@
   }
   .chevron.open {
     transform: rotate(90deg);
+  }
+
+  .approval-details {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .body-args {
+    margin-bottom: 8px;
   }
 
   .approval-bar {
@@ -241,7 +265,7 @@
 
   .btn {
     padding: 3px 12px;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     border: none;
     font-size: 12px;
     font-weight: 500;
@@ -266,7 +290,7 @@
   }
 
   .output {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.5;
     color: var(--text-secondary);

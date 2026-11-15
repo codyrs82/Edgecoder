@@ -261,6 +261,34 @@ describe("bitcoind coin selection (#46)", () => {
     expect(ambiguous).not.toBeInstanceOf(AnchorBroadcastRejectedError);
   });
 
+  it("an HTTP error or a body without a result is never taken as a broadcast txid", async () => {
+    const send = { statusCode: 200, data: "" as unknown };
+    agent.get("http://btc.test:38332").intercept({ path: /.*/, method: "POST" }).reply((opts) => {
+      const body = JSON.parse(String(opts.body));
+      const results: Record<string, unknown> = {
+        createrawtransaction: "rawtx0",
+        estimatesmartfee: { feerate: 0.00001 },
+        fundrawtransaction: { hex: "funded", fee: 0.000004, changepos: 1 },
+        signrawtransactionwithwallet: { hex: "signed", complete: true }
+      };
+      if (body.method === "sendrawtransaction") return send;
+      return { statusCode: 200, data: { result: results[body.method], error: null } };
+    }).persist();
+    const p = new BitcoindRpcProvider("http://btc.test:38332", "u", "p", "anchor");
+    for (const reply of [
+      { statusCode: 502, data: { message: "bad gateway" } },
+      { statusCode: 200, data: {} },
+      { statusCode: 200, data: { result: null, error: null } },
+      { statusCode: 401, data: "" }
+    ]) {
+      Object.assign(send, reply);
+      const err = await p.broadcastOpReturn("4543" + "01" + CHECKPOINT).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      // Ambiguous, not a definite rejection: the node may have relayed it.
+      expect(err).not.toBeInstanceOf(AnchorBroadcastRejectedError);
+    }
+  });
+
   it("fee rate = max(estimate, floor)", () => {
     expect(anchorFeeRateSatVb(undefined, {})).toBe(2);
     expect(anchorFeeRateSatVb(0.00025, {})).toBe(25);
@@ -444,7 +472,7 @@ describe("reconciliation (#103)", () => {
       async listAnchorsToReconcile() { return [listed]; }
     });
     const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
-    expect(out).toEqual([{ anchorId: "b1", event: "skipped" }]);
+    expect(out).toMatchObject([{ anchorId: "b1", event: "skipped" }]);
     expect(store.rows.get("b1")?.status).toBe("pending");
   });
 
@@ -479,7 +507,7 @@ describe("reconciliation (#103)", () => {
       async listAnchorsToReconcile() { return [...store.rows.values()].filter((r) => r.status === "broadcasting"); }
     });
     const out = await reconcileAnchors(deps(withLookup(async () => null), store), 6, CFG);
-    expect(out).toEqual([{ anchorId: "b1", event: "failed" }]);
+    expect(out).toMatchObject([{ anchorId: "b1", event: "failed" }]);
   });
 
   it("config from env", () => {

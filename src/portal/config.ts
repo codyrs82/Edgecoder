@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { z } from "zod";
-import { envInt, envUrl } from "../common/config.js";
+import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
+import { computeClassEnv, discoveryEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -10,14 +11,18 @@ import { envInt, envUrl } from "../common/config.js";
  * requirements are in portalProductionProblems(), run from validatePortalSecurityConfig() at
  * listen time. Documented in site-docs/reference/environment-variables.md.
  *
- * Not yet here: PORTAL_TRUSTED_ORIGINS / PORTAL_CONNECT_ORIGINS / PORTAL_CSP_ENFORCE and the
- * proxy setting, which #125 is changing; they move in once #125 merges.
+ * The lower block is validate-only: those variables are read by portal modules that take `env`
+ * as a parameter (discovery, registry, DNS, OAuth state), which keep their own defaults.
  */
 
 const optStr = z.string().optional();
 const ttl = (def: number) => envInt(def, { min: 1_000, max: 31 * 24 * 60 * 60 * 1000 });
 
 export const portalConfigSchema = z.object({
+  ...observabilityEnv,
+  ...serviceUrlsEnv,
+  ...discoveryEnv,
+  ...computeClassEnv,
   NODE_ENV: z.string().default("development"),
   PORTAL_PUBLIC_URL: envUrl("http://127.0.0.1:4310"),
   PORTAL_SERVICE_TOKEN: optStr,
@@ -37,6 +42,9 @@ export const portalConfigSchema = z.object({
   /** Most sats one account can withdraw to invoices per rolling 24 h through the portal; 0 = no portal cap. */
   PORTAL_WITHDRAW_DAILY_CAP_SATS: envInt(500_000, { min: 0, max: 2_100_000_000_000_000 }),
   MOBILE_OAUTH_TOKEN_TTL_MS: ttl(300_000),
+  // #39: read by chatCapacityOptionsFromEnv (src/portal/chat-capacity.ts); declared here so a bad value stops startup.
+  PORTAL_CHAT_CAPACITY_TIMEOUT_MS: envInt(2_000, { min: 100, max: 30_000 }),
+  PORTAL_CHAT_CAPACITY_TTL_MS: envInt(15_000, { min: 0, max: 600_000 }),
   OAUTH_MICROSOFT_PROMPT: z.string().default("select_account"),
   PASSKEY_RP_ID: optStr,
   PASSKEY_RP_NAME: z.string().default("EdgeCoder Portal"),
@@ -63,7 +71,45 @@ export const portalConfigSchema = z.object({
   OAUTH_MICROSOFT_TOKEN_URL: envUrl("https://login.microsoftonline.com/common/oauth2/v2.0/token"),
   OAUTH_MICROSOFT_USERINFO_URL: envUrl("https://graph.microsoft.com/oidc/userinfo"),
   OAUTH_GITHUB_CLIENT_ID: optStr,
-  OAUTH_GITHUB_CLIENT_SECRET: optStr
+  OAUTH_GITHUB_CLIENT_SECRET: optStr,
+
+  // ---- request security (src/portal/security.ts) ----
+  /** Comma-separated extra origins allowed to make state-changing requests / to appear in the CSP connect-src. */
+  PORTAL_TRUSTED_ORIGINS: optStr,
+  PORTAL_CONNECT_ORIGINS: optStr,
+  /** 0 or false switches the CSP to report-only. */
+  PORTAL_CSP_ENFORCE: envFlag({ off: ["0", "false"] }),
+  PORTAL_EDGE: envEnum(["cloudflare", "none"]).default("none"),
+  PORTAL_ORIGIN_LOCK_TOKEN: optStr,
+  PORTAL_COOKIE_SECURE: envFlag({ on: ["1"] }),
+  PORTAL_TRUST_FLY_CLIENT_IP: envFlag({ on: ["true"] }),
+  /** Development only (ignored in production): serve /internal/* without a service token. */
+  PORTAL_ALLOW_OPEN_INTERNAL: envFlag({ on: ["1"] }),
+  /** HMAC key for the OAuth state cookie; required in production (assertOauthStateSecret). */
+  OAUTH_STATE_SECRET: optStr,
+  PORTAL_DATABASE_URL: optStr,
+  AGENT_SIGNUPS_PER_HOUR: envNumber(undefined, { min: 0 }),
+  SUPPORT_EMAIL: optStr,
+  IOS_APP_TEAM_ID: optStr,
+  IOS_APP_BUNDLE_ID: optStr,
+
+  // ---- coordinator picker and registry (coordinator-discovery.ts, coordinator-registry.ts) ----
+  PORTAL_DISCOVERY: envEnumCi(["selector", "ordered"]),
+  PORTAL_DISCOVERY_SOURCES: optStr,
+  REGISTRY_TTL_MS: envNumber(undefined, { min: 0 }),
+  REGISTRY_HEALTH_INTERVAL_MS: envNumber(undefined, { min: 0 }),
+  REGISTRY_FALLBACK_URLS: optStr,
+  REGISTRY_SEEDS: optStr,
+  REGISTRY_POOL_FILE: optStr,
+  REGISTRY_SIGNING_KEY_PEM: optStr,
+
+  // ---- coordinator DNS records (dns-manager.ts) ----
+  GODADDY_API_KEY: optStr,
+  GODADDY_API_SECRET: optStr,
+  GODADDY_API_BASE: envUrl(),
+  DNS_BASE_DOMAIN: optStr,
+  DNS_COORDINATOR_PREFIX: optStr,
+  DNS_RECORD_TTL: envInt(undefined, { min: 0 })
 });
 
 export type PortalConfig = z.infer<typeof portalConfigSchema>;

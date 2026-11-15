@@ -3,6 +3,9 @@
 
 import { isDnsConfigured } from "./dns-manager.js";
 import type { PortalStore } from "./store.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("dns-sweep");
 
 // #16: moved unchanged from server.ts.
 const DNS_STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -13,10 +16,10 @@ export async function runDnsStaleSweep(store: PortalStore | null | undefined): P
   try {
     const count = await store.markStaleCoordinatorDns(DNS_STALE_THRESHOLD_MS);
     if (count > 0) {
-      console.log(`[portal] DNS stale sweep: marked ${count} coordinator(s) as stale`);
+      logger.info({ count }, "DNS stale sweep marked coordinators as stale");
     }
   } catch (err) {
-    console.error("[portal] DNS stale sweep failed:", err);
+    logger.error({ err }, "DNS stale sweep failed");
   }
 }
 

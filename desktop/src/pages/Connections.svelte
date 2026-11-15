@@ -19,6 +19,7 @@
     type Reservation,
   } from "../lib/api";
   import { CLASS_LABELS, shortModel } from "../lib/compute-choice";
+  import Select from "../components/ui/Select.svelte";
 
   interface Props {
     onNavigate?: (section: string) => void;
@@ -265,9 +266,11 @@
             {#if form.target === "reserved"}
               <label for="cn-res">Reservation</label>
               {#if leases.length}
-                <select id="cn-res" bind:value={form.reservationId}>
-                  {#each leases as l}<option value={l.id}>{CLASS_LABELS[l.computeClass]} until {new Date(l.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</option>{/each}
-                </select>
+                <Select
+                  id="cn-res"
+                  bind:value={form.reservationId}
+                  options={leases.map((l) => ({ value: l.id, label: `${CLASS_LABELS[l.computeClass]} until ${new Date(l.endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` }))}
+                />
               {:else}
                 <span class="sp-muted">No active reservations. <button class="small" onclick={() => onNavigate?.("compute")}>Reserve a machine</button></span>
               {/if}
@@ -278,10 +281,7 @@
               <span class="sp-muted">Chosen per request: the cheapest place and smallest model that fits (your free machines first, network GPUs for heavy work).</span>
             {:else}
               <label for="cn-model">Model</label>
-              <select id="cn-model" bind:value={form.model}>
-                <option value="" disabled>Choose a model</option>
-                {#each formModels as m}<option value={m}>{m}</option>{/each}
-              </select>
+              <Select id="cn-model" bind:value={form.model} placeholder="Choose a model" options={formModels.map((m) => ({ value: m, label: m }))} />
             {/if}
 
             {#if form.target !== "local" && form.target !== "mine"}
@@ -314,7 +314,9 @@
         <span class="sp-desc">{steps.text}</span>
         {#if steps.code}
           <div class="code-wrap">
-            <pre class="sp-code">{steps.code}</pre>
+            <!-- Scrolls sideways, so it has to take keyboard focus. -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <pre class="sp-code" tabindex="0" aria-label="Setup steps">{steps.code}</pre>
             <button class="small copy" onclick={() => copy(steps.code ?? "", "steps")}>{copied === "steps" ? "Copied" : "Copy"}</button>
           </div>
         {/if}
@@ -353,12 +355,19 @@
 
 <style>
   .conn.selected { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  .warn-row { background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); }
+  .warn-row { background: color-mix(in srgb, var(--yellow) 8%, transparent); }
   .conn-main {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;
   }
   .conn-main .sp-desc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* A loopback address has no break points and would run under the buttons in a narrow window. */
+  .conn-main .sp-desc { overflow-wrap: anywhere; }
+  @media (max-width: 760px) {
+    .conn-main { flex: 1 1 180px; }
+    /* The copy button sits over the first line once the lines reach the right edge. */
+    .code-wrap .sp-code { padding-top: 36px; }
+  }
   .form-grid { display: grid; grid-template-columns: 110px 1fr; gap: 10px 14px; align-items: center; font-size: 13px; color: var(--text-secondary); }
   .form-grid .inline { display: flex; align-items: center; gap: 8px; }
   .new { gap: 14px; }

@@ -76,8 +76,13 @@ export function registerRobotRoutes(
       return reply.code(401).send({ error: "unauthorized" });
     }
     const body = robotAgentRegisterSchema.parse(req.body);
-    const agent = queue.registerAgent(body);
-    return { ok: true, agent };
+    try {
+      const agent = queue.registerAgent(body);
+      return { ok: true, agent };
+    } catch (err) {
+      if (err instanceof Error && err.message === "payout_address_locked") return reply.code(409).send({ error: "payout_address_locked" });
+      throw err;
+    }
   });
 
   /* ---- Agent heartbeat ---- */

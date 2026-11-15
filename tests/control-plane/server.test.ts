@@ -1002,6 +1002,7 @@ describe("Coordinator proxy endpoints with mocked undici", () => {
   }
 
   test("GET /network/coordinators calls coordinator identity and mesh peers", async () => {
+    (await import("../../src/control-plane/server.js")).resetCoordinatorDiscoveryCache();
     // Mock identity call
     mockRequest.mockResolvedValueOnce({
       statusCode: 200,
@@ -1026,6 +1027,8 @@ describe("Coordinator proxy endpoints with mocked undici", () => {
   });
 
   test("GET /network/coordinators includes bootstrap when mesh unreachable", async () => {
+    // Results are cached for 30 s; start from a fresh lookup.
+    (await import("../../src/control-plane/server.js")).resetCoordinatorDiscoveryCache();
     // Both calls fail
     mockRequest.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     mockRequest.mockRejectedValueOnce(new Error("ECONNREFUSED"));
@@ -2007,5 +2010,74 @@ describe("Integration: registration -> mode change -> manifest flow", () => {
       headers: adminHeaders(),
     });
     expect(goneRes.statusCode).toBe(404);
+  });
+});
+
+describe("identifiers in privileged upstream URLs", () => {
+  let mockRequest: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const undici = await import("undici");
+    mockRequest = undici.request as unknown as ReturnType<typeof vi.fn>;
+    mockRequest.mockReset();
+    mockRequest.mockResolvedValue({ statusCode: 200, body: { json: async () => ({ ok: true }) } });
+  });
+
+  test("an encoded slash in a path id stays inside that id on the coordinator request", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/economy/credits/..%2F..%2Feconomy%2Ftreasury/quote",
+      headers: { "x-portal-service-token": PORTAL_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+    expect(mockRequest.mock.calls[0][0]).toBe("http://127.0.0.1:4301/economy/credits/..%2F..%2Feconomy%2Ftreasury/quote");
+  });
+
+  test("dot-segment ids are refused before any upstream request", async () => {
+    for (const url of ["/economy/payments/intents/%2E%2E", "/economy/credits/%2E%2E/quote", "/economy/payments/intents/%2E/confirm"]) {
+      const res = await app.inject({ method: url.endsWith("/confirm") ? "POST" : "GET", url, headers: adminHeaders(), ...(url.endsWith("/confirm") ? { payload: {} } : {}) });
+      // 400 from the id check, or 404 when the router has already resolved the dot segment.
+      expect([400, 404]).toContain(res.statusCode);
+    }
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  test("encodes intent, policy and agent ids", async () => {
+    await app.inject({ method: "POST", url: "/economy/payments/intents/a%2Fb%3Fx/confirm", headers: adminHeaders(), payload: {} });
+    await app.inject({ method: "POST", url: "/economy/treasury/policies/p%23q/activate", headers: adminHeaders(), payload: {} });
+    await app.inject({ method: "POST", url: "/orchestration/install-model", headers: adminHeaders(), payload: { target: "agent", agentId: "x/../../y", model: "qwen2.5:0.5b" } });
+    const urls = mockRequest.mock.calls.map((c) => String(c[0]));
+    expect(urls).toContain("http://127.0.0.1:4301/economy/payments/intents/a%2Fb%3Fx/confirm");
+    expect(urls).toContain("http://127.0.0.1:4301/economy/treasury/policies/p%23q/activate");
+    expect(urls.some((u) => u.includes("/orchestration/agents/") && !u.includes("x/../../y"))).toBe(true);
+  });
+});
+
+describe("F12 hardening", () => {
+  let mockRequest: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const undici = await import("undici");
+    mockRequest = undici.request as unknown as ReturnType<typeof vi.fn>;
+    mockRequest.mockReset();
+    mockRequest.mockResolvedValue({ statusCode: 200, body: { json: async () => ({ peers: [] }) } });
+  });
+
+  test("unauthenticated GET /network/coordinators does not trigger an upstream lookup per request", async () => {
+    await app.inject({ method: "GET", url: "/network/coordinators" });
+    const afterFirst = mockRequest.mock.calls.length;
+    for (let i = 0; i < 5; i += 1) {
+      expect((await app.inject({ method: "GET", url: "/network/coordinators" })).statusCode).toBe(200);
+    }
+    expect(mockRequest.mock.calls.length).toBe(afterFirst);
+  });
+
+  test("POST /bootstrap/coordinator does not echo internal error text", async () => {
+    const { ensureOllamaModelInstalled } = await import("../../src/model/ollama-installer.js");
+    (ensureOllamaModelInstalled as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("secret internal path /etc/x"));
+    const res = await app.inject({ method: "POST", url: "/bootstrap/coordinator", headers: { "x-admin-token": ADMIN_TOKEN } });
+    expect(res.statusCode).toBe(500);
+    expect(res.body).not.toContain("secret internal path");
   });
 });

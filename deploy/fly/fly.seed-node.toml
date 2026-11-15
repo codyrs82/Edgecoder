@@ -25,13 +25,14 @@ primary_region = "ord"
   EDGE_RUNTIME_MODE = "all-in-one"
   NETWORK_MODE = "public_mesh"
   COORDINATOR_PUBLIC_URL = "https://coordinator.edgecoder.io"
-  LOCAL_MODEL_PROVIDER = "ollama-local"
-  OLLAMA_AUTO_INSTALL = "true"
-  OLLAMA_MODEL = "qwen3.5:9b"
-  # #39: Fly machines have no Docker, so the embedded worker could never pass the sandbox
-  # check (SANDBOX_MODE=docker). Seeds are coordinator + Ollama chat only; compute comes
-  # from enrolled agents. Ollama itself is started by the agent image entrypoint (#9).
+  # #39 (owner decision): the US seed is coordinator-only. It runs no model: no Ollama, no
+  # embedded worker (Fly machines have no Docker, so the worker could never pass the
+  # SANDBOX_MODE=docker check anyway). Compute comes from enrolled agents; portal chat that
+  # needs a coordinator-hosted model is served by a seed that has one (edgecoder-seed-eu),
+  # chosen by the portal's capacity check. LOCAL_MODEL_PROVIDER / OLLAMA_* are therefore
+  # unset, and SKIP_OLLAMA stops the agent image entrypoint from starting an empty Ollama.
   DISABLE_SELF_AGENT = "1"
+  SKIP_OLLAMA = "true"
   # Every agent build since 1.4.7 signs its /mesh/ws bind; unsigned binds are refused.
   MESH_WS_REQUIRE_SIGNED = "true"
   # Fee-pool payouts for this seed's infrastructure go to the Lightning node it pays out from.
@@ -50,10 +51,6 @@ primary_region = "ord"
     type = "connections"
     hard_limit = 200
     soft_limit = 150
-
-[mounts]
-  source = "ollama_data"
-  destination = "/data/ollama" # #9: OLLAMA_MODELS; volume must be owned by uid 1000 (node)
 
 [checks]
   [checks.seed_health]

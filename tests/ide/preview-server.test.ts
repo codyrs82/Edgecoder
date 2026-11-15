@@ -47,3 +47,32 @@ describe("preview server", () => {
     expect((await fetch(base, { method: "POST" })).status).toBe(405);
   });
 });
+
+/** A raw HTTP/1.1 request (fetch would normalise the target), returning the status line. */
+async function rawStatus(target: string, host?: string): Promise<string> {
+  const { connect } = await import("node:net");
+  const port = (srv.server.address() as { port: number }).port;
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => {
+      sock.write(`GET ${target} HTTP/1.1\r\nHost: ${host ?? `127.0.0.1:${port}`}\r\nConnection: close\r\n\r\n`);
+    });
+    let data = "";
+    sock.on("data", (d) => (data += d));
+    sock.on("end", () => resolve(data.split("\r\n")[0]));
+    sock.on("error", reject);
+  });
+}
+
+describe("preview server request parsing", () => {
+  it("answers malformed request targets instead of crashing the process", async () => {
+    expect(await rawStatus("//")).toMatch(/ 404 /);
+    expect(await rawStatus(`/p/${"k".repeat(32)}/%E0%A4%A`)).toMatch(/ 400 /);
+    // Still serving afterwards.
+    expect((await fetch(base)).status).toBe(200);
+  });
+
+  it("refuses a non-loopback Host (DNS rebinding)", async () => {
+    expect(await rawStatus(`/p/${"k".repeat(32)}/`, "attacker.example")).toMatch(/ 403 /);
+    expect(await rawStatus(`/p/${"k".repeat(32)}/`)).toMatch(/ 200 /);
+  });
+});

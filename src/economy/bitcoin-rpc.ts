@@ -4,6 +4,9 @@
 import { request } from "undici";
 import { createHash, randomUUID } from "node:crypto";
 import type { BitcoinNetwork } from "../common/types.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("bitcoin");
 
 /* ------------------------------------------------------------------ */
 /*  Bitcoin RPC provider – broadcasts OP_RETURN anchors and tracks    */
@@ -146,10 +149,16 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method, params })
     });
-    const body = (await res.body.json()) as { result?: unknown; error?: { message: string; code: number } };
-    if (body.error) {
+    const body = (await res.body.json().catch(() => {
+      throw new Error(`bitcoind_http_${res.statusCode}:unreadable_body`);
+    })) as { result?: unknown; error?: { message: string; code: number } } | null;
+    // bitcoind answers RPC errors with a JSON error body (HTTP 500 before v28); that stays a
+    // BitcoindRpcError. Any other non-2xx, or a body without a result, is not an answer from the node.
+    if (body?.error) {
       throw new BitcoindRpcError(body.error.code, body.error.message);
     }
+    if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`bitcoind_http_${res.statusCode}`);
+    if (!body || typeof body !== "object" || !("result" in body)) throw new Error("bitcoind_rpc_no_result");
     return body.result;
   }
 
@@ -199,6 +208,8 @@ export class BitcoindRpcProvider implements BitcoinAnchorProvider {
       }
       throw err;
     }
+    // Not a definite rejection: the node may have relayed it, so this stays ambiguous.
+    if (typeof txid !== "string" || !/^[0-9a-f]{64}$/i.test(txid)) throw new Error("bitcoind_sendrawtransaction_bad_txid");
     return { txid, rawHex: signedHex };
   }
 
@@ -673,10 +684,10 @@ export function createBitcoinAnchorProviderFromEnv(network: BitcoinNetwork): Bit
     return new AnchorProxyClientProvider(proxyUrl, proxyToken);
   }
   if (process.env.NODE_ENV === "production") {
-    console.error("FATAL: BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
+    logger.fatal("BITCOIN_ANCHOR_PROVIDER must be set to 'anchor-proxy' or 'bitcoind' in production (mock produces fake transactions)");
     process.exit(1);
   }
-  console.warn("[bitcoin] using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");
+  logger.warn("using MockBitcoinAnchorProvider — anchoring is simulated (dev only)");
   return new MockBitcoinAnchorProvider();
 }
 

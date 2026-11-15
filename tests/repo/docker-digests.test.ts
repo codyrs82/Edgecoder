@@ -7,6 +7,7 @@ const DOCKERFILES = [
   "Dockerfile.anchor-proxy",
   "deploy/docker/Dockerfile.agent",
   "deploy/docker/Dockerfile.server",
+  "deploy/gpu-agent/Dockerfile.inference",
   "docker/sandbox-node.Dockerfile",
   "docker/sandbox-python.Dockerfile",
   "tests/e2e/Dockerfile.e2e"
@@ -25,7 +26,8 @@ const COMPOSE_FILES = [
   "deploy/infra/docker-compose.yml",
   "docker-compose.yml",
   "tests/e2e/docker-compose.e2e.yml",
-  "tests/e2e/docker-compose.scale.yml"
+  "tests/e2e/docker-compose.scale.yml",
+  "tests/e2e/docker-compose.lnd-regtest.yml"
 ];
 
 const composeImages = COMPOSE_FILES.flatMap((f) =>

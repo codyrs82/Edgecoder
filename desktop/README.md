@@ -62,3 +62,25 @@ Monaco's workers are bundled with Vite (`src/lib/monaco-setup.ts`), so the edito
 - log in through the deep link;
 - connect the local agent;
 - use the IDE panel.
+
+## color-mix() and WebKitGTK (#161)
+
+On Linux the app renders in the system WebKitGTK. CSS `color-mix()` needs **WebKitGTK 2.40 or newer**; macOS WebKit and Windows WebView2 already support it. Check a Linux machine with `pkg-config --modversion webkit2gtk-4.1` (Tauri 2 links webkit2gtk-4.1).
+
+Most `color-mix()` uses in `src/` tint a token for a hover or status background, for example `color-mix(in srgb, var(--red) 10%, transparent)`. A plain declaration written above it does **not** act as a fallback. The value contains `var()`, so an engine without `color-mix()` still accepts the declaration when parsing, then drops it at computed-value time. The property becomes `unset` (a transparent background, a `currentColor` border), and the earlier declaration is lost.
+
+What that means in practice:
+- **Decorative tints** (hover washes, diff and status row backgrounds, soft borders): older WebKitGTK shows no tint. That's acceptable, because text and icons keep their token colors and nothing becomes unreadable.
+- **A tint that carries meaning, or is the only hover or focus cue**, gets an explicit `@supports` fallback with a solid token:
+
+  ```css
+  .context-menu-item.delete:hover {
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+  }
+  @supports not (background: color-mix(in srgb, red 10%, transparent)) {
+    .context-menu-item.delete:hover { background: var(--bg-surface); }
+  }
+  ```
+
+- Don't use `color-mix()` for text color or for a focus ring.
+- A tint behind colored text also lowers its contrast. The sidebar's red "Delete" menu item used a 10% red wash on hover, which put the red text under 4.5:1 in both themes (caught by the `conversation menu` axe test), so it now uses the neutral hover background instead.

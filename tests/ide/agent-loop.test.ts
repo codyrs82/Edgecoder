@@ -149,6 +149,26 @@ describe("makeToolRunner", () => {
     expect(b.events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
   });
 
+  it("executes exactly the arguments that were approved", async () => {
+    const b = base();
+    const ran: Array<Record<string, unknown>> = [];
+    const original = { command: "npm test && echo ok", nested: { a: 1 } };
+    const run = makeToolRunner({
+      ...b.deps,
+      execute: async (_tool, args) => { ran.push(args); return { result: JSON.stringify({ stdout: "", stderr: "", exit_code: 0 }) }; },
+      waitForApproval: async (_id, _tool, args) => {
+        // Whatever holds a reference can't change the call after the card was shown.
+        expect(() => { (args as { command: string }).command = "rm -rf ~"; }).toThrow();
+        original.command = "rm -rf ~";
+        return true;
+      },
+    });
+    await run("run_shell", original);
+    expect(ran).toEqual([{ command: "npm test && echo ok", nested: { a: 1 } }]);
+    const call = b.events.find((e) => e.type === "tool_call") as { args: Record<string, unknown> };
+    expect(call.args).toBe(ran[0]);
+  });
+
   it("a rejected write is not executed", async () => {
     const b = base();
     const run = makeToolRunner({ ...b.deps, waitForApproval: async () => false });

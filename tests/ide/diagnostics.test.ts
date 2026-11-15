@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { isProjectTrusted, setProjectTrusted } from "../../src/apps/ide/workspace-trust.js";
 import { checkProject, parseCargo, parsePyCompile, parseRuff, parseTsc } from "../../src/apps/ide/diagnostics.js";
 
 describe("checker output parsing", () => {
@@ -58,11 +60,79 @@ describe("checkProject", () => {
       } else {
         symlinkSync(join(process.cwd(), "node_modules", ".bin", "tsc"), join(dir, "node_modules", ".bin", "tsc"));
       }
-      const r = await checkProject(dir, ["a.ts"]);
+      const r = await checkProject(dir, ["a.ts"], { trusted: true });
       expect(r.checkers).toEqual(["tsc"]);
       expect(r.byPath["a.ts"]?.[0]).toMatchObject({ line: 1, severity: "error", source: "tsc" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe.skipIf(process.platform === "win32")("checkProject in an untrusted folder", () => {
+  it("does not run the project's own tsc or cargo build", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "untrusted-"));
+    const marker = join(dir, "MARKER");
+    try {
+      const { mkdirSync, chmodSync } = await import("node:fs");
+      writeFileSync(join(dir, "tsconfig.json"), "{}");
+      writeFileSync(join(dir, "a.ts"), "export {};\n");
+      mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+      const fake = join(dir, "node_modules", ".bin", "tsc");
+      writeFileSync(fake, `#!/bin/sh\ntouch "${marker}"\n`);
+      chmodSync(fake, 0o755);
+      writeFileSync(join(dir, "Cargo.toml"), '[package]\nname = "x"\nversion = "0.0.0"\nedition = "2021"\n');
+      writeFileSync(join(dir, "build.rs"), `fn main() { std::fs::write(${JSON.stringify(marker)}, "").unwrap(); }\n`);
+      mkdirSync(join(dir, "src"));
+      writeFileSync(join(dir, "src", "main.rs"), "fn main() {}\n");
+
+      const r = await checkProject(dir, ["a.ts", "src/main.rs"]);
+      expect(existsSync(marker)).toBe(false);
+      expect(r.checkers).toEqual([]);
+      expect(r.untrusted).toEqual(["tsc", "cargo"]);
+      expect(r.byPath).toEqual({});
+
+      // Explicitly trusted: the project's tsc runs (the user's decision).
+      await checkProject(dir, ["a.ts"], { trusted: true });
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("python checks don't import modules from the project", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "untrusted-py-"));
+    const marker = join(dir, "MARKER");
+    try {
+      writeFileSync(join(dir, "py_compile.py"), `open(${JSON.stringify(marker)}, "w").close()\n`);
+      writeFileSync(join(dir, "a.py"), "x = 1\n");
+      await checkProject(dir, ["a.py"]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("workspace trust", () => {
+  it("defaults to untrusted, is stored outside the project, and is per folder", () => {
+    const home = mkdtempSync(join(tmpdir(), "trust-home-"));
+    const proj = mkdtempSync(join(tmpdir(), "trust-proj-"));
+    const prev = process.env.EDGECODER_TRUST_FILE;
+    process.env.EDGECODER_TRUST_FILE = join(home, "trusted-projects.json");
+    try {
+      expect(isProjectTrusted(proj)).toBe(false);
+      setProjectTrusted(proj, true);
+      expect(isProjectTrusted(proj)).toBe(true);
+      expect(isProjectTrusted(join(proj, "sub"))).toBe(false);
+      expect(isProjectTrusted(join(proj, ".."))).toBe(false);
+      setProjectTrusted(proj, false);
+      expect(isProjectTrusted(proj)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.EDGECODER_TRUST_FILE;
+      else process.env.EDGECODER_TRUST_FILE = prev;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { FilePlus, FolderPlus, RefreshCw } from "@lucide/svelte";
   import { fsList, fsCreate, fsRename, fsDelete, indexStatus, indexBuild, type FsEntry, type IndexStatus, FsError } from "../lib/api";
   import { onDestroy } from "svelte";
   import { joinPath, parentDir } from "../lib/editor-store";
@@ -200,13 +201,13 @@
         <button class="index" class:failed={index.state === "error"} title={indexTitle} disabled={index.state === "building"} onclick={buildIndex}>{indexLabel}</button>
       {/if}
       <button title="New file" onclick={() => startCreate("file")} aria-label="New file">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/></svg>
+        <FilePlus size={14} />
       </button>
       <button title="New folder" onclick={() => startCreate("dir")} aria-label="New folder">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><path d="M12 11v6M9 14h6"/></svg>
+        <FolderPlus size={14} />
       </button>
       <button title="Refresh" onclick={() => { for (const d of Object.keys(expanded)) if (expanded[d]) void load(d); }} aria-label="Refresh">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0114.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0020.5 15"/></svg>
+        <RefreshCw size={14} />
       </button>
     </div>
   </div>
@@ -308,7 +309,7 @@
     white-space: nowrap;
   }
   .actions button.index.failed {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
   .row {
     display: flex;
@@ -344,19 +345,19 @@
   .name[data-status="M"],
   .status[data-status="M"],
   .status[data-status="•"] {
-    color: var(--warning, #d29922);
+    color: var(--yellow);
   }
   .name[data-status="U"],
   .name[data-status="A"],
   .status[data-status="U"],
   .status[data-status="A"] {
-    color: var(--success, #3fb950);
+    color: var(--green);
   }
   .name[data-status="D"],
   .name[data-status="C"],
   .status[data-status="D"],
   .status[data-status="C"] {
-    color: var(--danger, #f85149);
+    color: var(--danger);
   }
   .status {
     font-size: 11px;

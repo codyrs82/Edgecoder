@@ -35,7 +35,7 @@ const capPolicy = { ...policy, maxFeeBps: 0 };
 const ok = () => ({ status: "succeeded" as const, feeMsat: 0 });
 
 function setup(opts: { limits?: PayoutLimits; earned?: number; pause?: PayoutPauseControl; calls?: PayInvoiceInput[] } = {}) {
-  const store = new MemoryPayoutStore(() => opts.earned ?? 1_000_000_000);
+  const store = new MemoryPayoutStore(() => opts.earned ?? 1_000_000_000, () => (opts.earned ?? 1_000_000_000) / 1000);
   store.received = 10_000_000_000;
   const events: Array<{ event: string; details: Record<string, unknown> }> = [];
   const svc = new PayoutService({
@@ -164,7 +164,7 @@ describe("payout kill switch", () => {
 });
 
 describe("coordinator wiring (source)", () => {
-  const src = readFileSync("src/swarm/coordinator.ts", "utf8");
+  const src = ["src/swarm/coordinator/payouts.ts", "src/swarm/coordinator/routes/admin.ts"].map((f) => readFileSync(f, "utf8")).join("\n");
   it("pause and reconciliation routes live in the admin plugin; the payout service pays through the pause-guarded provider", () => {
     const plugin = src.slice(src.indexOf("app.register(async (admin) => {"));
     for (const r of ['admin.get("/admin/payouts/pause"', 'admin.post("/admin/payouts/pause"', 'admin.get("/admin/payouts/reconciliation"', 'admin.post("/admin/payouts/reconciliation/run"']) {
@@ -258,7 +258,7 @@ describe.skipIf(!PG_URL)("payout safeguards against real Postgres", () => {
       const tag = randomUUID().slice(0, 8);
       const before = Number((await pool.query(`SELECT COALESCE(SUM(amount_msat + max_fee_msat), 0) AS m FROM payouts WHERE status IN ('paid','pending') AND created_at_ms >= $1`, [since])).rows[0].m);
       const accounts = Array.from({ length: 8 }, (_, i) => `cap-${tag}-${i}`);
-      for (const acct of accounts) await store.persistCreditTransaction({ txId: randomUUID(), accountId: acct, type: "earn", credits: 1, reason: "seed", timestampMs: Date.now(), msat: 100_000_000 });
+      for (const acct of accounts) await store.persistCreditTransaction({ txId: randomUUID(), accountId: acct, type: "earn", credits: 100_000, reason: "seed", timestampMs: Date.now(), msat: 100_000_000 });
       const capMsat = before + 30_000_000;
       const results = await Promise.all(
         accounts.map((acct) => {
@@ -287,7 +287,7 @@ describe.skipIf(!PG_URL)("payout safeguards against real Postgres", () => {
       const poolAcct = `pool-${randomUUID()}`;
       const outflow0 = await store.payoutsOutflowMsat();
       const liab0 = await store.liabilitiesMsat();
-      await store.persistCreditTransaction({ txId: randomUUID(), accountId: acct, type: "earn", credits: 1, reason: "seed", timestampMs: Date.now(), msat: 50_000_000 });
+      await store.persistCreditTransaction({ txId: randomUUID(), accountId: acct, type: "earn", credits: 50_000, reason: "seed", timestampMs: Date.now(), msat: 50_000_000 });
       await store.persistCreditTransaction({ txId: randomUUID(), accountId: poolAcct, type: "spend", credits: 0, reason: "fee_pool_distribution:42", timestampMs: 42, msat: 0 });
       const h = randomBytes(32).toString("hex");
       const p: PayoutRecord = { payoutId: randomUUID(), accountId: acct, coordinatorId: "c", kind: "withdraw", bolt11: "lntest", paymentHash: h, amountMsat: 10_000_000, feeMsat: 0, maxFeeMsat: 500_000, status: "pending", createdAtMs: Date.now() };

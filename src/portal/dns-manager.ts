@@ -3,6 +3,9 @@
 
 import { request } from "undici";
 import { isIPv6 } from "node:net";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("dns-manager");
 
 // ── Config ──────────────────────────────────────────────────────
 const GODADDY_API_KEY = process.env.GODADDY_API_KEY ?? "";
@@ -156,10 +159,10 @@ export async function createOrUpdateDnsRecord(
       return { ok: true, hostname };
     }
     const body = await res.body.text();
-    console.error(`[dns-manager] GoDaddy API error ${res.statusCode}: ${body}`);
+    logger.error({ status: res.statusCode, body: body.slice(0, 500) }, "GoDaddy API error");
     return { ok: false, hostname, error: `godaddy_api_${res.statusCode}` };
   } catch (err) {
-    console.error("[dns-manager] GoDaddy API request failed:", err);
+    logger.error({ err }, "GoDaddy API request failed");
     return { ok: false, hostname, error: "godaddy_api_request_failed" };
   }
 }
@@ -195,7 +198,7 @@ export async function deleteDnsRecord(
   }
 
   if (errors.length > 0) {
-    console.error("[dns-manager] DNS delete errors:", errors.join("; "));
+    logger.error({ errors }, "DNS delete errors");
     return { ok: false, error: errors.join("; ") };
   }
   return { ok: true };

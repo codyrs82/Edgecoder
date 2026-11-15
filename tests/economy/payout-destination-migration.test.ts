@@ -26,7 +26,7 @@ function lnurlFetcher(requested: string[]) {
 describe("auto payouts with no valid destination", () => {
   it("skip the account and keep its earnings payable; accounts with a Lightning address are paid", async () => {
     const earned: Record<string, number> = { "acct-nodest": 50_000_000, "acct-ln": 50_000_000 };
-    const store = new MemoryPayoutStore((a) => earned[a] ?? 0);
+    const store = new MemoryPayoutStore((a) => earned[a] ?? 0, (a) => (earned[a] ?? 0) / 1000);
     store.received = 10_000_000_000;
     store.autoAccounts.set("acct-ln", "alice@getalby.com"); // acct-nodest has none (retired seed address)
     const paid: PayInvoiceInput[] = [];

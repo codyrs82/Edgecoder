@@ -4,12 +4,13 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function registerDashboardPages(app: FastifyInstance): void {
 app.get("/portal/dashboard", async (_req, reply) => {
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .welcome-section { padding: 4px 0 16px; }
       .welcome-section h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
       .welcome-section .welcome-sub { color: var(--muted); font-size: 13px; margin: 0; }
@@ -68,7 +69,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
     </div>
     <!-- Account Overview KPIs -->
     <div class="card">
-      <h2 style="margin-top:0;">Account overview</h2>
+      <h2 class="u-mt-0">Account overview</h2>
       <div id="accountMeta" class="muted"><span class="loading-spinner sm"></span> Loading account...</div>
       <div class="kpis">
         <div class="kpi"><div class="label">Current credits</div><div class="value" id="creditsValue">--</div></div>
@@ -82,20 +83,20 @@ app.get("/portal/dashboard", async (_req, reply) => {
     <div id="emailVerifyCard" class="callout warn hidden">
       <h3>Email verification required</h3>
       <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
-      <div class="row" style="margin-top:10px;">
+      <div class="row u-mt-10">
         <button class="primary" id="emailVerifyNowBtn">Send verification email</button>
       </div>
     </div>
     <!-- Recent Activity Feed -->
     <div class="card">
-      <h3 style="margin-top:0;">Recent activity</h3>
+      <h3 class="u-mt-0">Recent activity</h3>
       <ul class="activity-feed" id="activityFeed">
         <li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text">Loading recent activity...</div></li>
       </ul>
     </div>
     <!-- Coordinator Operations (coordinator operators and system admins only) -->
     <div class="card hidden" id="coordOpsCard">
-      <h2 style="margin-top:0;">Coordinator Operations</h2>
+      <h2 class="u-mt-0">Coordinator Operations</h2>
       <div id="opsAccountLine" class="muted"><span class="loading-spinner sm"></span> Loading operator session...</div>
       <div id="opsFinalityLine" class="muted">Loading finality state...</div>
       <div class="kpis">
@@ -106,7 +107,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
     </div>
     <div id="adminInsightsSection" class="hidden">
     <div class="card">
-      <h3 style="margin-top:0;">Live issuance (rolling 24h)</h3>
+      <h3 class="u-mt-0">Live issuance (rolling 24h)</h3>
       <div class="kpis">
         <div class="kpi"><div class="label">Daily pool</div><div class="value" id="issuancePoolValue">-</div></div>
         <div class="kpi"><div class="label">Load index</div><div class="value" id="issuanceLoadValue">-</div></div>
@@ -118,7 +119,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       </table>
     </div>
     <div class="card">
-      <h3 style="margin-top:0;">Decentralized local model mesh</h3>
+      <h3 class="u-mt-0">Decentralized local model mesh</h3>
       <div id="modelMeshMeta" class="muted">Loading model-serving agents...</div>
       <table>
         <thead><tr><th>Agent</th><th>Provider</th><th>Model catalog</th><th>Capacity</th></tr></thead>
@@ -225,7 +226,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       var feed = document.getElementById("activityFeed");
       var items = (history || []).slice(0, 5);
       if (items.length === 0) {
-        feed.innerHTML = '<li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text" style="color:var(--muted);">No recent activity. Start a chat or enroll a node to get going.</div></li>';
+        feed.innerHTML = '<li><div class="af-icon">${icon("clock", 14)}</div><div class="af-text u-muted">No recent activity. Start a chat or enroll a node to get going.</div></li>';
         return;
       }
       var html = "";

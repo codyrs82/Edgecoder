@@ -6,6 +6,7 @@
 @import "tailwindcss/utilities.css" layer(utilities);
 @import "@edgecoder/tokens/tokens.css";
 @import "@edgecoder/tokens/theme.css";
+@import "./styles/ui.css";
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
 /* #29 (WCAG 2.4.7 / 1.4.11): a visible focus ring with 3:1 contrast on every surface. */

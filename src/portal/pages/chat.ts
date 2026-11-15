@@ -4,12 +4,13 @@
 import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
 app.get("/portal/chat", async (_req, reply) => {
   const content = `
-    <style>
+    <style nonce="${CSP_NONCE}">
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
       .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
@@ -23,16 +24,16 @@ app.get("/portal/chat", async (_req, reply) => {
         font-size:11px; font-weight:700; text-transform:uppercase;
         letter-spacing:0.5px; color:var(--muted);
       }
-      .chat-msg .msg-time { font-size:10px; color:var(--muted); opacity:0.7; }
+      .chat-msg .msg-time { font-size:10px; color:var(--muted); }
       .chat-msg.user .msg-role { color:var(--brand); }
       .chat-msg .msg-body { color:var(--text); }
       .chat-msg .msg-body p { margin:0 0 8px; }
       .chat-msg .msg-body p:last-child { margin-bottom:0; }
       /* ── Code blocks in chat ── */
       .chat-msg pre {
-        position:relative; background:rgba(0,0,0,0.45); padding:14px 16px;
+        position:relative; background:var(--bg-input); padding:14px 16px;
         border-radius:var(--radius-sm); overflow-x:auto; margin:10px 0;
-        border:1px solid rgba(255,255,255,0.06);
+        border:1px solid color-mix(in srgb, var(--text) 6%, transparent);
       }
       .chat-msg code {
         font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
@@ -40,17 +41,17 @@ app.get("/portal/chat", async (_req, reply) => {
       }
       .chat-msg pre code { background:none; padding:0; }
       .chat-msg code:not(pre code) {
-        background:rgba(0,0,0,0.3); padding:2px 6px;
+        background:var(--bg-elevated); padding:2px 6px;
         border-radius:4px; font-size:12px;
       }
       .code-copy-btn {
         position:absolute; top:6px; right:6px;
-        background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.1);
+        background:color-mix(in srgb, var(--text) 8%, transparent); border:1px solid color-mix(in srgb, var(--text) 10%, transparent);
         color:var(--muted); border-radius:4px; padding:3px 8px;
         font-size:10px; cursor:pointer; transition:all var(--transition-fast);
         font-family:inherit;
       }
-      .code-copy-btn:hover { background:rgba(255,255,255,0.15); color:var(--text); }
+      .code-copy-btn:hover { background:color-mix(in srgb, var(--text) 15%, transparent); color:var(--text); }
       /* ── Typing indicator ── */
       .typing-indicator { display:flex; gap:4px; align-items:center; padding:8px 0; }
       .typing-indicator .dot {
@@ -81,10 +82,10 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-input-tools { display:flex; align-items:center; justify-content:space-between; gap:8px; }
       .chat-send-btn {
         padding:7px 16px; border-radius:var(--radius-sm); min-height:30px;
-        background:var(--brand); border:1px solid var(--brand); color:#111; font-size:13px; font-weight:600;
+        background:var(--brand); border:1px solid var(--brand); color:var(--on-accent); font-size:13px; font-weight:600;
         cursor:pointer; white-space:nowrap;
       }
-      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:#111; }
+      .chat-send-btn:hover { background:var(--brand-2); border-color:var(--brand-2); color:var(--on-accent); }
       .chat-send-btn:disabled { opacity:0.5; cursor:not-allowed; filter:none; box-shadow:none; }
       /* ── Compute picker (where the chat runs), like the model picker in Claude or Cursor ── */
       .model-picker-wrap { position:relative; min-width:0; }
@@ -100,7 +101,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .model-dropdown {
         position:absolute; bottom:calc(100% + 8px); left:-6px; width:min(380px, 86vw);
         background:var(--bg-surface); border:1px solid var(--border-strong);
-        border-radius:var(--radius-md); box-shadow:0 -6px 28px rgba(0,0,0,0.45);
+        border-radius:var(--radius-md); box-shadow:var(--shadow-up);
         z-index:100; padding:6px; display:flex; flex-direction:column;
       }
       .model-dropdown input { min-height:30px; padding:6px 10px; font-size:12.5px; margin-bottom:4px; }
@@ -126,23 +127,28 @@ app.get("/portal/chat", async (_req, reply) => {
       .msg-error { color:var(--danger); }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
+      /* Empty thread and the streaming status line */
+      .chat-empty { padding:60px 0; text-align:center; }
+      .chat-empty-icon { display:inline-flex; width:44px; height:44px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:12px; }
+      .chat-empty .chat-empty-title { margin:0 0 6px; font-size:18px; color:var(--text); }
+      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
     </style>
     <div class="chat-layout">
       <!-- Conversations (New chat, Search, recent chats) live in the shell's sidebar. -->
       <div class="chat-main">
         <div class="chat-scroll" id="chatScroll">
           <div class="chat-thread" id="chatMessages">
-            <div style="padding:60px 0; text-align:center;">
-              <div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div>
-              <h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2>
-              <div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
+            <div class="chat-empty">
+              <div class="chat-empty-icon">${icon("chat", 20)}</div>
+              <h2 class="chat-empty-title">Start a conversation</h2>
+              <div class="muted u-fs-13">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div>
             </div>
           </div>
         </div>
-        <div id="streamingIndicator" class="hidden" style="max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px;">
+        <div id="streamingIndicator" class="hidden stream-indicator">
           <div class="typing-indicator"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
           <span id="streamStatus">Thinking...</span>
-          <span id="streamTokens" style="margin-left:auto;"></span>
+          <span id="streamTokens" class="u-ml-auto"></span>
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
@@ -162,7 +168,7 @@ app.get("/portal/chat", async (_req, reply) => {
                 <button class="chat-send-btn" id="sendBtn">Send</button>
               </div>
             </div>
-            <div class="muted" style="font-size:10px; margin-top:6px; text-align:center;">Enter to send, Shift+Enter for newline</div>
+            <div class="muted u-fs-10 u-mt-6 u-center">Enter to send, Shift+Enter for newline</div>
           </div>
         </div>
       </div>
@@ -238,7 +244,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var container = document.getElementById("chatMessages");
       var scrollParent = container.parentElement;
       if (!messages || messages.length === 0) {
-        container.innerHTML = '<div style="padding:60px 0; text-align:center;"><div style="display:inline-flex;width:44px;height:44px;border-radius:var(--radius-md);border:1px solid var(--card-border);background:var(--bg-surface);align-items:center;justify-content:center;color:var(--brand-2);margin-bottom:12px;">${icon("chat", 20)}</div><h2 style="margin:0 0 6px; font-size:18px; color:var(--text);">Start a conversation</h2><div class="muted" style="font-size:13px;">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
+        container.innerHTML = '<div class="chat-empty"><div class="chat-empty-icon">${icon("chat", 20)}</div><h2 class="chat-empty-title">Start a conversation</h2><div class="muted u-fs-13">Ask EdgeCoder anything about your code, infrastructure, or workflow.</div></div>';
         return;
       }
       var html = "";
@@ -410,7 +416,7 @@ app.get("/portal/chat", async (_req, reply) => {
               var parsed = JSON.parse(payload);
               if (parsed.warning) {
                 var warnBanner = document.createElement("div");
-                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);border-radius:6px;margin-bottom:8px;";
+                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:var(--yellow);background:color-mix(in srgb, var(--yellow) 8%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 20%, transparent);border-radius:6px;margin-bottom:8px;";
                 warnBanner.textContent = parsed.warning;
                 assistantBubble.insertBefore(warnBanner, assistantBody);
               }

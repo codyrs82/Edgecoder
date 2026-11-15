@@ -18,6 +18,10 @@ interface Stream {
   /** Next sequence number expected from the agent (pieces are applied in order, duplicates ignored). */
   nextSeq: number;
   chars: number;
+  /** Task the stream's subtask belongs to (set at open), so a reader is checked against it. */
+  taskId?: string;
+  /** UTF-8 size of everything accepted (text and tool calls): the most tokens the reply can be. */
+  bytes: number;
   done: boolean;
   error?: string;
   doneAtMs?: number;
@@ -34,8 +38,18 @@ export class InferenceStreams {
   }
 
   /** Open a stream for a subtask (at submit). */
-  open(subtaskId: string): void {
-    if (!this.streams.has(subtaskId)) this.streams.set(subtaskId, { chunks: [], nextSeq: 0, chars: 0, done: false });
+  open(subtaskId: string, taskId?: string): void {
+    if (!this.streams.has(subtaskId)) this.streams.set(subtaskId, { chunks: [], nextSeq: 0, chars: 0, bytes: 0, done: false, taskId });
+  }
+
+  /** Task a stream was opened for, or undefined. */
+  taskOf(subtaskId: string): string | undefined {
+    return this.streams.get(subtaskId)?.taskId;
+  }
+
+  /** UTF-8 bytes accepted into a stream so far (text plus tool calls), or undefined when unknown. */
+  replyBytes(subtaskId: string): number | undefined {
+    return this.streams.get(subtaskId)?.bytes;
   }
 
   has(subtaskId: string): boolean {
@@ -45,19 +59,25 @@ export class InferenceStreams {
   /**
    * Apply a piece from the agent. Out-of-order pieces ahead of the next expected one are refused
    * (the agent sends them in order; a gap means a lost request, and the final result has it all).
+   * A stream that has ended takes nothing more ("closed"), so there is exactly one final piece.
    */
-  append(subtaskId: string, seq: number, delta: string, done = false, error?: string, toolCalls?: unknown[]): "ok" | "duplicate" | "unknown" | "gap" | "too_large" {
+  append(subtaskId: string, seq: number, delta: string, done = false, error?: string, toolCalls?: unknown[]): "ok" | "duplicate" | "unknown" | "gap" | "too_large" | "closed" {
     const s = this.streams.get(subtaskId);
     if (!s) return "unknown";
     if (seq < s.nextSeq) return "duplicate";
+    if (s.done) return "closed";
     if (seq > s.nextSeq) return "gap";
     if (s.chars + delta.length > MAX_CHARS) return "too_large";
     s.nextSeq++;
     if (delta) {
       s.chunks.push(delta);
       s.chars += delta.length;
+      s.bytes += Buffer.byteLength(delta, "utf8");
     }
-    if (toolCalls?.length) s.toolCalls = [...(s.toolCalls ?? []), ...toolCalls];
+    if (toolCalls?.length) {
+      s.toolCalls = [...(s.toolCalls ?? []), ...toolCalls];
+      s.bytes += Buffer.byteLength(JSON.stringify(toolCalls), "utf8");
+    }
     if (done) this.finish(subtaskId, error);
     this.events.emit(subtaskId);
     return "ok";
@@ -95,4 +115,27 @@ export class InferenceStreams {
   prune(now = Date.now()): void {
     for (const [id, s] of this.streams) if (s.done && s.doneAtMs !== undefined && now - s.doneAtMs > KEEP_AFTER_DONE_MS) this.streams.delete(id);
   }
+}
+
+/** Tokens a chat template (and a model's built-in system prompt) may add on top of the request text. */
+export const PROMPT_TOKEN_ALLOWANCE = 2048;
+/** End-of-turn and similar tokens that are not in the reply text. */
+export const OUTPUT_TOKEN_ALLOWANCE = 64;
+
+/**
+ * Keep an agent's reported token counts within what the request and the streamed reply could
+ * hold: a token is at least one byte of text, so the request's size bounds the prompt tokens and
+ * the accepted stream's size bounds the output tokens. The counts price the call, so they are
+ * never taken as reported.
+ */
+export function boundTokenCounts(
+  reported: { promptTokens?: number; outputTokens?: number },
+  requestBytes: number,
+  replyBytes: number
+): { promptTokens?: number; outputTokens?: number } {
+  const bound = (n: number | undefined, max: number) => (n === undefined ? undefined : Math.max(0, Math.min(Math.floor(n), Math.floor(max))));
+  return {
+    promptTokens: bound(reported.promptTokens, requestBytes + PROMPT_TOKEN_ALLOWANCE),
+    outputTokens: bound(reported.outputTokens, replyBytes + OUTPUT_TOKEN_ALLOWANCE),
+  };
 }

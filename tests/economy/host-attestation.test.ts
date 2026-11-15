@@ -266,6 +266,23 @@ describe("service probes speak the real protocols", () => {
     expect(await probeCoordinatorIdentity("https://h", "coord-host", host.publicKeyPem, fetcher({ peerId: "coord-host", publicKeyPem: intruder.publicKeyPem }))).toEqual({ ok: false, detail: "identity_key_mismatch" });
     expect(await probeCoordinatorIdentity("https://h", "coord-host", host.publicKeyPem, fetcher({ peerId: "coord-other", publicKeyPem: host.publicKeyPem }))).toEqual({ ok: false, detail: "identity_peer_mismatch" });
   });
+
+  it("coordinator: a redirect from /identity is not followed", async () => {
+    const { createServer } = await import("node:http");
+    const target = createServer((_req, res) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ peerId: "coord-host", publicKeyPem: host.publicKeyPem })); });
+    await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
+    const targetPort = (target.address() as { port: number }).port;
+    const redirector = createServer((_req, res) => { res.statusCode = 302; res.setHeader("location", `http://127.0.0.1:${targetPort}/identity`); res.end(); });
+    await new Promise<void>((r) => redirector.listen(0, "127.0.0.1", r));
+    const port = (redirector.address() as { port: number }).port;
+    try {
+      expect(await probeCoordinatorIdentity(`http://127.0.0.1:${targetPort}`, "coord-host", host.publicKeyPem)).toEqual({ ok: true });
+      expect(await probeCoordinatorIdentity(`http://127.0.0.1:${port}`, "coord-host", host.publicKeyPem)).toEqual({ ok: false, detail: "identity_http_302" });
+    } finally {
+      target.close();
+      redirector.close();
+    }
+  });
 });
 
 // Real Postgres (CI sets TEST_DATABASE_URL): counting is atomic per host row.

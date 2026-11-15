@@ -59,10 +59,11 @@ API="https://api.cloudflare.com/client/v4"
 log() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 cf() { # method path [json]
   local m="$1" p="$2" body="${3:-}"
+  # The token goes to curl through a pipe (-H @file), not its argv, which every local user can list.
   if [ -n "$body" ]; then
-    curl -sS -X "$m" "$API$p" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data "$body"
+    curl -sS -X "$m" "$API$p" -H @<(printf 'Authorization: Bearer %s\n' "$CLOUDFLARE_API_TOKEN") -H "Content-Type: application/json" --data "$body"
   else
-    curl -sS -X "$m" "$API$p" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+    curl -sS -X "$m" "$API$p" -H @<(printf 'Authorization: Bearer %s\n' "$CLOUDFLARE_API_TOKEN")
   fi
 }
 ok() { jq -e '.success == true' >/dev/null 2>&1; }
@@ -212,14 +213,17 @@ check "cache rules" "$(put_phase http_request_cache_settings "$CACHE")" || true
 if [ "${APPLY_FLY:-0}" = "1" ]; then
   log "Fly secrets on $FLY_PORTAL_APP"
   need fly
-  fly secrets set -a "$FLY_PORTAL_APP" "PORTAL_EDGE=cloudflare" "PORTAL_ORIGIN_LOCK_TOKEN=$ORIGIN_LOCK_TOKEN"
+  # On stdin, not argv.
+  printf 'PORTAL_EDGE=cloudflare\nPORTAL_ORIGIN_LOCK_TOKEN=%s\n' "$ORIGIN_LOCK_TOKEN" | fly secrets import -a "$FLY_PORTAL_APP"
 fi
 
 # ----------------------------------------------------------------- pages ----
 if [ -n "${PAGES_PROJECT:-}" ]; then
   log "Static mirror -> Cloudflare Pages project $PAGES_PROJECT"
   PORTAL_PUBLIC_URL="https://$DOMAIN" npx tsx scripts/export-static-site.ts dist-static >/dev/null
-  CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" npx --yes wrangler@3 pages deploy dist-static --project-name "$PAGES_PROJECT" --commit-dirty=true
+  # An exact wrangler version: this process holds a Zone:Edit token, so it must not pick up
+  # whatever was published under wrangler@3 most recently.
+  CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" npx --yes "wrangler@${WRANGLER_VERSION:-3.114.0}" pages deploy dist-static --project-name "$PAGES_PROJECT" --commit-dirty=true
 fi
 
 log "Done"

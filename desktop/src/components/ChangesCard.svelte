@@ -135,7 +135,7 @@
     background: none;
     padding: 0;
     color: var(--text-primary);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -160,7 +160,7 @@
     border-color: var(--accent);
   }
   .undo-all:hover:not(:disabled) {
-    border-color: var(--danger, #f85149) !important;
-    color: var(--danger, #f85149) !important;
+    border-color: var(--danger) !important;
+    color: var(--danger) !important;
   }
 </style>

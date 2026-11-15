@@ -12,6 +12,7 @@
     type ReservationOptions,
   } from "../lib/api";
   import { CLASS_LABELS, choiceId, computeChoice, shortModel } from "../lib/compute-choice";
+  import Select from "../components/ui/Select.svelte";
 
   interface Props {
     /** Jump to another settings section (e.g. connect, plan). */
@@ -139,10 +140,11 @@
         </div>
         <div class="sp-row">
           <div class="sp-text"><span class="sp-title">Needs model</span><span class="sp-desc">Only machines that already have it.</span></div>
-          <select bind:value={model} aria-label="Model the machine must have">
-            <option value="">Any</option>
-            {#each option?.models ?? [] as m}<option value={m}>{shortModel(m)}</option>{/each}
-          </select>
+          <Select
+            bind:value={model}
+            ariaLabel="Model the machine must have"
+            options={[{ value: "", label: "Any" }, ...(option?.models ?? []).map((m) => ({ value: m, label: shortModel(m) }))]}
+          />
         </div>
         <div class="sp-row">
           <div class="sp-text">

@@ -2,17 +2,108 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { z } from "zod";
-import { envBool, envInt, envNumber, envUrl } from "../common/config.js";
+import { envBool, envEnum, envFlag, envFlagWord, envInt, envNumber, envUrl } from "../common/config.js";
+import {
+  anchoringEnv,
+  announceEnv,
+  bitcoindEnv,
+  bleSyncEnv,
+  computeClassEnv,
+  discoveryEnv,
+  escalationEnv,
+  hardwareVerificationEnv,
+  leaseEnv,
+  lightningEnv,
+  modelEnv,
+  observabilityEnv,
+  payoutEnv,
+  priceEpochEnv,
+  rateOracleEnv,
+  releaseEnv,
+  sandboxEnv,
+  serviceUrlsEnv,
+  trustEnv,
+  verificationEnv
+} from "../config/shared.js";
 
 /*
  * #15: coordinator (port 4301) configuration. Every numeric, boolean, enum and URL setting the
  * coordinator reads at module load is validated here, so "abc" for an interval or "maybe" for a
  * flag fails startup with the variable named instead of becoming NaN or false.
- * Defaults are unchanged from the previous inline reads. Secrets and free-form strings
- * (tokens, peer keys, file paths, ID lists) are still read where they are used.
+ * Defaults are unchanged from the previous inline reads. The groups from src/config/shared.ts
+ * cover the settings that library helpers read (payouts, anchoring, verification, discovery, ...).
  * Documented in site-docs/reference/environment-variables.md.
  */
+const str = () => z.string().optional();
+
 export const coordinatorConfigSchema = z.object({
+  ...observabilityEnv,
+  ...serviceUrlsEnv,
+  ...modelEnv,
+  ...sandboxEnv,
+  ...releaseEnv,
+  ...discoveryEnv,
+  ...announceEnv,
+  ...computeClassEnv,
+  ...rateOracleEnv,
+  ...priceEpochEnv,
+  ...lightningEnv,
+  ...payoutEnv,
+  ...bitcoindEnv,
+  ...anchoringEnv,
+  ...verificationEnv,
+  ...hardwareVerificationEnv,
+  ...leaseEnv,
+  ...escalationEnv,
+  ...bleSyncEnv,
+  EDGECODER_RESPONSE_SIGNING: trustEnv.EDGECODER_RESPONSE_SIGNING,
+  DATABASE_URL: str(),
+  // Tokens: required in production by requireProdEnv() in coordinator/context.ts (#5).
+  MESH_AUTH_TOKEN: str(),
+  ADMIN_API_TOKEN: str(),
+  INFERENCE_AUTH_TOKEN: str(),
+  PORTAL_SERVICE_TOKEN: str(),
+  PORTAL_COORDINATOR_TOKEN: str(),
+  COORDINATOR_REGISTRATION_TOKEN: str(),
+  // HMAC key and identity keys: validated as present/absent only and read byte-for-byte where used.
+  PAYMENT_WEBHOOK_SECRET: str(),
+  COORDINATOR_PRIVATE_KEY_PEM: str(),
+  COORDINATOR_PUBLIC_KEY_PEM: str(),
+  COORDINATOR_PEER_ID: str(),
+  COORDINATOR_PEER_CACHE_FILE: str(),
+  /** `<peerId>=<public key>[@url]` entries (src/mesh/peer-allowlist.ts parses and rejects bad ones). */
+  MESH_PEER_ALLOWLIST: str(),
+  MESH_REQUIRE_AGENT_SIGNED_RESULTS: envFlagWord(),
+  MESH_WS_REQUIRE_SIGNED: envFlag({ on: ["true"], ci: true }),
+  /** Outside production only; production always requires signed agent requests. */
+  REQUIRE_SIGNED_AGENT_REQUESTS: envFlag({ off: ["false"], ci: true }),
+  /** Comma-separated proxy addresses whose forwarded-IP headers are believed. */
+  COORDINATOR_TRUST_PROXY: str(),
+  COORDINATOR_FEE_ACCOUNT: z.string().default("coordinator-fee:default"),
+  APPROVED_COORDINATOR_IDS: str(),
+  NETWORK_MODE: envEnum(["public_mesh", "enterprise_overlay"]).default("public_mesh"),
+  OLLAMA_MODEL: z.string().default("qwen3.5:9b"),
+  // Floors (60 s / 30 s) are applied where these are read; 0 means "use the default".
+  ANCHOR_RECONCILE_MS: envNumber(900_000, { min: 0 }),
+  ANCHOR_CONFIRM_POLL_MS: envNumber(600_000, { min: 0 }),
+  // #46: read by anchorTrackerTuningFromEnv (src/economy/anchor-tracker.ts); declared here so a bad value stops startup.
+  ANCHOR_REORG_WATCH_CONFIRMATIONS: envInt(100, { min: 1 }),
+  ANCHOR_POLL_RETRY_BASE_MS: envInt(30_000, { min: 1_000 }),
+  ANCHOR_POLL_MAX_BACKOFF_MS: envInt(3_600_000, { min: 1_000 }),
+  PRICE_CONSENSUS_QUORUM: envNumber(undefined, { min: 0 }),
+  /** 0 turns the periodic ledger reconciliation off. */
+  LEDGER_VERIFY_INTERVAL_MS: envNumber(6 * 3_600_000, { min: 0 }),
+  INFRA_HOST_ENABLED: envFlag({ off: ["0"] }),
+  INFRA_HOST_SERVICES: str(),
+  INFRA_HOST_ELECTRS_ENDPOINT: z.string().default("electrs:50001"),
+  INFRA_HOST_REPORT_URLS: str(),
+  INFRA_HOST_ACCOUNT_ID: str(),
+  INFRA_HOST_REGION: str(),
+  INFRA_HOST_LIGHTNING_ADDRESS: str(),
+  INFRA_HOST_LIGHTNING_NODE_ID: str(),
+  HOST_ATTEST_ALLOW_PRIVATE: envFlag({ on: ["1"] }),
+  PORTAL_PUBLIC_URL: envUrl("https://edgecoder.io"),
+  REGISTRY_UPSTREAM_URL: envUrl(),
   COORDINATOR_FEE_BPS: envInt(150, { min: 0 }),
   ROBOT_COORDINATOR_FEE_BPS: envInt(200, { min: 0 }),
   ROBOT_SWEEP_INTERVAL_MS: envInt(86400000, { min: 1 }),
@@ -44,6 +135,8 @@ export const coordinatorConfigSchema = z.object({
   FEE_POOL_DISTRIBUTION_MS: envInt(86_400_000, { min: 60_000 }),
   /** Automatic Lightning-address payouts run this often. */
   PAYOUT_AUTO_INTERVAL_MS: envInt(21_600_000, { min: 60_000 }),
+  /** Earnings hold before an earn row is withdrawable (ms). Unset: 24 h on mainnet, 0 elsewhere (earningsHoldFromEnv). */
+  PAYOUT_EARNINGS_HOLD_MS: envInt(undefined, { min: 0 }),
   IOS_BATTERY_PULL_MIN_INTERVAL_MS: envInt(45000, { min: 1 }),
   IOS_BATTERY_TASK_STOP_LEVEL_PCT: envInt(20, { min: 0 }),
   STATS_LEDGER_SYNC_INTERVAL_MS: envInt(10000, { min: 1 }),
@@ -53,6 +146,9 @@ export const coordinatorConfigSchema = z.object({
   // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
   AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
+  // Signed requests per client address per window whose signature fails before the signer is proven
+  // (bad signature, clock skew). Past it the address is refused until the window passes.
+  PREAUTH_FAILURE_MAX_PER_IP: envInt(120, { min: 1 }),
   // Behavioural auto-blacklists expire: they are usually a misbehaving client build, not an attacker,
   // and a permanent one leaves a legitimate machine with no way back. 0 makes them permanent.
   AUTO_BLACKLIST_TTL_MS: envInt(3600000, { min: 0 }),

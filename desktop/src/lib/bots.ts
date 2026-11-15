@@ -118,6 +118,8 @@ export interface AskCard {
   id: string;
   question: string;
   detail?: string;
+  /** While it waits for you: the whole call, so the card shows every argument in full, not just `detail`. */
+  call?: { tool: string; args: Record<string, unknown> };
   /** null while it waits for you. */
   answer: "Allowed" | "Denied" | null;
   /** open_pull_request: what the PR will be. */
@@ -148,7 +150,7 @@ export function askCards(events: Array<{ type: string; id?: string; tool?: strin
         const pr = { title: s("title"), body: s("body"), branch: s("branch"), base: s("base"), diffstat: s("diffstat"), commits: n("commits"), uncommitted: n("uncommitted") };
         return { id: e.id!, question, answer, pr };
       }
-      return { id: e.id!, question, ...(detail ? { detail } : {}), answer };
+      return { id: e.id!, question, ...(detail ? { detail } : {}), ...(answer === null ? { call: { tool, args } } : {}), answer };
     });
 }
 

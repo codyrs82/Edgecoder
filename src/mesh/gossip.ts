@@ -4,6 +4,9 @@
 import { request } from "undici";
 import type { WebSocket } from "ws";
 import { MeshMessage, MeshPeerIdentity } from "../common/types.js";
+import { moduleLogger } from "../common/logger.js";
+
+const logger = moduleLogger("gossip");
 
 const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -139,10 +142,10 @@ export class GossipMesh {
               this.failureCounts.delete(peer.peerId);
               return;
             }
-            console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} failed: ${res.statusCode} ${body}`);
+            logger.warn({ peerUrl: peer.coordinatorUrl, status: res.statusCode, body: body.slice(0, 500) }, "gossip broadcast rejected");
             this.recordFailure(peer.peerId);
           } catch (err) {
-            console.warn(`[gossip] broadcast to ${peer.coordinatorUrl} error: ${(err as Error).message}`);
+            logger.warn({ peerUrl: peer.coordinatorUrl, error: (err as Error).message }, "gossip broadcast failed");
             this.recordFailure(peer.peerId);
           }
         }
@@ -160,7 +163,7 @@ export class GossipMesh {
     );
 
     if (peers.length > 0) {
-      console.log(`[gossip] broadcast type=${message.type} to ${peers.length} peers: ${delivered} delivered, ${failed} failed`);
+      logger.info({ type: message.type, peers: peers.length, delivered, failed }, "gossip broadcast");
     }
 
     return { delivered, failed };
@@ -192,7 +195,7 @@ export class GossipMesh {
         });
         await res.body.text().catch(() => "");
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          console.log(`[gossip] relayed to ${targetPeerId} via ${connectedId}`);
+          logger.info({ targetPeerId, via: connectedId }, "gossip relayed");
           return true;
         }
       } catch {
@@ -209,14 +212,14 @@ export class GossipMesh {
 
     // Mark peer as NATed after repeated failures — skip HTTP on future broadcasts
     if (count >= NAT_DETECTION_THRESHOLD && !this.natPeers.has(peerId)) {
-      console.log(`[gossip] marking peer ${peerId} as NATed after ${count} HTTP failures`);
+      logger.info({ peerId, failures: count }, "gossip peer marked NATed");
       this.natPeers.add(peerId);
     }
 
     if (count >= MAX_CONSECUTIVE_FAILURES) {
       // Only evict if we have no WS connection — NATed peers with WS are still reachable
       if (!this.hasWebSocket(peerId)) {
-        console.warn(`[gossip] evicting unreachable peer ${peerId} after ${count} consecutive failures`);
+        logger.warn({ peerId, failures: count }, "gossip peer evicted as unreachable");
         this.peers.delete(peerId);
         this.failureCounts.delete(peerId);
         this.natPeers.delete(peerId);

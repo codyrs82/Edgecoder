@@ -4,11 +4,14 @@ name: Deploy to Fly.io
 # takes effect after merge. workflow_run has no `paths` filter: every green CI
 # run on main deploys.
 #
-# DISABLED until #31: the Fly apps were deleted on purpose. Every deploy job is
-# gated on the repo variable DEPLOY_ENABLED == 'true', which is intentionally left
-# unset, so neither a merge to main nor a manual dispatch can deploy. Re-enable only
-# as part of #31 (create the `production` environment and the apps first, then set
-# the variable).
+# #31: the Fly apps exist again. Every deploy job is gated on the repo variable
+# DEPLOY_ENABLED == 'true' (the on/off switch; unset or anything else means no deploy,
+# neither on a merge to main nor on a manual dispatch). With the variable set, a deploy
+# runs only when:
+#   1. edgecoder-ci finished with conclusion `success` for a push to main (or this
+#      workflow was dispatched by hand from main), and
+#   2. the newest completed scale-nonroot run on main is green (#90, the #31 blocker).
+# The `production` environment must exist and hold the FLY_API_TOKEN secret.
 #
 # #33: one matrix job per real deploy/fly/*.toml. There is no separate coordinator
 # app (fly.seed-node.toml runs EDGE_RUNTIME_MODE=all-in-one, so the seed *is* the
@@ -22,25 +25,39 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-fly
   cancel-in-progress: false
 
 jobs:
   gate:
-    # Disabled until #31 (vars.DEPLOY_ENABLED is unset). Manual dispatch only from main.
+    # Off unless vars.DEPLOY_ENABLED == 'true' (#31). Manual dispatch only from main.
     if: >-
       ${{ vars.DEPLOY_ENABLED == 'true' && (
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
         (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
       ) }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     steps:
       - run: echo "CI green for ${{ github.event.workflow_run.head_sha || github.sha }}"
+      # #31 blocker (#90): scale-nonroot is path-filtered and nightly, so it is not part of
+      # edgecoder-ci. Refuse to deploy while its newest completed run on main is not green.
+      - name: Require green scale-nonroot on main
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          c=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow scale-nonroot.yml --branch main \
+            --status completed --limit 1 --json conclusion --jq '.[0].conclusion // "missing"')
+          echo "latest completed scale-nonroot run on main: $c"
+          [ "$c" = "success" ] || { echo "::error::scale-nonroot on main is '$c'; not deploying"; exit 1; }
 
   deploy:
     needs: gate
-    # disabled until #31; main only
+    # off unless vars.DEPLOY_ENABLED == 'true'; main only
     if: ${{ vars.DEPLOY_ENABLED == 'true' && (github.ref == 'refs/heads/main' || github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     environment: production

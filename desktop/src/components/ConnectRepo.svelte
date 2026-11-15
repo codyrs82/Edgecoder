@@ -105,12 +105,12 @@
     flex: 1;
     min-width: 0;
     padding: 7px 10px;
-    border: 0.5px solid var(--border-strong, var(--border));
+    border: 0.5px solid var(--border-strong);
     border-radius: 8px;
     background: var(--bg-surface);
     color: var(--text-primary);
     font-size: 13px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   input:focus {
     outline: none;
@@ -136,16 +136,16 @@
   .hint, .progress, .error {
     margin: 0;
     font-size: 12px;
-    color: var(--text-muted, var(--text-secondary));
+    color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .progress {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .error {
-    color: var(--red, #e5484d);
+    color: var(--red);
     white-space: normal;
   }
   .recent {

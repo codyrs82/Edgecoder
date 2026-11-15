@@ -17,6 +17,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { localBackend, networkBackend } from "../../inference-api/backends.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { ChatBackend, ChatPiece } from "../../inference-api/types.js";
+import { allowedOrigins, isWebOrigin, safeTokenEqual } from "./ide-auth.js";
 import type { NetworkDeps } from "./network-inference.js";
 
 export type ConnectionTarget = "local" | "mine" | "network" | "reserved" | "auto";
@@ -230,8 +231,19 @@ export class ConnectionManager {
 
   private async start(c: Connection): Promise<void> {
     const app = Fastify({ logger: false, bodyLimit: 16 * 1024 * 1024 });
+    // Same perimeter as the IDE server: no web-page Origin, loopback Host only (DNS rebinding).
+    const origins = allowedOrigins();
+    const hosts = new Set([`127.0.0.1:${c.port}`, `localhost:${c.port}`, `[::1]:${c.port}`]);
+    app.addHook("onRequest", async (req, reply) => {
+      const origin = req.headers.origin;
+      if (isWebOrigin(typeof origin === "string" ? origin : undefined, origins)) return reply.code(403).send({ error: "forbidden_origin" });
+      if (!hosts.has(String(req.headers.host ?? "").toLowerCase())) return reply.code(403).send({ error: "forbidden_host" });
+    });
     registerCompatRoutes(app, {
-      authenticate: async (req) => (apiKeyOf(req) === c.key ? c : null),
+      authenticate: async (req) => {
+        const key = apiKeyOf(req);
+        return key && safeTokenEqual(key, c.key) ? c : null;
+      },
       models: async () => [connectionModelId(c)],
       resolve: async () => {
         if (c.budgetCSats !== undefined && c.spentCSats >= c.budgetCSats)
@@ -239,7 +251,8 @@ export class ConnectionManager {
         return { backend: this.backendFor(c), model: connectionModelId(c) };
       },
     });
-    app.get("/health", async () => ({ ok: true, connection: c.name, model: connectionModelId(c) }));
+    // Unauthenticated, so it names nothing (the connection and model are behind the key: /v1/models).
+    app.get("/health", async () => ({ ok: true }));
     const entry: { app: FastifyInstance; error?: string; listening: boolean } = { app, listening: false };
     this.servers.set(c.id, entry);
     try {

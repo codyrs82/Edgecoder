@@ -23,12 +23,12 @@
     justify-content: space-between;
     gap: 12px;
     padding: 8px 14px;
-    background: var(--red, #b42318);
-    color: #fff;
+    background: var(--red);
+    color: var(--on-accent);
     font-size: 13px;
   }
   .endpoint-banner code {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .endpoint-banner button {
     background: none;

@@ -61,8 +61,8 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `GET` | `/economy/price/current` | Current dynamic price epoch | mesh token |
 | `GET` | `/economy/price/quote` | Get a sats quote for a given resource class | mesh token |
 | `GET` | `/economy/credits/:accountId/quote` | Credit-to-sats conversion quote | mesh token |
-| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only) | mesh token + admin token |
-| `POST` | `/economy/price/consensus` | Run weighted-median price consensus across peers | mesh token + admin token |
+| `POST` | `/economy/price/propose` | Propose a price update (approved coordinators only; 422 `price_out_of_bounds` outside the configured band or max step) | mesh token + admin token |
+| `POST` | `/economy/price/consensus` | Median price over signed quotes from allowlisted coordinators; 409 `price_quorum_not_met` without a quorum; result clamped to the max step | mesh token + admin token |
 | `POST` | `/economy/payments/intents` | Create a BTC/Lightning payment intent | mesh token + admin token |
 | `GET` | `/economy/payments/intents/:intentId` | Get payment intent status | mesh token |
 | `POST` | `/economy/payments/intents/:intentId/confirm` | Confirm payment settlement and mint credits | mesh token + admin token |
@@ -83,7 +83,7 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | `POST` | `/economy/issuance/quorum/vote` | Submit quorum vote for an issuance epoch | mesh token + admin token |
 | `GET` | `/economy/issuance/quorum/:epochId` | Get quorum votes for an epoch | mesh token |
 | `POST` | `/economy/issuance/anchor` | Anchor current issuance epoch to Bitcoin (spends sats) | admin token |
-| `GET` | `/economy/issuance/anchors` | List Bitcoin anchor records | mesh token |
+| `GET` | `/economy/issuance/anchors` | Anchoring status (`anchoring.mode`: disabled, simulated, enabled) and anchor records; pre-#46 simulated rows have `status: "simulated"` | mesh token |
 | `POST` | `/economy/issuance/reconcile` | Reconcile issuance across peers | mesh token |
 
 ### Mesh Networking
@@ -139,12 +139,12 @@ Most coordinator endpoints require the `x-mesh-token` header matching `MESH_AUTH
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/ledger/snapshot` | Full ordering chain snapshot | mesh token |
-| `GET` | `/ledger/verify` | Verify ordering chain integrity | mesh token |
+| `GET` | `/ledger/verify` | Verify ordering chain integrity; with `x-admin-token`, reconcile the credits ledger in Postgres (read-only, #115; `?max=` discrepancies, default 20) | mesh token (+ admin token for reconciliation) |
 | `GET` | `/stats/ledger/head` | Latest stats ledger record | mesh token |
 | `GET` | `/stats/ledger/range` | Stats ledger range query | mesh token |
 | `POST` | `/stats/ledger/ingest` | Ingest stats ledger records from peers | mesh token |
 | `POST` | `/stats/anchors/anchor-latest` | Anchor latest stats to Bitcoin (spends sats) | admin token |
-| `GET` | `/stats/anchors/verify` | Verify stats anchors | mesh token |
+| `GET` | `/stats/anchors/verify` | Whether a checkpoint has a real anchor tx at the required confirmations, plus anchoring status | mesh token |
 | `GET` | `/stats/projections/summary` | Projected network stats summary | mesh token |
 
 ### BLE Credits
@@ -246,7 +246,7 @@ Protected by `ADMIN_API_TOKEN` (via `x-admin-token` header or `Authorization: Be
 | `GET` | `/network/mode` | Current network mode | admin |
 | `POST` | `/network/mode` | Set network mode (public_mesh / enterprise_overlay) | admin |
 | `GET` | `/network/summary` | Network status (capacity, jobs, pricing) | admin |
-| `GET` | `/network/coordinators` | Coordinator discovery (known coordinators) | admin |
+| `GET` | `/network/coordinators` | Coordinator discovery (known coordinator URLs and peerIds; result cached 30 s) | none (public bootstrap) |
 | `GET` | `/mesh/peers` | Mesh peer listing (via coordinator) | admin |
 | `GET` | `/deployment/plan` | Current deployment plan | admin |
 
@@ -353,10 +353,11 @@ Public-facing. Auth routes are unauthenticated; most other routes require a vali
 | `GET` | `/auth/capabilities` | Auth capabilities (passkey, SSO providers) | none |
 | `POST` | `/auth/signup` | Email/password signup | none |
 | `POST` | `/auth/login` | Email/password login | none |
-| `POST` | `/auth/logout` | End session | session |
-| `GET` | `/auth/verify-email` | Verify email via token | none |
-| `POST` | `/auth/resend-verification` | Resend verification email | session |
-| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft) | none |
+| `POST` | `/auth/logout` | End the session presented by cookie and/or `Authorization: Bearer` (both are revoked server-side) | session |
+| `GET` | `/auth/verify-email` | The emailed link: shows a confirmation page and changes nothing | none |
+| `POST` | `/auth/verify-email` | Confirm the address: body `{ token, password? }`. Succeeds only with the account's own session (cookie or Bearer) or its password (`401 verify_password_required`, or `verify_sign_in_required` for an account without a password). On success the account's earlier sessions, API keys and passkeys are revoked (and, on a password account, linked providers and the GitHub token), and a new session is returned as `{ ok, sessionToken }`. Someone who did not create the account uses Forgot password instead. | none |
+| `POST` | `/auth/resend-verification` | Resend the verification email: body `{ email }`. Always answers `{ ok, message }` the same way (unknown, verified or capped addresses included); at most 4 verification emails per account per hour. | none |
+| `GET` | `/auth/oauth/:provider/start` | Start OAuth flow (google, microsoft, github). `appRedirect` is at most 512 characters. Rate limited with the other sign-in routes (10 per minute per IP). | none |
 | `GET` | `/auth/oauth/:provider/callback` | OAuth callback (GET) | none |
 | `POST` | `/auth/oauth/:provider/callback` | OAuth callback (POST) | none |
 | `POST` | `/auth/oauth/mobile/complete` | Complete native-app OAuth: `{ token, verifier? }`; a token from a start with `appChallenge` (base64url sha256 of `verifier`) needs that verifier | none |
@@ -384,7 +385,7 @@ Both routes share a rate limit of 5 requests per 15 minutes per client IP. Both 
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `POST` | `/auth/passkey/register/options` | Generate passkey registration options | session |
+| `POST` | `/auth/passkey/register/options` | Generate passkey registration options (`403 email_not_verified` until the email is verified) | session |
 | `POST` | `/auth/passkey/register/verify` | Verify passkey registration response | session |
 | `POST` | `/auth/passkey/login/options` | Generate passkey authentication options | none |
 | `POST` | `/auth/passkey/login/verify` | Verify passkey authentication response | none |
@@ -404,7 +405,7 @@ Keys for the [Hosted API](#hosted-api-portal-port-4310). Keys start with `eck_`;
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/keys` | List your API keys (metadata only, never the key) | session |
-| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`). | session |
+| `POST` | `/portal/api/keys` | Create a key: body `{ "name" }` (1 to 60 characters); returns `{ keyId, name, key }`. The key is shown only in this response. At most 20 keys per user (`409 too_many_keys`); `403 email_not_verified` until the account's email is verified. | session |
 | `DELETE` | `/portal/api/keys/:keyId` | Revoke a key (`404 unknown_key` if it is not yours) | session |
 
 ### Agent Signup
@@ -478,11 +479,11 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
 | `GET` | `/portal/api/conversations` | List conversations | session |
-| `POST` | `/portal/api/conversations` | Create a conversation | session |
-| `GET` | `/portal/api/conversations/:id/messages` | Get messages for a conversation | session |
-| `PATCH` | `/portal/api/conversations/:id` | Update conversation metadata | session |
+| `POST` | `/portal/api/conversations` | Create a conversation: body `{ title? }`, at most 200 characters (`400 invalid_title`). Shares the chat rate limit. | session |
+| `GET` | `/portal/api/conversations/:id/messages` | Get the latest 500 messages of a conversation, oldest first | session |
+| `PATCH` | `/portal/api/conversations/:id` | Rename: body `{ title }`, 1 to 200 characters (`400 invalid_title`) | session |
 | `DELETE` | `/portal/api/conversations/:id` | Delete a conversation | session |
-| `POST` | `/portal/api/chat` | Send a chat message (submits task) | session |
+| `POST` | `/portal/api/chat` | Send a chat message (submits task). `message` is at most 32,000 characters (`413 message_too_long`). Only the latest 40 messages, up to 120,000 characters, are sent as context. Rate limit: 20 per minute per user, shared with creating conversations (`429 rate_limited`). | session |
 
 ### Reviews
 

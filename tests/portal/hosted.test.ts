@@ -25,7 +25,7 @@ describe("hosted endpoint", () => {
     const app = Fastify();
     registerHostedRoutes(app, {
       store: store as never,
-      getCurrentUser: async (req) => (req.headers.cookie === "session" ? { userId: "u1" } : null),
+      getCurrentUser: async (req) => (req.headers.cookie === "session" ? { userId: "u1" } : req.headers.cookie === "unverified" ? { userId: "u2", emailVerified: false } : null),
       PORTAL_SERVICE_TOKEN: "svc",
       EXTERNAL_HTTP_TIMEOUT_MS: 1000,
       discoverCoordinatorUrlsForPortal: async () => [],
@@ -50,6 +50,10 @@ describe("hosted endpoint", () => {
   it("needs a signed-in user for keys and profile, and refuses markup in names", async () => {
     const { app } = setup();
     expect((await app.inject({ method: "POST", url: "/portal/api/keys", payload: { name: "x" } })).statusCode).toBe(401);
+    // An account whose email is not verified cannot hold API keys.
+    const unverified = await app.inject({ method: "POST", url: "/portal/api/keys", headers: { cookie: "unverified" }, payload: { name: "x" } });
+    expect(unverified.statusCode).toBe(403);
+    expect(unverified.json().error).toBe("email_not_verified");
     expect((await app.inject({ method: "POST", url: "/me/profile", headers: { cookie: "session" }, payload: { displayName: "<b>x</b>" } })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: "/me/profile", headers: { cookie: "session" }, payload: { displayName: "Cody" } })).json()).toEqual({ ok: true, displayName: "Cody" });
   });

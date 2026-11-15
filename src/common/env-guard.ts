@@ -26,6 +26,24 @@ export function requireProdEnv(service: string, names: string[], env: NodeJS.Pro
   }
 }
 
+/**
+ * Env a production coordinator refuses to start without. #55: DATABASE_URL is required because the
+ * replay/idempotency keys (contribution report ids, BLE tx ids, payment settlement, debit keys,
+ * expired lease holders) are durable only in Postgres; the in-memory fallbacks forget them on restart
+ * and are not shared between coordinators.
+ */
+export function coordinatorRequiredProdEnv(paymentsEnabled: boolean): string[] {
+  return [
+    "MESH_AUTH_TOKEN",
+    "PORTAL_SERVICE_URL",
+    "PORTAL_SERVICE_TOKEN",
+    "ADMIN_API_TOKEN",
+    "PAYMENT_WEBHOOK_SECRET",
+    "DATABASE_URL",
+    ...(paymentsEnabled ? ["LIGHTNING_PROVIDER"] : [])
+  ];
+}
+
 export type SharedTokenCheck = "ok" | "unauthorized" | "not_configured";
 
 /**

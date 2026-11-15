@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { registerSettingsComputePage } from "./settings-compute.js";
 import { registerSettingsOpsPages } from "./settings-ops.js";
 import { LEGACY_SETTINGS_REDIRECTS, SETTINGS_HELPERS_SCRIPT, redirectKeepingQuery, settingRow, settingsPage } from "./settings-shell.js";
+import { CSP_NONCE } from "../csp-nonce.js";
 
 /**
  * Settings (/portal/settings): General, Profile, Usage and Connect your tools, one section at a
@@ -20,13 +21,13 @@ const group = (label: string) => `<div class="set-group">${label}</div>`;
 const GENERAL = section(
   "general",
   "General",
-  "How the portal looks on this account.",
+  "How the portal looks in this browser.",
   card(
     settingRow(
       "Theme",
-      "Applies to every page of the portal, on every device you sign in from.",
-      `<select id="themeSelect" aria-label="Theme"><option value="warm">Graphite (default)</option><option value="midnight">Midnight</option><option value="emerald">Evergreen</option></select>`,
-      { keywords: "theme appearance colour color dark" }
+      "Light, dark, or follow your system setting. Saved in this browser, like the desktop app.",
+      `<select id="themeSelect" aria-label="Theme" data-theme-select><option value="system">System</option><option value="light">Light</option><option value="dark">Dark (default)</option></select>`,
+      { keywords: "theme appearance colour color dark light mode" }
     )
   )
 );
@@ -82,7 +83,7 @@ const TOOLS = section(
   group("API keys") +
     card(
       settingRow("Create a key", "Name it after the tool or machine that will use it.", `<input id="newKeyName" maxlength="60" placeholder="e.g. Cursor on laptop" aria-label="Key name" /><button class="primary" id="createKeyBtn">Create key</button>`, { keywords: "api key create token" }) +
-        `<div id="newKeyBox" class="hidden set-row wide"><strong>Copy this key now. It won't be shown again.</strong><div class="row"><code id="newKeyValue" style="word-break:break-all;"></code><button id="copyKeyBtn">Copy</button></div></div>` +
+        `<div id="newKeyBox" class="hidden set-row wide"><strong>Copy this key now. It won't be shown again.</strong><div class="row"><code id="newKeyValue" class="u-break-all"></code><button id="copyKeyBtn">Copy</button></div></div>` +
         `<div class="set-row wide" data-keywords="api keys revoke list"><table class="table"><thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody id="keysBody"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table></div>`
     ) +
     group("Instructions") +
@@ -177,7 +178,6 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
       me = await requireAuth();
       revealSettingsAdminTab(me);
       const user = me.user || {};
-      document.getElementById("themeSelect").value = user.uiTheme || "warm";
       document.getElementById("displayNameInput").value = user.displayName || "";
       document.getElementById("profileEmail").textContent = user.email || "";
       document.getElementById("profileEmailBadge").innerHTML = user.emailVerified ? statusBadge("Verified", "ok") : statusBadge("Unverified", "warn");
@@ -204,12 +204,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
         showToast("Could not save: " + String(err.message || err), true);
       }
     });
-    document.getElementById("themeSelect").addEventListener("change", async (e) => {
-      const theme = e.target.value;
-      applyTheme(theme);
-      try { await api("/me/theme", { method: "POST", body: JSON.stringify({ theme }) }); showToast("Theme updated."); }
-      catch (err) { showToast("Could not save theme: " + String(err.message || err), true); }
-    });
+    // #89: /assets/theme.js applies and stores the choice for select[data-theme-select].
 
     /* ── Plan & usage ── */
     function reasonLabel(reason) {
@@ -344,7 +339,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
 
 export function registerSettingsPages(app: FastifyInstance): void {
   app.get("/portal/settings", async (_req, reply) => {
-    const content = `<style>.search-hidden { display: none !important; }</style>${GENERAL}${PROFILE}${USAGE}${TOOLS}<div id="settingsNoMatch" class="hidden">No settings match your search.</div>`;
+    const content = `<style nonce="${CSP_NONCE}">.search-hidden { display: none !important; }</style>${GENERAL}${PROFILE}${USAGE}${TOOLS}<div id="settingsNoMatch" class="hidden">No settings match your search.</div>`;
     return reply.type("text/html").send(settingsPage("general", "Your account, plan, compute and connected tools.", content, SCRIPT));
   });
   registerSettingsComputePage(app);
