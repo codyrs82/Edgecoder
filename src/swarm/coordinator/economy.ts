@@ -26,6 +26,7 @@ import { ComputeOrderBook, type AskCapability } from "../../economy/order-book.j
 import { MarketHistory, type MarketOrder } from "../../economy/market-history.js";
 import {
   HardwareVerifier,
+  ipNetworkPrefix,
   hardwareVerificationConfigFromEnv,
   type HardwareVerificationRecord
 } from "../hardware-verification.js";
@@ -94,7 +95,7 @@ export const hardwareVerifier = new HardwareVerifier({
   config: hardwareVerificationConfigFromEnv(),
   classes: rateOracleConfig.computeClasses,
   persist: (r) => pgStore?.upsertHardwareVerification(r),
-  // Second witness after the first one disagreed (one witness alone cannot demote).
+  // Further witnesses: a second one after the first disagreed, two fresh ones for a confirmatory round.
   pickWitness: (subjectId, model, exclude, nowMs) => pickBenchmarkWitness(subjectId, model, nowMs, exclude)
 });
 /** The class, tier and weight an agent is paid and matched at (its verified grant); undefined for an unknown agent. */
@@ -128,25 +129,30 @@ export function benchmarkModelFor(agentId: string): string | undefined {
   return agentCapabilities.get(agentId)?.activeModel || rec?.selfReport?.gpu?.model || rec?.selfReport?.loaded?.model || undefined;
 }
 /**
- * A second agent to run the same GPU challenge (cross-check): online, same model, not the subject's
- * owner or IP, preferring agents that are themselves cross-checked. `exclude` (e.g. the first
- * witness, when a second one is needed) is skipped along with its owner and IP, so two witnesses
- * are independent of each other as well as of the subject. Sybils across owners are the residual
- * risk; ongoing evidence and re-challenges with a fresh random witness bound it.
+ * A witness for a GPU cross-check, picked uniformly at random among the eligible agents:
+ * - online, not blacklisted, and running the challenge's model;
+ * - eligible on its own verification record (hardwareVerifier.canWitness): a passed GPU challenge
+ *   and a clean enough witness record (few disagreements, strikes under the threshold);
+ * - independent of the subject and of every agent in `exclude` (earlier witnesses of the same
+ *   check): a different agent, owner account and IP network (/24 for IPv4, /48 for IPv6).
+ * Witnesses on separate accounts and networks can still collude; a demotion therefore needs a
+ * confirmatory round with two more fresh witnesses (hardware-verification.ts), and witnesses it
+ * overrules are struck.
  */
-export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number, exclude: string[] = []): string | undefined {
-  const others = [subjectId, ...exclude].map((id) => ({ id, cap: agentCapabilities.get(id) }));
-  const candidates: Array<{ id: string; rank: number }> = [];
+export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number, exclude: string[] = [], pick: (n: number) => number = randomInt): string | undefined {
+  const others = [subjectId, ...exclude].map((id) => {
+    const cap = agentCapabilities.get(id);
+    return { id, owner: cap?.ownerEmail, net: ipNetworkPrefix(cap?.sourceIp) };
+  });
+  const candidates: string[] = [];
   for (const [id, cap] of agentCapabilities) {
     if (nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
-    if (others.some((o) => o.id === id || (o.cap?.ownerEmail && cap.ownerEmail === o.cap.ownerEmail) || (o.cap?.sourceIp && cap.sourceIp === o.cap.sourceIp))) continue;
-    const rec = hardwareVerifier.get(id);
-    if (!rec?.challengeKinds.includes("gpu") || benchmarkModelFor(id) !== model) continue;
-    candidates.push({ id, rank: rec.measured?.crossChecked ? 2 : rec.status === "verified" ? 1 : 0 });
+    const net = ipNetworkPrefix(cap.sourceIp);
+    if (others.some((o) => o.id === id || (o.owner && cap.ownerEmail === o.owner) || (o.net && net === o.net))) continue;
+    if (benchmarkModelFor(id) !== model || !hardwareVerifier.canWitness(id, nowMs)) continue;
+    candidates.push(id);
   }
-  const best = Math.max(-1, ...candidates.map((c) => c.rank));
-  const top = candidates.filter((c) => c.rank === best);
-  return top.length ? top[randomInt(top.length)].id : undefined;
+  return candidates.length ? candidates[pick(candidates.length)] : undefined;
 }
 
 const MARKET_BID_MAX_AGE_MS = 24 * 60 * 60_000;

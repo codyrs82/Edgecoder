@@ -34,6 +34,7 @@ import {
   releaseManifestCache,
   REQUIRE_VERIFIED_AGENTS,
   behaviorTracker,
+  autoBlacklister,
   evaluateAndEnforce,
   ordering,
   pendingTunnelInvites,
@@ -438,6 +439,30 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         action: "record_witness_disagreement",
         coordinatorId: identity.peerId
       });
+    }
+    for (const strike of result.struckWitnesses ?? []) {
+      // A confirmatory round with two fresh witnesses cleared the subject this witness disagreed with.
+      securityLog.log({
+        level: securityLog.severity("hardware_witness_disagreement"),
+        event: "hardware_witness_disagreement",
+        source: { type: "agent", id: strike.agentId },
+        details: { subjectId, claimedTier: result.record?.claimed.tier, overruledBy: "confirmatory_round", witnessStrikes: strike.strikes, excludedFromWitnessing: strike.excluded },
+        action: strike.newlyExcluded ? "witness_excluded" : "witness_strike",
+        coordinatorId: identity.peerId
+      });
+      // Past the threshold: no more witness duty (canWitness) and one behaviour strike.
+      if (strike.newlyExcluded) {
+        autoBlacklister.processAnomalies(strike.agentId, [
+          {
+            ruleId: "HWW001",
+            ruleName: "hardware_witness_overruled",
+            severity: "WARN",
+            blacklistReason: "forged_results",
+            description: "as a hardware witness, repeatedly contradicted subjects that confirmatory rounds then cleared",
+            stats: { subjectId, witnessStrikes: strike.strikes }
+          }
+        ]);
+      }
     }
     if (result.changed) repostAsk(subjectId);
     if (result.record) {

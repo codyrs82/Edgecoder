@@ -235,6 +235,8 @@ export const hardwareVerificationEnv = {
   HARDWARE_CROSS_CHECK_MIN_SIMILARITY: fraction(),
   HARDWARE_REVALIDATE_MS: amount(),
   HARDWARE_RETRY_MS: amount(),
+  HARDWARE_WITNESS_STRIKE_THRESHOLD: count(),
+  HARDWARE_WITNESS_STRIKE_WINDOW_MS: amount(),
   HARDWARE_TIER_MIN_JSON: envJson()
 };
 
