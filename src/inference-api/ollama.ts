@@ -6,11 +6,6 @@
 import { request } from "undici";
 import type { ChatMessage, ToolCall, ToolSpec } from "./types.js";
 
-/**
- * Context window to ask for: enough for the prompt (about 3 characters a token) and the reply,
- * rounded up to a power of two, between 8k and 32k. Ollama's own default (a few thousand tokens)
- * silently cuts long prompts, such as a coding tool's system prompt and tool list.
- */
 /** Smallest context window a network call asks for (contextWindowFor). */
 export const MIN_CONTEXT_WINDOW = 8192;
 
@@ -30,15 +25,15 @@ export function keepAliveValue(setting: string | undefined): number | string | u
 /**
  * Load a model into memory now, so the first real call does not wait for it (several seconds on a
  * CPU, the "cold model" delay). An empty prompt makes Ollama load the model and return without
- * generating. The context window is the one network calls ask for: Ollama reloads a model whose
- * num_ctx changes, so warming it with another size would not help.
+ * generating. The context window must be the one the agent serves calls with (numCtx): Ollama
+ * reloads a model whose num_ctx changes, so warming it with another size would not help.
  */
-export async function warmOllamaModel(host: string, model: string, opts: { keepAlive?: string; timeoutMs?: number } = {}): Promise<void> {
+export async function warmOllamaModel(host: string, model: string, opts: { keepAlive?: string; timeoutMs?: number; numCtx?: number } = {}): Promise<void> {
   const keepAlive = keepAliveValue(opts.keepAlive);
   const res = await request(`${host.replace(/\/$/, "")}/api/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model, prompt: "", stream: false, ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}), options: { num_ctx: MIN_CONTEXT_WINDOW } }),
+    body: JSON.stringify({ model, prompt: "", stream: false, ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}), options: { num_ctx: opts.numCtx ?? MIN_CONTEXT_WINDOW } }),
     headersTimeout: opts.timeoutMs ?? 600_000,
     bodyTimeout: opts.timeoutMs ?? 600_000,
   });
@@ -54,10 +49,22 @@ export async function warmOllamaModel(host: string, model: string, opts: { keepA
   }
 }
 
-export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | undefined, maxTokens: number | undefined): number {
+/** Tokens a call needs: the prompt (about 3 characters a token), the reply, and a margin. */
+export function contextNeeded(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined): number {
   const chars = messages.reduce((n, m) => n + m.content.length + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0), 0) + (tools ? JSON.stringify(tools).length : 0);
-  const need = Math.ceil(chars / 3) + (maxTokens ?? 4096) + 256;
-  let ctx = MIN_CONTEXT_WINDOW;
+  return Math.ceil(chars / 3) + (maxTokens ?? 4096) + 256;
+}
+
+/**
+ * Context window to ask for when the caller has no fixed one (local chat): enough for the prompt
+ * and the reply, rounded up to a power of two, between `floor` (8k) and 32k. Ollama's own default
+ * (a few thousand tokens) silently cuts long prompts, such as a coding tool's system prompt and
+ * tool list. Ollama reloads a model whose num_ctx changes, so a network agent serves every call
+ * with one fixed window instead (ollamaChat's numCtx; src/swarm/parallelism.ts).
+ */
+export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | undefined, maxTokens: number | undefined, floor = MIN_CONTEXT_WINDOW): number {
+  const need = contextNeeded(messages, tools, maxTokens);
+  let ctx = Math.max(MIN_CONTEXT_WINDOW, floor);
   while (ctx < need && ctx < 32_768) ctx *= 2;
   return ctx;
 }
@@ -66,7 +73,7 @@ export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { done
 
 export async function* ollamaChat(
   host: string,
-  req: { model: string; messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number; /** AGENT_MODEL_KEEP_ALIVE (keepAliveValue). */ keepAlive?: string },
+  req: { model: string; messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number; /** AGENT_MODEL_KEEP_ALIVE (keepAliveValue). */ keepAlive?: string; /** A fixed context window (a network agent's); unset = sized per call. */ numCtx?: number },
   signal?: AbortSignal,
   /**
    * How long to wait for the first byte and between pieces. Ollama answers only once the model is
@@ -87,7 +94,7 @@ export async function* ollamaChat(
       think: false,
       ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
       options: {
-        num_ctx: contextWindowFor(req.messages, req.tools, req.maxTokens),
+        num_ctx: req.numCtx ?? contextWindowFor(req.messages, req.tools, req.maxTokens),
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.maxTokens !== undefined ? { num_predict: req.maxTokens } : {}),
       },

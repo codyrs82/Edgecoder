@@ -4,7 +4,7 @@
 /** What can run a chat: this machine's Ollama (free), or the network (your machines, a lease, or any agent). */
 
 import { NetworkInferenceError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
-import { ollamaChat } from "./ollama.js";
+import { contextWindowFor, ollamaChat } from "./ollama.js";
 import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
@@ -13,7 +13,10 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
     let stopped = "stop";
     let tokens: { promptTokens?: number; outputTokens?: number } = {};
     try {
-      for await (const p of ollamaChat(ollamaHost, { model, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
+      // Sized per call, but never below the window this machine's agent serves network calls with
+      // (AGENT_CONTEXT_WINDOW), so a short local chat does not make Ollama reload the model.
+      const numCtx = contextWindowFor(req.messages, req.tools, req.maxTokens, Number(process.env.AGENT_CONTEXT_WINDOW) || undefined);
+      for await (const p of ollamaChat(ollamaHost, { model, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature, numCtx }, signal)) {
         if ("doneReason" in p) {
           stopped = p.doneReason;
           tokens = {

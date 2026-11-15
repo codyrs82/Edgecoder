@@ -135,6 +135,26 @@ describe("runInferenceSubtask", () => {
     expect(posted.at(-1)).toMatchObject({ done: true, toolCalls: [{ function: { name: "read" } }] });
   });
 
+  it("an agent's calls all use its one context window, whatever their size; a call that does not fit is refused before Ollama", async () => {
+    const seen: number[] = [];
+    const host = await listen((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        seen.push(JSON.parse(raw).options.num_ctx);
+        res.end(JSON.stringify({ message: { content: "ok" }, done: true }) + "\n");
+      });
+    });
+    const call = (content: string, maxTokens?: number) =>
+      runInferenceSubtask({ ...st1, input: JSON.stringify({ messages: [{ role: "user", content }], maxTokens }) } as Subtask, { agentId: "a1", ollamaHost: host, contextWindow: 16_384, post: async () => ({}) });
+    expect((await call("hi", 64)).ok).toBe(true);
+    expect((await call("x".repeat(30_000), 1024)).ok).toBe(true); // ~10k tokens: per-call sizing would ask for 16k; a short one 8k
+    expect(seen).toEqual([16_384, 16_384]);
+    const tooLong = await call("x".repeat(60_000), 1024);
+    expect(tooLong).toMatchObject({ ok: false, error: expect.stringMatching(/^context_too_long: needs \d+ tokens, this agent serves 16384$/) });
+    expect(seen).toHaveLength(2);
+  });
+
   it("a failure before any output sends no final piece (the call can be retried elsewhere)", async () => {
     const host = await listen((_req, res) => { res.statusCode = 500; res.end(JSON.stringify({ error: "model failed to load" })); });
     const posted: unknown[] = [];

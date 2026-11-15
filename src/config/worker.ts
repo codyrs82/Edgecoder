@@ -76,6 +76,12 @@ export const workerConfigSchema = z.object({
     .trim()
     .regex(/^(-?\d+(\.\d+)?|-?(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/, "a duration such as 30m, 1h or 300s, a number of seconds, or -1")
     .optional(),
+  /**
+   * The one context window (tokens) the agent serves network calls with; longer calls go to agents
+   * with a bigger one. Default by memory, model size and parallel slots: 8k, 16k or 32k
+   * (src/swarm/parallelism.ts servedContextWindow).
+   */
+  AGENT_CONTEXT_WINDOW: envInt(undefined, { min: 2048, max: 131_072 }),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),

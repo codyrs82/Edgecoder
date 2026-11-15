@@ -42,3 +42,36 @@ export function parallelInferenceFor(
   if (Number.isInteger(ollama) && ollama >= 1) slots = Math.min(slots, ollama);
   return slots;
 }
+
+/** Context windows an agent may serve with (tokens). */
+export const CONTEXT_WINDOWS = [8192, 16384, 32768] as const;
+
+/**
+ * The one context window (num_ctx) an agent serves every network call with. Ollama reloads a model
+ * whose num_ctx changes (seconds on a CPU, and a 32k load of a 7B model took 12 GB), so the agent
+ * loads its model once with this window and only takes calls that fit it (it advertises the window
+ * with each pull; the coordinator routes longer calls to agents with a bigger one).
+ *
+ * Default: the largest of 8k / 16k / 32k whose KV cache for every parallel slot fits next to the
+ * model in usable memory (same estimates as parallelInferenceFor: usable = 60% of RAM or 90% of
+ * VRAM, model = params x 0.6 + 0.5 GB, KV = max(0.25, params x 0.12) GB per slot per 8k tokens);
+ * 8k when the model is unknown. A 4 GB CPU agent with a 1.5B model and 2 slots: 8k; 16 GB with a
+ * 7B model and 2 slots: 16k; 32 GB with a 7B model and 4 slots: 32k.
+ * AGENT_CONTEXT_WINDOW (2048-131072) overrides.
+ */
+export function servedContextWindow(
+  totalMemBytes: number,
+  override: number | undefined,
+  opts: { modelParamsB?: number; gpu?: boolean; slots: number }
+): number {
+  if (override !== undefined && Number.isInteger(override) && override >= 2048 && override <= 131_072) return override;
+  const b = opts.modelParamsB;
+  if (b === undefined || !Number.isFinite(b) || b <= 0) return CONTEXT_WINDOWS[0];
+  const usable = (totalMemBytes / 1024 ** 3) * (opts.gpu ? 0.9 : 0.6);
+  const modelGb = b * 0.6 + 0.5;
+  const kvPer8k = Math.max(0.25, b * 0.12);
+  for (const ctx of [...CONTEXT_WINDOWS].reverse()) {
+    if (modelGb + Math.max(1, opts.slots) * kvPer8k * (ctx / 8192) < usable) return ctx;
+  }
+  return CONTEXT_WINDOWS[0];
+}

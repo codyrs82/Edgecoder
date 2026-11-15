@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { MIN_CONTEXT_WINDOW, keepAliveValue, ollamaChat, warmOllamaModel } from "../../src/inference-api/ollama.js";
+import { MIN_CONTEXT_WINDOW, contextWindowFor, keepAliveValue, ollamaChat, warmOllamaModel } from "../../src/inference-api/ollama.js";
 import { workerConfigSchema } from "../../src/config/worker.js";
 
 /*
@@ -48,11 +48,31 @@ describe("keep_alive", () => {
   });
 });
 
+describe("context window", () => {
+  it("local chat sizes per call, never below the agent's window", () => {
+    const short = [{ role: "user" as const, content: "hi" }];
+    const long = [{ role: "user" as const, content: "x".repeat(60_000) }];
+    expect(contextWindowFor(short, undefined, 64)).toBe(8192);
+    expect(contextWindowFor(short, undefined, 64, 16_384)).toBe(16_384);
+    expect(contextWindowFor(long, undefined, 64, 16_384)).toBe(32_768);
+  });
+
+  it("a fixed window is sent as given", async () => {
+    const { host, bodies } = await capture(JSON.stringify({ message: { content: "hi" }, done: true }) + "\n");
+    for await (const _ of ollamaChat(host, { model: "m", messages: [{ role: "user", content: "x".repeat(50_000) }], numCtx: 8192 })) void _;
+    expect(bodies[0].body.options.num_ctx).toBe(8192);
+  });
+});
+
 describe("warmOllamaModel", () => {
   it("loads the model with an empty prompt, the network context window and keep_alive", async () => {
     const { host, bodies } = await capture(JSON.stringify({ done: true }));
     await warmOllamaModel(host, "qwen2.5-coder:1.5b", { keepAlive: "30m" });
-    expect(bodies).toEqual([{ url: "/api/generate", body: { model: "qwen2.5-coder:1.5b", prompt: "", stream: false, keep_alive: "30m", options: { num_ctx: MIN_CONTEXT_WINDOW } } }]);
+    await warmOllamaModel(host, "qwen2.5-coder:1.5b", { keepAlive: "30m", numCtx: 16_384 });
+    expect(bodies).toEqual([
+      { url: "/api/generate", body: { model: "qwen2.5-coder:1.5b", prompt: "", stream: false, keep_alive: "30m", options: { num_ctx: MIN_CONTEXT_WINDOW } } },
+      { url: "/api/generate", body: { model: "qwen2.5-coder:1.5b", prompt: "", stream: false, keep_alive: "30m", options: { num_ctx: 16_384 } } },
+    ]);
   });
 
   it("reports Ollama's error", async () => {

@@ -160,4 +160,26 @@ describe("fast dispatch", () => {
     await finish(busy, b);
     expect(pickupStats().count).toBeGreaterThan(0);
   });
+
+  test("a call longer than an agent's context window goes to an agent with a bigger one; none big enough: 413", async () => {
+    const long = "x".repeat(40_000); // ~13k tokens with the reply
+    const taskId = `inf-${randomUUID()}`;
+    const r = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: long }], maxTokens: 512, timeoutMs: 60_000 }, requester);
+    expect(r.statusCode, r.body).toBe(200);
+    const subtaskId = r.json().subtaskId;
+    const pullWin = async (k: PeerKeys, contextWindow: number) => {
+      const j = (await post("/pull", { agentId: k.peerId, inferenceSlots: 2, freeInferenceSlots: 2, contextWindow, wake: true }, k)).json();
+      return (j.subtask?.id ?? j.envelope?.subtaskId ?? null) as string | null;
+    };
+    await sleep(DEFER_MS + 50);
+    expect(await pullWin(idle, 8192)).toBeNull();
+    expect(await pullWin(busy, 16_384)).toBe(subtaskId);
+    await finish(busy, { taskId, subtaskId });
+    // The unsigned agent has the model too: make it report a small window, like the others.
+    expect(await pullWin(unsigned, 8192)).toBeNull();
+    await pullWin(busy, 8192);
+    const huge = await post("/inference/submit", { taskId: `inf-${randomUUID()}`, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: long }], maxTokens: 512, timeoutMs: 60_000 }, requester);
+    expect(huge.statusCode).toBe(413);
+    expect(huge.json()).toMatchObject({ error: "context_too_long", largestContextWindow: 8192 });
+  });
 });

@@ -5,7 +5,7 @@ import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
-import { parallelInferenceFor } from "./parallelism.js";
+import { parallelInferenceFor, servedContextWindow } from "./parallelism.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
@@ -99,6 +99,11 @@ const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGEN
   modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
   ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL
 });
+/** One context window for every network call (Ollama reloads the model when num_ctx changes). */
+const CONTEXT_WINDOW = servedContextWindow(totalmem(), W.AGENT_CONTEXT_WINDOW, {
+  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
+  slots: MAX_PARALLEL_INFERENCE
+});
 const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
@@ -186,8 +191,8 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
   const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const started = Date.now();
   try {
-    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000 });
-    console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, keep_alive ${MODEL_KEEP_ALIVE}`);
+    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000, numCtx: CONTEXT_WINDOW });
+    console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, context ${CONTEXT_WINDOW}, keep_alive ${MODEL_KEEP_ALIVE}, ${MAX_PARALLEL_INFERENCE} parallel`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
   }
@@ -1254,7 +1259,7 @@ async function loop(): Promise<void> {
           if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
             benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
             try {
-              lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL } : undefined });
+              lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL, numCtx: CONTEXT_WINDOW } : undefined });
               benchmarkUnreported = true;
               console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
             } catch (e) {
@@ -1317,7 +1322,7 @@ async function loop(): Promise<void> {
           }
           // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
           if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
-            const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST });
+            const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST, numCtx: CONTEXT_WINDOW });
             const answerBody = { agentId: AGENT_ID, ...answer };
             try {
               const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
@@ -1422,7 +1427,7 @@ async function loop(): Promise<void> {
 
         // Our model slots (the coordinator hands a call only to an agent with one free) and that we take nudges.
         const freeInferenceSlots = Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size);
-        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, wake: true };
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
@@ -1509,7 +1514,7 @@ async function loop(): Promise<void> {
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
             const run = st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
               : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);

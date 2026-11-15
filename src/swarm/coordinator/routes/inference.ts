@@ -9,6 +9,9 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
+import { contextNeeded } from "../../../inference-api/ollama.js";
+import type { ChatMessage } from "../../../inference-api/types.js";
+import { agentContextWindow } from "../dispatch.js";
 import { InferenceStreams, boundTokenCounts } from "../../inference-streams.js";
 import { pgStore } from "../../../db/store.js";
 import {
@@ -224,6 +227,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       onlyAccountId = accountId;
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
       return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+    }
+    // Every agent with the model serves a smaller context window than this call needs: say so now
+    // rather than wait for the no-capacity bound (agents that report no window take any size).
+    const needTokens = contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens);
+    if (holders.length > 0 && holders.every(([id]) => (agentContextWindow(id) ?? Infinity) < needTokens)) {
+      const largest = Math.max(...holders.map(([id]) => agentContextWindow(id) ?? 0));
+      return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model });
     }
     if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
     const billed = !reservationId && !onlyAccountId;

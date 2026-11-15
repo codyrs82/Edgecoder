@@ -28,6 +28,8 @@
 
 import type { Subtask } from "../../common/types.js";
 import { meetsCapability } from "../../economy/order-book.js";
+import { contextNeeded } from "../../inference-api/ollama.js";
+import type { ChatMessage } from "../../inference-api/types.js";
 import { subtaskModelEligible } from "../model-catalog.js";
 import { agentMayClaim } from "../sandbox-enforcement.js";
 import { queue, reservations } from "./context.js";
@@ -56,6 +58,8 @@ interface AgentLoad {
   reportedFree?: number;
   /** Understands work_available nudges. */
   wake: boolean;
+  /** Context window (tokens) it serves model calls with; undefined = not reported (any size). */
+  contextWindow?: number;
   atMs: number;
 }
 
@@ -83,9 +87,9 @@ export function setNudgeTransport(t: NudgeTransport | undefined): void {
 }
 
 /** What an agent says about its capacity when it pulls. */
-export function noteAgentPull(agentId: string, report: { inferenceSlots?: number; freeInferenceSlots?: number; wake?: boolean }, nowMs = Date.now()): void {
+export function noteAgentPull(agentId: string, report: { inferenceSlots?: number; freeInferenceSlots?: number; contextWindow?: number; wake?: boolean }, nowMs = Date.now()): void {
   nudgedAt.delete(agentId);
-  if (report.inferenceSlots === undefined && !report.wake) {
+  if (report.inferenceSlots === undefined && !report.wake && report.contextWindow === undefined) {
     loads.delete(agentId);
     return;
   }
@@ -93,6 +97,7 @@ export function noteAgentPull(agentId: string, report: { inferenceSlots?: number
     slots: Math.max(1, Math.min(16, report.inferenceSlots ?? 1)),
     reportedFree: report.freeInferenceSlots,
     wake: report.wake === true,
+    contextWindow: report.contextWindow,
     atMs: nowMs
   });
 }
@@ -111,6 +116,8 @@ export function claimRule(agentId: string, capability: Capability | undefined, p
   const lease = reservations.activeForAgent(agentId, nowMs);
   return (subtask) => {
     if (!agentMayClaim(capability, subtask)) return false;
+    // A model call longer than the window the agent serves with goes to an agent with a bigger one.
+    if (subtask.kind === "inference" && !fitsContextWindow(agentId, subtask)) return false;
     // A subtask granted to us by its origin: only while enough of the grant is left to run it.
     if (!peerGrantAllowsClaim(subtask, nowMs)) return false;
     // #54: a job that names a model goes only to an agent that reported it (inference: installed;
@@ -123,6 +130,32 @@ export function claimRule(agentId: string, capability: Capability | undefined, p
     if (meta.onlyAccountId) return (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
     return orderBook.canMatch(agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(agentId, capability), meta) && hasModel;
   };
+}
+
+/** Context window an agent reported (undefined: not reported, takes any size). */
+export function agentContextWindow(agentId: string): number | undefined {
+  return loads.get(agentId)?.contextWindow;
+}
+
+/** Tokens a model call needs (src/inference-api/ollama.ts contextNeeded), parsed once per subtask. */
+const neededTokens = new Map<string, number>();
+export function inferenceTokensNeeded(subtask: Pick<Subtask, "id" | "input">): number {
+  let n = neededTokens.get(subtask.id);
+  if (n === undefined) {
+    try {
+      const input = JSON.parse(subtask.input) as { messages?: ChatMessage[]; tools?: unknown[]; maxTokens?: number };
+      n = Array.isArray(input.messages) ? contextNeeded(input.messages, input.tools, input.maxTokens) : 0;
+    } catch {
+      n = 0;
+    }
+    neededTokens.set(subtask.id, n);
+  }
+  return n;
+}
+
+function fitsContextWindow(agentId: string, subtask: Subtask): boolean {
+  const window = agentContextWindow(agentId);
+  return window === undefined || inferenceTokensNeeded(subtask) <= window;
 }
 
 /** Free model slots: the agent's slots less the calls it holds, and no more than it last reported. Undefined when it reports none. */
@@ -247,6 +280,7 @@ export function onClaimable(subtask: Subtask, claimableAtMs: number): void {
 /** Drop bookkeeping for subtasks long gone and agents that stopped pulling. */
 export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, at] of readyAt) if (nowMs - at > READY_KEEP_MS) readyAt.delete(id);
+  for (const id of neededTokens.keys()) if (!queue.getSubtask(id)) neededTokens.delete(id);
   for (const [id, load] of loads) if (nowMs - load.atMs > READY_KEEP_MS) loads.delete(id);
   for (const [id, at] of nudgedAt) if (nowMs - at > READY_KEEP_MS) nudgedAt.delete(id);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parallelInferenceFor } from "../../src/swarm/parallelism.js";
+import { parallelInferenceFor, servedContextWindow } from "../../src/swarm/parallelism.js";
 
 const GB = 1024 ** 3;
 describe("parallel model calls", () => {
@@ -25,6 +25,16 @@ describe("parallel model calls", () => {
     expect(parallelInferenceFor(48 * GB, undefined, { modelParamsB: 30, gpu: true })).toBe(4);
     // The override still wins.
     expect(parallelInferenceFor(4 * GB, "3", { modelParamsB: 7 })).toBe(3);
+  });
+
+  it("one context window per agent, by memory, model size and slots", () => {
+    expect(servedContextWindow(3.8 * GB, undefined, { modelParamsB: 1.5, slots: 2 })).toBe(8192);
+    expect(servedContextWindow(16 * GB, undefined, { modelParamsB: 7, slots: 2 })).toBe(16384);
+    expect(servedContextWindow(32 * GB, undefined, { modelParamsB: 7, slots: 4 })).toBe(32768);
+    expect(servedContextWindow(8 * GB, undefined, { modelParamsB: 7, slots: 1 })).toBe(8192);
+    expect(servedContextWindow(64 * GB, undefined, { slots: 4 })).toBe(8192); // model unknown
+    expect(servedContextWindow(4 * GB, 4096, { modelParamsB: 7, slots: 1 })).toBe(4096);
+    expect(servedContextWindow(3.8 * GB, 1000, { modelParamsB: 1.5, slots: 2 })).toBe(8192); // out of range: default
   });
 
   it("never more than the machine's Ollama serves (OLLAMA_NUM_PARALLEL)", () => {
