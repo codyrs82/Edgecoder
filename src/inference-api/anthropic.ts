@@ -107,7 +107,7 @@ export async function* anthropicStream(pieces: AsyncIterable<ChatPiece>, model: 
         yield ev("content_block_stop", { index });
         textOpen = false;
       }
-      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { output_tokens: Math.ceil(outChars / 4) }, ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {}) });
+      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { ...(p.promptTokens !== undefined ? { input_tokens: p.promptTokens } : {}), output_tokens: p.outputTokens ?? Math.ceil(outChars / 4) }, ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {}) });
     }
   }
   yield ev("message_stop", {});
@@ -131,7 +131,7 @@ export async function anthropicResponse(pieces: AsyncIterable<ChatPiece>, model:
     content: [...(text ? [{ type: "text", text }] : []), ...calls.map((c) => ({ type: "tool_use", id: toolUseId(), name: c.function.name, input: c.function.arguments ?? {} }))],
     stop_reason: stopReason(calls.length, done),
     stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: Math.ceil(text.length / 4) },
+    usage: { input_tokens: done?.promptTokens ?? 0, output_tokens: done?.outputTokens ?? Math.ceil(text.length / 4) },
     ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
   };
 }

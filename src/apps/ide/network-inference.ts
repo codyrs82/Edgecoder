@@ -89,6 +89,8 @@ export interface CompletionPiece {
   done?: boolean;
   error?: string;
   creditsSpent?: number;
+  promptTokens?: number;
+  outputTokens?: number;
 }
 
 /** Where a network chat runs: any agent (billed per second), your own machines, or a lease you hold. */
@@ -156,7 +158,7 @@ export async function* streamNetworkCompletion(
     after = Number(r.json.next ?? after + chunks.length);
     if (r.json.done) {
       if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}) };
+      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}) };
       return;
     }
   }

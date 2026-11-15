@@ -103,6 +103,9 @@ interface TaskBilling {
   perSubtaskReserveMsat: number;
   costMsat: number;
   refunded: boolean;
+  /** Token counts an inference call was billed on (bounded), returned to the requester with the result. */
+  promptTokens?: number;
+  outputTokens?: number;
 }
 export const taskBilling = new Map<string, TaskBilling>();
 /** Usage records being filled in (keyed by task) until the task settles; then saved. */

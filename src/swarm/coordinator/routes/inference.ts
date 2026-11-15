@@ -177,11 +177,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
     if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
       const u = usagePending.get(claim.subtask.taskId);
       if (u) {
-        const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
         u.promptTokens = bounded.promptTokens;
         u.outputTokens = bounded.outputTokens;
+      }
+      // Kept on the billing entry too, which outlives the usage record until the requester reads the result.
+      const b = taskBilling.get(claim.subtask.taskId);
+      if (b) {
+        b.promptTokens = bounded.promptTokens;
+        b.outputTokens = bounded.outputTokens;
       }
     }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -203,7 +209,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       await new Promise((res) => setTimeout(res, 100));
       result = queue.getResult(body.subtaskId);
     }
+    // The token counts this call was billed on (agent-reported, bounded at /inference/chunks).
+    const tokens = {
+      ...(billing.promptTokens !== undefined ? { promptTokens: billing.promptTokens } : {}),
+      ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
+    };
     if (result) await settleTaskIfDone(body.taskId);
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs } : {}) });
+    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}) });
   });
 }
