@@ -29,6 +29,7 @@ import {
   hardwareVerifier
 } from "../economy.js";
 import { classParam } from "../schemas.js";
+import { ownerVerificationView } from "../../hardware-verification.js";
 import { COORDINATOR_FEE_BPS } from "../context.js";
 
 export function registerMarketRoutes(app: CoordinatorApp): void {
@@ -120,6 +121,8 @@ export function registerMarketRoutes(app: CoordinatorApp): void {
           creditsPerSecond: eff?.creditsPerSecond ?? 1,
           claimedTier: a.capability!.hardwareClass?.tier ?? null,
           verification: hardwareVerifier.get(a.agentId)?.status ?? "unverified",
+          // Why it is not verified and what (if anything) the owner can do: the portal explains it.
+          verificationDetail: (() => { const r = hardwareVerifier.get(a.agentId); return r ? ownerVerificationView(r) : null; })(),
           reliability: hardwareVerifier.reliability(a.agentId) ?? null,
           ask: a.ask?.msatPerCredit ?? null,
           tracking: a.ask?.tracking ?? true

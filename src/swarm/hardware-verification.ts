@@ -331,6 +331,26 @@ interface AwaitingCrossCheck {
 }
 
 /** A witness struck for being overruled by a confirmatory round. */
+/**
+ * What a machine's owner is shown about its verification (src/common/hardware-verification-copy.ts
+ * turns it into a sentence): the reason it is not verified, when it is checked next, and whether
+ * this agent version can answer the check at all.
+ */
+export function ownerVerificationView(r: HardwareVerificationRecord): {
+  status: HardwareVerificationStatus; claimedTier: ComputeTierId; grantedTier: ComputeTierId; reason: string | null;
+  nextCheckAtMs: number | null; checkSupported: boolean; flags: string[];
+} {
+  return {
+    status: r.status,
+    claimedTier: r.claimed.tier,
+    grantedTier: r.granted.tier,
+    reason: r.lastFailReason ?? null,
+    nextCheckAtMs: r.nextChallengeAtMs ?? null,
+    checkSupported: r.challengeKinds.includes(tierMetric(r.claimed.tier)),
+    flags: r.flags.filter((f) => f.startsWith("challenge_"))
+  };
+}
+
 export interface WitnessStrike {
   agentId: string;
   /** Strikes within the window, this one included. */

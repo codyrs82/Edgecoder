@@ -34,6 +34,7 @@ import { reservations, identity, COORDINATOR_PUBLIC_URL, saveUsage, usagePending
 import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { callerAccount } from "../auth.js";
 import { effectiveHardware, hardwareVerifier, NETWORK_FEE_BPS, classRefMsatPerCredit } from "../economy.js";
+import { ownerVerificationView } from "../../hardware-verification.js";
 
 // ── Reserved capacity (src/economy/reservations.ts) ──
 
@@ -156,7 +157,8 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
           ...(v
             ? {
                 verification: {
-                  status: v.status, claimedTier: v.claimed.tier, grantedTier: v.granted.tier, reason: v.lastFailReason ?? null,
+                  // status, tiers, reason, nextCheckAtMs, checkSupported, flags: the app explains them (hardware-verification-copy.ts).
+                  ...ownerVerificationView(v),
                   lastPassAtMs: v.lastPassAtMs ?? null, score: v.evidence.score ?? null, tokensPerSec: v.evidence.tokensPerSec ?? null,
                 },
               }

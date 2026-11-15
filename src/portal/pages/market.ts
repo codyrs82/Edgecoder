@@ -11,6 +11,7 @@
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
 import { CSP_NONCE } from "../csp-nonce.js";
+import { verificationMessage } from "../../common/hardware-verification-copy.js";
 
 export const MARKET_SUBTITLE =
   "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.";
@@ -48,6 +49,8 @@ export const MARKET_CONTENT = `
       .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
       .field input { font-family:var(--font-mono); }
       .hint { font-size:11px; color:var(--muted); }
+      .hint.verif { display:block; margin-top:2px; line-height:1.45; }
+      .hint.verif-ok { color:var(--ok); } .hint.verif-warn { color:var(--warn, var(--danger)); }
       .pos { color:var(--ok); } .neg { color:var(--danger); }
       .agents-list { font-size:12px; }
       .agents-list div { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid var(--card-border); }
@@ -137,6 +140,9 @@ export const MARKET_SCRIPT = `
         var satsHour = function (msatPerCredit, cps) { return msatPerCredit / 1000 * cps * 3600; };
         // The shell's escapeHtml (pages/escape.ts): coordinator- and agent-supplied values go through it.
         var esc = escapeHtml;
+        // Hardware verification copy (src/common/hardware-verification-copy.ts), shared with the desktop app.
+        var __name = function (f) { return f; };
+        var verificationMessage = ${verificationMessage.toString()};
 
         function api(path) { return fetch("/portal/api/market" + path, { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error(path + " " + r.status); return r.json(); }); }
 
@@ -272,8 +278,14 @@ export const MARKET_SCRIPT = `
           $("myOrders").innerHTML = mine.length ? "<strong>Your standing orders:</strong> " + mine.join(" · ") : "No standing orders. Your tasks bid the reference + premium; your agents ask the reference.";
           var ag = data.agents || [];
           // tier = what the agent is paid at (verified grant); claimedTier = what it reported, shown when different.
-          function vlabel(a) { var v = a.verification || "unverified"; return v === "base" ? "" : " · " + (v === "verified" ? "verified" : v === "pending" ? "verifying" : v === "demoted" ? "demoted from " + esc(a.claimedTier || "?") : "unverified" + (a.claimedTier && a.claimedTier !== a.tier ? " (claims " + esc(a.claimedTier) + ")" : "")); }
-          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + esc(a.agentId) + " <span class='hint'>" + esc(a.computeClass) + (a.tier ? " · " + esc(a.tier) + " " + esc(a.creditsPerSecond || 1) + "×" : "") + vlabel(a) + "</span></span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
+          // What the verification status means for this machine and whether the owner can do anything (per reason).
+          function vlabel(a) {
+            var d = a.verificationDetail || { status: a.verification || "unverified", claimedTier: a.claimedTier || a.tier || "?", grantedTier: a.tier || "?" };
+            if (d.status === "base") return "";
+            var m = verificationMessage(d, Date.now());
+            return "<span class='hint verif verif-" + esc(m.tone) + "' data-actionable='" + (m.actionable ? "yes" : "no") + "'>" + esc(m.text) + "</span>";
+          }
+          $("myAgents").innerHTML = ag.length ? "<div><strong>Your agents</strong><span>ask</span></div>" + ag.map(function (a) { return "<div><span>" + esc(a.agentId) + " <span class='hint'>" + esc(a.computeClass) + (a.tier ? " · " + esc(a.tier) + " " + esc(a.creditsPerSecond || 1) + "×" : "") + "</span>" + vlabel(a) + "</span><span>" + (a.ask === null ? "–" : fmt(a.ask)) + (a.tracking ? " (ref)" : "") + "</span></div>"; }).join("") : "";
         }
 
         function refresh() {
