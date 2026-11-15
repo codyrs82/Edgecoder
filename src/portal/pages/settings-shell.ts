@@ -60,7 +60,14 @@ export function settingRow(title: string, desc: string, control: string, opts: {
 
 export const SETTINGS_CSS = `
   <style nonce="${CSP_NONCE}">
-    .settings-layout { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 36px; max-width: 1060px; margin: 4px auto 0; }
+    .settings-layout { display: block; max-width: 860px; margin: 4px auto 0; }
+    .settings-layout.wide { max-width: 1180px; }
+    /* Settings own the left pane: back link, title, search, sections. */
+    .settings-sidebar { display: flex; flex-direction: column; gap: 4px; }
+    .settings-sidebar .settings-back { color: var(--muted); margin-bottom: 6px; }
+    .settings-sidebar .settings-back:hover { color: var(--text); }
+    .settings-sidebar-title { font-size: var(--fs-lg, 16px); font-weight: 600; padding: 6px 10px 10px; letter-spacing: -0.01em; }
+    .settings-nav-inline { display: none; }
     .settings-nav { position: sticky; top: calc(var(--topbar-h) + 20px); align-self: start; }
     .settings-search { position: relative; margin-bottom: 10px; }
     .settings-search .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
@@ -105,7 +112,8 @@ export const SETTINGS_CSS = `
     #settingsNoMatch { color: var(--muted); font-size: 13px; padding: 24px 0; }
     @media (max-width: 900px) {
       /* minmax(0, 1fr): the nowrap link row scrolls inside the column instead of widening the page. */
-      .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+      .settings-layout { gap: 16px; }
+      .settings-nav-inline { display: block; margin-bottom: 16px; }
       .settings-nav { position: static; min-width: 0; }
       .settings-links { flex-direction: row; overflow-x: auto; }
       .settings-link { white-space: nowrap; }
@@ -116,17 +124,31 @@ export const SETTINGS_CSS = `
     .payout-warning { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 6px; }
   </style>`;
 
-function settingsNav(active: SettingsSection): string {
-  const links = SETTINGS_NAV.map((t) => {
+function settingsLinks(active: SettingsSection, withIds: boolean): string {
+  return SETTINGS_NAV.map((t) => {
     const cls = ["settings-link", t.adminOnly && t.key !== active ? "hidden" : ""].filter(Boolean).join(" ");
-    const id = t.adminOnly ? `${t.key === "admin" ? ' id="settingsAdminTab"' : ""} data-admin-only` : "";
+    const id = t.adminOnly ? `${withIds && t.key === "admin" ? ' id="settingsAdminTab"' : ""} data-admin-only` : "";
     const current = t.key === active ? ' aria-current="page"' : "";
     return `<a class="${cls}" href="${t.href}"${id} data-section="${t.key}"${current}>${icon(t.icon, 16)}<span>${t.label}</span></a>`;
   }).join("");
-  return `<aside class="settings-nav">
+}
+
+/**
+ * Settings take over the app's left pane (as in Claude and Cursor): a way back to the app, the
+ * search box and the sections, instead of the chat sidebar with a second column of links.
+ */
+function settingsSidebar(active: SettingsSection): string {
+  return `<nav class="sidebar-nav settings-sidebar" aria-label="Settings">
+      <a class="nav-link settings-back" href="/portal/chat">${icon("chevronLeft", 16)}<span class="nav-label">Back to app</span></a>
+      <div class="settings-sidebar-title">Settings</div>
       <div class="settings-search">${icon("search", 14)}<input id="settingsSearch" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off" /></div>
-      <nav class="settings-links" aria-label="Settings sections">${links}</nav>
-    </aside>`;
+      <div class="settings-links" role="list">${settingsLinks(active, true)}</div>
+    </nav>`;
+}
+
+/** Narrow screens hide the sidebar in a drawer, so the sections also show as a scrolling row above the page. */
+function settingsInlineNav(active: SettingsSection): string {
+  return `<nav class="settings-nav settings-nav-inline" aria-label="Settings sections"><div class="settings-links">${settingsLinks(active, false)}</div></nav>`;
 }
 
 /** Admin link reveal, and the search box on pages without searchable rows (filters the links; Enter searches the account settings). */
@@ -186,7 +208,8 @@ export function settingsPage(section: SettingsSection, subtitle: string, content
     activeTab: "settings",
     heading: "Settings",
     subtitle,
-    content: `${SETTINGS_CSS}<div class="settings-layout${opts.wide ? " wide" : ""}">${settingsNav(section)}<div class="settings-pane">${content}</div></div>`,
+    content: `${SETTINGS_CSS}<div class="settings-layout${opts.wide ? " wide" : ""}">${settingsInlineNav(section)}<div class="settings-pane">${content}</div></div>`,
+    sidebarNav: settingsSidebar(section),
     script: SETTINGS_SHELL_SCRIPT + script
   });
 }
