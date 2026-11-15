@@ -187,6 +187,14 @@ export const payoutEnv = {
   PAYOUT_ALERT_WEBHOOK_URL: envUrl()
 };
 
+/** Soft launch (src/economy/launch-gate.ts): invite-only signups on the portal, low per-account caps on the coordinator. */
+export const launchEnv = {
+  LAUNCH_MODE: envEnumCi(["open", "invite"]),
+  LAUNCH_MAX_BUY_SATS_PER_DAY: count(),
+  LAUNCH_MAX_BALANCE_SATS: count(),
+  LAUNCH_MAX_PAYOUT_SATS_PER_DAY: count()
+};
+
 /** bitcoind JSON-RPC access, used by the anchor proxy and by a coordinator with BITCOIN_ANCHOR_PROVIDER=bitcoind. */
 export const bitcoindEnv = {
   BITCOIND_RPC_URL: envUrl(),

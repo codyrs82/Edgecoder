@@ -67,6 +67,10 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PAYOUT_RECONCILE_LOOKBACK_MS` | `86400000` | How far back the first reconciliation after a start reads node payments (ms). |
 | `PAYOUT_ALERT_WEBHOOK_URL` | _(unset)_ | POSTed a JSON summary (counts, amounts, payment hashes; no secrets) when reconciliation alerts or trips. |
 | `MOCK_LIGHTNING_BALANCE_SATS` | `0` | Dev only: starting balance of the mock Lightning wallet. |
+| `LAUNCH_MODE` | `open` | Portal and coordinator: `invite` turns on the soft launch (`src/economy/launch-gate.ts`). On the portal, a new account (email signup, first OAuth sign-in, a new AI-agent key) needs an invite code minted in Settings > Admin; existing accounts are grandfathered. On the coordinator, the `LAUNCH_MAX_*` caps below apply to every account. Set it on both. |
+| `LAUNCH_MAX_BUY_SATS_PER_DAY` | `50000` | Invite mode only: sats one account may spend buying cSats per rolling 24 h; paid and still-payable invoices count. `0` = no cap. |
+| `LAUNCH_MAX_BALANCE_SATS` | `200000` | Invite mode only: a purchase may not bring the account's cSats (balance plus open invoices plus the new one) above this. Earnings are not capped. `0` = no cap. |
+| `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` | `50000` | Invite mode only: layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS` (the lower applies) for every account's withdrawals and automatic payouts, the fee pool's included. `0` = no extra cap. |
 
 ## Model provider
 
