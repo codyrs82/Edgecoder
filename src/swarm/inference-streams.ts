@@ -57,6 +57,17 @@ export class InferenceStreams {
     return this.streams.get(subtaskId)?.bytes;
   }
 
+  /** The reply text the stream relayed (what the requester got), or undefined when unknown. */
+  replyText(subtaskId: string): string | undefined {
+    return this.streams.get(subtaskId)?.chunks.join("");
+  }
+
+  /** UTF-8 bytes of the tool calls a stream holds (0 when none). */
+  toolCallBytes(subtaskId: string): number {
+    const t = this.streams.get(subtaskId)?.toolCalls;
+    return t?.length ? Buffer.byteLength(JSON.stringify(t), "utf8") : 0;
+  }
+
   has(subtaskId: string): boolean {
     return this.streams.has(subtaskId);
   }
@@ -185,17 +196,31 @@ export const OUTPUT_TOKEN_ALLOWANCE = 64;
 /**
  * Keep an agent's reported token counts within what the request and the streamed reply could
  * hold: a token is at least one byte of text, so the request's size bounds the prompt tokens and
- * the accepted stream's size bounds the output tokens. The counts price the call, so they are
- * never taken as reported.
+ * the accepted stream's size bounds the output tokens. The output is also bounded by the call's
+ * output cap (`maxOutputTokens`, the request's maxTokens or INFERENCE_DEFAULT_MAX_TOKENS): an agent
+ * that ignores the cap and keeps streaming is not paid for what it streamed past it. The counts
+ * price the call, so they are never taken as reported.
  */
 export function boundTokenCounts(
   reported: { promptTokens?: number; outputTokens?: number },
   requestBytes: number,
-  replyBytes: number
+  replyBytes: number,
+  maxOutputTokens?: number
 ): { promptTokens?: number; outputTokens?: number } {
   const bound = (n: number | undefined, max: number) => (n === undefined ? undefined : Math.max(0, Math.min(Math.floor(n), Math.floor(max))));
+  const outputMax = replyBytes + OUTPUT_TOKEN_ALLOWANCE;
   return {
     promptTokens: bound(reported.promptTokens, requestBytes + PROMPT_TOKEN_ALLOWANCE),
-    outputTokens: bound(reported.outputTokens, replyBytes + OUTPUT_TOKEN_ALLOWANCE),
+    outputTokens: bound(reported.outputTokens, maxOutputTokens !== undefined && maxOutputTokens > 0 ? Math.min(outputMax, maxOutputTokens + OUTPUT_TOKEN_ALLOWANCE) : outputMax),
   };
+}
+
+/** The output cap a queued model call carries (its input's maxTokens), or undefined (older calls). */
+export function maxTokensOf(input: string): number | undefined {
+  try {
+    const n = (JSON.parse(input) as { maxTokens?: unknown }).maxTokens;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
 }

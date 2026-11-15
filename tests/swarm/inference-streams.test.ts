@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { InferenceStreams, OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE, boundTokenCounts } from "../../src/swarm/inference-streams.js";
+import { InferenceStreams, OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE, boundTokenCounts, maxTokensOf } from "../../src/swarm/inference-streams.js";
 import { runInferenceSubtask } from "../../src/swarm/inference-runner.js";
 import type { Subtask } from "../../src/common/types.js";
 
@@ -20,6 +20,12 @@ describe("InferenceStreams", () => {
     expect(boundTokenCounts({ promptTokens: 10_000_000, outputTokens: 10_000_000 }, 100, 50)).toEqual({ promptTokens: 100 + PROMPT_TOKEN_ALLOWANCE, outputTokens: 50 + OUTPUT_TOKEN_ALLOWANCE });
     expect(boundTokenCounts({ promptTokens: 12, outputTokens: 3 }, 100, 50)).toEqual({ promptTokens: 12, outputTokens: 3 });
     expect(boundTokenCounts({ outputTokens: 3 }, 100, 50)).toEqual({ promptTokens: undefined, outputTokens: 3 });
+    // The call's output cap bounds them too (an agent that streams past the cap is not paid for it).
+    expect(boundTokenCounts({ outputTokens: 10_000_000 }, 100, 1_000_000, 4096)).toEqual({ promptTokens: undefined, outputTokens: 4096 + OUTPUT_TOKEN_ALLOWANCE });
+    expect(boundTokenCounts({ outputTokens: 10_000_000 }, 100, 50, 4096).outputTokens).toBe(50 + OUTPUT_TOKEN_ALLOWANCE);
+    expect(maxTokensOf(JSON.stringify({ messages: [], maxTokens: 512 }))).toBe(512);
+    expect(maxTokensOf(JSON.stringify({ messages: [] }))).toBeUndefined();
+    expect(maxTokensOf("not json")).toBeUndefined();
   });
 
   it("applies pieces in order, ignores duplicates, refuses gaps", () => {

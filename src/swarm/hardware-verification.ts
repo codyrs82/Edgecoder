@@ -21,12 +21,23 @@
  * invalid answer (bad proof, missing tags, cross-check mismatch, faster than the claimed part can
  * physically be) grants the class base tier and is logged as a security event.
  *
- * Cross-check mismatch needs two witnesses: one witness alone cannot demote. When the first witness
- * disagrees with the subject, the same prompt goes to a second witness (not the subject or the first
- * witness, nor their accounts). If it disagrees too, the answer is invalid. If it agrees, the subject
- * is verified and the first witness's disagreement is recorded on its record (`witnessDisagreements`)
- * and reported to the caller (`SubmitResult.disagreeingWitness`). No second witness, or one that
- * never answers, settles as if there had been no witness at all. Until a pass, and
+ * Witnesses are picked at random by the coordinator among eligible agents (`canWitness` here, plus
+ * account and network checks in pickBenchmarkWitness): a passed GPU challenge, no blacklist, few
+ * witness disagreements and fewer than `witnessStrikeThreshold` witness strikes in the window, and
+ * a different account and IP network (/24, /48) from the subject and from each other.
+ *
+ * Cross-check mismatch needs four witnesses to demote: one witness alone, or two, cannot. When the
+ * first witness disagrees with the subject, the same prompt goes to a second witness (not the subject
+ * or the first witness, nor their accounts or networks). If it agrees, the subject is verified and
+ * the first witness's disagreement is recorded on its record (`witnessDisagreements`) and reported to
+ * the caller (`SubmitResult.disagreeingWitness`). If it disagrees too, the subject gets a confirmatory
+ * re-challenge: a fresh prompt (new nonce and seed), answered by two fresh witnesses that exclude all
+ * the earlier ones (and their accounts and networks). Both of them disagree: the answer is invalid
+ * (demoted). Both agree: the subject is verified and each of the two earlier witnesses gets a witness
+ * strike (`SubmitResult.struckWitnesses`); past `witnessStrikeThreshold` strikes in the window an
+ * agent is no longer picked as a witness, and the caller records a security event and a behaviour
+ * strike. A split, or a witness that never answers, settles unconfirmed (no demotion, no strike). No
+ * witness available at any step settles as if there had been no witness at all. Until a pass, and
  * for agents that never answer (older agents without benchmark support), the grant is the class
  * base tier: mixed fleets keep working at weight 1, nothing is rejected.
  *
@@ -110,6 +121,11 @@ export interface HardwareVerificationConfig {
   requireCrossCheck: boolean;
   crossCheckMinSimilarity: number;
   witnessTimeoutMs: number;
+  /** Witness strikes (overruled by a confirmatory round) within witnessStrikeWindowMs that end witness duty. */
+  witnessStrikeThreshold: number;
+  witnessStrikeWindowMs: number;
+  /** Disagreements (overruled by a single other witness) within the window that end witness duty. */
+  witnessMaxDisagreements: number;
   /** A passed tier is re-challenged after this long. */
   revalidateMs: number;
   /** Retry after a failure, decline or a missing witness. */
@@ -135,6 +151,9 @@ export const DEFAULT_HARDWARE_VERIFICATION: HardwareVerificationConfig = {
   requireCrossCheck: true,
   crossCheckMinSimilarity: 0.3,
   witnessTimeoutMs: 10 * 60_000,
+  witnessStrikeThreshold: 2,
+  witnessStrikeWindowMs: 30 * 86_400_000,
+  witnessMaxDisagreements: 3,
   revalidateMs: 6 * 60 * 60_000,
   retryMs: 15 * 60_000,
   expiryFactor: 4,
@@ -147,6 +166,8 @@ export const DEFAULT_HARDWARE_VERIFICATION: HardwareVerificationConfig = {
  *   HARDWARE_GPU_REQUIRE_CROSS_CHECK=0      grant GPU tiers without a second agent's matching output
  *   HARDWARE_CROSS_CHECK_MIN_SIMILARITY     0..1 (default 0.3)
  *   HARDWARE_REVALIDATE_MS / HARDWARE_RETRY_MS
+ *   HARDWARE_WITNESS_STRIKE_THRESHOLD       witness strikes that end witness duty (default 2)
+ *   HARDWARE_WITNESS_STRIKE_WINDOW_MS       how long a strike counts (default 30 days)
  */
 export function hardwareVerificationConfigFromEnv(env: NodeJS.ProcessEnv = process.env): HardwareVerificationConfig {
   const cfg: HardwareVerificationConfig = { ...DEFAULT_HARDWARE_VERIFICATION, tierMinimums: { ...DEFAULT_TIER_MINIMUMS }, evidence: { ...DEFAULT_HARDWARE_VERIFICATION.evidence } };
@@ -159,6 +180,8 @@ export function hardwareVerificationConfigFromEnv(env: NodeJS.ProcessEnv = proce
   cfg.crossCheckMinSimilarity = num(env.HARDWARE_CROSS_CHECK_MIN_SIMILARITY, 0, 1) ?? cfg.crossCheckMinSimilarity;
   cfg.revalidateMs = num(env.HARDWARE_REVALIDATE_MS, 60_000, 30 * 86_400_000) ?? cfg.revalidateMs;
   cfg.retryMs = num(env.HARDWARE_RETRY_MS, 10_000, 86_400_000) ?? cfg.retryMs;
+  cfg.witnessStrikeThreshold = Math.floor(num(env.HARDWARE_WITNESS_STRIKE_THRESHOLD, 1, 100) ?? cfg.witnessStrikeThreshold);
+  cfg.witnessStrikeWindowMs = num(env.HARDWARE_WITNESS_STRIKE_WINDOW_MS, 3_600_000, 365 * 86_400_000) ?? cfg.witnessStrikeWindowMs;
   if (env.HARDWARE_TIER_MIN_JSON?.trim()) {
     for (const [k, v] of Object.entries(JSON.parse(env.HARDWARE_TIER_MIN_JSON) as Record<string, unknown>)) {
       if (!(k in cfg.tierMinimums)) throw new Error(`[hardware-verification] unknown tier ${k}`);
@@ -232,11 +255,19 @@ export interface HardwareVerificationRecord {
   lastFailReason?: string;
   nextChallengeAtMs?: number;
   /**
-   * Times this agent, as a witness, disagreed with a subject that a second witness then confirmed.
-   * Recorded only; the hook for a witness penalty (reputation, exclusion from witness duty).
+   * Times this agent, as a witness, disagreed with a subject that another witness then confirmed
+   * (lifetime count; `witnessDisagreementTimes` holds the recent ones, which count for eligibility).
    */
   witnessDisagreements?: number;
   lastWitnessDisagreementAtMs?: number;
+  witnessDisagreementTimes?: number[];
+  /**
+   * Witness strikes: this agent disagreed with a subject that then passed a confirmatory round with
+   * two fresh witnesses. Lifetime count, and the recent ones (`witnessStrikeTimes`): at
+   * witnessStrikeThreshold within the window the agent is no longer picked as a witness.
+   */
+  witnessStrikes?: number;
+  witnessStrikeTimes?: number[];
   evidence: HardwareEvidence;
   updatedAtMs: number;
 }
@@ -253,6 +284,17 @@ interface PendingChallenge {
   witnessAgentId?: string;
   /** witness: the subject's challenge id. */
   witnessFor?: string;
+  /** own: a confirmatory re-challenge after two witnesses disagreed (see ConfirmRound). */
+  confirm?: ConfirmRound;
+}
+
+/** A confirmatory re-challenge: two fresh witnesses decide; the two earlier ones are struck if overruled. */
+interface ConfirmRound {
+  witnesses: string[];
+  /** The two witnesses whose disagreement led here. */
+  disagreeing: string[];
+  /** Witness answers received so far. */
+  answers: Record<string, string>;
 }
 
 interface AwaitingCrossCheck {
@@ -265,6 +307,18 @@ interface AwaitingCrossCheck {
   /** The first witness disagreed: only the second witness's answer decides. */
   firstWitness?: { agentId: string; similarity: number };
   secondWitnessId?: string;
+  confirm?: ConfirmRound;
+}
+
+/** A witness struck for being overruled by a confirmatory round. */
+export interface WitnessStrike {
+  agentId: string;
+  /** Strikes within the window, this one included. */
+  strikes: number;
+  /** No longer picked as a witness. */
+  excluded: boolean;
+  /** This strike reached the threshold (the caller records a security event and a behaviour strike once). */
+  newlyExcluded: boolean;
 }
 
 export interface SubmitResult {
@@ -277,6 +331,8 @@ export interface SubmitResult {
   invalid?: string;
   /** A witness whose mismatch a second witness overruled (recorded on its record): a security event. */
   disagreeingWitness?: string;
+  /** Witnesses overruled by a confirmatory round (each a witness strike). */
+  struckWitnesses?: WitnessStrike[];
 }
 
 export interface HardwareVerifierOptions {
@@ -285,9 +341,9 @@ export interface HardwareVerifierOptions {
   /** Persistence hook (Postgres upsert); errors are swallowed, memory stays authoritative. */
   persist?: (record: HardwareVerificationRecord) => Promise<unknown> | unknown;
   /**
-   * A second witness after the first one disagreed: another agent running `model`, none of
-   * `exclude` (subject and first witness) and preferably none of their accounts. Without it a
-   * disagreement settles as unconfirmed (no demotion).
+   * Another witness (a second one after the first disagreed, or the two of a confirmatory round):
+   * an eligible agent running `model`, none of `exclude` nor their accounts or networks. Without one
+   * a disagreement settles as unconfirmed (no demotion).
    */
   pickWitness?: (subjectId: string, model: string, exclude: string[], nowMs: number) => string | undefined;
   /** Deterministic randomness for tests. */
@@ -366,7 +422,7 @@ export class HardwareVerifier {
   private readonly restored = new Set<string>();
   private readonly pending = new Map<string, PendingChallenge[]>();
   private readonly awaiting = new Map<string, AwaitingCrossCheck>(); // by subject challenge id
-  private readonly witnessOutputs = new Map<string, string>(); // by subject challenge id
+  private readonly witnessOutputs = new Map<string, Map<string, string>>(); // by subject challenge id, then witness id
   private readonly lastPersistMs = new Map<string, number>();
   private readonly changedSinceTick = new Set<string>();
 
@@ -447,6 +503,25 @@ export class HardwareVerifier {
     return e && e.samples >= this.config.evidence.minSamples ? e.score : undefined;
   }
 
+  /**
+   * May this agent witness a GPU cross-check now? It passed a GPU challenge itself (verified at a GPU
+   * tier, or measured on a GPU challenge and unverified only for want of a witness, so a new fleet
+   * can bootstrap), and its recent witness record is clean enough: fewer than witnessStrikeThreshold
+   * strikes and fewer than witnessMaxDisagreements disagreements in the window. Model, account,
+   * network and blacklist are the caller's checks (pickBenchmarkWitness).
+   */
+  canWitness(agentId: string, nowMs: number): boolean {
+    const rec = this.records.get(agentId);
+    if (!rec || !rec.challengeKinds.includes("gpu")) return false;
+    const measuredGpu = rec.measured?.metric === "gpu";
+    const verifiedGpu = rec.status === "verified" && tierMetric(rec.granted.tier) === "gpu";
+    const unconfirmedGpu = rec.status === "unverified" && measuredGpu && (rec.lastFailReason === "cross_check_unavailable" || rec.lastFailReason === "cross_check_inconclusive");
+    if (!verifiedGpu && !unconfirmedGpu) return false;
+    const cutoff = nowMs - this.config.witnessStrikeWindowMs;
+    const recent = (times: number[] | undefined) => (times ?? []).filter((t) => t >= cutoff).length;
+    return recent(rec.witnessStrikeTimes) < this.config.witnessStrikeThreshold && recent(rec.witnessDisagreementTimes) < this.config.witnessMaxDisagreements;
+  }
+
   register(input: {
     agentId: string;
     claimed: HardwareClassification;
@@ -481,7 +556,8 @@ export class HardwareVerifier {
           flags: [],
           hardware: {},
           evidence: prev ? { ...prev.evidence, baselineTokensPerSec: undefined, speedRatio: undefined, samplesAtGrant: prev.evidence.samples } : freshEvidence(nowMs),
-          ...(prev?.witnessDisagreements ? { witnessDisagreements: prev.witnessDisagreements, lastWitnessDisagreementAtMs: prev.lastWitnessDisagreementAtMs } : {}),
+          // A witness record survives new hardware: a new profile does not wipe strikes.
+          ...(prev ? witnessHistory(prev) : {}),
           updatedAtMs: nowMs
         };
     if (!keep) {
@@ -636,7 +712,7 @@ export class HardwareVerifier {
    * Apply a measurement. Demotions apply at once; a GPU grant above the class base tier needs the
    * cross-check when requireCrossCheck (otherwise the base tier, "challenge_unconfirmed").
    */
-  private settle(rec: HardwareVerificationRecord, m: HardwareMeasurement, crossChecked: boolean, nowMs: number): boolean {
+  private settle(rec: HardwareVerificationRecord, m: HardwareMeasurement, crossChecked: boolean, nowMs: number, unconfirmedReason = "cross_check_unavailable"): boolean {
     rec.measured = m.metric === "gpu" ? { ...m, crossChecked } : m;
     if (m.tokensPerSec !== undefined) rec.evidence.baselineTokensPerSec = m.tokensPerSec;
     const base = this.base(rec.claimed.computeClass);
@@ -645,7 +721,7 @@ export class HardwareVerifier {
     rec.flags = rec.flags.filter((f) => f !== "challenge_unconfirmed");
     if (m.metric === "gpu" && aboveBase && !crossChecked && this.config.requireCrossCheck) {
       this.flag(rec, "challenge_unconfirmed");
-      return this.grant(rec, base, nowMs, { status: "unverified", reason: "cross_check_unavailable" });
+      return this.grant(rec, base, nowMs, { status: "unverified", reason: unconfirmedReason });
     }
     return this.grant(rec, target, nowMs);
   }
@@ -716,8 +792,23 @@ export class HardwareVerifier {
       ...(tokensPerSec !== undefined ? { tokensPerSec } : {}),
       ...(pend.challenge.kind === "gpu" ? { model: pend.challenge.model } : {})
     };
+    if (pend.challenge.kind === "gpu" && pend.confirm) {
+      const outs = this.witnessOutputs.get(pend.challenge.challengeId);
+      this.witnessOutputs.delete(pend.challenge.challengeId);
+      const answers: Record<string, string> = {};
+      for (const w of pend.confirm.witnesses) {
+        const out = outs?.get(w);
+        if (out !== undefined) answers[w] = out;
+      }
+      const round: ConfirmRound = { ...pend.confirm, answers };
+      if (Object.keys(answers).length === round.witnesses.length) return this.confirmVerdict(rec, pend.challenge, response.output as string, m, round, nowMs);
+      this.awaiting.set(pend.challenge.challengeId, { agentId, claimedTier: rec.claimed.tier, challenge: pend.challenge, output: response.output as string, measured: m, expiresAtMs: nowMs + this.config.witnessTimeoutMs, confirm: round });
+      rec.measured = { ...m, crossChecked: false };
+      if (rec.status !== "verified") rec.status = "pending";
+      return done(false);
+    }
     if (pend.challenge.kind === "gpu" && pend.witnessAgentId) {
-      const witnessOut = this.witnessOutputs.get(pend.challenge.challengeId);
+      const witnessOut = this.witnessOutputs.get(pend.challenge.challengeId)?.get(pend.witnessAgentId);
       if (witnessOut === undefined) {
         this.awaiting.set(pend.challenge.challengeId, { agentId, claimedTier: rec.claimed.tier, challenge: pend.challenge, output: response.output as string, measured: m, expiresAtMs: nowMs + this.config.witnessTimeoutMs });
         rec.measured = { ...m, crossChecked: false };
@@ -757,8 +848,14 @@ export class HardwareVerifier {
       this.recordWitnessDisagreement(first.agentId, nowMs);
       return finish(changed, { disagreeingWitness: first.agentId });
     }
-    // Two independent witnesses disagree with the subject: invalid.
-    if (first) return finish(this.invalid(rec, "cross_check_mismatch", nowMs), { invalid: "cross_check_mismatch" });
+    // Two witnesses disagree with the subject. They may be colluding (on separate accounts): demote
+    // only if a confirmatory round with two fresh witnesses fails too. None to be had: no demotion.
+    if (first) {
+      if (!this.requestConfirmatoryRound(rec, ch, [first.agentId, witness.agentId], nowMs)) return finish(this.settle(rec, m, false, nowMs));
+      rec.measured = { ...m, crossChecked: false };
+      if (rec.status !== "verified") rec.status = "pending";
+      return finish(false);
+    }
     // One witness alone cannot demote: ask a second one. None available => settle as unconfirmed.
     if (!this.requestSecondWitness(rec, ch, subject, m, { agentId: witness.agentId, similarity: sim }, nowMs)) return finish(this.settle(rec, m, false, nowMs));
     rec.measured = { ...m, crossChecked: false };
@@ -801,15 +898,89 @@ export class HardwareVerifier {
   }
 
   /**
-   * A witness disagreed with a subject that a second witness confirmed. Recorded on the witness's
-   * record only; this is the hook for a witness penalty (lower reputation, no further witness duty).
+   * Two witnesses disagreed with the subject: give the subject a fresh prompt (new nonce and seed,
+   * same model and deadline), answered by two fresh witnesses that exclude the subject, both earlier
+   * witnesses, and each other (and, in the picker, their accounts and networks). False when two such
+   * witnesses cannot be found.
    */
+  private requestConfirmatoryRound(rec: HardwareVerificationRecord, ch: GpuChallenge, disagreeing: string[], nowMs: number): boolean {
+    const size = modelWeightsGb(ch.model);
+    if (!size) return false;
+    const exclude = [rec.agentId, ...disagreeing];
+    const witnesses: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const w = this.opts.pickWitness?.(rec.agentId, ch.model, [...exclude, ...witnesses], nowMs);
+      if (!w || exclude.includes(w) || witnesses.includes(w)) return false;
+      witnesses.push(w);
+    }
+    const challenge: GpuChallenge = { ...ch, challengeId: this.id(), nonce: this.bytes(16).toString("hex"), seed: this.int(2 ** 31 - 1) };
+    // Delivered at the subject's next heartbeat; its deadline runs from then.
+    const own = this.pending.get(rec.agentId) ?? [];
+    own.push({ challenge, agentId: rec.agentId, role: "own", createdAtMs: nowMs, claimedTier: rec.claimed.tier, weightsGb: size.weightsGb, confirm: { witnesses, disagreeing, answers: {} } });
+    this.pending.set(rec.agentId, own);
+    for (const w of witnesses) {
+      const wq = this.pending.get(w) ?? [];
+      wq.push({ challenge: { ...challenge, challengeId: this.id(), deadlineMs: this.config.witnessTimeoutMs }, agentId: w, role: "witness", createdAtMs: nowMs, witnessFor: challenge.challengeId });
+      this.pending.set(w, wq);
+    }
+    return true;
+  }
+
+  /**
+   * The confirmatory round's verdict. Both fresh witnesses agree with the subject: verified, and the
+   * two earlier witnesses are struck. Both disagree: invalid (four independent witnesses against it).
+   * Anything else (a split, or a witness that did not follow the prompt) proves nothing: unconfirmed,
+   * no demotion, no strike.
+   */
+  private confirmVerdict(rec: HardwareVerificationRecord, ch: GpuChallenge, subject: string, m: HardwareMeasurement, round: ConfirmRound, nowMs: number): SubmitResult {
+    let agree = 0;
+    let disagree = 0;
+    for (const w of round.witnesses) {
+      const out = round.answers[w];
+      if (out === undefined || !checkInferenceOutput(ch.nonce, ch.lines, out).ok) continue;
+      if (inferenceSimilarity(ch.nonce, subject, out) >= this.config.crossCheckMinSimilarity) agree++;
+      else disagree++;
+    }
+    let changed: boolean;
+    let extra: Partial<SubmitResult> = {};
+    if (agree === round.witnesses.length) {
+      changed = this.settle(rec, m, true, nowMs);
+      extra = { struckWitnesses: round.disagreeing.map((id) => this.recordWitnessStrike(id, nowMs)).filter((s): s is WitnessStrike => s !== undefined) };
+    } else if (disagree === round.witnesses.length) {
+      changed = this.invalid(rec, "cross_check_mismatch", nowMs);
+      extra = { invalid: "cross_check_mismatch" };
+    } else {
+      changed = this.settle(rec, m, false, nowMs, "cross_check_inconclusive");
+    }
+    this.save(rec, nowMs);
+    return { accepted: true, changed, record: rec, ...extra };
+  }
+
+  private recent(times: number[] | undefined, nowMs: number): number[] {
+    const cutoff = nowMs - this.config.witnessStrikeWindowMs;
+    return [...(times ?? []), nowMs].filter((t) => t >= cutoff).slice(-50);
+  }
+
+  /** A witness disagreed with a subject that another witness confirmed: counts against its eligibility. */
   private recordWitnessDisagreement(witnessId: string, nowMs: number): void {
     const rec = this.records.get(witnessId);
     if (!rec) return;
     rec.witnessDisagreements = (rec.witnessDisagreements ?? 0) + 1;
     rec.lastWitnessDisagreementAtMs = nowMs;
+    rec.witnessDisagreementTimes = this.recent(rec.witnessDisagreementTimes, nowMs);
     this.save(rec, nowMs);
+  }
+
+  /** A witness overruled by a confirmatory round: a strike (and a disagreement). */
+  private recordWitnessStrike(witnessId: string, nowMs: number): WitnessStrike | undefined {
+    const rec = this.records.get(witnessId);
+    if (!rec) return undefined;
+    rec.witnessStrikes = (rec.witnessStrikes ?? 0) + 1;
+    rec.witnessStrikeTimes = this.recent(rec.witnessStrikeTimes, nowMs);
+    this.recordWitnessDisagreement(witnessId, nowMs);
+    const strikes = rec.witnessStrikeTimes.length;
+    const threshold = this.config.witnessStrikeThreshold;
+    return { agentId: witnessId, strikes, excluded: strikes >= threshold, newlyExcluded: strikes === threshold };
   }
 
   private witnessAnswer(pend: PendingChallenge, response: ChallengeResponse, nowMs: number): SubmitResult {
@@ -819,8 +990,18 @@ export class HardwareVerifier {
     if (!waiting) {
       // The subject has not answered yet; keep the output for when it does (expires with the challenge).
       const subjectPending = [...this.pending.values()].some((q) => q.some((p) => p.challenge.challengeId === subjectId));
-      if (subjectPending) this.witnessOutputs.set(subjectId, response.output);
+      if (subjectPending) this.witnessOutputs.set(subjectId, (this.witnessOutputs.get(subjectId) ?? new Map<string, string>()).set(pend.agentId, response.output));
       return { accepted: true, changed: false };
+    }
+    if (waiting.confirm) {
+      const round = waiting.confirm;
+      if (!round.witnesses.includes(pend.agentId) || round.answers[pend.agentId] !== undefined) return { accepted: true, changed: false };
+      round.answers[pend.agentId] = response.output;
+      if (Object.keys(round.answers).length < round.witnesses.length) return { accepted: true, changed: false };
+      this.awaiting.delete(subjectId);
+      const subjectRec = this.records.get(waiting.agentId);
+      if (!subjectRec || subjectRec.claimed.tier !== waiting.claimedTier) return { accepted: true, changed: false };
+      return this.confirmVerdict(subjectRec, waiting.challenge, waiting.output, waiting.measured, round, nowMs);
     }
     // Waiting on a second witness: only that witness's answer counts.
     if (waiting.secondWitnessId !== undefined && pend.agentId !== waiting.secondWitnessId) return { accepted: true, changed: false };
@@ -851,7 +1032,7 @@ export class HardwareVerifier {
           continue;
         }
         if (p.role === "witness") {
-          this.witnessOutputs.delete(p.witnessFor as string);
+          this.witnessOutputs.get(p.witnessFor as string)?.delete(agentId);
           continue;
         }
         this.witnessOutputs.delete(p.challenge.challengeId);
@@ -922,4 +1103,40 @@ export class HardwareVerifier {
 export function workTokens(outputChars: number, reportedTokens?: number): number {
   if (reportedTokens === undefined || !Number.isFinite(reportedTokens) || reportedTokens <= 0) return outputChars / 4;
   return Math.min(outputChars / 1.5, Math.max(outputChars / 8, reportedTokens));
+}
+
+/** The witness fields of a record (kept when the agent's hardware profile changes). */
+function witnessHistory(r: HardwareVerificationRecord): Partial<HardwareVerificationRecord> {
+  const out: Partial<HardwareVerificationRecord> = {};
+  if (r.witnessDisagreements) Object.assign(out, { witnessDisagreements: r.witnessDisagreements, lastWitnessDisagreementAtMs: r.lastWitnessDisagreementAtMs });
+  if (r.witnessDisagreementTimes?.length) out.witnessDisagreementTimes = [...r.witnessDisagreementTimes];
+  if (r.witnessStrikes) out.witnessStrikes = r.witnessStrikes;
+  if (r.witnessStrikeTimes?.length) out.witnessStrikeTimes = [...r.witnessStrikeTimes];
+  return out;
+}
+
+/**
+ * The network an address belongs to for witness independence: the /24 of an IPv4 address (also
+ * IPv4-mapped IPv6) or the /48 of an IPv6 address. Undefined when it is not an IP address.
+ */
+export function ipNetworkPrefix(ip: string | undefined): string | undefined {
+  if (!ip) return undefined;
+  let a = ip.trim().toLowerCase();
+  if (a.startsWith("[") && a.endsWith("]")) a = a.slice(1, -1);
+  a = a.replace(/%.*$/, "");
+  const v4 = /^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(a);
+  if (v4) {
+    const o = v4.slice(1, 5).map(Number);
+    return o.every((n) => n <= 255) ? `${o[0]}.${o[1]}.${o[2]}.0/24` : undefined;
+  }
+  if (!/^[0-9a-f:]+$/.test(a) || !a.includes(":")) return undefined;
+  const halves = a.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return undefined;
+  const groups = [...head, ...Array(fill).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => g.length === 0 || g.length > 4)) return undefined;
+  return `${groups.slice(0, 3).map((g) => parseInt(g, 16).toString(16)).join(":")}::/48`;
 }

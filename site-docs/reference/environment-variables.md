@@ -365,6 +365,8 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | `HARDWARE_CROSS_CHECK_MIN_SIMILARITY` | `0.3` | Similarity (0 to 1) two agents' outputs need for a cross-check to pass. |
 | `HARDWARE_REVALIDATE_MS` | `21600000` | How long a verified tier lasts (60000 to 30 days). |
 | `HARDWARE_RETRY_MS` | `900000` | Wait before a failed verification is retried (10000 to 1 day). |
+| `HARDWARE_WITNESS_STRIKE_THRESHOLD` | `2` | Witness strikes (a witness overruled by a confirmatory round of two fresh witnesses) within the window after which an agent is no longer picked as a hardware witness, and gets one behaviour strike (1 to 100). |
+| `HARDWARE_WITNESS_STRIKE_WINDOW_MS` | `2592000000` | How long a witness strike or disagreement counts towards witness eligibility (1 hour to 365 days; default 30 days). |
 | `HARDWARE_TIER_MIN_JSON` | built-in table | JSON object of tier minimums, for example `{"gpu.c24": 300}`. |
 | `RESULT_VERIFICATION_KINDS` | every verifiable kind | Comma-separated task kinds that are verified. |
 | `RESULT_VERIFICATION_MISMATCH_PENALTY` | `0.25` | Reputation (0 to 1) lost for a result outvoted by its replicas. |
@@ -547,6 +549,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
+| `INFERENCE_DEFAULT_MAX_TOKENS` | integer tokens, 16 to 32768 (output cap for a network model call that sets no `maxTokens`; an agent is never paid for output past a call's cap) | `4096` |
 | `PREAUTH_FAILURE_MAX_PER_IP` | integer ≥ 1 | `120` |
 | `AUTO_BLACKLIST_TTL_MS` | integer ≥ 0 | `3600000` |
 | `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |

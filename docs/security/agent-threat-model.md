@@ -178,7 +178,7 @@ Listeners on an agent install:
   - peer-forwarded results need an allowlisted coordinator signature and the agent's signed envelope.
 - Duration is measured on the coordinator's clock and capped by the timeout. Pay is capped by what
   the requester set aside.
-- Inference token counts are bounded by request and reply size.
+- Inference token counts are bounded by request and reply size, and by the call's output cap.
 - Withdrawals, payout address and LNURL confirm need the portal token. Payment intent confirm and
   reconcile are admin-only, and the payment webhook needs an HMAC.
 - Market orders are limited to the signer's own account.
@@ -202,6 +202,63 @@ Listeners on an agent install:
 - **BLE credit inflation.** The offline requester signed the CPU time the provider reported. Fixed:
   the requester signs at most the request's elapsed time on its own clock. (The iOS requester is a
   separate Swift implementation; it needs the same cap.)
+- **Inference padding.** An agent serving a network model call could stream filler and bill output
+  tokens for it, up to the reply size and the reserve; output is never verified. Fixed in two layers:
+  - *Output cap.* A call with no `maxTokens` gets `INFERENCE_DEFAULT_MAX_TOKENS` (4096, the size
+    the context sizing already assumed). The output tokens a call is priced on never exceed its cap
+    + 64, whatever the agent streams or reports (`boundTokenCounts`). The reserve is unchanged: it
+    is time-based and also covers the per-second power floor.
+  - *Degenerate-output detector* (`src/swarm/inference-degeneracy.ts`). When a call settles, the
+    coordinator judges the text it relayed to the requester. Signals, earliest wins: a unit of 1 to
+    64 words (or, inside a whitespace-free run, 1 to 32 characters) repeated 10+ times in a row over
+    2,000+ characters; a 4 KB window that deflates 32x or more; one word (with a letter in it) making
+    up 60%+ of 200-word windows over 2,000+ characters. Replies under 2,000 characters are never
+    judged. From the point the reply turns degenerate (after the first copy of a repeated unit)
+    nothing is billed: output tokens and the measured duration are cut to the clean byte share, so
+    neither the token price nor the power floor pays for the padding, and the rest of the reserve
+    returns to the requester. Each case is a security event (`inference_output_degenerate`). An
+    agent with 3+ degenerate replies that make up half or more of its model calls in an hour gets a
+    behaviour strike (`INF001`, WARN) for each further one; three strikes in an hour blacklist it
+    (expiring). One degenerate reply alone is never a strike: honest small models loop at
+    temperature 0 now and then.
+  - Calibration: no slice of this repository's source and docs (`src/swarm`, `docs`, tested as
+    32 KB replies) is flagged; generated JSON fixtures, hex dumps, markdown tables and separators
+    deflate at most ~25x and are not flagged either (`tests/swarm/inference-degeneracy.test.ts`).
+
+  Residual: padding that varies (a counting loop, random words, plausible filler from a cheaper
+  model) passes the detector; the output cap bounds it, at worst `maxTokens` of the reply. A reply
+  that is legitimately repetitive (a 1,000-element zero table, "say X 500 times") is billed only up
+  to where the repetition starts. Sampled spot-checks of temperature-0 calls (below) are designed,
+  not built.
+- **Colluding hardware witnesses.** Two witnesses on separate accounts that both contradicted an
+  honest GPU agent demoted it, and an overruled witness was only counted. Fixed:
+  - One witness's cross-check mismatch does not demote. The prompt goes to a second witness. If it
+    agrees, the subject is verified and the first witness's disagreement is counted
+    (`witnessDisagreements`) and logged as `hardware_witness_disagreement`.
+  - Two disagreeing witnesses do not demote either (this change). The subject gets a confirmatory
+    re-challenge: a fresh prompt (new nonce and seed) answered by two fresh witnesses that exclude all
+    earlier ones. Only if both of them disagree too is the subject demoted (`cross_check_mismatch`).
+    If both agree, the subject is verified and each earlier witness gets a witness strike. A split, a
+    witness that never answers, or no witness to be had settles unconfirmed at base tier: no demotion,
+    no strike.
+  - Witnesses are chosen uniformly at random among eligible agents (`pickBenchmarkWitness`,
+    `HardwareVerifier.canWitness`): online, not blacklisted, running the model, a passed GPU challenge
+    (or one unconfirmed only for want of a witness, so a new fleet can bootstrap), fewer than 3
+    disagreements and fewer than `HARDWARE_WITNESS_STRIKE_THRESHOLD` (2) strikes within
+    `HARDWARE_WITNESS_STRIKE_WINDOW_MS` (30 days), and a different owner account and IP network (/24
+    IPv4, /48 IPv6) from the subject and from each other.
+  - At the strike threshold the agent is no longer picked, and the coordinator logs
+    `hardware_witness_disagreement` (action `witness_excluded`) and records one behaviour strike
+    (`HWW001`). Strikes survive re-registration with new hardware.
+
+  Residual: demoting an honest agent now takes four colluding witnesses, on four accounts and four
+  networks, and the coordinator must pick all four from the colluders at random. A colluding pair can
+  still keep an honest agent at its base tier for a round (a split confirmatory round, or two lies
+  followed by a confirmatory witness that never answers), but cannot demote it, and every lie that a
+  confirmatory round overrules is a strike. Witness duty is unpaid, so exclusion costs a colluder
+  nothing directly; the behaviour strike and the logged events are the penalty. "Account" is the
+  agent's `ownerEmail`; agents with no owner are independent of everyone but themselves. Several
+  accounts behind different /24s (cheap VPS ranges) are still a Sybil route.
 - **Free compute through "anonymous" `/submit`.** Any signed agent could submit unbilled jobs, and
   the honest workers that ran them were paid nothing. Fixed: a remote agent asking for "anonymous"
   is billed to its owner.
@@ -212,16 +269,30 @@ Listeners on an agent install:
   can claim a code job, wait, and return any output; it is paid up to the reserve. Proposed: enable
   sampling (e.g. 5 to 10% of verifiable kinds) by default in production. The behaviour-rule flags
   below rely on it.
-- **Inference padding.** An agent can stream filler and report output tokens up to the reply size.
-  The cost to the requester is bounded by the reserve. Inference is not verified.
-- **Hardware witness.** Fixed: one witness's cross-check mismatch no longer demotes. The prompt goes
-  to a second witness (not the subject or the first witness, nor their owner or IP). Only if it also
-  disagrees is the subject demoted to its base tier (`cross_check_mismatch`). If it agrees, the
-  subject is verified and the first witness's disagreement is counted on its record
-  (`witnessDisagreements`) and logged as `hardware_witness_disagreement`. No second witness, or one
-  that times out, settles unconfirmed at base tier, never invalid. Residual: two colluding witnesses
-  on separate accounts can still demote an honest agent, and a disagreeing witness is recorded but
-  not yet penalised.
+- **Inference spot-checks (designed, not built).** The padding fix above prices only what the
+  coordinator can judge from the text. A sampled re-run would also catch varied filler and wrong-model
+  answers. Design:
+  - *Which calls.* Only `temperature: 0` calls on a billed network target, sampled at
+    `INFERENCE_VERIFICATION_RATE` (default 0), raised for agents with recent `inference_output_degenerate`
+    events.
+  - *The re-run.* After the original result is delivered and settled for the requester (the buyer never
+    waits), the coordinator enqueues a replica subtask with the same messages, tools, model and cap,
+    excluding the original agent and its account (`excludeAccounts`, as result verification does), with
+    no stream and no requester. It runs at the network's expense: unpaid unless
+    `RESULT_VERIFICATION_MINT_REPLICA_REWARDS` is on (the open minting decision, #114).
+  - *Comparison.* Lenient, because greedy decoding still differs across GPUs, quantisations and Ollama
+    builds: a common prefix of at least 25% of the shorter reply, or word 3-gram overlap of at least
+    0.3, is a match. A length ratio above 3 with a matching prefix means the original ran on past where
+    the honest reply stopped (padding). A gross mismatch (overlap under 0.05) together with a degenerate
+    or over-long original is a strike (`INF002`); a mismatch alone only raises the agent's sample rate.
+  - *Payment.* The original agent's earn row for a sampled call would be held (the earnings-hold
+    pattern used for payouts) until the check settles or times out, then released or reversed. The
+    requester's charge is final at delivery; a reversed earning is refunded to them.
+  - *Why not built now.* It needs a replica path for inference (agents stream to a requester today; a
+    replica has none), a held-earnings state per subtask that the current accrual path does not have,
+    the minting decision, and similarity thresholds calibrated on real fleet pairs (same tag, different
+    hardware). Built quickly, a too-strict comparator would strike honest agents. A Sybil replica on a
+    second account can still agree with a padded original (see "Sybil replicas").
 - **Sybil replicas.** Replicas exclude the executor's agent and account only. A second account can
   claim the replica and agree with a forged result.
 - **Reserved agents** are paid for time held. The work during a reservation is not checked.

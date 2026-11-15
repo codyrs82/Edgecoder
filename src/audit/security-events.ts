@@ -25,6 +25,7 @@ export type SecurityEventType =
   | "result_verification_replica_abandoned"
   | "hardware_challenge_invalid"
   | "hardware_witness_disagreement"
+  | "inference_output_degenerate"
   | "host_heartbeat_rejected"
   | "payout_limit_exceeded"
   | "payout_blocked_paused"
@@ -68,6 +69,7 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   auto_blacklist_triggered: "CRITICAL",
   hardware_challenge_invalid: "WARN",
   hardware_witness_disagreement: "WARN",
+  inference_output_degenerate: "WARN",
   host_heartbeat_rejected: "HIGH",
   payout_limit_exceeded: "HIGH",
   payout_blocked_paused: "WARN",
