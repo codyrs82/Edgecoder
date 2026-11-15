@@ -204,6 +204,65 @@ not open a solvency gap.
 - [ ] A small revenue withdrawal on signet: it appears under Settings > Revenue and in
       `GET /admin/payouts/reconciliation` stays `ok`.
 
+## Regtest money loop (rerun before mainnet)
+
+`scripts/regtest-money-loop.mjs` drives the whole money loop on the live **regtest** network
+(portal `edgecoder.io`, seeds `edgecoder-seed` / `edgecoder-seed-eu`, LND `edgecoder-lnd-test`) and
+prints evidence: intent ids, ledger sums, payout ids, LND payment hashes. It never touches
+`edgecoder-lnd`, refuses a hub that is not on regtest, and prints no tokens, keys or macaroons
+(ledger reads and coordinator calls that need a token run inside the seed machine,
+`scripts/regtest-money-loop/seed-query.mjs`). Evidence lands in `.money-loop/<run>/` (gitignored).
+Inputs: `~/.config/edgecoder/fly.token`, `coordinator-admin-token`, and test accounts in
+`~/.config/edgecoder/e2e/accounts/<name>.json` (verified, with an API key).
+
+Automatic payouts only pay a Lightning address on a public https domain, so the run brings up a
+regtest Lightning-address server, `scripts/regtest-money-loop/lnurl` (`<name>@edgecoder-regtest-lnurl.fly.dev`,
+invoices from the payee node; it also catches the alert webhook). Per name it can answer normally,
+cancel the invoice at once (`cancel`: the payment fails), hold it (`hold`: the payment stays in
+flight) or refuse (`error`).
+
+```sh
+S=scripts/regtest-money-loop.mjs
+node $S preflight                                  # hub/payee synced, pause + reconciliation per seed
+node $S lnurl-up                                   # Lightning-address server + webhook catcher
+node $S destinations st1 st2 ...                   # each host's payout destination (first time only)
+node $S buy st9 300000                             # 1. top-up invoice paid by the payee; balance arrives
+node $S spend st9 25 1                             # 2. 25 min of paid calls, cpu/apple/gpu.dc, <= 1/s
+node $S verify-spend st9 <spend-run>               # 2-3. reserve/refund per call, host 95 % / pool 5 %, exact sums
+node $S infer st9 us 10; node $S infer st9 eu 10   # 8. calls billed by each seed, one ledger
+node $S settings-test 600000 15000 30000           # hold 10 min, caps 15k single / 30k per account, webhook
+node $S transfer st9 <run> 12000 st2 st3 ...       # test earnings big enough to pay out (see below)
+node $S auto-payouts us                            # 4. one automatic payout pass after the hold
+node $S mode st3 cancel; node $S mode st4 hold     # 6. a failing and an in-flight destination
+node $S withdraw st1 14000                         # 6. caps: single and per-account 24 h
+node $S pause on; node $S withdraw st2 2000; node $S pause off   # 6. kill-switch drill
+node $S revenue 5000                               # 5. fee-pool withdrawal, /admin/revenue
+node $S hooks                                      # 6. what the alert webhook received
+node $S check                                      # ledger invariants, /ledger/verify, reconciliation, both seeds
+node $S settings-restore; node $S destinations-clear st1 ...; node $S lnurl-down
+```
+
+Notes from the first run (2026-11-15):
+
+- Organic earnings are far below the payout minimums: a model call costs 2-30 msat (a GPU call
+  ~130 msat). 1,060 calls in 25 minutes charged 49.2 sats in total; the best-earning host got 29 sats,
+  while `PAYOUT_MIN_SATS` is 1,000 and `PAYOUT_AUTO_MIN_SATS` 10,000. Payouts, caps, failed payouts,
+  restarts during payouts and revenue withdrawals therefore need either lower minimums on the
+  regtest seeds or `transfer`, which books test earnings straight into Postgres: a spend on the buyer
+  (bought over Lightning) and per host an earn of 95 % plus a 5 % network-fee earn on the pool,
+  reason `regtest_e2e_test:<run>` (wiped by `ledger-reset-network.ts`). It keeps the solvency check
+  balanced, unlike a one-sided earn row. It writes the shared ledger directly, so run it only with
+  the owner's explicit go-ahead (on 2026-11-15 it was not approved, and those steps did not run).
+- The coordinator runs automatic payouts on its own schedule (`PAYOUT_AUTO_INTERVAL_MS`, 6 h).
+  `auto-payouts` runs the same `PayoutService.runAutoPayouts` once inside a seed machine, built from
+  that machine's `dist/` and environment (same database, node, caps, hold, pause and LNURL pins).
+- `settings-test` sets Fly secrets on both seeds, which restarts them; `settings-restore` unsets
+  them (the caps fall back to `[env]` in the seeds' `fly.toml`). A restart runs reconciliation at
+  once, so expect a webhook alert if the node has an unexplained payment in the lookback window.
+- Buying uses the **payee** node to pay the coordinator's invoice. Never pay anything from the
+  **hub**: it is the coordinator's own node, and any payment it makes without a payout row trips
+  reconciliation (`unknown_payments`) and pauses payouts.
+
 ## Secrets and access
 
 - [ ] `ADMIN_API_TOKEN`, `PORTAL_SERVICE_TOKEN`, `MESH_AUTH_TOKEN`, `PAYMENT_WEBHOOK_SECRET` are

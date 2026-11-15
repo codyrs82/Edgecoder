@@ -54,3 +54,4 @@ desktop/src-tauri/resources/agent/
 
 # Stress harness run artifacts and per-run throwaway secrets (scripts/stress/)
 .stress-runs/
+.money-loop/
