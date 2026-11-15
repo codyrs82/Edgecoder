@@ -250,6 +250,17 @@ struct WalletOverview: Decodable {
         let lightningEnabled: Bool?
         let paused: Bool?
         let limits: Limits?
+        /// Bitcoin on-chain (ONCHAIN_ENABLED on the coordinator); nil or enabled false = "Coming soon".
+        let onchain: OnchainPolicy?
+    }
+    struct OnchainPolicy: Decodable {
+        let enabled: Bool
+        let depositConfirmations: Int?
+        let depositMinSats: Int?
+        let payoutMinSats: Int?
+        let payoutIntervalMs: Double?
+        let payoutFeePayer: String?
+        let payoutMaxFeeSats: Int?
     }
     struct PayoutRow: Decodable, Identifiable {
         var id: String { "\(createdAtMs)-\(kind)-\(amountMsat)" }
@@ -259,6 +270,7 @@ struct WalletOverview: Decodable {
         let feeMsat: Double?
         let status: String
         let error: String?
+        let txid: String?
     }
     struct Payouts: Decodable {
         let balance: PayoutBalance?
@@ -294,6 +306,29 @@ struct TopupStatus: Decodable {
     let intentId: String
     let status: String
     let cSats: Double?
+}
+
+/// Fund with Bitcoin: the deposit address and deposits (portal /portal/api/wallet/onchain*).
+struct OnchainFunding: Decodable {
+    struct Deposit: Decodable, Identifiable {
+        var id: String { "\(txid):\(vout)" }
+        let txid: String
+        let vout: Int
+        let amountSats: Int
+        let confirmations: Int
+        let requiredConfirmations: Int
+        let status: String
+        let seenAtMs: Double
+    }
+    let enabled: Bool
+    let network: String?
+    let address: String?
+    let confirmationsRequired: Int?
+    let minSats: Int?
+    let maxSats: Int?
+    let deposits: [Deposit]
+    let error: String?
+    let detail: String?
 }
 
 struct WithdrawResponse: Decodable {
