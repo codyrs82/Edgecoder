@@ -166,6 +166,14 @@ function freeSlots(agentId: string, claims: Claims, useReport: boolean): number 
   return Math.max(0, useReport && load.reportedFree !== undefined ? Math.min(byCount, load.reportedFree) : byCount);
 }
 
+/**
+ * Model calls this agent could start now (/inference/models freeSlots): its slots less the calls it
+ * holds, capped by its last report. An agent that reports no slots counts 1 while it holds nothing.
+ */
+export function freeModelSlots(agentId: string, claims: Claims): number {
+  return freeSlots(agentId, claims, true) ?? ((claims.get(agentId)?.all ?? 0) === 0 ? 1 : 0);
+}
+
 function liveAgent(agentId: string, cap: Capability | undefined, nowMs: number): cap is Capability {
   if (!cap || activeBlacklistRecord(agentId)) return false;
   return nowMs - cap.lastSeenMs <= LOAD_FRESH_MS;

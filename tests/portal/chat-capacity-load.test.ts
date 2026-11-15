@@ -57,4 +57,29 @@ describe("load-aware coordinator pick for network calls", () => {
     const d = directory({ [US]: report(5), [EU]: { reachable: true, agentModels: ["other"], modelLoad: { other: { idle: 9, waiting: 0 } } } });
     expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
   });
+  // Probe on the live regtest network (2026-11-15, after fast dispatch): every agent on both seeds
+  // held one call, so both reported 0 idle agents; the tie went to whichever was listed first and the
+  // 2-agent EU seed queued calls for 5 s (pickup p90) while the 7-agent US seed had free slots.
+  const slots = (agents: number, idle: number, free: number, waiting = 0): CapacityReport => ({ reachable: true, agentModels: [MODEL], modelLoad: { [MODEL]: { agents, idle, free, waiting } } });
+
+  it("compares free model slots, not idle agents, when the coordinator reports them", async () => {
+    const d = directory({ [EU]: slots(2, 0, 1), [US]: slots(7, 0, 6) });
+    const dEuFirst = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, probe: async (url) => (url === EU ? slots(2, 0, 1) : slots(7, 0, 6)), ttlMs: 60_000 });
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
+    expect((await dEuFirst.pick({ kind: "network", model: MODEL })).url).toBe(US);
+  });
+
+  it("when both are full, sends the call to the coordinator with more agents, whatever the order", async () => {
+    const d = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, probe: async (url) => (url === EU ? slots(2, 0, 0) : slots(7, 0, 0)), ttlMs: 60_000 });
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
+  });
+
+  it("spreads a burst by slots: the 7-agent seed takes most of 12 calls", async () => {
+    const d = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, probe: async (url) => (url === EU ? slots(2, 2, 4) : slots(7, 7, 14)), ttlMs: 60_000 });
+    const picks: string[] = [];
+    for (let i = 0; i < 12; i++) picks.push((await d.pick({ kind: "network", model: MODEL })).url!);
+    const eu = picks.filter((u) => u === EU).length;
+    expect(eu).toBeLessThanOrEqual(3);
+    expect(picks.slice(0, 8).every((u) => u === US)).toBe(true);
+  });
 });

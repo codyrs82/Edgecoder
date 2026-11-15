@@ -182,4 +182,18 @@ describe("fast dispatch", () => {
     expect(huge.statusCode).toBe(413);
     expect(huge.json()).toMatchObject({ error: "context_too_long", largestContextWindow: 8192 });
   });
+  test("/inference/models reports free model slots, so the portal can compare coordinators by room left", async () => {
+    const models = async () => ((await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json().models as Array<{ model: string; freeSlots?: number; idleAgents: number }>).find((m) => m.model === MODEL)!;
+    // Each of busy and idle reports 2 slots, both free.
+    await pull(busy, 2, 2);
+    await pull(idle, 2, 2);
+    const before = await models();
+    const c = await submit();
+    expect(await pull(idle, 2, 2)).toBe(c.subtaskId);
+    const after = await models();
+    // idle now holds one of its two slots: one fewer free slot, and the other still counts.
+    expect(before.freeSlots).toBeGreaterThanOrEqual(4);
+    expect(after.freeSlots).toBe((before.freeSlots ?? 0) - 1);
+    await finish(idle, c);
+  });
 });

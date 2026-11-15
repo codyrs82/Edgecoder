@@ -47,7 +47,8 @@ export interface CapacityReport {
   /** kind "network": models connected agents can run; undefined when the list could not be read. */
   agentModels?: string[];
   /** kind "network": per model, idle agents and calls waiting (coordinators that report them). */
-  modelLoad?: Record<string, { idle: number; waiting: number }>;
+  /** agents: holding the model; idle: holding nothing; free: model slots free now (newer coordinators); waiting: calls queued. */
+  modelLoad?: Record<string, { agents?: number; idle: number; free?: number; waiting: number }>;
 }
 
 export type CapacityProbe = (url: string, kind: ChatNeed["kind"]) => Promise<CapacityReport>;
@@ -118,12 +119,13 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       const json = (await res.body.json().catch(() => null)) as { models?: unknown } | null;
       if (!json || !Array.isArray(json.models)) return { reachable: true };
       const agentModels: string[] = [];
-      const modelLoad: Record<string, { idle: number; waiting: number }> = {};
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; waiting?: unknown }>) {
+      const modelLoad: Record<string, { agents?: number; idle: number; free?: number; waiting: number }> = {};
+      const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
-          if (typeof m.idleAgents === "number" && Number.isFinite(m.idleAgents)) {
-            modelLoad[m.model] = { idle: m.idleAgents, waiting: typeof m.waiting === "number" && Number.isFinite(m.waiting) ? m.waiting : 0 };
+          if (num(m.idleAgents)) {
+            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0 };
           }
         }
       }
@@ -250,14 +252,19 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
    */
   async function chooseByLoad(urls: string[], model: string, maxAgeMs: number): Promise<string | null> {
     const reports = await Promise.all(urls.map((u) => reportOf(u, "network", maxAgeMs)));
-    let best: { url: string; free: number } | null = null;
+    let best: { url: string; free: number; size: number } | null = null;
     for (let i = 0; i < urls.length; i++) {
       const r = reports[i];
       const load = r.modelLoad?.[model];
       if (!r.reachable || !load || recentlyFailed(urls[i]) || !r.agentModels?.includes(model)) continue;
       const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
-      const free = load.idle - load.waiting - sentCount(urls[i], model, reportAt);
-      if (!best || free > best.free) best = { url: urls[i], free };
+      // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
+      const room = load.free ?? load.idle;
+      const free = room - load.waiting - sentCount(urls[i], model, reportAt);
+      // A tie (both full, or both equally free) goes to the coordinator with more agents for the model,
+      // so a small region is not flooded just because it is listed first.
+      const size = load.agents ?? 0;
+      if (!best || free > best.free || (free === best.free && size > best.size)) best = { url: urls[i], free, size };
     }
     if (best) noteSent(best.url, model, cache.get(`network|${best.url}`)?.at ?? 0);
     return best?.url ?? null;

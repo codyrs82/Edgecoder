@@ -11,7 +11,7 @@ import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../econom
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow } from "../dispatch.js";
+import { agentContextWindow, freeModelSlots } from "../dispatch.js";
 import { InferenceStreams, boundTokenCounts } from "../../inference-streams.js";
 import { pgStore } from "../../../db/store.js";
 import {
@@ -194,15 +194,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   /** Models agents on the network can run now, with how many agents and the price per class. */
   app.get("/inference/models", async () => {
     const now = Date.now();
-    const byModel = new Map<string, { agents: number; idle: number; classes: Set<ComputeClassId> }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId> }>();
+    const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
       for (const m of new Set(routableModels(cap))) {
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, classes: new Set<ComputeClassId>() };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>() };
         e.agents++;
         if (queue.agentClaims(id) === 0) e.idle++;
+        e.free += freeModelSlots(id, claims);
         e.classes.add(cls);
         byModel.set(m, e);
       }
@@ -213,9 +215,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     return {
       // Model calls are priced per token: cSats per million tokens in and out, by model size.
       models: [...byModel.entries()]
-        // idleAgents / waiting: how busy this coordinator is for the model, so the portal can send new
-        // calls where an agent is free (inference runs where it was submitted; it is never relayed).
-        .map(([model, e]) => ({ model, agents: e.agents, idleAgents: e.idle, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
+        // idleAgents / freeSlots / waiting: how busy this coordinator is for the model, so the portal can
+        // send new calls where a slot is free (inference runs where it was submitted; it is never relayed).
+        // freeSlots counts parallel model slots, so two half-busy coordinators still compare by room left.
+        .map(([model, e]) => ({ model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
     };
