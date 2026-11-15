@@ -112,6 +112,7 @@ describe("GET /v1/ide/network/world (IDE provider)", () => {
     const body = res.json();
     expect(body.connected).toBe(true);
     expect(body.servedBy).toBe("coord-us");
+    expect(typeof body.selfAgentId).toBe("string");
     expect(typeof body.coordinators[0].myRttMs).toBe("number");
     expect(seen.some((s) => s.url === "/forward/network/world" && s.auth === `Bearer ${TOKEN}`)).toBe(true);
   });

@@ -1,6 +1,8 @@
 // Canned backend answers for the a11y run, so every screen is audited with content in it
 // rather than in its empty or error state. Shapes follow src/lib/api.ts and src/lib/types.ts.
 
+import { WORLD } from "./world-fixture";
+
 /** Answered with a 404 (nothing in progress). */
 export const NOT_FOUND = Symbol("not found");
 
@@ -8,6 +10,7 @@ const NOW = Date.now();
 const PEER = "12D3KooWA11yPeer0000000000000000000000000000000001";
 
 const FIXTURES: Array<[RegExp, unknown]> = [
+  [/\/v1\/ide\/network\/world$/, WORLD],
   [/:4301\/health\/runtime/, {
     ok: true,
     coordinator: { provider: "ollama-local", queued: 2, agents: 3, results: 41 },
@@ -164,7 +167,7 @@ export const SECTION_SHOWS: Record<string, string> = {
   "Connect your tools": "Cursor",
   "Models": "llama3.2:3b",
   "Integrations": "@a11y",
-  "Network": "agent-linux",
+  "Network": "codys-mac-studio",
   "Dashboard": "ollama-local",
   "Active work": "Connected Agents (2)",
   "Tasks": "Submit New Task",

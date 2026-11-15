@@ -823,7 +823,8 @@ app.get("/v1/ide/network/world", async (_req, reply) => {
   try {
     const r = await networkWorld(networkDeps);
     if (r.status !== 200) return reply.status(r.status === 429 ? 429 : 502).send({ connected: false, reason: r.status === 429 ? "rate_limited" : "coordinator_error", status: r.status, error: r.json.error ?? null });
-    return reply.send({ connected: true, ...r.json });
+    // This computer's own agent, so the page can call it "This computer" (it is also marked `mine`).
+    return reply.send({ connected: true, ...r.json, selfAgentId: networkDeps.agentId });
   } catch (err) {
     return reply.status(502).send({ connected: false, reason: "agent_unreachable", error: (err as Error).message });
   }
