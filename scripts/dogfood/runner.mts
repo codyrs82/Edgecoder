@@ -402,10 +402,15 @@ function changedFiles(wt: string): string[] {
   return parsePorcelainZ(execFileSync("git", ["status", "--porcelain", "-z", "--untracked-files=all"], { cwd: wt, encoding: "utf8" }));
 }
 
-async function accept(job: Job, wt: string): Promise<{ passed: boolean; changed: string[]; checks: any[]; reason?: string }> {
+async function accept(job: Job, wt: string): Promise<{ passed: boolean; changed: string[]; checks: any[]; reason?: string; scratchRemoved?: string[] }> {
   return exclusive(() => {
+    // New files outside the allowed paths are the model's scratch work (debug scripts): removed and
+    // recorded. A change to an existing file outside them still fails the job.
+    const untracked = parsePorcelainZ(execFileSync("git", ["status", "--porcelain", "-z", "--untracked-files=all"], { cwd: wt, encoding: "utf8" }).split("\0").filter((e) => e.startsWith("??")).join("\0"));
+    const scratchRemoved = untracked.filter((f) => !pathAllowed(f, job.allowedPaths));
+    for (const f of scratchRemoved) rmSync(join(wt, f), { force: true });
     const changed = changedFiles(wt);
-    const checks: any[] = [];
+    const checks: any[] = scratchRemoved.length ? [{ kind: "scratch_removed", files: scratchRemoved }] : [];
     const outside = changed.filter((f) => !pathAllowed(f, job.allowedPaths));
     if (outside.length) return { passed: false, changed, checks, reason: `changed files outside allowedPaths: ${outside.join(", ")}` };
     if (!changed.length) return { passed: false, changed, checks, reason: "no file changed" };
@@ -467,6 +472,7 @@ function promptFor(job: Job, wt: string, contextBlocks: string[]): string {
     "",
     `- You may only create or change: ${job.allowedPaths.map((p) => `\`${p}\``).join(", ")}. Do not change any other file.`,
     ...checks,
+    "- Do not create scratch or debug files; use the test file itself to try things.",
     "- When you are done, answer with a short summary of what you changed.",
     ...(files.length ? ["", "Relevant files:", ...files] : []),
     ...(contextBlocks.length ? ["", "Context:", ...contextBlocks] : []),
