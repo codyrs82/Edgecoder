@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { botCompute, botInitial, botStatusLine, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
+import { botCompute, botInitial, botStatusLine, readableSummary, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
 
 describe("bot header helpers", () => {
   it("status chip, folder name and compute text", () => {
@@ -69,6 +69,11 @@ describe("bots helpers", () => {
     expect(botStatusLine(bot({ status: "paused", lastRun }))).toBe("Paused · Fixed 2 tests.");
     expect(botStatusLine(bot({ nextRunAtMs: now + 30 * 60_000 }), now)).toBe("First run in 30 min");
     expect(botStatusLine(bot())).toBe("Message it or press Run now");
+    // Raw tool-call JSON from an older run never shows in the sidebar.
+    const jsonRun = { ...lastRun, summary: '{"name": "git_status", "argumen' };
+    expect(botStatusLine(bot({ lastRun: jsonRun }))).toBe("Ran git status");
+    expect(readableSummary('```json\n[{"name": "read_file"}, {"name": "git_diff"}]')).toBe("Ran read file, git diff");
+    expect(readableSummary("{plain braces}")).toBe("{plain braces}");
   });
 
   it("schedule, time and budget text", () => {

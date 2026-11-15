@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Square, ArrowUp } from "@lucide/svelte";
+  import { Square, ArrowUp, Plus } from "@lucide/svelte";
   import { tick, type Snippet } from "svelte";
 
   interface Props {
@@ -11,7 +11,7 @@
     onStop?: () => void;
     /** Project path search; when set, typing @ offers files and folders to mention. */
     mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
-    /** Controls on the bottom-left of the box (the compute picker). */
+    /** Controls on the bottom-right of the box, before Send (the compute picker). */
     toolbar?: Snippet;
   }
   let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, toolbar }: Props = $props();
@@ -100,6 +100,20 @@
     if (textareaEl) textareaEl.style.height = "auto";
   }
 
+  /** The + button: start an @-mention, which offers the project's files and folders. */
+  async function addContext() {
+    if (!textareaEl) return;
+    const caret = textareaEl.selectionStart ?? text.length;
+    const before = text.slice(0, caret);
+    const insert = `${before && !/\s$/.test(before) ? " " : ""}@`;
+    text = before + insert + text.slice(caret);
+    await tick();
+    const pos = caret + insert.length;
+    textareaEl.focus();
+    textareaEl.setSelectionRange(pos, pos);
+    void updateMention();
+  }
+
   function autoResize(e: Event) {
     const ta = e.target as HTMLTextAreaElement;
     ta.style.height = "auto";
@@ -141,14 +155,19 @@
     oninput={autoResize}
   ></textarea>
   <div class="bottom-row">
+  {#if mentions}
+    <button type="button" class="icon-btn" title="Add a file or folder (@)" aria-label="Add a file or folder" onclick={() => void addContext()}>
+      <Plus size={16} />
+    </button>
+  {/if}
   <div class="toolbar">{@render toolbar?.()}</div>
   {#if streaming && onStop}
     <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc)">
-      <Square size={14} fill="currentColor" />
+      <Square size={12} fill="currentColor" />
     </button>
   {:else}
     <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
-      <ArrowUp size={16} strokeWidth={2.4} />
+      <ArrowUp size={16} strokeWidth={2.25} />
     </button>
   {/if}
   </div>
@@ -200,41 +219,46 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Claude-style composer: a roomy box, + on the left, the model chip and Send on the right. */
   .input-bar {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
     background: var(--bg-surface);
-    border: 1px solid var(--border-control);
-    border-radius: 16px;
-    padding: 10px 10px 8px 14px;
+    border: 0.5px solid var(--border-control);
+    border-radius: 18px;
+    padding: 12px 8px 8px;
     flex: 1;
+    box-shadow: var(--shadow-sm);
     transition: border-color 0.15s;
   }
   .input-bar:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-control));
+    border-color: var(--text-muted);
   }
   .bottom-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
+    min-height: var(--control-md);
   }
   .toolbar {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 4px;
-    margin-left: -6px;
   }
   textarea {
     flex: 1;
+    min-height: 44px;
+    padding: 0 8px;
     border: none;
     background: none;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 14px;
+    font-size: var(--prose-size, var(--fs-md));
     line-height: 1.5;
     resize: none;
     outline: none;
@@ -244,8 +268,8 @@
     color: var(--text-muted);
   }
   .send-btn {
-    width: 30px;
-    height: 30px;
+    width: var(--control-md);
+    height: var(--control-md);
     border-radius: 50%;
     border: none;
     background: var(--accent);
@@ -255,13 +279,19 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s;
+    transition: background 0.15s, color 0.15s;
   }
   .send-btn:hover:not(:disabled) {
     background: var(--accent-hover);
   }
+  /* Nothing to send yet: a quiet grey button instead of a faded orange one. */
   .send-btn:disabled {
-    opacity: 0.4;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
     cursor: not-allowed;
+  }
+  .send-btn.stop {
+    background: var(--text-primary);
+    color: var(--bg-surface);
   }
 </style>

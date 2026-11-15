@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ChevronDown, Plus } from "@lucide/svelte";
   import { menu } from "../lib/menu";
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, type Snippet } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import ComputePicker from "./ComputePicker.svelte";
@@ -37,8 +37,12 @@
     onFilesChanged?: () => void;
     onOpenPath?: (path: string) => void;
     onPreview?: (path: string) => void;
+    /** The panel is the whole view (no folder open): the conversation is centred at reading width. */
+    wide?: boolean;
+    /** Shown when no folder is open: the full card (empty chat) or a compact bar (compact = true). */
+    noProject?: Snippet<[boolean]>;
   }
-  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview }: Props = $props();
+  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview, wide = false, noProject }: Props = $props();
 
   let streamingToolEvents: ToolEvent[] = $state([]);
   /** Where a message goes: the local agent, or a background job on the network. */
@@ -321,7 +325,7 @@
   }
 </script>
 
-<div class="editor-chat-panel">
+<div class="editor-chat-panel" class:wide>
   <div class="panel-header">
     <button
       bind:this={pickerTrigger}
@@ -333,8 +337,7 @@
       <span class="convo-title-text">{conversation.title}</span>
       <ChevronDown size={12} />
     </button>
-    <ComputePicker selected={$computeChoice} up={false} onSelect={(id) => computeChoice.set(id)} />
-    <button class="new-chat-btn" onclick={newChat} title="New coding chat" aria-label="New coding chat">
+    <button class="icon-btn" onclick={newChat} title="New coding chat" aria-label="New coding chat">
       <Plus size={16} />
     </button>
   </div>
@@ -375,10 +378,16 @@
     </div>
   {/if}
 
+  {#if !projectRoot && noProject && (conversation.messages.length > 0 || isStreaming)}
+    {@render noProject(true)}
+  {/if}
+
   <div class="messages-scroll" bind:this={scrollContainer}>
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
-        {#if projectRoot}
+        {#if !projectRoot && noProject}
+          {@render noProject(false)}
+        {:else if projectRoot}
           <p>The agent can read, search and edit files in this project and run commands. Edits and commands ask for your approval first.</p>
           <p class="hint">It sees the open file and your selection.</p>
         {:else}
@@ -433,7 +442,11 @@
       streaming={isStreaming}
       onStop={stop}
       mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}
-    />
+    >
+      {#snippet toolbar()}
+        <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
+      {/snippet}
+    </ChatInput>
   </div>
 </div>
 
@@ -449,7 +462,8 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 8px 12px;
+    height: 36px;
+    padding: 0 6px 0 4px;
     border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
   }
@@ -459,11 +473,13 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px;
+    height: var(--control-md);
+    padding: 0 8px;
     border: none;
     background: none;
     color: var(--text-primary);
-    font-size: 13px;
+    font: inherit;
+    font-size: var(--fs-sm);
     font-weight: 500;
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -480,24 +496,6 @@
     white-space: nowrap;
   }
 
-  .new-chat-btn {
-    width: 28px;
-    height: 28px;
-    border: none;
-    background: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: all 0.15s;
-  }
-  .new-chat-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
 
   .conversation-picker {
     position: absolute;
@@ -563,21 +561,32 @@
   .empty-state {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 4px;
     padding: 24px;
   }
   .empty-state p {
-    color: var(--text-muted);
-    font-size: 13px;
+    color: var(--text-secondary);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-ui);
     text-align: center;
+    max-width: 320px;
     margin: 0;
+  }
+  .empty-state p.hint {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
   }
 
   .messages {
     display: flex;
     flex-direction: column;
-    padding: 12px 0;
+    gap: 20px;
+    padding: 16px;
+    /* The panel is narrow: 14 px prose. Full width when the panel is the whole view. */
+    --prose-size: var(--fs-base);
   }
 
   .run-on {
@@ -585,8 +594,8 @@
     align-items: center;
     gap: 4px;
     margin-bottom: 6px;
-    font-size: 11px;
-    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
   }
   .auto-apply {
     margin-left: auto;
@@ -596,9 +605,24 @@
     cursor: pointer;
   }
   .panel-input {
-    border-top: 0.5px solid var(--border);
-    padding: 8px;
+    padding: 4px 12px 12px;
     flex-shrink: 0;
+  }
+  /* The whole view: reading width, like the Chat view. */
+  .wide .messages, .wide .panel-input {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    box-sizing: border-box;
+  }
+  .wide .messages {
+    padding: 24px;
+    gap: 24px;
+    --prose-size: var(--fs-md);
+  }
+  .wide .panel-input {
+    padding: 4px 24px 16px;
+    --prose-size: var(--fs-md);
   }
   .pull-banner {
     display: flex;

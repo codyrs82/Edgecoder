@@ -65,6 +65,19 @@ describe("@edgecoder/tokens (#23)", () => {
     expect(norm(readFileSync(join(root, "src/theme.css"), "utf8"))).toBe(buildTheme(tokens));
   });
 
+  it("one type scale, line heights and control heights, on a 4 px grid for controls", () => {
+    const css = buildCss(tokens);
+    for (const k of Object.keys(tokens.type)) expect(css).toContain(`--fs-${k}: ${tokens.type[k]};`);
+    for (const k of Object.keys(tokens.leading)) expect(css).toContain(`--lh-${k}: ${tokens.leading[k]};`);
+    for (const k of Object.keys(tokens.control)) expect(css).toContain(`--control-${k}: ${tokens.control[k]};`);
+    // Body text stays in the 14-15 px range; controls are multiples of 4 px.
+    expect(parseFloat(tokens.type.base)).toBe(14);
+    expect(parseFloat(tokens.type.md)).toBe(15);
+    for (const v of Object.values<string>(tokens.control)) expect(parseFloat(v) % 4).toBe(0);
+    // Never a name that collides with Tailwind's --text-* or the colour tokens.
+    expect(css).not.toMatch(/--text-(xs|sm|base|md|lg|xl):/);
+  });
+
   it("theme.css has no self-referencing variables", () => {
     for (const m of buildTheme(tokens).matchAll(/--([\w-]+):\s*var\(--([\w-]+)\)/g)) {
       expect(m[1]).not.toBe(m[2]);

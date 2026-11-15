@@ -3,6 +3,7 @@
   // Both views stay mounted in App.svelte, outside this component, so each tab names its panel by
   // id instead of rendering a Tabs.Content.
   import { Tabs } from "bits-ui";
+  import { MessageSquare, Code } from "@lucide/svelte";
 
   type View = "chat" | "editor";
   interface Props {
@@ -11,20 +12,20 @@
   }
   let { activeTab, onSwitch }: Props = $props();
 
-  const VIEWS: { id: View; label: string }[] = [
-    { id: "chat", label: "Chat" },
-    { id: "editor", label: "EdgeCoder" },
+  const VIEWS: { id: View; label: string; icon: typeof Code }[] = [
+    { id: "chat", label: "Chat", icon: MessageSquare },
+    { id: "editor", label: "Code", icon: Code },
   ];
 </script>
 
 <Tabs.Root class="contents" value={activeTab} onValueChange={(v) => onSwitch(v as View)}>
   <Tabs.List aria-label="View">
     {#snippet child({ props })}
-      <div {...props} class="tab-switcher">
+      <div {...props} class="tab-switcher view-switch">
         {#each VIEWS as view (view.id)}
           <Tabs.Trigger value={view.id} id="view-tab-{view.id}">
             {#snippet child({ props })}
-              <button {...props} class="tab" aria-controls="view-{view.id}">{view.label}</button>
+              <button {...props} class="tab" aria-controls="view-{view.id}"><view.icon size={14} aria-hidden="true" />{view.label}</button>
             {/snippet}
           </Tabs.Trigger>
         {/each}
@@ -36,28 +37,34 @@
 <style>
   .tab-switcher {
     display: flex;
-    background: var(--bg-surface);
-    border-radius: var(--radius-md);
-    padding: 3px;
+    height: var(--control-md);
+    padding: 2px;
     gap: 2px;
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
   }
   .tab {
-    padding: 6px 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
     border: none;
+    border-radius: var(--radius-sm);
     background: none;
     color: var(--text-secondary);
-    font-size: 13px;
+    font: inherit;
+    font-size: var(--fs-sm);
     font-weight: 500;
+    line-height: 1;
     cursor: pointer;
-    border-radius: var(--radius-sm);
-    transition: all 0.15s;
+    transition: background-color .12s, color .12s;
   }
   .tab:hover {
     color: var(--text-primary);
   }
   .tab[data-state="active"] {
-    background: var(--bg-base);
+    background: var(--bg-surface);
     color: var(--text-primary);
-    font-weight: 600;
+    box-shadow: var(--shadow-sm);
   }
 </style>

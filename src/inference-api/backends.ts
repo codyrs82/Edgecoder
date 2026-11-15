@@ -5,7 +5,7 @@
 
 import { NetworkInferenceError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat } from "./ollama.js";
-import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "./auto-route.js";
+import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
 export function localBackend(ollamaHost: string, model: string): ChatBackend {
@@ -68,12 +68,14 @@ export function autoBackend(opts: {
   policy?: ComputePolicy;
   /** Per request: what the network may cost (a bot's budget left today) and the "model" policy's model. */
   plan?: () => PlanOptions;
+  /** The smallest model Auto picks for chat and for agent work (default: the env, else 7B / 7B). */
+  floor?: QualityFloor;
 }): ChatBackend {
   return async function* (req, signal) {
     const inputs = await opts.inputs();
     const policy = opts.policy ?? "auto";
     const planOpts = opts.plan?.() ?? {};
-    const routes = planRoutes(sizeWorkload(req), inputs, policy, planOpts);
+    const routes = planRoutes(sizeWorkload(req, opts.floor), inputs, policy, planOpts);
     if (!routes.length) throw new ChatBackendError(noRouteMessage(policy, inputs, planOpts), 404);
     // The small free fallback is always tried, whatever maxTries cuts.
     const main = routes.filter((r) => !r.fallback).slice(0, opts.maxTries ?? 4);

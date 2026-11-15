@@ -69,7 +69,7 @@ The model name the connection reports is `auto`, the bare model (`local`), `mine
 Auto picks a place per request (`src/inference-api/auto-route.ts`):
 
 1. **Size the job.** A request that sends tools, or whose prompt is estimated at more than 6,000 tokens, is heavy (agent work). Anything else is a quick task.
-2. **Pick a model at each place.** Embedding models are never used. Heavy work needs a model of at least about 6B parameters and prefers ones near 14B, with coder models ranked higher. Quick tasks prefer the smallest model from about 1B up, since bigger models take longer.
+2. **Pick a model at each place.** Embedding models are never used. Nothing below the quality floor is picked: 7B parameters by default for both quick tasks and agent work (set `EDGECODER_AUTO_MIN_CHAT_B` and `EDGECODER_AUTO_MIN_CODING_B` to change it). Heavy work prefers models near 14B, with coder models ranked higher. Quick tasks take the smallest model that meets the floor, since bigger models take longer. When nothing that meets the floor can run, the biggest free model on this computer or your machines answers instead and the reply says so. Picking a specific model skips all of this.
 3. **Rank places, cheapest first:** an active reservation you hold (already paid), this computer (free), your other online machines (free), then the network. On the network, model calls cost the same per token on every class, so faster classes come first: Datacenter GPU, GPU, Apple, CPU. CPU is skipped for heavy work.
 4. **Try in order.** If a place can't start the request, the next one is tried, up to four.
 

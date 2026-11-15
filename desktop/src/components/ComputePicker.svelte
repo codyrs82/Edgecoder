@@ -88,10 +88,10 @@
 <Popover.Root bind:open {onOpenChange}>
   <Popover.Trigger bind:ref={triggerEl}>
     {#snippet child({ props })}
-      <button {...props} class="trigger" title="Choose the model and where it runs">
+      <button {...props} class="trigger" title="Choose the model and where it runs ({label.model} · {label.where})">
         <span class="model">{label.model}</span>
         <span class="where">{label.where}</span>
-        <ChevronDown size={12} strokeWidth={2.5} />
+        <ChevronDown size={12} />
       </button>
     {/snippet}
   </Popover.Trigger>
@@ -229,13 +229,15 @@
 {/snippet}
 
 <style>
+  /* A quiet chip: never louder than the message being typed. */
   .trigger {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: none; border-radius: var(--radius-sm);
-    background: transparent; color: var(--text-secondary); font-size: 12.5px; cursor: pointer; max-width: 320px; min-width: 0;
+    display: inline-flex; align-items: center; gap: 4px; height: var(--control-md); padding: 0 8px; border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--fs-xs); line-height: 1; cursor: pointer; max-width: 280px; min-width: 0;
   }
-  .trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-surface); color: var(--text-primary); }
-  .trigger .model { color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .trigger .where { color: var(--text-muted); white-space: nowrap; }
+  .trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-elevated); color: var(--text-primary); }
+  .trigger .model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trigger .where { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trigger .where::before { content: "·"; margin-right: 4px; }
 
   /* The menu is portalled to <body> by bits-ui, outside this component's scope. */
   :global {

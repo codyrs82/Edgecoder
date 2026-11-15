@@ -1,3 +1,39 @@
+/* desktop-polish: one control scale for the whole app. Every button is one of these:
+   .icon-btn (28 px square, 16 px icon), .btn (28 px tall, 13 px text) and its --sm (24 px) size,
+   in a quiet default, --primary (accent fill), --ghost (no border) or --danger tone. */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box;
+  width: var(--control-md); height: var(--control-md); padding: 0; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-secondary); cursor: pointer; transition: background-color .12s, color .12s;
+}
+.icon-btn:hover:not(:disabled), .icon-btn[aria-expanded="true"], .icon-btn.on { background: var(--bg-elevated); color: var(--text-primary); }
+.icon-btn:disabled { opacity: .45; cursor: not-allowed; }
+.icon-btn--sm { width: var(--control-sm); height: var(--control-sm); }
+.icon-btn svg { flex: none; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none; box-sizing: border-box;
+  height: var(--control-md); padding: 0 10px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg-surface); color: var(--text-primary); font: inherit; font-size: var(--fs-sm); font-weight: 500;
+  line-height: 1; white-space: nowrap; cursor: pointer; text-decoration: none; transition: background-color .12s, border-color .12s, color .12s;
+}
+.btn:hover:not(:disabled) { background: var(--bg-elevated); border-color: var(--border-control); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn--sm { height: var(--control-sm); padding: 0 8px; font-size: var(--fs-xs); }
+.btn--lg { height: var(--control-lg); padding: 0 14px; }
+.btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn--primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn--ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+.btn--ghost:hover:not(:disabled), .btn--ghost.on { background: var(--bg-elevated); border-color: transparent; color: var(--text-primary); }
+.btn--danger { color: var(--red); }
+.btn svg { flex: none; }
+
+/* A small count or state next to a label ("3", "M"). */
+.ui-badge {
+  display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 999px;
+  background: var(--bg-elevated); color: var(--text-secondary); font-size: var(--fs-2xs); font-weight: 500; font-variant-numeric: tabular-nums;
+}
+
 /* #24: styling for the bits-ui primitives in components/ui. They render in portals at the end
    of <body>, outside any component's scoped styles, so their classes are global and built only
    from the shared tokens. Layers: dialogs 200, popups (select, popover) 300; toasts above both. */

@@ -247,528 +247,245 @@
   }
 </script>
 
-<div class="settings">
-  <h1>Settings</h1>
+<!-- Cursor-style: a title, then groups of rows in cards (title and one-line description on the
+     left, the control on the right); styles in styles/settings-page.css. -->
+<div class="sp general">
+  <h1>General</h1>
 
-  <!-- #23: Appearance -->
-  <div class="section">
-    <h2>Appearance</h2>
-    <label>
-      <span class="label-text">Theme</span>
-      <div class="input-row">
-        <Select
-          ariaLabel="Theme"
-          bind:value={themePref}
-          onChange={(v) => setTheme(v)}
-          options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]}
-        />
-      </div>
-    </label>
-  </div>
-
-  <!-- Projects folder -->
-  <div class="section">
-    <h2>Projects</h2>
-    <label>
-      <span class="label-text">Projects folder</span>
-      <div class="input-row">
-        <input type="text" aria-label="Projects folder" bind:value={projectsFolderDraft} placeholder="~/EdgeCoder" disabled={projectsFolder?.source === "env"} onkeydown={(e) => { if (e.key === "Enter") void saveProjectsFolder(projectsFolderDraft); }} />
-        {#if projectsFolderDraft.trim() && projectsFolderDraft !== projectsFolder?.path}
-          <button class="btn-sm" onclick={() => void saveProjectsFolder(projectsFolderDraft)}>Save</button>
-        {/if}
-        <button class="btn-sm" onclick={() => void chooseProjectsFolder()} disabled={projectsFolder?.source === "env"}>Choose…</button>
-        {#if projectsFolderMsg}<span class="badge {projectsFolderMsg.ok ? 'valid' : 'invalid'}">{projectsFolderMsg.ok ? projectsFolderMsg.text : "Not saved"}</span>{/if}
-      </div>
-    </label>
-    <span class="hint">
-      {#if projectsFolderMsg && !projectsFolderMsg.ok}{projectsFolderMsg.text}
-      {:else if projectsFolder?.source === "env"}Set by EDGECODER_PROJECTS_DIR on this machine.
-      {:else}New projects and connected repositories go here, one folder per repository. Created when first used.{/if}
-    </span>
-  </div>
-
-  <!-- Mesh Configuration -->
-  <div class="section">
-    <h2>Mesh Configuration</h2>
-
-    <div class="mesh-status">
-      <span class="label-text">Connected through</span>
-      {#if meshStatus === "loading"}
-        <span class="hint">Checking…</span>
-      {:else if meshStatus}
-        <div class="input-row">
-          <code>{meshStatus.url}</code>
-          {#if meshStatus.region}<span class="badge" title="Coordinator region">{meshStatus.region}</span>{/if}
-          {#if meshStatus.latencyMs !== null}<span class="badge" title="Median /identity round trip">{meshStatus.latencyMs} ms</span>{/if}
-          <span class="badge valid">Joined</span>
+  <section class="sp-group" aria-labelledby="gen-appearance">
+    <h2 class="sp-group-title" id="gen-appearance">Appearance</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Theme</span>
+          <span class="sp-desc">Light, dark, or follow the system setting.</span>
         </div>
-        <span class="hint">
-          {#if meshStatus.steered}
-            Chosen as the fastest healthy coordinator in EdgeCoder's signed registry; its identity key matched the registry.
-          {:else if meshStatus.fallbackReason}
-            Using the default coordinator (the coordinator registry was not usable: {meshStatus.fallbackReason.split(":")[0].replaceAll("_", " ")}).
+        <div class="sp-controls">
+          <Select
+            ariaLabel="Theme"
+            bind:value={themePref}
+            onChange={(v) => setTheme(v)}
+            options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]}
+          />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-projects">
+    <h2 class="sp-group-title" id="gen-projects">Projects</h2>
+    <div class="sp-card">
+      <div class="sp-row stack">
+        <div class="sp-text">
+          <span class="sp-title">Projects folder</span>
+          <span class="sp-desc">
+            {#if projectsFolderMsg && !projectsFolderMsg.ok}{projectsFolderMsg.text}
+            {:else if projectsFolder?.source === "env"}Set by EDGECODER_PROJECTS_DIR on this machine.
+            {:else}New projects and connected repositories go here, one folder per repository. Created when first used.{/if}
+          </span>
+        </div>
+        <div class="sp-inline">
+          <input type="text" class="grow" aria-label="Projects folder" bind:value={projectsFolderDraft} placeholder="~/EdgeCoder" disabled={projectsFolder?.source === "env"} onkeydown={(e) => { if (e.key === "Enter") void saveProjectsFolder(projectsFolderDraft); }} />
+          {#if projectsFolderDraft.trim() && projectsFolderDraft !== projectsFolder?.path}
+            <button class="primary" onclick={() => void saveProjectsFolder(projectsFolderDraft)}>Save</button>
           {/if}
-          This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.
-        </span>
+          <button onclick={() => void chooseProjectsFolder()} disabled={projectsFolder?.source === "env"}>Choose…</button>
+          {#if projectsFolderMsg}<span class={projectsFolderMsg.ok ? "sp-ok" : "sp-err"}>{projectsFolderMsg.ok ? projectsFolderMsg.text : "Not saved"}</span>{/if}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-network">
+    <h2 class="sp-group-title" id="gen-network">Network</h2>
+    <div class="sp-card">
+      <div class="sp-row stack">
+        <div class="sp-text">
+          <span class="sp-title">Connected through</span>
+          {#if meshStatus === "loading"}
+            <span class="sp-desc">Checking…</span>
+          {:else if meshStatus}
+            <span class="sp-inline mesh-line">
+              <code>{meshStatus.url}</code>
+              {#if meshStatus.region}<span class="sp-pill" title="Coordinator region">{meshStatus.region}</span>{/if}
+              {#if meshStatus.latencyMs !== null}<span class="sp-pill" title="Median /identity round trip">{meshStatus.latencyMs} ms</span>{/if}
+              <span class="sp-ok"><span class="sp-dot on"></span> Joined</span>
+            </span>
+            <span class="sp-desc">
+              {#if meshStatus.steered}
+                Chosen as the fastest healthy coordinator in EdgeCoder's signed registry; its identity key matched the registry.
+              {:else if meshStatus.fallbackReason}
+                Using the default coordinator (the coordinator registry was not usable: {meshStatus.fallbackReason.split(":")[0].replaceAll("_", " ")}).
+              {/if}
+              This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.
+            </span>
+          {:else}
+            <span class="sp-desc">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
+          {/if}
+        </div>
+      </div>
+      {#each [["coordinator", "Coordinator URL", "Advanced: the coordinator this computer talks to."], ["portal", "Portal URL", "Advanced: where sign-in, wallet and usage live."]] as const as [kind, label, desc]}
+        <div class="sp-row stack">
+          <div class="sp-text">
+            <span class="sp-title">{label}</span>
+            <span class="sp-desc">{desc}</span>
+          </div>
+          <div class="sp-inline">
+            {#if kind === "coordinator"}
+              <input type="text" class="grow" aria-label={label} bind:value={coordinatorUrl} placeholder={endpointDefaults.coordinator} />
+            {:else}
+              <input type="text" class="grow" aria-label={label} bind:value={portalUrl} placeholder={endpointDefaults.portal} />
+            {/if}
+            <button onclick={() => handleTestEndpoint(kind)} disabled={endpointTest[kind] === "testing"}>
+              {endpointTest[kind] === "testing" ? "Testing…" : "Test connection"}
+            </button>
+            {#if endpointTest[kind] === "ok"}<span class="sp-ok">Reachable</span>{/if}
+            {#if endpointTest[kind] === "fail"}<span class="sp-err">Unreachable</span>{/if}
+          </div>
+        </div>
+      {/each}
+      {#if endpointError || endpointRestartNeeded}
+        <div class="sp-row stack">
+          {#if endpointError}<p class="sp-err">{endpointError}</p>{/if}
+          {#if endpointRestartNeeded}
+            <p class="sp-desc" role="status">
+              EdgeCoder needs a restart before it can reach a changed host (the app only connects to hosts it allowed at launch).
+              <button class="small" onclick={restartForEndpoints}>Restart now</button>
+            </p>
+          {/if}
+        </div>
+      {/if}
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Default endpoints</span>
+          <span class="sp-desc">Go back to EdgeCoder's coordinator and portal.</span>
+        </div>
+        <div class="sp-controls"><button onclick={handleResetEndpoints}>Reset to defaults</button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-power">
+    <h2 class="sp-group-title" id="gen-power">Power</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Max concurrent tasks</span>
+          <span class="sp-desc">Network jobs this computer runs at once.</span>
+        </div>
+        <div class="sp-controls"><input type="number" class="num" aria-label="Max concurrent tasks" bind:value={maxConcurrentTasks} min="1" max="10" /></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">CPU cap</span>
+          <span class="sp-desc">The most CPU network jobs may use.</span>
+        </div>
+        <div class="sp-controls">
+          <input type="range" aria-label="CPU cap" bind:value={cpuCapPercent} min="10" max="100" />
+          <span class="slider-value">{cpuCapPercent}%</span>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Only run tasks when idle</span>
+          <span class="sp-desc">Wait until you are away from the keyboard.</span>
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={idleOnly} aria-label="Only run tasks when idle" onclick={() => (idleOnly = !idleOnly)}></button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">BLE peer discovery</span>
+          <span class="sp-desc">{bleNote || "Find EdgeCoder machines nearby over Bluetooth (macOS)."}</span>
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable BLE peer discovery" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
+        </div>
+      </div>
+    </div>
+    <div class="save-row">
+      <button class="primary" onclick={save}>Save Settings</button>
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-identity">
+    <h2 class="sp-group-title" id="gen-identity">Node identity</h2>
+    <div class="sp-card">
+      {#if identityError}
+        <div class="sp-row"><span class="sp-err">{identityError}</span></div>
+      {:else if identity}
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Peer ID</span></div>
+          <code class="value">{identity.peerId}</code>
+        </div>
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Coordinator</span></div>
+          <span class="value">{identity.coordinatorUrl}</span>
+        </div>
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Network mode</span></div>
+          <span class="sp-pill">{identity.networkMode}</span>
+        </div>
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">Public key</span></div>
+          <div class="sp-controls">
+            <code class="value">{truncatedKey}&hellip;</code>
+            <button class="small" onclick={copyPublicKey}>{copiedKey ? "Copied" : "Copy"}</button>
+          </div>
+        </div>
       {:else}
-        <span class="hint">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
+        <div class="sp-row"><span class="sp-muted">Loading identity…</span></div>
       {/if}
     </div>
+  </section>
 
-    <span class="label-text override-title">Overrides (advanced)</span>
-    {#each [["coordinator", "Coordinator URL"], ["portal", "Portal URL"]] as const as [kind, label]}
-      <label>
-        <span class="label-text">{label}</span>
-        <div class="input-row">
-          {#if kind === "coordinator"}
-            <input type="text" bind:value={coordinatorUrl} placeholder={endpointDefaults.coordinator} />
-          {:else}
-            <input type="text" bind:value={portalUrl} placeholder={endpointDefaults.portal} />
-          {/if}
-          <button class="btn-sm" onclick={() => handleTestEndpoint(kind)} disabled={endpointTest[kind] === "testing"}>
-            {endpointTest[kind] === "testing" ? "Testing..." : "Test connection"}
-          </button>
-          {#if endpointTest[kind] === "ok"}<span class="badge valid">Reachable</span>{/if}
-          {#if endpointTest[kind] === "fail"}<span class="badge invalid">Unreachable</span>{/if}
+  <section class="sp-group" aria-labelledby="gen-about">
+    <h2 class="sp-group-title" id="gen-about">About</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text"><span class="sp-title">Local model</span><span class="sp-desc">Ollama: <span class:sp-ok={ollamaStatus === "Running"} class:sp-err={ollamaStatus !== "Running" && ollamaStatus !== "Checking..."}>{ollamaStatus}</span>{#if installedModels.length > 0} · installed: {installedModels.join(", ")}{/if}</span></div>
+        <code class="value">{activeModel}</code>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text"><span class="sp-title">App version</span></div>
+        <code class="value">{appVersion}</code>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Updates</span>
+          <span class="sp-desc">
+            {#if updateStatus.state === "checking"}Checking…
+            {:else if updateStatus.state === "up-to-date"}<span class="sp-ok">Up to date</span>
+            {:else if updateStatus.state === "available" || updateStatus.state === "ready"}<span class="sp-warn">v{updateStatus.update.version} {updateStatus.state === "ready" ? "ready" : "available"}</span>
+            {:else if updateStatus.state === "downloading"}Downloading… {updateStatus.progress}%
+            {:else if updateStatus.state === "installing"}Installing…
+            {:else if updateStatus.state === "error"}<span class="sp-err">{updateStatus.message}</span>
+            {:else}EdgeCoder checks for updates on its own.{/if}
+          </span>
         </div>
-      </label>
-    {/each}
-    {#if endpointError}<p class="badge invalid">{endpointError}</p>{/if}
-    {#if endpointRestartNeeded}
-      <p class="hint" role="status">
-        EdgeCoder needs a restart before it can reach a changed host (the app only connects to hosts it allowed at launch).
-        <button class="btn-sm" onclick={restartForEndpoints}>Restart now</button>
-      </p>
-    {/if}
-    <button class="btn-sm" onclick={handleResetEndpoints}>Reset to defaults</button>
-  </div>
-
-  <!-- Power Policy -->
-  <div class="section">
-    <h2>Power Policy</h2>
-
-    <label>
-      <span class="label-text">Max Concurrent Tasks</span>
-      <input type="number" bind:value={maxConcurrentTasks} min="1" max="10" />
-    </label>
-
-    <label>
-      <span class="label-text">CPU Cap</span>
-      <div class="slider-row">
-        <input type="range" bind:value={cpuCapPercent} min="10" max="100" />
-        <span class="slider-value">{cpuCapPercent}%</span>
+        <div class="sp-controls">
+          {#if updateStatus.state === "available" || updateStatus.state === "ready"}
+            <button class="primary" onclick={handleInstallUpdate}>Restart to update</button>
+          {:else if updateStatus.state !== "checking" && updateStatus.state !== "downloading" && updateStatus.state !== "installing"}
+            <button onclick={handleCheckUpdate}>{updateStatus.state === "error" ? "Retry" : "Check for updates"}</button>
+          {/if}
+        </div>
       </div>
-    </label>
-
-    <label class="toggle">
-      <input type="checkbox" bind:checked={idleOnly} />
-      <span>Only run tasks when idle</span>
-    </label>
-  </div>
-
-  <!-- Local Mesh -->
-  <div class="section">
-    <h2>Local Mesh</h2>
-
-    <label class="toggle">
-      <input type="checkbox" checked={bleEnabled} disabled={bleSaving} onchange={(e) => setBle((e.currentTarget as HTMLInputElement).checked)} />
-      <span>Enable BLE peer discovery (macOS)</span>
-      {#if bleNote}<span class="hint">{bleNote}</span>{/if}
-    </label>
-  </div>
-
-  <!-- Node Identity -->
-  <div class="section">
-    <h2>Node Identity</h2>
-
-    {#if identityError}
-      <p class="identity-error">{identityError}</p>
-    {:else if identity}
-      <div class="identity-grid">
-        <span class="id-label">Peer ID</span>
-        <span class="id-value mono">{identity.peerId}</span>
-
-        <span class="id-label">Coordinator URL</span>
-        <span class="id-value">{identity.coordinatorUrl}</span>
-
-        <span class="id-label">Network Mode</span>
-        <span class="id-value">
-          <span class="network-badge">{identity.networkMode}</span>
-        </span>
-
-        <span class="id-label">Public Key</span>
-        <span class="id-value mono">
-          {truncatedKey}&hellip;
-          <button class="btn-copy" onclick={copyPublicKey}>
-            {copiedKey ? "Copied!" : "Copy"}
-          </button>
-        </span>
-      </div>
-    {:else}
-      <p class="identity-loading">Loading identity...</p>
-    {/if}
-  </div>
-
-  <!-- Save -->
-  <div class="save-row">
-    <button class="btn-save" onclick={save}>Save Settings</button>
-  </div>
-
-  <!-- Local Model -->
-  <div class="section">
-    <h2>Local Model</h2>
-    <div class="about-row">
-      <span class="about-label">Active Model</span>
-      <span class="about-value mono">{activeModel}</span>
     </div>
-    <div class="about-row">
-      <span class="about-label">Ollama</span>
-      <span class="about-value" class:status-ok={ollamaStatus === "Running"} class:status-err={ollamaStatus !== "Running" && ollamaStatus !== "Checking..."}>{ollamaStatus}</span>
-    </div>
-    {#if installedModels.length > 0}
-      <div class="about-row">
-        <span class="about-label">Installed</span>
-        <span class="about-value mono">{installedModels.join(", ")}</span>
-      </div>
-    {/if}
-  </div>
-
-  <!-- About -->
-  <div class="section about-section">
-    <h2>About</h2>
-    <div class="about-row">
-      <span class="about-label">App Version</span>
-      <span class="about-value mono">{appVersion}</span>
-    </div>
-    <div class="about-row">
-      <span class="about-label">Updates</span>
-      <span class="about-value">
-        {#if updateStatus.state === "checking"}
-          <span class="update-checking">Checking...</span>
-        {:else if updateStatus.state === "up-to-date"}
-          <span class="update-ok">Up to date</span>
-        {:else if updateStatus.state === "available" || updateStatus.state === "ready"}
-          <span class="update-available">v{updateStatus.update.version} {updateStatus.state === "ready" ? "ready" : "available"}</span>
-          <button class="btn-sm" onclick={handleInstallUpdate}>Restart to update</button>
-        {:else if updateStatus.state === "downloading"}
-          <span class="update-checking">Downloading... {updateStatus.progress}%</span>
-        {:else if updateStatus.state === "installing"}
-          <span class="update-checking">Installing...</span>
-        {:else if updateStatus.state === "error"}
-          <span class="update-error">{updateStatus.message}</span>
-        {:else}
-          <button class="btn-sm" onclick={handleCheckUpdate}>Check for Updates</button>
-        {/if}
-      </span>
-    </div>
-    {#if updateStatus.state !== "checking" && updateStatus.state !== "downloading" && updateStatus.state !== "installing" && updateStatus.state !== "available" && updateStatus.state !== "ready"}
-      <div class="about-row" style="margin-top: 0.5rem;">
-        <span></span>
-        <button class="btn-check-update" onclick={handleCheckUpdate}>
-          {updateStatus.state === "error" ? "Retry" : "Check for Updates"}
-        </button>
-      </div>
-    {/if}
-  </div>
+  </section>
 </div>
 
 <style>
-  .settings {
-    padding: 1.5rem;
-    max-width: 640px;
-  }
-
-  h1 {
-    margin: 0 0 1.5rem;
-    font-size: 1.4rem;
-  }
-
-  .section {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    padding: 1.2rem 1.4rem;
-    border-radius: 10px;
-    margin-bottom: 1.2rem;
-  }
-
-  .section h2 {
-    font-size: 0.92rem;
-    margin: 0 0 1rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 600;
-  }
-
-  label {
-    display: block;
-    margin-bottom: 0.85rem;
-  }
-
-  .label-text {
-    display: block;
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    margin-bottom: 0.35rem;
-  }
-
-  input[type="text"],
-  input[type="number"] {
-    width: 100%;
-    padding: 0.45rem 0.6rem;
-    background: var(--bg-input);
-    border: 1px solid var(--border-control);
-    border-radius: 5px;
-    color: inherit;
-    font-size: 0.88rem;
-    box-sizing: border-box;
-  }
-
-  input[type="number"] {
-    width: 100px;
-  }
-
-  .input-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-  .input-row code {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .input-row input[type="text"] {
-    flex: 1;
-  }
-
-  .btn-sm {
-    padding: 0.4rem 0.75rem;
-    background: var(--accent);
-    color: var(--on-accent);
-    border: none;
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.78rem;
-    font-weight: 600;
-    white-space: nowrap;
-    transition: opacity 0.15s;
-  }
-
-  .btn-sm:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .badge {
-    font-size: 0.78rem;
-    font-weight: 600;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    white-space: nowrap;
-  }
-
-  .badge.valid {
-    color: var(--green);
-    background: color-mix(in srgb, var(--green) 12%, transparent);
-  }
-
-  .badge.invalid {
-    color: var(--red-strong);
-    background: color-mix(in srgb, var(--red) 12%, transparent);
-  }
-
-  .slider-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .slider-row input[type="range"] {
-    flex: 1;
-    accent-color: var(--accent);
-  }
-
-  .slider-value {
-    font-size: 0.88rem;
-    font-weight: 600;
-    min-width: 3.5em;
-    text-align: right;
-  }
-
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    cursor: pointer;
-    font-size: 0.88rem;
-  }
-
-  .toggle input {
-    accent-color: var(--accent);
-  }
-
-  /* Node Identity grid */
-  .identity-grid {
-    display: grid;
-    grid-template-columns: 120px 1fr;
-    gap: 0.5rem 1rem;
-    font-size: 0.85rem;
-  }
-
-  .id-label {
-    color: var(--text-muted);
-    padding-top: 0.15rem;
-  }
-
-  .id-value {
-    word-break: break-all;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .mono {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-  }
-
-  .network-badge {
-    display: inline-block;
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 0.15rem 0.5rem;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-  }
-
-  .btn-copy {
-    padding: 0.15rem 0.45rem;
-    font-size: 0.72rem;
-    background: var(--border);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: color 0.15s;
-  }
-
-  .btn-copy:hover {
-    color: var(--accent);
-  }
-
-  .identity-loading,
-  .identity-error {
-    font-size: 0.85rem;
-    margin: 0;
-  }
-
-  .identity-error {
-    color: var(--red);
-  }
-
-  .identity-loading {
-    color: var(--text-muted);
-  }
-
-  /* Save row */
-  .save-row {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-top: 0.5rem;
-  }
-
-  .btn-save {
-    padding: 0.6rem 1.8rem;
-    background: var(--accent);
-    color: var(--on-accent);
-    border: none;
-    border-radius: 7px;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 0.92rem;
-    transition: opacity 0.15s;
-  }
-
-  .btn-save:hover {
-    opacity: 0.9;
-  }
-
-  .about-section {
-    margin-top: 1.5rem;
-  }
-  .about-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 0.85rem;
-    margin-bottom: 0.4rem;
-  }
-  .about-row:last-child {
-    margin-bottom: 0;
-  }
-  .about-label {
-    color: var(--text-muted);
-  }
-  .about-value {
-    color: var(--text-primary);
-    text-align: right;
-    max-width: 60%;
-    word-break: break-word;
-  }
-  .status-ok {
-    color: var(--green);
-  }
-  .status-err {
-    color: var(--red);
-  }
-  .update-ok {
-    color: var(--green);
-    font-weight: 600;
-  }
-  .update-available {
-    color: var(--accent-secondary);
-    font-weight: 600;
-  }
-  .update-checking {
-    color: var(--text-muted);
-  }
-  .update-error {
-    color: var(--red);
-    font-size: 0.8rem;
-  }
-  .btn-check-update {
-    padding: 0.35rem 0.75rem;
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.78rem;
-    font-weight: 600;
-    transition: all 0.15s;
-  }
-  .btn-check-update:hover {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-  }
-  .mesh-status {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 14px;
-  }
-  .hint {
-    color: var(--text-secondary);
-    font-size: 12.5px;
-    line-height: 1.5;
-  }
-  .override-title {
-    display: block;
-    margin: 6px 0 4px;
-  }
+  .general .sp-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+  .general .sp-inline input.grow { flex: 1 1 220px; min-width: 0; }
+  .general .mesh-line { margin: 2px 0; font-size: var(--fs-sm); }
+  .general .mesh-line code { overflow-wrap: anywhere; }
+  .general input.num { width: 72px; }
+  .general input[type="range"] { width: 140px; accent-color: var(--accent); }
+  .general .slider-value { width: 40px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: var(--fs-sm); }
+  .general .value { color: var(--text-secondary); font-size: var(--fs-xs); max-width: 60%; overflow-wrap: anywhere; text-align: right; }
+  .general span.value { font-size: var(--fs-sm); }
+  .general .save-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+  .general p { margin: 0; }
 </style>

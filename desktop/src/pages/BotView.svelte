@@ -7,7 +7,7 @@
   import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botCompute, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, relativeTime, runSourceText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botCompute, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, relativeTime, runSourceText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -415,7 +415,7 @@
                 <td class="src" title={runSourceText(r)}>{runSourceText(r)}</td>
                 <td class="st {r.status}">{RUN_STATUS_TEXT[r.status]}</td>
                 <td class="sum" title={r.summary}>
-                  {r.summary}
+                  {readableSummary(r.summary)}
                   {#each r.pullRequests ?? [] as p (p.url)}
                     <button class="link pr-link" onclick={() => openLink(p.url)} title={p.url}><GitPullRequest size={12} /> PR #{p.number}</button>
                   {/each}
@@ -1282,14 +1282,15 @@
   .messages {
     flex: 1;
     overflow-y: auto;
-    padding: 12px 20px;
+    padding: 20px 24px;
     display: flex;
     flex-direction: column;
     align-items: center;
+    gap: 20px;
   }
   .messages > :global(*) {
     width: 100%;
-    max-width: 820px;
+    max-width: 760px;
   }
   .event {
     text-align: center;

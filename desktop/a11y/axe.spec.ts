@@ -267,7 +267,7 @@ for (const vp of VIEWPORTS) {
 
     test("editor view", async ({ page }) => {
       await openApp(page);
-      const tab = page.getByRole("tab", { name: "EdgeCoder" });
+      const tab = page.getByRole("tab", { name: "Code" });
       await tab.click();
       await expect(tab).toHaveAttribute("aria-selected", "true");
       await expect(page.locator("#view-editor")).toBeVisible();

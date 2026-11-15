@@ -35,4 +35,14 @@ describe("MarkdownRenderer with model output", () => {
     await fireEvent.click(btn);
     expect(onOpenInEditor).toHaveBeenCalledWith("const a = 1;", "ts");
   });
+
+  it("copies a code block from its header", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { container } = render(MarkdownRenderer, { source: "```sh\nnpm test\n```" });
+    const btn = container.querySelector(".copy-code-btn") as HTMLElement;
+    await fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith("npm test");
+    await vi.waitFor(() => expect(btn.textContent).toBe("Copied"));
+  });
 });

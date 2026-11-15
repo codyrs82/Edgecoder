@@ -29,7 +29,7 @@
   import { bots, activeBotId, pollBots, refreshBots } from "./lib/bots-store";
   import type { Bot as BotRecord } from "./lib/bots";
 
-  let activeTab: "chat" | "editor" = $state("chat");
+  let activeTab = $state<"chat" | "editor">("chat");
   let settingsOpen = $state(false);
   let settingsSection: string | undefined = $state(undefined);
   function openSettings(section?: string) {
@@ -82,7 +82,7 @@
   }
 
   /** IDE agent project state — shared across tabs */
-  let projectRoot: string | null = $state(null);
+  let projectRoot = $state<string | null>(null);
   let chatStreaming = $state(false);
 
   $effect(() => {
@@ -213,6 +213,18 @@
 
   // Persistent bots: the sidebar lists them; one can be open in place of the chat.
   const activeBot = $derived($bots.find((b) => b.id === $activeBotId) ?? null);
+  /** What the title bar names: the open chat (or bot) in Chat, the project in Code. */
+  let chatHeader = $state<{ title: string; detail: string | null }>({ title: "New chat", detail: null });
+  let editorBare = $state(true);
+  let explorerOpen = $state(true);
+  const projectName = $derived(projectRoot ? projectRoot.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? null : null);
+  const titleText = $derived(
+    activeTab === "editor" ? (projectName ?? "No folder open") : activeBot ? activeBot.name : chatHeader.title || "New chat",
+  );
+  const titleDetail = $derived(activeTab === "editor" ? null : activeBot ? activeBot.role || null : chatHeader.detail);
+  $effect(() => {
+    document.title = titleText ? `${titleText} · EdgeCoder` : "EdgeCoder";
+  });
   /** The bot form: null closed, "new", or the bot being edited. */
   let botForm = $state<null | "new" | BotRecord>(null);
   $effect(() => {
@@ -257,7 +269,9 @@
 
   // The header's + : what you can create.
   let newMenuOpen = $state(false);
-  let sidebarToggleLabel = $derived(activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : "Toggle chat");
+  let sidebarToggleLabel = $derived(
+    activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : explorerOpen ? "Hide files" : "Show files",
+  );
   let newMenuTrigger: HTMLButtonElement | undefined = $state();
   function newChatHere() {
     newMenuOpen = false;
@@ -341,7 +355,7 @@
         // A fresh folder: apply the agent's edits as it goes (each reply stays undoable).
         setAutoApplyEdits(root, true);
         await tick();
-        chatView.addNote(`Started a new project in \`${root.replace(/^\/Users\/[^/]+/, "~")}\`. The agent writes its files there; open the EdgeCoder tab to see and edit them.`);
+        chatView.addNote(`Started a new project in \`${root.replace(/^\/Users\/[^/]+/, "~")}\`. The agent writes its files there; open the Code view to see and edit them.`);
       } catch (err) {
         console.warn("Couldn't create a project:", err);
       }
@@ -362,39 +376,46 @@
 {:else}
   <div class="app-shell">
     {#if activeTab !== "chat"}<UpdateBanner />{/if}
-    <!-- Header / Title Bar -->
-    <header class="header" data-tauri-drag-region>
-      <div class="new-menu-wrap">
-        <button bind:this={newMenuTrigger} class="header-btn" title="New" aria-label="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
-          <Plus size={18} strokeWidth={2} />
+    <!-- Title bar: drawn by the page (macOS overlay title bar leaves room for the traffic lights). -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="tb-side" data-tauri-drag-region>
+        <button class="icon-btn" title={sidebarToggleLabel} aria-label={sidebarToggleLabel} aria-pressed={activeTab === "chat" ? historyOpen : explorerOpen}
+          disabled={activeTab === "editor" && editorBare}
+          onclick={() => {
+            if (activeTab === "chat") historyOpen = !historyOpen;
+            else explorerOpen = !explorerOpen;
+          }}>
+          <PanelLeft size={16} />
         </button>
-        {#if newMenuOpen}
-          <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
-          <div class="new-menu" role="menu" aria-label="New" tabindex="-1"
-            use:menu={{ trigger: newMenuTrigger, onClose: (returnFocus) => { newMenuOpen = false; if (returnFocus) newMenuTrigger?.focus(); } }}>
-            <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
-            <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
-            <button role="menuitem" onclick={connectRepoHere} title="Clone or update a repository in your projects folder"><FolderGit2 size={15} /> Connect repository…</button>
-            <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
-            <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
-          </div>
-        {/if}
+        <div class="new-menu-wrap">
+          <button bind:this={newMenuTrigger} class="icon-btn" title="New" aria-label="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
+            <Plus size={16} />
+          </button>
+          {#if newMenuOpen}
+            <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
+            <div class="new-menu" role="menu" aria-label="New" tabindex="-1"
+              use:menu={{ trigger: newMenuTrigger, onClose: (returnFocus) => { newMenuOpen = false; if (returnFocus) newMenuTrigger?.focus(); } }}>
+              <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
+              <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
+              <button role="menuitem" onclick={connectRepoHere} title="Clone or update a repository in your projects folder"><FolderGit2 size={15} /> Connect repository…</button>
+              <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
+              <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
+            </div>
+          {/if}
+        </div>
+        <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
       </div>
 
-      <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
+      <div class="tb-title" data-tauri-drag-region title={activeTab === "editor" && projectRoot ? projectRoot : titleText}>
+        <span class="tb-name" data-tauri-drag-region>{titleText}</span>
+        {#if titleDetail}<span class="tb-detail" data-tauri-drag-region>{titleDetail}</span>{/if}
+      </div>
 
-      <button class="header-btn" title={sidebarToggleLabel} aria-label={sidebarToggleLabel} onclick={() => {
-        if (activeTab === "chat") {
-          historyOpen = !historyOpen;
-        } else {
-          editorView?.toggleChatPanel?.();
-        }
-      }}>
-        <PanelLeft size={18} />
-      </button>
-      <button class="header-btn" title="Settings" aria-label="Settings" onclick={() => openSettings()}>
-        <SettingsIcon size={17} strokeWidth={2} />
-      </button>
+      <div class="tb-side tb-right" data-tauri-drag-region>
+        <button class="icon-btn" title="Settings" aria-label="Settings" onclick={() => openSettings()}>
+          <SettingsIcon size={16} />
+        </button>
+      </div>
     </header>
 
     <!-- Main Content Area — both views stay mounted, hidden via CSS -->
@@ -422,7 +443,7 @@
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>
-          <ChatView bind:this={chatView} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
+          <ChatView bind:this={chatView} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
           <div class="composer">
             <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet toolbar()}
@@ -433,7 +454,7 @@
         </div>
       </div>
       <div class="tab-panel" class:hidden={activeTab !== "editor"} role="tabpanel" id="view-editor" aria-labelledby="view-tab-editor">
-        <EditorView bind:this={editorView} {projectRoot} onOpenProject={openProject} onProjectOpened={adoptProject} onRepoConnected={(r) => void repoConnected(r)} />
+        <EditorView bind:this={editorView} {projectRoot} {explorerOpen} onBareChange={(b) => (editorBare = b)} onOpenProject={openProject} onProjectOpened={adoptProject} onRepoConnected={(r) => void repoConnected(r)} />
       </div>
     </main>
 
@@ -471,8 +492,8 @@
   :global(body) {
     margin: 0;
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: var(--fs-base);
+    line-height: var(--lh-ui);
     background: var(--bg-deep);
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
@@ -488,37 +509,61 @@
     overflow: hidden;
   }
 
-  /* Header */
-  .header {
-    display: flex;
+  /* Title bar: 44 px, icon buttons on the sides, the open chat or project in the middle. */
+  .titlebar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
     align-items: center;
-    justify-content: space-between;
-    padding: 8px 16px;
+    gap: 12px;
+    height: 44px;
+    padding: 0 8px 0 10px;
     border-bottom: 0.5px solid var(--border);
+    background: var(--bg-deep);
     flex-shrink: 0;
     -webkit-app-region: drag;
+    user-select: none;
   }
-  .header-btn {
-    width: 36px;
-    height: 36px;
-    border: none;
-    background: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
+  /* The macOS traffic lights sit at the left of the bar (tauri.conf.json trafficLightPosition). */
+  :global(html[data-titlebar="overlay"]) .titlebar {
+    padding-left: 80px;
+  }
+  .tb-side {
     display: flex;
     align-items: center;
-    justify-content: center;
-    transition: all 0.15s;
+    gap: 2px;
+    min-width: 0;
+  }
+  .tb-right {
+    justify-content: flex-end;
+  }
+  .tb-side :global(button), .tb-side :global([role="tablist"]) {
     -webkit-app-region: no-drag;
   }
-  .header-btn:hover {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    transform: scale(1.05);
+  .tb-side > :global(.view-switch) {
+    margin-left: 6px;
   }
-  .header-btn:active {
-    transform: scale(0.95);
+  .tb-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: var(--fs-sm);
+    line-height: 1;
+  }
+  .tb-name {
+    color: var(--text-primary);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tb-detail {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Content */
@@ -542,7 +587,8 @@
     flex-direction: row !important;
   }
   .chat-sidebar {
-    width: 260px;
+    width: 264px;
+    background: var(--bg-deep);
     flex-shrink: 0;
     border-right: 0.5px solid var(--border);
     overflow: hidden;
@@ -568,11 +614,11 @@
     flex-shrink: 0;
     display: flex;
     justify-content: center;
-    padding: 8px 20px 16px;
+    padding: 4px 24px 16px;
   }
   .composer > :global(*) {
     width: 100%;
-    max-width: 820px;
+    max-width: 760px;
   }
 
   .loading-screen {

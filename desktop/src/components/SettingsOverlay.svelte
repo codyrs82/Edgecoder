@@ -169,7 +169,8 @@
     align-items: center;
     gap: 8px;
     margin: 12px 10px 6px;
-    padding: 6px 8px;
+    height: var(--control-md);
+    padding: 0 8px;
     border: none;
     background: none;
     color: var(--text-secondary);
@@ -186,9 +187,10 @@
     align-items: center;
     gap: 8px;
     margin: 4px 10px 10px;
-    padding: 7px 10px;
-    border: 0.5px solid var(--border);
-    border-radius: 9px;
+    height: var(--control-lg);
+    padding: 0 10px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-md);
     background: var(--bg-base);
     color: var(--text-secondary);
   }
@@ -217,13 +219,15 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    height: 30px;
+    padding: 0 10px;
     border: none;
     background: none;
     color: var(--text-secondary);
     text-align: left;
     cursor: pointer;
-    font-size: 13px;
+    font: inherit;
+    font-size: var(--fs-sm);
     border-radius: var(--radius-md);
   }
   .nav-item:hover {
@@ -249,6 +253,29 @@
     flex: 1;
     overflow-y: auto;
     min-width: 0;
+  }
+  /* On macOS the window's traffic lights sit over the top of the section list. */
+  :global(html[data-titlebar="overlay"]) .settings-side {
+    padding-top: 30px;
+  }
+  /* Sections not yet built from styles/settings-page.css read at the same scale: a centred
+     column, a 20 px title and quiet group titles (no shouting uppercase). */
+  .settings-content > :global(:not(.sp)) {
+    max-width: 1080px;
+    margin: 0 auto;
+    box-sizing: border-box;
+  }
+  .settings-content :global(h1) {
+    font-size: var(--fs-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .settings-content :global(h2:not(.peer-id)) {
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-secondary);
   }
   /* #29: at the 640px minimum window the nav gives its width to the page. */
   @media (max-width: 760px) {
