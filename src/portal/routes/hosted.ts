@@ -12,6 +12,7 @@
  * editing for signed-in users.
  */
 
+import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -43,6 +44,8 @@ export interface HostedRoutesDeps {
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
   /** Opens the credit account of a new (agent) user; server.ts's ensureCreditAccountForUser. */
   ensureCreditAccountForUser?: (user: { userId: string; email: string }) => Promise<void>;
+  /** Where network calls go (shared with portal chat); built from discoverCoordinatorUrlsForPortal when absent. */
+  chatCapacity?: ChatCapacityDirectory;
 }
 
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
@@ -55,6 +58,18 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
   const { store } = deps;
 
   const networkFor = (accountId: string): NetworkDeps => portalNetworkDeps(deps, accountId);
+  const capacity: ChatCapacityDirectory =
+    deps.chatCapacity ?? createChatCapacityDirectory({ candidates: deps.discoverCoordinatorUrlsForPortal, allowed: () => true, serviceToken: deps.PORTAL_SERVICE_TOKEN });
+  /**
+   * A plain network call goes to the coordinator with the most free agents for its model
+   * (chat-capacity.ts); inference runs where it is submitted, so this is what spreads API traffic
+   * across seeds. Calls on your own machines or a lease stay with the default coordinator.
+   */
+  const networkForCall = async (accountId: string, target: { model: string; target?: "mine"; reservationId?: string }): Promise<NetworkDeps> => {
+    if (target.target === "mine" || target.reservationId) return networkFor(accountId);
+    const { url } = await capacity.pick({ kind: "network", model: target.model }).catch(() => ({ url: null }));
+    return url ? portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId) : networkFor(accountId);
+  };
   // Balance, reservations and the chat compute picker for signed-in users.
   registerComputeRoutes(app, deps);
 
@@ -99,7 +114,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       }
       const target = hostedTarget(model);
       if (!target) return { status: 400, error: "Name a model: auto (cheapest place that fits), network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
-      return { backend: networkBackend(networkFor(ctx.accountId), target), model: model! };
+      return { backend: networkBackend(await networkForCall(ctx.accountId, target), target), model: model! };
     },
   });
 
