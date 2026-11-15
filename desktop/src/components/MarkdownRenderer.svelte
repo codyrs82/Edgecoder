@@ -21,13 +21,16 @@
       if (url) void openShell(url).catch(() => {});
       return;
     }
-    if (target.classList.contains('open-in-editor-btn')) {
-      const wrapper = target.closest('.code-block-wrapper');
-      const codeEl = wrapper?.querySelector('code');
-      if (codeEl && onOpenInEditor) {
-        const lang = target.dataset.lang || 'plaintext';
-        onOpenInEditor(codeEl.textContent || '', lang);
-      }
+    const button = target.closest<HTMLElement>(".code-btn");
+    const codeEl = button?.closest(".code-block-wrapper")?.querySelector("code");
+    if (!button || !codeEl) return;
+    if (button.classList.contains("open-in-editor-btn")) {
+      onOpenInEditor?.(codeEl.textContent || "", button.dataset.lang || "plaintext");
+    } else if (button.classList.contains("copy-code-btn")) {
+      void navigator.clipboard?.writeText(codeEl.textContent || "").then(() => {
+        button.textContent = "Copied";
+        setTimeout(() => (button.textContent = "Copy"), 1500);
+      }).catch(() => {});
     }
   }
 </script>
@@ -37,40 +40,60 @@
 <div class="markdown" onclick={handleClick}>{@html html}</div>
 
 <style>
+  /* Chat prose: 15 px body (14 px in the narrow code-view panel), restrained headings, 4/8 px rhythm. */
   .markdown {
-    font-size: 14px;
-    line-height: 1.6;
-    word-wrap: break-word;
+    font-size: var(--prose-size, var(--fs-md));
+    line-height: var(--lh-prose);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
+  .markdown > :global(:first-child) { margin-top: 0; }
+  .markdown > :global(:last-child) { margin-bottom: 0; }
   .markdown :global(p) {
-    margin: 0 0 0.75em;
+    margin: 0 0 12px;
   }
-  .markdown :global(p:last-child) {
-    margin-bottom: 0;
+  .markdown :global(h1), .markdown :global(h2), .markdown :global(h3),
+  .markdown :global(h4), .markdown :global(h5), .markdown :global(h6) {
+    margin: 20px 0 8px;
+    font-weight: 600;
+    line-height: var(--lh-tight);
+    letter-spacing: -0.005em;
   }
-  .markdown :global(pre) {
-    background: var(--bg-deep);
-    border-radius: var(--radius-sm);
-    padding: 12px 16px;
-    overflow-x: auto;
-    margin: 0.75em 0;
-    font-size: 13px;
+  .markdown :global(h1) { font-size: 1.2em; }
+  .markdown :global(h2) { font-size: 1.1em; }
+  .markdown :global(h3), .markdown :global(h4), .markdown :global(h5), .markdown :global(h6) { font-size: 1em; }
+  .markdown :global(strong) { font-weight: 600; }
+  .markdown :global(hr) { border: none; border-top: 0.5px solid var(--border-strong); margin: 20px 0; }
+  .markdown :global(ul), .markdown :global(ol) {
+    margin: 0 0 12px;
+    padding-left: 1.5em;
   }
+  .markdown :global(li) { margin: 4px 0; padding-left: 2px; }
+  .markdown :global(li > p) { margin: 0; }
+  .markdown :global(li > ul), .markdown :global(li > ol) { margin: 4px 0 0; }
+  .markdown :global(li::marker) { color: var(--text-secondary); }
   .markdown :global(code) {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 0.86em;
   }
   .markdown :global(:not(pre) > code) {
-    background: var(--bg-deep);
-    padding: 2px 6px;
+    padding: 1px 5px;
     border-radius: 4px;
+    background: var(--bg-elevated);
+    border: 0.5px solid var(--border);
   }
-  .markdown :global(ul), .markdown :global(ol) {
-    padding-left: 1.5em;
-    margin: 0.5em 0;
+  .markdown :global(pre) {
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    border-radius: var(--radius-md);
+    background: var(--bg-deep);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
   }
+  .markdown :global(pre code) { font-size: inherit; }
   .markdown :global(a) {
-    color: var(--accent);
+    color: var(--accent-secondary);
     text-decoration: none;
   }
   .markdown :global(a:hover) {
@@ -78,77 +101,81 @@
   }
   .markdown :global(table) {
     border-collapse: collapse;
-    margin: 0.75em 0;
+    margin: 0 0 12px;
     width: 100%;
+    font-size: var(--fs-sm);
   }
   .markdown :global(th), .markdown :global(td) {
-    border: 0.5px solid var(--border-strong);
+    border-bottom: 0.5px solid var(--border-strong);
     padding: 6px 10px;
     text-align: left;
-    font-size: 13px;
   }
   .markdown :global(th) {
-    background: var(--bg-surface);
     font-weight: 600;
-  }
-  .markdown :global(blockquote) {
-    border-left: 3px solid var(--accent);
-    margin: 0.75em 0;
-    padding: 4px 12px;
     color: var(--text-secondary);
   }
-  /* Code block wrapper styles */
-  .markdown :global(.plan-list) {
-    margin: 8px 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+  .markdown :global(blockquote) {
+    border-left: 2px solid var(--border-control);
+    margin: 0 0 12px;
+    padding: 0 12px;
+    color: var(--text-secondary);
   }
-  .markdown :global(.plan-title) { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 6px; }
+  .markdown :global(.plan-list) {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-md);
+  }
+  .markdown :global(.plan-title) { font-size: var(--fs-xs); color: var(--text-secondary); margin-bottom: 6px; }
   .markdown :global(.plan-list ol) { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-  .markdown :global(.plan-list li) { display: flex; gap: 8px; align-items: center; }
+  .markdown :global(.plan-list li) { display: flex; gap: 8px; align-items: center; margin: 0; }
   .markdown :global(.plan-list li.done) { color: var(--text-secondary); text-decoration: line-through; }
   .markdown :global(.plan-box) {
     width: 14px; height: 14px; flex: none; border-radius: 4px; display: inline-grid; place-items: center;
     border: 1px solid var(--text-secondary); font-size: 10px;
   }
+  /* Code blocks: a quiet header with the language, Copy and Open in editor. */
   .markdown :global(.code-block-wrapper) {
-    position: relative;
-    margin: 0.75em 0;
+    margin: 0 0 12px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-deep);
   }
   .markdown :global(.code-block-wrapper pre) {
     margin: 0;
-    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-    border: 0.5px solid var(--border);
-    border-top: none;
+    border-radius: 0;
+    background: transparent;
   }
   .markdown :global(.code-block-header) {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 4px 12px;
+    height: 32px;
+    padding: 0 6px 0 12px;
+    border-bottom: 0.5px solid var(--border);
     background: var(--bg-elevated);
-    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-    border: 0.5px solid var(--border);
-    border-bottom: none;
   }
   .markdown :global(.code-lang) {
-    font-size: 11px;
-    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
     font-family: var(--font-mono);
   }
-  .markdown :global(.open-in-editor-btn) {
-    font-size: 11px;
-    padding: 2px 8px;
+  .markdown :global(.code-actions) { display: flex; gap: 2px; }
+  .markdown :global(.code-btn) {
+    height: var(--control-sm);
+    padding: 0 8px;
+    border: none;
+    border-radius: var(--radius-sm);
     background: none;
-    border: 0.5px solid var(--border-strong);
-    border-radius: 4px;
     color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--fs-xs);
+    line-height: 1;
     cursor: pointer;
-    transition: all 0.15s;
   }
-  .markdown :global(.open-in-editor-btn:hover) {
-    color: var(--accent);
-    border-color: var(--accent);
+  .markdown :global(.code-btn:hover) {
+    background: var(--bg-surface);
+    color: var(--text-primary);
   }
 </style>

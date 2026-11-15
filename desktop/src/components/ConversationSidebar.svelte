@@ -298,7 +298,7 @@
             onclick={() => { onSelectBot?.(bot.id); if (!inline) onClose(); }}
             title="{bot.name}{bot.role ? ` · ${bot.role}` : ''}: {botStatusLine(bot)}"
           >
-            <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={30} decorative />
+            <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={26} decorative />
             <span class="bot-text">
               <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
               <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget"} class:err={bot.status === "error"}>{botStatusLine(bot)}</span>
@@ -447,10 +447,10 @@
   .bot-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 8px;
+    gap: 8px;
+    padding: 5px 8px;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: none;
     color: var(--text-primary);
     cursor: pointer;
@@ -481,8 +481,8 @@
     color: var(--text-secondary);
   }
   .bot-status {
-    font-size: 11.5px;
-    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -503,12 +503,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
+    height: 30px;
+    padding: 0 10px;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
     background: none;
     color: var(--text-secondary);
-    font-size: 13px;
+    font: inherit;
+    font-size: var(--fs-sm);
     cursor: pointer;
     text-align: left;
   }
@@ -682,8 +684,9 @@
     align-items: center;
     gap: 4px;
     margin: 0 8px;
-    padding: 6px 6px 6px 10px;
-    border-radius: 8px;
+    min-height: 30px;
+    padding: 2px 4px 2px 10px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     transition: background 0.15s;
     position: relative;
@@ -761,8 +764,8 @@
   }
 
   .kebab-btn {
-    width: 28px;
-    height: 28px;
+    width: var(--control-sm);
+    height: var(--control-sm);
     border: none;
     background: none;
     color: var(--text-muted);

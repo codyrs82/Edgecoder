@@ -8,6 +8,8 @@
     onConnected: (r: RepoConnection) => void;
   }
   let { onConnected }: Props = $props();
+  const uid = $props.id();
+  const inputId = `${uid}-repo`;
 
   let repo = $state("");
   let busy = $state(false);
@@ -49,10 +51,10 @@
 
 <div class="connect-repo">
   <form onsubmit={(e) => { e.preventDefault(); void connect(); }}>
-    <label for="connect-repo-input">Connect a repository</label>
+    <label for={inputId}>Connect a repository</label>
     <div class="row">
       <input
-        id="connect-repo-input"
+        id={inputId}
         bind:this={input}
         bind:value={repo}
         placeholder="owner/repo or https://github.com/owner/repo"
@@ -60,7 +62,7 @@
         spellcheck="false"
         disabled={busy}
       />
-      <button type="submit" class="primary" disabled={busy || !repo.trim()}>
+      <button type="submit" class="btn btn--lg" disabled={busy || !repo.trim()}>
         {#if busy}<LoaderCircle size={13} class="spin" />{:else}<GitBranch size={13} />{/if}
         Connect
       </button>
@@ -89,53 +91,39 @@
     text-align: left;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
   label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    color: var(--text-primary);
   }
   .row {
     display: flex;
-    gap: 6px;
-    margin-top: 4px;
+    gap: 8px;
   }
   input {
     flex: 1;
     min-width: 0;
-    padding: 7px 10px;
-    border: 0.5px solid var(--border-strong);
-    border-radius: 8px;
-    background: var(--bg-surface);
+    height: var(--control-lg);
+    padding: 0 10px;
+    border: 0.5px solid var(--border-control);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
     color: var(--text-primary);
-    font-size: 13px;
-    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    font-family: inherit;
+  }
+  input::placeholder {
+    color: var(--text-muted);
   }
   input:focus {
     outline: none;
     border-color: var(--accent);
   }
-  button.primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    border: none;
-    border-radius: 8px;
-    background: var(--accent);
-    color: var(--bg-base);
-    font-weight: 600;
-    font-size: 13px;
-    cursor: pointer;
-  }
-  button.primary:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
   .hint, .progress, .error {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -156,16 +144,18 @@
     overflow-y: auto;
   }
   .chip {
-    padding: 4px 10px;
-    border: 0.5px solid var(--border);
+    height: var(--control-sm);
+    padding: 0 10px;
+    border: 0.5px solid var(--border-strong);
     border-radius: 999px;
-    background: var(--bg-surface);
+    background: transparent;
     color: var(--text-secondary);
-    font-size: 12px;
+    font: inherit;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .chip:hover:not(:disabled) {
-    border-color: var(--accent);
+    background: var(--bg-elevated);
     color: var(--text-primary);
   }
   :global(.connect-repo .spin) {

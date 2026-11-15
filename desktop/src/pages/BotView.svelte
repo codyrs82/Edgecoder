@@ -1282,14 +1282,15 @@
   .messages {
     flex: 1;
     overflow-y: auto;
-    padding: 12px 20px;
+    padding: 20px 24px;
     display: flex;
     flex-direction: column;
     align-items: center;
+    gap: 20px;
   }
   .messages > :global(*) {
     width: 100%;
-    max-width: 820px;
+    max-width: 760px;
   }
   .event {
     text-align: center;

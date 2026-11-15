@@ -10,6 +10,7 @@
   import type { StreamProgress } from "../lib/api";
   import { usageText } from "../lib/compute-choice";
   import type { ToolEvent } from "../lib/types";
+  import { Copy, Check } from "@lucide/svelte";
 
   interface Props {
     role: "user" | "assistant";
@@ -30,6 +31,14 @@
     usage?: { cSats: number; where?: string };
   }
   let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
+
+  let copied = $state(false);
+  function copyReply() {
+    void navigator.clipboard?.writeText(content).then(() => {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    }).catch(() => {});
+  }
 </script>
 
 <div class="message {role}">
@@ -87,8 +96,17 @@
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
       {/if}
-      {#if usage && !streaming && usageText(usage)}
-        <div class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</div>
+      {#if !streaming && content.trim()}
+        <div class="reply-footer">
+          <button type="button" class="icon-btn icon-btn--sm" title={copied ? "Copied" : "Copy reply"} aria-label={copied ? "Copied" : "Copy reply"} onclick={copyReply}>
+            {#if copied}<Check size={14} />{:else}<Copy size={14} />{/if}
+          </button>
+          {#if usage && usageText(usage)}
+            <span class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</span>
+          {/if}
+        </div>
+      {:else if usage && !streaming && usageText(usage)}
+        <div class="reply-footer"><span class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</span></div>
       {/if}
     </div>
   {/if}
@@ -97,39 +115,42 @@
 <style>
   .message {
     display: flex;
-    margin-bottom: 16px;
-    padding: 0 16px;
+    min-width: 0;
   }
   .message.user {
     justify-content: flex-end;
   }
-  .message.assistant {
-    justify-content: flex-start;
-  }
   .bubble {
-    max-width: 85%;
-    border-radius: var(--radius-md);
-    padding: 10px 14px;
+    min-width: 0;
   }
+  /* The user's turn: a compact bubble on the right. */
   .user-bubble {
-    background: var(--bg-surface);
+    max-width: min(80%, 560px);
+    padding: 8px 14px;
+    border-radius: var(--radius-xl);
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: var(--prose-size, var(--fs-md));
     line-height: 1.5;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
+  /* The reply: full-width prose, no box. */
   .assistant-bubble {
+    width: 100%;
     color: var(--text-primary);
   }
   .tool-events {
     margin-top: 8px;
   }
-  .message:hover {
-    opacity: 1;
+  .reply-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 0 -4px;
   }
   .reply-usage {
-    margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
 </style>

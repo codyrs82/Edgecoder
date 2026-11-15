@@ -77,8 +77,11 @@ const md = new Marked({
       }
       return `<div class="code-block-wrapper">
       <div class="code-block-header">
-        <span class="code-lang">${escapeHtml(name)}</span>
-        <button class="open-in-editor-btn" data-lang="${escapeHtml(name || "plaintext")}">Open in Editor</button>
+        <span class="code-lang">${escapeHtml(name || "text")}</span>
+        <span class="code-actions">
+          <button type="button" class="code-btn copy-code-btn">Copy</button>
+          <button type="button" class="code-btn open-in-editor-btn" data-lang="${escapeHtml(name || "plaintext")}">Open in editor</button>
+        </span>
       </div>
       <pre><code class="language-${escapeHtml(name)}">${escapeHtml(text)}</code></pre>
     </div>`;
