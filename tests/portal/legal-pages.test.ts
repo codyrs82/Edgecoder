@@ -60,6 +60,14 @@ describe("legal and Bluetooth pages", () => {
     for (const href of ["/terms", "/privacy", "/acceptable-use", "/host-agreement", "/bluetooth"]) expect(home.body).toContain(`href="${href}"`);
   });
 
+  it("the admin Network page explains Bluetooth mesh, which it can't show live", async () => {
+    const res = await get("/portal/settings/network");
+    expect(res.body).toContain('id="netBle"');
+    expect(res.body).toContain("POST /credits/ble-sync");
+    expect(res.body).toContain("MESH_AUTH_TOKEN");
+    expect(res.body).toContain('href="/bluetooth"');
+  });
+
   it("the sign-up form has the required agreement checkbox", async () => {
     const res = await get("/portal");
     expect(res.body).toContain('id="signupAcceptTerms"');

@@ -4,7 +4,7 @@
 
 Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
 
-These Terms of Service (the "Terms") are an agreement between you and EdgeCoder, LLC ("EdgeCoder", "we", "us"). They govern your use of the EdgeCoder website at edgecoder.io, the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent, the hosted API and any related services (together, the "Service").
+These Terms of Service (the "Terms") are an agreement between you and EdgeCoder, LLC ("EdgeCoder", "we", "us"). They govern your use of the EdgeCoder website ([WEBSITE DOMAIN]), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent, the hosted API and any related services (together, the "Service").
 
 By creating an account, checking the box at sign-up, or using the Service, you agree to these Terms, the [Privacy Policy](/privacy) and the [Acceptable Use Policy](/acceptable-use), which is part of these Terms. If you install the EdgeCoder agent to run work for others, the [Host Agreement](/host-agreement) also applies. If you do not agree, do not use the Service.
 

@@ -32,7 +32,7 @@
 
   // Grouped like Cursor's settings; keywords make the search find a section by what's in it.
   const sections = [
-    { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup" },
+    { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup legal terms privacy acceptable use host agreement" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
     { id: "plan", label: "Wallet", icon: Wallet, group: 1, keywords: "csats buy add funds top up balance lightning invoice billing activity sats earnings withdraw payout" },
     { id: "usage", label: "Usage", icon: BarChart3, group: 1, keywords: "spend cost tokens budget requests history csv export chart" },

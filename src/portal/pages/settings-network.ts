@@ -79,6 +79,11 @@ export function networkPageContent(): string {
       .net-gap li:last-child { border-bottom:0; }
       .net-gap li .n { font-family:var(--font-mono); font-variant-numeric:tabular-nums; color:var(--text-secondary); white-space:nowrap; }
       .net-gap .none { color:var(--muted); font-size:12.5px; }
+      .net-ble summary { cursor:pointer; display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; list-style:none; }
+      .net-ble summary h3 { margin:0; }
+      .net-ble ul { margin:10px 0 0; padding-left:18px; color:var(--text-secondary); font-size:13px; line-height:1.6; }
+      .net-ble li { margin-bottom:6px; }
+      .net-ble a { color:var(--brand-2); }
       @media (max-width: 900px) {
         .net-charts, .net-gaps { grid-template-columns:minmax(0, 1fr); }
         .net-kpi .value { font-size:19px; }
@@ -115,6 +120,17 @@ export function networkPageContent(): string {
         <div class="net-chart" id="chartCalls"><h3>Throughput</h3><div class="hint">Model calls per minute</div><div class="net-legend"></div></div>
         <div class="net-chart" id="chartLatency"><h3>Latency</h3><div class="hint">Pickup (claimable to claimed) and TTFT (submit to first piece), ms</div><div class="net-legend"></div></div>
       </div>
+      <details class="net-card net-ble" id="netBle">
+        <summary><h3>Bluetooth mesh</h3><span class="hint">Not in this view: Bluetooth work is offline, peer to peer. What it is and how it reaches the ledger.</span></summary>
+        <ul>
+          <li><b>Purpose.</b> When an agent can't reach any coordinator, it can send a model prompt to a nearby EdgeCoder device over Bluetooth LE and get the answer back. The internet path is always preferred. macOS (desktop app and agent) and iOS only.</li>
+          <li><b>Not reported live.</b> Coordinators never see Bluetooth peers or jobs as they happen, so the agents table and charts above don't include them. They show up only when the signed payment records are settled.</li>
+          <li><b>Settlement.</b> Both devices sign a credit record (CPU seconds × a model-size multiplier, 0.3 to 1.0) and keep it in an offline ledger. When one is back online it posts the records to <code>POST /credits/ble-sync</code>. The coordinator verifies both Ed25519 signatures against the registered keys and accounts, skips duplicates, caps each record at <code>BLE_SYNC_MAX_CREDITS_PER_TX</code> (default 100), and moves the credits with reason <code>ble_compute</code>. Records that can't settle yet (low balance, account mismatch) stay pending on the device and are retried.</li>
+          <li><b>Admission (Macs).</b> A Mac refuses all incoming Bluetooth work unless <code>MESH_AUTH_TOKEN</code> is set on the agent; coordinators no longer hand out the mesh token (security pull request 288). With it, requests need an HMAC proof, are replay-protected within 2 minutes, limited to 64 KiB and rate-limited per sender. Bluetooth jobs are model prompts only: no code runs.</li>
+          <li><b>Known gaps.</b> No link encryption or pairing (prompts travel in plain text); iOS providers don't authenticate requesters yet and iOS requests are refused by Macs; Macs don't yet originate Bluetooth work; Macs advertise model size 0 and so earn the 0.3 multiplier.</li>
+          <li><b>Switches.</b> Desktop: Settings &gt; General &gt; Bluetooth mesh (on by default). Agent: <code>EDGECODER_BLE=0</code> turns it off. iOS: runs with the runtime. Public explainer: <a href="/bluetooth" target="_blank" rel="noopener">/bluetooth</a>; threat model: docs/security/agent-threat-model.md.</li>
+        </ul>
+      </details>
       <div class="net-card">
         <h3>Agents</h3>
         <div class="net-filter">

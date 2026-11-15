@@ -4,7 +4,7 @@
 
 Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
 
-This policy explains what personal information EdgeCoder, LLC ("EdgeCoder", "we") collects when you use edgecoder.io, the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
+This policy explains what personal information EdgeCoder, LLC ("EdgeCoder", "we") collects when you use the EdgeCoder website ([WEBSITE DOMAIN]), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
 
 ## The most important thing to know
 
