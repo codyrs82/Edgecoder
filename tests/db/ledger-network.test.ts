@@ -163,7 +163,10 @@ describe.skipIf(!PG_URL)("ledger network guard (Postgres)", () => {
     const ok = await run(["--confirm-wipe-ledger", "regtest", "--to", "bitcoin"]);
     expect(ok.stdout).toMatch(/wiped ledger: regtest -> bitcoin/);
     expect(ok.stdout).toMatch(/credit_transactions\s+2/);
-    expect(ok.stdout + ok.stderr).not.toContain(url.password);
+    // The URL itself never appears. The password check needs a password long enough not to occur in
+    // ordinary output by chance (CI's is "ci").
+    expect(ok.stdout + ok.stderr).not.toContain(url.toString());
+    if (url.password.length >= 8) expect(ok.stdout + ok.stderr).not.toContain(url.password);
     expect(await count(pool, "credit_transactions")).toBe(0);
     expect((await readLedgerNetwork(pool))?.network).toBe("bitcoin");
   }, 30_000);

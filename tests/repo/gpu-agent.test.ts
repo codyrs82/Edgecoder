@@ -54,7 +54,8 @@ describe("deploy/gpu-agent/vm-bootstrap.sh", () => {
     }
   });
 
-  it("accepts only plain https service URLs", () => {
+  // The bootstrap script runs on Ubuntu; Windows' bash and argument passing mangle the newline case.
+  it.skipIf(process.platform === "win32")("accepts only plain https service URLs", () => {
     const check = (url: string) =>
       spawnSync("bash", ["-c", `. "${BOOTSTRAP}"; check_url TEST_URL "$1"`, "_", url], { env: { PATH: process.env.PATH, EDGECODER_BOOTSTRAP_LIB: "1" }, encoding: "utf8" }).status;
     expect(check("https://coordinator.example.org")).toBe(0);
