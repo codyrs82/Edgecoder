@@ -135,3 +135,9 @@ coordinator shows a banner and disables the form.
 - **Fee wording follows the coordinator.** The screens read `purchaseFeeBps` and `networkFeeBps`
   and fall back to 0 and 500 (the owner's defaults) only when an older coordinator does not
   report them.
+
+## Screens
+
+`docs/design/screens/`: portal (`portal-*`) and desktop (`desktop-*`) in light and dark, rendered
+against a fake coordinator on regtest with the default fees (free purchase, 5 % network fee). The
+full-page portal captures are over 300 KB and are not committed.

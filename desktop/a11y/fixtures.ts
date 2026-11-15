@@ -127,7 +127,7 @@ const FIXTURES: Array<[RegExp, unknown]> = [
   [/\/wallet\/send\/requests/, { requests: [] }],
   [/\/portal\/api\/wallet\/overview/, {
     connected: true, network: "regtest", networkSource: "coordinator", cSats: 125_000, earnedSats: 42, btcUsd: 98_450, rateStale: false,
-    fees: { purchaseFeeBps: 150, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
+    fees: { purchaseFeeBps: 0, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
     payouts: {
       balance: { earnedMsat: 42_000, heldMsat: 2_000, maturesAtMs: NOW + 3_600_000, paidMsat: 10_000, pendingMsat: 0, payableMsat: 30_000 },
       policy: { network: "regtest", minPayoutSats: 1_000, maxFeeBps: 100, minFeeFloorSats: 10, lightningEnabled: true, paused: false, limits: { maxSingleSats: 100_000, maxAccountDailySats: 500_000 } },
@@ -136,7 +136,7 @@ const FIXTURES: Array<[RegExp, unknown]> = [
   }],
   [/\/portal\/api\/wallet\/overview/, {
     connected: true, network: "regtest", networkSource: "coordinator", cSats: 125_000, earnedSats: 42, btcUsd: 98_450, rateStale: false,
-    fees: { purchaseFeeBps: 150, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
+    fees: { purchaseFeeBps: 0, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
     payouts: {
       balance: { earnedMsat: 42_000, heldMsat: 2_000, maturesAtMs: NOW + 3_600_000, paidMsat: 10_000, pendingMsat: 0, payableMsat: 30_000 },
       policy: { network: "regtest", minPayoutSats: 1_000, maxFeeBps: 100, minFeeFloorSats: 10, lightningEnabled: true, paused: false, limits: { maxSingleSats: 100_000, maxAccountDailySats: 500_000 } },
