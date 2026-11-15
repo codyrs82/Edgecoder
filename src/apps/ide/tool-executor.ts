@@ -122,10 +122,53 @@ export function locateEdit(
       }
       return { index: first, oldString: o, newString: n };
     }
-    if (!o.endsWith("\n") || o.length <= 1) return { error: "old_string not found in file" };
+    if (!o.endsWith("\n") || o.length <= 1) return locateEditIgnoringIndent(content, o, n);
     o = o.slice(0, -1);
     if (n.endsWith("\n")) n = n.slice(0, -1);
   }
+}
+
+const leadingWs = (line: string) => /^[ \t]*/.exec(line)![0];
+
+/**
+ * The fallback when old_string is not in the file verbatim: the same lines with different
+ * indentation (models often guess the indent of code they saw with line numbers in front, seen
+ * dogfooding qwen3-coder:30b: five failed edits of one config line in a row). Applied only when
+ * exactly one place matches line by line ignoring leading whitespace; new_string is shifted by the
+ * same indent difference so the edit keeps the file's indentation. Otherwise the error names the
+ * nearest line that does exist, so the next try can copy it.
+ */
+function locateEditIgnoringIndent(content: string, oldString: string, newString: string): { index: number; oldString: string; newString: string } | { error: string } {
+  const notFound = "old_string not found in file";
+  const want = oldString.split("\n");
+  const firstReal = want.findIndex((l) => l.trim() !== "");
+  if (firstReal === -1) return { error: notFound };
+  const lines = content.split("\n");
+  const matches: number[] = [];
+  for (let i = 0; i + want.length <= lines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < want.length && ok; j++) ok = lines[i + j].trim() === want[j].trim() && (want[j].trim() !== "" || lines[i + j].trim() === "");
+    if (ok) matches.push(i);
+  }
+  if (matches.length > 1) return { error: "old_string matches multiple locations in the file (ignoring indentation). Provide a more specific string." };
+  if (matches.length === 0) {
+    const needle = want[firstReal].trim();
+    const near = lines.findIndex((l) => l.trim() === needle);
+    if (near === -1) return { error: notFound };
+    return { error: `${notFound}. Line ${near + 1} has that text as \`${lines[near]}\` (copy its exact indentation and the lines around it).` };
+  }
+  const start = matches[0];
+  // Indent difference, from the first non-empty line: the file's indent minus the one written.
+  const have = leadingWs(lines[start + firstReal]);
+  const wrote = leadingWs(want[firstReal]);
+  const shift = (line: string) => {
+    if (line.trim() === "") return line;
+    if (have.length >= wrote.length) return have.slice(0, have.length - wrote.length) + line;
+    const cut = wrote.length - have.length;
+    return leadingWs(line).length >= cut ? line.slice(cut) : line.trimStart();
+  };
+  const index = lines.slice(0, start).reduce((n, l) => n + l.length + 1, 0);
+  return { index, oldString: lines.slice(start, start + want.length).join("\n"), newString: newString.split("\n").map(shift).join("\n") };
 }
 
 export function isWithin(root: string, child: string): boolean {
