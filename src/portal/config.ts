@@ -69,6 +69,13 @@ export const portalConfigSchema = z.object({
   WALLET_SECRET_PEPPER: optStr,
   COORDINATOR_OPERATIONS_OWNER_EMAILS: optStr,
   SYSTEM_ADMIN_EMAILS: optStr,
+  /**
+   * Hosting by request (src/portal/host-requests.ts; read by hostApprovalPolicyFromEnv). On unless
+   * 0 or false: only approved hosts' machines take other accounts' work.
+   */
+  HOST_APPROVAL_REQUIRED: envFlag({ off: ["0", "false"] }),
+  /** Comma-separated emails always treated as approved hosts (besides SYSTEM_ADMIN_EMAILS). */
+  HOST_APPROVED_EMAILS: optStr,
   COORDINATOR_ADMIN_EMAILS: optStr,
   IOS_OAUTH_CALLBACK_PREFIX: z.string().default("edgecoder://oauth-callback"),
   OAUTH_GOOGLE_CLIENT_ID: optStr,

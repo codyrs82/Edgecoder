@@ -55,6 +55,8 @@ async function reservableAgents(accountId: string, cls: ComputeClassId, model?: 
   const out: Array<{ agentId: string; ownerAccountId: string; tier?: string; creditsPerSecond: number; vramGb?: number; models: string[] }> = [];
   for (const [id, cap] of agentCapabilities) {
     if (activeBlacklistRecord(id) || now - cap.lastSeenMs > 60_000 || reservations.isHeld(id, now)) continue;
+    // Not an approved host: its machines work only for their owner (src/portal/host-requests.ts).
+    if (cap.hostApproved === false) continue;
     const eff = effectiveHardware(id, cap);
     if ((eff?.computeClass ?? "cpu") !== cls) continue;
     if (model && !agentHasModel(cap, model)) continue;
@@ -166,6 +168,8 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
           activeModel: cap!.activeModel ?? null,
           models: [...(cap!.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
           reservedUntilMs: lease?.endMs ?? null,
+          // false: the owner is not an approved host yet, so this machine runs only the owner's own work.
+          hostsForNetwork: cap!.hostApproved !== false,
         };
       });
     let networkAgents = 0;

@@ -3,6 +3,7 @@
 
 import { request } from "undici";
 import { escapeHtml } from "./pages/escape.js";
+import { COMPUTE_HARDWARE_LABELS, HOST_KIND_LABELS, type HostRequestRecord } from "./host-requests.js";
 
 /** #16: transactional email via Resend (verification link, wallet send code). Moved from server.ts. */
 export interface PortalMailerConfig {
@@ -180,5 +181,48 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(input.email, "Confirm your wallet's new payment server", html, "payout_callback_code_email");
   }
 
-  return { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
+  /** A new "Request to host" (host-requests.ts) for the system admins. Resolves false when email or admins are not configured. */
+  async function sendHostRequestAdminEmail(adminEmails: string[], r: HostRequestRecord): Promise<boolean> {
+    if (adminEmails.length === 0) {
+      log.warn("SYSTEM_ADMIN_EMAILS not set; skipping host request notification.");
+      return false;
+    }
+    const link = `${cfg.portalPublicUrl}/portal/settings/admin#hostRequests`;
+    const row = (k: string, v: string | null) => (v ? `<li>${k}: ${escapeHtml(v)}</li>` : "");
+    const html = `
+      <p>New request to host on EdgeCoder.</p>
+      <ul>
+        ${row("Name", r.name)}${row("Email", r.email)}${row("Organisation", r.organisation)}
+        ${row("Would host", r.hostKinds.map((k) => HOST_KIND_LABELS[k]).join(", "))}
+        ${row("Hardware", r.computeHardware ? COMPUTE_HARDWARE_LABELS[r.computeHardware] : null)}${row("Hardware details", r.hardwareDetails)}
+        ${row("Region", r.region)}
+      </ul>
+      ${r.message ? `<p>Message:</p><blockquote>${escapeHtml(r.message).replace(/\n/g, "<br>")}</blockquote>` : ""}
+      <p>Review it under Settings, Admin, Host requests: <a href="${link}">${link}</a></p>
+    `;
+    return sendResendEmail(adminEmails.join(","), `Host request: ${r.name.slice(0, 60)}`, html, "host_request_admin_email");
+  }
+
+  /** An approved host request: what to do next, with the invite code when one was minted. */
+  async function sendHostApprovedEmail(input: { email: string; name: string; inviteCode: string | null }): Promise<boolean> {
+    const signup = `${cfg.portalPublicUrl}/portal${input.inviteCode ? `?invite=${encodeURIComponent(input.inviteCode)}` : ""}#signup`;
+    const signin = `${cfg.portalPublicUrl}/portal`;
+    const html = input.inviteCode
+      ? `
+      <p>Hi ${escapeHtml(input.name)},</p>
+      <p>Thanks for offering to host on EdgeCoder. Your request is approved.</p>
+      <p>Create your account with this invite code (it works once and expires in 30 days):</p>
+      <p><strong style="font-size:18px;letter-spacing:0.08em;">${escapeHtml(input.inviteCode)}</strong></p>
+      <p><a href="${signup}">${signup}</a></p>
+      <p>Once signed in, Settings, Install agent has the installer and your node token. Use this email address for the account: host approval is tied to it.</p>
+    `
+      : `
+      <p>Hi ${escapeHtml(input.name)},</p>
+      <p>Thanks for offering to host on EdgeCoder. Your request is approved: machines on the account with this email can now take work from the network.</p>
+      <p>Sign in at <a href="${signin}">${signin}</a>; Settings, Install agent has the installer. Agents already running pick this up within a few minutes.</p>
+    `;
+    return sendResendEmail(input.email, "Your EdgeCoder host request is approved", html, "host_approved_email");
+  }
+
+  return { sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
 }

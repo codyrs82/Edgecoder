@@ -1611,6 +1611,8 @@ export interface Machine {
   activeModel: string | null;
   models: string[];
   reservedUntilMs: number | null;
+  /** false: the account is not an approved host yet, so this machine runs only your own work (hosting for others is by request). */
+  hostsForNetwork?: boolean;
   /** Hardware verification: the tier claimed, the tier paid after the coordinator's challenge, and evidence from real work. */
   verification?: { status: string; claimedTier: string; grantedTier: string; reason: string | null; lastPassAtMs: number | null; score: number | null; tokensPerSec: number | null };
 }

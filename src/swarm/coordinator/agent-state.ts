@@ -105,6 +105,12 @@ export const agentCapabilities = new Map<
     region?: string;
     vpnDetected?: boolean;
     enrollmentReason?: string;
+    /**
+     * Host approval from the portal (src/portal/host-requests.ts). false: the owner is not an
+     * approved host, so the agent runs only its owner's own work (claimRule in dispatch.ts).
+     * undefined (no portal, loopback, an older portal): no restriction.
+     */
+    hostApproved?: boolean;
     powerTelemetry?: AgentPowerTelemetry;
     activeModel?: string;
     activeModelParamSize?: number;

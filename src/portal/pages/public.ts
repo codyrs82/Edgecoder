@@ -52,7 +52,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
       <title>EdgeCoder | Private AI Coding on Your Infrastructure</title>
       <meta
         name="description"
-        content="EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Contribute idle CPU and GPU time for sats, or buy compute at a daily market rate."
+        content="EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Buy compute at a daily market rate; hosting is by invitation during early access."
       />
       ${themeHeadTags()}
       <style nonce="${CSP_NONCE}">
@@ -133,7 +133,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             <div class="nav-links">
               <a href="/#how">How it works</a>
               <a href="/#market">Market</a>
-              <a href="/#hosting">Run a node</a>
+              <a href="/host">Host with us</a>
               <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
@@ -157,7 +157,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             </p>
             <div class="hero-cta">
               <a class="btn primary" href="/portal#signup">Create an account</a>
-              <a class="btn" href="/portal/settings/install">Run an agent</a>
+              <a class="btn" href="/host">Host with us</a>
               <a class="btn ghost" href="#how">How it works ${icon("arrowRight", 14)}</a>
             </div>
           </div>
@@ -175,10 +175,10 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             <p>No tokens to speculate on. One credit is one server-measured second of work on a known hardware class, and its sats value is locked the moment it is earned.</p>
           </div>
           <div class="steps">
-            <div class="step"><h3>Contribute or buy</h3><p>Install the agent to sell idle capacity, or fund with Lightning (Bitcoin on-chain coming soon) at the day's market rate.</p></div>
+            <div class="step"><h3>Buy or host</h3><p>Fund with Lightning (Bitcoin on-chain coming soon) at the day's market rate. Hosting capacity for others is by invitation during early access.</p></div>
             <div class="step"><h3>Match on the book</h3><p>Agents post an ask per hardware class, tasks carry a bid. A task is claimed only when the ask clears the bid, and it trades at the ask.</p></div>
             <div class="step"><h3>Verify and pay</h3><p>The coordinator measures run time itself, samples results for redundant verification, and credits the worker at the agreed price.</p></div>
-            <div class="step"><h3>Withdraw in sats</h3><p>Earned sats are paid to your Lightning wallet on request or automatically to a Lightning address. Infrastructure hosts are paid from the network fee pool.</p></div>
+            <div class="step"><h3>Withdraw in sats</h3><p>Hosts' earned sats are paid to their Lightning wallet on request or automatically to a Lightning address. Infrastructure hosts are paid from the network fee pool.</p></div>
           </div>
         </section>
 
@@ -210,9 +210,9 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
         <section class="section" id="hosting">
           <div class="section-head">
-            <div class="eyebrow">Run infrastructure</div>
-            <h2>Host the network, earn the fees.</h2>
-            <p>A share of every settled task and every purchase goes to a fee pool that is distributed to infrastructure hosts by uptime and by what they run. Hosting a Bitcoin node for the network is paid work.</p>
+            <div class="eyebrow">Infrastructure hosts · by invitation</div>
+            <h2>Hosting is by request during early access.</h2>
+            <p>We are adding hosts one at a time while the network is in early access. A share of every settled task and every purchase goes to a fee pool; early-access hosts are paid from it by uptime and by what they run, including hosting a Bitcoin node for the network. <a href="/host">Request to host</a>.</p>
           </div>
           <div class="host-tiers">
             <div class="tier"><div class="wl">Weight</div><div class="w">1.0×</div><h3>Coordinator</h3><ul><li>Schedules tasks, runs the order book</li><li>Anchors ledger checkpoints</li><li>Serves local inference for chat</li></ul></div>
@@ -232,13 +232,13 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             <div class="feature"><div class="ic">${icon("layers", 16)}</div><h3>Anchored ledger</h3><p>A hash-chained ledger of claims, results and earnings, with periodic OP_RETURN checkpoints on Bitcoin for third-party verification.</p></div>
             <div class="feature"><div class="ic">${icon("cpu", 16)}</div><h3>Sandboxed execution</h3><p>Remote code runs in Docker with no network, read-only filesystem and resource limits. No sandbox, no swarm work.</p></div>
             <div class="feature"><div class="ic">${icon("globe", 16)}</div><h3>One mesh, many devices</h3><p>macOS, Linux, Windows, iOS, Docker and VS Code agents; coordinators federate and gossip tasks across regions.</p></div>
-            <div class="feature"><div class="ic">${icon("user", 16)}</div><h3>Operational access control</h3><p>Passkeys, SSO, node enrollment tokens, operator approval and admin tooling for managed deployments.</p></div>
+            <div class="feature"><div class="ic">${icon("user", 16)}</div><h3>Operational access control</h3><p>Passkeys, SSO, node enrollment tokens, operator approval of every host and admin tooling for managed deployments.</p></div>
           </div>
         </section>
 
         <section class="cta">
-          <div><h2>Start with an account or an agent.</h2><p>Create an account to buy compute and manage your wallet, or install the agent and start earning sats for idle time.</p></div>
-          <div class="row"><a class="btn primary" href="/portal#signup">Create account</a><a class="btn" href="/portal/settings/install">Install the agent</a></div>
+          <div><h2>Start with an account, or ask to host.</h2><p>Create an account to buy compute and manage your wallet. Want to run a node for the network? Hosting is by invitation during early access: tell us what you would run.</p></div>
+          <div class="row"><a class="btn primary" href="/portal#signup">Create account</a><a class="btn" href="/host#request">Request to host</a></div>
         </section>
       </main>
 
@@ -303,7 +303,7 @@ export function privacyPolicyHtml(): string {
             <div class="nav-links">
               <a href="/#how">How it works</a>
               <a href="/#market">Market</a>
-              <a href="/#hosting">Run a node</a>
+              <a href="/host">Host with us</a>
               <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>
@@ -445,7 +445,7 @@ export function termsOfServiceHtml(): string {
             <div class="nav-links">
               <a href="/#how">How it works</a>
               <a href="/#market">Market</a>
-              <a href="/#hosting">Run a node</a>
+              <a href="/host">Host with us</a>
               <a href="${DOCS_SITE_URL}" target="_blank" rel="noreferrer">Docs</a>
               <a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">GitHub</a>
             </div>

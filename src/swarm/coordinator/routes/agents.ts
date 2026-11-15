@@ -164,6 +164,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       ...(body.region ? { region: body.region } : {}),
       vpnDetected: activation.vpnDetected,
       enrollmentReason: activation.reason,
+      // The portal's host approval; a registration the portal did not answer keeps the last one known.
+      ...(typeof (activation.hostApproved ?? previous?.hostApproved) === "boolean" ? { hostApproved: activation.hostApproved ?? previous?.hostApproved } : {}),
       powerTelemetry: body.powerTelemetry
         ? {
             ...body.powerTelemetry,

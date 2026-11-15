@@ -24,6 +24,11 @@
   let { onNavigate }: Props = $props();
 
   let overview = $state<ComputeOverview | null>(null);
+  // Host approval (portal Settings > Admin): an approved host's machines also take other people's work.
+  let approvedHost = $derived.by(() => {
+    const ms = overview?.account?.machines ?? [];
+    return ms.some((m) => m.hostsForNetwork === true) && !ms.some((m) => m.hostsForNetwork === false);
+  });
   let res = $state<ReservationOptions | null>(null);
   /** Network, BTC/USD and fees from the portal; the page works without them. */
   let wallet = $state<WalletOverview | null>(null);
@@ -196,6 +201,14 @@
 
     <div class="sp-group">
       <div class="sp-group-title">Your machines</div>
+      <p class="sp-muted" data-testid="hosting-note">
+        {#if approvedHost}
+          Your machines run your own work for free. Your account is an approved host, so they also take work from the network.
+        {:else}
+          Your machines run your own work for free. Hosting for others is by request during early access.
+          <button class="ghost small sp-link" onclick={() => openUrl(portalWebUrl("/host#request"))}>Request to host ↗</button>
+        {/if}
+      </p>
       <div class="sp-card">
         {#if (overview.account?.machines ?? []).length === 0}
           <div class="sp-row"><span class="sp-muted">No machines linked to your account yet. Install EdgeCoder on another computer and sign in with the same account.</span></div>

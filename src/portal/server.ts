@@ -70,11 +70,13 @@ import {
   normalizePasskeyResponsePayload,
   deriveCredentialIdFromVerifyBody
 } from "./portal-utils.js";
-import { parseOriginList, registerPortalSecurity } from "./security.js";
+import { clientIp, parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
 import { registerInviteAdminRoutes } from "./invites.js";
+import { hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
+import { renderHostFormResult } from "./pages/host.js";
 import { launchModeFromEnv } from "../economy/launch-gate.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
@@ -302,7 +304,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail } = createPortalMailer(
+const { sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -900,6 +902,23 @@ registerRevenueRoutes(
 // Settings > Admin > Early access: system admins mint, list and revoke invite codes (src/portal/invites.ts).
 registerInviteAdminRoutes(app, { store, launchMode: LAUNCH_MODE, getCurrentUser, buildAccessContext });
 
+// Hosting by request (src/portal/host-requests.ts): the public "Request to host" form, Settings >
+// Admin > Host requests, and the host approval the coordinators check (HOST_APPROVAL_REQUIRED).
+const HOST_APPROVAL_POLICY = hostApprovalPolicyFromEnv();
+await registerHostRequestRoutes(app, {
+  store,
+  policy: HOST_APPROVAL_POLICY,
+  launchMode: LAUNCH_MODE,
+  getCurrentUser,
+  buildAccessContext,
+  clientIp: (req) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }),
+  notifyAdmins: (record) => sendHostRequestAdminEmail([...SYSTEM_ADMIN_EMAILS], record),
+  notifyApproved: sendHostApprovedEmail,
+  renderFormResult: renderHostFormResult,
+  log: app.log
+});
+const hostApprovedFor = (email: string | null | undefined) => isApprovedHost(email, HOST_APPROVAL_POLICY, store);
+
 // Settings > Network for system admins: every coordinator's GET /admin/network, merged, agents joined to accounts.
 registerNetworkAdminRoutes(app, {
   coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "",
@@ -920,7 +939,7 @@ registerNetworkAdminRoutes(app, {
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
-const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
+const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);

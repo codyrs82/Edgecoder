@@ -10,7 +10,7 @@ import { moduleLogger } from "../../common/logger.js";
 const logger = moduleLogger("portal-internal");
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
+export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
   internal.addHook("onRequest", async (req, reply) => {
     if (!requireInternalToken(req as any, reply)) return reply;
   });
@@ -100,6 +100,8 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
         ownerEmail: refreshed.ownerEmail,
         emailVerified: refreshed.emailVerified,
         nodeApproved: refreshed.nodeApproved,
+        // Host approval (src/portal/host-requests.ts): false = this node runs only its owner's own work.
+        hostApproved: await hostApprovedFor(refreshed.ownerEmail),
         active: refreshed.active,
         sourceIp: refreshed.lastIp,
         countryCode: refreshed.lastCountryCode,
@@ -146,14 +148,16 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     if (!requireInternalToken(req as any, reply)) return;
     const body = z.object({ nodeIds: z.array(z.string()).max(200) }).parse(req.body);
-    const nodes = await Promise.all(body.nodeIds.map((nodeId) => store.getNodeEnrollment(nodeId)));
+    const nodes = (await Promise.all(body.nodeIds.map((nodeId) => store.getNodeEnrollment(nodeId)))).filter((n): n is NonNullable<typeof n> => Boolean(n));
+    const hostApproved = await Promise.all(nodes.map((n) => hostApprovedFor(n.ownerEmail)));
     return reply.send({
-      nodes: nodes.filter((n): n is NonNullable<typeof n> => Boolean(n)).map((n) => ({
+      nodes: nodes.map((n, i) => ({
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
         ownerEmail: n.ownerEmail,
         emailVerified: n.emailVerified,
         nodeApproved: n.nodeApproved,
+        hostApproved: hostApproved[i],
         active: n.active,
         sourceIp: n.lastIp,
         countryCode: n.lastCountryCode,

@@ -195,6 +195,7 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   for (const [id, cap] of agentCapabilities) {
     if (excluded.has(id) || activeBlacklistRecord(id) || !agentHasModel(cap, subtask.requestedModel ?? "")) continue;
     if (nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (cap.hostApproved === false && !subtask.projectMeta.onlyAccountId) continue;
     if (subtask.projectMeta.onlyAccountId && (await rewardAccountForAgent(id)) !== subtask.projectMeta.onlyAccountId) continue;
     other = true;
     break;

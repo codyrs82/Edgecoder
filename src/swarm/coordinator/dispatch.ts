@@ -124,6 +124,9 @@ export function claimRule(agentId: string, capability: Capability | undefined, p
     // code: its active model, which is what code work runs on).
     const hasModel = subtaskModelEligible(capability, subtask);
     const meta = subtask.projectMeta;
+    // Host approval (src/portal/host-requests.ts): an agent whose owner is not an approved host
+    // runs only its owner's own work ("My machines"): no other account's job, no lease.
+    if (capability?.hostApproved === false) return Boolean(meta.onlyAccountId) && !meta.reservationId && (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
     // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
     if (lease) return meta.reservationId === lease.id && hasModel;
     if (meta.reservationId) return false;

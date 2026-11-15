@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { InviteRecord } from "./invites.js";
+import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecord, HostRequestStatus, ComputeHardware } from "./host-requests.js";
 import { Pool } from "pg";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 
@@ -320,6 +321,128 @@ export class PortalStore {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_node_enrollments_token_idx ON portal_node_enrollments (registration_token_hash)`);
     await this.migrateInviteCodes();
     await this.migratePayoutDestinations();
+    await this.migrateHostRequests();
+  }
+
+  /**
+   * Hosting by request (src/portal/host-requests.ts). portal_host_approvals is keyed by email.
+   * The first time it is created, the owners of every node approved at that moment are
+   * grandfathered into it, so existing hosts keep taking network work when the gate comes on.
+   * Returns how many emails were grandfathered (0 on every later start).
+   */
+  async migrateHostRequests(nowMs = Date.now()): Promise<number> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_host_requests (
+         request_id TEXT PRIMARY KEY, created_at_ms BIGINT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL,
+         organisation TEXT, host_kinds TEXT NOT NULL, compute_hardware TEXT, hardware_details TEXT, region TEXT, message TEXT,
+         status TEXT NOT NULL DEFAULT 'new', notes TEXT, updated_at_ms BIGINT NOT NULL, updated_by TEXT, invite_code_id TEXT, ip_hash TEXT)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_host_requests_email_idx ON portal_host_requests (email, created_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_host_requests_ip_idx ON portal_host_requests (ip_hash, created_at_ms)`);
+    const existed = await this.pool.query(`SELECT to_regclass('portal_host_approvals') IS NOT NULL AS present`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_host_approvals (
+         email TEXT PRIMARY KEY, approved_at_ms BIGINT NOT NULL, approved_by TEXT NOT NULL, source TEXT NOT NULL, note TEXT)`
+    );
+    if (existed.rows[0]?.present) return 0;
+    const r = await this.pool.query(
+      `INSERT INTO portal_host_approvals (email, approved_at_ms, approved_by, source, note)
+       SELECT DISTINCT lower(u.email), $1::bigint, 'migration', 'grandfathered', 'Approved node before host approval was required'
+       FROM portal_node_enrollments n JOIN portal_users u ON u.user_id = n.owner_user_id
+       WHERE n.node_approved = TRUE
+       ON CONFLICT (email) DO NOTHING`,
+      [nowMs]
+    );
+    return r.rowCount ?? 0;
+  }
+
+  // ── Hosting by request (src/portal/host-requests.ts) ──
+
+  async createHostRequest(r: HostRequestRecord & { ipHash: string | null }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_host_requests (request_id, created_at_ms, name, email, organisation, host_kinds, compute_hardware, hardware_details, region, message, status, notes, updated_at_ms, updated_by, invite_code_id, ip_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [r.requestId, r.createdAtMs, r.name, r.email, r.organisation, r.hostKinds.join(","), r.computeHardware, r.hardwareDetails, r.region, r.message, r.status, r.notes, r.updatedAtMs, r.updatedBy, r.inviteCodeId, r.ipHash]
+    );
+  }
+
+  async countHostRequestsSince(input: { email: string; ipHash: string | null; sinceMs: number }): Promise<{ byEmail: number; byIp: number }> {
+    const r = await this.pool.query(
+      `SELECT count(*) FILTER (WHERE email = $1) AS by_email, count(*) FILTER (WHERE $2::text IS NOT NULL AND ip_hash = $2) AS by_ip
+       FROM portal_host_requests WHERE created_at_ms > $3 AND (email = $1 OR ip_hash = $2)`,
+      [input.email, input.ipHash, input.sinceMs]
+    );
+    return { byEmail: Number(r.rows[0]?.by_email ?? 0), byIp: Number(r.rows[0]?.by_ip ?? 0) };
+  }
+
+  private hostRequestFromRow(row: Record<string, any>): HostRequestRecord {
+    return {
+      requestId: row.request_id,
+      createdAtMs: Number(row.created_at_ms),
+      name: row.name,
+      email: row.email,
+      organisation: row.organisation ?? null,
+      hostKinds: String(row.host_kinds ?? "").split(",").filter(Boolean) as HostKind[],
+      computeHardware: (row.compute_hardware ?? null) as ComputeHardware | null,
+      hardwareDetails: row.hardware_details ?? null,
+      region: row.region ?? null,
+      message: row.message ?? null,
+      status: row.status as HostRequestStatus,
+      notes: row.notes ?? null,
+      updatedAtMs: Number(row.updated_at_ms),
+      updatedBy: row.updated_by ?? null,
+      inviteCodeId: row.invite_code_id ?? null
+    };
+  }
+
+  async listHostRequests(limit: number): Promise<HostRequestRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM portal_host_requests ORDER BY created_at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.map((row) => this.hostRequestFromRow(row));
+  }
+
+  async getHostRequest(requestId: string): Promise<HostRequestRecord | null> {
+    const r = await this.pool.query(`SELECT * FROM portal_host_requests WHERE request_id = $1`, [requestId]);
+    return r.rows[0] ? this.hostRequestFromRow(r.rows[0]) : null;
+  }
+
+  async updateHostRequest(requestId: string, patch: { status?: HostRequestStatus; notes?: string | null; inviteCodeId?: string; updatedAtMs: number; updatedBy: string }): Promise<HostRequestRecord | null> {
+    const r = await this.pool.query(
+      `UPDATE portal_host_requests SET
+         status = COALESCE($2, status),
+         notes = CASE WHEN $3::boolean THEN $4 ELSE notes END,
+         invite_code_id = COALESCE($5, invite_code_id),
+         updated_at_ms = $6, updated_by = $7
+       WHERE request_id = $1 RETURNING *`,
+      [requestId, patch.status ?? null, patch.notes !== undefined, patch.notes ?? null, patch.inviteCodeId ?? null, patch.updatedAtMs, patch.updatedBy]
+    );
+    return r.rows[0] ? this.hostRequestFromRow(r.rows[0]) : null;
+  }
+
+  private hostApprovalFromRow(row: Record<string, any>): HostApprovalRecord {
+    return { email: row.email, approvedAtMs: Number(row.approved_at_ms), approvedBy: row.approved_by, source: row.source as HostApprovalSource, note: row.note ?? null };
+  }
+
+  async getHostApproval(email: string): Promise<HostApprovalRecord | null> {
+    const r = await this.pool.query(`SELECT * FROM portal_host_approvals WHERE email = lower($1)`, [email]);
+    return r.rows[0] ? this.hostApprovalFromRow(r.rows[0]) : null;
+  }
+
+  async listHostApprovals(limit: number): Promise<HostApprovalRecord[]> {
+    const r = await this.pool.query(`SELECT * FROM portal_host_approvals ORDER BY approved_at_ms DESC LIMIT $1`, [limit]);
+    return r.rows.map((row) => this.hostApprovalFromRow(row));
+  }
+
+  async approveHost(h: HostApprovalRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_host_approvals (email, approved_at_ms, approved_by, source, note) VALUES (lower($1),$2,$3,$4,$5)
+       ON CONFLICT (email) DO UPDATE SET approved_at_ms = EXCLUDED.approved_at_ms, approved_by = EXCLUDED.approved_by, source = EXCLUDED.source, note = EXCLUDED.note`,
+      [h.email, h.approvedAtMs, h.approvedBy, h.source, h.note]
+    );
+  }
+
+  async revokeHost(email: string): Promise<boolean> {
+    const r = await this.pool.query(`DELETE FROM portal_host_approvals WHERE email = lower($1)`, [email]);
+    return (r.rowCount ?? 0) > 0;
   }
 
   /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */

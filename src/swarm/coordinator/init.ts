@@ -4,6 +4,7 @@
 /**
  * Coordinator startup: restores persisted state and starts the periodic jobs.
  */
+import { HOST_APPROVAL_REFRESH_MS, refreshHostApprovals } from "./enrollment.js";
 import type { PeerExchangePayload, MeshPeerRole } from "../../common/types.js";
 import { ensureOllamaModelInstalled } from "../../model/ollama-installer.js";
 import { pgStore } from "../../db/store.js";
@@ -159,6 +160,10 @@ export async function initCoordinator(): Promise<void> {
           app.log.warn({ error: String(error) }, "grant_sweep_failed");
         }
       }, 15_000);
+      // Host approval (src/portal/host-requests.ts): an admin's approve or revoke reaches agents already registered.
+      setInterval(() => {
+        void refreshHostApprovals().catch((error) => app.log.warn({ error: String(error) }, "host_approval_refresh_failed"));
+      }, HOST_APPROVAL_REFRESH_MS).unref?.();
       // Hardware verification: expire unanswered challenges and missing witnesses, re-post changed asks.
       setInterval(() => {
         for (const agentId of hardwareVerifier.tick(Date.now())) repostAsk(agentId);
