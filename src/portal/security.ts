@@ -98,7 +98,8 @@ export const CHAT_RATE_LIMIT = { max: 20, timeWindow: "1 minute" } as const;
 const CHAT_ROUTES: RegExp[] = [/^\/portal\/api\/chat$/, /^\/portal\/api\/conversations$/];
 /** Lightning top-ups by API key (each one asks the coordinator's node for an invoice). */
 export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
-const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/];
+// Each top-up creates a Lightning invoice on the coordinator's node: the API and the signed-in wallet page share the limit.
+const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/, /^\/portal\/api\/wallet\/topup$/];
 
 /**
  * The only legitimate cross-site POST: Apple's OAuth uses response_mode=form_post, so

@@ -119,3 +119,12 @@ describe("walletOverviewView", () => {
     expect(v).toMatchObject({ network: "bitcoin", networkSource: "portal", connected: true, btcUsd: null });
   });
 });
+
+describe("wallet top-up rate limit", () => {
+  it("the session top-up carries the same limit as the API top-up (each one creates a Lightning invoice)", async () => {
+    const { rateLimitFor, TOPUP_RATE_LIMIT } = await import("../../src/portal/security.js");
+    expect(rateLimitFor("/portal/api/wallet/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
+    expect(rateLimitFor("/v1/account/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
+    expect(rateLimitFor("/portal/api/wallet/topup/abc", "GET")).toBeUndefined();
+  });
+});
