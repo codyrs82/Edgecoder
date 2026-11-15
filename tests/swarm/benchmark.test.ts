@@ -135,6 +135,12 @@ describe("GPU inference challenge", () => {
     expect(knownBandwidthGbps("Apple M4 Pro")).toBe(273);
     expect(knownBandwidthGbps("Apple M2")).toBe(100);
     expect(knownBandwidthGbps("Mystery Accelerator")).toBeUndefined();
+    // Weak datacenter parts the agent labels datacenter (gpu.dc).
+    expect(knownBandwidthGbps("NVIDIA A16")).toBe(200);
+    expect(knownBandwidthGbps("Tesla T4")).toBe(320);
+    expect(knownBandwidthGbps("NVIDIA A40")).toBe(696);
+    expect(knownBandwidthGbps("NVIDIA RTX A4000")).toBe(448);
+    expect(knownBandwidthGbps("NVIDIA L40S")).toBe(864);
   });
 
   describe("answering through Ollama", () => {
@@ -186,5 +192,51 @@ describe("GPU inference challenge", () => {
       expect(r.gpu).toMatchObject({ model: "qwen3.5:9b", evalTokens: 400, tokensPerSec: 200, weightsGb: 5.4, bandwidthGbps: 1080 });
       expect(r.loaded).toEqual({ model: "qwen3.5:9b", vramGb: 6 });
     });
+  });
+});
+
+describe("local benchmark on a freshly loaded model", () => {
+  // The live A16 host (2026-11-15): the first generation after the model load produced nothing for
+  // 20 s, so the 20 s timed run failed and the report said gpu=-. A warm-up now takes that stall.
+  let server: Server;
+  let host = "";
+  const requests: Array<{ prompt: string; num_predict?: unknown }> = [];
+  let firstStallMs = 0;
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/api/ps") return res.end(JSON.stringify({ models: [{ name: "qwen3-coder:30b", size_vram: 19 * 1024 ** 3 }] }));
+        if (req.url !== "/api/generate") {
+          res.statusCode = 404;
+          return res.end("{}");
+        }
+        const b = JSON.parse(body) as { prompt: string; options: Record<string, unknown> };
+        requests.push({ prompt: b.prompt, num_predict: b.options.num_predict });
+        const stall = requests.length === 1 ? firstStallMs : 0;
+        setTimeout(() => {
+          const tag = /"1\. ([0-9A-F]{6})-1 "/.exec(b.prompt)?.[1] ?? "";
+          const text = tag ? Array.from({ length: 12 }, (_, i) => `${i + 1}. ${tag}-${i + 1} a plain sentence about the topic with enough words to count.`).join("\n") : "OK";
+          if (!res.destroyed) res.end(JSON.stringify({ response: text, eval_count: tag ? 192 : 2, eval_duration: tag ? 4e9 : 1e8 }));
+        }, stall);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    host = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+
+  it("warms the model untimed first, so a stalled first generation does not lose the GPU result", async () => {
+    firstStallMs = 600;
+    requests.length = 0;
+    const r = await runLocalBenchmark({ cpuBudgetMs: 50, threads: 1, ollama: { host, model: "qwen3-coder:30b", timeoutMs: 400, warmupTimeoutMs: 5_000 } });
+    expect(r.errors ?? []).toEqual([]);
+    expect(requests).toHaveLength(2);
+    expect(requests[0].num_predict).toBe(4); // the warm-up
+    expect(requests[1].num_predict).toBe(192);
+    // 192 tokens in 4 s on a 3.3B-active MoE (1.98 GB per token).
+    expect(r.gpu).toMatchObject({ model: "qwen3-coder:30b", tokensPerSec: 48, weightsGb: 1.98, bandwidthGbps: 95 });
   });
 });

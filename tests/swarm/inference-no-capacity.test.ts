@@ -89,7 +89,7 @@ describe("inference claim timeout (no capacity)", () => {
     expect(Date.now() - t0).toBeLessThan(CLAIM_TIMEOUT_MS + 3_000);
     expect(read.statusCode, read.body).toBe(503);
     expect(read.headers["retry-after"]).toBe("15");
-    expect(read.json()).toMatchObject({ error: "no_capacity" });
+    expect(read.json()).toMatchObject({ error: "no_capacity", reason: "busy" });
     expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6);
 
     // A read after the fact gets the same answer.
@@ -105,6 +105,21 @@ describe("inference claim timeout (no capacity)", () => {
     expect(await earnedMsat(worker.peerId)).toBe(earnedBefore);
     // The refund happened once.
     expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6);
+  });
+
+  test("a class no agent with the model is paid at is refused at submit, not called busy later", async () => {
+    // The worker registered without a hardware profile: it is matched at cpu. An @gpu.dc call for its model:
+    const before = creditEngine.balance(requester.peerId);
+    const taskId = `inf-${randomUUID()}`;
+    const res = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, computeClass: "gpu.dc", messages: [{ role: "user", content: "hi" }], timeoutMs: 60_000 }, requester);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toEqual({ error: "no_agent_in_class", model: MODEL, computeClass: "gpu.dc", availableClasses: ["cpu"] });
+    expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6); // nothing set aside
+    // A class that has the model is accepted as before.
+    const ok = await post("/inference/submit", { taskId: `inf-${randomUUID()}`, submitterAccountId: requester.peerId, model: MODEL, computeClass: "cpu", messages: [{ role: "user", content: "hi" }], timeoutMs: 60_000 }, requester);
+    expect(ok.statusCode, ok.body).toBe(200);
+    // Leave nothing queued for the next test's pull.
+    await sleep(CLAIM_TIMEOUT_MS + 300);
   });
 
   test("a call an agent claimed before the bound runs and is settled as usual", async () => {

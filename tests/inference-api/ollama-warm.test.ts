@@ -57,6 +57,19 @@ describe("context window", () => {
     expect(contextWindowFor(long, undefined, 64, 16_384)).toBe(32_768);
   });
 
+  it("the last piece carries the model-load time (left out of the power floor)", async () => {
+    const { host } = await capture(JSON.stringify({ message: { content: "hi" }, done: true, prompt_eval_count: 48, eval_count: 11, load_duration: 3_400_000_000 }) + "\n");
+    const pieces = [];
+    for await (const p of ollamaChat(host, { model: "m", messages: [{ role: "user", content: "x" }] })) pieces.push(p);
+    expect(pieces.at(-1)).toEqual({ doneReason: "stop", promptTokens: 48, outputTokens: 11, loadMs: 3_400 });
+  });
+
+  it("warming with a generation runs a few tokens, not just the load", async () => {
+    const { host, bodies } = await capture(JSON.stringify({ response: "OK", done: true }));
+    await warmOllamaModel(host, "qwen3-coder:30b", { keepAlive: "-1", numCtx: 65_536, generate: true });
+    expect(bodies[0].body).toMatchObject({ model: "qwen3-coder:30b", prompt: "Say OK.", keep_alive: -1, options: { num_ctx: 65_536, num_predict: 4 } });
+  });
+
   it("a fixed window is sent as given", async () => {
     const { host, bodies } = await capture(JSON.stringify({ message: { content: "hi" }, done: true }) + "\n");
     for await (const _ of ollamaChat(host, { model: "m", messages: [{ role: "user", content: "x".repeat(50_000) }], numCtx: 8192 })) void _;

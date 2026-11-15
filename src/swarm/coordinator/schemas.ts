@@ -36,7 +36,8 @@ const hardwareProfileSchema = z.object({
       vendor: z.string().max(32).optional(),
       model: z.string().max(128).optional(),
       vramGb: z.number().min(0).max(8192).optional(),
-      datacenter: z.boolean().optional()
+      datacenter: z.boolean().optional(),
+      count: z.number().int().min(1).max(64).optional()
     })
     .optional(),
   benchmarkScore: z.number().min(0).optional(),

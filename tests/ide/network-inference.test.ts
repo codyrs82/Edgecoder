@@ -78,6 +78,28 @@ describe("streamNetworkCompletion", () => {
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);
   });
 
+  it("no machine of the requested class is not called busy", async () => {
+    // At submit: holders exist, none in the class (the 2x A16 demoted to cpu, an @gpu.dc call).
+    const atSubmit = await fakeForwarder(() => ({ status: 409, json: { error: "no_agent_in_class", model: "qwen3-coder:30b", computeClass: "gpu.dc", availableClasses: ["cpu"] } }));
+    const e1 = streamNetworkCompletion(atSubmit, { model: "qwen3-coder:30b", computeClass: "gpu.dc", messages: [{ role: "user", content: "hi" }] }).next();
+    await expect(e1).rejects.toThrow(/No gpu\.dc machine runs qwen3-coder:30b right now; it runs on: cpu/);
+    server?.close();
+    // At the claim bound: the coordinator's 503 says which.
+    const atClaim = await fakeForwarder((path, body) =>
+      path === "/forward/inference/submit"
+        ? { json: { taskId: body.taskId, subtaskId: "st-x", reservedCSats: 10 } }
+        : { status: 503, json: { error: "no_capacity", reason: "none_in_class", computeClass: "gpu.dc", retryAfterSec: 15 } }
+    );
+    let msg = "";
+    try {
+      for await (const _ of streamNetworkCompletion(atClaim, { model: "qwen3-coder:30b", computeClass: "gpu.dc", messages: [{ role: "user", content: "hi" }] })) void _;
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/No gpu\.dc machine runs qwen3-coder:30b right now/);
+    expect(msg).not.toMatch(/busy/);
+  });
+
   it("lists each model, and per class", async () => {
     const deps = await fakeForwarder(() => ({ json: { models: [{ model: "qwen2.5-coder:32b", agents: 2, classes: ["gpu", "apple"] }] } }));
     expect((await listNetworkModels(deps)).map((m) => m.id)).toEqual(["network/qwen2.5-coder:32b", "network/qwen2.5-coder:32b@gpu", "network/qwen2.5-coder:32b@apple"]);

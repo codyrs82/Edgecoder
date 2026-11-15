@@ -329,6 +329,8 @@ export function priceExecution(r: ExecutionResult<ResultMeta>) {
           paramsB: paramsB(subtask.requestedModel ?? ""),
           btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
           durationMs,
+          // The host's model load is not the buyer's: the floor counts the seconds after it.
+          floorExcludeMs: taskBilling.get(taskId)?.loadMs,
           computeClass,
           tierWeight: hardwareWeight,
           perSecondCostMsat,

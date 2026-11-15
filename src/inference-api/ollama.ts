@@ -28,12 +28,19 @@ export function keepAliveValue(setting: string | undefined): number | string | u
  * generating. The context window must be the one the agent serves calls with (numCtx): Ollama
  * reloads a model whose num_ctx changes, so warming it with another size would not help.
  */
-export async function warmOllamaModel(host: string, model: string, opts: { keepAlive?: string; timeoutMs?: number; numCtx?: number } = {}): Promise<void> {
+export async function warmOllamaModel(host: string, model: string, opts: { keepAlive?: string; timeoutMs?: number; numCtx?: number; /** Also generate a few tokens (first-generation set-up, not just the load). */ generate?: boolean } = {}): Promise<void> {
   const keepAlive = keepAliveValue(opts.keepAlive);
   const res = await request(`${host.replace(/\/$/, "")}/api/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model, prompt: "", stream: false, ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}), options: { num_ctx: opts.numCtx ?? MIN_CONTEXT_WINDOW } }),
+    body: JSON.stringify({
+      model,
+      prompt: opts.generate ? "Say OK." : "",
+      stream: false,
+      ...(opts.generate ? { think: false } : {}),
+      ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
+      options: { num_ctx: opts.numCtx ?? MIN_CONTEXT_WINDOW, ...(opts.generate ? { num_predict: 4, temperature: 0 } : {}) },
+    }),
     headersTimeout: opts.timeoutMs ?? 600_000,
     bodyTimeout: opts.timeoutMs ?? 600_000,
   });
@@ -69,7 +76,7 @@ export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | un
   return ctx;
 }
 
-export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number };
+export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number; /** Ollama's load_duration: time spent loading the model for this call. */ loadMs?: number };
 
 export async function* ollamaChat(
   host: string,
@@ -120,7 +127,7 @@ export async function* ollamaChat(
     buf = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
-      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string; prompt_eval_count?: number; eval_count?: number };
+      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string; prompt_eval_count?: number; eval_count?: number; load_duration?: number };
       try {
         chunk = JSON.parse(line);
       } catch {
@@ -129,7 +136,10 @@ export async function* ollamaChat(
       if (chunk.error) throw new Error(chunk.error);
       if (chunk.message?.content) yield { delta: chunk.message.content };
       if (chunk.message?.tool_calls?.length) yield { toolCalls: chunk.message.tool_calls };
-      if (chunk.done) yield { doneReason: chunk.done_reason ?? "stop", promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count };
+      if (chunk.done) {
+        const loadMs = typeof chunk.load_duration === "number" && Number.isFinite(chunk.load_duration) && chunk.load_duration > 0 ? Math.round(chunk.load_duration / 1e6) : undefined;
+        yield { doneReason: chunk.done_reason ?? "stop", promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count, ...(loadMs !== undefined ? { loadMs } : {}) };
+      }
     }
   }
 }

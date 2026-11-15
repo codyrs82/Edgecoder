@@ -17,6 +17,7 @@ import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type 
 import { pgStore } from "../../../db/store.js";
 import {
   ACCEPTED_COMPUTE_CLASS_IDS,
+  capacityGap,
   resolveRequestedClass,
   type ComputeClassId
 } from "../../../economy/compute-classes.js";
@@ -111,7 +112,19 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number }>();
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: "busy" | "none_in_class"; computeClass?: string; model?: string }>();
+
+/** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
+function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
+  const out: ComputeClassId[] = [];
+  for (const [id, cap] of agentCapabilities) {
+    if (!agentHasModel(cap, model) || activeBlacklistRecord(id)) continue;
+    if (cap.lastSeenMs !== undefined && nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (!includeReserved && reservations.isHeld(id)) continue;
+    out.push((effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId);
+  }
+  return out;
+}
 const claimDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
 
 function pruneNoCapacity(now = Date.now()): void {
@@ -135,7 +148,10 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   claimDeadlines.delete(subtaskId);
   if (!queue.markRemoteClaimed(subtaskId)) return false;
   const accountId = taskBilling.get(taskId)?.accountId ?? usagePending.get(taskId)?.accountId ?? "";
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now() });
+  // Say which: every agent of the class was busy, or (now) no agent of the class holds the model.
+  const usage = usagePending.get(taskId);
+  const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason: gap === "none_in_class" ? "none_in_class" : "busy", ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -220,11 +236,20 @@ export function onInferenceClaimable(subtask: Subtask, nowMs = Date.now()): void
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, submittedAtMs + subtask.timeoutMs - nowMs));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: "busy" | "none_in_class"; computeClass?: string; model?: string }) {
+  const noneInClass = c?.reason === "none_in_class";
   return reply
     .code(503)
     .header("retry-after", String(NO_CAPACITY_RETRY_AFTER_SEC))
-    .send({ error: "no_capacity", message: `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC });
+    .send({
+      error: "no_capacity",
+      reason: c?.reason ?? "busy",
+      ...(c?.computeClass ? { computeClass: c.computeClass } : {}),
+      message: noneInClass
+        ? `No ${c?.computeClass} machine runs ${c?.model ?? "this model"} right now; nothing was charged.`
+        : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
+      retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC,
+    });
 }
 
 const inferenceSubmitSchema = z.object({
@@ -322,6 +347,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const billed = !reservationId && !onlyAccountId;
     const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
     const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
+    // Agents hold the model, but none is paid at the requested class (matching is by granted class):
+    // say so now instead of waiting out the claim bound and calling every machine "busy".
+    if (billed && taskClass !== "any") {
+      const classes = holderClasses(body.model);
+      if (capacityGap(taskClass, classes) === "none_in_class") {
+        return reply.code(409).send({ error: "no_agent_in_class", model: body.model, computeClass: taskClass, availableClasses: [...new Set(classes)].sort() });
+      }
+    }
     const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
     const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
     if (reserve > 0) {
@@ -376,6 +409,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // (accrueResultCredits), so they are bounded below and never cost more than was set aside.
         promptTokens: z.number().int().min(0).max(10_000_000).optional(),
         outputTokens: z.number().int().min(0).max(10_000_000).optional(),
+        // The agent's model-load time for this call: left out of the power floor (job-pricing.ts). Only
+        // the agent is paid by the floor, so reporting more than it spent only lowers its own pay.
+        loadMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
       })
       .parse(req.body);
     const claim = queue.getClaim(body.subtaskId);
@@ -395,6 +431,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (b) {
         b.promptTokens = bounded.promptTokens;
         b.outputTokens = bounded.outputTokens;
+        if (body.loadMs !== undefined) b.loadMs = Math.round(body.loadMs);
       }
     }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -410,12 +447,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     if ("error" in reader || !owner || reader.accountId !== owner) return reply.code(403).send({ error: "not_requester" });
     // The subtask must be one of this task's: owning a task gives no read of another's stream.
     if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
-    if (noCapacity.has(body.taskId)) return noCapacityReply(reply);
+    if (noCapacity.has(body.taskId)) return noCapacityReply(reply, noCapacity.get(body.taskId));
     if (!billing) return reply.code(403).send({ error: "not_requester" });
     const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
     if (!r) return reply.code(404).send({ error: "unknown_stream" });
     // Cancelled while this read waited.
-    if (noCapacity.has(body.taskId)) return noCapacityReply(reply);
+    if (noCapacity.has(body.taskId)) return noCapacityReply(reply, noCapacity.get(body.taskId));
     // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
     let result = r.done ? queue.getResult(body.subtaskId) : undefined;
     for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {

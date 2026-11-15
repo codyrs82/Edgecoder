@@ -58,6 +58,19 @@ describe("per-token pricing for model calls", () => {
     expect(inferenceCostMsat({ ...base, promptTokens: 10, outputTokens: 5, durationMs: 600_000 })).toMatchObject({ basis: "power_floor" });
   });
 
+  it("the power floor leaves out the host's model load: a cold call costs what the warm one does", () => {
+    // Live regtest, 2026-11-15: qwen2.5-coder:1.5b, 48 tokens in, 11 out; tokens alone are ~0.0008 cSats.
+    const call = { paramsB: 1.5, btcUsd: 80_000, promptTokens: 48, outputTokens: 11, computeClass: "apple", tierWeight: 1, perSecondCostMsat: 0 };
+    const warm = inferenceCostMsat({ ...call, durationMs: 1_500 });
+    const cold = inferenceCostMsat({ ...call, durationMs: 4_900, floorExcludeMs: 3_400 });
+    expect(warm.basis).toBe("power_floor");
+    expect(cold).toEqual(warm);
+    // Without a reported load the whole duration counts (older agents), never below zero.
+    expect(inferenceCostMsat({ ...call, durationMs: 4_900 }).costMsat).toBeGreaterThan(warm.costMsat * 3);
+    expect(inferenceCostMsat({ ...call, durationMs: 1_000, floorExcludeMs: 5_000 })).toMatchObject({ basis: "tokens" });
+    expect(inferenceCostMsat({ ...call, durationMs: 4_900, floorExcludeMs: Number.NaN })).toEqual(inferenceCostMsat({ ...call, durationMs: 4_900 }));
+  });
+
   it("falls back to per-second without token counts", () => {
     expect(inferenceCostMsat(base)).toEqual({ costMsat: 1_560, basis: "per_second" });
   });
