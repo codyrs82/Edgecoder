@@ -29,6 +29,7 @@ import { autoBackend, networkBackend } from "../../inference-api/backends.js";
 import { AUTO_MODEL_ID, routeInputsFrom } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
+import { withInvoiceQr } from "../invoice-qr.js";
 import { registerAgentRoutes } from "./agents.js";
 import { COMPUTE_CLASSES, portalCoordinatorTransport, portalNetworkDeps, registerComputeRoutes } from "./compute.js";
 
@@ -158,7 +159,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     if (!ctx) return reply;
     const parsed = z.object({ amountSats: z.number().int().min(100).max(1_000_000) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_amount", detail: "amountSats: whole sats, 100 to 1,000,000" });
-    return relay(reply, await coord(ctx.accountId, "/account/buy", { amountSats: parsed.data.amountSats }));
+    const r = await coord(ctx.accountId, "/account/buy", { amountSats: parsed.data.amountSats });
+    // Optional qrSvg: the invoice as an SVG QR code, for clients that show one.
+    return relay(reply, { status: r.status, json: withInvoiceQr(r.status, r.json) });
   });
 
   /** Whether a top-up was paid (the coordinator asks its Lightning node while unpaid). */

@@ -178,7 +178,7 @@ describe("portal shell and chat page markup", () => {
       expect(html, url).toContain('id="accountMenu" role="menu"');
       expect(html, url).toContain('id="profileGear"');
       expect(html, url).not.toContain("balance-chip");
-      for (const label of ["Profile", "Plan &amp; usage", "Usage", "Compute", "Connect your tools", "Install agent", "Settings", "Admin", "Docs", "Log out"]) expect(html, `${url} ${label}`).toContain(`<span>${label}</span>`);
+      for (const label of ["Profile", "Wallet", "Usage", "Compute", "Connect your tools", "Install agent", "Settings", "Admin", "Docs", "Log out"]) expect(html, `${url} ${label}`).toContain(`<span>${label}</span>`);
       expect(html, url).toContain('"/portal/api/compute/summary"');
     }
     const chat = (await app.inject({ url: "/portal/chat" })).body;

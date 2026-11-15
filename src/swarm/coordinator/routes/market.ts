@@ -29,13 +29,15 @@ import {
   hardwareVerifier
 } from "../economy.js";
 import { classParam } from "../schemas.js";
+import { COORDINATOR_FEE_BPS } from "../context.js";
 
 export function registerMarketRoutes(app: CoordinatorApp): void {
   app.get("/economy/market/book", async (req, reply) => {
     if (!requireMeshOrPortalToken(req, reply)) return;
     const query = z.object({ computeClass: classParam.optional() }).parse(req.query);
     const classes = query.computeClass ? [query.computeClass] : COMPUTE_CLASS_IDS;
-    return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS };
+    // Both fees, read-only, so the apps can show what a purchase and an earning keep back (docs/economy-math.md).
+    return { books: classes.map((c) => orderBook.snapshot(c)), defaultBidPremiumBps: MARKET_DEFAULT_BID_PREMIUM_BPS, networkFeeBps: NETWORK_FEE_BPS, purchaseFeeBps: COORDINATOR_FEE_BPS };
   });
 
   /** Candles (OHLC of the mid, trade volume) for one class; `interval` 1m|5m|15m|1h|4h|1d. Portal-token readable. */

@@ -28,7 +28,9 @@ const ALLOWED: Record<string, RegExp[]> = {
   // The avatar illustration's eyes and highlights sit on the bot's own colour, not on a theme surface.
   "components/BotAvatar.svelte": [/#fff\b/, /#1d1d1f\b/, /#ffffff\b/],
   // The HTML preview is a browser canvas: pages without a background expect white in either theme.
-  "pages/EditorView.svelte": [/#fff\b/]
+  "pages/EditorView.svelte": [/#fff\b/],
+  // Invoice QR codes: scanners need black modules on a white ground in either theme.
+  "lib/qr.ts": [/#ffffff\b/, /#000000\b/]
 };
 
 /** A hex colour in a CSS or attribute position; `#123` issue references in prose do not match. */

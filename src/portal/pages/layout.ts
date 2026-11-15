@@ -10,7 +10,7 @@ import { CLIENT_ESCAPE_JS } from "./escape.js";
 /** Account menu entries (the popup above the avatar row), in the desktop app's order. */
 export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
   { href: "/portal/settings#profile", label: "Profile", icon: "user" },
-  { href: "/portal/settings/plan", label: "Plan &amp; usage", icon: "wallet" },
+  { href: "/portal/settings/plan", label: "Wallet", icon: "wallet" },
   { href: "/portal/settings#usage", label: "Usage", icon: "zap" },
   { href: "/portal/settings/compute", label: "Compute", icon: "cpu" },
   { href: "/portal/settings#tools", label: "Connect your tools", icon: "key" },

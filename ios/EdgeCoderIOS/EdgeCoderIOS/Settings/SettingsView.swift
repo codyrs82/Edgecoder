@@ -296,7 +296,9 @@ struct SettingsView: View {
                     .foregroundColor(Theme.accent)
             }
 
-            WalletSummaryRow()
+            if sessionStore.isAuthenticated {
+                WalletLinkRow()
+            }
         }
     }
 
@@ -505,47 +507,21 @@ private struct SettingsLabel: View {
     }
 }
 
-// MARK: - Wallet Summary Row
+// MARK: - Wallet link
 
-private struct WalletSummaryRow: View {
-    @State private var onboarding: WalletOnboardingStatus?
-    @State private var loading = false
-
+/// Opens Wallet & market: balance, Add funds over Lightning, prices, earnings and withdrawals.
+private struct WalletLinkRow: View {
     var body: some View {
-        Group {
-            if loading {
-                HStack {
-                    ProgressView()
-                        .tint(Theme.textMuted)
-                    Text("Loading wallet...")
-                        .font(.caption)
-                        .foregroundColor(Theme.textMuted)
-                }
-            } else if let onboarding {
-                Divider().overlay(Theme.border)
-                SettingsCardHeader(icon: "bitcoinsign.circle", title: "Wallet", color: Theme.yellow)
-                SettingsLabel(label: "Account", value: String(onboarding.accountId.prefix(12)) + "...")
-                SettingsLabel(label: "Network", value: onboarding.network)
-            } else {
-                // No wallet — don't show anything
+        Divider().overlay(Theme.border)
+        NavigationLink {
+            WalletView()
+        } label: {
+            HStack {
+                SettingsCardHeader(icon: "bitcoinsign.circle", title: "Wallet & market", color: Theme.yellow)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundColor(Theme.textMuted)
             }
         }
-        .task {
-            await load()
-        }
-    }
-
-    private func load() async {
-        loading = true
-        defer { loading = false }
-        do {
-            onboarding = try await APIClient.shared.request(
-                baseURL: APIClient.shared.config.portalBaseURL,
-                path: "/wallet/onboarding",
-                method: "GET"
-            )
-        } catch {
-            onboarding = nil
-        }
+        .accessibilityHint("Balance, add funds, prices, earnings and withdrawals")
     }
 }

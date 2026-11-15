@@ -61,7 +61,7 @@ describe("portal navigation like the desktop app", () => {
     expect(menu).toContain('id="accountMenuEmail"');
     const expected: Array<[string, string]> = [
       ["Profile", "/portal/settings#profile"],
-      ["Plan &amp; usage", "/portal/settings/plan"],
+      ["Wallet", "/portal/settings/plan"],
       ["Usage", "/portal/settings#usage"],
       ["Compute", "/portal/settings/compute"],
       ["Connect your tools", "/portal/settings#tools"],
@@ -73,7 +73,7 @@ describe("portal navigation like the desktop app", () => {
     expect(menu).toMatch(/target="_blank" rel="noreferrer">.*?<span>Docs<\/span>/);
     expect(menu).toContain('id="logoutBtn"');
     // Labels appear in the desktop's order.
-    const order = ["Profile", "Plan &amp; usage", "Usage", "Compute", "Connect your tools", "Install agent", "Settings", "Admin", "Docs", "Log out"].map((l) => menu.indexOf(`<span>${l}</span>`));
+    const order = ["Profile", "Wallet", "Usage", "Compute", "Connect your tools", "Install agent", "Settings", "Admin", "Docs", "Log out"].map((l) => menu.indexOf(`<span>${l}</span>`));
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 
