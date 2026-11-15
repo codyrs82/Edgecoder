@@ -121,6 +121,24 @@ describe("/inference/chunks token counts", () => {
     // Counts bounded by the stream: 11 bytes of reply and a ~100-byte request price at well under the reserve.
     expect(earned).toBeLessThan(reservedMsat / 2);
   });
+
+  test("the requester's final stream read carries the token counts it was billed on", async () => {
+    const taskId = `inf-${randomUUID()}`;
+    expect((await submitInference(taskId)).statusCode).toBe(200);
+    const st = await pull();
+    expect(st?.taskId).toBe(taskId);
+    await post("/inference/chunks", { subtaskId: st!.id, seq: 0, delta: "hello there" }, worker);
+    await post("/inference/chunks", { subtaskId: st!.id, seq: 1, delta: "", done: true, promptTokens: 7, outputTokens: 3 }, worker);
+    // As in use: the requester is reading when the agent's result lands (the read waits for it).
+    // (inject() starts on .then, so start it now.)
+    const reading = post("/inference/stream", { taskId, subtaskId: st!.id, waitMs: 0 }, requester).then((r) => r);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await post("/result", { subtaskId: st!.id, taskId, agentId: worker.peerId, ok: true, output: "hello there", durationMs: 500 }, worker)).statusCode).toBe(200);
+    const read = await reading;
+    expect(read.statusCode, JSON.stringify(read.json())).toBe(200);
+    expect(read.json(), JSON.stringify(read.json())).toMatchObject({ done: true, promptTokens: 7, outputTokens: 3 });
+    expect(typeof read.json().creditsSpent).toBe("number");
+  });
 });
 
 describe("anonymous /submit", () => {

@@ -55,7 +55,10 @@ describe("portal config (#15)", () => {
 describe("coordinator config (#15)", () => {
   it("keeps the previous defaults", () => {
     const c = loadConfig("coordinator", coordinatorConfigSchema, {});
-    expect(c.COORDINATOR_FEE_BPS).toBe(150);
+    // Owner decision 2026-11-15: buying cSats is free; the fee is taken on compute payments.
+    expect(c.COORDINATOR_FEE_BPS).toBe(0);
+    expect(c.NETWORK_FEE_BPS).toBe(500);
+    expect(c.FEE_POOL_HOST_DISTRIBUTION).toBe(false);
     expect(c.ISSUANCE_WINDOW_MS).toBe(86_400_000);
     expect(c.ISSUANCE_SMOOTHING_ALPHA).toBe(0.35);
     expect(c.ROBOT_QUEUE_ENABLED).toBe(false);

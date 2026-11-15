@@ -66,14 +66,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   /** Models agents on the network can run now, with how many agents and the price per class. */
   app.get("/inference/models", async () => {
     const now = Date.now();
-    const byModel = new Map<string, { agents: number; classes: Set<ComputeClassId> }>();
+    const byModel = new Map<string, { agents: number; idle: number; classes: Set<ComputeClassId> }>();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
       for (const m of new Set(routableModels(cap))) {
-        const e = byModel.get(m) ?? { agents: 0, classes: new Set<ComputeClassId>() };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, classes: new Set<ComputeClassId>() };
         e.agents++;
+        if (queue.agentClaims(id) === 0) e.idle++;
         e.classes.add(cls);
         byModel.set(m, e);
       }
@@ -84,7 +85,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     return {
       // Model calls are priced per token: cSats per million tokens in and out, by model size.
       models: [...byModel.entries()]
-        .map(([model, e]) => ({ model, agents: e.agents, classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
+        // idleAgents / waiting: how busy this coordinator is for the model, so the portal can send new
+        // calls where an agent is free (inference runs where it was submitted; it is never relayed).
+        .map(([model, e]) => ({ model, agents: e.agents, idleAgents: e.idle, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD) }))
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
     };
@@ -177,11 +180,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
     if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
       const u = usagePending.get(claim.subtask.taskId);
       if (u) {
-        const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
         u.promptTokens = bounded.promptTokens;
         u.outputTokens = bounded.outputTokens;
+      }
+      // Kept on the billing entry too, which outlives the usage record until the requester reads the result.
+      const b = taskBilling.get(claim.subtask.taskId);
+      if (b) {
+        b.promptTokens = bounded.promptTokens;
+        b.outputTokens = bounded.outputTokens;
       }
     }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -203,7 +212,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       await new Promise((res) => setTimeout(res, 100));
       result = queue.getResult(body.subtaskId);
     }
+    // The token counts this call was billed on (agent-reported, bounded at /inference/chunks).
+    const tokens = {
+      ...(billing.promptTokens !== undefined ? { promptTokens: billing.promptTokens } : {}),
+      ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
+    };
     if (result) await settleTaskIfDone(body.taskId);
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs } : {}) });
+    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}) });
   });
 }

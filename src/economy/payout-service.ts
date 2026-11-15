@@ -274,7 +274,7 @@ export type FeePoolDistribution = {
   distributedMsat: number;
   hosts: Array<{ hostId: string; accountId: string; weight: number; msat: number }>;
   /** Why nothing ran: another instance holds the lock, the window was distributed recently, or payouts are paused. */
-  skipped?: "locked" | "recent" | "payouts_paused";
+  skipped?: "locked" | "recent" | "payouts_paused" | "disabled";
 };
 
 export type PayoutResult =

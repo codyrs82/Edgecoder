@@ -214,6 +214,8 @@ export async function runFeePoolDistribution(opts: { manual?: boolean } = {}): P
   // "locked"), and the timer skips a window another instance already distributed ("recent", at
   // 90% of FEE_POOL_DISTRIBUTION_MS). The admin route is a manual override of the latter only.
   if (feePoolDistributing) return feePoolDistributing;
+  // The fee is EdgeCoder's revenue; sharing it with infrastructure hosts is opt-in.
+  if (!CC.FEE_POOL_HOST_DISTRIBUTION) return { distributedMsat: 0, hosts: [], skipped: "disabled" };
   const expectedHeartbeats = Math.max(1, Math.floor(CC.FEE_POOL_DISTRIBUTION_MS / CC.HOST_HEARTBEAT_MS));
   const minIntervalMs = opts.manual ? 0 : Math.floor(CC.FEE_POOL_DISTRIBUTION_MS * 0.9);
   feePoolDistributing = payoutService.distributeFeePool(expectedHeartbeats, { minIntervalMs }).finally(() => { feePoolDistributing = null; });

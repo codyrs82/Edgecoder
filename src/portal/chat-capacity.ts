@@ -46,6 +46,8 @@ export interface CapacityReport {
   ownModelCount?: number;
   /** kind "network": models connected agents can run; undefined when the list could not be read. */
   agentModels?: string[];
+  /** kind "network": per model, idle agents and calls waiting (coordinators that report them). */
+  modelLoad?: Record<string, { idle: number; waiting: number }>;
 }
 
 export type CapacityProbe = (url: string, kind: ChatNeed["kind"]) => Promise<CapacityReport>;
@@ -116,10 +118,16 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       const json = (await res.body.json().catch(() => null)) as { models?: unknown } | null;
       if (!json || !Array.isArray(json.models)) return { reachable: true };
       const agentModels: string[] = [];
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown }>) {
-        if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) agentModels.push(m.model);
+      const modelLoad: Record<string, { idle: number; waiting: number }> = {};
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; waiting?: unknown }>) {
+        if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
+          agentModels.push(m.model);
+          if (typeof m.idleAgents === "number" && Number.isFinite(m.idleAgents)) {
+            modelLoad[m.model] = { idle: m.idleAgents, waiting: typeof m.waiting === "number" && Number.isFinite(m.waiting) ? m.waiting : 0 };
+          }
+        }
       }
-      return { reachable: true, agentModels };
+      return { reachable: true, agentModels, ...(Object.keys(modelLoad).length ? { modelLoad } : {}) };
     } catch {
       return { reachable: false };
     }
@@ -218,7 +226,48 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     return at !== undefined && now() - at < Math.max(ttlMs, RECHECK_NO_AFTER_MS);
   };
 
+  /**
+   * Calls sent to a coordinator for a model since its report was taken: they occupy agents the
+   * report still counts as idle, so a burst inside one cache window spreads instead of piling up.
+   */
+  const sentSince = new Map<string, { reportAt: number; n: number }>();
+  const sentKey = (url: string, model: string) => `${url}|${model}`;
+  const sentCount = (url: string, model: string, reportAt: number) => {
+    const e = sentSince.get(sentKey(url, model));
+    return e && e.reportAt === reportAt ? e.n : 0;
+  };
+  const noteSent = (url: string, model: string, reportAt: number) => {
+    const key = sentKey(url, model);
+    const e = sentSince.get(key);
+    sentSince.set(key, { reportAt, n: e && e.reportAt === reportAt ? e.n + 1 : 1 });
+  };
+
+  /**
+   * Network calls: among coordinators that list the model and report their load, the one with the
+   * most free agents for it (idle minus waiting minus calls sent since its report); configured order
+   * breaks ties. Inference runs where it is submitted, so this is what spreads calls across seeds.
+   * Null when no coordinator reports load (older builds): the priority order below decides.
+   */
+  async function chooseByLoad(urls: string[], model: string, maxAgeMs: number): Promise<string | null> {
+    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", maxAgeMs)));
+    let best: { url: string; free: number } | null = null;
+    for (let i = 0; i < urls.length; i++) {
+      const r = reports[i];
+      const load = r.modelLoad?.[model];
+      if (!r.reachable || !load || recentlyFailed(urls[i]) || !r.agentModels?.includes(model)) continue;
+      const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
+      const free = load.idle - load.waiting - sentCount(urls[i], model, reportAt);
+      if (!best || free > best.free) best = { url: urls[i], free };
+    }
+    if (best) noteSent(best.url, model, cache.get(`network|${best.url}`)?.at ?? 0);
+    return best?.url ?? null;
+  }
+
   async function choose(urls: string[], need: ChatNeed, maxAgeMs: number): Promise<string | null> {
+    if (need.kind === "network") {
+      const byLoad = await chooseByLoad(urls, need.model, maxAgeMs);
+      if (byLoad) return byLoad;
+    }
     // Start every probe now so the wait is one timeout at most, then read them in priority order.
     const reports = urls.map((u) => reportOf(u, need.kind, maxAgeMs));
     const lesser: Array<{ url: string; rank: number }> = [];
