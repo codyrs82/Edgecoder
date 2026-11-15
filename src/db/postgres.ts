@@ -2445,6 +2445,68 @@ export class PostgresStore {
     }));
   }
 
+  /**
+   * Remote model control audit (src/swarm/coordinator/model-control.ts): one row per owner command,
+   * kept in ollama_rollouts with target_type "model-control" (provider = the action, model = its
+   * arguments, requested_by = the owning account).
+   */
+  async upsertModelControlAudit(row: {
+    commandId: string;
+    agentId: string;
+    action: string;
+    args: string;
+    status: string;
+    accountId: string;
+    requestedAtMs: number;
+    updatedAtMs: number;
+    error?: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ollama_rollouts (
+        rollout_id, target_type, target_id, provider, model, auto_install, status,
+        requested_by, requested_at_ms, updated_at_ms, error
+      ) VALUES ($1,'model-control',$2,$3,$4,false,$5,$6,$7,$8,$9)
+      ON CONFLICT (rollout_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        updated_at_ms = EXCLUDED.updated_at_ms,
+        error = EXCLUDED.error
+      WHERE ollama_rollouts.target_type = 'model-control' AND ollama_rollouts.target_id = EXCLUDED.target_id`,
+      [row.commandId, row.agentId, row.action, row.args, row.status, row.accountId, row.requestedAtMs, row.updatedAtMs, row.error ?? null]
+    );
+  }
+
+  async listModelControlAudit(agentId: string, limit = 25): Promise<Array<{
+    commandId: string;
+    agentId: string;
+    action: string;
+    args: string;
+    status: string;
+    accountId: string;
+    requestedAtMs: number;
+    updatedAtMs: number;
+    error?: string;
+  }>> {
+    const result = await this.pool.query(
+      `SELECT rollout_id, target_id, provider, model, status, requested_by, requested_at_ms, updated_at_ms, error
+       FROM ollama_rollouts
+       WHERE target_type = 'model-control' AND target_id = $1
+       ORDER BY requested_at_ms DESC
+       LIMIT $2`,
+      [agentId, limit]
+    );
+    return result.rows.map((row) => ({
+      commandId: row.rollout_id,
+      agentId: row.target_id,
+      action: row.provider,
+      args: row.model,
+      status: row.status,
+      accountId: row.requested_by,
+      requestedAtMs: Number(row.requested_at_ms),
+      updatedAtMs: Number(row.updated_at_ms),
+      error: row.error ?? undefined
+    }));
+  }
+
   /* ── Staged Rollout Policies ──────────────────────────── */
 
   async upsertRolloutPolicy(policy: RolloutPolicy): Promise<void> {

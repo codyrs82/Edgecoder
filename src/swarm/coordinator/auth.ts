@@ -93,7 +93,11 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
   "/agent-mesh/direct-work/result",
   "/agent-mesh/models/request"
 ]);
-const AGENT_POST_PATTERNS: readonly RegExp[] = [/^\/orchestration\/agents\/[^/]+\/(status|ack)$/];
+const AGENT_POST_PATTERNS: readonly RegExp[] = [
+  /^\/orchestration\/agents\/[^/]+\/(status|ack)$/,
+  // Remote model control: the agent's own state and command results (routes/model-control.ts).
+  /^\/agent-control\/agents\/[^/]+\/report$/
+];
 /** GET routes a signed agent may call; each scopes what it returns to the signer (see the route). */
 const AGENT_GET_PATTERNS: readonly RegExp[] = [
   /^\/inference\/models$/,

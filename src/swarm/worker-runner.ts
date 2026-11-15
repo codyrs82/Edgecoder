@@ -51,6 +51,11 @@ import { createLocalForwarder } from "./local-forwarder.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { workerConfigSchema } from "../config/worker.js";
+import { layerOverrides, loadOverrides, overridesPath, saveOverrides, withoutKeys, type EnvModelSettings, type ModelOverridesFile } from "../model/remote-control/overrides.js";
+import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-control/agent-controller.js";
+import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
+import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
+import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
 
 // #15: validated once; a malformed value exits here with a message naming the variable.
 const W = loadConfigOrExit("worker", workerConfigSchema);
@@ -92,19 +97,54 @@ const AGENT_ID = W.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "
 const MODE = W.AGENT_MODE;
 const OS = (W.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
 const PROVIDER = W.LOCAL_MODEL_PROVIDER;
-const OLLAMA_MODEL = W.OLLAMA_MODEL;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
-// By memory and OLLAMA_MODEL's size, never past this machine's OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
-const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE, {
-  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
-  ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL
-});
-/** One context window for every network call (Ollama reloads the model when num_ctx changes). */
-const CONTEXT_WINDOW = servedContextWindow(totalmem(), W.AGENT_CONTEXT_WINDOW, {
-  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
-  slots: MAX_PARALLEL_INFERENCE
-});
+/*
+ * Model settings: the env file, with the owner's remote changes layered over it
+ * (src/model/remote-control/overrides.ts). The env file is root's on a headless install; remote
+ * changes live in the agent's own <config dir>/model-overrides.json, and a local change to the env
+ * (the operator, or the desktop app) supersedes the remote one for that setting.
+ */
+const MODEL_OVERRIDES_FILE = overridesPath(PLATFORM_CONFIG_DIR);
+const ENV_MODEL_SETTINGS: EnvModelSettings = {
+  model: process.env.OLLAMA_MODEL?.trim() || undefined,
+  contextWindow: process.env.AGENT_CONTEXT_WINDOW?.trim() || undefined,
+  parallel: process.env.AGENT_PARALLEL_INFERENCE?.trim() || undefined,
+  keepAlive: process.env.AGENT_MODEL_KEEP_ALIVE?.trim() || undefined
+};
+let modelOverrides: ModelOverridesFile = (() => {
+  const { overrides, problems } = loadOverrides(MODEL_OVERRIDES_FILE);
+  for (const p of problems) console.warn(`[worker] model overrides: ${p}`);
+  const { superseded } = layerOverrides(ENV_MODEL_SETTINGS, overrides);
+  if (superseded.length === 0) return overrides;
+  console.log(`[worker] model overrides: local configuration changed ${superseded.join(", ")} since the remote change; the local value wins`);
+  const kept = withoutKeys(overrides, superseded);
+  try {
+    saveOverrides(MODEL_OVERRIDES_FILE, kept);
+  } catch (e) {
+    console.warn(`[worker] model overrides: could not rewrite ${MODEL_OVERRIDES_FILE}: ${String(e)}`);
+  }
+  return kept;
+})();
+/** The effective model settings from the env and the override file (also re-run after a remote change). */
+function computeModelSettings(): CurrentModelSettings {
+  const layered = layerOverrides(ENV_MODEL_SETTINGS, modelOverrides);
+  const model = layered.env.model || W.OLLAMA_MODEL;
+  const modelParamsB = model ? paramsB(model) : undefined;
+  // By memory and the model's size, never past this machine's OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
+  const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
+  const ctxRaw = layered.env.contextWindow !== undefined ? Number(layered.env.contextWindow) : undefined;
+  /** One context window for every network call (Ollama reloads the model when num_ctx changes). */
+  const contextWindow = servedContextWindow(totalmem(), Number.isInteger(ctxRaw) ? ctxRaw : undefined, { modelParamsB, slots: parallel });
+  const keepAlive = layered.env.keepAlive ?? (SANDBOX_MODE_FOR_DEFAULTS === "none" && W.AGENT_INFERENCE_ONLY === true ? "-1" : "30m");
+  const src = (k: keyof EnvModelSettings): "env" | "remote" | "default" => (layered.sources[k] === "remote" ? "remote" : ENV_MODEL_SETTINGS[k] !== undefined ? "env" : "default");
+  return { model, parallel, contextWindow, keepAlive, sources: { model: src("model"), contextWindow: src("contextWindow"), parallel: src("parallel"), keepAlive: src("keepAlive") } };
+}
+const SANDBOX_MODE_FOR_DEFAULTS: SandboxMode = resolveSandboxMode(process.env);
+let modelSettings = computeModelSettings();
+let OLLAMA_MODEL = modelSettings.model;
+let MAX_PARALLEL_INFERENCE = modelSettings.parallel;
+let CONTEXT_WINDOW = modelSettings.contextWindow;
 const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
@@ -184,7 +224,7 @@ if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
 }
 const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
 /** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
-const MODEL_KEEP_ALIVE = W.AGENT_MODEL_KEEP_ALIVE ?? (INFERENCE_ONLY ? "-1" : "30m");
+let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
 /**
  * Load the network model before taking work, so the first call does not pay a cold load (about
  * 4-5 s on a CPU, and a headers timeout under parallel calls). Bounded: a missing model or a
@@ -421,6 +461,68 @@ async function installedModelsCached(nowMs = Date.now()): Promise<string[]> {
     installedModelsCache = { models: await listInstalledModels(), atMs: nowMs };
   }
   return installedModelsCache.models;
+}
+
+// ── Remote model control (src/model/remote-control/) ──
+// The owner changes this machine's models from the portal: the coordinator signs each command and
+// sends it down the mesh WebSocket; the host's policy (AGENT_REMOTE_CONTROL, AGENT_MODEL_ALLOWLIST,
+// bounds, disk and memory) decides what is done.
+const ollamaAdmin = createOllamaAdmin(OLLAMA_HOST);
+const SERVES_OLLAMA = PROVIDER === "ollama-local" || INFERENCE_ONLY;
+/** Puts the env + override file back into effect after a remote change (model reload included). */
+async function applyModelSettings(): Promise<void> {
+  const before = OLLAMA_MODEL;
+  modelOverrides = loadOverrides(MODEL_OVERRIDES_FILE).overrides;
+  modelSettings = computeModelSettings();
+  OLLAMA_MODEL = modelSettings.model;
+  MAX_PARALLEL_INFERENCE = modelSettings.parallel;
+  CONTEXT_WINDOW = modelSettings.contextWindow;
+  MODEL_KEEP_ALIVE = modelSettings.keepAlive;
+  installedModelsCache = undefined;
+  if (before !== OLLAMA_MODEL) {
+    // The old model would otherwise hold its memory until its keep-alive runs out (never, with -1).
+    await ollamaAdmin.unload(before).catch(() => undefined);
+    lastRegisteredAtMs = 0; // re-register: the coordinator learns the new active model
+  }
+  console.log(`[agent:${AGENT_ID}] model settings now: ${OLLAMA_MODEL}, context ${CONTEXT_WINDOW}, ${MAX_PARALLEL_INFERENCE} parallel, keep_alive ${MODEL_KEEP_ALIVE}`);
+  if (SERVES_OLLAMA) await warmNetworkModel(OLLAMA_MODEL, "remote change");
+}
+const modelControl = new ModelControlAgent({
+  agentId: AGENT_ID,
+  enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL),
+  allowlist: resolveAllowlist(W.AGENT_MODEL_ALLOWLIST),
+  ollama: ollamaAdmin,
+  overridesFile: MODEL_OVERRIDES_FILE,
+  env: ENV_MODEL_SETTINGS,
+  overrides: modelOverrides,
+  current: () => ({ ...modelSettings, model: OLLAMA_MODEL, parallel: MAX_PARALLEL_INFERENCE, contextWindow: CONTEXT_WINDOW, keepAlive: MODEL_KEEP_ALIVE }),
+  apply: applyModelSettings,
+  hardware: (() => {
+    const gpu = HARDWARE_PROFILE.gpu as { vendor?: string; model?: string; vramGb?: number; count?: number } | undefined;
+    // Apple silicon shares RAM with the GPU: memory is counted once (as RAM).
+    const vramBytes = gpu && gpu.vendor !== "apple" && gpu.vramGb ? Math.round(gpu.vramGb * 1024 ** 3) : undefined;
+    return { ramBytes: totalmem(), vramBytes, gpu: gpu ? { vendor: gpu.vendor, model: gpu.model, count: gpu.count } : undefined };
+  })(),
+  modelsDir: ollamaModelsDir(),
+  diskSpace,
+  sizeOf: (model) => registryModelSize(model),
+  report: async (body) => {
+    await post(`/agent-control/agents/${encodeURIComponent(AGENT_ID)}/report`, body, { retries: 1, timeoutMs: 10_000, signed: true });
+  },
+  // The desktop app (all-in-one) owns its machine's settings.
+  localUi: process.env.EDGE_RUNTIME_MODE === "all-in-one",
+  ollamaNumParallel: Number.isInteger(Number(process.env.OLLAMA_NUM_PARALLEL)) && Number(process.env.OLLAMA_NUM_PARALLEL) > 0 ? Number(process.env.OLLAMA_NUM_PARALLEL) : undefined
+});
+const MODEL_STATE_REPORT_MS = 10 * 60_000;
+let lastModelStateReportMs = 0;
+/** Sends this machine's model state to the coordinator (the portal's view). */
+async function reportModelState(): Promise<void> {
+  lastModelStateReportMs = Date.now();
+  try {
+    await post(`/agent-control/agents/${encodeURIComponent(AGENT_ID)}/report`, { state: await modelControl.state() }, { retries: 0, timeoutMs: 10_000, signed: true });
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] model state report failed: ${String(e).slice(0, 160)}`);
+  }
 }
 
 function backoffMs(): number {
@@ -857,6 +959,8 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       meshWsOpen = true;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
       reconnectDelay = 1000;
+      // The portal's view of this machine's models (also refreshed every MODEL_STATE_REPORT_MS).
+      void reportModelState();
     });
 
     ws.on("message", async (data) => {
@@ -865,6 +969,20 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
         // Fast dispatch: there is work; pull now (the pull decides what, if anything, we get).
         if (message && typeof message === "object" && message.type === "work_available" && !message.fromPeerId) {
           wakeLoop(true);
+          return;
+        }
+        // Remote model control: checked against the coordinator identity we proved (pinned key),
+        // its target, lifetime and replay; then the host's own policy. Never gossip.
+        if (message && typeof message === "object" && message.type === MODEL_CONTROL_FRAME_TYPE) {
+          let verified: { peerId: string; publicKeyPem: string } | null = null;
+          try {
+            verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+          } catch {
+            verified = null;
+          }
+          void modelControl.handleFrame(message, verified).then(() => {
+            installedModelsCache = undefined;
+          });
           return;
         }
         const peer = getMeshPeer();
@@ -1384,6 +1502,7 @@ async function loop(): Promise<void> {
             }
           }
 
+          if (meshWsOpen && Date.now() - lastModelStateReportMs >= MODEL_STATE_REPORT_MS) void reportModelState();
           if (hb.orchestration?.pending) {
             const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
               try {
@@ -1397,6 +1516,9 @@ async function loop(): Promise<void> {
               const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
               // A coordinator may only name Ollama library models, and never installs the binary.
               if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
+              // The same host policy as the owner's commands: AGENT_REMOTE_CONTROL and the allowlist.
+              const refusal = hb.orchestration.provider === "ollama-local" ? modelControl.orchestrationRefusal(switchModel) : null;
+              if (refusal) throw new Error(`orchestration_${refusal}`);
               await ensureOllamaModelInstalled(
                 {
                   enabled: hb.orchestration.provider === "ollama-local",

@@ -39,7 +39,8 @@ export type SecurityEventType =
   | "onchain_deposit_held"
   | "onchain_deposit_reversed"
   | "onchain_batch_resurfaced"
-  | "onchain_batch_stuck";
+  | "onchain_batch_stuck"
+  | "model_control_not_owner";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -90,7 +91,9 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   onchain_deposit_held: "WARN",
   onchain_deposit_reversed: "CRITICAL",
   onchain_batch_resurfaced: "CRITICAL",
-  onchain_batch_stuck: "HIGH"
+  onchain_batch_stuck: "HIGH",
+  // A portal session asked to control a machine its account does not own (src/swarm/coordinator/model-control.ts).
+  model_control_not_owner: "HIGH"
 };
 
 export class SecurityEventLogger {

@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { settingRow, settingsPage } from "./settings-shell.js";
+import { machinesPageScript, machinesSectionHtml } from "./settings-machines.js";
 
 /** Settings > Nodes (/portal/settings/nodes) and Settings > Admin (/portal/settings/admin). */
 export function registerSettingsOpsPages(app: FastifyInstance): void {
@@ -43,6 +44,7 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
         </table>
         </div>
       </div>
+      ${machinesSectionHtml()}
     </section>
   `;
   const script = `
@@ -127,17 +129,19 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
       }
     });
 
+    ${machinesPageScript()}
     (async () => {
       const me = await requireAuth();
       revealSettingsAdminTab(me);
       const user = me.user || {};
       if (!user.emailVerified) document.getElementById("emailVerifyNote").classList.remove("hidden");
       await loadNodes();
+      await loadMachines();
     })().catch((err) => {
       showToast("Could not load nodes: " + String(err.message || err), true);
     });
   `;
-  return reply.type("text/html").send(settingsPage("nodes", "Enroll nodes and track their activation.", content, script));
+  return reply.type("text/html").send(settingsPage("nodes", "Enroll nodes, track their activation and manage their models.", content, script));
 });
 
 app.get("/portal/settings/admin", async (_req, reply) => {

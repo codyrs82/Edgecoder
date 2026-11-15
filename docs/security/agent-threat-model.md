@@ -46,6 +46,8 @@ The owner's three goals: an agent install must not be a path to
    key (`src/trust/response-signing.ts`). The agent verifies them against a pinned key: TOFU by
    default, strict with seed keys for `*.edgecoder.io` installs. Work, orchestration commands and
    blacklist updates reach agents only this way, or over the mesh WebSocket as coordinator-signed gossip.
+   The owner's model commands are coordinator-signed frames down the agent's authenticated mesh
+   WebSocket ([Remote model control](#remote-model-control)).
 3. **Coordinator ↔ coordinator.** Allowlisted peer keys (`MESH_PEER_ALLOWLIST`, #52/#118), plus the
    mesh token as a transport gate. This change does not alter it.
 4. **Portal ↔ coordinator.** Portal service token; the portal binds `acct-<userId>` from the session.
@@ -64,7 +66,7 @@ Coordinator routes that agents may reach without the coordinators' token are lis
 - `/submit`, `/inference/{submit,stream,chunks}`;
 - `/account/*`, `POST /economy/market/orders`;
 - `/agent-mesh/*` (signed, agent-self);
-- `/orchestration/agents/:id/{status,ack}`;
+- `/orchestration/agents/:id/{status,ack}`, `/agent-control/agents/:id/report` (signer = `:id`);
 - signed GETs of `/inference/models`, `/agent-mesh/peers/:self` and `/tasks/:t/subtasks/:s/result`
   (results of the signer's own account only).
 
@@ -97,7 +99,11 @@ Listeners on an agent install:
 - Mesh `task_offer` is queued only when sender id and key equal the coordinator identity the worker
   verified (`isFromIdentity`). `task_claim` is accepted only from trusted peers.
 - Orchestration (model pull, Ollama install) is admin-only on the coordinator. The agent accepts only
-  Ollama-library model names (`isOllamaLibraryModelName`) and never installs binaries from it.
+  Ollama-library model names (`isOllamaLibraryModelName`) and never installs binaries from it. An
+  admin model rollout now passes the same host policy as the owner's commands (below): refused with
+  `AGENT_REMOTE_CONTROL=off`, and only for models on the host's allowlist.
+- Owner model commands ([Remote model control](#remote-model-control)) reach only the owning
+  account's machines, are signed by the agent's pinned coordinator, and are bounded by the host.
 - Agent-mesh tunnels relay only a counter. Direct-work routes are signed agent-self, and direct work
   is same-account only (below).
 
@@ -163,12 +169,102 @@ Listeners on an agent install:
   `SANDBOX_SECCOMP_PROFILE` is set. On Linux installs the agent user is in the `docker` group, so a
   compromise of the agent process is root on that host (not a cross-user path by itself). Task code
   is passed on argv and is visible in `ps` to local users.
-- **Model pulls.** An admin-forced model pull may name any user's Ollama-library model
-  (`user/model`) with no size cap. Only an operator can trigger it.
+- **Model pulls (replaced).** An admin-forced pull could name any Ollama-library model with no size
+  cap. Now every remote pull (the owner's or an operator's) must be on the host's allowlist (the
+  curated catalog by default, `AGENT_MODEL_ALLOWLIST` to change it) and fit the disk and memory;
+  `AGENT_REMOTE_CONTROL=off` refuses all of them. What is left: an allowlisted catalog model is still
+  a third-party download from registry.ollama.ai (its weights are not pinned by digest), and an
+  operator who extends the allowlist with `namespace/model` tags trusts that namespace.
 - **Agent Docker image.** It binds the mesh server on 0.0.0.0. It now accepts only trusted,
   signed gossip, but the port is still reachable from the LAN.
 - **Desktop local coordinator (4301).** It binds 127.0.0.1 with no Host-header check. Exposure to
   DNS rebinding from a web page was not traced; it is listed for follow-up.
+
+## Remote model control
+
+The owner manages each machine's models from the portal (Settings > Nodes): pull, select, remove,
+context window, parallel slots, keep-alive, reload. Code: `src/model/remote-control/`,
+`src/swarm/coordinator/model-control.ts`, `src/swarm/coordinator/routes/model-control.ts`,
+`src/portal/routes/machines.ts`.
+
+**Chain of authority**
+
+1. **Owner → portal.** The portal session names the user; the account is always
+   `acct-<session user>`, never taken from the request. The portal also checks the machine is one of
+   the user's enrolled agent nodes before calling any coordinator.
+2. **Portal → coordinator.** `POST /agent-control/agents/:id/commands` with the portal service token
+   and `{accountId, action, args}`. The coordinator looks up the agent's verified ownership row
+   (`verifiedAccountOf`, the portal-linked `agent_ownership` mapping) and refuses unless it names that
+   account: `403 not_your_machine`, the same answer for another account's machine and for a machine
+   with no ownership row, logged as `model_control_not_owner` (HIGH). An agent cannot bind its id to
+   an account by itself (see `portalBindDecision`).
+3. **Coordinator → agent.** The command is a `model_control` frame:
+
+   ```
+   { type: "model_control",
+     command: { v: 1, id, agentId, coordinatorId, requestedBy, issuedAtMs, expiresAtMs, action, args },
+     signature }   // Ed25519 by the coordinator's identity key over
+                   // "edgecoder-model-control-v1\n" + canonical JSON (sorted keys) of command
+   ```
+
+   It goes only down a mesh WebSocket whose bind proved the agent's registered key (never an unsigned
+   bind, never a peer coordinator's socket, never HTTP to the agent). Its lifetime is at most 2 minutes.
+4. **Agent.** It accepts the frame only if the signature verifies against the coordinator identity
+   its trust gate proved (the pinned key: TOFU, or strict seeds), `coordinatorId` is that identity,
+   `agentId` is its own, the command is not expired, at most 60 s in the future, with a lifetime of at
+   most 2 minutes, and its `id` is new (a replay cache keeps ids until they expire and refuses new
+   commands when full of live ones). The strict schema rejects any field the signature did not
+   cover. Only then does the host's policy apply:
+   - `AGENT_REMOTE_CONTROL=off`: view only (the state is still reported);
+   - models: Ollama library names only, and on `AGENT_MODEL_ALLOWLIST` (default: the catalog);
+   - pulls: the size (catalog, else the registry manifest, else refused) must fit the free disk
+     (download + 10% + 2 GiB) and the memory (VRAM + half the RAM, or 75% of the RAM); one at a
+     time; aborted after 3 h;
+   - settings: context 2048 to 131072, slots 1 to 8, keep-alive `-1`, `0` or up to 24 h;
+   - remove: never the active model, never a model loaded in Ollama;
+   - at most 30 commands per 10 minutes.
+5. **Agent → coordinator.** Results, progress and state go back as signed agent requests
+   (`/agent-control/agents/:id/report`; the signer must be `:id`). A result is accepted only for a
+   command this coordinator sent to that agent, and never after it settled. State is capped at 64 KB
+   and the portal shows it only after HTML escaping.
+
+**Rate limits (coordinator):** 30 commands per account and 12 per machine per 10 minutes, one open
+pull per machine, one refresh per machine every 5 s.
+
+**Audit:** every command except refresh: account, machine, action, arguments, time, status
+(`sent`, `accepted`, `progress`, `done`, `refused`, `failed`, `undelivered`, `expired`) and the
+agent's error or message. Kept in memory per agent (50) and in Postgres when configured
+(`ollama_rollouts`, `target_type = 'model-control'`); shown to the owning account under the machine.
+
+**Persistence without root:** the agent cannot write `/etc/edgecoder/agent-N.env` or the units.
+Remote settings go to `<config dir>/model-overrides.json` in the agent's own state directory (mode
+0600, atomic rename), checked against the same bounds when loaded (bad values and unknown keys are
+ignored). Each entry records the env value it replaced; when the env no longer has that value (the
+operator or the desktop app changed it locally), the local value wins and the entry is dropped.
+Ollama's server-side `OLLAMA_NUM_PARALLEL` is in the Ollama unit and is not changed remotely: the
+agent sends at most its slot count, and calls past Ollama's limit queue (the installer's `--parallel`
+changes both). `num_ctx` and `keep_alive` are sent with each request.
+
+**What a compromised party can do**
+
+- *Portal (service token):* send any allowlisted, bounded command to any owned machine, as any
+  account. It cannot install binaries, name a model off the allowlist or exceed the bounds; hosts
+  with `AGENT_REMOTE_CONTROL=off` are untouched. (The service token already reaches every account's
+  balance; it is a high-value secret either way.)
+- *Coordinator (identity key):* the same for the agents that pinned it, without the ownership check.
+- *Another user:* nothing; the ownership check runs on the coordinator, from the verified mapping.
+- *Network attacker on the WebSocket:* cannot forge or alter a frame (signature), redirect it to
+  another agent (`agentId` is signed), or replay it (id cache, 2-minute lifetime).
+- *A user's own agent:* can report a false state for itself (its own machine) and nothing about
+  any other agent.
+
+**Residual risk**
+
+- The Postgres audit rows share `ollama_rollouts`, which mesh-token holders can list
+  (`/orchestration/rollouts`): coordinators see which account changed which machine's models.
+- A coordinator without a database keeps the audit in memory only (lost on restart); its agents
+  have no ownership rows, so no remote control is possible there at all.
+- The desktop app's own machine view does not show remote commands yet (the portal does).
 
 ## 2. Theft of bitcoin/cSats
 
@@ -396,7 +492,9 @@ Listeners on an agent install:
   - send code and prompts (sandboxed);
   - ask for benchmarks;
   - see the agent's results and telemetry;
-  - with its admin token, make agents pull Ollama-library models.
+  - make agents pull, select or remove allowlisted models, and change their bounded model settings
+    (as a forged owner command or an admin rollout); a host that sets `AGENT_REMOTE_CONTROL=off`
+    refuses all of it.
 
   It cannot install binaries or run code outside the sandbox through orchestration. It does not
   learn the agent's keys.

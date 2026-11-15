@@ -26,6 +26,7 @@ import { createPayoutCallbackClient, registerPayoutCallbackNotifyRoute, register
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
+import { registerMachineRoutes } from "./routes/machines.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
 import { registerNetworkAdminRoutes } from "./routes/network-admin.js";
@@ -881,6 +882,8 @@ registerReviewRoutes(app, reviewsRouteDeps);
 const marketRouteDeps = { LAUNCH_MODE, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
+// Settings > Nodes > Machines: the owner's remote model control (src/portal/routes/machines.ts).
+registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, store });
 // The Wallet screens (web, desktop, iOS): one read-only overview, and a session-bound Lightning top-up.
 registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
 registerPayoutRoutes(app, marketRouteDeps, {

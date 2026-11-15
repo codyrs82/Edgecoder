@@ -89,6 +89,16 @@ export const workerConfigSchema = z.object({
    * (src/swarm/parallelism.ts servedContextWindow).
    */
   AGENT_CONTEXT_WINDOW: envInt(undefined, { min: 2048, max: 131_072 }),
+  /**
+   * Remote model control from the owner's portal (src/model/remote-control/): "off" makes this host
+   * view-only (its state is still shown; no command changes anything, admin model rollouts included).
+   */
+  AGENT_REMOTE_CONTROL: z.string().trim().regex(/^(on|off|1|0|true|false|yes|no)$/i, "on or off").optional(),
+  /**
+   * Models a remote command (the owner's, or an operator rollout) may pull or select: comma-separated
+   * Ollama tags. Unset = the curated catalog; `catalog` in the list adds it back; `none` allows nothing.
+   */
+  AGENT_MODEL_ALLOWLIST: z.string().trim().max(4000).optional(),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),
