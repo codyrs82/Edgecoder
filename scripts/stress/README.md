@@ -69,7 +69,10 @@ no invariant failed. `scripts/stress/remote-smoke.sh` does the same through the 
 `STRESS_LATENCY_SIGMA` (log-normal simulated work time), `STRESS_NO_SANDBOX_SHARE` (inference-only
 agents), `STRESS_TOPUP_SATS`, plus `STRESS_RAMP_MAX_RATE`, `STRESS_CHURN_FRACTION`,
 `STRESS_KILL_MODE=stop|kill`, `STRESS_DOWN_SEC`, `STRESS_LOCK_SEC`, `STRESS_PAUSE_SEC`,
-`STRESS_WITHDRAWALS_PER_ACCOUNT`.
+`STRESS_WITHDRAWALS_PER_ACCOUNT`, `STRESS_NUDGE=1` (agents hold a signed-bind mesh WebSocket and pull
+at once on a `work_available` nudge, as current workers do; unset = poll-only agents, for a
+before/after of pickup time: the coordinators' `/metrics` report `edgecoder_dispatch_pickup_p50_ms` /
+`_p90_ms`, reset by `reconfigure.sh`).
 
 | scenario | local | remote | what it does |
 |---|---|---|---|

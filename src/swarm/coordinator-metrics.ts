@@ -17,6 +17,8 @@ export interface CoordinatorMetricSources {
   /** Agents in the in-memory registry, seen recently or not (pruned after AGENT_CAPABILITY_TTL_MS). */
   knownAgents?: () => number;
   payoutReconcile: () => ReconcileResult | null;
+  /** Fast dispatch: pickup time (claimable to claimed) over recent claims, and nudges sent. */
+  dispatch?: () => { count: number; p50: number; p90: number; nudges: number };
 }
 
 /** ReconcileResult["status"], plus "never_run" until the first run completes. */
@@ -27,6 +29,12 @@ export function registerCoordinatorMetrics(metrics: ServiceMetrics, sources: Coo
   metrics.gauge("edgecoder_queue_results", "Task results held by the swarm queue.", () => sources.queue().results);
   metrics.gauge("edgecoder_connected_agents", "Agents seen by this coordinator in the last 2 minutes.", sources.connectedAgents);
   if (sources.knownAgents) metrics.gauge("edgecoder_known_agents", "Agents in this coordinator's registry (seen within the retention window).", sources.knownAgents);
+  if (sources.dispatch) {
+    const d = sources.dispatch;
+    metrics.gauge("edgecoder_dispatch_pickup_p50_ms", "Median time from a subtask becoming claimable to an agent claiming it, recent claims (ms).", () => d().p50);
+    metrics.gauge("edgecoder_dispatch_pickup_p90_ms", "90th percentile time from a subtask becoming claimable to an agent claiming it, recent claims (ms).", () => d().p90);
+    metrics.gauge("edgecoder_dispatch_nudges_sent", "work_available nudges sent to agents since start.", () => d().nudges);
+  }
   metrics.stateGauge(
     "edgecoder_payout_reconcile_status",
     "Outcome of the last payout reconciliation run (1 for the current state).",

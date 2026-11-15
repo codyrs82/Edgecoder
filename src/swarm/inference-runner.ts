@@ -9,7 +9,7 @@
  */
 
 import type { Subtask, SubtaskResult } from "../common/types.js";
-import { ollamaChat } from "../inference-api/ollama.js";
+import { contextNeeded, ollamaChat } from "../inference-api/ollama.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "../inference-api/types.js";
 
 export interface InferenceInput {
@@ -18,6 +18,11 @@ export interface InferenceInput {
   maxTokens?: number;
   temperature?: number;
 }
+
+/** Error of a model call that produced no text and no tool call (src/swarm/coordinator/routes/inference.ts retries it). */
+export const EMPTY_REPLY_ERROR = "empty_reply";
+/** Error of a call longer than the agent's context window (another agent may serve a bigger one). */
+export const CONTEXT_TOO_LONG_ERROR = "context_too_long";
 
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
@@ -28,6 +33,10 @@ export async function runInferenceSubtask(
   deps: {
     agentId: string;
     ollamaHost: string;
+    /** How long Ollama keeps the model loaded after the call (AGENT_MODEL_KEEP_ALIVE). */
+    keepAlive?: string;
+    /** The one context window this agent serves calls with (AGENT_CONTEXT_WINDOW); unset = sized per call. */
+    contextWindow?: number;
     /** Signed POST to the coordinator. */
     post: (path: string, body: unknown) => Promise<unknown>;
   },
@@ -43,6 +52,15 @@ export async function runInferenceSubtask(
   }
   const model = st.requestedModel;
   if (!model) return { ...base, ok: false, output: "", error: "no model requested", durationMs: 0 };
+
+  // A call that does not fit the agent's window is refused before Ollama sees it (asking for a bigger
+  // window would reload the model). Nothing was sent, so the coordinator gives it to another agent.
+  if (deps.contextWindow) {
+    const need = contextNeeded(input.messages, input.tools, input.maxTokens);
+    if (need > deps.contextWindow) {
+      return { ...base, ok: false, output: "", error: `${CONTEXT_TOO_LONG_ERROR}: needs ${need} tokens, this agent serves ${deps.contextWindow}`, durationMs: 0 };
+    }
+  }
 
   let seq = 0;
   let pending = "";
@@ -63,9 +81,12 @@ export async function runInferenceSubtask(
   };
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), Math.max(5_000, st.timeoutMs));
+  // The subtask's own deadline bounds the call; the HTTP client's timeouts sit just past it, so a
+  // cold model load (seconds to minutes on a CPU) is not cut off as a "Headers Timeout Error".
+  const deadlineMs = Math.max(5_000, st.timeoutMs);
+  const timer = setTimeout(() => abort.abort(), deadlineMs);
   try {
-    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal)) {
+    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000)) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
       else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens };
       else if ("delta" in piece) {
@@ -74,11 +95,19 @@ export async function runInferenceSubtask(
         if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }
+    if (!full.trim() && toolCalls.length === 0) {
+      // No text and no tool call is not an answer. It is reported as a failure without a final
+      // piece, so the requester's stream stays open and the coordinator can give the call to
+      // another agent; nothing is charged for a failed call.
+      return { ...base, ok: false, output: "", error: EMPTY_REPLY_ERROR, durationMs: Date.now() - started };
+    }
     await flush(true);
     return { ...base, ok: true, output: full, durationMs: Date.now() - started };
   } catch (err) {
     const msg = abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : (err as Error).message;
-    await flush(true, msg);
+    // Nothing reached the requester yet: leave the stream open, so the call can be retried elsewhere
+    // (the failed result tells the coordinator, which ends the stream when it does not retry).
+    if (full || toolCalls.length) await flush(true, msg);
     return { ...base, ok: false, output: full, error: msg, durationMs: Date.now() - started };
   } finally {
     clearTimeout(timer);

@@ -5,13 +5,15 @@ import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
-import { parallelInferenceFor } from "./parallelism.js";
+import { parallelInferenceFor, servedContextWindow } from "./parallelism.js";
+import { paramsB } from "../inference-api/auto-route.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
+import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
@@ -92,7 +94,16 @@ const PROVIDER = W.LOCAL_MODEL_PROVIDER;
 const OLLAMA_MODEL = W.OLLAMA_MODEL;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
-const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
+// By memory and OLLAMA_MODEL's size, never past this machine's OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
+const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE, {
+  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
+  ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL
+});
+/** One context window for every network call (Ollama reloads the model when num_ctx changes). */
+const CONTEXT_WINDOW = servedContextWindow(totalmem(), W.AGENT_CONTEXT_WINDOW, {
+  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
+  slots: MAX_PARALLEL_INFERENCE
+});
 const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
@@ -169,6 +180,23 @@ if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
   console.warn(`[agent] AGENT_INFERENCE_ONLY is ignored with SANDBOX_MODE=${SANDBOX_MODE}: this agent takes code and inference work`);
 }
 const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
+/** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
+const MODEL_KEEP_ALIVE = W.AGENT_MODEL_KEEP_ALIVE ?? (INFERENCE_ONLY ? "-1" : "30m");
+/**
+ * Load the network model before taking work, so the first call does not pay a cold load (about
+ * 4-5 s on a CPU, and a headers timeout under parallel calls). Bounded: a missing model or a
+ * stopped Ollama only logs, and the agent goes on (the call then fails and is retried elsewhere).
+ */
+async function warmNetworkModel(model: string, why: string): Promise<void> {
+  const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
+  const started = Date.now();
+  try {
+    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000, numCtx: CONTEXT_WINDOW });
+    console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, context ${CONTEXT_WINDOW}, keep_alive ${MODEL_KEEP_ALIVE}, ${MAX_PARALLEL_INFERENCE} parallel`);
+  } catch (e) {
+    console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
+  }
+}
 let warnedNoSandbox = false;
 const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
 const PORTAL_URL = W.PORTAL_URL ?? "";
@@ -731,6 +759,70 @@ async function learnCoordinatorPeer(peer: MeshPeer, coordinatorUrl: string, from
   }
 }
 
+// ── Fast dispatch (src/swarm/coordinator/dispatch.ts) ──
+// The coordinator sends "work_available" (no task, no id) down the authenticated mesh WebSocket
+// when there is work this agent could take; the agent then pulls at once with its normal signed
+// /pull, where every claim rule applies. The poll stays as the fallback, slower while the socket
+// is up. A nudge can only make the agent pull sooner.
+/** Poll interval while idle: with the mesh WebSocket up (nudges arrive), and without. */
+const IDLE_POLL_WITH_NUDGES_MS = 3_000;
+const IDLE_POLL_MS = 1_200;
+/** A nudged pass skips registration/heartbeat/tunnels when a full pass ran this recently. */
+const QUICK_PULL_WINDOW_MS = 5_000;
+let meshWsOpen = false;
+let wokenByNudge = false;
+let lastHousekeepingAtMs = 0;
+let wakeIdle: (() => void) | null = null;
+let wakePending = false;
+/** Wake the loop's idle wait now (a nudge, or a model slot that just freed). */
+function wakeLoop(byNudge: boolean): void {
+  if (byNudge) wokenByNudge = true;
+  if (wakeIdle) wakeIdle();
+  else wakePending = true;
+}
+/** The loop's idle wait: ends after `ms` or at the first wakeLoop. */
+function idleWait(ms: number): Promise<void> {
+  if (wakePending) {
+    wakePending = false;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      wakeIdle = null;
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    wakeIdle = done;
+  });
+}
+
+/** What /heartbeat answers (the fields the worker uses). */
+type HeartbeatReply = {
+  ok?: boolean;
+  blacklisted?: boolean;
+  reason?: string;
+  orchestration?: {
+    provider: "edgecoder-local" | "ollama-local";
+    model?: string;
+    autoInstall: boolean;
+    pending: boolean;
+  } | null;
+  tunnelInvites?: Array<{ fromAgentId: string; token: string }>;
+  tunnelCloseNotices?: Array<{ peerAgentId: string; token: string; reason: string }>;
+  directWorkOffers?: Array<{
+    offerId: string;
+    fromAgentId: string;
+    toAgentId: string;
+    workType: "code_task" | "model_inference";
+    language?: "python" | "javascript";
+    input: string;
+  }>;
+  blacklist?: { version: number; agents: string[] };
+    benchmarkChallenge?: BenchmarkChallenge;
+    hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
+};
+
 function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   let reconnectDelay = 1000;
   const MAX_RECONNECT_DELAY = 30_000;
@@ -753,6 +845,7 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     let registeredPeerId: string | null = null;
 
     ws.on("open", () => {
+      meshWsOpen = true;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
       reconnectDelay = 1000;
     });
@@ -760,6 +853,11 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     ws.on("message", async (data) => {
       try {
         const message = JSON.parse(data.toString());
+        // Fast dispatch: there is work; pull now (the pull decides what, if anything, we get).
+        if (message && typeof message === "object" && message.type === "work_available" && !message.fromPeerId) {
+          wakeLoop(true);
+          return;
+        }
         const peer = getMeshPeer();
         if (peer) {
           // Register this WS for outbound gossip on first message from the coordinator.
@@ -782,6 +880,7 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     });
 
     ws.on("close", () => {
+      meshWsOpen = false;
       // Unregister WS from gossip mesh
       if (registeredPeerId) {
         const peer = getMeshPeer();
@@ -821,6 +920,8 @@ async function loop(): Promise<void> {
     role: "agent",
     host: OLLAMA_HOST
   });
+  // Before the first pull (registration waits a few seconds at most): the network model is loaded.
+  if (PULLS_FROM_COORDINATOR && (PROVIDER === "ollama-local" || INFERENCE_ONLY)) await warmNetworkModel(OLLAMA_MODEL, "startup");
 
   const providers = new ProviderRegistry();
   let currentProvider = PROVIDER;
@@ -1112,230 +1213,221 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
-        // Re-steer now and then; hysteresis keeps the current coordinator unless another is clearly faster.
-        if (coordinatorSteering && Date.now() - lastSteeredAtMs >= STEERING_INTERVAL_MS) {
-          const steered = await steerCoordinator();
-          if (steered && coordinator.set(steered.url, "steering")) cacheCoordinatorUrl(coordinator.url);
-        }
-        // ── Sandbox policy enforcement ──
-        const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
-        if (sandboxError?.startsWith("sandbox_required")) {
-          console.error(`[agent:${AGENT_ID}] ${sandboxError}`);
-          await new Promise((r) => setTimeout(r, 5000));
-          continue;
-        }
-        // Docker configured but not running: stay registered (the IDE forwarder and heartbeats
-        // keep working) but pull nothing until it is back.
-        if (!sandboxError && !sandboxImagesReady && !sandboxImagesBuilding) {
-          sandboxImagesBuilding = true;
-          console.log(`[agent:${AGENT_ID}] preparing sandbox images (first run builds them; this can take a few minutes)`);
-          void ensureSandboxImages().then((r) => {
-            sandboxImagesBuilding = false;
-            sandboxImagesReady = r.ok;
-            if (!r.ok) console.warn(`[agent:${AGENT_ID}] sandbox images not ready: ${r.error}`);
-          });
-        }
-        const sandboxProblem = sandboxError ?? (sandboxImagesReady ? null : "sandbox images not ready");
-        if (Boolean(sandboxProblem) !== sandboxDown) {
-          sandboxDown = Boolean(sandboxProblem);
-          console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxProblem}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
-        }
-
-        // Pinned-key trust: the coordinator proves possession of its key before any register,
-        // heartbeat or pull (re-proven on URL change, on reconnect and when the check expires).
-        await verifyCoordinatorOrThrow();
-        // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
-        if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
-          benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
-          try {
-            lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL } : undefined });
-            benchmarkUnreported = true;
-            console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
-          } catch (e) {
-            console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
+        // A work_available nudge (fast dispatch) shortly after a full pass goes straight to the pull:
+        // registration, heartbeat, tunnels and the rest ran a moment ago, and run again on the next pass.
+        const quickPull = wokenByNudge && Date.now() - lastHousekeepingAtMs < QUICK_PULL_WINDOW_MS && registeredWithUrl === coordinator.url && coordinator.isVerified();
+        wokenByNudge = false;
+        let hb: HeartbeatReply = {};
+        let blacklistSet = new Set<string>();
+        if (quickPull) {
+          await verifyCoordinatorOrThrow();
+        } else {
+          lastHousekeepingAtMs = Date.now();
+          // Re-steer now and then; hysteresis keeps the current coordinator unless another is clearly faster.
+          if (coordinatorSteering && Date.now() - lastSteeredAtMs >= STEERING_INTERVAL_MS) {
+            const steered = await steerCoordinator();
+            if (steered && coordinator.set(steered.url, "steering")) cacheCoordinatorUrl(coordinator.url);
           }
-        }
-        if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
-          if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
-          const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
-          const registerBody = {
-            ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
-            agentId: AGENT_ID,
-            ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-            os: OS,
-            version: "0.1.0",
-            mode: effectiveMode,
-            registrationToken: AGENT_REGISTRATION_TOKEN,
-            localModelProvider: currentProvider,
-            clientType: AGENT_CLIENT_TYPE,
-            maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-            sandboxMode: SANDBOX_MODE,
-            powerTelemetry,
-            publicKeyPem: keys.publicKeyPem,
-            x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
-            hardwareProfile: HARDWARE_PROFILE,
-            ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
-            ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
-            ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
-            ...(binaryIntegrity ? { binaryIntegrity } : {})
-          };
-          const registerResponse = (await post("/register", registerBody, {
-            signed: true,
-          })) as {
-            accepted?: boolean;
-            meshToken?: string;
-            rewardAccountId?: string;
-          };
-          registeredWithUrl = coordinator.url;
-          lastRegisteredAtMs = Date.now();
-          adoptMeshToken(registerResponse.meshToken);
-          adoptRewardAccount(registerResponse.rewardAccountId);
-        }
+          // ── Sandbox policy enforcement ──
+          const sandboxError = await enforceSandboxPolicy(SANDBOX_MODE, SANDBOX_REQUIRED);
+          if (sandboxError?.startsWith("sandbox_required")) {
+            console.error(`[agent:${AGENT_ID}] ${sandboxError}`);
+            await new Promise((r) => setTimeout(r, 5000));
+            continue;
+          }
+          // Docker configured but not running: stay registered (the IDE forwarder and heartbeats
+          // keep working) but pull nothing until it is back.
+          if (!sandboxError && !sandboxImagesReady && !sandboxImagesBuilding) {
+            sandboxImagesBuilding = true;
+            console.log(`[agent:${AGENT_ID}] preparing sandbox images (first run builds them; this can take a few minutes)`);
+            void ensureSandboxImages().then((r) => {
+              sandboxImagesBuilding = false;
+              sandboxImagesReady = r.ok;
+              if (!r.ok) console.warn(`[agent:${AGENT_ID}] sandbox images not ready: ${r.error}`);
+            });
+          }
+          const sandboxProblem = sandboxError ?? (sandboxImagesReady ? null : "sandbox images not ready");
+          if (Boolean(sandboxProblem) !== sandboxDown) {
+            sandboxDown = Boolean(sandboxProblem);
+            console.warn(`[agent:${AGENT_ID}] ${sandboxDown ? `${sandboxProblem}; not pulling swarm tasks until it is` : "sandbox available again; pulling swarm tasks"}`);
+          }
 
-        const hbStart = Date.now();
-        // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
-        const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
-        const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
-        const hb = (await post("/heartbeat", hbBody, { signed: true })) as {
-          ok?: boolean;
-          blacklisted?: boolean;
-          reason?: string;
-          orchestration?: {
-            provider: "edgecoder-local" | "ollama-local";
-            model?: string;
-            autoInstall: boolean;
-            pending: boolean;
-          } | null;
-          tunnelInvites?: Array<{ fromAgentId: string; token: string }>;
-          tunnelCloseNotices?: Array<{ peerAgentId: string; token: string; reason: string }>;
-          directWorkOffers?: Array<{
-            offerId: string;
-            fromAgentId: string;
-            toAgentId: string;
-            workType: "code_task" | "model_inference";
-            language?: "python" | "javascript";
-            input: string;
-          }>;
-          blacklist?: { version: number; agents: string[] };
-          benchmarkChallenge?: BenchmarkChallenge;
-          hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
-        };
-        if ("benchmark" in hbBody) benchmarkUnreported = false;
-        try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
-
-        // Heartbeat succeeded — reset failure counter and cache proven URL
-        consecutiveFailures = 0;
-        cacheCoordinatorUrl(coordinator.url);
-
-        if (hb.blacklisted) {
-          console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
-          await new Promise((r) => setTimeout(r, 5000));
-          continue;
-        }
-        // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
-        if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
-          const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST });
-          const answerBody = { agentId: AGENT_ID, ...answer };
-          try {
-            const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
-              verification?: { status?: string; grantedTier?: string; claimedTier?: string } | null;
+          // Pinned-key trust: the coordinator proves possession of its key before any register,
+          // heartbeat or pull (re-proven on URL change, on reconnect and when the check expires).
+          await verifyCoordinatorOrThrow();
+          // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
+          if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
+            benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
+            try {
+              lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL, numCtx: CONTEXT_WINDOW } : undefined });
+              benchmarkUnreported = true;
+              console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
+            } catch (e) {
+              console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
+            }
+          }
+          if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
+            if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
+            const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+            const registerBody = {
+              ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+              agentId: AGENT_ID,
+              ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+              os: OS,
+              version: "0.1.0",
+              mode: effectiveMode,
+              registrationToken: AGENT_REGISTRATION_TOKEN,
+              localModelProvider: currentProvider,
+              clientType: AGENT_CLIENT_TYPE,
+              maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+              sandboxMode: SANDBOX_MODE,
+              powerTelemetry,
+              publicKeyPem: keys.publicKeyPem,
+              x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+              hardwareProfile: HARDWARE_PROFILE,
+              ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
+              ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
+              ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
+              ...(binaryIntegrity ? { binaryIntegrity } : {})
             };
-            const v = res?.verification;
-            console.log(`[agent:${AGENT_ID}] benchmark challenge ${answer.kind}${answer.declined ? ` declined (${answer.declined})` : ""}: ${v ? `${v.status} ${v.grantedTier}/${v.claimedTier}` : "answered"}`);
-          } catch (e) {
-            console.warn(`[agent:${AGENT_ID}] benchmark challenge answer failed: ${e}`);
+            const registerResponse = (await post("/register", registerBody, {
+              signed: true,
+            })) as {
+              accepted?: boolean;
+              meshToken?: string;
+              rewardAccountId?: string;
+            };
+            registeredWithUrl = coordinator.url;
+            lastRegisteredAtMs = Date.now();
+            adoptMeshToken(registerResponse.meshToken);
+            adoptRewardAccount(registerResponse.rewardAccountId);
           }
-        }
-        const blacklistSet = new Set(hb.blacklist?.agents ?? []);
-        for (const notice of hb.tunnelCloseNotices ?? []) {
-          peerTunnels.delete(notice.peerAgentId);
-          await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token }, { signed: true });
-        }
-        for (const invite of hb.tunnelInvites ?? []) {
-          if (blacklistSet.has(invite.fromAgentId)) continue;
-          await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token }, { signed: true });
-          peerTunnels.set(invite.fromAgentId, invite.token);
-        }
 
-        const idlePeersResponse = await coordinatorGet(`/agent-mesh/peers/${AGENT_ID}`);
-        if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
-          const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
-          for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
-            if (blacklistSet.has(peerId)) continue;
-            if (peerId === AGENT_ID) continue;
-            if (peerTunnels.has(peerId)) continue;
-            const connect = await signedJsonPost("/agent-mesh/connect", { fromAgentId: AGENT_ID, toAgentId: peerId });
-            if (connect.statusCode >= 200 && connect.statusCode < 300) {
-              const body = (await parseJsonBodySafe(connect)) as { token?: string };
-              if (body.token) peerTunnels.set(peerId, body.token);
-            }
+          const hbStart = Date.now();
+          // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
+          const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
+          if ("benchmark" in hbBody) benchmarkUnreported = false;
+          try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
+
+          // Heartbeat succeeded — reset failure counter and cache proven URL
+          consecutiveFailures = 0;
+          cacheCoordinatorUrl(coordinator.url);
+
+          if (hb.blacklisted) {
+            console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
+            await new Promise((r) => setTimeout(r, 5000));
+            continue;
           }
-        }
-
-        for (const token of peerTunnels.values()) {
-          const relayRes = await signedJsonPost("/agent-mesh/relay", {
-            token,
-            fromAgentId: AGENT_ID,
-            payload: `ping:${Date.now()}`
-          });
-          if (relayRes.statusCode === 404 || relayRes.statusCode === 403) {
-            for (const [peerId, peerToken] of peerTunnels.entries()) {
-              if (peerToken === token) peerTunnels.delete(peerId);
-            }
-          }
-        }
-
-        if (hb.orchestration?.pending) {
-          const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
+          // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
+          if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
+            const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST, numCtx: CONTEXT_WINDOW });
+            const answerBody = { agentId: AGENT_ID, ...answer };
             try {
-              await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct }, { signed: true });
-            } catch {
-              // best-effort; coordinator may be unreachable
+              const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
+                verification?: { status?: string; grantedTier?: string; claimedTier?: string } | null;
+              };
+              const v = res?.verification;
+              console.log(`[agent:${AGENT_ID}] benchmark challenge ${answer.kind}${answer.declined ? ` declined (${answer.declined})` : ""}: ${v ? `${v.status} ${v.grantedTier}/${v.claimedTier}` : "answered"}`);
+            } catch (e) {
+              console.warn(`[agent:${AGENT_ID}] benchmark challenge answer failed: ${e}`);
             }
-          };
-          try {
-            await reportStatus("starting", "Preparing to switch model…");
-            const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
-            // A coordinator may only name Ollama library models, and never installs the binary.
-            if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
-            await ensureOllamaModelInstalled(
-              {
-                enabled: hb.orchestration.provider === "ollama-local",
-                autoInstall: hb.orchestration.autoInstall,
-                model: switchModel,
-                role: "agent",
-                host: OLLAMA_HOST,
-                allowBinaryInstall: false
-              },
-              reportStatus
-            );
-            currentProvider = hb.orchestration.provider;
-            providers.use(currentProvider);
-            await reportStatus("done", "Model switch complete.");
+          }
+          blacklistSet = new Set(hb.blacklist?.agents ?? []);
+          for (const notice of hb.tunnelCloseNotices ?? []) {
+            peerTunnels.delete(notice.peerAgentId);
+            await post("/agent-mesh/close-ack", { agentId: AGENT_ID, token: notice.token }, { signed: true });
+          }
+          for (const invite of hb.tunnelInvites ?? []) {
+            if (blacklistSet.has(invite.fromAgentId)) continue;
+            await post("/agent-mesh/accept", { agentId: AGENT_ID, token: invite.token }, { signed: true });
+            peerTunnels.set(invite.fromAgentId, invite.token);
+          }
+
+          const idlePeersResponse = await coordinatorGet(`/agent-mesh/peers/${AGENT_ID}`);
+          if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
+            const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
+            for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
+              if (blacklistSet.has(peerId)) continue;
+              if (peerId === AGENT_ID) continue;
+              if (peerTunnels.has(peerId)) continue;
+              const connect = await signedJsonPost("/agent-mesh/connect", { fromAgentId: AGENT_ID, toAgentId: peerId });
+              if (connect.statusCode >= 200 && connect.statusCode < 300) {
+                const body = (await parseJsonBodySafe(connect)) as { token?: string };
+                if (body.token) peerTunnels.set(peerId, body.token);
+              }
+            }
+          }
+
+          for (const token of peerTunnels.values()) {
+            const relayRes = await signedJsonPost("/agent-mesh/relay", {
+              token,
+              fromAgentId: AGENT_ID,
+              payload: `ping:${Date.now()}`
+            });
+            if (relayRes.statusCode === 404 || relayRes.statusCode === 403) {
+              for (const [peerId, peerToken] of peerTunnels.entries()) {
+                if (peerToken === token) peerTunnels.delete(peerId);
+              }
+            }
+          }
+
+          if (hb.orchestration?.pending) {
+            const reportStatus = async (phase: string, message: string, progressPct?: number): Promise<void> => {
+              try {
+                await post("/orchestration/agents/" + AGENT_ID + "/status", { phase, message, progressPct }, { signed: true });
+              } catch {
+                // best-effort; coordinator may be unreachable
+              }
+            };
             try {
+              await reportStatus("starting", "Preparing to switch model…");
+              const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
+              // A coordinator may only name Ollama library models, and never installs the binary.
+              if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
+              await ensureOllamaModelInstalled(
+                {
+                  enabled: hb.orchestration.provider === "ollama-local",
+                  autoInstall: hb.orchestration.autoInstall,
+                  model: switchModel,
+                  role: "agent",
+                  host: OLLAMA_HOST,
+                  allowBinaryInstall: false
+                },
+                reportStatus
+              );
+              currentProvider = hb.orchestration.provider;
+              providers.use(currentProvider);
+              if (hb.orchestration.provider === "ollama-local") await warmNetworkModel(switchModel, "model switch");
+              await reportStatus("done", "Model switch complete.");
+              try {
+                await post(
+                  `/orchestration/agents/${AGENT_ID}/ack`,
+                  { ok: true },
+                  { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS), signed: true }
+                );
+              } catch (ackError) {
+                console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
+                await reportStatus("warning", "Model switch done locally; waiting for coordinator ack retry.").catch(() => {});
+              }
+            } catch (error) {
+              await reportStatus("error", String(error)).catch(() => {});
               await post(
                 `/orchestration/agents/${AGENT_ID}/ack`,
-                { ok: true },
+                {
+                  ok: false,
+                  error: String(error)
+                },
                 { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS), signed: true }
-              );
-            } catch (ackError) {
-              console.warn(`[agent:${AGENT_ID}] orchestration ack retry exhausted: ${String(ackError)}`);
-              await reportStatus("warning", "Model switch done locally; waiting for coordinator ack retry.").catch(() => {});
+              ).catch(() => {});
             }
-          } catch (error) {
-            await reportStatus("error", String(error)).catch(() => {});
-            await post(
-              `/orchestration/agents/${AGENT_ID}/ack`,
-              {
-                ok: false,
-                error: String(error)
-              },
-              { retries: Math.max(3, COORDINATOR_POST_RETRIES + 1), timeoutMs: Math.max(20000, COORDINATOR_HTTP_TIMEOUT_MS), signed: true }
-            ).catch(() => {});
           }
         }
 
-        const pullBody = { agentId: AGENT_ID };
+        // Our model slots (the coordinator hands a call only to an agent with one free) and that we take nudges.
+        const freeInferenceSlots = Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size);
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
@@ -1343,7 +1435,8 @@ async function loop(): Promise<void> {
           warnedNoSandbox = true;
           console.log(`[agent:${AGENT_ID}] inference-only: pulling inference subtasks only (no sandbox, no task code is run)`);
         }
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown
+        // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -1421,7 +1514,7 @@ async function loop(): Promise<void> {
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
             const run = st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
               : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);
@@ -1503,7 +1596,11 @@ async function loop(): Promise<void> {
             while (inflightInference.size >= MAX_PARALLEL_INFERENCE) await Promise.race(inflightInference);
             const job: Promise<void> = runAndReport()
               .catch((e) => console.warn(`[agent:${AGENT_ID}] inference ${st.id} failed: ${String(e)}`))
-              .finally(() => inflightInference.delete(job));
+              .finally(() => {
+                inflightInference.delete(job);
+                // A slot is free: pull again now rather than at the next poll.
+                wakeLoop(false);
+              });
             inflightInference.add(job);
             continue;
           }
@@ -1790,9 +1887,9 @@ async function loop(): Promise<void> {
       }
 
       const idleDelayMs = coordinatorOnline
-        ? (OS === "ios" && !allowPeerDirectWork(powerTelemetry) ? 2500 : 1200)
+        ? (OS === "ios" && !allowPeerDirectWork(powerTelemetry) ? 2500 : meshWsOpen ? IDLE_POLL_WITH_NUDGES_MS : IDLE_POLL_MS)
         : 5000;
-      await new Promise((r) => setTimeout(r, idleDelayMs));
+      await idleWait(idleDelayMs);
     } catch (error) {
       // 429: the coordinator is fine and knows us; we are only sending too fast. Back off for its
       // Retry-After without counting a failure: failures lead to offline mode and re-registering,

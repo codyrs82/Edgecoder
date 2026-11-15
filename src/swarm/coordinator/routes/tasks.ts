@@ -4,7 +4,7 @@
 /**
  * Task routes: submit, pull and result.
  */
-import { agentMayClaim, inferenceOnlyAgent } from "../../sandbox-enforcement.js";
+import { inferenceOnlyAgent } from "../../sandbox-enforcement.js";
 import { createHash, randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { z } from "zod";
@@ -17,7 +17,7 @@ import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../
 import { msatToCSats } from "../../../economy/job-pricing.js";
 import { pgStore } from "../../../db/store.js";
 import { resolveRequestedClass, type ComputeClassId } from "../../../economy/compute-classes.js";
-import { capabilityConstraints, meetsCapability } from "../../../economy/order-book.js";
+import { capabilityConstraints } from "../../../economy/order-book.js";
 import { isProduction } from "../../../common/env-guard.js";
 import {
   checkResultClaim,
@@ -28,7 +28,7 @@ import {
   serverMeasuredDurationMs
 } from "../../result-integrity.js";
 import { executorKey, type ExecutionResult, type VerificationOutcome } from "../../verification.js";
-import { resultModelMismatch, subtaskModelEligible } from "../../model-catalog.js";
+import { resultModelMismatch } from "../../model-catalog.js";
 import { evaluateAgentPowerPolicy } from "../../power-policy.js";
 import {
   createTaskEnvelope,
@@ -54,7 +54,6 @@ import {
   COORDINATOR_PUBLIC_URL,
   IOS_BATTERY_PULL_MIN_INTERVAL_MS,
   IOS_BATTERY_TASK_STOP_LEVEL_PCT,
-  reservations,
   claimedTradePrice,
   MESH_AUTH_TOKEN,
   MESH_PEER_ALLOWLIST,
@@ -87,7 +86,6 @@ import {
   marketOrders,
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS,
-  askCapabilityOf,
   effectiveHardware,
   marketHistory,
   hardwareVerifier,
@@ -116,8 +114,9 @@ import {
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
-import { inferenceStreams } from "./inference.js";
-import { peerGrantAllowsClaim } from "../grants.js";
+import { inferenceStreams, retryInferenceElsewhere } from "./inference.js";
+import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
+import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
@@ -365,28 +364,21 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // is claimed and requeued for an agent that may not run it.
     const inferenceOnly = inferenceOnlyAgent(capability);
     const pullerAccount = await rewardAccountForAgent(body.agentId);
-    // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
-    const lease = reservations.activeForAgent(body.agentId);
+    // Fast dispatch (dispatch.ts): the agent's model slots, and whether it takes work_available nudges.
+    noteAgentPull(body.agentId, body);
+    const canTake = claimRule(body.agentId, capability, pullerAccount);
+    const claims = queue.activeClaims();
+    const nowMs = Date.now();
     const task = queue.claim(
       body.agentId,
       capability?.activeModel,
       pullerAccount,
       // The book enforces the bid's class, price and constraints. The subtask's own constraints are
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-      (subtask) => {
-        if (!agentMayClaim(capability, subtask)) return false;
-        // A subtask granted to us by its origin: only while enough of the grant is left to run it.
-        if (!peerGrantAllowsClaim(subtask)) return false;
-        // #54: a job that names a model goes only to an agent that reported it (inference: installed;
-        // code: its active model, which is what code work runs on).
-        const hasModel = subtaskModelEligible(capability, subtask);
-        const meta = subtask.projectMeta;
-        if (lease) return meta.reservationId === lease.id && hasModel;
-        if (meta.reservationId) return false;
-        if (meta.onlyAccountId) return meta.onlyAccountId === pullerAccount && hasModel;
-        return orderBook.canMatch(body.agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(body.agentId, capability), meta) && hasModel;
-      }
+      // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
+      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs)
     );
+    if (task) noteClaimed(task.id);
     if (task) {
       // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
       const match = orderBook.canMatch(body.agentId, task.taskId);
@@ -591,6 +583,11 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // task id of an encrypted (envelope) task from the subtask id, so the requester's poll, which
     // matches on task id, never found the result.
     if (subtask && body.taskId !== subtask.taskId) body = { ...body, taskId: subtask.taskId };
+    // A model call that produced no text and no tool call failed, whatever the agent says (agents
+    // before this rule reported it as a success): it is not charged, and may be retried below.
+    if (subtask?.kind === "inference" && body.ok && !(body.output ?? "").trim() && !inferenceStreams.hasContent(body.subtaskId)) {
+      body = { ...body, ok: false, output: "", error: EMPTY_REPLY_ERROR };
+    }
     // Server-side duration: never more than measured since claim or the subtask timeout.
     const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
     // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
@@ -607,6 +604,12 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // BHV001 judges speed by the coordinator's clock (claim to receipt), never the reported duration.
       behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: serverMeasuredDurationMs(claim), kind: claim.subtask.kind });
       evaluateAndEnforce(body.agentId);
+    }
+
+    // A failed model call that reached the requester with nothing goes to another agent once
+    // (routes/inference.ts): no result is recorded and nothing is charged for this run.
+    if (!isPeerForward && subtask?.kind === "inference" && !body.ok && (await retryInferenceElsewhere(subtask, body.agentId, body.error))) {
+      return reply.send({ ok: true, retried: true });
     }
 
     // ── #50: sampled results are held for redundant verification ──

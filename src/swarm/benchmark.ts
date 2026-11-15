@@ -29,6 +29,7 @@ import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import { request } from "undici";
 import { catalogEntryForTag } from "../model/catalog.js";
+import { MIN_CONTEXT_WINDOW } from "../inference-api/ollama.js";
 
 /** scrypt cost of one CPU work unit. Changing it changes every tier minimum; bump the prefix with it. */
 export const CPU_WORK = { N: 2048, r: 8, p: 1, keylen: 16, prefix: "edgecoder-bench-v1:" } as const;
@@ -329,7 +330,7 @@ export interface OllamaGeneration {
   evalDurationMs?: number;
 }
 
-export async function ollamaGenerate(input: { host?: string; model: string; prompt: string; seed: number; numPredict: number; timeoutMs: number }): Promise<OllamaGeneration> {
+export async function ollamaGenerate(input: { host?: string; model: string; prompt: string; seed: number; numPredict: number; timeoutMs: number; numCtx?: number }): Promise<OllamaGeneration> {
   const res = await request(`${ollamaBase(input.host)}/api/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -340,7 +341,9 @@ export async function ollamaGenerate(input: { host?: string; model: string; prom
       prompt: input.prompt,
       stream: false,
       think: false,
-      options: { temperature: 0, top_k: 1, seed: input.seed, num_predict: input.numPredict }
+      // The context window the agent serves network calls with, so a benchmark does not leave the model loaded with
+      // another size (Ollama would reload it for the next call: a cold start).
+      options: { temperature: 0, top_k: 1, seed: input.seed, num_predict: input.numPredict, num_ctx: input.numCtx ?? MIN_CONTEXT_WINDOW }
     })
   });
   const text = await res.body.text();
@@ -386,7 +389,7 @@ export const LOCAL_BENCH_SEED = "edgecoder-local-benchmark-v1";
  * The agent's periodic self-benchmark (< ~30 s): a time-boxed CPU scan on every core, then (when an
  * Ollama model is configured) a short fixed-seed generation and the largest model in VRAM.
  */
-export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: number; ollama?: { host?: string; model: string; timeoutMs?: number } }): Promise<AgentBenchmarkReport> {
+export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: number; ollama?: { host?: string; model: string; timeoutMs?: number; numCtx?: number } }): Promise<AgentBenchmarkReport> {
   const t0 = Date.now();
   const errors: string[] = [];
   const report: AgentBenchmarkReport = { version: 1, ranAtMs: t0, durationMs: 0 };
@@ -406,7 +409,7 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
   if (opts.ollama?.model) {
     const { host, model } = opts.ollama;
     try {
-      const gen = await ollamaGenerate({ host, model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, numPredict: 192, timeoutMs: opts.ollama.timeoutMs ?? 20_000 });
+      const gen = await ollamaGenerate({ host, model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, numPredict: 192, timeoutMs: opts.ollama.timeoutMs ?? 20_000, numCtx: opts.ollama.numCtx });
       const tokens = estimateTokens(gen.response, gen.evalCount);
       const tps = gen.evalDurationMs && gen.evalDurationMs > 0 ? (tokens / gen.evalDurationMs) * 1000 : 0;
       const size = modelWeightsGb(model);
@@ -432,7 +435,7 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
 }
 
 /** Answer a coordinator challenge. Never throws: failures come back as `declined`. */
-export async function answerChallenge(challenge: BenchmarkChallenge, ctx: { ollamaHost?: string; threads?: number }): Promise<ChallengeResponse> {
+export async function answerChallenge(challenge: BenchmarkChallenge, ctx: { ollamaHost?: string; threads?: number; numCtx?: number }): Promise<ChallengeResponse> {
   const t0 = Date.now();
   const base = { challengeId: challenge.challengeId, kind: challenge.kind };
   try {
@@ -448,7 +451,8 @@ export async function answerChallenge(challenge: BenchmarkChallenge, ctx: { olla
       seed: challenge.seed,
       numPredict: challenge.numPredict,
       // Answer even when slow: a late answer is still a measurement (it demotes instead of passing).
-      timeoutMs: Math.min(5 * 60_000, Math.max(30_000, challenge.deadlineMs * 3))
+      timeoutMs: Math.min(5 * 60_000, Math.max(30_000, challenge.deadlineMs * 3)),
+      numCtx: ctx.numCtx
     });
     return { ...base, output: gen.response.slice(0, 16_000), evalCount: gen.evalCount, evalDurationMs: gen.evalDurationMs, elapsedMs: Date.now() - t0 };
   } catch (e) {

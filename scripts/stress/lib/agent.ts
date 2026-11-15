@@ -19,7 +19,9 @@
  *   oversized         a /result over the 1 MiB agent limit -> 413
  */
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import WebSocket from "ws";
 import { hashRequestBody, signRequest } from "../../../src/security/request-signing.js";
+import { signMeshWsBind } from "../../../src/mesh/ws-auth.js";
 import { call, sleep, type CallResult } from "./http.js";
 import type { Recorder } from "./metrics.js";
 import type { AccountCred, CoordinatorTarget } from "./target.js";
@@ -99,6 +101,14 @@ export class SimAgent {
   readonly stats = { claimed: 0, reported: 0, accepted: 0, held: 0, rejected: 0, abandoned: 0, reRegistered: 0, inference: 0 };
   lastError?: string;
   private readonly rand: () => number;
+  /**
+   * STRESS_NUDGE=1: behave like a current worker for fast dispatch: hold a signed-bind mesh
+   * WebSocket, say `wake: true` in each pull, and pull at once on a work_available frame. Off: the
+   * old poll-only agent (the "before" of a pickup-latency comparison).
+   */
+  private readonly nudge = process.env.STRESS_NUDGE === "1";
+  private ws?: WebSocket;
+  private wakeSleep?: () => void;
 
   constructor(readonly cfg: AgentConfig, private readonly rec: Recorder, private readonly shared: AgentSharedState) {
     this.agentId = `stress-${cfg.runId}-${cfg.behaviour === "honest" ? "a" : "m"}${cfg.index}`;
@@ -222,6 +232,7 @@ export class SimAgent {
 
   stop(): void {
     this.stopping = true;
+    this.ws?.close();
     if (this.hbTimer) {
       clearTimeout(this.hbTimer);
       clearInterval(this.hbTimer);
@@ -237,6 +248,44 @@ export class SimAgent {
     }
     this.startHeartbeats();
     return true;
+  }
+
+  /** Fast dispatch: the mesh WebSocket (signed bind), reopened while the agent runs. */
+  private openMeshSocket(): void {
+    if (!this.nudge || this.stopping || !this.meshToken) return;
+    const url = `${this.cfg.coordinator.url.replace(/^http/, "ws").replace(/\/$/, "")}/mesh/ws?peerId=${encodeURIComponent(this.agentId)}`;
+    const ws = new WebSocket(url, { headers: { "x-mesh-token": this.meshToken, ...signMeshWsBind(this.agentId, this.privateKeyPem) } });
+    this.ws = ws;
+    ws.on("message", (d) => {
+      try {
+        if (JSON.parse(d.toString()).type === "work_available") {
+          this.rec.count("agent.nudge.received");
+          this.wakeSleep?.();
+        }
+      } catch {
+        // gossip we do not read
+      }
+    });
+    ws.on("error", () => undefined);
+    ws.on("close", () => {
+      if (this.ws === ws) this.ws = undefined;
+      if (!this.stopping) setTimeout(() => this.openMeshSocket(), 2_000).unref?.();
+    });
+  }
+
+  /** Idle sleep that a nudge ends early. */
+  private idleSleep(ms: number): Promise<void> {
+    if (!this.nudge) return sleep(ms);
+    return new Promise((resolve) => {
+      const t = setTimeout(done, ms);
+      const self = this;
+      function done() {
+        clearTimeout(t);
+        self.wakeSleep = undefined;
+        resolve();
+      }
+      this.wakeSleep = done;
+    });
   }
 
   /** Pull loop until stop(). */
@@ -255,7 +304,8 @@ export class SimAgent {
         if (!(await this.register(false))) await this.register(true);
         this.rec.count("agent.churn.reconnect");
       }
-      const r = await this.signedPost("/pull", { agentId: this.agentId });
+      if (this.nudge && !this.ws) this.openMeshSocket();
+      const r = await this.signedPost("/pull", this.nudge ? { agentId: this.agentId, inferenceSlots: 1, freeInferenceSlots: 1, wake: true } : { agentId: this.agentId });
       if (r.status === 401) {
         await this.recover(r);
         await sleep(this.cfg.idlePollMs);
@@ -272,7 +322,8 @@ export class SimAgent {
       }
       const st = r.json?.subtask;
       if (!st) {
-        await sleep(this.cfg.idlePollMs * (0.5 + this.rand()));
+        // With nudges the poll is only a fallback (the worker polls every 3 s then).
+        await this.idleSleep(this.cfg.idlePollMs * (this.nudge ? 2 : 1) * (0.5 + this.rand()));
         continue;
       }
       await this.execute(st);

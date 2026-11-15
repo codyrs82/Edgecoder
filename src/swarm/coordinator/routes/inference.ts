@@ -5,10 +5,13 @@
  * Inference routes: model list, submit, chunk upload and streaming.
  */
 import { z } from "zod";
-import type { ResourceClass } from "../../../common/types.js";
+import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
+import { contextNeeded } from "../../../inference-api/ollama.js";
+import type { ChatMessage } from "../../../inference-api/types.js";
+import { agentContextWindow } from "../dispatch.js";
 import { InferenceStreams, boundTokenCounts } from "../../inference-streams.js";
 import { pgStore } from "../../../db/store.js";
 import {
@@ -20,7 +23,7 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, reservations, taskBilling, usagePending, queue, identity } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -81,6 +84,80 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   await refundTaskSubmit(taskId);
   coordinatorApp.log.warn({ taskId, subtaskId, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
   return true;
+}
+
+/** A failed call is given to another agent only with at least this much of its time left. */
+export const INFERENCE_RETRY_MIN_LEFT_MS = 15_000;
+/** Failures another agent would only repeat (the request itself is bad). */
+const NOT_RETRYABLE = /^(bad inference request|no model requested)/;
+/** Subtasks already given to another agent once (each call is retried at most once). */
+const retriedInference = new Map<string, number>();
+setInterval(() => {
+  const cutoff = Date.now() - 2 * INFERENCE_MAX_TIMEOUT_MS;
+  for (const [id, at] of retriedInference) if (at < cutoff) retriedInference.delete(id);
+}, 60_000).unref?.();
+
+/**
+ * A model call that failed before anything reached the requester (an empty reply, a crashed or
+ * missing local model) is given to another agent once, when the request has time left and
+ * another agent holds the model. Nothing is charged for the failed run (accrueResultCredits pays
+ * successes only); the reserve stays in place for the retry, and the call is settled by the
+ * retry's result, or refunded in full by the no-capacity cancel when nobody takes it. Returns true
+ * when the subtask went back on the queue (the caller then records no result).
+ */
+export async function retryInferenceElsewhere(subtask: Subtask, agentId: string, error: string | undefined, nowMs = Date.now()): Promise<boolean> {
+  if (subtask.kind !== "inference" || retriedInference.has(subtask.id)) return false;
+  if (error && NOT_RETRYABLE.test(error)) return false;
+  const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
+  if (submittedAtMs === undefined) return false;
+  const leftMs = submittedAtMs + subtask.timeoutMs - nowMs;
+  if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS) return false;
+  // A reserved call runs only on its lease's agent.
+  if (subtask.projectMeta.reservationId) return false;
+  const excluded = new Set([agentId, ...queue.excludedAgents(subtask.id)]);
+  let other = false;
+  for (const [id, cap] of agentCapabilities) {
+    if (excluded.has(id) || activeBlacklistRecord(id) || !agentHasModel(cap, subtask.requestedModel ?? "")) continue;
+    if (nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (subtask.projectMeta.onlyAccountId && (await rewardAccountForAgent(id)) !== subtask.projectMeta.onlyAccountId) continue;
+    other = true;
+    break;
+  }
+  if (!other) return false;
+  // Only when the requester has nothing yet (the stream starts again for the next agent).
+  if (!inferenceStreams.reopenIfEmpty(subtask.id)) return false;
+  if (!queue.releaseForRetry(subtask.id, agentId, nowMs)) return false;
+  retriedInference.set(subtask.id, nowMs);
+  claimedTradePrice.delete(subtask.id);
+  // The retry gets the same claim bound as a new call (never past the request's own deadline).
+  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
+  coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
+  return true;
+}
+
+/** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
+function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
+  const old = claimDeadlines.get(subtaskId);
+  if (old) clearTimeout(old);
+  const deadline = setTimeout(() => {
+    claimDeadlines.delete(subtaskId);
+    void cancelUnclaimedInference(taskId, subtaskId).catch((err) => coordinatorApp.log.error({ err, taskId }, "inference_no_capacity_cancel_failed"));
+  }, Math.max(0, ms));
+  deadline.unref?.();
+  claimDeadlines.set(subtaskId, deadline);
+}
+
+/**
+ * A model call back on the queue after its holder's lease expired (the agent vanished) gets the
+ * no-capacity bound again: without it, a call nobody takes kept its reserve until some agent came.
+ * Called from the queue's claimable hook; a call with no bound armed and its time used up is
+ * cancelled now (refunded in full: nothing was charged for the lost run).
+ */
+export function onInferenceClaimable(subtask: Subtask, nowMs = Date.now()): void {
+  if (subtask.kind !== "inference" || claimDeadlines.has(subtask.id)) return;
+  const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
+  if (submittedAtMs === undefined) return;
+  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, submittedAtMs + subtask.timeoutMs - nowMs));
 }
 
 function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }) {
@@ -169,6 +246,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
       return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
     }
+    // Every agent with the model serves a smaller context window than this call needs: say so now
+    // rather than wait for the no-capacity bound (agents that report no window take any size).
+    const needTokens = contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens);
+    if (holders.length > 0 && holders.every(([id]) => (agentContextWindow(id) ?? Infinity) < needTokens)) {
+      const largest = Math.max(...holders.map(([id]) => agentContextWindow(id) ?? 0));
+      return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model });
+    }
     if (taskIdInUse(body.taskId)) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
     const billed = !reservationId && !onlyAccountId;
     const resolved = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
@@ -211,12 +295,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       },
     });
     inferenceStreams.open(subtask.id, body.taskId);
-    const deadline = setTimeout(() => {
-      claimDeadlines.delete(subtask.id);
-      void cancelUnclaimedInference(body.taskId, subtask.id).catch((err) => coordinatorApp.log.error({ err, taskId: body.taskId }, "inference_no_capacity_cancel_failed"));
-    }, INFERENCE_CLAIM_TIMEOUT_MS);
-    deadline.unref?.();
-    claimDeadlines.set(subtask.id, deadline);
+    armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
   });
@@ -239,7 +318,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
-    if (r === "ok" && body.done && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
+    if (r === "ok" && body.done && inferenceStreams.isDone(body.subtaskId) && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
       const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
       const u = usagePending.get(claim.subtask.taskId);
       if (u) {

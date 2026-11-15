@@ -78,9 +78,39 @@ export class InferenceStreams {
       s.toolCalls = [...(s.toolCalls ?? []), ...toolCalls];
       s.bytes += Buffer.byteLength(JSON.stringify(toolCalls), "utf8");
     }
-    if (done) this.finish(subtaskId, error);
+    // A final piece that ends a reply with no text and no tool call (and no error) does not end the
+    // stream: an empty reply is a failed call, which the coordinator may give to another agent.
+    if (done && (error || s.chunks.length > 0 || s.toolCalls?.length)) this.finish(subtaskId, error);
     this.events.emit(subtaskId);
     return "ok";
+  }
+
+  /** True once the stream has ended. */
+  isDone(subtaskId: string): boolean {
+    return this.streams.get(subtaskId)?.done === true;
+  }
+
+  /** True when the stream has any reply text or tool call (something reached, or can reach, the requester). */
+  hasContent(subtaskId: string): boolean {
+    const s = this.streams.get(subtaskId);
+    return !!s && (s.chunks.length > 0 || !!s.toolCalls?.length);
+  }
+
+  /**
+   * Make a stream that got nothing ready for another agent: its pieces start again at 0 and an
+   * error that ended it is cleared. Refused (false) once any text or tool call was accepted, since
+   * the requester may already have it.
+   */
+  reopenIfEmpty(subtaskId: string): boolean {
+    const s = this.streams.get(subtaskId);
+    if (!s || s.chunks.length > 0 || s.toolCalls?.length) return false;
+    s.nextSeq = 0;
+    s.chars = 0;
+    s.bytes = 0;
+    s.done = false;
+    s.error = undefined;
+    s.doneAtMs = undefined;
+    return true;
   }
 
   /** End a stream (also when the result arrives without a final piece). */

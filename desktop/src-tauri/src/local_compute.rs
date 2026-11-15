@@ -210,7 +210,8 @@ impl std::fmt::Display for Version {
 }
 
 /// Parallel request slots for the Ollama the app starts: 4 with 32 GB or more, 2 with 16 GB, else 1
-/// (matches the agent's parallelInferenceFor).
+/// (the agent's parallelInferenceFor without a model). The agent gets the same number as
+/// OLLAMA_NUM_PARALLEL (AgentCompute::env) and never runs more calls at once.
 pub fn ollama_parallel_for(total_bytes: u64) -> u32 {
     let gb = total_bytes as f64 / 1_073_741_824.0;
     if gb >= 31.0 {
@@ -608,6 +609,9 @@ pub struct AgentCompute {
     /// LOCAL_MODEL_PROVIDER when we will make sure Ollama is up: the agent decides its worker's
     /// provider once at boot, and Ollama may still be starting then.
     pub model_provider: Option<&'static str>,
+    /// OLLAMA_NUM_PARALLEL the app starts Ollama with, so the agent never runs more model calls at
+    /// once than Ollama serves (src/swarm/parallelism.ts caps its own default at this).
+    pub ollama_num_parallel: Option<String>,
 }
 
 impl AgentCompute {
@@ -624,6 +628,7 @@ impl AgentCompute {
         put("OLLAMA_HOST", &self.ollama_host);
         put("DOCKER_HOST", &self.docker_host);
         put("LOCAL_MODEL_PROVIDER", &self.model_provider.map(str::to_string));
+        put("OLLAMA_NUM_PARALLEL", &self.ollama_num_parallel);
         out
     }
 }
@@ -855,6 +860,7 @@ impl Manager {
             docker_host: docker_sock.map(|s| format!("unix://{}", s.display())),
             path_dirs: self.layout.as_ref().map(|l| l.path_dirs()).unwrap_or_default(),
             model_provider: (plan.action != OllamaAction::Missing).then_some("ollama-local"),
+            ollama_num_parallel: (plan.action != OllamaAction::Missing).then(|| ollama_parallel_for(total_memory_bytes()).to_string()),
         };
         self.with(|i| i.compute = compute.clone());
         compute
@@ -1633,6 +1639,7 @@ mod tests {
             docker_host: Some("unix:///Users/a/.colima/default/docker.sock".into()),
             path_dirs: vec![],
             model_provider: Some("ollama-local"),
+            ollama_num_parallel: Some("2".into()),
         };
         let env = c.env(|_| None);
         assert_eq!(
@@ -1641,8 +1648,11 @@ mod tests {
                 ("OLLAMA_HOST".to_string(), "http://127.0.0.1:11435".to_string()),
                 ("DOCKER_HOST".to_string(), "unix:///Users/a/.colima/default/docker.sock".to_string()),
                 ("LOCAL_MODEL_PROVIDER".to_string(), "ollama-local".to_string()),
+                ("OLLAMA_NUM_PARALLEL".to_string(), "2".to_string()),
             ]
         );
+        // A user's own OLLAMA_NUM_PARALLEL reaches both Ollama and the agent (inherited): not overwritten.
+        assert!(!c.env(|k| (k == "OLLAMA_NUM_PARALLEL").then(|| "4".to_string())).iter().any(|(k, _)| k == "OLLAMA_NUM_PARALLEL"));
         let env = c.env(|k| (k == "DOCKER_HOST").then(|| "tcp://remote:2375".to_string()));
         assert!(!env.iter().any(|(k, _)| k == "DOCKER_HOST"));
         assert_eq!(AgentCompute::default().env(|_| None), vec![]);
