@@ -447,9 +447,10 @@ export class Repl {
             return;
           }
           await this.c.publish(id, true);
+          const title = (await this.c.snapshot(id).catch(() => this.snap)).session.title;
           this.line(
             st.green("▸ Remote control on.") +
-              ` Open the EdgeCoder app → Code → ${this.snap.session.projectRoot.split(/[/\\]/).pop()} → "${this.snap.session.title}" (live).\n` +
+              ` Open the EdgeCoder app → Code → ${this.snap.session.projectRoot.split(/[/\\]/).pop()} → "${title}" (live).\n` +
               st.dim("  The app can send messages and approve tool calls; this terminal mirrors it. /take takes control back, /remote off stops."),
           );
           return;

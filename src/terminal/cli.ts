@@ -194,6 +194,8 @@ async function connectProvider(a: Args, me: ClientRef, say: (s: string) => void)
   process.env.IDE_PROVIDER_PORT = String(port);
   process.env.LOG_LEVEL ||= "silent";
   if (a.apiKeyFile) process.env.EDGECODER_API_KEY_FILE = resolve(a.apiKeyFile);
+  // Node's warnings (library deprecations) would print into the conversation too.
+  process.removeAllListeners("warning");
   say(`Starting the EdgeCoder provider in this process on 127.0.0.1:${port}…`);
   const { ideProviderServer } = await import("../apps/ide/provider-server.js");
   await ideProviderServer.listen({ host: "127.0.0.1", port });
