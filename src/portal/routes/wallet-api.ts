@@ -12,7 +12,8 @@
  * - POST /portal/api/wallet/topup and GET /portal/api/wallet/topup/:intentId: a Lightning invoice
  *   that credits this account, and whether it was paid. The session twin of /v1/account/topup
  *   (hosted.ts, API key); both call the coordinator's existing /account/buy and /account/intent,
- *   which price the purchase (docs/economy-math.md section 2). Nothing here computes money.
+ *   which price the purchase (docs/economy-math.md section 2). Nothing here computes money. A
+ *   created invoice also carries `qrSvg`, its QR code (invoice-qr.ts).
  *
  * Every coordinator call goes through portalCoordinatorTransport, which binds the account to the
  * session (acct-<userId>); the client never names an account.
@@ -21,6 +22,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { computeOverview } from "../../apps/ide/network-inference.js";
+import { withInvoiceQr } from "../invoice-qr.js";
 import { accountIdFor, portalCoordinatorTransport, portalNetworkDeps, type ComputeRoutesDeps } from "./compute.js";
 
 export interface WalletApiDeps extends ComputeRoutesDeps {
@@ -99,7 +101,8 @@ export function registerWalletApiRoutes(app: FastifyInstance, deps: WalletApiDep
     const parsed = z.object({ amountSats: z.number().int().min(TOPUP_MIN_SATS).max(TOPUP_MAX_SATS) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_amount", detail: `amountSats: whole sats, ${TOPUP_MIN_SATS} to ${TOPUP_MAX_SATS.toLocaleString("en-US")}` });
     const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("POST", "/account/buy", { amountSats: parsed.data.amountSats }).catch(() => unreachable);
-    return reply.code(r.status === 0 ? 502 : r.status).send(r.json);
+    // qrSvg: the invoice as a QR code (invoice-qr.ts), drawn from the BOLT11 string only.
+    return reply.code(r.status === 0 ? 502 : r.status).send(withInvoiceQr(r.status, r.json));
   });
 
   app.get("/portal/api/wallet/topup/:intentId", async (req, reply) => {

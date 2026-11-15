@@ -68,11 +68,14 @@ export const WALLET_CSS = `
     .wl-break .fee dd { color: var(--text-secondary); }
     .wl-primary { width: 100%; min-height: 44px; font-size: 14.5px; }
     .wl-step[hidden] { display: none; }
-    .wl-invoice { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
+    .wl-invoice { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
     @media (max-width: 560px) { .wl-invoice { grid-template-columns: 1fr; } }
-    .wl-bolt { width: 132px; height: 132px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    .wl-bolt { width: 176px; height: 176px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
       border: 1px dashed var(--brand-border); background: var(--brand-soft); color: var(--brand-2); text-align: center; font-size: 11.5px; padding: 10px; }
     .wl-bolt svg { width: 34px; height: 34px; }
+    .wl-qr { display: block; width: 176px; height: 176px; border-radius: 12px; border: 1px solid var(--card-border); }
+    .wl-qr[hidden], .wl-bolt[hidden] { display: none; }
+    @media (max-width: 560px) { .wl-qr { width: min(240px, 100%); height: auto; aspect-ratio: 1; margin: 0 auto; } }
     .wl-inv-text { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; word-break: break-all; padding: 10px 12px; border-radius: 10px;
       background: var(--bg-input); border: 1px solid var(--card-border); max-height: 92px; overflow: auto; color: var(--text-secondary); }
     .wl-inv-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
@@ -208,7 +211,10 @@ export const WALLET_CONTENT = `
           <h3>Pay this invoice <span class="wl-pill" id="invoiceNet">Lightning</span></h3>
           <div class="wl-faint" id="invoiceSummary"></div>
           <div class="wl-invoice">
-            <div class="wl-bolt" aria-hidden="true">${icon("zap", 34)}<span>Open in your Lightning wallet, or copy the invoice</span></div>
+            <div>
+              <img class="wl-qr" id="invoiceQr" alt="QR code of the Lightning invoice. Scan it with your wallet." hidden />
+              <div class="wl-bolt" id="invoiceQrFallback" aria-hidden="true">${icon("zap", 34)}<span>Open in your Lightning wallet, or copy the invoice</span></div>
+            </div>
             <div>
               <div class="wl-inv-text" id="invoiceText" tabindex="0" aria-label="Lightning invoice"></div>
               <div class="wl-inv-actions">
@@ -502,6 +508,11 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       $("invoiceNet").className = "wl-pill" + (net.test ? "" : " ok");
       $("invoiceSummary").textContent = "Pay " + fmtSats(r.json.amountSats) + " sats" + (fmtUsd(r.json.amountSats, btc()) ? " (" + fmtUsd(r.json.amountSats, btc()) + ")" : "") + ". You get " + fmtNum(r.json.cSats, 3) + " cSats" + (r.json.feeSats > 0 ? " after the " + fmtSats(r.json.feeSats) + " sat purchase fee." : "; there is no purchase fee.");
       $("invoiceText").textContent = r.json.invoice;
+      // The server's QR (an SVG built from the BOLT11 only) goes in as an image: no markup enters the page.
+      const qr = typeof r.json.qrSvg === "string" && r.json.qrSvg.startsWith("<svg") ? r.json.qrSvg : "";
+      $("invoiceQr").hidden = !qr;
+      $("invoiceQrFallback").hidden = !!qr;
+      if (qr) $("invoiceQr").setAttribute("src", "data:image/svg+xml;base64," + btoa(qr)); else $("invoiceQr").removeAttribute("src");
       $("openWalletLink").setAttribute("href", "lightning:" + r.json.invoice);
       $("invoiceStatus").textContent = "Waiting for payment…";
       $("copyInvoiceLabel").textContent = "Copy invoice";

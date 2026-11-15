@@ -163,7 +163,7 @@ describe("account routes for API keys (/v1/account)", () => {
         seen.push({ path, body: req.body, token: req.headers["x-portal-service-token"] });
         return reply;
       });
-    record("/account/buy", { intentId: "int-1", invoice: "lnbcrt10u1fake", amountSats: 1000, cSats: 1000, feeSats: 0, network: "regtest", expiresInSeconds: 900 });
+    record("/account/buy", { intentId: "int-1", invoice: "lnbcrt10u1pnz8kq0pp5qy7d3xw6r0mnt9vxk2c8a0l4ghs3e5u7wqzq3jf2ky6v8s0n9pxsdqqcqzzsxqyz5vqsp5h7e2d9k6c0w3m8xr5qv4n2t7l9s6f3a7g8", amountSats: 1000, cSats: 1000, feeSats: 0, network: "regtest", expiresInSeconds: 900 });
     record("/account/intent", { intentId: "int-1", status: "settled", cSats: 1000 });
     record("/account/summary", { accountId: "x", cSats: 42.5, earnedSats: 0, recent: [{ type: "debit", cSats: 1 }], machines: [] });
     record("/account/usage", { totals: { requests: 3, cSats: 1.5 }, byDay: [], byModel: [], records: [{ model: "m" }] });
@@ -186,7 +186,9 @@ describe("account routes for API keys (/v1/account)", () => {
     const { app, auth, accountId } = await withKey([c.url]);
     const r = await app.inject({ method: "POST", url: "/v1/account/topup", headers: auth, payload: { amountSats: 1000 } });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toMatchObject({ invoice: "lnbcrt10u1fake", amountSats: 1000, intentId: "int-1" });
+    expect(r.json()).toMatchObject({ invoice: "lnbcrt10u1pnz8kq0pp5qy7d3xw6r0mnt9vxk2c8a0l4ghs3e5u7wqzq3jf2ky6v8s0n9pxsdqqcqzzsxqyz5vqsp5h7e2d9k6c0w3m8xr5qv4n2t7l9s6f3a7g8", amountSats: 1000, intentId: "int-1" });
+    // Optional qrSvg: the invoice as an SVG QR code (src/portal/invoice-qr.ts).
+    expect(r.json().qrSvg).toMatch(/^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);
     expect(c.seen[0]).toEqual({ path: "/account/buy", body: { amountSats: 1000, accountId }, token: "svc-token" });
     // The caller cannot name another account.
     await app.inject({ method: "POST", url: "/v1/account/topup", headers: auth, payload: { amountSats: 1000, accountId: "acct-victim" } });

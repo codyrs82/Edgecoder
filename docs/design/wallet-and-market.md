@@ -56,7 +56,7 @@ of the Wallet screen):
           "No purchase fee: 1 sat buys 1 cSat."   (a fee line appears only if purchaseFeeBps > 0)
           [Create Lightning invoice]
    ↓
-[Invoice] QR (where available) · invoice text · Copy · Open in wallet (lightning:)
+[Invoice] QR of LIGHTNING:<BOLT11, upper case> · invoice text · Copy · Open in wallet (lightning:)
           "Waiting for payment" with a live dot; countdown from expiresInSeconds
           polls /topup/:intentId every 3 s
    ↓                         ↓                          ↓
@@ -117,13 +117,11 @@ coordinator shows a banner and disables the form.
 |---|---|---|---|
 | Where | Settings > Wallet (`/portal/settings/plan`), Settings > Compute | Settings > Plan & usage (wallet), Compute | Settings > Wallet & market |
 | Data | `/portal/api/wallet/overview`, `/portal/api/wallet/topup*`, `/wallet/payouts*`, market proxies | Local agent `/v1/ide/compute*` for balance and buying; portal overview for fees, rate, network, payouts | Portal endpoints over the session cookie |
-| QR | **Not shown: no QR library is a dependency** (gap) | **Not shown** (same gap) | CoreImage `CIQRCodeGenerator` (system framework) |
+| QR | `qrcode-generator` 2.0.4 (approved by the owner), drawn server-side as SVG (`src/portal/invoice-qr.ts`, `qrSvg` on the session top-up and on `/v1/account/topup`) and shown as an `<img>` data URI, so no markup enters the page | `qrcode-generator` 2.0.4, drawn in the app (`desktop/src/lib/qr.ts`) | CoreImage `CIQRCodeGenerator` (system framework) |
 | Layout | Two-column hero at ≥ 900 px, one column below | One column, 720 px max | Native scroll of cards |
 
 ## API gaps (kept as gaps, not built)
 
-- **QR on web and desktop**: no QR encoder in either dependency tree. Adding one needs the
-  owner's approval (for example `qrcode-generator`, MIT, no dependencies).
 - **Invoice expiry time**: `/account/buy` returns `expiresInSeconds`, but `/account/intent`
   returns only `status`; after a reload the countdown cannot be restored, only the status.
 - **Payment-intent history** comes from `/dashboard/summary` (`walletSnapshot.paymentIntents`)

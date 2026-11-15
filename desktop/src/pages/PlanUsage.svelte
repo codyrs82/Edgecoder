@@ -12,6 +12,7 @@
     type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest,
   } from "../lib/api";
   import { scrollRegion } from "../lib/scroll-region";
+  import { invoiceQr, QR_DARK, QR_LIGHT, QR_QUIET } from "../lib/qr";
   import { countdown, fmtMsat, fmtNum, fmtSats, fmtUsd, networkInfo, pct, purchasePreview, reasonText } from "../lib/wallet-format";
 
   type Invoice = { intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number };
@@ -54,6 +55,7 @@
   let destSaving = $state(false);
   let sendRequests = $state<WalletSendRequest[]>([]);
 
+  let qr = $derived(invoice ? invoiceQr(invoice.invoice) : null);
   let net = $derived(networkInfo(wallet?.network ?? invoice?.network));
   let btcUsd = $derived(wallet?.btcUsd ?? null);
   // Buying is free (0) unless the coordinator states a purchase fee.
@@ -269,8 +271,16 @@
         {:else if step === "invoice" && invoice}
           <h2 class="wl-h" id="wl-funds-title">Pay this invoice <span class="wl-pill">{networkInfo(invoice.network).test ? `${networkInfo(invoice.network).short} · test sats` : "Lightning · mainnet"}</span></h2>
           <p class="wl-faint">Pay {fmtSats(invoice.amountSats)} sats{fmtUsd(invoice.amountSats, btcUsd) ? ` (${fmtUsd(invoice.amountSats, btcUsd)})` : ""}. You get {fmtNum(invoice.cSats, 3)} cSats{invoice.feeSats > 0 ? ` after the ${fmtSats(invoice.feeSats)} sat purchase fee.` : "; there is no purchase fee."}</p>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-          <div class="wl-inv-text" tabindex="0" aria-label="Lightning invoice">{invoice.invoice}</div>
+          <div class="wl-inv">
+            {#if qr}
+              <svg class="wl-qr" viewBox="0 0 {qr.size + QR_QUIET * 2} {qr.size + QR_QUIET * 2}" shape-rendering="crispEdges" role="img" aria-label="QR code of the Lightning invoice. Scan it with your wallet.">
+                <rect width={qr.size + QR_QUIET * 2} height={qr.size + QR_QUIET * 2} fill={QR_LIGHT} />
+                <path transform="translate({QR_QUIET} {QR_QUIET})" d={qr.d} fill={QR_DARK} />
+              </svg>
+            {/if}
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <div class="wl-inv-text" tabindex="0" aria-label="Lightning invoice">{invoice.invoice}</div>
+          </div>
           <div class="wl-inv-actions">
             <button class="primary" onclick={copyInvoice}>{#if copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy invoice{/if}</button>
             <a class="sp-button" href={`lightning:${invoice.invoice}`}><ExternalLink size={14} /> Open in wallet</a>
@@ -508,6 +518,10 @@
   .wl-test { color: var(--yellow); font-size: 12px; display: flex; gap: 6px; align-items: flex-start; margin: 4px 0 0; }
   .wl-inv-text { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; word-break: break-all; padding: 10px 12px; border-radius: 10px;
     background: var(--bg-base); border: 0.5px solid var(--border); max-height: 96px; overflow: auto; color: var(--text-secondary); margin-top: 8px; }
+  .wl-inv { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 760px) { .wl-inv { grid-template-columns: minmax(0, 1fr); } }
+  .wl-qr { width: 168px; height: 168px; border-radius: 12px; border: 0.5px solid var(--border); margin-top: 8px; }
+  @media (max-width: 760px) { .wl-qr { width: min(220px, 100%); height: auto; aspect-ratio: 1; margin: 8px auto 0; } }
   .wl-inv-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
   .wl-wait { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; padding: 10px 12px; border-radius: 10px; background: var(--bg-base); border: 0.5px solid var(--border); font-size: 13px; color: var(--text-primary); }
   .wl-wait .grow { flex: 1; }

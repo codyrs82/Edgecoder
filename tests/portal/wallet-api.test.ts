@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWalletApiRoutes, walletOverviewView } from "../../src/portal/routes/wallet-api.js";
 
+const BOLT11_FAKE = "lnbcrt200u1pnz8kq0pp5qy7d3xw6r0mnt9vxk2c8a0l4ghs3e5u7wqzq3jf2ky6v8s0n9pxsdqqcqzzsxqyz5vqsp5h7e2d9k6c0w3m8xr5qv4n2t7l9s6f3a7g8j0p5q2z4y7x6c3";
+
 /** A coordinator that answers like the real one for the routes the wallet calls. */
 async function fakeCoordinator(opts: { payouts?: boolean } = {}) {
   const seen: Array<{ method: string; path: string; body: any; token: unknown }> = [];
@@ -20,7 +22,7 @@ async function fakeCoordinator(opts: { payouts?: boolean } = {}) {
     note(req);
     const amountSats = (req.body as any).amountSats;
     const feeSats = Math.floor((amountSats * 150) / 10000);
-    return { intentId: "pi-1", invoice: "lnbcrt200u1fake", amountSats, cSats: amountSats - feeSats, feeSats, network: "regtest", expiresInSeconds: 900 };
+    return { intentId: "pi-1", invoice: BOLT11_FAKE, amountSats, cSats: amountSats - feeSats, feeSats, network: "regtest", expiresInSeconds: 900 };
   });
   co.post("/account/intent", async (req, reply) => {
     note(req);
@@ -86,7 +88,10 @@ describe("portal wallet API", () => {
   it("creates a top-up invoice through /account/buy for the session's account and passes the coordinator's pricing through", async () => {
     const r = await app.inject({ method: "POST", url: "/portal/api/wallet/topup", headers: auth, payload: { amountSats: 20000, accountId: "acct-someone-else" } });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toEqual({ intentId: "pi-1", invoice: "lnbcrt200u1fake", amountSats: 20000, cSats: 19700, feeSats: 300, network: "regtest", expiresInSeconds: 900 });
+    const { qrSvg, ...rest } = r.json();
+    expect(rest).toEqual({ intentId: "pi-1", invoice: BOLT11_FAKE, amountSats: 20000, cSats: 19700, feeSats: 300, network: "regtest", expiresInSeconds: 900 });
+    // The invoice's QR code, drawn by the portal from the BOLT11 string.
+    expect(qrSvg).toMatch(/^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);
     const call = coord.seen.filter((s) => s.path === "/account/buy").at(-1);
     expect(call).toMatchObject({ body: { amountSats: 20000, accountId: "acct-u1" }, token: "svc" });
   });
