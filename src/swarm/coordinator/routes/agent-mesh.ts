@@ -24,12 +24,15 @@ import {
   directWorkById,
   directWorkInbox
 } from "../agent-state.js";
-import { requireMeshToken, requireAgentSelf } from "../auth.js";
+import { requireMeshToken, requireAgentSelf, agentSignatureAtGate } from "../auth.js";
 
 export function registerAgentMeshRoutes(app: CoordinatorApp): void {
   app.get("/agent-mesh/peers/:agentId", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const params = z.object({ agentId: z.string() }).parse(req.params);
+    // A coordinator (mesh token), or the named agent itself (its signature over this GET).
+    const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+    const signer = agentSignatureAtGate(headers, "GET", String(req.url ?? "").split("?")[0]);
+    if (signer !== params.agentId && !requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     if (activeBlacklistRecord(params.agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
     const peers = [...agentCapabilities.keys()].filter(
       (id) => id !== params.agentId && !activeBlacklistRecord(id)

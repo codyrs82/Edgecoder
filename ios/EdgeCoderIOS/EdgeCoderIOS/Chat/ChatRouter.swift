@@ -114,7 +114,7 @@ final class ChatRouter: ObservableObject {
         }
 
         // 3. Coordinator/swarm — submit to task queue
-        if !swarmRuntime.meshToken.isEmpty {
+        if swarmRuntime.isSwarmReady {
             do {
                 let swarmResult = try await swarmRuntime.submitChatTask(prompt: lastUserContent, requestedModel: requestedModel)
                 let elapsed = Int((CFAbsoluteTimeGetCurrent() - started) * 1000)
@@ -197,7 +197,7 @@ final class ChatRouter: ObservableObject {
                 modelName = "ble-\(matchingPeer!.agentId)"
             }
         }
-        if routeDecision == .offlineStub && !swarmRuntime.meshToken.isEmpty {
+        if routeDecision == .offlineStub && swarmRuntime.isSwarmReady {
             routeDecision = .swarm
             routeLabel = routeLabels[.swarm] ?? "swarm"
             modelName = "swarm"
@@ -272,7 +272,7 @@ final class ChatRouter: ObservableObject {
             "modelLoaded": modelManager.state == .ready,
             "activeModel": modelManager.selectedModel,
             "blePeers": bleMeshManager.discoveredPeers.count,
-            "swarmEnabled": !swarmRuntime.meshToken.isEmpty
+            "swarmEnabled": swarmRuntime.isSwarmReady
         ]
     }
 }

@@ -52,11 +52,90 @@ export function hasPortalServiceToken(headers: Record<string, unknown>): boolean
 }
 
 /*
- * Mesh token scope (docs/security-baseline.md, "Coordinator route authority"). Every enrolled agent
- * holds MESH_AUTH_TOKEN, so it is a transport gate only (the global onRequest hook). Routes that act
- * for one agent take the agent from its request signature (requireAgentSelf); operator routes need
- * authorizeAdmin; coordinator-to-coordinator routes verify an allowlisted peer signature.
+ * Mesh token scope (docs/security-baseline.md, "Coordinator route authority";
+ * docs/security/agent-threat-model.md). MESH_AUTH_TOKEN is held by coordinators and operator
+ * tooling only: agents are never given it. An agent passes the global onRequest hook with its own
+ * registered Ed25519 key (agentSignatureAtGate), and only on the routes an agent uses
+ * (isAgentGateRoute). Routes that act for one agent take the agent from its request signature
+ * (requireAgentSelf); operator routes need authorizeAdmin; coordinator-to-coordinator routes
+ * verify an allowlisted peer signature.
  */
+
+/** POST routes a signed agent (worker, iOS app, local forwarder) may call without the mesh token. */
+const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
+  "/heartbeat",
+  "/pull",
+  "/result",
+  "/benchmark/response",
+  "/agent/diagnostics",
+  "/credits/ble-sync",
+  "/submit",
+  "/inference/submit",
+  "/inference/stream",
+  "/inference/chunks",
+  "/account/summary",
+  "/account/usage",
+  "/account/buy",
+  "/account/intent",
+  "/account/reservations",
+  "/account/reservations/list",
+  "/account/reservations/cancel",
+  "/economy/market/orders",
+  "/agent-mesh/connect",
+  "/agent-mesh/accept",
+  "/agent-mesh/relay",
+  "/agent-mesh/close",
+  "/agent-mesh/close-ack",
+  "/agent-mesh/direct-work/offer",
+  "/agent-mesh/direct-work/accept",
+  "/agent-mesh/direct-work/result",
+  "/agent-mesh/models/request"
+]);
+const AGENT_POST_PATTERNS: readonly RegExp[] = [/^\/orchestration\/agents\/[^/]+\/(status|ack)$/];
+/** GET routes a signed agent may call; each scopes what it returns to the signer (see the route). */
+const AGENT_GET_PATTERNS: readonly RegExp[] = [
+  /^\/inference\/models$/,
+  /^\/agent-mesh\/peers\/[^/]+$/,
+  /^\/tasks\/[^/]+\/subtasks\/[^/]+\/result$/
+];
+
+/** Whether `method path` (no query string) is a route a signed agent may reach without the mesh token. */
+export function isAgentGateRoute(method: string, path: string): boolean {
+  const m = method.toUpperCase();
+  if (m === "POST") return AGENT_POST_ROUTES.has(path) || AGENT_POST_PATTERNS.some((re) => re.test(path));
+  if (m === "GET") return AGENT_GET_PATTERNS.some((re) => re.test(path));
+  return false;
+}
+
+/**
+ * Transport-gate check for agents: the request carries a signature, over this method and path and
+ * within the clock-skew window, by the key this coordinator holds for the named agent. Returns the
+ * agent id, or null. The body binding, nonce replay check and identity checks stay with the route
+ * (verifyAgentRequest / requireAgentSelf), so nothing is consumed or counted here.
+ */
+export function agentSignatureAtGate(headers: Record<string, unknown>, method: string, path: string): string | null {
+  const signed = extractSignedHeaders(headers);
+  if (!signed) return null;
+  const cap = agentCapabilities.get(signed["x-agent-id"]);
+  if (!cap?.publicKeyPem) return null;
+  try {
+    const result = verifySignedRequest({
+      method: method.toUpperCase(),
+      path,
+      headers: signed,
+      publicKeyPem: cap.publicKeyPem,
+      maxSkewMs: SECURITY_MAX_SKEW_MS
+    });
+    return result.valid ? signed["x-agent-id"] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The account an agent works and pays for: its owner's, or the agent itself before it is linked. */
+export async function agentAccount(agentId: string): Promise<string> {
+  return (await pgStore?.getAgentOwnership(agentId))?.accountId ?? agentId;
+}
 
 /**
  * Agent-self routes: the request must be signed by a registered agent key, and when the route
@@ -95,8 +174,8 @@ export function requireMeshOrPortalToken(req: { headers: Record<string, unknown>
 /**
  * Account-scoped money routes (withdraw, set payout address, read a user's balance) require the
  * PORTAL service token specifically. The portal binds accountId = acct-<userId> from the session
- * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents hold
- * only the shared mesh token and must NOT be able to move another account's funds (audit econ#1).
+ * before calling, so it is the only caller allowed to name an arbitrary accountId. Agents must NOT
+ * be able to move another account's funds (audit econ#1).
  */
 export function requirePortalServiceToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): boolean {
   const headers = ((req as any).headers ?? {}) as Record<string, unknown>;

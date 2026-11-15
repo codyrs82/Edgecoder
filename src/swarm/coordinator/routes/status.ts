@@ -28,22 +28,34 @@ import {
   blacklistByAgent
 } from "../agent-state.js";
 import { diagnosticsByAgentId } from "../services.js";
+import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
 
 export function registerStatusRoutes(app: CoordinatorApp): void {
   app.get("/status", async () => queue.status());
 
   /**
    * Requester-side result lookup for a submitted subtask (used by the IDE /run/swarm
-   * route, which polls after POST /submit). Mesh-token protected by the global hook.
+   * route, which polls after POST /submit). Scoped to the submitter below.
    * 404 while the subtask is still queued/running or when the ids don't match.
    */
   app.get("/tasks/:taskId/subtasks/:subtaskId/result", async (req, reply) => {
     const { taskId, subtaskId } = req.params as { taskId: string; subtaskId: string };
+    const billing = taskBilling.get(taskId);
+    // A coordinator (mesh token) or the portal reads any result; an agent (its signature, which is
+    // how it passed the global hook) only results of tasks its own account submitted.
+    const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+    if (!hasMeshToken(headers) && !hasPortalServiceToken(headers)) {
+      const signer = agentSignatureAtGate(headers, "GET", String(req.url ?? "").split("?")[0]);
+      if (!signer) return reply.code(401).send({ error: "mesh_unauthorized" });
+      const owner = billing?.accountId;
+      if (owner && owner !== "anonymous" && owner !== signer && owner !== (await agentAccount(signer))) {
+        return reply.code(404).send({ error: "result_not_ready", taskId, subtaskId });
+      }
+    }
     const result = queue.getResult(subtaskId);
     if (!result || result.taskId !== taskId) {
       return reply.code(404).send({ error: "result_not_ready", taskId, subtaskId });
     }
-    const billing = taskBilling.get(taskId);
     return reply.send({
       taskId: result.taskId,
       subtaskId: result.subtaskId,

@@ -21,6 +21,11 @@ final class SwarmRuntimeController: ObservableObject {
     @Published var agentId: String = "iphone-\(UUID().uuidString.prefix(8))"
     @Published var registrationToken: String = ""
     @Published var meshToken: String = ""
+    /// Registered with the coordinator this session. Coordinators no longer hand agents a mesh
+    /// token (agents sign every request with their own key), so a token is not the signal.
+    @Published var isRegistered = false
+    /// Swarm features are available: registered, or an operator-configured mesh token is set.
+    var isSwarmReady: Bool { isRegistered || !meshToken.isEmpty }
     @Published var selectedCoordinatorURL: String = AppConfig.current.coordinatorBootstrapURL.absoluteString
     @Published var heartbeatCount = 0
     @Published var lastHeartbeatAt: Date?
@@ -247,6 +252,7 @@ final class SwarmRuntimeController: ObservableObject {
 
         appendEvent("Manual re-register started for \(currentAgentId).")
         meshToken = ""
+        isRegistered = false
         registrationToken = ""
         selectedCoordinatorURL = AppConfig.current.coordinatorBootstrapURL.absoluteString
         persistRuntimeSettings()
@@ -338,7 +344,7 @@ final class SwarmRuntimeController: ObservableObject {
     }
 
     private func registerAgent() async -> Bool {
-        if !meshToken.isEmpty { return true }
+        if isSwarmReady { return true }
         lastRegisterAt = Date()
         lastRegisterError = ""
         appendEvent("Registering agent \(agentId)...")
@@ -374,6 +380,7 @@ final class SwarmRuntimeController: ObservableObject {
                !rewardAccountId.utf8.contains(0x0A) {
                 bleMeshManager.currentAccountId = rewardAccountId
             }
+            isRegistered = true
             appendEvent("Register succeeded.")
             return true
         } catch is CancellationError {
@@ -387,6 +394,7 @@ final class SwarmRuntimeController: ObservableObject {
                 // Enrollment/token drift can happen after node-id migration or stale local token.
                 // Re-enroll and retry loop shortly.
                 meshToken = ""
+                isRegistered = false
                 registrationToken = ""
                 persistRuntimeSettings()
                 await ensureEnrollment(force: true)
@@ -437,6 +445,7 @@ final class SwarmRuntimeController: ObservableObject {
                case .serverError(let message) = apiError,
                message.contains("mesh_unauthorized") {
                 meshToken = ""
+                isRegistered = false
                 persistRuntimeSettings()
                 statusText = "Heartbeat auth expired. Re-registering..."
                 appendEvent(statusText)
@@ -654,7 +663,7 @@ final class SwarmRuntimeController: ObservableObject {
 
     private func postDiagnosticsEvent(message: String, eventAtMs: Int) async {
         guard diagnosticsUploadEnabled else { return }
-        guard !meshToken.isEmpty else { return }
+        guard isSwarmReady else { return }
         let payload: [String: Any] = [
             "agentId": agentId,
             "events": [

@@ -24,8 +24,7 @@ import {
   queue,
   OLLAMA_MODEL,
   securityLog,
-  identity,
-  MESH_AUTH_TOKEN
+  identity
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import {
@@ -259,7 +258,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       accepted: true,
       policy: defaultPolicy,
       mode: body.mode,
-      meshToken: MESH_AUTH_TOKEN || undefined,
+      // No meshToken: the coordinators' shared token is never handed to agents. Agents authenticate
+      // every request with their own key (docs/security/agent-threat-model.md).
       hardwareVerification: verificationSummary(hardwareRecord),
       // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
       rewardAccountId: await rewardAccountForAgent(body.agentId)

@@ -608,7 +608,13 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     // Header first; the query parameter is kept for agents that predate it (it can end up in logs).
     const token = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-token") || url.searchParams.get("token");
     const peerId = url.searchParams.get("peerId");
-    if (!peerId || (MESH_AUTH_TOKEN && (!token || !safeTokenEqual(token, MESH_AUTH_TOKEN)))) {
+    const tokenValid = !MESH_AUTH_TOKEN || (Boolean(token) && safeTokenEqual(String(token), MESH_AUTH_TOKEN));
+    // Agents hold no mesh token: a registered agent connects with a signed bind by its own key.
+    // A coordinator peer's id binds with that peer's key only, never with an agent key registered
+    // under the same id (an agent named like a coordinator would otherwise take its gossip).
+    const meshPeerKey = peerId ? mesh.listPeers().find((p) => p.peerId === peerId)?.publicKeyPem : undefined;
+    const registeredAgentKey = peerId && !meshPeerKey ? agentCapabilities.get(peerId)?.publicKeyPem : undefined;
+    if (!peerId || (!tokenValid && !registeredAgentKey)) {
       socket.close(4001, "mesh_unauthorized");
       return;
     }
@@ -618,9 +624,10 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       peerId,
       signature,
       issuedAtMs,
-      knownPublicKeyPem: agentCapabilities.get(peerId)?.publicKeyPem ?? mesh.listPeers().find((p) => p.peerId === peerId)?.publicKeyPem,
+      knownPublicKeyPem: meshPeerKey ?? registeredAgentKey,
       existingAuthenticated: meshWsBindings.get(peerId)?.authenticated === true,
-      requireSigned: MESH_WS_REQUIRE_SIGNED
+      // Without the token, only a signed bind (proof of the registered agent key) is admitted.
+      requireSigned: MESH_WS_REQUIRE_SIGNED || !tokenValid
     });
     // A signed bind is single-use: the same headers cannot bind a second connection.
     const replayed =

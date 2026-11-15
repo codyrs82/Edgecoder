@@ -167,7 +167,7 @@ Handling is graduated; speed alone never blacklists at once:
 **Still open.**
 
 - The allowlist is a static environment variable on each coordinator, not a signed document. Adding a peer means changing the configuration of every coordinator.
-- `MESH_AUTH_TOKEN` is still a shared secret that gates the transport. It no longer confers peer trust.
+- `MESH_AUTH_TOKEN` is still a shared secret that gates the transport between coordinators. It no longer confers peer trust, and agents are no longer given it (they authenticate with their own keys; `docs/security/agent-threat-model.md`). Every agent registered before that change received it, so it must be rotated once coordinators and agents are updated.
 - `MESH_PEER_ALLOWLIST` is not in the `[env]` of the Fly seed configs; whether it is set as a secret on the deployed seeds was not verified.
 
 ## 8. End-to-end acceptance (#56, third criterion): not met

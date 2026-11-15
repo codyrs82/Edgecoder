@@ -3,8 +3,8 @@
 
 /**
  * Loopback forwarder: the user's IDE (or any local coding agent) sends swarm work to its own
- * agent, which signs it with the agent key and relays it to the coordinator the agent is
- * registered with. The coordinator then bills the agent owner's account (/submit binds the
+ * agent, which signs it with the agent key (GETs included) and relays it to the coordinator the
+ * agent is registered with. The coordinator then bills the agent owner's account (/submit binds the
  * account to the signer), so nothing local needs the shared mesh token or names an account.
  *
  *   POST /forward/submit                                      -> POST {coordinator}/submit (signed)
@@ -45,10 +45,10 @@ export interface LocalForwarderDeps {
   coordinatorUrl: () => string | null;
   /** The last coordinator-steering decision (registry pick, region, latency), for the app's Settings. */
   steering?: () => unknown;
-  /** x-mesh-token for the coordinator's global hook. */
+  /** x-mesh-token, only when the operator configured one (agents are never given the coordinators' token). */
   meshHeaders: () => Record<string, string>;
-  /** Agent request-signing headers over the exact body bytes. */
-  signedHeaders: (path: string, rawBody: string) => Record<string, string>;
+  /** Agent request-signing headers over the exact body bytes (method defaults to POST). */
+  signedHeaders: (path: string, rawBody: string, method?: string) => Record<string, string>;
   /** The account the coordinator bills for this agent, for /forward/health. */
   agentId: string;
   timeoutMs?: number;
@@ -117,15 +117,17 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       }
 
       if (req.method === "GET" && path === "/forward/inference/models") {
-        const upstream = await request(`${coordinator}/inference/models`, { method: "GET", headers: deps.meshHeaders(), headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+        const upstream = await request(`${coordinator}/inference/models`, { method: "GET", headers: { ...deps.meshHeaders(), ...deps.signedHeaders("/inference/models", "", "GET") }, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
         return send(res, upstream.statusCode, await upstream.body.text());
       }
 
       const result = req.method === "GET" ? RESULT_PATH_RE.exec(path) : null;
       if (result) {
-        const upstream = await request(`${coordinator}/tasks/${result[1]}/subtasks/${result[2]}/result`, {
+        const resultPath = `/tasks/${result[1]}/subtasks/${result[2]}/result`;
+        const upstream = await request(`${coordinator}${resultPath}`, {
           method: "GET",
-          headers: deps.meshHeaders(),
+          // Signed: the coordinator returns only results of tasks this agent's account submitted.
+          headers: { ...deps.meshHeaders(), ...deps.signedHeaders(resultPath, "", "GET") },
           headersTimeout: timeoutMs,
           bodyTimeout: timeoutMs
         });

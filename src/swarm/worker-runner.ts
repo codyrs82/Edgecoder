@@ -502,11 +502,11 @@ function meshHeaders(): Record<string, string> {
  * Request-signing headers. The coordinator checks `x-body-sha256` against the raw bytes it
  * receives, so pass the exact serialized body that goes on the wire (post() does this).
  */
-function signedHeaders(path: string, body: unknown): Record<string, string> {
+function signedHeaders(path: string, body: unknown, method = "POST"): Record<string, string> {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
   const bodyHash = hashRequestBody(raw);
   return signRequest({
-    method: "POST",
+    method,
     path,
     bodyHash,
     privateKeyPem: keys.privateKeyPem,
@@ -677,7 +677,8 @@ function signedJsonPost(path: string, body: unknown) {
 
 /** A GET the worker acts on (agent-mesh peers): same verified, signed-response path. */
 function coordinatorGet(path: string) {
-  return coordinatorClient.call({ method: "GET", path, headers: { ...meshHeaders(), "x-agent-id": AGENT_ID } });
+  // Signed over GET + path: the coordinator admits agents by their own key, not a shared token.
+  return coordinatorClient.call({ method: "GET", path, headers: { ...meshHeaders(), ...signedHeaders(path, "", "GET") } });
 }
 
 async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: { text: () => Promise<string> } }): Promise<unknown> {
@@ -828,10 +829,9 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
-    // Wait for a valid mesh token before connecting — connecting without one
-    // triggers rapid 4001 close → reconnect loops that trip DOS detection.
-    // Only to a coordinator that has proven its key (it follows URL changes on reconnect).
-    if (!meshAuthToken || !coordinator.isVerified()) {
+    // Only to a coordinator that has proven its key (it follows URL changes on reconnect), and only
+    // once registered: the coordinator admits the connection by this agent's signed bind.
+    if (!registeredWithUrl || !coordinator.isVerified()) {
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       return;
@@ -839,7 +839,7 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     // Token in a header only (never the URL, where proxies log it), and a signed bind so the
     // coordinator ties this connection to AGENT_ID's registered key (src/mesh/ws-auth.ts).
     const coordinatorUrl = coordinator.url;
-    const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), { headers: { "x-mesh-token": meshAuthToken, ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
+    const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), { headers: { ...meshHeaders(), ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
 
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
@@ -1056,7 +1056,7 @@ async function loop(): Promise<void> {
    */
   let meshUplinkStarted = false;
   function startMeshUplink(): void {
-    if (!meshPeer || meshUplinkStarted || !meshAuthToken || !coordinator.isVerified()) return;
+    if (!meshPeer || meshUplinkStarted || !coordinator.isVerified()) return;
     meshUplinkStarted = true;
     const peer = meshPeer;
     peer.config.bootstrapUrls = [coordinator.url];
@@ -1066,16 +1066,14 @@ async function loop(): Promise<void> {
       .catch((e) => console.warn(`[agent:${AGENT_ID}] mesh bootstrap failed (non-fatal): ${String(e)}`));
     connectMeshWebSocket(() => meshPeer);
   }
-  /** Use the mesh token a coordinator's /register response provisions (heartbeats and pulls need it). */
+  /**
+   * After a successful /register: start the mesh uplink. A coordinators' mesh token in the response
+   * (coordinators before this change sent one) is ignored: agents authenticate with their own key,
+   * and a shared token held by every install is no credential (docs/security/agent-threat-model.md).
+   */
   function adoptMeshToken(token: unknown): void {
     if (typeof token === "string" && token.length > 0 && token !== meshAuthToken) {
-      meshAuthToken = token;
-      console.log(`[agent:${AGENT_ID}] mesh token provisioned from coordinator register response`);
-      // The LAN mesh server refuses everything but /identity until it has a token.
-      meshServer?.setMeshToken(token);
-      meshPeer?.setMeshToken(token);
-      if (bleTransport) bleTransport.updateAdvertisement({ meshTokenHash: computeMeshTokenHash() });
-      if (bleMesh) bleMesh.setOwnTokenHash(computeMeshTokenHash());
+      console.log(`[agent:${AGENT_ID}] ignoring a mesh token in the register response (agents sign their requests)`);
     }
     startMeshUplink();
   }
