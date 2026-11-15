@@ -44,6 +44,7 @@ import {
   payoutPolicy,
   ECONOMY_PAYMENTS_ENABLED,
   payoutLimits,
+  launchConfig,
   payoutPause,
   memoryPayoutStore,
   RESERVED_HOST_ACCOUNTS,
@@ -51,6 +52,8 @@ import {
   runFeePoolDistribution
 } from "../payouts.js";
 import { recordInfraHeartbeat } from "../infra-hosts.js";
+import { launchUsageFor } from "../payments.js";
+import { launchPolicyView } from "../../../economy/launch-gate.js";
 import { verifyCreditLedger, alertLedgerMismatch } from "../ledger-verify.js";
 
 export function registerEconomyRoutes(app: CoordinatorApp): void {
@@ -96,7 +99,8 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
     if (!requirePortalServiceToken(req as any, reply)) return;
     const { accountId } = z.object({ accountId: z.string().min(1) }).parse(req.params);
     const [balance, payouts, pins] = await Promise.all([payoutService.balance(accountId), payoutStore.listPayouts(accountId, 100), callbackPins.listCallbackPins(accountId)]);
-    return { accountId, balance, payouts, callbackPins: callbackPinStatus(pins), policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused() } };
+    const launch = launchPolicyView(launchConfig, launchConfig.mode === "invite" ? (await launchUsageFor(accountId)).boughtWindowSats : undefined);
+    return { accountId, balance, payouts, callbackPins: callbackPinStatus(pins), policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused(), launch } };
   });
   app.post("/economy/payouts/withdraw", async (req, reply) => {
     if (!requirePortalServiceToken(req as any, reply)) return;
