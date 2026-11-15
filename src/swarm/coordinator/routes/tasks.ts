@@ -130,6 +130,9 @@ async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: 
   return decision.ok ? { ok: true } : decision;
 }
 
+/** Open claims any agent may hold (the worker's AGENT_PARALLEL_INFERENCE ceiling). */
+const MAX_OPEN_CLAIMS_FLOOR = 16;
+
 export function registerTaskRoutes(app: CoordinatorApp): void {
   app.post("/submit", async (req, reply) => {
     const body = taskSchema.parse(req.body);
@@ -376,7 +379,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // The book enforces the bid's class, price and constraints. The subtask's own constraints are
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
       // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
-      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs)
+      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs),
+      // Claim hoarding: open claims per agent are bounded by what it declared, never below the
+      // worker's parallel-inference ceiling (16) and never above the schema's 64.
+      Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR)
     );
     if (task) noteClaimed(task.id);
     if (task) {
