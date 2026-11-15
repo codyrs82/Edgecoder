@@ -5,7 +5,7 @@
 // tests/model/catalog-sync.test.ts fails when the two drift. At runtime the Model Manager
 // prefers GET /model/catalog from the inference service and falls back to this list.
 
-export const MODEL_CATALOG_VERSION = "2026-11-01.1";
+export const MODEL_CATALOG_VERSION = "2026-11-15.1";
 
 export type CatalogCategory = "coding" | "general" | "small" | "large";
 
@@ -236,6 +236,19 @@ export const MODEL_CATALOG: CatalogModel[] = [
     contextTokens: 131_072,
     license: "Llama 3.3 Community",
     capabilities: ["thinking"]
+  },
+  {
+    modelId: "qwen3-coder-next:latest",
+    name: "Qwen3-Coder-Next 80B MoE",
+    paramSize: "80B (3B active)",
+    diskSize: "52 GB",
+    description:
+      "Qwen's next-generation agentic coder: 80B MoE with only 3B active, 256K context, tool calling. Fast for its size; one 80 GB card or two 48 GB cards.",
+    category: "large",
+    minMemoryGb: 60,
+    contextTokens: 262_144,
+    license: "Apache-2.0",
+    capabilities: ["tools"]
   },
   {
     modelId: "gpt-oss:120b",

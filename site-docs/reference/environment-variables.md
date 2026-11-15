@@ -67,6 +67,10 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PAYOUT_RECONCILE_LOOKBACK_MS` | `86400000` | How far back the first reconciliation after a start reads node payments (ms). |
 | `PAYOUT_ALERT_WEBHOOK_URL` | _(unset)_ | POSTed a JSON summary (counts, amounts, payment hashes; no secrets) when reconciliation alerts or trips. |
 | `MOCK_LIGHTNING_BALANCE_SATS` | `0` | Dev only: starting balance of the mock Lightning wallet. |
+| `LAUNCH_MODE` | `open` | Portal and coordinator: `invite` turns on the soft launch (`src/economy/launch-gate.ts`). On the portal, a new account (email signup, first OAuth sign-in, a new AI-agent key) needs an invite code minted in Settings > Admin; existing accounts are grandfathered. On the coordinator, the `LAUNCH_MAX_*` caps below apply to every account. Set it on both. |
+| `LAUNCH_MAX_BUY_SATS_PER_DAY` | `50000` | Invite mode only: sats one account may spend buying cSats per rolling 24 h; paid and still-payable invoices count. `0` = no cap. |
+| `LAUNCH_MAX_BALANCE_SATS` | `200000` | Invite mode only: a purchase may not bring the account's cSats (balance plus open invoices plus the new one) above this. Earnings are not capped. `0` = no cap. |
+| `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` | `50000` | Invite mode only: layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS` (the lower applies) for every account's withdrawals and automatic payouts, the fee pool's included. `0` = no extra cap. |
 
 ## Model provider
 
@@ -586,6 +590,7 @@ These are not service configuration, so no schema lists them and the docs test s
 | `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider | Set by the IDE provider for the child processes it starts. |
 | `VITEST` | portal registry | Set by the test runner. |
 | `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |
+| `EDGECODER_INSTALL_TUNING` | installer CLI (`src/install/options.ts`) | Written into each instance's env file: the tuning flags (`--context-window`, `--parallel`, `--keep-alive`) the last `edgecoder-install apply` was given, so a re-run without them (a package upgrade) keeps their values. The agent ignores it. |
 | `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`, `EDGECODER_API_KEY` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |
 | `BT_PROXY_PORT` | BLE proxy launch scripts | Port the Swift `edgecoder-ble-proxy` companion listens on (default `11435`). |
 | `BT_PROXY_HOST` | BLE proxy launch scripts | Host for the BLE proxy HTTP API (default `127.0.0.1`). |

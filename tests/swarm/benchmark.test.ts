@@ -123,6 +123,8 @@ describe("GPU inference challenge", () => {
     expect(activeParamsB("weird")).toBeUndefined();
     expect(modelWeightsGb("qwen3.5:9b")).toEqual({ weightsGb: 5.4, activeParamsB: 9 });
     expect(modelWeightsGb("not-a-model:1b")).toBeUndefined();
+    // MoE: weights read per token follow the active parameters (3B), not the 80B total.
+    expect(modelWeightsGb("qwen3-coder-next:latest")).toEqual({ weightsGb: 1.8, activeParamsB: 3 });
   });
 
   it("known part bandwidth", () => {

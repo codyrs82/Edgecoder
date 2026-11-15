@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
+import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -23,6 +23,7 @@ export const portalConfigSchema = z.object({
   ...serviceUrlsEnv,
   ...discoveryEnv,
   ...computeClassEnv,
+  ...launchEnv,
   NODE_ENV: z.string().default("development"),
   PORTAL_PUBLIC_URL: envUrl("http://127.0.0.1:4310"),
   PORTAL_SERVICE_TOKEN: optStr,

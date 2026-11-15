@@ -123,6 +123,14 @@ describe("walletOverviewView", () => {
     const v = walletOverviewView({ fallbackNetwork: "bitcoin", overview: { connected: true, account: { cSats: 1 } }, rates: null, book: null, payouts: { policy: {} } });
     expect(v).toMatchObject({ network: "bitcoin", networkSource: "portal", connected: true, btcUsd: null });
   });
+
+  it("passes on the coordinator's soft-launch caps (early access), and nothing when it runs open", () => {
+    const launch = { mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, maxPayoutSatsPerDay: 50000, boughtWindowSats: 1200 };
+    const v = walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: { policy: { launch } } });
+    expect(v.launch).toEqual(launch);
+    expect(walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: { policy: { launch: { mode: "open" } } } }).launch).toBeNull();
+    expect(walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: null }).launch).toBeNull();
+  });
 });
 
 describe("wallet top-up rate limit", () => {
@@ -131,5 +139,20 @@ describe("wallet top-up rate limit", () => {
     expect(rateLimitFor("/portal/api/wallet/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
     expect(rateLimitFor("/v1/account/topup", "POST")).toEqual(TOPUP_RATE_LIMIT);
     expect(rateLimitFor("/portal/api/wallet/topup/abc", "GET")).toBeUndefined();
+  });
+});
+
+describe("wallet page: early access", () => {
+  it("shows the soft-launch caps from the overview, and a cap refusal's own sentence", async () => {
+    const { WALLET_SCRIPT } = await import("../../src/portal/pages/wallet.js");
+    // Run the page's text builder on its own (it is plain JS inside the script).
+    const src = WALLET_SCRIPT.slice(WALLET_SCRIPT.indexOf("function launchText"), WALLET_SCRIPT.indexOf("function renderLaunch"));
+    const fmtSats = (n: number) => Math.round(n).toLocaleString("en-US");
+    const launchText = new Function("fmtSats", `${src}; return launchText;`)(fmtSats);
+    expect(launchText({ mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, maxPayoutSatsPerDay: 0, boughtWindowSats: 20000 })).toBe(
+      "Early access: up to 50,000 sats per day (30,000 left today), a balance of up to 200,000 cSats."
+    );
+    expect(launchText(null)).toBe("");
+    expect(WALLET_SCRIPT).toContain("renderLaunch(o.launch)");
   });
 });

@@ -32,6 +32,8 @@ export class GossipMesh {
   private admission?: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null;
   /** Called for every message broadcast (the coordinator records which subtasks it offered). */
   private broadcastListener?: (message: MeshMessage) => void;
+  /** Whether a peer may be reached over HTTP (/mesh/ingest, /mesh/relay-gossip); default: every peer. */
+  private httpAllowed: (peerId: string) => boolean = () => true;
 
   setAdmission(fn: (peer: MeshPeerIdentity, existing: MeshPeerIdentity | undefined, opts: AddPeerOptions) => MeshPeerIdentity | null): void {
     this.admission = fn;
@@ -39,6 +41,15 @@ export class GossipMesh {
 
   onBroadcast(fn: (message: MeshMessage) => void): void {
     this.broadcastListener = fn;
+  }
+
+  /**
+   * Limit the HTTP paths to the peers `fn` allows. A peer it refuses gets gossip only down its open
+   * WebSocket; without one the message is skipped for it (not a failure: no NAT mark, no eviction).
+   * Agents use it for coordinators, whose HTTP mesh routes need the coordinators' token.
+   */
+  setHttpPolicy(fn: (peerId: string) => boolean): void {
+    this.httpAllowed = fn;
   }
 
   setMeshToken(token: string): void {
@@ -126,6 +137,11 @@ export class GossipMesh {
           }
         }
 
+        if (!this.httpAllowed(peer.peerId)) {
+          logger.debug({ peerId: peer.peerId, type: message.type }, "gossip skipped: no WebSocket and HTTP not allowed for this peer");
+          return;
+        }
+
         // ── Path 2: HTTP POST (works for publicly reachable peers) ──
         // Skip HTTP for peers we know are behind NAT — go straight to relay
         if (!this.natPeers.has(peer.peerId)) {
@@ -176,7 +192,7 @@ export class GossipMesh {
    */
   async send(peerId: string, message: MeshMessage, timeoutMs = 8_000): Promise<{ statusCode: number; body: Record<string, unknown> | null } | null> {
     const peer = this.peers.get(peerId);
-    if (!peer) return null;
+    if (!peer || !this.httpAllowed(peerId)) return null;
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
     try {
@@ -216,7 +232,7 @@ export class GossipMesh {
 
       // Look up the connected peer's HTTP URL for the relay request
       const connectedPeer = this.peers.get(connectedId);
-      if (!connectedPeer) continue;
+      if (!connectedPeer || !this.httpAllowed(connectedId)) continue;
 
       try {
         const res = await request(`${connectedPeer.coordinatorUrl}/mesh/relay-gossip`, {

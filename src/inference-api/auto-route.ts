@@ -97,10 +97,16 @@ export function sizeWorkload(req: Pick<ChatRequest, "messages" | "tools">, floor
   return { heavy, promptTokens, needsTools, minParamsB: heavy ? floor.codingB : floor.chatB };
 }
 
-/** Billions of parameters from a model tag ("qwen2.5-coder:7b" -> 7, "qwen3-coder:30b" -> 30); unknown tags count as 7. */
+/**
+ * Billions of parameters (total, for MoE models) of a model: from its tag ("qwen2.5-coder:7b" -> 7,
+ * "qwen3-coder:30b" -> 30), else from the catalog's size for a tag that carries none
+ * ("qwen3-coder-next:latest" -> 80); unknown models count as 7. Pricing and Auto's sizing use it.
+ */
 export function paramsB(model: string): number {
   const m = /[:\-_](\d+(?:\.\d+)?)b\b/i.exec(model);
-  return m ? Number(m[1]) : 7;
+  if (m) return Number(m[1]);
+  const fromCatalog = Number(/^\s*([\d.]+)\s*B/i.exec(catalogEntryForTag(model)?.paramSize ?? "")?.[1]);
+  return Number.isFinite(fromCatalog) && fromCatalog > 0 ? fromCatalog : 7;
 }
 
 const isEmbedding = (m: string) => /embed/i.test(m);

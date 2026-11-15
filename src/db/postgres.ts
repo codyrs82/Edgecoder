@@ -3567,6 +3567,23 @@ export class PostgresStore {
     );
   }
 
+  /** One account's purchases created since `sinceMs` (the soft-launch caps, src/economy/launch-gate.ts). */
+  async listPaymentIntentsForAccountSince(accountId: string, sinceMs: number): Promise<Array<Pick<PaymentIntent, "accountId" | "amountSats" | "quotedCredits" | "status" | "createdAtMs">>> {
+    const result = await this.pool.query(
+      `SELECT account_id, amount_sats, quoted_credits, status, created_at_ms
+       FROM payment_intents
+       WHERE account_id = $1 AND created_at_ms >= $2`,
+      [accountId, sinceMs]
+    );
+    return result.rows.map((row) => ({
+      accountId: row.account_id,
+      amountSats: Number(row.amount_sats),
+      quotedCredits: Number(row.quoted_credits),
+      status: row.status,
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
   async listPendingPaymentIntents(limit = 200): Promise<PaymentIntent[]> {
     const result = await this.pool.query(
       `SELECT intent_id, account_id, coordinator_id, wallet_type, network, invoice_ref, amount_sats,

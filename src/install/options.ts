@@ -19,6 +19,12 @@ export interface InstallOptions {
   /** Portal API key (eck_...) or session token: self-enrol every instance that has no --token and apply the returned registration token. */
   enrollToken?: string;
   model?: string;
+  /** Tuning: the context window every network call is served with (AGENT_CONTEXT_WINDOW). */
+  contextWindow?: number;
+  /** Tuning: parallel model calls per instance (AGENT_PARALLEL_INFERENCE and Ollama's OLLAMA_NUM_PARALLEL). */
+  parallel?: number;
+  /** Tuning: how long Ollama keeps the model loaded (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). */
+  keepAlive?: string;
   perGpu: boolean;
   /** GPU layout: per-gpu (one model per card), mixed (half per card, half in pairs), single (all cards pooled). Default: mixed on 4+ cards of 40 GB+, else per-gpu. */
   layout?: "per-gpu" | "mixed" | "single";
@@ -62,9 +68,12 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--token", arg: "[AGENT_ID=]TOKEN", description: "Registration token from the portal Nodes page; repeatable. Without AGENT_ID= it applies to every instance." },
   { flag: "--tokens-file", arg: "PATH", description: "File of AGENT_ID=TOKEN lines (one per instance)." },
   { flag: "--enroll", arg: "API_KEY", description: "Portal API key (eck_..., Settings → API keys; or a portal session token; or set EDGECODER_API_KEY): self-enrol each un-tokened instance with the portal and apply the registration token it returns." },
-  { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: the strongest that fits each instance's VRAM: 30B coder per 48 GB card, gpt-oss:120b on 80 GB+, qwen3:235b on 160 GB+, qwen3-coder:480b on 320 GB+)." },
+  { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: the strongest that fits each instance's VRAM: 30B coder per 48 GB card, qwen3-coder-next on 80 GB+, qwen3:235b on 160 GB+, qwen3-coder:480b on 320 GB+)." },
+  { flag: "--context-window", arg: "N", description: "Context window (tokens, 2048-131072) every network call is served with (AGENT_CONTEXT_WINDOW). Default: sized by memory and model." },
+  { flag: "--parallel", arg: "N", description: "Parallel model calls per instance, 1-16 (AGENT_PARALLEL_INFERENCE and the instance's OLLAMA_NUM_PARALLEL). Default: sized by VRAM and model." },
+  { flag: "--keep-alive", arg: "DUR", description: "How long Ollama keeps the model loaded after a call: a duration (30m, 1h30m), seconds, or -1 for always (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). Default 30m." },
   { flag: "--layout", arg: "per-gpu|mixed|single", description: "How GPUs are used. per-gpu: one model per card (most parallel work). mixed: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB+). single: every card pooled for the biggest model." },
-  { flag: "--gpus-per-instance", arg: "N", description: "Pool N GPUs per instance (overrides --layout), e.g. 2 for gpt-oss:120b on 48 GB cards, 8 for qwen3-coder:480b." },
+  { flag: "--gpus-per-instance", arg: "N", description: "Pool N GPUs per instance (overrides --layout), e.g. 2 for qwen3-coder-next on 48 GB cards, 8 for qwen3-coder:480b." },
   { flag: "--per-gpu", description: "Same as --layout per-gpu." },
   { flag: "--single", description: "Same as --layout single: one agent with every GPU pooled." },
   { flag: "--instances", arg: "N", description: "Exact number of agent instances to run (overrides --per-gpu/--single)." },
@@ -133,6 +142,9 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--tokens-file": o.tokensFile = val(); break;
       case "--enroll": o.enrollToken = val(); break;
       case "--model": o.model = val(); break;
+      case "--context-window": o.contextWindow = checkContextWindow(val()); break;
+      case "--parallel": o.parallel = checkParallel(val()); break;
+      case "--keep-alive": o.keepAlive = checkKeepAlive(val()); break;
       case "--per-gpu": o.perGpu = true; o.layout = "per-gpu"; break;
       case "--single": o.perGpu = false; o.layout = "single"; break;
       case "--layout": {
@@ -159,6 +171,76 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
     }
   }
   return o;
+}
+
+export const CONTEXT_WINDOW_RANGE = [2048, 131_072] as const;
+export const PARALLEL_RANGE = [1, 16] as const;
+/** Ollama keep_alive: -1 (never unload), whole seconds, or a Go duration such as 30m or 1h30m. */
+const KEEP_ALIVE_PATTERN = /^(-1|\d{1,7}|(\d{1,5}(\.\d{1,3})?(ms|s|m|h)){1,4})$/;
+
+function checkContextWindow(v: string): number {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < CONTEXT_WINDOW_RANGE[0] || n > CONTEXT_WINDOW_RANGE[1]) throw new Error(`--context-window must be a whole number of tokens from ${CONTEXT_WINDOW_RANGE[0]} to ${CONTEXT_WINDOW_RANGE[1]}`);
+  return n;
+}
+function checkParallel(v: string): number {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < PARALLEL_RANGE[0] || n > PARALLEL_RANGE[1]) throw new Error(`--parallel must be a whole number from ${PARALLEL_RANGE[0]} to ${PARALLEL_RANGE[1]}`);
+  return n;
+}
+function checkKeepAlive(v: string): string {
+  if (!KEEP_ALIVE_PATTERN.test(v)) throw new Error("--keep-alive must be -1, a number of seconds or a duration such as 30m or 1h30m");
+  return v;
+}
+
+export type InstallTuning = Pick<InstallOptions, "contextWindow" | "parallel" | "keepAlive">;
+
+/** The env-file line that records which tuning flags set the values, so a later run can keep them. */
+export const TUNING_ENV_KEY = "EDGECODER_INSTALL_TUNING";
+
+/** "context-window:32768,parallel:8,keep-alive:-1" for the flags given; undefined when none was. */
+export function renderTuning(t: InstallTuning): string | undefined {
+  const parts: string[] = [];
+  if (t.contextWindow !== undefined) parts.push(`context-window:${t.contextWindow}`);
+  if (t.parallel !== undefined) parts.push(`parallel:${t.parallel}`);
+  if (t.keepAlive !== undefined) parts.push(`keep-alive:${t.keepAlive}`);
+  return parts.length ? parts.join(",") : undefined;
+}
+
+/**
+ * The tuning flags a previous run wrote into an instance's env file (EDGECODER_INSTALL_TUNING).
+ * Values that do not pass the flags' own checks are dropped, so a tampered file adds nothing.
+ */
+export function tuningFromEnvFile(text: string): InstallTuning {
+  const line = text.split(/\r?\n/).find((l) => l.startsWith(`${TUNING_ENV_KEY}=`));
+  const out: InstallTuning = {};
+  if (!line) return out;
+  for (const part of line.slice(TUNING_ENV_KEY.length + 1).split(",")) {
+    const i = part.indexOf(":");
+    if (i < 0) continue;
+    const [k, v] = [part.slice(0, i), part.slice(i + 1)];
+    try {
+      if (k === "context-window") out.contextWindow = checkContextWindow(v);
+      else if (k === "parallel") out.parallel = checkParallel(v);
+      else if (k === "keep-alive") out.keepAlive = checkKeepAlive(v);
+    } catch { /* ignore an invalid value */ }
+  }
+  return out;
+}
+
+/**
+ * Options for a re-run (a package upgrade runs `apply --from-package` with no tuning flags): every
+ * tuning flag not given now takes the value the previous run recorded in `previousEnvFile`.
+ */
+export function inheritTuning(o: InstallOptions, previousEnvFile: string | undefined): InstallOptions {
+  if (!previousEnvFile) return o;
+  const prev = tuningFromEnvFile(previousEnvFile);
+  return {
+    ...o,
+    contextWindow: o.contextWindow ?? prev.contextWindow,
+    parallel: o.parallel ?? prev.parallel,
+    keepAlive: o.keepAlive ?? prev.keepAlive
+  };
 }
 
 export function parseTokensFile(text: string): Record<string, string> {

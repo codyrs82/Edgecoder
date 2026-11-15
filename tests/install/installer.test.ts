@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { detectHardware, hardwareProfileFor, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGpu, selectGpuPool, type Probe } from "../../src/install/hardware.js";
-import { helpText, parseInstallArgs, parseTokensFile, INSTALL_OPTIONS } from "../../src/install/options.js";
+import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, tuningFromEnvFile, INSTALL_OPTIONS } from "../../src/install/options.js";
 import { pickModel, planInstall, renderEnvFile } from "../../src/install/plan.js";
 import { applyPlan, defaultPaths, launchdAgentPlist, removeServices, systemdAgentUnit, systemdOllamaUnit, windowsAgentCmd, type Host } from "../../src/install/services.js";
 import { enrollNodes, pullModels, type HttpPost } from "../../src/install/cli.js";
@@ -124,15 +124,15 @@ describe("plan", () => {
     expect(own.instances[0].env.EDGECODER_TRUST_MODE).toBeUndefined();
   });
 
-  it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for gpt-oss:120b", () => {
+  it("an 8x 48 GB host defaults to mixed: four cards one each, two pairs for qwen3-coder-next", () => {
     const plan = planInstall(gpuBox, parseInstallArgs(["apply", "--token", "t"]), true);
     expect(plan.instances.map((i) => [i.agentId, i.env.CUDA_VISIBLE_DEVICES, i.model, i.memoryGb])).toEqual([
       ["gpu-box-local-gpu0", "0", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu1", "1", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu2", "2", "qwen3-coder:30b", 48],
       ["gpu-box-local-gpu3", "3", "qwen3-coder:30b", 48],
-      ["gpu-box-local-gpu4-5", "4,5", "gpt-oss:120b", 96],
-      ["gpu-box-local-gpu6-7", "6,7", "gpt-oss:120b", 96],
+      ["gpu-box-local-gpu4-5", "4,5", "qwen3-coder-next:latest", 96],
+      ["gpu-box-local-gpu6-7", "6,7", "qwen3-coder-next:latest", 96],
     ]);
     // The pooled instance's Ollama sees both cards.
     expect(plan.instances[4].gpus.map((g) => g.index)).toEqual([4, 5]);
@@ -321,5 +321,61 @@ describe("enrolment: --enroll self-registers nodes with the portal", () => {
     expect(helpText()).toContain("EDGECODER_API_KEY");
     const plan = planInstall(twoGpu, parseInstallArgs(["apply"], { EDGECODER_API_KEY: "eck_secret" }), true);
     expect(JSON.stringify(plan)).not.toContain("eck_secret");
+  });
+});
+
+describe("tuning flags: --context-window, --parallel, --keep-alive", () => {
+  const probe: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n" : null);
+  const hw = detectHardware({ probe, platform: "linux", arch: "x64", ramGb: 256, cpuModel: "x", cpuCores: 32, hostname: "box" });
+  const p = defaultPaths("linux", { nodeBin: "/usr/bin/node" });
+
+  it("parses and validates the values", () => {
+    const o = parseInstallArgs(["apply", "--context-window", "32768", "--parallel=6", "--keep-alive", "-1"]);
+    expect([o.contextWindow, o.parallel, o.keepAlive]).toEqual([32768, 6, "-1"]);
+    expect(parseInstallArgs(["apply", "--keep-alive", "1h30m"]).keepAlive).toBe("1h30m");
+    expect(parseInstallArgs(["apply", "--keep-alive", "600"]).keepAlive).toBe("600");
+    expect(() => parseInstallArgs(["apply", "--context-window", "1024"])).toThrow(/--context-window/);
+    expect(() => parseInstallArgs(["apply", "--context-window", "200000"])).toThrow(/--context-window/);
+    expect(() => parseInstallArgs(["apply", "--parallel", "0"])).toThrow(/--parallel/);
+    expect(() => parseInstallArgs(["apply", "--parallel", "17"])).toThrow(/--parallel/);
+    expect(() => parseInstallArgs(["apply", "--keep-alive", "forever"])).toThrow(/--keep-alive/);
+    expect(() => parseInstallArgs(["apply", "--keep-alive=$(id)"])).toThrow(/--keep-alive/);
+  });
+
+  it("writes them to the agent env and the instance's Ollama unit", () => {
+    const plan = planInstall(hw, parseInstallArgs(["apply", "--token", "t", "--context-window", "65536", "--parallel", "8", "--keep-alive", "-1"]), true);
+    const env = renderEnvFile(plan.instances[0].env);
+    expect(env).toContain("AGENT_CONTEXT_WINDOW=65536\n");
+    expect(env).toContain("AGENT_PARALLEL_INFERENCE=8\n");
+    expect(env).toContain("AGENT_MODEL_KEEP_ALIVE=-1\n");
+    const unit = systemdOllamaUnit(p, plan.instances[0]);
+    expect(unit).toContain('Environment="OLLAMA_NUM_PARALLEL=8"');
+    expect(unit).toContain('Environment="OLLAMA_KEEP_ALIVE=-1"');
+    expect(unit).not.toContain("OLLAMA_KEEP_ALIVE=30m");
+  });
+
+  it("without the flags the defaults stand (no context window or keep-alive pinned)", () => {
+    const plan = planInstall(hw, parseInstallArgs(["apply", "--token", "t"]), true);
+    expect(plan.instances[0].env.AGENT_CONTEXT_WINDOW).toBeUndefined();
+    expect(plan.instances[0].env.AGENT_MODEL_KEEP_ALIVE).toBeUndefined();
+    expect(plan.instances[0].env.EDGECODER_INSTALL_TUNING).toBeUndefined();
+    expect(systemdOllamaUnit(p, plan.instances[0])).toContain('Environment="OLLAMA_KEEP_ALIVE=30m"');
+  });
+
+  it("a re-run without the flags (a package upgrade) keeps the values the last run set", () => {
+    const first = planInstall(hw, parseInstallArgs(["apply", "--token", "t", "--parallel", "8", "--keep-alive", "2h"]), true);
+    const previous = renderEnvFile(first.instances[0].env);
+    expect(tuningFromEnvFile(previous)).toEqual({ parallel: 8, keepAlive: "2h" });
+    // The upgrade's re-run: no tuning flags. An explicit flag still wins over the inherited value.
+    const rerun = inheritTuning(parseInstallArgs(["apply", "--from-package", "--context-window", "16384"]), previous);
+    expect([rerun.parallel, rerun.keepAlive, rerun.contextWindow]).toEqual([8, "2h", 16384]);
+    const again = planInstall(hw, { ...rerun, tokens: { "*": "t" } }, true);
+    expect(again.instances[0].env.AGENT_PARALLEL_INFERENCE).toBe("8");
+    expect(again.instances[0].env.AGENT_MODEL_KEEP_ALIVE).toBe("2h");
+    expect(again.instances[0].env.AGENT_CONTEXT_WINDOW).toBe("16384");
+    // A computed parallel count is not a pinned one: it is re-sized on the next run.
+    expect(tuningFromEnvFile(renderEnvFile(planInstall(hw, parseInstallArgs(["apply", "--token", "t"]), true).instances[0].env))).toEqual({});
+    // Garbage in an old env file is ignored, not written back.
+    expect(tuningFromEnvFile("EDGECODER_INSTALL_TUNING=parallel:99,keep-alive:$(x),context-window:12\n")).toEqual({});
   });
 });

@@ -39,6 +39,7 @@ describe("job pricing (cSats = sats)", () => {
 });
 
 import { cSatsPerMTokens, inferenceCostMsat, tokenPriceUsdPerM } from "../../src/economy/job-pricing.js";
+import { paramsB } from "../../src/inference-api/auto-route.js";
 
 describe("per-token pricing for model calls", () => {
   const base = { paramsB: 9, btcUsd: 100_000, durationMs: 10_000, computeClass: "apple", tierWeight: 3, perSecondCostMsat: 1_560 };
@@ -49,6 +50,10 @@ describe("per-token pricing for model calls", () => {
     expect(tokenPriceUsdPerM(70)).toEqual({ input: 0.3, output: 0.8 });
     // 9B at $100k BTC: 40 sats in, 100 sats out per million tokens.
     expect(cSatsPerMTokens(9, 100_000)).toEqual({ input: 40, output: 100 });
+  });
+
+  it("prices qwen3-coder-next (no size in its tag) as the 80B model it is, not the 7B default", () => {
+    expect(tokenPriceUsdPerM(paramsB("qwen3-coder-next:latest"))).toEqual({ input: 0.3, output: 0.8 });
   });
 
   it("charges tokens when that covers the power, else the power floor", () => {

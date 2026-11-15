@@ -69,6 +69,13 @@ export class MeshPeer {
     this.protocol = new MeshProtocol();
     this.gossip = new GossipMesh();
     if (config.meshToken) this.gossip.setMeshToken(config.meshToken);
+    // An agent holds no coordinators' mesh token (docs/security/agent-threat-model.md), so a
+    // coordinator's /mesh/ingest and /mesh/relay-gossip answer it 401 mesh_unauthorized. It gossips
+    // to coordinators only down the signed mesh WebSocket, which they accept from agents. An agent
+    // an operator gave the token (a private mesh) keeps the HTTP path.
+    if (config.role === "agent") {
+      this.gossip.setHttpPolicy((peerId) => Boolean(this.config.meshToken) || this.peerTable.get(peerId)?.role !== "coordinator");
+    }
   }
 
   /** Set (or rotate) the mesh token used on outbound mesh requests and gossip. */

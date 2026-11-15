@@ -16,7 +16,7 @@ import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
+import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -1303,13 +1303,13 @@ async function loop(): Promise<void> {
             };
             const registerResponse = (await post("/register", registerBody, {
               signed: true,
-            })) as {
-              accepted?: boolean;
+            })) as RegisterReply & {
               meshToken?: string;
               rewardAccountId?: string;
             };
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
+            console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             adoptMeshToken(registerResponse.meshToken);
             adoptRewardAccount(registerResponse.rewardAccountId);
           }
@@ -1798,7 +1798,8 @@ async function loop(): Promise<void> {
             };
             // Keep the mesh token from this register too: an agent that went offline before its first
             // registration has none, and without it every heartbeat is refused (mesh_unauthorized).
-            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as { meshToken?: string; rewardAccountId?: string };
+            const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as RegisterReply & { meshToken?: string; rewardAccountId?: string };
+            console.log(registeredLogLine(AGENT_ID, coordinator.url, probeRegister));
             adoptMeshToken(probeRegister.meshToken);
             adoptRewardAccount(probeRegister.rewardAccountId);
             const probeBody = { agentId: AGENT_ID, powerTelemetry };

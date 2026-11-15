@@ -66,3 +66,22 @@ export function rateLimitWaitMs(err: unknown): number | null {
   const wait = typeof e.retryAfterMs === "number" && Number.isFinite(e.retryAfterMs) ? e.retryAfterMs : DEFAULT_RATE_LIMIT_WAIT_MS;
   return Math.min(MAX_RATE_LIMIT_WAIT_MS, Math.max(1_000, wait));
 }
+
+/** The parts of a /register reply the "registered" log line reports. */
+export interface RegisterReply {
+  accepted?: boolean;
+  hardwareVerification?: { status?: unknown; grantedClass?: unknown; grantedTier?: unknown } | null;
+}
+
+/**
+ * The line a worker logs after each successful /register: hosting guides use it as evidence that
+ * the agent joined (agent id, coordinator, and the class and tier the coordinator granted).
+ */
+export function registeredLogLine(agentId: string, coordinatorUrl: string, reply: RegisterReply | undefined): string {
+  const hv = reply?.hardwareVerification;
+  const parts: string[] = [];
+  if (hv && typeof hv.grantedClass === "string") parts.push(`class=${hv.grantedClass}`);
+  if (hv && typeof hv.grantedTier === "string") parts.push(`tier=${hv.grantedTier}`);
+  if (hv && typeof hv.status === "string") parts.push(`verification=${hv.status}`);
+  return `[agent:${agentId}] registered with ${coordinatorUrl}${parts.length ? ` (${parts.join(" ")})` : ""}`;
+}

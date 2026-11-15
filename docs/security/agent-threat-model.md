@@ -118,6 +118,10 @@ Listeners on an agent install:
   - `/mesh/ws` admits agents by their signed bind. A coordinator peer's id binds only with that
     peer's key, so an agent registered under a coordinator's id cannot take its gossip.
   - The agent mesh server hears trusted senders only.
+  - Agents gossip to coordinators only down the signed mesh WebSocket. The HTTP gossip routes
+    (`/mesh/ingest`, `/mesh/relay-gossip`) stay behind the coordinators' token; an agent without it
+    no longer tries them every 30 s (which logged 401 `mesh_unauthorized` and marked the
+    coordinator NATed). An agent an operator gave the token keeps the HTTP path.
   - The iOS app no longer treats "has a mesh token" as "registered" (Swift change, not compiled
     here: no iOS SDK on the review machine).
 - **Direct-work offers had no size, count or lifetime bound.** They are pushed into the target's

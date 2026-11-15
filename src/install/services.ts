@@ -89,7 +89,8 @@ function ollamaEnv(p: ServicePaths, inst: AgentInstance): Record<string, string>
   const env: Record<string, string> = {
     OLLAMA_HOST: `127.0.0.1:${inst.ollamaPort}`,
     OLLAMA_MODELS: p.modelsDir,
-    OLLAMA_KEEP_ALIVE: "30m",
+    // --keep-alive (plan.ts AGENT_MODEL_KEEP_ALIVE): the server default matches what the agent sends.
+    OLLAMA_KEEP_ALIVE: inst.env?.AGENT_MODEL_KEEP_ALIVE ?? "30m",
     HOME: p.modelsDir
   };
   // Same slot count the agent sends at once (plan.ts AGENT_PARALLEL_INFERENCE).

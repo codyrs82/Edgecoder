@@ -14,7 +14,7 @@
  * the default (Q4_K_M unless noted) download sizes as listed on ollama.com.
  */
 
-export const MODEL_CATALOG_VERSION = "2026-11-01.1";
+export const MODEL_CATALOG_VERSION = "2026-11-15.1";
 
 export type CatalogCategory = "coding" | "general" | "small" | "large";
 
@@ -247,6 +247,19 @@ export const MODEL_CATALOG: CatalogModel[] = [
     capabilities: ["thinking"]
   },
   {
+    modelId: "qwen3-coder-next:latest",
+    name: "Qwen3-Coder-Next 80B MoE",
+    paramSize: "80B (3B active)",
+    diskSize: "52 GB",
+    description:
+      "Qwen's next-generation agentic coder: 80B MoE with only 3B active, 256K context, tool calling. Fast for its size; one 80 GB card or two 48 GB cards.",
+    category: "large",
+    minMemoryGb: 60,
+    contextTokens: 262_144,
+    license: "Apache-2.0",
+    capabilities: ["tools"]
+  },
+  {
     modelId: "gpt-oss:120b",
     name: "gpt-oss 120B MoE",
     paramSize: "117B (5.1B active)",
@@ -320,7 +333,7 @@ export function defaultModelForMemory(memoryGb: number, catalog: CatalogModel[] 
 export function gpuModelForVram(vramGb: number): string {
   if (vramGb >= 320) return "qwen3-coder:480b";
   if (vramGb >= 160) return "qwen3:235b";
-  if (vramGb >= 80) return "gpt-oss:120b";
+  if (vramGb >= 80) return "qwen3-coder-next:latest";
   if (vramGb >= 24) return "qwen3-coder:30b";
   return defaultModelForMemory(vramGb);
 }
