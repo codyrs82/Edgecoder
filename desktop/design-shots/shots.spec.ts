@@ -173,6 +173,8 @@ for (const vp of SIZES) {
     test("coding view, folder open", async ({ page }) => {
       await open(page, true);
       await editorTab(page);
+      // The Code view is chat-first; the files and editor come in on this toggle.
+      await page.getByRole("button", { name: "Files and editor" }).click({ timeout: 2_000 }).catch(() => {});
       await page.getByText("main.ts").first().click({ timeout: 5_000 }).catch(async () => {
         await page.getByText("src", { exact: true }).first().click();
         await page.getByText("main.ts").first().click();

@@ -1,6 +1,21 @@
 <script lang="ts">
   import { getGitHubStatus, getOAuthStartUrl, disconnectGitHub } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
+  import { githubCli, githubCliStatus } from "../lib/github-cli";
+
+  // The GitHub CLI: what pushing, publishing and cloning private repositories use.
+  let checkingCli = $state(false);
+  async function checkCli(fresh = false) {
+    checkingCli = true;
+    try {
+      await githubCliStatus(fresh);
+    } finally {
+      checkingCli = false;
+    }
+  }
+  $effect(() => {
+    void checkCli();
+  });
 
   let loading = $state(true);
   let connected = $state(false);
@@ -58,8 +73,34 @@
 <div class="integrations">
   <h1>Integrations</h1>
 
+  <div class="section" data-testid="github-cli">
+    <h2>GitHub for your projects</h2>
+    {#if !$githubCli || (checkingCli && !$githubCli)}
+      <p class="loading-text" role="status">Checking the GitHub CLI...</p>
+    {:else if $githubCli.loggedIn}
+      <div class="github-connected">
+        <div class="github-profile">
+          <span class="github-login">@{$githubCli.login ?? "unknown"}</span>
+          <span class="badge connected">Signed in</span>
+        </div>
+        <button type="button" class="btn-secondary" onclick={() => void checkCli(true)} disabled={checkingCli}>{checkingCli ? "Checking..." : "Check again"}</button>
+      </div>
+      <p class="description cli-note">Projects clone, pull, push and publish to GitHub with this sign-in (the GitHub CLI, <code>gh</code>).</p>
+    {:else}
+      <p class="description">
+        {#if $githubCli.ghInstalled}
+          Cloning private repositories, pushing and publishing projects use the GitHub CLI. Sign in once in a terminal:
+        {:else}
+          Cloning private repositories, pushing and publishing projects use the GitHub CLI, which isn't installed. Install it, then sign in:
+        {/if}
+      </p>
+      <pre class="cmd">{$githubCli.ghInstalled ? "gh auth login" : "brew install gh\ngh auth login"}</pre>
+      <button type="button" class="btn-primary" onclick={() => void checkCli(true)} disabled={checkingCli}>{checkingCli ? "Checking..." : "Check again"}</button>
+    {/if}
+  </div>
+
   <div class="section">
-    <h2>GitHub</h2>
+    <h2>GitHub for the agent</h2>
     {#if loading}
       <p class="loading-text" role="status">Checking connection...</p>
     {:else if connected}
@@ -108,6 +149,28 @@
     font-weight: 600;
   }
   .loading-text { color: var(--text-muted); font-size: 0.85rem; }
+  .cmd {
+    margin: 0 0 1rem;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-base);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: pre;
+  }
+  .cli-note { margin: 0.8rem 0 0; }
+  .btn-secondary {
+    height: var(--control-md);
+    padding: 0 12px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--fs-sm);
+    cursor: pointer;
+  }
   .description {
     color: var(--text-secondary);
     font-size: 0.85rem;

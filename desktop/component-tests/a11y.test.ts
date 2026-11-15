@@ -173,8 +173,9 @@ const PAGES: Case[] = [
   ["Settings: Logs", SECTION_SHOWS["Logs"], LogViewer, {}],
   ["Bot", "Tidy the README", BotView, { bot: BOT, onEdit: noop, onDeleted: noop }],
   ["Conversation sidebar", "Seeded chat", ConversationSidebar, { open: true, inline: true, onClose: noop, onSelectConversation: noop, onNewChat: noop, activeConversationId: "c1", user: USER, onOpenSettings: noop, onLogout: noop }],
-  ["Editor chat panel", "Ask about your code", EditorChatPanel, {}],
-  ["Editor", "Open a project", EditorView, { projectRoot: null }],
+  ["Editor chat panel", "Pick a project to start", EditorChatPanel, {}],
+  ["Editor chat panel in a project", "a11y/demo", EditorChatPanel, { projectRoot: "/Users/a11y/EdgeCoder/demo" }],
+  ["Editor", "Pick a project to start", EditorView, { projectRoot: null }],
 ];
 
 const OVERLAYS: Case[] = [
@@ -247,24 +248,32 @@ describe("axe: overlays (#29)", () => {
   });
 });
 
-// desktop-polish: with no folder open the Code view is one empty state and the chat takes the room.
-describe("Code view with no folder", () => {
-  it("shows one Open folder action and no editor or file panes", async () => {
+// With no project the Code view is one prompt (pick or create a project) and the chat takes the room.
+describe("Code view with no project", () => {
+  it("shows one prompt to pick or create a project, no composer and no editor or file panes", async () => {
     const onBareChange = vi.fn();
     const { container } = render(EditorView, { projectRoot: null, onBareChange });
-    await screen.findByRole("heading", { name: "Open a project" });
+    await screen.findByRole("heading", { name: "Pick a project to start" });
     expect(screen.getAllByRole("button", { name: /Open folder/ })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /New project/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Clone from GitHub/ })).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(container.querySelector(".explorer-panel")).toBeNull();
     expect(container.querySelector(".editor-panel")?.classList.contains("hidden")).toBe(true);
     expect(onBareChange).toHaveBeenLastCalledWith(true);
   });
 
-  it("brings the files and the editor back once a folder is open", async () => {
+  it("is chat first in a project, and brings the files and the editor in on the toggle", async () => {
     const onBareChange = vi.fn();
     const { container } = render(EditorView, { projectRoot: "/Users/a11y/EdgeCoder/demo", onBareChange });
+    expect(await screen.findByRole("button", { name: /^Branch main/ })).toBeTruthy();
+    expect(container.querySelector(".explorer-panel")).toBeNull();
+    expect(onBareChange).toHaveBeenLastCalledWith(true);
+    await fireEvent.click(screen.getByRole("button", { name: "Files and editor" }));
     await waitFor(() => expect(container.querySelector(".explorer-panel")).not.toBeNull());
     expect(container.querySelector(".editor-panel")?.classList.contains("hidden")).toBe(false);
-    expect(screen.queryByRole("heading", { name: "Open a project" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Pick a project to start" })).toBeNull();
     expect(onBareChange).toHaveBeenLastCalledWith(false);
+    localStorage.removeItem("edgecoder-workspace-open");
   });
 });

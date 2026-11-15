@@ -121,6 +121,11 @@ const FIXTURES: Array<[RegExp, unknown]> = [
   [/\/v1\/ide\/settings\/projects-folder/, { path: "/Users/a11y/EdgeCoder", source: "default", defaultPath: "/Users/a11y/EdgeCoder" }],
   [/\/v1\/ide\/repos\/recent/, { ghInstalled: true, loggedIn: true, login: "a11y", repos: ["a11y/demo", "a11y/site"] }],
   [/\/v1\/ide\/project$/, { projectRoot: null }],
+  [/\/v1\/ide\/git\/github\/status/, { ghInstalled: true, loggedIn: true, login: "a11y" }],
+  [/\/v1\/ide\/git\/state/, {
+    branch: "main", upstream: "origin/main", ahead: 1, behind: 0, staged: [], unstaged: [{ path: "src/app.ts", status: "M" }],
+    branches: ["main", "feature/login"], remotes: ["origin"], remoteUrl: "https://github.com/a11y/demo.git", hasCommits: true,
+  }],
   [/\/portal\/api\/github\/status/, { connected: true, login: "a11y" }],
   [/\/portal\/api\/github\/token/, { token: null }],
   [/\/wallet\/payout-destination/, {

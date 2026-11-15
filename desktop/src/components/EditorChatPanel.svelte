@@ -1,13 +1,16 @@
 <script lang="ts">
-  import { ChevronDown, Plus } from "@lucide/svelte";
+  import { ChevronDown, Plus, PanelRight } from "@lucide/svelte";
   import { menu } from "../lib/menu";
-  import { onMount, onDestroy, type Snippet } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import ChatProjectHeader from "./ChatProjectHeader.svelte";
+  import NoProjectPrompt from "./NoProjectPrompt.svelte";
+  import { chatsChanged, lastChatFor, projectName, setLastChatFor } from "../lib/projects";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import ComputePicker from "./ComputePicker.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
-  import { streamChat, streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
+  import { streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
@@ -37,12 +40,29 @@
     onFilesChanged?: () => void;
     onOpenPath?: (path: string) => void;
     onPreview?: (path: string) => void;
-    /** The panel is the whole view (no folder open): the conversation is centred at reading width. */
+    /** The panel is the whole view (no editor showing): the conversation is centred at reading width. */
     wide?: boolean;
-    /** Shown when no folder is open: the full card (empty chat) or a compact bar (compact = true). */
-    noProject?: Snippet<[boolean]>;
+    /** Bump to reload the project header's git state. */
+    gitRefreshKey?: number;
+    /** No project: open this recent one (the chat is linked to it). */
+    onPickProject?: (root: string) => void;
+    onNewProject?: () => void;
+    onOpenFolder?: () => void;
+    onClone?: () => void;
+    /** Settings → Integrations (GitHub). */
+    onConnectGitHub?: () => void;
+    /** Show uncommitted changes (Source Control). */
+    onReviewChanges?: () => void;
+    /** The files and editor beside the chat: shown or not, and the toggle. */
+    workspaceOpen?: boolean;
+    onToggleWorkspace?: () => void;
+    /** The chat showing changed (the sidebar highlights it). */
+    onConversationChange?: (id: string) => void;
   }
-  let { projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview, wide = false, noProject }: Props = $props();
+  let {
+    projectRoot = null, onApplyCode, getFileContext, onFilesChanged, onOpenPath, onPreview, wide = false, gitRefreshKey = 0,
+    onPickProject, onNewProject, onOpenFolder, onClone, onConnectGitHub, onReviewChanges, workspaceOpen = false, onToggleWorkspace, onConversationChange,
+  }: Props = $props();
 
   let streamingToolEvents: ToolEvent[] = $state([]);
   /** Where a message goes: the local agent, or a background job on the network. */
@@ -56,7 +76,60 @@
   let streamingChanged: string[] = $state([]);
   let githubToken: string | null = null;
 
-  let conversation: Conversation = $state(createConversation("editor"));
+  /** A new coding chat in `root` (none: it waits for a project). */
+  function freshConversation(root: string | null): Conversation {
+    const c = createConversation("editor");
+    if (root) c.projectRoot = root;
+    return c;
+  }
+  let conversation: Conversation = $state(freshConversation(untrack(() => projectRoot)));
+  /** Each load that replaces the conversation takes a number; a slower, older one is dropped. */
+  let loadSeq = 0;
+  $effect(() => {
+    onConversationChange?.(conversation.id);
+  });
+
+  /** Save the chat and remember it as its project's last one. */
+  async function persist() {
+    await saveConversation(conversation);
+    localStorage.setItem("edgecoder-last-editor-id", conversation.id);
+    if (conversation.projectRoot) setLastChatFor(conversation.projectRoot, conversation.id);
+    chatsChanged();
+  }
+
+  // The open project changed: the chat follows it. An empty chat moves to the new project; one
+  // with messages stays with its own and the project's last chat (or a new one) opens instead.
+  let seenRoot: string | null | undefined = undefined;
+  $effect(() => {
+    const root = projectRoot;
+    if (root === seenRoot) return;
+    seenRoot = root;
+    untrack(() => void followProject(root));
+  });
+
+  async function followProject(root: string | null) {
+    if ((conversation.projectRoot ?? null) === root) return;
+    if (conversation.messages.length === 0 && !isStreaming) {
+      if (root) conversation.projectRoot = root;
+      else delete conversation.projectRoot;
+      conversation = conversation;
+      return;
+    }
+    // A chat with no project yet is linked to the one just opened (the user picked it for it).
+    if (!conversation.projectRoot && root) {
+      conversation.projectRoot = root;
+      conversation = conversation;
+      await persist();
+      return;
+    }
+    const seq = ++loadSeq;
+    const id = root ? lastChatFor(root) : null;
+    const loaded = id ? await loadConversationFromDb(id) : undefined;
+    if (seq !== loadSeq) return;
+    if (isStreaming && abortController) abortController.abort();
+    conversation = loaded && (loaded.projectRoot ?? null) === root ? loaded : freshConversation(root);
+    streamingContent = "";
+  }
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let streamProgress: StreamProgress | undefined = $state(undefined);
@@ -81,22 +154,15 @@
       usePortalChat = true;
     }
 
-    // Restore last editor conversation
-    const lastId = localStorage.getItem("edgecoder-last-editor-id");
-    if (lastId) {
-      const loaded = await loadConversationFromDb(lastId);
-      if (loaded) {
-        conversation = loaded;
-      }
-    } else {
-      // Fallback: load most recent editor conversation
-      const recent = await listConversationsBySource("editor");
-      if (recent.length > 0) {
-        const loaded = await loadConversationFromDb(recent[0].id);
-        if (loaded) conversation = loaded;
-      }
+    // Reopen the last coding chat: the open project's, else the last one at all.
+    const seq = ++loadSeq;
+    const lastId = (projectRoot ? lastChatFor(projectRoot) : null) ?? localStorage.getItem("edgecoder-last-editor-id");
+    const loaded = lastId ? await loadConversationFromDb(lastId) : undefined;
+    if (seq === loadSeq && loaded && conversation.messages.length === 0) {
+      // With a project open, only one of its own chats reopens (not another project's, nor one without a project).
+      if (!projectRoot || loaded.projectRoot === projectRoot) conversation = loaded;
     }
-    recentConversations = await listConversationsBySource("editor");
+    await refreshConversationList();
 
     getGitHubToken().then((t) => { githubToken = t; }).catch(() => {});
 
@@ -109,20 +175,19 @@
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
     if (pullPollTimer) clearInterval(pullPollTimer);
-    if (conversation.messages.length > 0) {
-      localStorage.setItem("edgecoder-last-editor-id", conversation.id);
-      saveConversation(conversation);
-    }
+    if (conversation.messages.length > 0) void persist();
   });
 
+  /** The picker lists this project's chats (or, with none open, the ones without a project). */
   async function refreshConversationList() {
-    recentConversations = await listConversationsBySource("editor");
+    const all = await listConversationsBySource("editor");
+    recentConversations = all.filter((c) => (c.projectRoot ?? null) === (projectRoot ?? null));
   }
 
   function scrollToBottom() {
     if (scrollContainer) {
       requestAnimationFrame(() => {
-        scrollContainer!.scrollTop = scrollContainer!.scrollHeight;
+        if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
       });
     }
   }
@@ -144,8 +209,13 @@
 
   export async function sendMessage(text: string) {
     if (isStreaming) return;
+    // Coding chats belong to a project; with none open the prompt to pick one shows instead.
+    if (!projectRoot) return;
+    if (!conversation.projectRoot) conversation.projectRoot = projectRoot;
 
+    const titled = conversation.title !== "New chat";
     addMessage(conversation, "user", text);
+    if (!titled) conversation.title = text.slice(0, 60) + (text.length > 60 ? "..." : "");
     conversation = conversation;
 
     isStreaming = true;
@@ -169,7 +239,7 @@
             streamProgress = progress;
           },
         );
-      } else if (projectRoot) {
+      } else {
         // Agent mode: tools for reading, editing and searching the project and running commands.
         const ctx = getFileContext?.();
         const attached = await expandMentions(text);
@@ -201,41 +271,16 @@
           githubToken,
           autoApply ? "edits" : "none",
         );
-      } else {
-        // Stream through local IDE provider (OpenAI-compatible format)
-        const fileContext = getFileContext?.();
-        const systemMessages = fileContext
-          ? [{ role: "system", content: `The user is editing ${fileContext.path} (${fileContext.language}). Current file content:\n\`\`\`${fileContext.language}\n${fileContext.content}\n\`\`\`` }]
-          : [];
-
-        const apiMessages = [
-          ...systemMessages,
-          ...conversation.messages.map((m) => ({ role: m.role, content: m.content })),
-        ];
-
-        await streamChat(
-          apiMessages,
-          (chunk) => {
-            streamingContent += chunk;
-            scrollToBottom();
-          },
-          abortController.signal,
-          (progress) => {
-            streamProgress = progress;
-          },
-          get(computeChoice),
-        );
       }
       finishTurn(streamingContent);
-      await saveConversation(conversation);
-      localStorage.setItem("edgecoder-last-editor-id", conversation.id);
+      await persist();
       await refreshConversationList();
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         // Stopped: keep what arrived so far.
         if (streamingContent || streamingToolEvents.length > 0) {
           finishTurn(`${streamingContent}\n\n_(stopped)_`);
-          await saveConversation(conversation);
+          await persist();
         }
       } else {
         addMessage(conversation, "assistant", `Error: ${(err as Error).message}`);
@@ -280,27 +325,42 @@
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
+  /** A new chat in the open project. */
   export async function newChat() {
+    ++loadSeq;
     if (isStreaming && abortController) abortController.abort();
-    if (conversation.messages.length > 0) await saveConversation(conversation);
-    conversation = createConversation("editor");
+    if (conversation.messages.length > 0) await persist();
+    conversation = freshConversation(projectRoot);
     streamingContent = "";
     isStreaming = false;
     abortController = null;
     showPicker = false;
   }
 
-  async function switchConversation(id: string) {
+  /** Open a saved coding chat (the caller has opened its project first). */
+  export async function openChat(id: string) {
+    const seq = ++loadSeq;
     if (isStreaming && abortController) abortController.abort();
-    if (conversation.messages.length > 0) await saveConversation(conversation);
+    if (conversation.messages.length > 0) await persist();
     const loaded = await loadConversationFromDb(id);
-    if (loaded) {
-      conversation = loaded;
-      streamingContent = "";
-      isStreaming = false;
-      abortController = null;
-    }
+    if (seq !== loadSeq || !loaded) return;
+    conversation = loaded;
+    streamingContent = "";
+    isStreaming = false;
+    abortController = null;
     showPicker = false;
+    if (loaded.projectRoot) setLastChatFor(loaded.projectRoot, loaded.id);
+  }
+
+  async function switchConversation(id: string) {
+    await openChat(id);
+  }
+
+  /** Add a note from the app (what a new project or clone did) as an assistant message. */
+  export async function addNote(text: string) {
+    addMessage(conversation, "assistant", text);
+    conversation = conversation;
+    await persist();
   }
 
   export function getConversationId(): string {
@@ -332,22 +392,31 @@
       class="conversation-selector"
       aria-haspopup="menu"
       aria-expanded={showPicker}
-      onclick={() => { showPicker = !showPicker; }}
+      title="Chats in this project"
+      onclick={() => { showPicker = !showPicker; if (showPicker) void refreshConversationList(); }}
     >
       <span class="convo-title-text">{conversation.title}</span>
       <ChevronDown size={12} />
     </button>
-    <button class="icon-btn" onclick={newChat} title="New coding chat" aria-label="New coding chat">
+    {#if projectRoot && onToggleWorkspace}
+      <button class="icon-btn" class:on={workspaceOpen} aria-pressed={workspaceOpen} onclick={onToggleWorkspace} title={workspaceOpen ? "Hide files and editor" : "Show files and editor"} aria-label="Files and editor">
+        <PanelRight size={16} />
+      </button>
+    {/if}
+    <button class="icon-btn" onclick={newChat} disabled={!projectRoot} title={projectRoot ? "New chat in this project" : "Pick a project first"} aria-label="New coding chat">
       <Plus size={16} />
     </button>
   </div>
+  {#if projectRoot}
+    <ChatProjectHeader {projectRoot} refreshKey={gitRefreshKey} onChanged={onFilesChanged} {onReviewChanges} {onConnectGitHub} />
+  {/if}
 
   {#if showPicker}
     <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
     <div
       class="conversation-picker"
       role="menu"
-      aria-label="Recent coding chats"
+      aria-label="Chats in this project"
       tabindex="-1"
       use:menu={{ trigger: pickerTrigger, onClose: (returnFocus) => { showPicker = false; if (returnFocus) pickerTrigger?.focus(); } }}
     >
@@ -363,7 +432,7 @@
           <span class="picker-time">{formatTime(convo.updatedAt)}</span>
         </button>
       {:else}
-        <div class="picker-empty" role="menuitem" aria-disabled="true">No previous coding chats</div>
+        <div class="picker-empty" role="menuitem" aria-disabled="true">{projectRoot ? "No other chats in this project" : "No chats without a project"}</div>
       {/each}
     </div>
   {/if}
@@ -378,20 +447,14 @@
     </div>
   {/if}
 
-  {#if !projectRoot && noProject && (conversation.messages.length > 0 || isStreaming)}
-    {@render noProject(true)}
-  {/if}
-
   <div class="messages-scroll" bind:this={scrollContainer}>
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
-        {#if !projectRoot && noProject}
-          {@render noProject(false)}
-        {:else if projectRoot}
-          <p>The agent can read, search and edit files in this project and run commands. Edits and commands ask for your approval first.</p>
-          <p class="hint">It sees the open file and your selection.</p>
+        {#if !projectRoot}
+          <NoProjectPrompt onPick={(r) => onPickProject?.(r)} onNewProject={() => onNewProject?.()} onOpenFolder={() => onOpenFolder?.()} onClone={() => onClone?.()} />
         {:else}
-          <p>Ask about your code, request changes, or get explanations. Open a folder to let the agent edit files.</p>
+          <p>The agent can read, search and edit files in this project and run commands. Edits and commands ask for your approval first.</p>
+          <p class="hint">It sees the open file and your selection. Type @ to add a file.</p>
         {/if}
       </div>
     {:else}
@@ -427,26 +490,31 @@
   </div>
 
   <div class="panel-input">
-    {#if projectRoot && !usePortalChat}
-      <!-- Where the model runs (this computer, your machines, the network) is the compute picker above. -->
-      <div class="run-on">
-        <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
-          <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
-          Auto-apply edits
-        </label>
-      </div>
+    {#if !projectRoot}
+      {#if conversation.messages.length > 0}
+        <NoProjectPrompt compact onPick={(r) => onPickProject?.(r)} onNewProject={() => onNewProject?.()} onOpenFolder={() => onOpenFolder?.()} onClone={() => onClone?.()} />
+      {/if}
+    {:else}
+      {#if !usePortalChat}
+        <div class="run-on">
+          <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
+            <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
+            Auto-apply edits
+          </label>
+        </div>
+      {/if}
+      <ChatInput
+        onSend={handleSend}
+        placeholder="Ask the agent to change {projectName(projectRoot)}… (@ to add a file)"
+        streaming={isStreaming}
+        onStop={stop}
+        mentions={(q) => mentionSuggestions(q, (x) => fsFind(x, 8))}
+      >
+        {#snippet toolbar()}
+          <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
+        {/snippet}
+      </ChatInput>
     {/if}
-    <ChatInput
-      onSend={handleSend}
-      placeholder={!projectRoot ? "Ask about your code…" : "Ask the agent… (@ to mention a file)"}
-      streaming={isStreaming}
-      onStop={stop}
-      mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}
-    >
-      {#snippet toolbar()}
-        <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
-      {/snippet}
-    </ChatInput>
   </div>
 </div>
 
@@ -458,6 +526,9 @@
     overflow: hidden;
   }
 
+  .editor-chat-panel {
+    position: relative;
+  }
   .panel-header {
     display: flex;
     align-items: center;

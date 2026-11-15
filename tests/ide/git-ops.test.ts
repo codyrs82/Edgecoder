@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GitError, GitOps } from "../../src/apps/ide/git-ops.js";
+import { GitError, GitOps, displayRemoteUrl } from "../../src/apps/ide/git-ops.js";
 
 let root: string;
 const git = (...a: string[]) => execFileSync("git", a, { cwd: root, encoding: "utf8" });
@@ -66,6 +66,18 @@ describe("GitOps", () => {
     await g.checkout("main");
     expect((await g.state())!.branches.sort()).toEqual(["feature/x", "main"]);
     await expect(g.checkout("bad..name", true)).rejects.toThrow(/not a valid branch/);
+  });
+
+  it("shows the first remote's URL without credentials", async () => {
+    const g = new GitOps(root);
+    expect((await g.state())!.remoteUrl).toBeNull();
+    git("remote", "add", "origin", "https://user:secret-token@github.com/acme/widgets.git");
+    const st = (await g.state())!;
+    expect(st.remotes).toEqual(["origin"]);
+    expect(st.remoteUrl).toBe("https://github.com/acme/widgets.git");
+    expect(displayRemoteUrl("git@github.com:acme/widgets.git")).toBe("git@github.com:acme/widgets.git");
+    expect(displayRemoteUrl("https://ghp_abc@github.com/a/b")).toBe("https://github.com/a/b");
+    expect(displayRemoteUrl("")).toBeNull();
   });
 
   it("is null outside a repository", async () => {

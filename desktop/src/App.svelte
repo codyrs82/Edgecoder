@@ -22,7 +22,12 @@
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
-  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Bot, PanelLeft } from "@lucide/svelte";
+  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, Bot, PanelLeft } from "@lucide/svelte";
+  import ProjectSidebar from "./components/ProjectSidebar.svelte";
+  import NewProjectDialog from "./components/NewProjectDialog.svelte";
+  import { forgetProject, loadRecentProjects, projectName as folderName, rememberProject, tildePath, type CreatedProject, type RecentProject } from "./lib/projects";
+  import { notify } from "./lib/toast";
+  import type { Conversation } from "./lib/types";
   import type { RepoConnection } from "./lib/api";
   import BotView from "./pages/BotView.svelte";
   import BotForm from "./components/BotForm.svelte";
@@ -110,7 +115,7 @@
       backendReady.then(() => {
         ideGetProject().then(async (p) => {
           if (p) {
-            projectRoot = p;
+            adoptProject(p);
             return;
           }
           // The IDE server forgets the folder when the agent restarts; reopen the last one.
@@ -119,7 +124,7 @@
           if (saved) {
             try {
               await ideSetProject(saved);
-              projectRoot = saved;
+              adoptProject(saved);
             } catch {
               // moved or deleted: forget it
               try { localStorage.removeItem("edgecoder-project-root"); } catch { /* ignore */ }
@@ -215,11 +220,23 @@
   const activeBot = $derived($bots.find((b) => b.id === $activeBotId) ?? null);
   /** What the title bar names: the open chat (or bot) in Chat, the project in Code. */
   let chatHeader = $state<{ title: string; detail: string | null }>({ title: "New chat", detail: null });
-  let editorBare = $state(true);
-  let explorerOpen = $state(true);
+  /** The Code view's projects sidebar. */
+  let codeSidebarOpen = $state(readFlag("edgecoder-code-sidebar", true));
+  function readFlag(key: string, fallback: boolean): boolean {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : v === "true";
+    } catch {
+      return fallback;
+    }
+  }
+  /** The coding chat showing (the projects sidebar highlights it). */
+  let editorChatId = $state<string | null>(null);
+  /** The New project sheet: closed, new, or on "Clone from GitHub". */
+  let newProjectSheet = $state<null | "new" | "clone">(null);
   const projectName = $derived(projectRoot ? projectRoot.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? null : null);
   const titleText = $derived(
-    activeTab === "editor" ? (projectName ?? "No folder open") : activeBot ? activeBot.name : chatHeader.title || "New chat",
+    activeTab === "editor" ? (projectName ?? "No project open") : activeBot ? activeBot.name : chatHeader.title || "New chat",
   );
   const titleDetail = $derived(activeTab === "editor" ? null : activeBot ? activeBot.role || null : chatHeader.detail);
   $effect(() => {
@@ -269,38 +286,79 @@
 
   // The header's + : what you can create.
   let newMenuOpen = $state(false);
-  let sidebarToggleLabel = $derived(
-    activeTab === "chat" ? (historyOpen ? "Hide sidebar" : "Show sidebar") : explorerOpen ? "Hide files" : "Show files",
-  );
+  let sidebarToggleLabel = $derived((activeTab === "chat" ? historyOpen : codeSidebarOpen) ? "Hide sidebar" : "Show sidebar");
+  /** Recent projects for the + menu, read when it opens. */
+  let recentForMenu = $state<RecentProject[]>([]);
   let newMenuTrigger: HTMLButtonElement | undefined = $state();
   function newChatHere() {
     newMenuOpen = false;
+    if (activeTab === "editor") {
+      void newCodingChat(null);
+      return;
+    }
     activeBotId.set(null);
     activeTab = "chat";
     chatView?.newChat();
     queueMicrotask(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus());
   }
-  async function newProjectHere() {
-    newMenuOpen = false;
+
+  // --- Projects (the Code view) -----------------------------------------------------------------
+
+  /** Open a project folder: the IDE server works in it and the coding chat follows it. */
+  async function openProjectRoot(root: string): Promise<boolean> {
+    if (root === projectRoot) return true;
     try {
-      const root = await ideNewProject("");
-      projectRoot = root;
-      try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
-      setAutoApplyEdits(root, true);
-      activeTab = "chat";
-      chatView?.newChat();
-      await tick();
-      chatView?.addNote(`New project in \`${root.replace(/^\/Users\/[^/]+/, "~")}\`. Describe what to build; the agent writes the files there.`);
+      await ideSetProject(root);
+      adoptProject(root);
+      return true;
     } catch (err) {
-      console.warn("Couldn't create a project:", err);
+      notify(`Couldn't open ${tildePath(root)}: ${(err as Error).message}. It may have been moved or deleted.`, "error");
+      forgetProject(root);
+      return false;
     }
   }
 
-  // The + menu's "Connect repository…": a new chat with the cursor in its Connect field.
-  async function connectRepoHere() {
-    newChatHere();
+  /** A new coding chat in `root` (null: the open project). */
+  async function newCodingChat(root: string | null) {
+    activeTab = "editor";
+    if (root && !(await openProjectRoot(root))) return;
     await tick();
-    chatView?.focusConnect();
+    await editorView?.newChat();
+    queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#view-editor .panel-input textarea")?.focus());
+  }
+
+  async function openCodingChat(c: Conversation) {
+    activeTab = "editor";
+    if (c.projectRoot) {
+      if (!(await openProjectRoot(c.projectRoot))) return;
+    } else {
+      // A chat from before chats had projects: shown on its own, with the prompt to link it.
+      projectRoot = null;
+    }
+    await tick();
+    await editorView?.openChat(c.id);
+  }
+
+  function startNewProject(mode: "new" | "clone") {
+    newMenuOpen = false;
+    newProjectSheet = mode;
+  }
+
+  /** The New project sheet finished: the project is open; start a chat in it and say what happened. */
+  async function projectCreated(p: CreatedProject) {
+    newProjectSheet = null;
+    adoptProject(p.root);
+    activeTab = "editor";
+    await tick();
+    await editorView?.newChat();
+    await editorView?.addNote(`${p.summary} Describe what to build or change; the agent works in this folder.`);
+    if (p.warning) notify(p.warning, "error");
+  }
+
+  async function openRecent(root: string) {
+    newMenuOpen = false;
+    activeTab = "editor";
+    await openProjectRoot(root);
   }
 
   /** A repository connected from a new chat or the EdgeCoder tab: open it and say what happened. */
@@ -315,6 +373,7 @@
   /** A folder the IDE server already made the open project (a clone from Source Control). */
   function adoptProject(root: string) {
     projectRoot = root;
+    rememberProject(root);
     try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
   }
 
@@ -335,8 +394,8 @@
       const selected = await open({ directory: true, title: "Open Project" });
       if (selected && typeof selected === "string") {
         await ideSetProject(selected);
-        projectRoot = selected;
-        try { localStorage.setItem("edgecoder-project-root", selected); } catch { /* storage unavailable */ }
+        adoptProject(selected);
+        activeTab = "editor";
       }
     } catch (err) {
       console.warn("Failed to open project dialog:", err);
@@ -350,8 +409,7 @@
     if (!projectRoot && isBuildRequest(message)) {
       try {
         const root = await ideNewProject(message);
-        projectRoot = root;
-        try { localStorage.setItem("edgecoder-project-root", root); } catch { /* storage unavailable */ }
+        adoptProject(root);
         // A fresh folder: apply the agent's edits as it goes (each reply stays undoable).
         setAutoApplyEdits(root, true);
         await tick();
@@ -379,26 +437,35 @@
     <!-- Title bar: drawn by the page (macOS overlay title bar leaves room for the traffic lights). -->
     <header class="titlebar" data-tauri-drag-region>
       <div class="tb-side" data-tauri-drag-region>
-        <button class="icon-btn" title={sidebarToggleLabel} aria-label={sidebarToggleLabel} aria-pressed={activeTab === "chat" ? historyOpen : explorerOpen}
-          disabled={activeTab === "editor" && editorBare}
+        <button class="icon-btn" title={sidebarToggleLabel} aria-label={sidebarToggleLabel} aria-pressed={activeTab === "chat" ? historyOpen : codeSidebarOpen}
           onclick={() => {
             if (activeTab === "chat") historyOpen = !historyOpen;
-            else explorerOpen = !explorerOpen;
+            else {
+              codeSidebarOpen = !codeSidebarOpen;
+              try { localStorage.setItem("edgecoder-code-sidebar", String(codeSidebarOpen)); } catch { /* storage unavailable */ }
+            }
           }}>
           <PanelLeft size={16} />
         </button>
         <div class="new-menu-wrap">
-          <button bind:this={newMenuTrigger} class="icon-btn" title="New" aria-label="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => (newMenuOpen = !newMenuOpen)}>
+          <button bind:this={newMenuTrigger} class="icon-btn" title="New" aria-label="New" aria-haspopup="menu" aria-expanded={newMenuOpen} onclick={() => { recentForMenu = loadRecentProjects().slice(0, 5); newMenuOpen = !newMenuOpen; }}>
             <Plus size={16} />
           </button>
           {#if newMenuOpen}
             <!-- The same keyboard menu as the conversation list (#161): arrows, Home/End, Escape, click away. -->
             <div class="new-menu" role="menu" aria-label="New" tabindex="-1"
               use:menu={{ trigger: newMenuTrigger, onClose: (returnFocus) => { newMenuOpen = false; if (returnFocus) newMenuTrigger?.focus(); } }}>
-              <button role="menuitem" onclick={newChatHere}><SquarePen size={15} /> New chat</button>
-              <button role="menuitem" onclick={newProjectHere}><FolderPlus size={15} /> New project</button>
-              <button role="menuitem" onclick={connectRepoHere} title="Clone or update a repository in your projects folder"><FolderGit2 size={15} /> Connect repository…</button>
-              <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); activeTab = "editor"; }}><FolderOpen size={15} /> Open folder…</button>
+              <button role="menuitem" onclick={newChatHere} title={activeTab === "editor" ? (projectName ? `A new chat in ${projectName}` : "Pick a project first") : "A new chat"}><SquarePen size={15} /> New chat{#if activeTab === "editor" && projectName}<span class="menu-hint">in {projectName}</span>{/if}</button>
+              <button role="menuitem" onclick={() => startNewProject("new")}><FolderPlus size={15} /> New project…</button>
+              <button role="menuitem" onclick={() => startNewProject("clone")} title="Clone a repository into your projects folder, or update the copy there"><FolderGit2 size={15} /> Clone from GitHub…</button>
+              <button role="menuitem" onclick={() => { newMenuOpen = false; void openProject(); }}><FolderOpen size={15} /> Open folder…</button>
+              {#if recentForMenu.length > 0}
+                <div class="menu-label" role="presentation">Open recent</div>
+                {#each recentForMenu as r (r.root)}
+                  <button role="menuitem" title={tildePath(r.root)} onclick={() => void openRecent(r.root)}><Folder size={15} /> <span class="menu-text">{folderName(r.root)}</span></button>
+                {/each}
+                <div class="menu-sep" role="separator"></div>
+              {/if}
               <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
             </div>
           {/if}
@@ -453,10 +520,41 @@
           </div>
         </div>
       </div>
-      <div class="tab-panel" class:hidden={activeTab !== "editor"} role="tabpanel" id="view-editor" aria-labelledby="view-tab-editor">
-        <EditorView bind:this={editorView} {projectRoot} {explorerOpen} onBareChange={(b) => (editorBare = b)} onOpenProject={openProject} onProjectOpened={adoptProject} onRepoConnected={(r) => void repoConnected(r)} />
+      <div class="tab-panel chat-layout" class:hidden={activeTab !== "editor"} role="tabpanel" id="view-editor" aria-labelledby="view-tab-editor">
+        <div class="chat-sidebar" class:collapsed={!codeSidebarOpen}>
+          <ProjectSidebar
+            currentProject={projectRoot}
+            activeChatId={editorChatId}
+            onOpenProject={(root) => void openProjectRoot(root)}
+            onSelectChat={(c) => void openCodingChat(c)}
+            onNewChat={(root) => void newCodingChat(root)}
+            onNewProject={() => startNewProject("new")}
+            onClone={() => startNewProject("clone")}
+            onOpenFolder={() => void openProject()}
+            user={user!}
+            onOpenSettings={openSettings}
+            onLogout={logout}
+          />
+        </div>
+        <div class="chat-main">
+          <EditorView
+            bind:this={editorView}
+            {projectRoot}
+            onOpenProject={openProject}
+            onProjectOpened={adoptProject}
+            onPickProject={(root) => void openProjectRoot(root)}
+            onNewProject={() => startNewProject("new")}
+            onClone={() => startNewProject("clone")}
+            onConnectGitHub={() => openSettings("integrations")}
+            onConversationChange={(id) => (editorChatId = id)}
+          />
+        </div>
       </div>
     </main>
+
+    {#if newProjectSheet}
+      <NewProjectDialog mode={newProjectSheet} onClose={() => (newProjectSheet = null)} onCreated={(p) => void projectCreated(p)} onConnectGitHub={() => { newProjectSheet = null; openSettings("integrations"); }} />
+    {/if}
 
     {#if botForm}
       <BotForm bot={botForm === "new" ? null : botForm} defaultProject={projectRoot} onClose={() => (botForm = null)} onSaved={botSaved} />
@@ -663,5 +761,30 @@
   .new-menu button:disabled {
     color: var(--text-secondary);
     cursor: default;
+  }
+  .new-menu .menu-hint {
+    margin-left: auto;
+    padding-left: 12px;
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .new-menu .menu-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .menu-label {
+    padding: 8px 10px 4px;
+    font-size: var(--fs-2xs);
+    color: var(--text-muted);
+  }
+  .menu-sep {
+    height: 0.5px;
+    margin: 4px 6px;
+    background: var(--border);
   }
 </style>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { Popover, Tabs } from "bits-ui";
-  import { Settings2, PanelRight, Globe, Columns2, SquareTerminal, Sparkles, TriangleAlert, GitBranch, FolderOpen, X, RotateCw } from "@lucide/svelte";
+  import { Settings2, PanelRight, PanelLeft, Globe, Columns2, SquareTerminal, Sparkles, TriangleAlert, GitBranch, X, RotateCw } from "@lucide/svelte";
   import { notify } from "../lib/toast";
   import FileTree from "../components/FileTree.svelte";
   import Select from "../components/ui/Select.svelte";
@@ -9,9 +9,8 @@
   import TerminalPanel from "../components/TerminalPanel.svelte";
   import SourceControl from "../components/SourceControl.svelte";
   import EditorChatPanel from "../components/EditorChatPanel.svelte";
-  import ConnectRepo from "../components/ConnectRepo.svelte";
   import { createFile, detectLanguage, type EditorFile } from "../lib/editor-store";
-  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, ideProjectTrust, ideSetProjectTrust, idePreviewUrl, type Diagnostic, type RepoConnection } from "../lib/api";
+  import { fsRead, fsWrite, fsStat, fsGitStatus, FsError, ideInlineEdit, ideComplete, ideDiagnostics, ideProjectTrust, ideSetProjectTrust, idePreviewUrl, type Diagnostic } from "../lib/api";
   import { registerAutocomplete } from "../lib/autocomplete";
   import { loadEditorSettings, saveEditorSettings, monacoOptions, type EditorSettings } from "../lib/editor-settings";
   import { InlineEditController } from "../lib/inline-edit-session";
@@ -21,17 +20,21 @@
 
   interface Props {
     projectRoot?: string | null;
+    /** Open a folder (the picker). */
     onOpenProject?: () => void;
     /** The IDE server already opened this folder (a clone): show it. */
     onProjectOpened?: (root: string) => void;
-    /** A repository was connected from the empty state (it is now the open project). */
-    onRepoConnected?: (r: RepoConnection) => void;
-    /** The files sidebar (the title bar's left toggle). */
-    explorerOpen?: boolean;
-    /** Told when the view has nothing to edit (no folder, no file): the chat then takes the room. */
+    /** No project: open this recent one. */
+    onPickProject?: (root: string) => void;
+    onNewProject?: () => void;
+    onClone?: () => void;
+    onConnectGitHub?: () => void;
+    /** The coding chat showing changed. */
+    onConversationChange?: (id: string) => void;
+    /** Told when the view has nothing to edit (no files and editor showing): the chat then takes the room. */
     onBareChange?: (bare: boolean) => void;
   }
-  let { projectRoot = null, onOpenProject, onProjectOpened, onRepoConnected, explorerOpen = true, onBareChange }: Props = $props();
+  let { projectRoot = null, onOpenProject, onProjectOpened, onPickProject, onNewProject, onClone, onConnectGitHub, onConversationChange, onBareChange }: Props = $props();
 
   /** Prefix for buffers that are not (yet) a project file, e.g. code opened from chat. */
   const UNTITLED = "untitled:";
@@ -57,8 +60,23 @@
   let editorChatPanel: EditorChatPanel | undefined = $state(undefined);
 
   let activeFile = $derived(files.find((f) => f.path === activeFilePath) ?? null);
-  /** No folder and no open file: one empty state, and the chat gets the whole view. */
-  const bare = $derived(!projectRoot && files.length === 0);
+  /** The files and editor beside the chat. Hidden, the chat takes the whole view (like a chat-first IDE). */
+  let workspaceOpen = $state(readWorkspacePref());
+  let explorerOpen = $state(true);
+  function readWorkspacePref(): boolean {
+    try {
+      const v = localStorage.getItem("edgecoder-workspace-open");
+      if (v !== null) return v === "true";
+    } catch { /* storage unavailable */ }
+    // Chat first, like Claude Code: the files and editor come in when a file opens or on the toggle.
+    return false;
+  }
+  function setWorkspaceOpen(open: boolean) {
+    workspaceOpen = open;
+    try { localStorage.setItem("edgecoder-workspace-open", String(open)); } catch { /* storage unavailable */ }
+  }
+  /** Nothing to edit, or the editor is put away: the chat gets the whole view. */
+  const bare = $derived(projectRoot ? !workspaceOpen : files.length === 0);
   $effect(() => {
     onBareChange?.(bare);
   });
@@ -380,6 +398,7 @@
 
   /** Open a project file from disk (or switch to it if it's already open). */
   export async function openPath(path: string, line?: number) {
+    if (!workspaceOpen) setWorkspaceOpen(true);
     if (!files.some((f) => f.path === path)) {
       try {
         const disk = await fsRead(path);
@@ -597,6 +616,7 @@
 
   /** Open code (e.g. from chat) in a new untitled buffer. */
   export function openFile(path: string, content: string) {
+    if (projectRoot && !workspaceOpen) setWorkspaceOpen(true);
     let name = path.replace(UNTITLED, "");
     let key = `${UNTITLED}${name}`;
     for (let n = 2; files.some((f) => f.path === key); n++) {
@@ -613,6 +633,18 @@
   export function onAgentChangedFiles() {
     void pollDisk();
     treeRefresh++;
+  }
+
+  /** The coding chat: a new one in the open project, a saved one, or a note in the current one. */
+  export const newChat = () => editorChatPanel?.newChat();
+  export const openChat = (id: string) => editorChatPanel?.openChat(id);
+  export const addNote = (text: string) => editorChatPanel?.addNote(text);
+
+  /** Uncommitted changes: Source Control beside the chat. */
+  function reviewChanges() {
+    setWorkspaceOpen(true);
+    explorerOpen = true;
+    sidebarView = "git";
   }
 
   export function toggleChatPanel() {
@@ -687,25 +719,6 @@
   <QuickOpen onOpen={(p) => void openPath(p)} onClose={() => { quickOpen = false; editor?.focus(); }} />
 {/if}
 
-<!-- No folder open: one card, in the chat's empty state (a slim bar once the chat has messages). -->
-{#snippet noProject(compact: boolean)}
-  {#if compact}
-    <div class="no-folder-bar">
-      <span>No folder open. The agent can answer questions; open a folder to let it edit files.</span>
-      <button class="btn btn--sm" onclick={() => onOpenProject?.()}><FolderOpen size={13} /> Open folder…</button>
-    </div>
-  {:else}
-    <div class="no-folder-card">
-      <h2>Open a project</h2>
-      <p>Open a folder or connect a GitHub repository, and the agent can read and edit its files and run commands. You can also just ask.</p>
-      <button class="btn btn--primary btn--lg" onclick={() => onOpenProject?.()}><FolderOpen size={15} /> Open folder…</button>
-      {#if onRepoConnected}
-        <div class="no-folder-repo"><ConnectRepo onConnected={(r) => onRepoConnected?.(r)} /></div>
-      {/if}
-    </div>
-  {/if}
-{/snippet}
-
 <div class="editor-layout" class:resizing={isResizing} class:bare>
   {#if !bare && explorerOpen}
   <div class="explorer-panel" style="width: {explorerWidth}px">
@@ -748,11 +761,6 @@
           {/snippet}
         </Tabs.Content>
       </Tabs.Root>
-    {:else}
-      <div class="no-project">
-        <p>No folder open</p>
-        <button class="btn" onclick={() => onOpenProject?.()}><FolderOpen size={14} /> Open folder…</button>
-      </div>
     {/if}
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
@@ -773,6 +781,9 @@
       {/each}
       <div class="tab-bar-spacer"></div>
       <div class="tools">
+        {#if projectRoot}
+          <button class="icon-btn" class:on={explorerOpen} aria-pressed={explorerOpen} title={explorerOpen ? "Hide files" : "Show files"} aria-label="Files" onclick={() => (explorerOpen = !explorerOpen)}><PanelLeft size={16} /></button>
+        {/if}
         {#if gitBranch}<span class="branch" title="Git branch"><GitBranch size={13} /> {gitBranch}</span>{/if}
         {#if checking}
           <span class="branch" title="Running the project's checkers">Checking…</span>
@@ -898,8 +909,17 @@
       <EditorChatPanel
         bind:this={editorChatPanel}
         wide={bare}
-        {noProject}
         {projectRoot}
+        gitRefreshKey={treeRefresh}
+        {onPickProject}
+        {onNewProject}
+        onOpenFolder={onOpenProject}
+        {onClone}
+        {onConnectGitHub}
+        onReviewChanges={reviewChanges}
+        {workspaceOpen}
+        onToggleWorkspace={() => setWorkspaceOpen(!workspaceOpen)}
+        {onConversationChange}
         onApplyCode={handleApplyCode}
         getFileContext={getActiveFileContext}
         onFilesChanged={onAgentChangedFiles}
@@ -970,18 +990,6 @@
   .sidebar-body {
     flex: 1;
     min-height: 0;
-  }
-  .no-project {
-    padding: 16px 12px;
-    font-size: var(--fs-sm);
-    color: var(--text-secondary);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-items: flex-start;
-  }
-  .no-project p {
-    margin: 0;
   }
   .editor-panel {
     flex: 1;
@@ -1246,47 +1254,6 @@
   .hint {
     font-size: var(--fs-xs);
     color: var(--text-muted);
-  }
-  /* The no-folder card (rendered inside the chat's empty state) and its compact bar. */
-  .no-folder-card {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    max-width: 520px;
-    text-align: center;
-  }
-  .no-folder-card h2 {
-    margin: 0;
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--text-primary);
-  }
-  .no-folder-card p {
-    margin: 0 0 8px;
-    color: var(--text-secondary);
-    font-size: var(--fs-base);
-    line-height: var(--lh-ui);
-  }
-  .no-folder-repo {
-    width: 100%;
-    margin-top: 16px;
-    padding-top: 20px;
-    border-top: 0.5px solid var(--border);
-    display: flex;
-    justify-content: center;
-  }
-  .no-folder-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 8px 6px 14px;
-    border-bottom: 0.5px solid var(--border);
-    font-size: var(--fs-xs);
-    color: var(--text-secondary);
   }
   .resize-handle {
     width: 4px;

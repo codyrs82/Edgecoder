@@ -31,11 +31,29 @@ export interface GitState {
   branches: string[];
   /** Remote names (origin first when present). */
   remotes: string[];
+  /** The first remote's URL (origin when present), without any credentials in it; null without one. */
+  remoteUrl: string | null;
   /** False before the first commit. */
   hasCommits: boolean;
 }
 
 export class GitError extends Error {}
+
+/** A remote URL safe to show: user:password@ (or a token) taken out of http(s) URLs. */
+export function displayRemoteUrl(url: string): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const u = new URL(url);
+      u.username = "";
+      u.password = "";
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+  return url;
+}
 
 function letter(c: string): string {
   if (c === "?") return "U";
@@ -82,7 +100,7 @@ export class GitOps {
     } catch {
       return null;
     }
-    const st: GitState = { branch: null, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: [], remotes: [], hasCommits: false };
+    const st: GitState = { branch: null, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: [], remotes: [], remoteUrl: null, hasCommits: false };
     const recs = raw.split("\0");
     for (let i = 0; i < recs.length; i++) {
       const r = recs[i];
@@ -115,6 +133,13 @@ export class GitOps {
       // no commits yet
     }
     st.remotes = await this.remotes();
+    if (st.remotes[0]) {
+      try {
+        st.remoteUrl = displayRemoteUrl((await this.git(["remote", "get-url", "--", st.remotes[0]])).trim());
+      } catch {
+        // a remote without a URL: leave it null
+      }
+    }
     return st;
   }
 

@@ -1298,6 +1298,8 @@ export interface GitState {
   branches: string[];
   /** Remote names, origin first. */
   remotes: string[];
+  /** The first remote's URL without credentials (older IDE servers leave it out). */
+  remoteUrl?: string | null;
   hasCommits: boolean;
 }
 export const gitState =() => fsCall<GitState | { notARepo: true }>("GET", "/v1/ide/git/state");
@@ -1424,6 +1426,18 @@ export const ideSetProjectTrust = (trusted: boolean) => fsCall<ProjectTrust>("PO
 
 /** Create <projects folder>/<name> (a git repo) and make it the open project. */
 export const ideNewProject = (name: string) => fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name }).then((r) => r.projectRoot);
+export type ProjectTemplate = "empty" | "web" | "node";
+export interface NewProjectRequest {
+  /** The exact folder name. */
+  folder: string;
+  /** Absolute parent folder; the projects folder when left out. */
+  parentDir?: string;
+  template?: ProjectTemplate;
+  git?: boolean;
+}
+/** The New project sheet: <parentDir>/<folder> with a template, git or not; it becomes the open project. */
+export const ideCreateProject = (req: NewProjectRequest) =>
+  fsCall<{ projectRoot: string }>("POST", "/v1/ide/projects/new", { name: req.folder, ...req }).then((r) => r.projectRoot);
 /** Preview URL of a project file (default index.html) on the IDE server's preview origin. */
 export const idePreviewUrl = (path = "") => fsCall<{ url: string }>("GET", `/v1/ide/preview?path=${encodeURIComponent(path)}`).then((r) => r.url);
 
