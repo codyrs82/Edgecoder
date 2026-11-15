@@ -55,6 +55,13 @@ export interface AgentBehaviorStats {
   identicalOutputCount: number;
   recentOutputHashes: string[];
   avgOutputLength: number;
+  /**
+   * Results the output-content rules (BHV002 empty, BHV003 identical, BHV010 tiny) look at: code
+   * results only. A model call's output is whatever the requester's prompt asks for: a one-word or
+   * repeated answer is often the right one (live regtest, 2026-11-15: short factual answers got every
+   * honest agent blacklisted). Model calls are covered by BHV001 and result verification instead.
+   */
+  outputTasks: number;
 
   // Timing
   avgDurationMs: number;
@@ -223,14 +230,17 @@ export class AgentBehaviorTracker {
     // agent reported as successful: a failed result earns nothing, and an agent whose model is
     // broken fails fast with empty output, which is not fraud.
     const okTasks = tasks.filter(t => t.ok);
-    const emptyOutputCount = okTasks.filter(t => t.outputLength === 0).length;
+    const isCode = (t: { kind?: string }) => t.kind !== "inference";
+    const codeTasks = tasks.filter(isCode);
+    const okCodeTasks = okTasks.filter(isCode);
+    const emptyOutputCount = okCodeTasks.filter(t => t.outputLength === 0).length;
 
     // Identical output detection: count max consecutive identical hashes
     let identicalOutputCount = 0;
-    if (okTasks.length >= 2) {
+    if (okCodeTasks.length >= 2) {
       let consecutiveRun = 1;
-      for (let i = 1; i < okTasks.length; i++) {
-        if (okTasks[i].outputHash === okTasks[i - 1].outputHash) {
+      for (let i = 1; i < okCodeTasks.length; i++) {
+        if (okCodeTasks[i].outputHash === okCodeTasks[i - 1].outputHash) {
           consecutiveRun++;
           identicalOutputCount = Math.max(identicalOutputCount, consecutiveRun);
         } else {
@@ -242,8 +252,9 @@ export class AgentBehaviorTracker {
     // Ring buffer of recent output hashes
     const recentOutputHashes = tasks.slice(-OUTPUT_HASH_RING_SIZE).map(t => t.outputHash);
 
-    const totalOutputLength = tasks.reduce((sum, t) => sum + t.outputLength, 0);
-    const avgOutputLength = totalTasks > 0 ? totalOutputLength / totalTasks : 0;
+    const totalOutputLength = codeTasks.reduce((sum, t) => sum + t.outputLength, 0);
+    const avgOutputLength = codeTasks.length > 0 ? totalOutputLength / codeTasks.length : 0;
+    const outputTasks = codeTasks.length;
 
     // Timing
     const durations = tasks.map(t => t.durationMs);
@@ -295,6 +306,7 @@ export class AgentBehaviorTracker {
       identicalOutputCount,
       recentOutputHashes,
       avgOutputLength,
+      outputTasks,
       avgDurationMs,
       minDurationMs,
       durationStdDev,

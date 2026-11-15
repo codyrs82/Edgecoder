@@ -133,15 +133,16 @@ const bhv001SuspiciouslyFast: AnomalyRule = (stats, config) => {
 
 const bhv002MassEmptyOutputs: AnomalyRule = (stats, config) => {
   if (stats.totalTasks === 0) return null;
-  const emptyRatio = stats.emptyOutputCount / stats.totalTasks;
+  if (stats.outputTasks === 0) return null;
+  const emptyRatio = stats.emptyOutputCount / stats.outputTasks;
   if (stats.emptyOutputCount >= config.massEmptyMinCount && emptyRatio > config.massEmptyRatioThreshold) {
     return {
       ruleId: "BHV002",
       ruleName: "Mass empty outputs",
       severity: "HIGH",
       blacklistReason: "forged_results",
-      description: `${stats.emptyOutputCount}/${stats.totalTasks} tasks returned empty output (${(emptyRatio * 100).toFixed(0)}%)`,
-      stats: { emptyOutputCount: stats.emptyOutputCount, totalTasks: stats.totalTasks, emptyRatio },
+      description: `${stats.emptyOutputCount}/${stats.outputTasks} code tasks returned empty output (${(emptyRatio * 100).toFixed(0)}%)`,
+      stats: { emptyOutputCount: stats.emptyOutputCount, totalTasks: stats.outputTasks, emptyRatio },
     };
   }
   return null;
@@ -256,7 +257,7 @@ const bhv009RobotPrecision: AnomalyRule = (stats, config) => {
 const bhv010TinyOutputs: AnomalyRule = (stats, config) => {
   if (
     stats.avgOutputLength < config.tinyOutputAvgLengthThreshold &&
-    stats.totalTasks >= config.tinyOutputMinTasks &&
+    stats.outputTasks >= config.tinyOutputMinTasks &&
     stats.successRate > config.tinyOutputMinSuccessRate
   ) {
     return {
@@ -264,7 +265,7 @@ const bhv010TinyOutputs: AnomalyRule = (stats, config) => {
       ruleName: "Tiny outputs",
       severity: "WARN",
       blacklistReason: "forged_results",
-      description: `Avg output length ${stats.avgOutputLength.toFixed(1)} over ${stats.totalTasks} "successful" tasks`,
+      description: `Avg output length ${stats.avgOutputLength.toFixed(1)} over ${stats.outputTasks} code tasks`,
       stats: { avgOutputLength: stats.avgOutputLength, totalTasks: stats.totalTasks, successRate: stats.successRate },
     };
   }
