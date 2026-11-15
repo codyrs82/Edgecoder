@@ -17,7 +17,9 @@ function dispatcherFor(url: string, ca?: string, servername?: string): Dispatche
   let d = dispatchers.get(key);
   if (!d) {
     d = new Agent({
-      connections: 512,
+      // Sockets per origin. Kept modest: a local docker VM's port forwarder (colima/lima: one ssh
+      // master with a 256 file limit) collapses when a load generator opens hundreds of sockets.
+      connections: Number(process.env.STRESS_HTTP_CONNECTIONS ?? 64),
       pipelining: 1,
       keepAliveTimeout: 30_000,
       connect: ca ? { ca, rejectUnauthorized: true, ...(servername ? { servername } : {}), timeout: 10_000 } : { timeout: 10_000 }

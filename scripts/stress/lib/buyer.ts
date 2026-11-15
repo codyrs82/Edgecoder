@@ -20,6 +20,8 @@ import type { LndClient } from "./lnd.js";
 import type { Recorder } from "./metrics.js";
 import type { AccountCred, CoordinatorTarget } from "./target.js";
 
+const SUBMITTERS_PER_BUYER = Math.max(1, Number(process.env.STRESS_SUBMITTERS_PER_BUYER ?? 2));
+
 export interface TaskOutcome {
   taskId: string;
   coordinatorId: string;
@@ -30,11 +32,15 @@ export interface TaskOutcome {
   completedAtMs?: number;
   /** Error a failed subtask reported ("simulated_failure" = injected by the harness). */
   error?: string;
+  /** Which submitter identity sent it (coordinator#slot). */
+  submitterSlot?: string;
 }
 
 export class SimBuyer {
   private submitters = new Map<string, SimAgent>();
   private submitterStarts = new Map<string, Promise<SimAgent | null>>();
+  private submitCount = 0;
+  private lastReRegisterMs = new Map<SimAgent, number>();
   readonly tasks: TaskOutcome[] = [];
   readonly topups: Array<{ intentId?: string; amountSats: number; outcome: string; paid: boolean; settled: boolean; settleMs?: number; paymentHashHex?: string }> = [];
 
@@ -57,21 +63,27 @@ export class SimBuyer {
   }
 
   /** The buyer's signed identity on one coordinator (enrolled under the buyer's account, never pulls). */
-  async submitter(coordinator: CoordinatorTarget): Promise<SimAgent | null> {
-    // One start per coordinator even when many calls race (each enrolment rotates the token).
-    let p = this.submitterStarts.get(coordinator.id);
+  /**
+   * The buyer's signed identity on one coordinator. A coordinator allows each agent identity
+   * AGENT_RATE_LIMIT_MAX (300) signed requests a minute, so a buyer submitting faster spreads its
+   * submissions over STRESS_SUBMITTERS_PER_BUYER identities (default 2), as a real client would.
+   */
+  async submitter(coordinator: CoordinatorTarget, slot = 0): Promise<SimAgent | null> {
+    const key = `${coordinator.id}#${slot % SUBMITTERS_PER_BUYER}`;
+    // One start per identity even when many calls race (each enrolment rotates the token).
+    let p = this.submitterStarts.get(key);
     if (!p) {
-      p = this.startSubmitter(coordinator);
-      this.submitterStarts.set(coordinator.id, p);
+      p = this.startSubmitter(coordinator, slot % SUBMITTERS_PER_BUYER);
+      this.submitterStarts.set(key, p);
     }
     return p;
   }
 
-  private async startSubmitter(coordinator: CoordinatorTarget): Promise<SimAgent | null> {
+  private async startSubmitter(coordinator: CoordinatorTarget, slot: number): Promise<SimAgent | null> {
     const a = new SimAgent(
       {
         runId: this.runId,
-        index: 9000 + this.index * 10 + this.coordinators.indexOf(coordinator),
+        index: 9000 + this.index * 100 + this.coordinators.indexOf(coordinator) * 10 + slot,
         owner: this.account,
         coordinator,
         portalUrl: this.portalUrl,
@@ -88,7 +100,7 @@ export class SimBuyer {
       this.shared
     );
     if (!(await a.start())) return null;
-    this.submitters.set(coordinator.id, a);
+    this.submitters.set(`${coordinator.id}#${slot}`, a);
     return a;
   }
 
@@ -136,12 +148,13 @@ export class SimBuyer {
     const taskId = `stress-${this.runId}-t-${randomUUID().slice(0, 12)}`;
     const outcome: TaskOutcome = { taskId, coordinatorId: coordinator.id, submittedAtMs: Date.now(), subtaskIds: [], status: "submitted", submitOutcome: "" };
     this.tasks.push(outcome);
-    const sub = await this.submitter(coordinator);
+    const sub = await this.submitter(coordinator, this.submitCount++);
     if (!sub) {
       outcome.status = "rejected";
       outcome.submitOutcome = "submitter_unavailable";
       return outcome;
     }
+    outcome.submitterSlot = this.submitters.size ? [...this.submitters.entries()].find(([, v]) => v === sub)?.[0] : undefined;
     const body = {
       taskId,
       prompt,
@@ -153,8 +166,11 @@ export class SimBuyer {
       ...extra
     };
     let r = await sub.signedPost("/submit", body);
-    if (r.status === 401) {
-      // The coordinator restarted and forgot this identity: register again (as a real client would) and retry once.
+    if (r.status === 401 && Date.now() - (this.lastReRegisterMs.get(sub) ?? 0) > 60_000) {
+      // The coordinator restarted and forgot this identity: register again and retry once. At most
+      // once a minute: a 401 is also what a rate-limited identity gets, and re-registering in a loop
+      // trips the coordinator's registration-storm rule (BHV008).
+      this.lastReRegisterMs.set(sub, Date.now());
       this.rec.count("submitter.reregister");
       if (await sub.register(true)) r = await sub.signedPost("/submit", body);
     }
@@ -170,7 +186,7 @@ export class SimBuyer {
   /** Poll each subtask's result until it is published, failed or the deadline passes. */
   async awaitTask(t: TaskOutcome, deadlineMs: number, pollMs = 2_000): Promise<void> {
     const coordinator = this.coordinators.find((c) => c.id === t.coordinatorId)!;
-    const sub = await this.submitter(coordinator);
+    const sub = t.submitterSlot ? this.submitters.get(t.submitterSlot) ?? null : await this.submitter(coordinator);
     if (!sub || t.status !== "submitted") return;
     const pending = new Set(t.subtaskIds);
     let failed = false;
