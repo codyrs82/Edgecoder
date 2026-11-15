@@ -269,6 +269,54 @@ Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`,
 `EDGECODER_API_KEY` (same as `--enroll`; takes precedence over `EDGECODER_ENROLL_TOKEN`).
 
+## Changing models from the portal
+
+A headless host's models can be managed without SSH: sign in to the portal and open
+**Settings > Nodes**. Under "Your machines' models" each agent enrolled to your account shows its
+installed models (with sizes), the active model, its Ollama version, GPU and VRAM, RAM, free disk,
+and its context window, parallel slots and keep-alive. For a connected machine you can:
+
+- **Pull** a model, with download progress. Only models the host allows (below) are offered, and a
+  pull that does not fit the free disk (download + 10% + 2 GiB) or the machine's memory (VRAM plus
+  half the RAM on a GPU host, 75% of the RAM otherwise) is refused before it starts.
+- **Use** an installed model as the active (network) model. The old model is unloaded and the new
+  one loaded before the agent takes more work.
+- **Remove** an installed model (never the active one).
+- **Apply** a context window (2048 to 131072 tokens), parallel slots (1 to 8) and keep-alive (`-1`
+  never unload, `0`, or up to `24h`). Context and keep-alive are sent with each Ollama request, so
+  they take effect at once. Parallel slots are how many calls the agent sends at once; Ollama's own
+  `OLLAMA_NUM_PARALLEL` lives in the Ollama unit, which the agent cannot change: above it, calls
+  queue inside Ollama. Re-run `edgecoder-install apply --parallel N` to raise it.
+- **Reload model**: unload and load it again (after an Ollama upgrade, or to free memory).
+
+Every command is listed under the machine with who sent it, when, and the result.
+
+**Who can do this.** Only the account the machine is enrolled to. The portal names the account
+from your session; the coordinator checks the machine's verified ownership and signs the command
+with its identity key; the agent acts only on a command signed by the coordinator it pinned, for its
+own id, within two minutes, once. See [the threat model](security/agent-threat-model.md#remote-model-control).
+
+**Where changes are kept.** The agent runs as the unprivileged `edgecoder` user and cannot rewrite
+`/etc/edgecoder/agent-N.env`. Remote changes go to
+`/var/lib/edgecoder/agent-N/.config/edgecoder/model-overrides.json` (the agent's own state
+directory, mode 0600) and are layered over the env file at startup. Each entry records the env value
+it replaced; if that value later changes (you edit the env file, or re-run the installer with
+`--model`, `--context-window`, `--parallel` or `--keep-alive`), **the local value wins** and the
+remote one is dropped. Delete the file and restart the agent to return to the env file alone.
+
+**Host controls** (in `agent-N.env`):
+
+| Variable | Effect |
+| --- | --- |
+| `AGENT_REMOTE_CONTROL=off` | View only: the state is still shown, no remote command changes anything (an operator's model rollout included). |
+| `AGENT_MODEL_ALLOWLIST=qwen3-coder:30b,qwen3.5:9b` | Only these models may be pulled or selected remotely. Unset: the curated catalog. `catalog,<tag>` adds to the catalog; `none` allows nothing. |
+
+Desktop machines (macOS, Windows) take the same commands, and their app stays authoritative. The
+remote "active model" is the model the machine serves to the network; the app's Model Manager
+still picks the model for local chat. A model loaded in Ollama (in use on the machine) cannot be
+removed remotely, a setting the app's own configuration changes replaces the remote value, and the
+portal always shows what the machine reports.
+
 ## Example: an 8× RTX 6000 Ada host
 
 ```bash

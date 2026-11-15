@@ -16,6 +16,7 @@ import type {
 } from "../../../common/types.js";
 import { checkPeerRegistration, isAllowlistedKey } from "../../../mesh/peer-trust.js";
 import { setNudgeTransport } from "../dispatch.js";
+import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../../../security/key-fingerprint.js";
@@ -450,6 +451,28 @@ setNudgeTransport({
   send: (agentId, frame) => {
     const b = meshWsBindings.get(agentId);
     if (!b || !b.authenticated || !agentCapabilities.has(agentId)) return false;
+    const ws = b.socket as { readyState?: number; send: (data: string) => void };
+    if (ws.readyState !== 1) return false;
+    try {
+      ws.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+});
+
+// Remote model control (../model-control.ts): owner commands go only down a socket whose bind proved
+// the agent's registered key, and only to a registered agent (never a peer coordinator's socket).
+setModelControlTransport({
+  connected: (agentId) => {
+    const b = meshWsBindings.get(agentId);
+    return !!b && b.authenticated && agentCapabilities.has(agentId) && (b.socket as { readyState?: number }).readyState === 1;
+  },
+  send: (agentId, frame) => {
+    const b = meshWsBindings.get(agentId);
+    if (!b || !b.authenticated || !agentCapabilities.has(agentId)) return false;
+    if (mesh.listPeers().some((p) => p.peerId === agentId)) return false;
     const ws = b.socket as { readyState?: number; send: (data: string) => void };
     if (ws.readyState !== 1) return false;
     try {
