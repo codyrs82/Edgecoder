@@ -76,16 +76,33 @@ export async function* openAiStream(pieces: AsyncIterable<ChatPiece>, model: str
     `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
   yield chunk({ role: "assistant", content: "" }, null);
   let calls = 0;
+  let outChars = 0;
   for await (const p of pieces) {
-    if ("delta" in p) yield chunk({ content: p.delta }, null);
+    if ("delta" in p) {
+      outChars += p.delta.length;
+      yield chunk({ content: p.delta }, null);
+    }
     else if ("toolCalls" in p) {
       yield chunk({ tool_calls: toOpenAiCalls(p.toolCalls, calls) }, null);
       calls += p.toolCalls.length;
     } else if ("done" in p) {
-      yield chunk({}, calls ? "tool_calls" : p.stopReason === "length" ? "length" : "stop", p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {});
+      yield chunk({}, calls ? "tool_calls" : p.stopReason === "length" ? "length" : "stop", {
+        usage: openAiUsage(p, outChars),
+        ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {})
+      });
     }
   }
   yield "data: [DONE]\n\n";
+}
+
+/**
+ * OpenAI `usage` for a reply: the token counts the call was billed on when known (the model's own
+ * counts), otherwise an estimate of the output (about 4 characters per token) and 0 for the prompt.
+ */
+export function openAiUsage(done: { promptTokens?: number; outputTokens?: number } | undefined, outputChars: number) {
+  const prompt = done?.promptTokens ?? 0;
+  const completion = done?.outputTokens ?? Math.ceil(outputChars / 4);
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
 }
 
 /** A whole (non-streamed) reply. */
@@ -105,7 +122,7 @@ export async function openAiResponse(pieces: AsyncIterable<ChatPiece>, model: st
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [{ index: 0, message: { role: "assistant", content: text || (calls.length ? null : ""), ...(calls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: calls.length ? "tool_calls" : done?.stopReason === "length" ? "length" : "stop" }],
-    usage: { prompt_tokens: 0, completion_tokens: Math.ceil(text.length / 4), total_tokens: Math.ceil(text.length / 4) },
+    usage: openAiUsage(done, text.length),
     ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
   };
 }

@@ -9,9 +9,26 @@ case "${1:-}" in
   bitcoind)
     wallet=()
     [ -d "$DATA/regtest/wallets/miner" ] && wallet=(-wallet=miner)
-    exec bitcoind "${wallet[@]}" -regtest -datadir="$DATA" -server -txindex -fallbackfee=0.0002 \
+    bitcoind "${wallet[@]}" -regtest -datadir="$DATA" -server -txindex -fallbackfee=0.0002 \
       -rpcuser=edgecoder -rpcpassword="$BTC_RPC_PASS" -rpcbind=[::] -rpcallowip=0.0.0.0/0 -rpcallowip=::/0 \
-      -zmqpubrawblock=tcp://[::]:28332 -zmqpubrawtx=tcp://[::]:28333 -printtoconsole
+      -zmqpubrawblock=tcp://[::]:28332 -zmqpubrawtx=tcp://[::]:28333 -printtoconsole &
+    btcd=$!
+    trap 'kill -TERM "$btcd" 2>/dev/null' TERM INT
+    # Regtest only gets blocks when someone mines them. Left idle, LND marks itself unsynced
+    # (synced_to_chain=false) and invoice creation hangs, which is what broke top-ups on 2026-11-15.
+    # Mine one block every REGTEST_BLOCK_INTERVAL_S (default 600) into the miner wallet; 0 disables.
+    interval=${REGTEST_BLOCK_INTERVAL_S:-600}
+    if [ "$interval" -gt 0 ] 2>/dev/null; then
+      (
+        cli() { bitcoin-cli -regtest -datadir="$DATA" -rpcuser=edgecoder -rpcpassword="$BTC_RPC_PASS" "$@"; }
+        until cli getblockcount >/dev/null 2>&1; do sleep 2; done
+        while sleep "$interval"; do
+          addr=$(cli -rpcwallet=miner getnewaddress 2>/dev/null) || continue
+          cli generatetoaddress 1 "$addr" >/dev/null 2>&1 && echo "regtest keepalive: mined block $(cli getblockcount)"
+        done
+      ) &
+    fi
+    wait "$btcd"
     ;;
   lnd)
     alias=${2:?alias}

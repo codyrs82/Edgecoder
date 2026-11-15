@@ -596,7 +596,8 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `testnet` | Bitcoin network: `bitcoin`, `testnet`, `signet` |
-| `COORDINATOR_FEE_BPS` | `150` | Coordinator fee in basis points |
+| `COORDINATOR_FEE_BPS` | `0` | Fee on buying cSats (basis points); 0 = 1 sat buys 1 cSat |
+| `FEE_POOL_HOST_DISTRIBUTION` | off | Share the network fee with infrastructure hosts; off = EdgeCoder keeps it |
 | `COORDINATOR_FEE_ACCOUNT` | `coordinator-fee:default` | Fee collection account |
 | `APPROVED_COORDINATOR_IDS` | | Comma-separated approved coordinator peer IDs |
 | `PRICE_EPOCH_CPU_MIN_SATS` / `PRICE_EPOCH_CPU_MAX_SATS` | `10` / `120` | Band for the legacy CPU price epoch (sats per compute unit) |

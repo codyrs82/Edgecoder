@@ -50,7 +50,8 @@ Consolidated reference for all environment controls. The primary config file on 
 | `INFRA_HOST_LIGHTNING_NODE_ID` | _(unset)_ | This host's Lightning node id (`lncli getinfo` → `identity_pubkey`); a remote coordinator attests the `lightning` service by a BOLT 8 handshake against it on port 9735. |
 | `INFRA_HOST_ELECTRS_ENDPOINT` | `electrs:50001` | Where this coordinator checks its own electrs (Electrum `server.version`) before counting the `electrs` service. |
 | `HOST_ATTEST_ALLOW_PRIVATE` | _(unset)_ | `1` lets service probes of remote hosts target private/loopback addresses (local test networks only). |
-| `FEE_POOL_DISTRIBUTION_MS` | `86400000` | Interval for distributing the network fee pool to hosts by uptime × services (ms; min 60000). |
+| `FEE_POOL_DISTRIBUTION_MS` | `86400000` | Interval for distributing the network fee pool to hosts by uptime × services (ms; min 60000). Only used when `FEE_POOL_HOST_DISTRIBUTION` is on. |
+| `FEE_POOL_HOST_DISTRIBUTION` | unset (off) | `1` or `true`: share the network fee (`network:fee_pool`) with infrastructure hosts by uptime. Off by default: the fee is EdgeCoder's revenue. |
 | `PAYOUT_AUTO_INTERVAL_MS` | `21600000` | Interval for the LNURL auto-payout sweep (ms; min 60000). |
 | `RECEIPT_EPOCH_MS` | `3600000` | Length of a signed-work-receipt Merkle epoch before it is sealed and anchored (ms). |
 | `RECEIPT_REPLICATION_MS` | `60000` | How often sealed receipt epochs are replicated to peers (ms). |
@@ -217,7 +218,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 |---|---|
 | `WALLET_DEFAULT_NETWORK` | Default chain/network for wallet operations. |
 | `WALLET_SECRET_PEPPER` | Accepted for existing deployments; no code reads it today. |
-| `COORDINATOR_FEE_BPS` | Coordinator fee in basis points. |
+| `COORDINATOR_FEE_BPS` | Fee on buying cSats, in basis points. Default `0`: 1 sat buys 1 cSat; the fee is taken on compute payments (`NETWORK_FEE_BPS`). |
 | `COORDINATOR_FEE_ACCOUNT` | Fee recipient account address. |
 | `PAYMENT_INTENT_TTL_MS` | Payment intent expiry (ms). |
 | `PAYMENT_INTENT_EXPIRY_GRACE_MS` | Default `120000`. Extra time after the TTL before an **unpaid** intent is expired; reconcile always asks the Lightning node first. |

@@ -36,7 +36,16 @@ export interface ChatRequest {
 export type ChatPiece =
   | { delta: string }
   | { toolCalls: ToolCall[] }
-  | { done: true; cSatsSpent?: number; stopReason?: "stop" | "length"; /** Where it ran, when Auto chose. */ where?: string };
+  | {
+      done: true;
+      cSatsSpent?: number;
+      stopReason?: "stop" | "length";
+      /** Where it ran, when Auto chose. */
+      where?: string;
+      /** Token counts as billed (the model's own counts, bounded by the coordinator); absent when unknown. */
+      promptTokens?: number;
+      outputTokens?: number;
+    };
 
 export class ChatBackendError extends Error {
   constructor(message: string, readonly status: number) {

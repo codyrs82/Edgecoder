@@ -436,6 +436,13 @@ export class SwarmQueue {
     return this.agentClaimCount.get(agentId) ?? 0;
   }
 
+  /** Unclaimed inference subtasks waiting for `model`: load the portal weighs when routing new calls. */
+  waitingInference(model: string): number {
+    let n = 0;
+    for (const t of this.tasks) if (!t.claimedBy && t.subtask.kind === "inference" && t.subtask.requestedModel === model) n++;
+    return n;
+  }
+
   status(): { queued: number; agents: number; results: number } {
     return {
       queued: this.tasks.length,
