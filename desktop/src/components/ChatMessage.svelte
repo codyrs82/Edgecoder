@@ -10,6 +10,8 @@
   import type { StreamProgress } from "../lib/api";
   import { usageText } from "../lib/compute-choice";
   import type { ToolEvent } from "../lib/types";
+  import { ChevronRight } from "@lucide/svelte";
+  import { summarizeSteps } from "../lib/tool-steps";
   import { Copy, Check } from "@lucide/svelte";
 
   interface Props {
@@ -32,6 +34,8 @@
   }
   let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
 
+  /** A finished turn's steps start folded into their summary line. */
+  let stepsOpen = $state(false);
   let copied = $state(false);
   function copyReply() {
     void navigator.clipboard?.writeText(content).then(() => {
@@ -46,47 +50,58 @@
     <div class="bubble user-bubble">{content}</div>
   {:else}
     <div class="bubble assistant-bubble">
-      <MarkdownRenderer source={content} {onOpenInEditor} />
       {#if toolEvents && toolEvents.length > 0}
-        <div class="tool-events">
+        {@const stepCount = toolEvents.filter((e) => e.type === "tool_call" || e.type === "shell_output").length}
+        {#if !streaming && stepCount >= 2}
+          <!-- A finished turn's steps fold into one line ("Read 2 files, edited 1 file · 5 steps"). -->
+          <button type="button" class="steps-summary" aria-expanded={stepsOpen} onclick={() => (stepsOpen = !stepsOpen)}>
+            <span class="steps-chev" class:open={stepsOpen} aria-hidden="true"><ChevronRight size={13} /></span>
+            <span class="steps-text">{summarizeSteps(toolEvents)}</span>
+            <span class="steps-count">· {stepCount} steps</span>
+          </button>
+        {/if}
+        {#if streaming || stepCount < 2 || stepsOpen}
+        <div class="tool-events" class:folded={!streaming && stepCount >= 2}>
           {#each toolEvents as evt}
-            {#if evt.type === "tool_call"}
-              <ToolCallBlock
-                id={evt.id ?? ""}
-                tool={evt.tool ?? "unknown"}
-                args={evt.args ?? {}}
-                requiresApproval={evt.requires_approval ?? false}
-                result={evt.result}
-                error={evt.error}
-                status={evt.error ? "completed" : evt.result !== undefined ? "completed" : evt.approval_status === "rejected" ? "rejected" : evt.approval_status === "pending" ? "pending" : "executing"}
-                onApprove={(id) => onToolApproval?.(id, true)}
-                onReject={(id) => onToolApproval?.(id, false)}
-              />
-            {:else if evt.type === "shell_output"}
-              <ShellBlock
-                id={evt.id ?? ""}
-                command={evt.command}
-                stdout={evt.stdout}
-                stderr={evt.stderr}
-                exitCode={evt.exit_code}
-                status="completed"
-              />
-            {:else if evt.type === "diff"}
-              <DiffBlock
-                id={evt.id ?? ""}
-                file={evt.file ?? "unknown"}
-                hunks={evt.hunks ?? []}
-                status="accepted"
-              />
-            {:else if evt.type === "plan"}
-              <PlanBlock
-                steps={(evt.steps ?? []).map(s => ({ ...s, status: s.status as "pending" | "in_progress" | "completed" | "failed" }))}
-                planStatus={(evt.plan_status ?? "proposed") as "proposed" | "approved" | "executing"}
-              />
-            {/if}
-          {/each}
+              {#if evt.type === "tool_call"}
+                <ToolCallBlock
+                  id={evt.id ?? ""}
+                  tool={evt.tool ?? "unknown"}
+                  args={evt.args ?? {}}
+                  requiresApproval={evt.requires_approval ?? false}
+                  result={evt.result}
+                  error={evt.error}
+                  status={evt.error ? "completed" : evt.result !== undefined ? "completed" : evt.approval_status === "rejected" ? "rejected" : evt.approval_status === "pending" ? "pending" : "executing"}
+                  onApprove={(id) => onToolApproval?.(id, true)}
+                  onReject={(id) => onToolApproval?.(id, false)}
+                />
+              {:else if evt.type === "shell_output"}
+                <ShellBlock
+                  id={evt.id ?? ""}
+                  command={evt.command}
+                  stdout={evt.stdout}
+                  stderr={evt.stderr}
+                  exitCode={evt.exit_code}
+                  status="completed"
+                />
+              {:else if evt.type === "diff"}
+                <DiffBlock
+                  id={evt.id ?? ""}
+                  file={evt.file ?? "unknown"}
+                  hunks={evt.hunks ?? []}
+                  status="accepted"
+                />
+              {:else if evt.type === "plan"}
+                <PlanBlock
+                  steps={(evt.steps ?? []).map(s => ({ ...s, status: s.status as "pending" | "in_progress" | "completed" | "failed" }))}
+                  planStatus={(evt.plan_status ?? "proposed") as "proposed" | "approved" | "executing"}
+                />
+              {/if}
+            {/each}
         </div>
+        {/if}
       {/if}
+      <MarkdownRenderer source={content} {onOpenInEditor} />
       {#if networkTaskId}
         <NetworkTaskCard taskId={networkTaskId} />
       {/if}
@@ -140,8 +155,45 @@
     width: 100%;
     color: var(--text-primary);
   }
+  .steps-summary {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 8px -6px;
+    padding: 3px 6px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--fs-sm);
+    cursor: pointer;
+  }
+  .steps-summary:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+  .steps-chev {
+    display: inline-flex;
+    transition: transform 0.15s;
+  }
+  .steps-chev.open {
+    transform: rotate(90deg);
+  }
+  .steps-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .steps-count {
+    flex-shrink: 0;
+    white-space: nowrap;
+    color: var(--text-muted);
+  }
   .tool-events {
-    margin-top: 8px;
+    margin: 0 0 10px -6px;
   }
   .reply-footer {
     display: flex;

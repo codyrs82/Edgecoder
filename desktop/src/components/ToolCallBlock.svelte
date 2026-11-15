@@ -1,5 +1,6 @@
 <script lang="ts">
   import ToolArgs from "./ToolArgs.svelte";
+  import { editDiff, stepLabel } from "../lib/tool-steps";
 
   interface Props {
     id: string;
@@ -65,6 +66,11 @@
     return "";
   });
 
+  /** "Read" + "index.html": the step in plain words (the tool's own name is the tooltip). */
+  let label = $derived(stepLabel(tool, args, status !== "executing" && !(status === "pending" && requiresApproval)));
+  /** The lines an edit changes, shown instead of its raw arguments. */
+  let diff = $derived(editDiff(tool, args));
+
   let truncatedResult = $derived.by(() => {
     if (!result) return "";
     if (result.length > MAX_RESULT_LENGTH) {
@@ -88,8 +94,8 @@
   }
 </script>
 
-<div class="tool-call-block" style="border-left-color: {borderColor}">
-  <button class="header" onclick={toggle} type="button" aria-expanded={expanded}>
+<div class="tool-call-block" class:asking style="--step-color: {borderColor}">
+  <button class="header" onclick={toggle} type="button" aria-expanded={expanded} title={tool}>
     <span class="tool-info">
       {#if status === "executing"}
         <span class="spinner"></span>
@@ -100,8 +106,10 @@
       {:else}
         <span class="dot" style="background: {borderColor}"></span>
       {/if}
-      <span class="tool-name">{tool}</span>
-      {#if mainArg && !asking}
+      <span class="tool-name">{label.verb}</span>
+      {#if label.target && !asking}
+        <span class="main-arg" title={label.target}>{label.target}</span>
+      {:else if mainArg && !asking}
         <span class="main-arg">{mainArg}</span>
       {/if}
     </span>
@@ -130,7 +138,12 @@
   {#if expanded}
     <div class="body">
       {#if !asking}
-        <div class="body-args"><ToolArgs {tool} {args} /></div>
+        {#if diff}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <pre class="step-diff" tabindex="0" aria-label="Changes to {label.target || 'the file'}">{#each diff as l, i (i)}<span class="dl {l.kind}"><span class="sign" aria-hidden="true">{l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}</span>{l.text}</span>{/each}</pre>
+        {:else}
+          <div class="body-args"><ToolArgs {tool} {args} /></div>
+        {/if}
       {/if}
       {#if error}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -148,12 +161,17 @@
 </div>
 
 <style>
+  /* One quiet line per step, like Claude Code and Cursor; a call waiting for approval is a card. */
   .tool-call-block {
-    border-left: 3px solid var(--accent-secondary);
     border-radius: var(--radius-sm);
-    background: var(--bg-surface);
-    margin: 6px 0;
+    margin: 0;
     overflow: hidden;
+  }
+  .tool-call-block.asking {
+    margin: 6px 0;
+    border: 0.5px solid var(--border-strong);
+    border-left: 3px solid var(--step-color);
+    background: var(--bg-surface);
   }
 
   .header {
@@ -161,17 +179,54 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    padding: 8px 12px;
+    min-height: 26px;
+    padding: 3px 6px;
     background: none;
     border: none;
-    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     font-family: inherit;
     text-align: left;
   }
+  .asking .header {
+    padding: 8px 12px;
+    color: var(--text-primary);
+  }
   .header:hover {
-    background: var(--bg-elevated);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+  .step-diff {
+    margin: 0 0 8px;
+    padding: 6px 0;
+    max-height: 320px;
+    overflow: auto;
+    border-radius: var(--radius-sm);
+    background: var(--bg-base);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+  }
+  .dl {
+    display: block;
+    padding: 0 10px 0 4px;
+    white-space: pre;
+    color: var(--text-secondary);
+  }
+  .dl .sign {
+    display: inline-block;
+    width: 14px;
+    color: var(--text-muted);
+  }
+  .dl.add {
+    background: color-mix(in srgb, var(--green) 14%, transparent);
+    color: var(--text-primary);
+  }
+  .dl.del {
+    background: color-mix(in srgb, var(--red) 14%, transparent);
+    color: var(--text-primary);
   }
 
   .tool-info {
@@ -212,8 +267,7 @@
   }
 
   .tool-name {
-    font-family: var(--font-mono);
-    font-weight: 600;
+    font-weight: 500;
     white-space: nowrap;
   }
 
@@ -285,6 +339,9 @@
   }
 
   .body {
+    padding: 4px 6px 8px 26px;
+  }
+  .asking .body {
     border-top: 1px solid var(--border);
     padding: 8px 12px;
   }
