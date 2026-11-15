@@ -92,6 +92,14 @@ export interface AgentBehaviorStats {
   avgDurationMs: number;
   minDurationMs: number;
   durationStdDev: number;
+  /**
+   * Duration spread over code results only (BHV009 "robot precision"). A model call's duration
+   * follows its prompt and model: short, similar questions on a small model are honestly very
+   * consistent (live regtest load test, 2026-11-15: an honest CPU agent was blacklisted at 48 ms).
+   */
+  codeDurationStdDev: number;
+  /** Code results the precision rule saw. */
+  codeTimingTasks: number;
   /** Successful results faster than their kind's threshold (fastResultThresholdMs). */
   suspiciouslyFastCount: number;
   /** The same per subtask kind ("unknown" when the kind wasn't recorded). */
@@ -326,6 +334,9 @@ export class AgentBehaviorTracker {
       : 0;
     const minDurationMs = durations.length > 0 ? Math.min(...durations) : 0;
     const durationStdDev = computeStdDev(durations, avgDurationMs);
+    const codeDurations = codeTasks.map(t => t.durationMs);
+    const codeAvgDurationMs = codeDurations.length > 0 ? codeDurations.reduce((a, b) => a + b, 0) / codeDurations.length : 0;
+    const codeDurationStdDev = computeStdDev(codeDurations, codeAvgDurationMs);
     const fastResultsByKind: Record<string, FastResultCounts> = {};
     let suspiciouslyFastCount = 0;
     for (const t of okTasks) {
@@ -375,6 +386,8 @@ export class AgentBehaviorTracker {
       avgDurationMs,
       minDurationMs,
       durationStdDev,
+      codeDurationStdDev,
+      codeTimingTasks: codeDurations.length,
       suspiciouslyFastCount,
       fastResultsByKind,
       signatureFailureCount,
