@@ -101,6 +101,8 @@ export const agentCapabilities = new Map<
     ownerEmail?: string;
     sourceIp?: string;
     countryCode?: string;
+    /** Self-reported hosting region code (e.g. a Fly region such as "sin"); display only. */
+    region?: string;
     vpnDetected?: boolean;
     enrollmentReason?: string;
     powerTelemetry?: AgentPowerTelemetry;

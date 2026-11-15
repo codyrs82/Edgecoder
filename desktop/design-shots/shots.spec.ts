@@ -202,3 +202,24 @@ test.describe("settings sections", () => {
     }
   });
 });
+
+// Settings > Network, the world view (NETWORK_WORLD=1): graph with a machine selected, and cards,
+// in both themes, against a11y/world-fixture.ts.
+test.describe("network world view", () => {
+  test.skip(!process.env.NETWORK_WORLD, "NETWORK_WORLD=1 only");
+  test.use({ viewport: SIZES[0] });
+  for (const theme of ["light", "dark"] as const) {
+    test(theme, async ({ page }) => {
+      await page.addInitScript((t) => localStorage.setItem("edgecoder-theme", t), theme);
+      await open(page);
+      await page.getByRole("banner").getByRole("button", { name: "Settings" }).click();
+      await page.getByRole("dialog", { name: "Settings" }).getByRole("tab", { name: "Network" }).click();
+      const graph = page.getByRole("group", { name: /network graph/i });
+      await expect(graph).toBeVisible();
+      await graph.getByRole("button", { name: /3f2a/ }).click();
+      await shot(page, `network-world-graph-${theme}`);
+      await page.getByRole("button", { name: "Cards" }).click();
+      await shot(page, `network-world-cards-${theme}`);
+    });
+  }
+});

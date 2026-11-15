@@ -114,7 +114,7 @@ export function takeNetworkSample(nowMs = Date.now()): NetworkSample {
 const accountCache = new Map<string, { accountId: string | null; atMs: number }>();
 
 /** Owner account per agent (agent_ownership), cached; null when not linked or not known here. */
-async function accountsFor(agentIds: string[], nowMs: number): Promise<Map<string, string | null>> {
+export async function accountsFor(agentIds: string[], nowMs: number): Promise<Map<string, string | null>> {
   for (const id of accountCache.keys()) if (!agentCapabilities.has(id)) accountCache.delete(id);
   const out = new Map<string, string | null>();
   const misses: string[] = [];

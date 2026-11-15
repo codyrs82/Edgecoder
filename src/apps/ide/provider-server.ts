@@ -34,6 +34,7 @@ import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubR
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
@@ -814,6 +815,19 @@ app.post("/v1/ide/projects/new", async (req, reply) => {
 app.get("/v1/ide/compute", async (_req, reply) => {
   if (!networkDeps) return reply.send({ connected: false, reason: "not_enrolled" });
   return reply.send(await computeOverview(networkDeps));
+});
+
+// Network page: the anonymized world view (other people's machines masked) and this computer's round trip to each coordinator.
+app.get("/v1/ide/network/world", async (_req, reply) => {
+  if (!networkDeps) return reply.send({ connected: false, reason: "not_enrolled" });
+  try {
+    const r = await networkWorld(networkDeps);
+    if (r.status !== 200) return reply.status(r.status === 429 ? 429 : 502).send({ connected: false, reason: r.status === 429 ? "rate_limited" : "coordinator_error", status: r.status, error: r.json.error ?? null });
+    // This computer's own agent, so the page can call it "This computer" (it is also marked `mine`).
+    return reply.send({ connected: true, ...r.json, selfAgentId: networkDeps.agentId });
+  } catch (err) {
+    return reply.status(502).send({ connected: false, reason: "agent_unreachable", error: (err as Error).message });
+  }
 });
 
 app.post("/v1/ide/compute/buy", async (req, reply) => {

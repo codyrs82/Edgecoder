@@ -1459,6 +1459,62 @@ export interface CoordinatorSteering {
   decidedAtMs: number;
 }
 export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
+// The network's world view (:4304 /v1/ide/network/world): every coordinator and every machine on
+// it, other people's masked, plus this computer's round trip to each coordinator (myRttMs).
+export type WorldStatus = "idle" | "busy" | "stale";
+export interface WorldAgent {
+  /** Opaque stable id (a keyed hash), for keys only. */
+  id: string;
+  /** Masked label, e.g. "mac-•••3f2a". */
+  label: string;
+  /** Your machine: `name` is its real name. */
+  mine: boolean;
+  name?: string;
+  os: string;
+  region: string | null;
+  country: string | null;
+  continent: string | null;
+  computeClass: string;
+  tier: string | null;
+  vramGb: number | null;
+  models: string[];
+  modelsTotal: number;
+  activeModel: string | null;
+  status: WorldStatus;
+  slots: number;
+  slotsUsed: number;
+  coordinatorId: string;
+  /** The coordinator's measured round trip to this machine (WebSocket pings), ms. */
+  rttMs: number | null;
+}
+export interface WorldCoordinator {
+  id: string;
+  url: string;
+  region: string | null;
+  country: string | null;
+  continent: string | null;
+  agents: number;
+  agentsOnline: number;
+  reachable: boolean;
+  self: boolean;
+  /** This computer's measured round trip to the coordinator, ms (null: not measured or no answer). */
+  myRttMs?: number | null;
+}
+export interface WorldView {
+  connected: boolean;
+  reason?: string;
+  generatedAtMs: number;
+  servedBy: string;
+  coordinators: WorldCoordinator[];
+  links: Array<{ from: string; to: string; rttMs: number | null }>;
+  agents: WorldAgent[];
+  models: Array<{ model: string; agents: number; online: number }>;
+  totals: { coordinators: number; agents: number; online: number; busy: number; mine: number; models: number; slots: number; slotsUsed: number };
+  truncated: boolean;
+  /** This computer's agent id (its entry is one of `mine`). */
+  selfAgentId?: string;
+}
+export const networkWorld = () => fsCall<WorldView | { connected: false; reason?: string }>("GET", "/v1/ide/network/world");
 export const computeBuy = (amountSats: number) =>
   fsCall<{ intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number }>("POST", "/v1/ide/compute/buy", { amountSats });
 export const computeIntent = (intentId: string) => fsCall<{ intentId: string; status: string; cSats: number }>("POST", "/v1/ide/compute/intent", { intentId });

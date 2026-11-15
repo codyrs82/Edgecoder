@@ -33,6 +33,8 @@ export const workerConfigSchema = z.object({
   // A free string: installers write values such as "linux" here and the worker only reports it.
   AGENT_OS: str(),
   AGENT_CLIENT_TYPE: z.string().default("edgecoder-native"),
+  /** Hosting region code shown in the network's world view (e.g. "sin"); unset = FLY_REGION when on Fly. */
+  AGENT_REGION: z.string().regex(/^[a-z0-9-]{2,24}$/, "a region code such as sin or us-east-1").optional(),
   AGENT_DEVICE_ID: str(),
   AGENT_REGISTRATION_TOKEN: str(),
   MESH_AUTH_TOKEN: str(),

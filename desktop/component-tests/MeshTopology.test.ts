@@ -1,106 +1,128 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, within, waitFor } from "@testing-library/svelte";
+import { WORLD } from "../a11y/world-fixture";
 
 const api = vi.hoisted(() => ({
-  getMeshPeers: vi.fn(),
-  getMeshReputation: vi.fn(),
-  getIdentity: vi.fn(),
+  networkWorld: vi.fn(),
   isRemoteMode: vi.fn(() => false),
-  computeOverview: vi.fn(),
 }));
 vi.mock("../src/lib/api", () => ({ ...api, backendReady: Promise.resolve() }));
 
 import MeshTopology from "../src/pages/MeshTopology.svelte";
 
-const peer = (id: string) => ({ peerId: id, publicKeyPem: "PEM", coordinatorUrl: `https://${id}.example`, networkMode: "public_mesh" as const });
-
 beforeEach(() => {
-  api.getMeshPeers.mockResolvedValue({ peers: [peer("peer-aaaa"), peer("peer-bbbb"), peer("peer-cccc")] });
-  api.getMeshReputation.mockResolvedValue({ peers: [{ peerId: "peer-aaaa", score: 91 }] });
-  api.computeOverview.mockResolvedValue({
-    connected: true,
-    account: {
-      accountId: "acct-1", cSats: 10, earnedSats: 0, recent: [], networkAgents: 4,
-      coordinator: { peerId: "coord-1", url: "https://coordinator.example" },
-      machines: [
-        { agentId: "studio", online: true, lastSeenMs: 0, computeClass: "apple", tier: "apple.m.hi", activeModel: null, models: ["qwen3.5:9b"], reservedUntilMs: null },
-        { agentId: "macbook", online: false, lastSeenMs: 0, computeClass: "apple", tier: null, activeModel: null, models: [], reservedUntilMs: null },
-      ],
-    },
-  });
-  api.getIdentity.mockResolvedValue({ peerId: "self-node", publicKeyPem: "SELFPEM", coordinatorUrl: "https://coord.example", networkMode: "public_mesh" });
+  api.isRemoteMode.mockReturnValue(false);
+  api.networkWorld.mockResolvedValue(structuredClone(WORLD));
 });
 afterEach(() => cleanup());
 
-async function nodes() {
-  const graph = await screen.findByRole("group", { name: /mesh graph/i });
-  await waitFor(() => expect(within(graph).getAllByRole("button")).toHaveLength(4));
-  return within(graph).getAllByRole("button");
+async function graphNodes() {
+  const graph = await screen.findByRole("group", { name: /network graph/i });
+  await waitFor(() => expect(within(graph).getAllByRole("button")).toHaveLength(WORLD.agents.length));
+  return { graph, nodes: within(graph).getAllByRole("button") };
 }
-const details = () => screen.getByRole("complementary", { name: /selected node details/i });
+const details = () => screen.getByRole("complementary", { name: /machine details/i });
 
-describe("MeshTopology graph", () => {
-  it("has exactly one tab stop (roving tabindex)", async () => {
+describe("Network page: the world view", () => {
+  it("shows the network's totals, both coordinators and the link between them", async () => {
     render(MeshTopology);
-    const all = await nodes();
-    expect(all.filter((n) => n.getAttribute("tabindex") === "0")).toHaveLength(1);
+    const summary = await screen.findByRole("region", { name: /network summary/i });
+    expect(within(summary).getByText("Machines online").nextElementSibling?.textContent).toBe(String(WORLD.totals.online));
+    expect(within(summary).getByText("Coordinators").nextElementSibling?.textContent).toBe("2");
+    expect(within(summary).getByText("Models available").nextElementSibling?.textContent).toBe("4");
+    // Nearest: the iad machine, 38 ms to the US coordinator + 3 ms from it.
+    expect(within(summary).getByText("~41 ms")).toBeTruthy();
+    const coords = screen.getByRole("region", { name: "Coordinators" });
+    expect(within(coords).getByText(/coordinator\.edgecoder\.io · answering/)).toBeTruthy();
+    expect(within(coords).getByText("coordinator-eu.edgecoder.io")).toBeTruthy();
+    expect(within(coords).getByText(/meshed, 88 ms apart/)).toBeTruthy();
+    // The old empty state is gone.
+    expect(screen.queryByText(/no peers discovered/i)).toBeNull();
   });
 
-  it("arrow keys move focus between nodes", async () => {
+  it("graph: a node per machine with one tab stop; yours named, others masked", async () => {
     render(MeshTopology);
-    const all = await nodes();
-    const first = all.find((n) => n.getAttribute("tabindex") === "0")!;
+    const { graph, nodes } = await graphNodes();
+    expect(nodes.filter((n) => n.getAttribute("tabindex") === "0")).toHaveLength(1);
+    const labels = nodes.map((n) => n.getAttribute("aria-label") ?? "");
+    expect(labels.filter((l) => l.startsWith("Your machine"))).toHaveLength(2);
+    expect(labels.some((l) => l.includes("codys-mac-studio (this computer)"))).toBe(true);
+    for (const l of labels.filter((l) => !l.startsWith("Your machine"))) expect(l).toMatch(/^Machine [a-z]{3}-•••[0-9a-f]{4},/);
+    // The coordinators are hubs in the graph.
+    expect(within(graph).getByText("IAD")).toBeTruthy();
+    expect(within(graph).getByText("FRA")).toBeTruthy();
+  });
+
+  it("graph: selecting a machine shows its models, class, region, load and estimated latency", async () => {
+    render(MeshTopology);
+    const { nodes } = await graphNodes();
+    const gpu = nodes.find((n) => (n.getAttribute("aria-label") ?? "").includes("3f2a"))!;
+    gpu.focus();
+    await fireEvent.keyDown(gpu, { key: "Enter" });
+    expect(gpu.getAttribute("aria-pressed")).toBe("true");
+    const d = details();
+    expect(within(d).getByRole("heading", { name: "lin-•••3f2a" })).toBeTruthy();
+    expect(within(d).getByText("~56 ms")).toBeTruthy(); // 38 + 18
+    expect(within(d).getByText(/ord · US · North America/)).toBeTruthy();
+    expect(within(d).getByText(/gpu · gpu.24gb · 24 GB/)).toBeTruthy();
+    expect(within(d).getByText("4 of 6 slots in use")).toBeTruthy();
+    expect(within(d).getByText("deepseek-r1:32b")).toBeTruthy();
+    await fireEvent.keyDown(gpu, { key: "Escape" });
+    expect(within(details()).getByRole("heading", { name: /select a machine/i })).toBeTruthy();
+  });
+
+  it("graph: arrow keys move focus between machines", async () => {
+    render(MeshTopology);
+    const { nodes } = await graphNodes();
+    const first = nodes.find((n) => n.getAttribute("tabindex") === "0")!;
     first.focus();
     await fireEvent.keyDown(first, { key: "ArrowRight" });
-    const active = document.activeElement as Element;
-    expect(active === first).toBe(false);
-    expect(all.indexOf(active as HTMLElement)).toBeGreaterThan(-1);
-    expect(active.getAttribute("tabindex")).toBe("0");
-    expect(first.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement).not.toBe(first);
+    expect((document.activeElement as Element).getAttribute("tabindex")).toBe("0");
   });
 
-  it("Enter selects a peer and shows its details; Escape clears", async () => {
+  it("cards: sorted nearest first by default, and by region, model or status", async () => {
     render(MeshTopology);
-    const all = await nodes();
-    // The name starts with the text drawn under the node ("peer-aaa…") and ends with the rest of the id.
-    const a = all.find((n) => /peer-aaa/.test(n.getAttribute("aria-label") ?? ""))!;
-    expect(a.getAttribute("aria-label")).toBe("Peer peer-aaa\u2026a, reputation 91");
-    a.focus();
-    await fireEvent.keyDown(a, { key: "Enter" });
-    expect(a.getAttribute("aria-pressed")).toBe("true");
-    expect(within(details()).getByText("https://peer-aaaa.example")).toBeTruthy();
-    expect(within(details()).getByText("91")).toBeTruthy();
-    await fireEvent.keyDown(a, { key: "Escape" });
-    expect(a.getAttribute("aria-pressed")).toBe("false");
-    expect(within(details()).getByText(/select a node/i)).toBeTruthy();
+    await fireEvent.click(await screen.findByRole("button", { name: "Cards" }));
+    const names = () => within(screen.getByRole("list", { name: /machines/i })).getAllByRole("listitem").map((li) => li.querySelector(".wname")?.textContent);
+    // 38+3, then 38+18, 38+31 (yours), 38+34 ...; the stale machine with no figure last.
+    expect(names().slice(0, 3)).toEqual(["lin-•••a1b8", "lin-•••3f2a", "codys-mac-studio (this computer)"]);
+    expect(names().at(-1)).toBe("win-•••0d4e");
+    await fireEvent.click(screen.getByRole("button", { name: /^Nearest/ }));
+    expect(names()[0]).toBe("lin-•••9a30"); // farthest first (jnb via the EU coordinator: 112 + 161)
+
+    await fireEvent.click(screen.getByRole("button", { name: /^Region/ }));
+    expect(names()[0]).toBe("lin-•••9a30"); // AF first
+    await fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
+    expect(names().at(-1)).toBe("win-•••0d4e");
+    await fireEvent.click(screen.getByRole("button", { name: /^Model/ }));
+    expect(names()[0]).toBe("lin-•••3f2a"); // deepseek-r1:32b
   });
 
-  it("clicking the self node shows this node's identity; clicking again deselects", async () => {
+  it("filters: my machines only, and by model", async () => {
     render(MeshTopology);
-    const all = await nodes();
-    const self = all.find((n) => /^This node/.test(n.getAttribute("aria-label") ?? ""))!;
-    await fireEvent.click(self);
-    expect(self.getAttribute("aria-pressed")).toBe("true");
-    expect(within(details()).getByText("https://coord.example")).toBeTruthy();
-    await fireEvent.click(self);
-    expect(self.getAttribute("aria-pressed")).toBe("false");
+    await fireEvent.click(await screen.findByRole("button", { name: "Cards" }));
+    await fireEvent.click(screen.getByRole("button", { name: /my machines/i }));
+    const list = () => within(screen.getByRole("list", { name: /machines/i })).getAllByRole("listitem");
+    expect(list().map((li) => li.querySelector(".wname")?.textContent).sort()).toEqual(["codys-mac-studio (this computer)", "codys-macbook-air"]);
+    await fireEvent.click(screen.getByRole("button", { name: "Everyone" }));
+    await fireEvent.change(screen.getByRole("combobox", { name: /model/i }), { target: { value: "qwen2.5-coder:32b" } });
+    expect(list()).toHaveLength(2);
   });
 
-  it("only one node is selected at a time", async () => {
+  it("never shows another person's machine by name", async () => {
     render(MeshTopology);
-    const all = await nodes();
-    await fireEvent.click(all[1]);
-    await fireEvent.click(all[2]);
-    expect(all.filter((n) => n.getAttribute("aria-pressed") === "true")).toEqual([all[2]]);
+    await graphNodes();
+    await fireEvent.click(screen.getByRole("button", { name: "Cards" }));
+    const text = document.body.textContent ?? "";
+    for (const a of WORLD.agents.filter((x) => !x.mine)) expect(text).toContain(a.label);
+    expect(text).not.toMatch(/agentId|ownerTag/);
   });
 
-  it("shows your machines and the coordinator they meet through, without a LAN", async () => {
+  it("says when this computer is not enrolled, instead of an empty graph", async () => {
+    api.networkWorld.mockResolvedValue({ connected: false, reason: "not_enrolled" });
     render(MeshTopology);
-    const list = await screen.findByRole("region", { name: /your machines/i });
-    expect(within(list).getByText("studio")).toBeTruthy();
-    expect(within(list).getByText(/apple · apple.m.hi · online/)).toBeTruthy();
-    expect(within(list).getByText(/macbook/)).toBeTruthy();
-    expect(within(list).getByText(/coordinator.example/)).toBeTruthy();
-    expect(screen.getByText(/4 machines online/)).toBeTruthy();
+    expect(await screen.findByText(/isn't on the network yet/i)).toBeTruthy();
+    expect(screen.getByText(/Settings › Compute/)).toBeTruthy();
   });
 });

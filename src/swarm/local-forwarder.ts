@@ -10,6 +10,7 @@
  *   POST /forward/submit                                      -> POST {coordinator}/submit (signed)
  *   POST /forward/inference/submit | /forward/inference/stream -> the coordinator's (signed)
  *   GET  /forward/inference/models                            -> GET  {coordinator}/inference/models
+ *   GET  /forward/network/world                               -> GET  {coordinator}/network/world (anonymized)
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
  *   GET  /forward/health                                      -> forwarder state (+ coordinator steering)
  *
@@ -34,6 +35,11 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/account/reservations/list": "/account/reservations/list",
   "/forward/account/reservations/cancel": "/account/reservations/cancel",
   "/forward/account/usage": "/account/usage",
+};
+/** GET routes relayed to the coordinator, signed by this agent (no query string). */
+const SIGNED_GETS: Record<string, string> = {
+  "/forward/inference/models": "/inference/models",
+  "/forward/network/world": "/network/world",
 };
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const RESULT_PATH_RE = /^\/forward\/tasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/subtasks\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/result$/;
@@ -116,8 +122,10 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
         return send(res, upstream.statusCode, await upstream.body.text());
       }
 
-      if (req.method === "GET" && path === "/forward/inference/models") {
-        const upstream = await request(`${coordinator}/inference/models`, { method: "GET", headers: { ...deps.meshHeaders(), ...deps.signedHeaders("/inference/models", "", "GET") }, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+      // Signed GETs whose answer the coordinator scopes to the signer (models; the world view marks its own machines).
+      const signedGet = req.method === "GET" ? SIGNED_GETS[path] : undefined;
+      if (signedGet) {
+        const upstream = await request(`${coordinator}${signedGet}`, { method: "GET", headers: { ...deps.meshHeaders(), ...deps.signedHeaders(signedGet, "", "GET") }, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
         return send(res, upstream.statusCode, await upstream.body.text());
       }
 

@@ -16,6 +16,7 @@ import type {
 } from "../../../common/types.js";
 import { checkPeerRegistration, isAllowlistedKey } from "../../../mesh/peer-trust.js";
 import { setNudgeTransport } from "../dispatch.js";
+import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../../../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../../../trust/identity-challenge.js";
@@ -433,6 +434,11 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
 // displace an authenticated one, and every message must come from the bound peer.
 const MESH_WS_REQUIRE_SIGNED = CC.MESH_WS_REQUIRE_SIGNED;
 const meshWsBindings = new Map<string, { socket: unknown; authenticated: boolean }>();
+/**
+ * Round trip from this coordinator to each peer on an authenticated mesh socket (agents and peer
+ * coordinators), from WebSocket pings (src/swarm/agent-rtt.ts). Read by GET /network/world.
+ */
+export const meshRtt = new RttTracker();
 
 // Fast dispatch (../dispatch.ts): work_available nudges go only down a socket whose bind proved the
 // agent's registered key, and only to registered agents (never to a peer coordinator's socket).
@@ -672,6 +678,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
 
     app.log.info({ peerId, signedBind: bind.authenticated }, "mesh_ws_peer_connected");
     mesh.setWebSocketForPeer(peerId, socket);
+    // Only a bind that proved its key is measured, so an unsigned socket cannot set another peer's figure.
+    if (bind.authenticated) startRttPings(socket as unknown as PingableSocket, peerId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
 
     socket.on("message", async (data) => {
       try {
