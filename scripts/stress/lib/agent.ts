@@ -51,13 +51,15 @@ export interface AgentConfig {
   idlePollMs: number;
   /** Do not pull (a buyer's submitter identity). */
   pulls: boolean;
+  /** Reported hardware (decides the compute class; paid at the class base tier until verified). */
+  hardwareProfile?: Record<string, unknown>;
 }
 
 /** Shared between the agents of one load generator (attacks that need another agent's claim). */
 export interface AgentSharedState {
   recentClaims: Array<{ subtaskId: string; taskId: string; agentId: string; atMs: number }>;
-  /** subtaskId -> number of plain 200 (credited path, not held) /result answers seen. */
-  acceptedResults: Map<string, number>;
+  /** subtaskId -> every plain 200 (credited path, not held) /result answer seen: who and when. */
+  acceptedResults: Map<string, Array<{ agentId: string; atMs: number; kind: string }>>;
 }
 
 export function newSharedState(): AgentSharedState {
@@ -168,7 +170,8 @@ export class SimAgent {
       sandboxMode: this.cfg.sandboxMode,
       publicKeyPem: this.publicKeyPem,
       ...(this.cfg.models.length ? { installedModels: this.cfg.models, activeModel: this.cfg.models[0] } : {}),
-      powerTelemetry: { onACPower: true, deviceType: "server" }
+      powerTelemetry: { onACPower: true, deviceType: "server" },
+      ...(this.cfg.hardwareProfile ? { hardwareProfile: this.cfg.hardwareProfile } : {})
     };
     const r = await this.signedPost("/register", body);
     if (r.status !== 200 || !r.json?.accepted) {
@@ -344,7 +347,9 @@ export class SimAgent {
       if (r.json.held) this.stats.held++;
       else {
         this.stats.accepted++;
-        this.shared.acceptedResults.set(subtaskId, (this.shared.acceptedResults.get(subtaskId) ?? 0) + 1);
+        const seen = this.shared.acceptedResults.get(subtaskId) ?? [];
+        seen.push({ agentId: this.agentId, atMs: Date.now(), kind });
+        this.shared.acceptedResults.set(subtaskId, seen);
       }
       if (kind !== "result") {
         this.rec.addEvidence({

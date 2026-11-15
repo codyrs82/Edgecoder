@@ -179,7 +179,7 @@ export class SimBuyer {
   /** OpenAI-compatible chat completion through the portal (billed to the key's account). */
   async inference(model: string, prompt: string): Promise<CallResult> {
     return call(this.rec, "POST /v1/chat/completions [portal]", this.portal("/v1/chat/completions"), {
-      body: { model: `network/${model}`, messages: [{ role: "user", content: prompt }], max_tokens: 32 },
+      body: { model: model.includes("/") ? model : `network/${model}`, messages: [{ role: "user", content: prompt }], max_tokens: 32 },
       headers: this.auth(),
       timeoutMs: 120_000
     });
