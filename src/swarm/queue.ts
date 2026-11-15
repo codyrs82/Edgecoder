@@ -156,6 +156,25 @@ export class SwarmQueue {
     return materialized;
   }
 
+  /**
+   * Stress finding 2: put back a subtask that was queued or running before a restart (its row is in
+   * queue_tasks already). A subtask that was claimed keeps its claimant and attempt count, with its
+   * lease restarted now: if the claimant heartbeats and reports it is accepted, otherwise the lease
+   * expires as usual and the subtask is requeued (or failed at the retry cap).
+   */
+  restoreSubtask(subtask: Subtask, opts: { attempts?: number; claim?: { agentId: string; claimedAtMs: number } } = {}, nowMs = Date.now()): boolean {
+    if (this.tasks.some((t) => t.subtask.id === subtask.id)) return false;
+    const claim = opts.claim;
+    const item: QueueItem = { subtask, attempts: opts.attempts && opts.attempts > 0 ? opts.attempts : undefined };
+    if (claim) {
+      item.claimedBy = claim.agentId;
+      item.claimedAt = Math.min(claim.claimedAtMs, nowMs);
+      item.leaseRenewedAt = nowMs;
+    }
+    this.tasks.push(item);
+    return true;
+  }
+
   /** #99: per-subtask tail of store writes, so a claim and its expiry reach Postgres in order. */
   private readonly persistTails = new Map<string, Promise<void>>();
 

@@ -702,6 +702,7 @@ export async function refundTaskSubmit(taskId: string): Promise<boolean> {
       const unusedMsat = Math.max(0, billing.reservedMsat - billing.costMsat);
       if (unusedMsat > 0) await grantCreditsIdempotent(billing.accountId, msatToCSats(unusedMsat), `task_submit_refund:${taskId}`, txId);
       billing.refunded = true;
+      await pgStore?.markTaskBillingSettled(taskId, Date.now()).catch((err) => app.log.warn({ err, taskId }, "task_billing_settle_persist_failed"));
       const usage = usagePending.get(taskId);
       if (usage) {
         usagePending.delete(taskId);

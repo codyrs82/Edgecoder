@@ -20,7 +20,7 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import type { CoordinatorApp } from "../app.js";
-import { FALLBACK_BTC_USD, reservations, taskBilling, usagePending, queue } from "../context.js";
+import { FALLBACK_BTC_USD, reservations, taskBilling, usagePending, queue, identity } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -125,6 +125,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
     const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
     if (reserve > 0) {
+      // Durable billing (stress finding 2): a restart refunds what this call did not use.
+      await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() })
+        .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
       try {
         await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: `inference_reserve:${body.taskId}` });
       } catch (err) {

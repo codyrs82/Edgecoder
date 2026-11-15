@@ -13,7 +13,7 @@ import { FEE_POOL_LOCK_KEY, FEE_POOL_LOCK_NAMESPACE, PAYOUT_GLOBAL_LOCK_KEY, PAY
  * Deleted (WIPED_TABLES): balances and earnings (credit_transactions and the projections and
  * contribution reports reconciliation checks them against), purchases and fees (payment_intents,
  * coordinator_fee_events), payouts, usage and reservation leases priced in msat, work still able to
- * accrue earnings (queue, pending verifications), and the signed/anchored history of all of that
+ * accrue earnings (queue, pending verifications, task billing), and the signed/anchored history of all of that
  * (ordering and stats ledgers, quorum records, anchors, work receipts and epochs, issuance, ledger
  * verifications). A ledger chain anchored on regtest proves nothing on mainnet, so it restarts.
  *
@@ -37,6 +37,7 @@ export const WIPED_TABLES = [
   "queue_tasks",
   "queue_results",
   "queue_expired_holders",
+  "task_billing",
   "ledger_records",
   "stats_ledger_records",
   "quorum_ledger_records",

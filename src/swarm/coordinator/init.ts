@@ -72,6 +72,7 @@ import { reconcileIntent } from "./payments.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
 import { sweepGrants } from "./grants.js";
+import { restoreTaskBilling } from "./billing-restore.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -121,6 +122,9 @@ export async function initCoordinator(): Promise<void> {
       }
       // #105: results held for verification before a restart are held again, not dropped.
       await restorePendingVerifications(storeRef).catch((error) => app.log.warn({ error: String(error) }, "result_verification_restore_failed"));
+      // Stress finding 2: tasks billed here and not settled before the restart are resumed or refunded
+      // (after the verifications, which own the subtasks they hold).
+      await restoreTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_restore_failed"));
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([

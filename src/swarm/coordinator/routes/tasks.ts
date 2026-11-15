@@ -146,6 +146,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         // to the actual cost when it finishes (job-pricing.ts).
         const early = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
         const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
+        // Durable billing first (stress finding 2): a restart resumes or refunds the task. Amounts
+        // are read back from the ledger, so a row whose debit never happened refunds nothing.
+        await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() })
+          .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
         // One charge per task id network-wide: the same task sent again (retry, or to the other seed) is refused.
         await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: `task_reserve:${body.taskId}` });
         taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
@@ -262,6 +266,11 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         ...constraints
       }
     }));
+
+    // Which subtasks make up the task, for a restart to tell whether it can resume them.
+    if (taskBilling.has(body.taskId)) {
+      await pgStore?.setTaskBillingSubtasks(body.taskId, subtasksWithIds.map((s) => s.id)).catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
+    }
 
     // Detect circular dependencies and warn (enqueue anyway to avoid deadlock)
     const circularIds = depTracker.detectCircularDeps(subtasksWithIds);
