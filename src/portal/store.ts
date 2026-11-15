@@ -5,6 +5,17 @@ import type { InviteRecord } from "./invites.js";
 import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecord, HostRequestStatus, ComputeHardware } from "./host-requests.js";
 import { Pool } from "pg";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
+import { randomUUID } from "node:crypto";
+import {
+  USER_DELETE_PLAN,
+  deleteStatement,
+  emailHash,
+  maskEmail,
+  type AdminAuditEntry,
+  type AdminUserSummary,
+  type DeleteAccountInput,
+  type DeleteAccountResult
+} from "./account-admin.js";
 
 export type PortalUser = {
   userId: string;
@@ -322,6 +333,7 @@ export class PortalStore {
     await this.migrateInviteCodes();
     await this.migratePayoutDestinations();
     await this.migrateHostRequests();
+    await this.migrateAccountAdmin();
   }
 
   /**
@@ -443,6 +455,152 @@ export class PortalStore {
   async revokeHost(email: string): Promise<boolean> {
     const r = await this.pool.query(`DELETE FROM portal_host_approvals WHERE email = lower($1)`, [email]);
     return (r.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Account deletion (src/portal/account-admin.ts): a tombstone per deleted account (the email's
+   * hash, so the address can sign up again and old ids stay resolvable in audits) and the admin
+   * audit log.
+   */
+  async migrateAccountAdmin(): Promise<void> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_deleted_accounts (
+         user_id TEXT PRIMARY KEY, email_hash TEXT NOT NULL, account_kind TEXT NOT NULL, deleted_at_ms BIGINT NOT NULL,
+         deleted_by TEXT NOT NULL, reason TEXT)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_deleted_accounts_email_idx ON portal_deleted_accounts (email_hash)`);
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_admin_audit (
+         audit_id TEXT PRIMARY KEY, at_ms BIGINT NOT NULL, actor_user_id TEXT NOT NULL, actor_email TEXT NOT NULL, action TEXT NOT NULL,
+         target_user_id TEXT, target_email_hash TEXT, target_email_hint TEXT, detail JSONB NOT NULL)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_admin_audit_at_idx ON portal_admin_audit (at_ms DESC)`);
+  }
+
+  // ── Settings > Admin > Users (src/portal/account-admin.ts) ──
+
+  private static readonly SUMMARY_SQL = `
+    SELECT u.user_id, u.email, u.email_verified, u.role, u.account_kind, u.display_name, u.created_at_ms, u.verified_at_ms,
+      EXISTS (SELECT 1 FROM portal_agent_identities a WHERE a.user_id = u.user_id) AS has_agent_key,
+      (SELECT MAX(s.created_at_ms) FROM portal_sessions s WHERE s.user_id = u.user_id) AS last_session_ms,
+      (SELECT COUNT(*) FROM portal_sessions s WHERE s.user_id = u.user_id AND s.expires_at_ms > $1) AS active_sessions,
+      (SELECT COUNT(*) FROM portal_node_enrollments n WHERE n.owner_user_id = u.user_id) AS machines,
+      (SELECT COUNT(*) FROM portal_node_enrollments n WHERE n.owner_user_id = u.user_id AND n.node_approved) AS approved_machines,
+      (SELECT MAX(n.last_seen_ms) FROM portal_node_enrollments n WHERE n.owner_user_id = u.user_id) AS machine_seen_ms,
+      (SELECT COUNT(*) FROM portal_api_keys k WHERE k.user_id = u.user_id AND k.revoked_at_ms IS NULL) AS api_keys,
+      (SELECT MAX(GREATEST(k.created_at_ms, COALESCE(k.last_used_ms, 0))) FROM portal_api_keys k WHERE k.user_id = u.user_id) AS key_used_ms,
+      (SELECT MAX(c.updated_at_ms) FROM portal_conversations c WHERE c.user_id = u.user_id) AS chat_ms,
+      (SELECT MAX(COALESCE(p.last_used_at_ms, p.created_at_ms)) FROM portal_passkey_credentials p WHERE p.user_id = u.user_id) AS passkey_ms
+    FROM portal_users u`;
+
+  private mapSummaryRow(row: any): AdminUserSummary {
+    const n = (v: unknown) => (v === null || v === undefined ? 0 : Number(v));
+    const lastSessionMs = row.last_session_ms === null || row.last_session_ms === undefined ? null : Number(row.last_session_ms);
+    return {
+      userId: row.user_id,
+      email: row.email,
+      displayName: row.display_name ?? undefined,
+      role: (row.role ?? "user") as "user" | "admin",
+      emailVerified: Boolean(row.email_verified),
+      accountKind: row.account_kind ?? "person",
+      agentKey: Boolean(row.has_agent_key) || row.account_kind === "agent" || isAgentPlaceholderEmail(row.email),
+      createdAtMs: Number(row.created_at_ms),
+      lastSessionMs,
+      activeSessions: n(row.active_sessions),
+      machines: n(row.machines),
+      approvedMachines: n(row.approved_machines),
+      apiKeys: n(row.api_keys),
+      lastActivityMs: Math.max(n(row.created_at_ms), n(row.verified_at_ms), n(lastSessionMs), n(row.machine_seen_ms), n(row.key_used_ms), n(row.chat_ms), n(row.passkey_ms))
+    };
+  }
+
+  async listAdminUserSummaries(nowMs: number): Promise<AdminUserSummary[]> {
+    const r = await this.pool.query(`${PortalStore.SUMMARY_SQL} ORDER BY u.created_at_ms`, [nowMs]);
+    return r.rows.map((row) => this.mapSummaryRow(row));
+  }
+
+  async getAdminUserSummary(userId: string, nowMs: number): Promise<AdminUserSummary | null> {
+    const r = await this.pool.query(`${PortalStore.SUMMARY_SQL} WHERE u.user_id = $2`, [nowMs, userId]);
+    return r.rows[0] ? this.mapSummaryRow(r.rows[0]) : null;
+  }
+
+  /**
+   * Deletes every portal row of an account (USER_DELETE_PLAN) in one transaction, then writes the
+   * tombstone and the audit entry in the same transaction. Sessions and API keys are cut first,
+   * outside it, so access ends even if the deletion fails. Refuses (rolls back) when the account is
+   * gone, is an admin, or has a machine enrolled by the time the row lock is held.
+   */
+  async deleteUserAccount(input: DeleteAccountInput): Promise<DeleteAccountResult> {
+    const counts: Record<string, number> = {};
+    const add = (table: string, n: number | null | undefined) => (counts[table] = (counts[table] ?? 0) + Number(n ?? 0));
+    const nowMs = Date.now();
+    add("portal_sessions", (await this.pool.query(`DELETE FROM portal_sessions WHERE user_id = $1`, [input.userId])).rowCount);
+    const revoked = await this.pool.query(`UPDATE portal_api_keys SET revoked_at_ms = $2 WHERE user_id = $1 AND revoked_at_ms IS NULL`, [input.userId, nowMs]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query(`SELECT email, role FROM portal_users WHERE user_id = $1 FOR UPDATE`, [input.userId]);
+      const row = locked.rows[0];
+      const refuse = async (error: string, detail: string): Promise<DeleteAccountResult> => {
+        await client.query("ROLLBACK");
+        return { deleted: false, error, detail };
+      };
+      if (!row) return await refuse("user_not_found", "The account no longer exists.");
+      if (row.role === "admin") return await refuse("cannot_delete_admin", "The account is an admin.");
+      const machines = await client.query(`SELECT COUNT(*) AS n FROM portal_node_enrollments WHERE owner_user_id = $1`, [input.userId]);
+      if (Number(machines.rows[0]?.n ?? 0) > 0) return await refuse("has_machines", "A machine was enrolled meanwhile. Remove it first.");
+      const email: string = row.email;
+      for (const step of USER_DELETE_PLAN) {
+        const { sql, params } = deleteStatement(step, input.userId, email);
+        add(step.table, (await client.query(sql, params)).rowCount);
+      }
+      await client.query(
+        `INSERT INTO portal_deleted_accounts (user_id, email_hash, account_kind, deleted_at_ms, deleted_by, reason) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [input.userId, emailHash(email), input.accountKind, nowMs, input.actorUserId, input.reason || null]
+      );
+      const auditId = randomUUID();
+      const detail = { counts, apiKeysRevoked: Number(revoked.rowCount ?? 0), force: input.force, reason: input.reason, balances: input.balances ?? null, bulk: Boolean(input.bulk), accountKind: input.accountKind };
+      await client.query(
+        `INSERT INTO portal_admin_audit (audit_id, at_ms, actor_user_id, actor_email, action, target_user_id, target_email_hash, target_email_hint, detail)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [auditId, nowMs, input.actorUserId, input.actorEmail, "account.delete", input.userId, emailHash(email), maskEmail(email), JSON.stringify(detail)]
+      );
+      await client.query("COMMIT");
+      return { deleted: true, counts, auditId };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async appendAdminAudit(e: Omit<AdminAuditEntry, "auditId" | "atMs">): Promise<string> {
+    const auditId = randomUUID();
+    await this.pool.query(
+      `INSERT INTO portal_admin_audit (audit_id, at_ms, actor_user_id, actor_email, action, target_user_id, target_email_hash, target_email_hint, detail)
+       VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8)`,
+      [auditId, Date.now(), e.actorUserId, e.actorEmail, e.action, e.targetUserId, e.targetEmailHint, JSON.stringify(e.detail)]
+    );
+    return auditId;
+  }
+
+  async listAdminAudit(limit: number): Promise<AdminAuditEntry[]> {
+    const r = await this.pool.query(
+      `SELECT audit_id, at_ms, actor_user_id, actor_email, action, target_user_id, target_email_hint, detail FROM portal_admin_audit ORDER BY at_ms DESC LIMIT $1`,
+      [limit]
+    );
+    return r.rows.map((row) => ({
+      auditId: row.audit_id,
+      atMs: Number(row.at_ms),
+      actorUserId: row.actor_user_id,
+      actorEmail: row.actor_email,
+      action: row.action,
+      targetUserId: row.target_user_id ?? null,
+      targetEmailHint: row.target_email_hint ?? null,
+      detail: typeof row.detail === "string" ? JSON.parse(row.detail) : row.detail ?? {}
+    }));
   }
 
   /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */

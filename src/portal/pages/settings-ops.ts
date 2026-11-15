@@ -213,10 +213,41 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     <div id="userMgmtSection" class="hidden">
     <div class="card">
       <h2 class="u-mt-0">User management</h2>
+      <p class="muted">Accounts that signed up with an agent key have no email by design and are labelled "Agent (key sign-in)". Delete needs no machines, no balance and no pending payout on any coordinator; recent activity needs force.</p>
+      <div class="row" id="userFilterRow">
+        <button class="userFilterBtn primary" data-filter="all">All <span id="userCount-all"></span></button>
+        <button class="userFilterBtn" data-filter="verified">Verified <span id="userCount-verified"></span></button>
+        <button class="userFilterBtn" data-filter="unverified">Unverified <span id="userCount-unverified"></span></button>
+        <button class="userFilterBtn" data-filter="agent">Agent key <span id="userCount-agent"></span></button>
+        <button class="userFilterBtn" data-filter="admin">Admins <span id="userCount-admin"></span></button>
+        <input id="userSearch" type="search" maxlength="200" placeholder="Search email, id or name" aria-label="Search users" />
+      </div>
       <table>
-        <thead><tr><th>Email</th><th>Role</th><th>Email verified</th><th>Created</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Last sign-in</th><th>Machines</th><th>API keys</th><th>Balance</th><th>Actions</th></tr></thead>
         <tbody id="userMgmtBody"></tbody>
       </table>
+      <div class="row">
+        <button id="userPrevBtn">Previous</button>
+        <span class="muted" id="userPageNote"></span>
+        <button id="userNextBtn">Next</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="u-mt-0">Clean up abandoned sign-ups</h3>
+      <p class="muted">Lists unverified accounts older than N days with no machines, API keys, recent activity, balance or pending payout. Nothing is deleted until you confirm the list.</p>
+      <div class="row">
+        <input id="cleanupDays" type="number" min="1" max="3650" step="1" value="30" aria-label="Older than days" title="Older than this many days" />
+        <label><input id="cleanupAgents" type="checkbox" /> Include agent-key accounts</label>
+        <button id="cleanupDryRunBtn">Show accounts (dry run)</button>
+      </div>
+      <div id="cleanupResult" class="hidden u-mt-10">
+        <div class="muted" id="cleanupNote"></div>
+        <table>
+          <thead><tr><th>Email</th><th>Status</th><th>Created</th><th>Last activity</th><th>Result</th></tr></thead>
+          <tbody id="cleanupBody"></tbody>
+        </table>
+        <button class="danger" id="cleanupConfirmBtn">Delete these accounts</button>
+      </div>
     </div>
     </div>
     <div id="adminNodeApprovalSection" class="hidden">
@@ -507,30 +538,97 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       }
     });
 
-    /* ── User management (admin only) ── */
+    /* ── User management (admin only; routes/admin-users.ts) ── */
+    const userView = { filter: "all", q: "", page: 1, pages: 1, selfUserId: "" };
+    const STATUS_TONE = { verified: "ok", unverified: "warn", agent: "info" };
+    async function apiDetail(path, options) {
+      const res = await fetch(path, { credentials: "include", headers: { "content-type": "application/json" }, ...options });
+      let payload = null;
+      try { payload = await res.json(); } catch {}
+      if (!res.ok) throw new Error(payload ? String(payload.error || res.status) + (payload.detail ? ": " + payload.detail : "") : String(res.status));
+      return payload;
+    }
+    function userStatusBadge(u) { return statusBadge(u.labelText || u.label, STATUS_TONE[u.label] || "neutral"); }
     async function loadUserManagement() {
       try {
-        const data = await api("/portal/api/admin/users", { method: "GET", headers: {} });
-        const body = document.getElementById("userMgmtBody");
-        const rows = (data.users || []).map(function(u) {
-          const roleBtn = u.role === "admin"
-            ? "<button class='userRoleBtn' data-uid='" + encodeAttr(u.userId) + "' data-role='user'>Remove Admin</button>"
-            : "<button class='userRoleBtn primary' data-uid='" + encodeAttr(u.userId) + "' data-role='admin'>Make Admin</button>";
-          return "<tr><td>" + escapeHtml(u.email) + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
-            boolBadge(Boolean(u.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
-            fmtTime(u.createdAtMs) + "</td><td>" + roleBtn + "</td></tr>";
+        const qs = "?filter=" + encodeURIComponent(userView.filter) + "&page=" + userView.page + (userView.q ? "&q=" + encodeURIComponent(userView.q) : "");
+        const data = await api("/portal/api/admin/users" + qs, { method: "GET", headers: {} });
+        userView.page = Number(data.page) || 1;
+        userView.pages = Number(data.pages) || 1;
+        userView.selfUserId = String(data.selfUserId || "");
+        const counts = data.counts || {};
+        ["all", "verified", "unverified", "agent", "admin"].forEach(function(f) {
+          const el = document.getElementById("userCount-" + f);
+          if (el) el.textContent = counts[f] === undefined ? "" : "(" + Number(counts[f]) + ")";
         });
-        body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='5'>No users found.</td></tr>";
+        document.querySelectorAll(".userFilterBtn").forEach(function(btn) { btn.classList.toggle("primary", btn.getAttribute("data-filter") === userView.filter); });
+        document.getElementById("userPageNote").textContent = "Page " + userView.page + " of " + userView.pages + " (" + Number(data.total || 0) + " accounts)";
+        const rows = (data.users || []).map(function(u) {
+          const uid = encodeAttr(u.userId);
+          const roleBtn = u.role === "admin"
+            ? "<button class='userRoleBtn' data-uid='" + uid + "' data-role='user'>Remove Admin</button>"
+            : "<button class='userRoleBtn primary' data-uid='" + uid + "' data-role='admin'>Make Admin</button>";
+          const canDelete = u.role !== "admin" && u.userId !== userView.selfUserId;
+          const delBtn = canDelete ? " <button class='userDeleteBtn danger' data-uid='" + uid + "' data-email='" + encodeAttr(u.email) + "'>Delete</button>" : "";
+          const machines = Number(u.machines) + (Number(u.approvedMachines) ? " (" + Number(u.approvedMachines) + " approved)" : "");
+          const lastSignIn = u.lastSessionMs ? fmtTime(u.lastSessionMs) + (Number(u.activeSessions) ? " · " + Number(u.activeSessions) + " active" : "") : "never";
+          return "<tr><td>" + escapeHtml(u.email) + (u.displayName ? "<div class='muted'>" + escapeHtml(u.displayName) + "</div>" : "") + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
+            userStatusBadge(u) + "</td><td>" + fmtTime(u.createdAtMs) + "</td><td>" + escapeHtml(lastSignIn) + "</td><td>" + escapeHtml(machines) + "</td><td>" + Number(u.apiKeys) +
+            "</td><td><span id='bal-" + uid + "'><button class='userBalanceBtn' data-uid='" + uid + "'>Check</button></span></td><td>" + roleBtn + delBtn + "</td></tr>";
+        });
+        renderRows("userMgmtBody", rows, 9, "No users found.");
       } catch (err) {
-        document.getElementById("userMgmtBody").innerHTML = "<tr><td colspan='5'>Failed to load users.</td></tr>";
+        document.getElementById("userMgmtBody").innerHTML = "<tr><td colspan='9'>Failed to load users.</td></tr>";
+      }
+    }
+    document.getElementById("userFilterRow").addEventListener("click", function(event) {
+      const btn = event.target && event.target.closest ? event.target.closest(".userFilterBtn") : null;
+      if (!btn) return;
+      userView.filter = btn.getAttribute("data-filter") || "all";
+      userView.page = 1;
+      loadUserManagement();
+    });
+    let userSearchTimer = null;
+    document.getElementById("userSearch").addEventListener("input", function(event) {
+      clearTimeout(userSearchTimer);
+      userSearchTimer = setTimeout(function() { userView.q = String(event.target.value || "").trim(); userView.page = 1; loadUserManagement(); }, 250);
+    });
+    document.getElementById("userPrevBtn").addEventListener("click", function() { if (userView.page > 1) { userView.page--; loadUserManagement(); } });
+    document.getElementById("userNextBtn").addEventListener("click", function() { if (userView.page < userView.pages) { userView.page++; loadUserManagement(); } });
+    async function deleteUser(uid, email, force) {
+      const typed = window.prompt("Delete " + email + "?\\n\\nAll of its portal data (sessions, API keys, passkeys, chats, agent identity) is removed. The coordinator ledger is kept.\\n\\nType the email to confirm:");
+      if (typed === null) return;
+      try {
+        const r = await apiDetail("/portal/api/admin/users/" + encodeURIComponent(uid) + "/delete", { method: "POST", body: JSON.stringify({ confirmEmail: typed, force: Boolean(force) }) });
+        showToast("Deleted " + email + " (audit " + String(r.auditId || "") + ").");
+        await loadUserManagement();
+      } catch (err) {
+        const msg = String(err.message || err);
+        if (!force && msg.indexOf("recent_activity") === 0 && window.confirm(msg + "\\n\\nDelete anyway (force)? A balance or machine still blocks it.")) return deleteUser(uid, email, true);
+        showToast("Delete refused: " + msg, true);
       }
     }
     document.getElementById("userMgmtBody").addEventListener("click", async function(event) {
       var target = event.target;
-      if (!target || !target.classList || !target.classList.contains("userRoleBtn")) return;
-      var uid = target.getAttribute("data-uid");
+      if (!target || !target.classList) return;
+      var uid = decodeURIComponent(target.getAttribute("data-uid") || "");
+      if (!uid) return;
+      if (target.classList.contains("userDeleteBtn")) return deleteUser(uid, decodeURIComponent(target.getAttribute("data-email") || ""), false);
+      if (target.classList.contains("userBalanceBtn")) {
+        const cell = document.getElementById("bal-" + encodeAttr(uid));
+        cell.textContent = "…";
+        try {
+          const b = await apiDetail("/portal/api/admin/users/" + encodeURIComponent(uid) + "/balance", { method: "GET" });
+          const text = Number(b.cSats) + " cSats" + (Number(b.pendingPayouts) ? ", " + Number(b.pendingPayouts) + " pending payout(s)" : "") + (b.complete ? "" : " (incomplete: " + (b.coordinators || []).filter(function(c) { return !c.ok; }).length + " coordinator(s) did not answer)");
+          cell.textContent = text;
+        } catch (err) {
+          cell.textContent = "error";
+        }
+        return;
+      }
+      if (!target.classList.contains("userRoleBtn")) return;
       var role = target.getAttribute("data-role");
-      if (!uid || !role) return;
+      if (!role) return;
       try {
         await api("/portal/api/admin/users/" + encodeURIComponent(uid) + "/role", {
           method: "POST",
@@ -540,6 +638,44 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         await loadUserManagement();
       } catch (err) {
         showToast("Role update failed: " + String(err.message || err), true);
+      }
+    });
+
+    /* ── Bulk cleanup: dry run, then delete exactly the listed accounts ── */
+    let cleanupPlan = null;
+    function cleanupRequest() {
+      return { olderThanDays: Number(document.getElementById("cleanupDays").value || 30), includeAgentAccounts: document.getElementById("cleanupAgents").checked };
+    }
+    document.getElementById("cleanupDryRunBtn").addEventListener("click", async function() {
+      try {
+        const plan = await apiDetail("/portal/api/admin/users/cleanup", { method: "POST", body: JSON.stringify({ ...cleanupRequest(), dryRun: true }) });
+        cleanupPlan = { request: cleanupRequest(), userIds: (plan.candidates || []).map(function(c) { return c.userId; }) };
+        const rows = (plan.candidates || []).map(function(c) {
+          return "<tr><td>" + escapeHtml(c.email) + "</td><td>" + escapeHtml(c.label) + "</td><td>" + fmtTime(c.createdAtMs) + "</td><td>" + fmtTime(c.lastActivityMs) + "</td><td>will be deleted</td></tr>";
+        }).concat((plan.skipped || []).map(function(s) {
+          return "<tr><td>" + escapeHtml(s.email) + "</td><td></td><td></td><td></td><td>skipped: " + escapeHtml(s.error) + "</td></tr>";
+        }));
+        document.getElementById("cleanupResult").classList.remove("hidden");
+        renderRows("cleanupBody", rows, 5, "No accounts match.");
+        document.getElementById("cleanupNote").textContent = cleanupPlan.userIds.length + " account(s) would be deleted, " + (plan.skipped || []).length + " skipped.";
+        document.getElementById("cleanupConfirmBtn").classList.toggle("hidden", cleanupPlan.userIds.length === 0);
+      } catch (err) {
+        showToast("Dry run failed: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("cleanupConfirmBtn").addEventListener("click", async function() {
+      if (!cleanupPlan || cleanupPlan.userIds.length === 0) return;
+      const phrase = "DELETE " + cleanupPlan.userIds.length;
+      const typed = window.prompt("Delete the " + cleanupPlan.userIds.length + " listed account(s)? Each is re-checked first.\\n\\nType " + phrase + " to confirm:");
+      if (typed === null) return;
+      try {
+        const r = await apiDetail("/portal/api/admin/users/cleanup", { method: "POST", body: JSON.stringify({ ...cleanupPlan.request, dryRun: false, userIds: cleanupPlan.userIds, confirm: typed.trim() }) });
+        showToast("Deleted " + (r.deleted || []).length + " account(s); " + (r.skipped || []).length + " skipped.");
+        cleanupPlan = null;
+        document.getElementById("cleanupResult").classList.add("hidden");
+        await loadUserManagement();
+      } catch (err) {
+        showToast("Cleanup failed: " + String(err.message || err), true);
       }
     });
 

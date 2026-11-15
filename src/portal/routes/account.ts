@@ -128,37 +128,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     return reply.send({ ok: true, theme: body.theme });
   });
 
-  app.get("/portal/api/admin/users", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const access = await buildAccessContext(user);
-    if (!access.isSystemAdmin) return reply.code(403).send({ error: "admin_only" });
-    const users = await store.listAllUsers();
-    return reply.send({
-      users: users.map((u) => ({
-        userId: u.userId,
-        email: u.email,
-        role: u.role,
-        emailVerified: u.emailVerified,
-        createdAtMs: u.createdAtMs
-      }))
-    });
-  });
-
-  app.post("/portal/api/admin/users/:userId/role", async (req, reply) => {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
-    const user = await getCurrentUser(req as any);
-    if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const access = await buildAccessContext(user);
-    if (!access.isSystemAdmin) return reply.code(403).send({ error: "admin_only" });
-    const { userId } = req.params as { userId: string };
-    const body = z.object({ role: z.enum(["user", "admin"]) }).parse(req.body);
-    const target = await store.getUserById(userId);
-    if (!target) return reply.code(404).send({ error: "user_not_found" });
-    await store.setUserRole(userId, body.role);
-    return reply.send({ ok: true, userId, role: body.role });
-  });
+  // /portal/api/admin/users* moved to routes/admin-users.ts (list, role, delete, cleanup).
 
   // Enrolment (and only enrolment) also takes a portal API key, so `edgecoder-install --enroll eck_...` needs no browser session token.
   const enrollingUser = async (req: { headers: Record<string, unknown> }) => {
