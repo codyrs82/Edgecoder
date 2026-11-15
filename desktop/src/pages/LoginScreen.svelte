@@ -64,6 +64,25 @@
     }
   }
 
+  // The portal names why it refused (routes/auth.ts refuse(); messages as in portal oauth-identity.ts).
+  function oauthFailureMessage(code: string | null, provider: string | null): string {
+    const p = provider === "microsoft" ? "Microsoft" : provider === "google" ? "Google" : provider === "github" ? "GitHub" : "this provider";
+    switch (code) {
+      case "oauth_account_exists":
+        return `An account with this email already exists. Sign in with your email and password, then connect ${p} from Settings on the portal.`;
+      case "oauth_account_unverified":
+        return `An account with this email exists but its email is not verified. Verify it (or use Forgot password), sign in, then connect ${p} from Settings.`;
+      case "oauth_identity_linked_elsewhere":
+        return `This ${p} account is already connected to a different EdgeCoder account.`;
+      case "email_not_verified":
+        return `Verify your email address before connecting ${p}.`;
+      case "oauth_connect_session_mismatch":
+        return `Your session changed while connecting ${p}. Sign in again and retry.`;
+      default:
+        return code ? `${p} sign-in was not completed (${code}).` : "OAuth sign-in was not completed";
+    }
+  }
+
   // Handle deep link callback from OAuth (edgecoder://oauth-callback?mobile_token=...)
   (window as any).__handleDeepLink = async (urlStr: string) => {
     // Only a callback for a sign-in this app started.
@@ -76,7 +95,7 @@
       const token = url.searchParams.get("mobile_token");
       const status = url.searchParams.get("status");
       if (status !== "ok" || !token) {
-        error = "OAuth sign-in was not completed";
+        error = oauthFailureMessage(url.searchParams.get("error"), url.searchParams.get("provider"));
         return;
       }
       submitting = true;

@@ -230,11 +230,19 @@ export function lndDispatcher(certBase64: string | undefined): Dispatcher | unde
   return new Agent({ connect: { ca: pem } });
 }
 
+/**
+ * Upper bound for the node calls that answer a user (create an invoice, look one up). An LND that
+ * is unsynced or stuck can hold these open indefinitely; without a bound the coordinator held the
+ * request for minutes and the portal gave up with a 502.
+ */
+export const LIGHTNING_RPC_TIMEOUT_MS = 15_000;
+
 export class LndRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
     private readonly macaroonHex: string,
-    private readonly dispatcher?: Dispatcher
+    private readonly dispatcher?: Dispatcher,
+    private readonly rpcTimeoutMs = LIGHTNING_RPC_TIMEOUT_MS
   ) {}
 
   async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
@@ -249,7 +257,9 @@ export class LndRestProvider implements LightningProvider {
         value: String(input.amountSats),
         memo: input.memo,
         expiry: String(input.expiresInSeconds)
-      })
+      }),
+      headersTimeout: this.rpcTimeoutMs,
+      bodyTimeout: this.rpcTimeoutMs
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw new Error(`lnd_invoice_create_failed:${res.statusCode}`);
@@ -424,7 +434,9 @@ export class LndRestProvider implements LightningProvider {
       method: "GET",
       headers: {
         "Grpc-Metadata-macaroon": this.macaroonHex
-      }
+      },
+      headersTimeout: this.rpcTimeoutMs,
+      bodyTimeout: this.rpcTimeoutMs
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       return { settled: false };
@@ -605,7 +617,8 @@ export function interpretClnPays(body: { pays?: ClnPay[] }, sinceMs: number): No
 export class ClnRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
-    private readonly apiToken: string
+    private readonly apiToken: string,
+    private readonly rpcTimeoutMs = LIGHTNING_RPC_TIMEOUT_MS
   ) {}
 
   async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
@@ -619,7 +632,9 @@ export class ClnRestProvider implements LightningProvider {
         amountMsat: `${input.amountSats * 1000}msat`,
         description: input.memo,
         expiry: input.expiresInSeconds
-      })
+      }),
+      headersTimeout: this.rpcTimeoutMs,
+      bodyTimeout: this.rpcTimeoutMs
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw new Error(`cln_invoice_create_failed:${res.statusCode}`);
@@ -715,7 +730,9 @@ export class ClnRestProvider implements LightningProvider {
       method: "GET",
       headers: {
         authorization: `Bearer ${this.apiToken}`
-      }
+      },
+      headersTimeout: this.rpcTimeoutMs,
+      bodyTimeout: this.rpcTimeoutMs
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       await res.body.dump();
