@@ -155,6 +155,10 @@ export const coordinatorConfigSchema = z.object({
   // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
   // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.
   INFERENCE_CLAIM_TIMEOUT_MS: envInt(45_000, { min: 1_000, max: 600_000 }),
+  // Output cap (tokens) for a network model call that sets none: bounds what an agent can bill for
+  // a reply (token padding) and so the worst case of every call. Matches the 4096 the context
+  // sizing already assumed for such calls (contextNeeded). A call may still ask for up to 32768.
+  INFERENCE_DEFAULT_MAX_TOKENS: envInt(4_096, { min: 16, max: 32_768 }),
   // Signed requests per client address per window whose signature fails before the signer is proven
   // (bad signature, clock skew). Past it the address is refused until the window passes.
   PREAUTH_FAILURE_MAX_PER_IP: envInt(120, { min: 1 }),

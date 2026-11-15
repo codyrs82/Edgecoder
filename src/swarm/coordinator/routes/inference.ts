@@ -12,7 +12,8 @@ import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
 import { agentContextWindow, freeModelSlots } from "../dispatch.js";
-import { InferenceStreams, boundTokenCounts } from "../../inference-streams.js";
+import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
+import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
 import { pgStore } from "../../../db/store.js";
 import {
   ACCEPTED_COMPUTE_CLASS_IDS,
@@ -23,9 +24,9 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity, securityLog } from "../context.js";
 import { mutable } from "../mutable-state.js";
-import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
+import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
 import { resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
 import {
   effectiveHardware,
@@ -41,6 +42,65 @@ import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } fro
 export const inferenceStreams = new InferenceStreams();
 setInterval(() => inferenceStreams.prune(), 60_000).unref?.();
 const INFERENCE_MAX_TIMEOUT_MS = 300_000;
+/** Output cap for a call that sets none (INFERENCE_DEFAULT_MAX_TOKENS). */
+export const INFERENCE_DEFAULT_MAX_TOKENS = CC.INFERENCE_DEFAULT_MAX_TOKENS;
+/** Which agents' recent replies were degenerate (token padding); a pattern is a behaviour strike. */
+export const degenerateReplies = new DegenerateReplyTracker();
+
+/**
+ * A successful model call is about to be paid: judge the reply the requester got (this
+ * coordinator's own copy of the stream) and bill only its clean prefix (inference-degeneracy.ts).
+ * The output tokens and the measured duration the call is priced on are cut to the clean share,
+ * so the per-token price and the per-second power floor both stop at the point the reply turned
+ * degenerate; what is not charged goes back to the requester when the task settles. A pattern of
+ * degenerate replies from one agent is a behaviour strike. Returns the verdict, and the duration
+ * to price the call on.
+ */
+export function judgeInferenceReply(
+  subtask: Subtask,
+  agentId: string,
+  output: string,
+  durationMs: number,
+  nowMs = Date.now()
+): { verdict: DegeneracyVerdict; durationMs: number; fraction: number } {
+  const text = inferenceStreams.replyText(subtask.id) ?? output;
+  const verdict = detectDegenerateOutput(text);
+  const seen = degenerateReplies.record(agentId, verdict.degenerate, nowMs);
+  if (!verdict.degenerate) return { verdict, durationMs, fraction: 1 };
+  const fraction = billableFraction(text, verdict.cleanChars, inferenceStreams.toolCallBytes(subtask.id));
+  const cut = (n: number | undefined) => (n === undefined ? undefined : Math.ceil(n * fraction));
+  const u = usagePending.get(subtask.taskId);
+  const b = taskBilling.get(subtask.taskId);
+  const reportedOutputTokens = u?.outputTokens ?? b?.outputTokens;
+  if (u) u.outputTokens = cut(u.outputTokens);
+  if (b) b.outputTokens = cut(b.outputTokens);
+  const billedDurationMs = Math.round(durationMs * fraction);
+  securityLog.log({
+    level: securityLog.severity("inference_output_degenerate"),
+    event: "inference_output_degenerate",
+    source: { type: "agent", id: agentId },
+    details: {
+      taskId: subtask.taskId, subtaskId: subtask.id, model: subtask.requestedModel, reason: verdict.reason, ...verdict.detail,
+      totalChars: verdict.totalChars, cleanChars: verdict.cleanChars, billedFraction: Number(fraction.toFixed(4)),
+      reportedOutputTokens, billedOutputTokens: cut(reportedOutputTokens), degenerateInWindow: seen.degenerate, repliesInWindow: seen.total,
+    },
+    action: "degenerate_tail_not_billed",
+    coordinatorId: identity.peerId,
+  });
+  if (seen.strike) {
+    autoBlacklister.processAnomalies(agentId, [
+      {
+        ruleId: "INF001",
+        ruleName: "inference_output_degenerate",
+        severity: "WARN",
+        blacklistReason: "forged_results",
+        description: "most of the agent's recent model replies turned into repeated or degenerate text (token padding)",
+        stats: { degenerate: seen.degenerate, replies: seen.total, subtaskId: subtask.id, reason: verdict.reason ?? "" },
+      },
+    ], nowMs);
+  }
+  return { verdict, durationMs: billedDurationMs, fraction };
+}
 
 /**
  * No capacity: a call no agent claimed within INFERENCE_CLAIM_TIMEOUT_MS is cancelled. It is
@@ -251,7 +311,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     }
     // Every agent with the model serves a smaller context window than this call needs: say so now
     // rather than wait for the no-capacity bound (agents that report no window take any size).
-    const needTokens = contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens);
+    // Every call has an output cap: what an agent can bill for a reply is bounded by it.
+    const maxTokens = body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS;
+    const needTokens = contextNeeded(body.messages as ChatMessage[], body.tools, maxTokens);
     if (holders.length > 0 && holders.every(([id]) => (agentContextWindow(id) ?? Infinity) < needTokens)) {
       const largest = Math.max(...holders.map(([id]) => agentContextWindow(id) ?? 0));
       return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model });
@@ -286,7 +348,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       taskId: body.taskId,
       kind: "inference",
       language: "python",
-      input: JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens: body.maxTokens, temperature: body.temperature }),
+      input: JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens, temperature: body.temperature }),
       timeoutMs: body.timeoutMs,
       snapshotRef: "inference",
       requestedModel: body.model,
@@ -322,7 +384,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
     if (r === "ok" && body.done && inferenceStreams.isDone(body.subtaskId) && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
-      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0);
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0, maxTokensOf(claim.subtask.input));
       const u = usagePending.get(claim.subtask.taskId);
       if (u) {
         u.promptTokens = bounded.promptTokens;

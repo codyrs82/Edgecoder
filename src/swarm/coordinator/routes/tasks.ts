@@ -115,7 +115,7 @@ import {
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
-import { inferenceStreams, retryInferenceElsewhere } from "./inference.js";
+import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
 import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
@@ -703,6 +703,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // Pieces lost on the way would leave the requester with less than the result it pays for.
       if (body.ok && subtask?.kind === "inference" && inferenceStreams.backfill(body.subtaskId, body.output ?? "")) {
         app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId }, "inference_stream_backfilled");
+      }
+      // Token padding: a reply that turns degenerate is billed for its clean prefix only.
+      if (body.ok && subtask?.kind === "inference" && execution) {
+        execution.meta.durationMs = judgeInferenceReply(subtask, body.agentId, body.output ?? "", execution.meta.durationMs).durationMs;
       }
       inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
       // ── Dependency tracking: store output and release dependent subtasks ──
