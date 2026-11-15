@@ -43,7 +43,7 @@ async function standardSetup(ctx: RunContext, opts: { agents?: number; malicious
 
 const smoke: Scenario = {
   name: "smoke",
-  description: "Small end-to-end pass over every flow (CI-like): top-up, code tasks on both coordinators, inference, market order, reservation, payout hold check.",
+  description: "Small end-to-end pass over every flow (CI-like): top-up, code tasks on both coordinators, inference, market order, reservation (+ reserved inference and cancel).",
   // Simulated work takes ~1.2 s: the coordinator's BHV001 rule blacklists an agent after three
   // results it reports as faster than 500 ms (src/security/anomaly-detector.ts).
   defaults: { agents: 6, buyers: 2, durationSec: 20, rate: 0.5, topupSats: 5_000, latency: { medianMs: 1_200, sigma: 0.3 }, noSandboxShare: 0.2, failureRate: 0 },
