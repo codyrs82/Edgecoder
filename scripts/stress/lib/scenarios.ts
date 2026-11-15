@@ -67,7 +67,7 @@ const smoke: Scenario = {
     await ctx.drain();
     const s = ctx.taskSummary(r.tasks);
     ctx.extra.tasks = s;
-    if ((s.byStatus.completed ?? 0) < s.total) ctx.finding({ severity: "high", title: "smoke: not every code task completed", detail: JSON.stringify(s) });
+    if ((s.byStatus.completed ?? 0) + (s.byStatus.failed_injected ?? 0) < s.total) ctx.finding({ severity: "high", title: "smoke: not every code task completed", detail: JSON.stringify(s) });
     const infFail = r.inference.filter((x) => !x.outcome.startsWith("2"));
     if (infFail.length) ctx.finding({ severity: "high", title: "smoke: inference calls failed", detail: JSON.stringify(infFail.slice(0, 5)) });
   }

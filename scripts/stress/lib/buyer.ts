@@ -28,6 +28,8 @@ export interface TaskOutcome {
   status: "submitted" | "rejected" | "completed" | "failed" | "timeout";
   submitOutcome: string;
   completedAtMs?: number;
+  /** Error a failed subtask reported ("simulated_failure" = injected by the harness). */
+  error?: string;
 }
 
 export class SimBuyer {
@@ -162,7 +164,10 @@ export class SimBuyer {
         const r = await sub.meshGet(`/tasks/${encodeURIComponent(t.taskId)}/subtasks/${encodeURIComponent(id)}/result`, `GET /tasks/:t/subtasks/:s/result [${coordinator.id}]`, [404]);
         if (r.status === 200 && r.json && (r.json.result || r.json.ok !== undefined || r.json.output !== undefined)) {
           const res = r.json.result ?? r.json;
-          if (res.ok === false) failed = true;
+          if (res.ok === false) {
+            failed = true;
+            t.error = String(res.error ?? "failed");
+          }
           pending.delete(id);
         }
       }
@@ -172,7 +177,7 @@ export class SimBuyer {
     else {
       t.status = failed ? "failed" : "completed";
       t.completedAtMs = Date.now();
-      this.rec.record("task end-to-end (submit -> result)", t.completedAtMs - t.submittedAtMs, failed ? "500:subtask_failed" : "200");
+      this.rec.record("task end-to-end (submit -> result)", t.completedAtMs - t.submittedAtMs, !failed ? "200" : t.error === "simulated_failure" ? "expected:500:simulated_failure" : `500:${(t.error ?? "subtask_failed").slice(0, 60)}`);
     }
   }
 

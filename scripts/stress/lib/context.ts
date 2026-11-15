@@ -290,7 +290,8 @@ export class RunContext {
     const by: Record<string, number> = {};
     const rejected: Record<string, number> = {};
     for (const t of all) {
-      by[t.status] = (by[t.status] ?? 0) + 1;
+      const k = t.status === "failed" && t.error === "simulated_failure" ? "failed_injected" : t.status;
+      by[k] = (by[k] ?? 0) + 1;
       if (t.status === "rejected") rejected[t.submitOutcome] = (rejected[t.submitOutcome] ?? 0) + 1;
     }
     const e2e = all.filter((t) => t.completedAtMs).map((t) => t.completedAtMs! - t.submittedAtMs).sort((a, b) => a - b);
