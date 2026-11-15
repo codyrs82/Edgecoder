@@ -87,10 +87,36 @@ To move a database to a new network, wipe its ledger explicitly:
 - [ ] Runbook for a trip: payouts stay paused until an admin resumes. Read the failed checks,
       compare `GET /economy/payouts/:accountId` and the node's payments, fix the cause, then resume.
 
+## Withdrawing EdgeCoder revenue
+
+EdgeCoder keeps `NETWORK_FEE_BPS` (5 %) of every compute payment, booked as `network_fee:<task>`
+earn rows on the account `network:fee_pool` (sharing it with infrastructure hosts is off unless
+`FEE_POOL_HOST_DISTRIBUTION=1`). Withdrawing it is an ordinary payout from that account:
+
+- Portal: Settings > Revenue (`/portal/settings/revenue`, system admins only) shows fee income,
+  what is payable, held and already withdrawn, the last 30 days by day and past withdrawals, and
+  takes a BOLT11 invoice. Confirming needs a code emailed to the admin. The portal calls the
+  coordinator with `COORDINATOR_ADMIN_TOKEN` (set it to the seeds' `ADMIN_API_TOKEN`); the token
+  stays on the server.
+- API: `GET /admin/revenue` and `POST /admin/revenue/withdraw {"bolt11": "..."}` on a coordinator,
+  with `x-admin-token`.
+
+Both pay through `PayoutService`, so the payout caps (the per-account cap applies to the pool
+account too), the pause switch, the earnings hold, reconciliation, the `payout_settled` ledger
+record and the security events apply as for any withdrawal; every attempt is also logged as a
+`security:revenue_withdrawal` event. Leave room for the routing fee cap in the payable balance.
+The solvency check counts the pool's withdrawals like any account's, so a revenue withdrawal does
+not open a solvency gap.
+
+- [ ] A small revenue withdrawal on signet: it appears under Settings > Revenue and in
+      `GET /admin/payouts/reconciliation` stays `ok`.
+
 ## Secrets and access
 
 - [ ] `ADMIN_API_TOKEN`, `PORTAL_SERVICE_TOKEN`, `MESH_AUTH_TOKEN`, `PAYMENT_WEBHOOK_SECRET` are
-      long random values, set as platform secrets, distinct per purpose, never in git.
+      long random values, set as platform secrets, distinct per purpose, never in git. The
+      portal's `COORDINATOR_ADMIN_TOKEN` (revenue page) is the seeds' `ADMIN_API_TOKEN`: set it
+      only on the portal, as a secret.
 - [ ] `PAYMENT_WEBHOOK_SECRET` is set (production refuses unsigned payment webhooks).
 - [ ] `MESH_PEER_ALLOWLIST` lists every peer with `@url` pins; `COORDINATOR_PRIVATE_KEY_PEM` is
       stable per seed.

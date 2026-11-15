@@ -193,6 +193,9 @@ const ADMIN_ROUTES: Array<{ method: "GET" | "POST"; url: string; route: string }
   { method: "POST", url: "/admin/payouts/pause", route: "/admin/payouts/pause" },
   { method: "GET", url: "/admin/payouts/reconciliation", route: "/admin/payouts/reconciliation" },
   { method: "POST", url: "/admin/payouts/reconciliation/run", route: "/admin/payouts/reconciliation/run" },
+  // EdgeCoder's revenue (the network fee pool) and withdrawing it.
+  { method: "GET", url: "/admin/revenue", route: "/admin/revenue" },
+  { method: "POST", url: "/admin/revenue/withdraw", route: "/admin/revenue/withdraw" },
   { method: "POST", url: "/economy/fee-pool/distribute", route: "/economy/fee-pool/distribute" }
 ];
 

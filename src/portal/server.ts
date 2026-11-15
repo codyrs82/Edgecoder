@@ -27,6 +27,7 @@ import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
+import { registerRevenueRoutes } from "./routes/revenue.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
@@ -878,6 +879,12 @@ registerPayoutRoutes(app, marketRouteDeps, {
   store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, dailyCapSats: C.PORTAL_WITHDRAW_DAILY_CAP_SATS,
   sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
 });
+// EdgeCoder's revenue (the network fee pool) for system admins: report and withdraw, through the coordinator's admin routes.
+registerRevenueRoutes(
+  app,
+  { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, buildAccessContext },
+  { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare }
+);
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

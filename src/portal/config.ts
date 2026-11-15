@@ -35,6 +35,12 @@ export const portalConfigSchema = z.object({
   RESEND_FROM_EMAIL: optStr,
   CONTROL_PLANE_URL: envUrl(),
   CONTROL_PLANE_ADMIN_TOKEN: optStr,
+  /**
+   * The coordinators' ADMIN_API_TOKEN, for the system-admin revenue page (routes/revenue.ts: the fee
+   * pool report and withdrawing it). Sent only server-side, only to allowlisted coordinators.
+   * Unset: the page says it is not configured.
+   */
+  COORDINATOR_ADMIN_TOKEN: optStr,
   PORTAL_SESSION_TTL_MS: ttl(1000 * 60 * 60 * 24 * 7),
   PORTAL_EMAIL_VERIFY_TTL_MS: ttl(1000 * 60 * 60 * 24),
   PASSKEY_CHALLENGE_TTL_MS: ttl(300_000),
