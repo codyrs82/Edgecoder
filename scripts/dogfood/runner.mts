@@ -171,7 +171,7 @@ function decide(tool: string, args: any, job: Job, approvals: Approval[], st: { 
 
 // ---------------------------------------------------------------------------- the agent
 type Call = { ttftMs: number | null; totalMs: number; promptTokens: number; outputTokens: number; cSats: number; where?: string; error?: string; retries?: number };
-interface AgentRun { calls: Call[]; toolCalls: Record<string, number>; sigs: Record<string, number>; approvals: Approval[]; text: string; toolErrors: string[]; timedOut: boolean; via: string }
+interface AgentRun { calls: Call[]; toolCalls: Record<string, number>; sigs: Record<string, number>; approvals: Approval[]; text: string; toolErrors: string[]; timedOut: boolean; via: string; trace?: string[] }
 
 const KEY = (() => { try { return JSON.parse(readFileSync(join(homedir(), ".config/edgecoder/e2e/accounts", `${ACCOUNT}.json`), "utf8")).apiKey as string; } catch { return ""; } })();
 const IDE_TOKEN = (() => { try { return readFileSync(join(homedir(), ".edgecoder/ide-token"), "utf8").trim(); } catch { return ""; } })();
@@ -271,8 +271,12 @@ async function runInproc(job: Job, model: string, wt: string, prompt: string, ma
   const abort = new AbortController();
   const timer = setTimeout(() => { r.timedOut = true; abort.abort(); }, TASK_TIMEOUT_MS);
   const rewrites = new Map<string, any>();
+  r.trace = [];
   const sendEvent = (e: any) => {
     if (e.type === "text") r.text += e.content;
+    // A compact trace of tool calls and results, for reading what the model tried.
+    if (e.type === "tool_call") r.trace!.push(`call ${e.tool} ${JSON.stringify(e.args).slice(0, 300)}`);
+    if (e.type === "tool_result" || e.type === "shell_output") r.trace!.push(`result ${e.error ? `ERROR ${String(e.error).slice(0, 200)}` : String(e.result ?? e.stdout ?? "").slice(0, 120).replace(/\n/g, " ")}`);
     if (e.type === "tool_call") {
       r.toolCalls[e.tool] = (r.toolCalls[e.tool] ?? 0) + 1;
       const sig = `${e.tool}:${JSON.stringify(e.args)}`;
@@ -519,6 +523,8 @@ async function attempt(job: Job, tier: TierName, n: number, base: string, contex
     const ttfts = r.calls.map((c) => c.ttftMs).filter((x): x is number => x !== null).sort((a, b) => a - b);
     card.ttftMs = { first: r.calls[0]?.ttftMs ?? null, p50: ttfts[Math.floor(ttfts.length / 2)] ?? null, max: ttfts.at(-1) ?? null };
     card.callErrors = r.calls.map((c) => c.error).filter(Boolean);
+    card.toolErrors = r.toolErrors.slice(0, 20);
+    card.trace = r.trace?.slice(-40);
     card.failureModes = acc.passed ? [] : failureModes(r, acc);
     card.finalText = r.text.slice(-800);
     const outDir = join(DIR, "runs", RUN);
