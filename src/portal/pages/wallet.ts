@@ -197,6 +197,7 @@ export const WALLET_CONTENT = `
             <div class="wl-fund soon" role="listitem" title="Coming soon">${icon("bitcoin", 14)}<span>Fund with Bitcoin</span><small>Coming soon</small></div>
           </div>
           <div class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</div>
+          <div class="wl-testnote hidden" id="launchNote" role="note">${icon("alert", 14)}<span id="launchNoteText"></span></div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             ${presets.map((p, i) => `<button type="button" role="radio" aria-checked="${i === 1 ? "true" : "false"}" data-amount="${p}">${p.toLocaleString("en-US")}<small>sats</small></button>`).join("")}
             <button type="button" role="radio" aria-checked="false" data-amount="custom">Custom<small>100 to 1M</small></button>
@@ -500,6 +501,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     function topupError(text) { const e = $("topupError"); e.textContent = text || ""; e.classList.toggle("hidden", !text); }
     const TOPUP_ERRORS = {
       payments_disabled: "Buying cSats is turned off on this coordinator.", invalid_amount: "Enter whole sats from 100 to 1,000,000.",
+      launch_buy_daily_cap: "Early access: you reached today's purchase limit.", launch_balance_cap: "Early access: that would take your balance over the early-access limit.",
       no_coordinator: "No coordinator is reachable right now. Try again in a minute.", coordinator_unreachable: "No coordinator is reachable right now. Try again in a minute.",
       not_authenticated: "Your session ended. Sign in again."
     };
@@ -509,7 +511,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       btn.disabled = true; btn.textContent = "Preparing payment…";
       const r = await call("/portal/api/wallet/topup", { method: "POST", body: JSON.stringify({ amountSats: state.amount }) }).catch(() => ({ ok: false, json: {} }));
       renderBreakdown();
-      if (!r.ok || !r.json.invoice) { topupError(TOPUP_ERRORS[r.json.error] || "Could not create the invoice (" + (r.json.error || r.status || "network error") + ")."); return; }
+      // A soft-launch refusal carries its own sentence (with the sats still allowed).
+      if (!r.ok || !r.json.invoice) { topupError((/^launch_/.test(r.json.error || "") && r.json.detail) || TOPUP_ERRORS[r.json.error] || "Could not create the invoice (" + (r.json.error || r.status || "network error") + ")."); return; }
       state.intent = r.json;
       state.expiresAt = Date.now() + Number(r.json.expiresInSeconds || 0) * 1000;
       const net = networkInfo(r.json.network);
@@ -573,6 +576,21 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     $("paidDoneBtn").addEventListener("click", backToAmount);
     $("retryInvoiceBtn").addEventListener("click", () => { showStep("stepAmount"); createInvoice().catch((e) => topupError(String(e.message || e))); });
 
+    /* ── Early access (LAUNCH_MODE=invite on the coordinator: src/economy/launch-gate.ts) ── */
+    function launchText(l) {
+      if (!l || l.mode !== "invite") return "";
+      const parts = [];
+      if (l.maxBuySatsPerDay > 0) parts.push("up to " + fmtSats(l.maxBuySatsPerDay) + " sats per day" + (l.boughtWindowSats ? " (" + fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats)) + " left today)" : ""));
+      if (l.maxBalanceSats > 0) parts.push("a balance of up to " + fmtSats(l.maxBalanceSats) + " cSats");
+      if (l.maxPayoutSatsPerDay > 0) parts.push("withdrawals of up to " + fmtSats(l.maxPayoutSatsPerDay) + " sats per day");
+      return parts.length ? "Early access: " + parts.join(", ") + "." : "";
+    }
+    function renderLaunch(l) {
+      const text = launchText(l);
+      $("launchNote").classList.toggle("hidden", !text);
+      $("launchNoteText").textContent = text;
+    }
+
     /* ── Overview: balance, network, fees, earnings ── */
     function renderOverview(o) {
       state.overview = o;
@@ -580,6 +598,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const net = renderNetBadge(o.network);
       $("topupTestNote").classList.toggle("hidden", !net.test);
       $("topupTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Pay with a " + net.short + " wallet; these sats have no value." : "";
+      renderLaunch(o.launch);
       if (o.connected && o.cSats !== null) {
         $("balanceValue").textContent = fmtNum(o.cSats);
         $("balanceUsd").textContent = (fmtUsd(o.cSats, o.btcUsd) || "") + (o.btcUsd ? " · BTC $" + fmtSats(o.btcUsd) + (o.rateStale ? " (rate is stale)" : "") : "");
