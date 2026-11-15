@@ -491,6 +491,18 @@ function satsField(value: unknown, what: string): number {
   return n;
 }
 
+/**
+ * LND's creation_time_ns as whole ms. A real timestamp in nanoseconds (~1.8e18) is far above
+ * Number.MAX_SAFE_INTEGER, so it is parsed as a BigInt; only the ms value has to be a safe integer.
+ */
+function nsToMs(value: unknown): number {
+  const v = typeof value === "number" ? String(value) : value;
+  if (typeof v !== "string" || !/^\d+$/.test(v.trim())) throw new Error("balance_malformed:creation_time_ns");
+  const ms = Number(BigInt(v.trim()) / 1_000_000n);
+  if (!Number.isSafeInteger(ms)) throw new Error("balance_malformed:creation_time_ns");
+  return ms;
+}
+
 function optionalSats(value: unknown, what: string): number {
   return value === undefined || value === null ? 0 : satsField(value, what);
 }
@@ -543,8 +555,7 @@ export function interpretLndPayments(body: { payments?: LndPayment[] }): NodePay
   if (!body || !Array.isArray(body.payments)) throw new Error("payments_malformed:payments");
   return body.payments.map((p) => {
     const status = p.status === "SUCCEEDED" ? "succeeded" : p.status === "FAILED" ? "failed" : "in_flight"; // IN_FLIGHT, INITIATED, UNKNOWN: money may still move
-    const ns = p.creation_time_ns !== undefined ? satsField(p.creation_time_ns, "creation_time_ns") : undefined;
-    const createdAtMs = ns !== undefined ? Math.floor(ns / 1e6) : optionalSats(p.creation_date, "creation_date") * 1000;
+    const createdAtMs = p.creation_time_ns !== undefined ? nsToMs(p.creation_time_ns) : optionalSats(p.creation_date, "creation_date") * 1000;
     return { paymentHash: paymentHashField(p.payment_hash), status, valueMsat: satsField(p.value_msat, "value_msat"), feeMsat: optionalSats(p.fee_msat, "fee_msat"), createdAtMs };
   });
 }

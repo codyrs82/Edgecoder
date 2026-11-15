@@ -199,6 +199,12 @@ describe("provider reconciliation reads", () => {
       { paymentHash: h, status: "succeeded", valueMsat: 5_000, feeMsat: 10, createdAtMs: 2_000 },
       { paymentHash: h, status: "in_flight", valueMsat: 1, feeMsat: 0, createdAtMs: 0 }
     ]);
+    // A real LND creation_time_ns (~1.8e18) is above Number.MAX_SAFE_INTEGER: it must still parse
+    // (stress harness, payout-storm: every reconciliation after the first payout errored).
+    expect(interpretLndPayments({ payments: [{ payment_hash: h, value_msat: "20000", fee_msat: "0", status: "SUCCEEDED", creation_time_ns: "1794709229649836839", creation_date: "1794709229" }] })).toEqual([
+      { paymentHash: h, status: "succeeded", valueMsat: 20_000, feeMsat: 0, createdAtMs: 1_794_709_229_649 }
+    ]);
+    expect(() => interpretLndPayments({ payments: [{ payment_hash: h, value_msat: "1", creation_time_ns: "-5" }] })).toThrow(/creation_time_ns/);
     expect(() => interpretLndPayments({})).toThrow(/payments/);
     expect(() => interpretLndPayments({ payments: [{ payment_hash: "zz", value_msat: "1" }] })).toThrow(/payment_hash/);
   });
