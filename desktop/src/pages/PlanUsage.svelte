@@ -475,8 +475,8 @@
   .wl-fund-methods { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
   .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border, var(--border)); font-size: 12.5px; font-weight: 600; }
   .wl-fund.active { border-color: var(--brand, var(--accent)); }
-  .wl-fund.soon { opacity: 0.6; }
-  .wl-fund small { font-weight: 500; opacity: 0.8; }
+  .wl-fund.soon { border-style: dashed; }
+  .wl-fund small { font-weight: 500; }
   .wl { gap: 18px; }
   .wl-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .net-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;

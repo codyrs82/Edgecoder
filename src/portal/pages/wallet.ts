@@ -71,8 +71,8 @@ export const WALLET_CSS = `
     .wl-fund-methods { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
     .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
     .wl-fund.active { border-color: var(--brand); color: var(--text); background: var(--bg-elevated); }
-    .wl-fund.soon { opacity: 0.6; }
-    .wl-fund small { font-weight: 500; color: var(--muted); }
+    .wl-fund.soon { border-style: dashed; }
+    .wl-fund small { font-weight: 500; }
     .wl-invoice { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
     @media (max-width: 560px) { .wl-invoice { grid-template-columns: 1fr; } }
     .wl-bolt { width: 176px; height: 176px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
