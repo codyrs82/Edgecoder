@@ -7,6 +7,8 @@
  * the model in the end, locally or on a network agent.
  */
 
+import type { RoutingHints } from "./job-descriptor.js";
+
 export interface ToolCall {
   function: { name: string; arguments: Record<string, unknown> };
 }
@@ -30,6 +32,8 @@ export interface ChatRequest {
   tools?: ToolSpec[];
   maxTokens?: number;
   temperature?: number;
+  /** For model "auto": what the client said about the job (body `edgecoder`, x-edgecoder-* headers, session). */
+  hints?: RoutingHints;
 }
 
 /** What a backend yields: text as it is generated, the tool calls, then the end. */

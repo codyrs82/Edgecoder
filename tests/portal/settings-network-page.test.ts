@@ -11,7 +11,7 @@ describe("Settings > Network page", () => {
     const res = await app.inject({ url: "/portal/settings/network" });
     expect(res.statusCode).toBe(200);
     const html = res.body;
-    for (const id of ["netDenied", "netKpis", "kpiOnline", "kpiBusy", "kpiFree", "kpiQueued", "kpiPickup", "kpiTtft", "kpiCalls", "netCoords", "chartUtil", "chartLoad", "chartCalls", "chartLatency", "agentsTable", "agentFilter", "modelsBody", "gapMissing", "gapSaturated", "gapStale", "gapCoverage"]) {
+    for (const id of ["netDenied", "netKpis", "kpiOnline", "kpiBusy", "kpiFree", "kpiQueued", "kpiPickup", "kpiTtft", "kpiCalls", "netCoords", "chartUtil", "chartLoad", "chartCalls", "chartLatency", "agentsTable", "agentFilter", "modelsBody", "routingBody", "routingWeights", "gapMissing", "gapSaturated", "gapStale", "gapCoverage"]) {
       expect(html, id).toContain(`id="${id}"`);
     }
     expect(html).toContain("/portal/api/admin/network");

@@ -160,7 +160,7 @@
               {#each data.records.slice(0, 200) as r (r.id)}
                 <tr class:failed={!r.ok}>
                   <td class="sp-muted">{new Date(r.atMs).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td>
-                  <td>{r.kind === "reservation" ? `Reservation${r.model ? ` · ${shortModel(r.model)}` : ""}` : r.model ? shortModel(r.model) : "Code job"}</td>
+                  <td title={r.routing ?? undefined}>{r.kind === "reservation" ? `Reservation${r.model ? ` · ${shortModel(r.model)}` : ""}` : r.model ? shortModel(r.model) : "Code job"}{#if r.routing}<div class="sp-muted routed">Auto: {r.routing}</div>{/if}</td>
                   <td>{placementLabel[r.placement] ?? r.placement}{r.computeClass ? ` · ${CLASS_LABELS[r.computeClass] ?? r.computeClass}` : ""}</td>
                   <td>{r.source ?? "–"}</td>
                   <td class="num">{dur(r.durationMs / 1000)}</td>
@@ -179,6 +179,7 @@
 
 <style>
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .routed { font-size: 11px; max-width: 360px; white-space: normal; }
   .stat { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
   .chart-card { padding: 14px 16px 8px; margin-top: 10px; }
   .chart { width: 100%; height: 120px; display: block; }
