@@ -44,7 +44,7 @@ import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js
 import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
-import { createNewProject } from "./new-project.js";
+import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
@@ -803,12 +803,26 @@ app.get("/v1/ide/preview", async (req, reply) => {
   return reply.send({ url: preview.urlFor(previewPort, path) });
 });
 
-// A new project for something the user asked to build from chat: <projects folder>/<name>.
+// A new project: from chat (<projects folder>/<slug of the request>) or the desktop's New project
+// sheet (an exact folder name, a location, a template, git or not). It becomes the open project.
 app.post("/v1/ide/projects/new", async (req, reply) => {
-  const { name } = z.object({ name: z.string().max(200).default("") }).parse(req.body ?? {});
-  const projectRoot = createNewProject(name);
-  activeProjectRoot = projectRoot;
-  return reply.send({ projectRoot });
+  const b = z.object({
+    name: z.string().max(200).default(""),
+    parentDir: z.string().min(1).max(4096).optional(),
+    folder: z.string().min(1).max(200).optional(),
+    template: z.enum(PROJECT_TEMPLATES).default("empty"),
+    git: z.boolean().default(true),
+  }).safeParse(req.body ?? {});
+  if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
+  try {
+    const { name, ...opts } = b.data;
+    const projectRoot = createNewProject(name, opts);
+    activeProjectRoot = projectRoot;
+    return reply.send({ projectRoot });
+  } catch (err) {
+    if (err instanceof NewProjectError) return reply.status(err.code === "exists" ? 409 : 400).send({ error: err.code, message: err.message });
+    throw err;
+  }
 });
 
 // Compute page: cSats balance, prices per class, network models (through this machine's agent).
