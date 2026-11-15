@@ -24,8 +24,13 @@ compute class's base tier. Its price is quoted in msat per credit.
 
 All formulas are in `src/economy/job-pricing.ts`; the coordinator applies them when a result is
 accepted (`accrueResultCredits` in `src/swarm/coordinator/results.ts`). What the requester pays is what the
-agent earns, minus the network fee (`NETWORK_FEE_BPS`, default 500 = 5 %), which goes to the fee
-pool (section 5). Failed work is not charged and earns nothing.
+agent earns, minus the network fee (`NETWORK_FEE_BPS`, default 500 = 5 %), which is EdgeCoder's
+revenue and is booked to `network:fee_pool` (section 5). Failed work is not charged and earns nothing.
+
+**Fees, as decided by the owner on 2026-11-15:** buying cSats is free (`COORDINATOR_FEE_BPS` = 0,
+1 sat buys 1 cSat); on every compute payment (model call, job, reservation) the compute host gets
+95 % and EdgeCoder keeps 5 % (`NETWORK_FEE_BPS` = 500). The fee pool is no longer shared with
+infrastructure hosts unless `FEE_POOL_HOST_DISTRIBUTION` is set.
 
 ### Model calls: per token, by model size
 
@@ -100,11 +105,11 @@ paid in full when it is made. When it ends, early or on time, the unused time is
 `POST /economy/payments/intents` (coordinator):
 
 ```
-feeSats  = floor(amountSats × COORDINATOR_FEE_BPS / 10000)      # default 150 bps = 1.5 %
+feeSats  = floor(amountSats × COORDINATOR_FEE_BPS / 10000)      # default 0: purchases are free
 cSats    = amountSats − feeSats
 ```
 
-Example: 10,000 sats → fee 150 → **9,850 cSats**.
+Example (default): 10,000 sats → **10,000 cSats**. With `COORDINATOR_FEE_BPS=150` it would be 9,850.
 
 cSats are granted only when the Lightning node reports the invoice settled
 (`src/economy/payment-settlement.ts`, #42): LND by `r_hash` with preimage, amount and state checks;
@@ -333,7 +338,11 @@ Three guards sit in front of every payment out of the node (`src/economy/payout-
   result; `POST /admin/payouts/reconciliation/run` runs one now. Dedicate the node to the
   coordinator: any other spending from it trips `unknown_payments` by design.
 
-### The network fee pool pays infrastructure hosts
+### The network fee pool: EdgeCoder's revenue (optionally shared with hosts)
+
+By default the pool is EdgeCoder's: nothing below runs unless `FEE_POOL_HOST_DISTRIBUTION` is set
+(`runFeePoolDistribution` answers `skipped: "disabled"`). The rest of this section describes the
+opt-in sharing with infrastructure hosts, for networks with third-party coordinator operators.
 
 Two inflows to `network:fee_pool`:
 
