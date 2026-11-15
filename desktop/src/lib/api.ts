@@ -793,6 +793,75 @@ export async function savePayoutDestination(input: { destination: string; challe
   return { status: "error", error: String(body.error ?? res.status), detail: String(body.detail ?? `Could not save (${body.error ?? res.status}).`) };
 }
 
+/** Payout balance as the coordinator reports it (GET /economy/payouts/:account through the portal). */
+export interface PayoutBalance {
+  earnedMsat: number;
+  /** Earned but inside the earnings hold (PAYOUT_EARNINGS_HOLD_MS: 24 h on mainnet, 0 on regtest). */
+  heldMsat: number;
+  maturesAtMs: number | null;
+  paidMsat: number;
+  pendingMsat: number;
+  payableMsat: number;
+}
+export interface PayoutPolicyView {
+  network?: string;
+  minPayoutSats?: number;
+  maxFeeBps?: number;
+  minFeeFloorSats?: number;
+  autoMinPayoutSats?: number;
+  lightningEnabled?: boolean;
+  paused?: boolean;
+  limits?: { maxSingleSats?: number; maxAccountDailySats?: number; maxGlobalDailySats?: number };
+}
+export interface PayoutRow { createdAtMs: number; kind: string; amountMsat: number; feeMsat: number; status: string; error?: string }
+
+/** The portal's one-call wallet view (/portal/api/wallet/overview): network, BTC/USD, both fees, payouts. */
+export interface WalletOverview {
+  connected: boolean;
+  network: string;
+  networkSource: "coordinator" | "portal";
+  cSats: number | null;
+  earnedSats: number | null;
+  btcUsd: number | null;
+  rateStale: boolean;
+  fees: { purchaseFeeBps: number | null; networkFeeBps: number | null };
+  topup: { minSats: number; maxSats: number };
+  payouts: { balance: PayoutBalance | null; policy: PayoutPolicyView | null; payouts: PayoutRow[] } | null;
+}
+
+export async function getWalletOverview(): Promise<WalletOverview> {
+  const res = await fetch(`${portalBase()}/portal/api/wallet/overview`, { headers: { ...authHeaders() }, credentials: "include" });
+  if (res.status === 401) throw new Error("Sign in to see your wallet.");
+  if (!res.ok) throw new Error("Could not load your wallet.");
+  return res.json();
+}
+
+export type WithdrawResult =
+  | { status: "paid"; amountMsat: number }
+  | { status: "verification_required"; challengeId: string; amountMsat: number; detail: string }
+  | { status: "error"; code: string; detail: string };
+
+/** Withdraw to a BOLT11 invoice through the portal (an emailed code confirms it: first call returns verification_required). */
+export async function withdrawToInvoice(input: { bolt11: string; challengeId?: string; emailCode?: string }): Promise<WithdrawResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${portalBase()}/wallet/payouts/withdraw`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      credentials: "include",
+      body: JSON.stringify(input),
+    });
+  } catch {
+    return { status: "error", code: "network", detail: "Could not reach EdgeCoder. Check your connection and try again." };
+  }
+  const body = (await res.json().catch(() => ({}))) as Record<string, any>;
+  if (res.status === 202 && body.verificationRequired) {
+    return { status: "verification_required", challengeId: String(body.challengeId), amountMsat: Number(body.amountMsat ?? 0), detail: String(body.detail ?? "We emailed you a code.") };
+  }
+  if (res.ok && body.ok) return { status: "paid", amountMsat: Number(body.payout?.amountMsat ?? 0) };
+  return { status: "error", code: String(body.code ?? body.error ?? res.status), detail: String(body.detail ?? `Withdrawal failed (${body.code ?? body.error ?? res.status}).`) };
+}
+
 export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {
   const res = await fetch(`${portalBase()}/wallet/send/requests`, {
     headers: { ...authHeaders() },

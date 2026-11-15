@@ -8,11 +8,14 @@
     cancelReservation,
     computeErrorText,
     portalWebUrl,
+    getWalletOverview,
     type ComputeOverview,
+    type WalletOverview,
     type ReservationOptions,
   } from "../lib/api";
   import { CLASS_LABELS, choiceId, computeChoice, shortModel } from "../lib/compute-choice";
   import Select from "../components/ui/Select.svelte";
+  import { fmtUsd, networkInfo, pct } from "../lib/wallet-format";
 
   interface Props {
     /** Jump to another settings section (e.g. connect, plan). */
@@ -22,6 +25,8 @@
 
   let overview = $state<ComputeOverview | null>(null);
   let res = $state<ReservationOptions | null>(null);
+  /** Network, BTC/USD and fees from the portal; the page works without them. */
+  let wallet = $state<WalletOverview | null>(null);
   let error = $state("");
   let notice = $state("");
   let loading = $state(true);
@@ -56,6 +61,7 @@
   let refresher: ReturnType<typeof setInterval> | undefined;
   onMount(() => {
     void load();
+    getWalletOverview().then((w) => (wallet = w)).catch(() => undefined);
     tick = setInterval(() => (now = Date.now()), 1000);
     refresher = setInterval(load, 30_000);
   });
@@ -157,7 +163,7 @@
             {/if}
           </div>
           {#if estimate > balance}
-            <button onclick={() => onNavigate?.("plan")}>Buy cSats</button>
+            <button onclick={() => onNavigate?.("plan")}>Add funds</button>
           {/if}
           <button class="primary" disabled={reserving || !option?.available || estimate > balance} onclick={reserve}>{reserving ? "Reserving…" : "Reserve"}</button>
         </div>
@@ -237,15 +243,16 @@
       <div class="sp-group-title">Reservations and code jobs: per second</div>
       <div class="sp-card">
         <table>
-          <thead><tr><th>Class</th><th class="num">cSats / second</th><th class="num">cSats / hour</th><th class="num">Machines free</th></tr></thead>
+          <thead><tr><th>Class</th><th class="num">cSats / second</th><th class="num">cSats / hour</th><th class="num">≈ USD / hour</th><th class="num">Machines free</th></tr></thead>
           <tbody>
             {#each Object.entries(overview.classes ?? {}) as [id, c] (id)}
-              <tr><td>{c.label}</td><td class="num">{fmt(c.cSatsPerSecondBaseTier, 4)}</td><td class="num">{fmt(c.cSatsPerSecondBaseTier * 3600, 0)}</td><td class="num">{res?.options?.[id]?.available ?? "–"}</td></tr>
+              <tr><td>{c.label}</td><td class="num">{fmt(c.cSatsPerSecondBaseTier, 4)}</td><td class="num">{fmt(c.cSatsPerSecondBaseTier * 3600, 0)}</td><td class="num">{fmtUsd(c.cSatsPerSecondBaseTier * 3600, wallet?.btcUsd).replace("≈ ", "") || "–"}</td><td class="num">{res?.options?.[id]?.available ?? "–"}</td></tr>
             {/each}
           </tbody>
         </table>
       </div>
-      <p class="sp-muted">Prices are for each class's base tier; faster tiers cost more per second and finish sooner. {overview.account?.networkAgents ?? 0} machines are online.</p>
+      <p class="sp-muted">Prices are for each class's base tier; faster tiers cost more per second and finish sooner. The price a machine is paid comes from the order book and stays between 0.25x and 4x of the class reference. {overview.account?.networkAgents ?? 0} machines are online.</p>
+      <p class="sp-muted">1 cSat = 1 sat. Of everything you pay, {pct(10000 - (wallet?.fees.networkFeeBps ?? 500))} goes to the machine's owner and {pct(wallet?.fees.networkFeeBps ?? 500)} is the network fee that pays infrastructure hosts. Your own machines are free.{#if wallet} Network: {networkInfo(wallet.network).label}.{/if}</p>
     </div>
 
     {#if ended.length}

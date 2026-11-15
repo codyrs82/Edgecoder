@@ -83,7 +83,6 @@ import MeshTopology from "../src/pages/MeshTopology.svelte";
 import Dashboard from "../src/pages/Dashboard.svelte";
 import ActiveWork from "../src/pages/ActiveWork.svelte";
 import TaskQueue from "../src/pages/TaskQueue.svelte";
-import Credits from "../src/pages/Credits.svelte";
 import LogViewer from "../src/pages/LogViewer.svelte";
 import BotView from "../src/pages/BotView.svelte";
 import EditorView from "../src/pages/EditorView.svelte";
@@ -161,7 +160,7 @@ const PAGES: Case[] = [
   ["Chat", "What would you like to build?", ChatView, {}],
   ["Settings: General", SECTION_SHOWS["General"], Settings, {}],
   ["Settings: Profile", SECTION_SHOWS["Profile"], Account, { user: USER, onLogout: noop }],
-  ["Settings: Plan & usage", SECTION_SHOWS["Plan & usage"], PlanUsage, {}],
+  ["Settings: Wallet", SECTION_SHOWS["Wallet"], PlanUsage, {}],
   ["Settings: Usage", SECTION_SHOWS["Usage"], Usage, {}],
   ["Settings: Compute", SECTION_SHOWS["Compute"], ComputeMarket, {}],
   ["Settings: Connect your tools", SECTION_SHOWS["Connect your tools"], Connections, {}],
@@ -171,7 +170,6 @@ const PAGES: Case[] = [
   ["Settings: Dashboard", SECTION_SHOWS["Dashboard"], Dashboard, {}],
   ["Settings: Active work", SECTION_SHOWS["Active work"], ActiveWork, {}],
   ["Settings: Tasks", SECTION_SHOWS["Tasks"], TaskQueue, {}],
-  ["Settings: Wallet", SECTION_SHOWS["Wallet"], Credits, {}],
   ["Settings: Logs", SECTION_SHOWS["Logs"], LogViewer, {}],
   ["Bot", "Tidy the README", BotView, { bot: BOT, onEdit: noop, onDeleted: noop }],
   ["Conversation sidebar", "Seeded chat", ConversationSidebar, { open: true, inline: true, onClose: noop, onSelectConversation: noop, onNewChat: noop, activeConversationId: "c1", user: USER, onOpenSettings: noop, onLogout: noop }],
