@@ -306,14 +306,23 @@ const payoutStorm: Scenario = {
     ctx.extra.balancesBeforeStorm = before;
     ctx.log(`provider payout balances: ${JSON.stringify(before)}`);
 
-    ctx.phase("withdraw inside the hold (expect refusal)");
+    ctx.phase("withdraw into the held part (expect refusal)");
+    // An amount above what has matured but within what was earned: only the earnings hold refuses it.
     const inside: Record<string, number> = {};
     for (const acct of providerAccounts) {
-      const inv = await payee.addInvoice(20, `stress hold ${acct}`);
+      const b = (before[acct] as { payableMsat?: number; heldMsat?: number } | null) ?? {};
+      if (!b.heldMsat || b.heldMsat < 2_000) {
+        inside["skipped:nothing_held"] = (inside["skipped:nothing_held"] ?? 0) + 1;
+        continue;
+      }
+      const amountSats = Math.floor(((b.payableMsat ?? 0) + b.heldMsat / 2) / 1000);
+      const inv = await payee.addInvoice(amountSats, `stress hold ${acct}`);
       const w = await withdraw(ctx.rec, coords[0], token, acct, inv.bolt11, " (inside hold)");
-      inside[w.outcome + (w.json?.code ? `:${w.json.code}` : "")] = (inside[w.outcome + (w.json?.code ? `:${w.json.code}` : "")] ?? 0) + 1;
+      const k = w.outcome.includes(String(w.json?.code)) ? w.outcome : `${w.outcome}${w.json?.code ? `:${w.json.code}` : ""}`;
+      inside[k] = (inside[k] ?? 0) + 1;
+      if (w.status === 200) ctx.finding({ severity: "critical", title: "payout-storm: a withdrawal reaching into held earnings was paid", detail: `${acct}: asked ${amountSats} sats with payable ${b.payableMsat} msat and held ${b.heldMsat} msat`, evidence: w.json });
     }
-    ctx.extra.withdrawInsideHold = inside;
+    ctx.extra.withdrawIntoHeld = inside;
     const holdMs = ctx.t.settings.earningsHoldMs ?? 0;
     ctx.phase(`wait out the earnings hold (${holdMs} ms)`);
     await sleep(holdMs + 5_000);

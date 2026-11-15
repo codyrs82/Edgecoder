@@ -261,7 +261,9 @@ export async function sqlInvariants(postgresUrl: string, o: SqlCheckOptions): Pr
     const capViolations: unknown[] = [];
     const live = payouts.filter((p) => p.status === "paid" || p.status === "pending");
     const outflow = (p: any) => Number(p.amount_msat) + (p.status === "pending" ? Math.max(Number(p.fee_msat), Number(p.max_fee_msat)) : Number(p.fee_msat));
-    for (const p of live) {
+    // Payouts made before this run may have followed other settings (reconfigure.sh): only this
+    // run's payouts are judged, against windows that still include the older ones.
+    for (const p of live.filter((x) => Number(x.created_at_ms) >= since)) {
       const at = Number(p.created_at_ms);
       const matured = (earnsBy.get(p.account_id) ?? []).filter((e) => e.t <= at - holdMs).reduce((s, e) => s + e.msat, 0);
       const outSoFar = live.filter((x) => x.account_id === p.account_id && Number(x.created_at_ms) <= at).reduce((s, x) => s + Number(x.amount_msat), 0);
@@ -280,7 +282,7 @@ export async function sqlInvariants(postgresUrl: string, o: SqlCheckOptions): Pr
       title: `Payouts never exceed earnings matured past the hold (${holdMs} ms) at the time they were made`,
       status: holdViolations.length ? "fail" : "pass",
       severity: "critical",
-      detail: `${live.length} paid/pending payouts replayed, ${holdViolations.length} over matured earnings`,
+      detail: `${live.filter((x) => Number(x.created_at_ms) >= since).length} paid/pending payouts of this run replayed (${live.length} in the ledger), ${holdViolations.length} over matured earnings`,
       evidence: { holdViolations: holdViolations.slice(0, 10) }
     });
     out.push({
