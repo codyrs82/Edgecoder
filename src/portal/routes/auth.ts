@@ -22,6 +22,11 @@ import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfi
 import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
+import { inviteCodeHash, inviteCodeUsable, redeemInviteForNewAccount } from "../invites.js";
+
+/** Shown when an OAuth sign-in would create an account and the soft launch needs an invite. */
+const OAUTH_INVITE_REQUIRED = "EdgeCoder is in early access: creating an account needs an invite code. Enter yours under Create account, then continue with single sign-on.";
+const OAUTH_INVITE_INVALID = "That invite code is not valid: it may be mistyped, expired, revoked or used up.";
 
 /** Verification emails per account per window (signup's own email counts); on top of the per-IP route limit. */
 export const EMAIL_VERIFY_MAX_PER_WINDOW = 4;
@@ -33,7 +38,7 @@ export const RESEND_VERIFICATION_RESPONSE = {
 } as const;
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
@@ -54,7 +59,9 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
         google: oauthGoogleConfigured,
         microsoft: oauthMicrosoftConfigured,
         apple: false
-      }
+      },
+      // Soft launch (LAUNCH_MODE=invite): new accounts need an invite code; sign-in does not.
+      launch: { mode: LAUNCH_MODE, inviteRequired: LAUNCH_MODE === "invite" }
     };
   });
 
@@ -64,7 +71,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       .object({
         email: z.string().email(),
         password: passwordSchema,
-        displayName: z.string().min(2).max(100).optional()
+        displayName: z.string().min(2).max(100).optional(),
+        inviteCode: z.string().max(64).optional()
       })
       .parse(req.body);
     const email = normalizeEmail(body.email);
@@ -72,8 +80,13 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     const existing = await store.getUserByEmail(email);
     if (existing) return reply.code(409).send({ error: "email_already_registered" });
 
+    // Soft launch: a new account takes one use of an invite code (no-op in open mode).
+    const userId = randomUUID();
+    const invite = await redeemInviteForNewAccount({ mode: LAUNCH_MODE, store, code: body.inviteCode, userId });
+    if (!invite.ok) return reply.code(invite.status).send({ error: invite.error, detail: invite.detail });
+
     const user = await store.createUser({
-      userId: randomUUID(),
+      userId,
       email,
       displayName: body.displayName,
       passwordHash: hashPassword(body.password),
@@ -212,7 +225,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
 
   // Shared by sign-in (/start) and connect-from-Settings (/connect): for a connect the state row
   // carries the signed-in user, and the callback checks that the same session finishes it.
-  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string }) {
+  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string }) {
     const portalStore = store!;
     const provider = oauthProviders[providerName];
     if (!provider.clientId || !provider.clientSecret) {
@@ -227,6 +240,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       expiresAtMs: Date.now() + 10 * 60 * 1000,
       ...(opts.nativeRedirect ? { nativeRedirect: opts.nativeRedirect } : {}),
       ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {}),
+      ...(opts.inviteCodeHash ? { inviteCodeHash: opts.inviteCodeHash } : {}),
       // Only meaningful for a hand-off to a native app.
       ...(opts.nativeRedirect && opts.appChallenge ? { appChallenge: opts.appChallenge } : {})
     });
@@ -252,8 +266,16 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
     // A native app's redirect is a short fixed deep link; the length cap keeps state rows small.
-    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional() }).parse(req.query);
-    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge });
+    const query = z.object({ appRedirect: z.string().max(512).optional(), appChallenge: z.string().regex(APP_CHALLENGE_RE).optional(), invite: z.string().max(64).optional() }).parse(req.query);
+    // Soft launch: an invite for a possible new account is checked now and redeemed only if the
+    // callback creates the account (an existing account signs in without using it).
+    let invite: string | undefined;
+    if (LAUNCH_MODE === "invite" && query.invite) {
+      const usable = await inviteCodeUsable(store, query.invite);
+      if (!usable) return reply.code(403).type("text/html").send(oauthErrorPage(OAUTH_INVITE_INVALID));
+      invite = inviteCodeHash(usable);
+    }
+    return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge, inviteCodeHash: invite });
   });
 
   /** Connect a provider to the signed-in account, from Settings. A POST (origin-checked), so other sites can't start it. */
@@ -401,7 +423,12 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       if (decision.kind === "use_existing") {
         user = existing;
       } else {
-        user = await portalStore.createUser({ userId: randomUUID(), email, emailVerified: profile.emailVerified, displayName: undefined });
+        const newUserId = randomUUID();
+        if (LAUNCH_MODE === "invite") {
+          if (!state.inviteCodeHash) return refuse(403, "invite_required", OAUTH_INVITE_REQUIRED);
+          if (!(await portalStore.redeemInviteCode(state.inviteCodeHash, newUserId, Date.now()))) return refuse(403, "invite_invalid", OAUTH_INVITE_INVALID);
+        }
+        user = await portalStore.createUser({ userId: newUserId, email, emailVerified: profile.emailVerified, displayName: undefined });
         await ensureCreditAccountForUser(user);
       }
     } else if (!user.emailVerified && provesEmailOf(user)) {

@@ -962,21 +962,23 @@ export class PortalStore {
     linkUserId?: string;
     /** Native flows: base64url sha256 of a verifier the app keeps; the mobile token is bound to it. */
     appChallenge?: string;
+    /** Soft launch: the hash of the invite given at the start, redeemed if the callback creates the account. */
+    inviteCodeHash?: string;
   }): Promise<void> {
     await this.pruneExpired("portal_oauth_states");
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash`,
       [stateId, now]
     );
     const row = result.rows[0];
@@ -986,7 +988,8 @@ export class PortalStore {
       redirectUri: row.redirect_uri,
       ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
       ...(row.link_user_id ? { linkUserId: row.link_user_id } : {}),
-      ...(row.app_challenge ? { appChallenge: row.app_challenge } : {})
+      ...(row.app_challenge ? { appChallenge: row.app_challenge } : {}),
+      ...(row.invite_code_hash ? { inviteCodeHash: row.invite_code_hash } : {})
     };
   }
 

@@ -31,6 +31,7 @@ import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
 import { registerAgentRoutes } from "./agents.js";
+import type { LaunchMode } from "../../economy/launch-gate.js";
 import { COMPUTE_CLASSES, portalCoordinatorTransport, portalNetworkDeps, registerComputeRoutes } from "./compute.js";
 
 export const API_KEY_PREFIX = "eck_";
@@ -45,6 +46,8 @@ export interface HostedRoutesDeps {
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
   /** Opens the credit account of a new (agent) user; server.ts's ensureCreditAccountForUser. */
   ensureCreditAccountForUser?: (user: { userId: string; email: string }) => Promise<void>;
+  /** Soft launch: in invite mode a new AI-agent account needs an invite code (routes/agents.ts). */
+  LAUNCH_MODE?: LaunchMode;
   /** Where network calls go (shared with portal chat); built from discoverCoordinatorUrlsForPortal when absent. */
   chatCapacity?: ChatCapacityDirectory;
 }
@@ -81,7 +84,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     return key;
   };
   // AI agents: signup with a public key, returns an API key for the endpoint below.
-  registerAgentRoutes(app, { store, issueApiKey, onAgentCreated: deps.ensureCreditAccountForUser });
+  registerAgentRoutes(app, { store, issueApiKey, onAgentCreated: deps.ensureCreditAccountForUser, launchMode: deps.LAUNCH_MODE ?? "open", inviteStore: store });
 
   const authenticate = async (req: FastifyRequest) => {
     const key = apiKeyOf(req);
