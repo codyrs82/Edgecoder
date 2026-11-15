@@ -172,14 +172,17 @@ const bhv003DuplicateForgery: AnomalyRule = (stats, config) => {
 };
 
 const bhv004SuccessCollapse: AnomalyRule = (stats, config) => {
-  if (stats.totalTasks >= config.successCollapseMinTasks && stats.successRate < config.successCollapseRateThreshold) {
+  // Counts agent failures only (a program error is a correctly executed job), and at most a few per
+  // submitter (AgentBehaviorTracker): a buyer whose programs exit non-zero can't collapse it.
+  const counted = stats.rateTasks ?? stats.totalTasks;
+  if (counted >= config.successCollapseMinTasks && stats.successRate < config.successCollapseRateThreshold) {
     return {
       ruleId: "BHV004",
       ruleName: "Success collapse",
       severity: "HIGH",
       blacklistReason: "policy_violation",
-      description: `Success rate ${(stats.successRate * 100).toFixed(0)}% over ${stats.totalTasks} tasks`,
-      stats: { successRate: stats.successRate, totalTasks: stats.totalTasks },
+      description: `Success rate ${(stats.successRate * 100).toFixed(0)}% over ${counted} tasks`,
+      stats: { successRate: stats.successRate, totalTasks: counted, cappedFailureCount: stats.cappedFailureCount ?? 0 },
     };
   }
   return null;

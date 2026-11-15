@@ -55,6 +55,8 @@ export type DirectWorkOffer = {
   acceptedBy?: string;
   acceptedAtMs?: number;
   result?: { ok: boolean; output: string; error?: string; durationMs: number; completedAtMs: number };
+  /** The verified account both agents share (direct work is same-account only); sent to the target. */
+  fromAccountId?: string;
 };
 
 export const directWorkById = new Map<string, DirectWorkOffer>();
@@ -169,7 +171,7 @@ export const blacklistByAgent = new Map<string, BlacklistRecord>();
 export const blacklistAuditLog: BlacklistRecord[] = [];
 
 // ── Behavioral monitoring ──
-export const behaviorTracker = new AgentBehaviorTracker();
+export const behaviorTracker = new AgentBehaviorTracker(undefined, { submitterFailureCap: CC.BEHAVIOR_SUBMITTER_FAILURE_CAP });
 // BHV001 never strikes on speed for kinds this coordinator verifies by re-execution: it flags
 // the agent (fastResultVerificationFlags) and verification decides. With verification off
 // (RESULT_VERIFICATION_RATE=0) nothing is verifiable, so a sustained pattern can strike.

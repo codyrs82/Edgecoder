@@ -28,6 +28,14 @@ import {
   DIRECT_WORK_INPUT_MAX_CHARS
 } from "../agent-state.js";
 import { requireMeshToken, requireAgentSelf, agentSignatureAtGate } from "../auth.js";
+import { verifiedAccountOf } from "../agent-accounts.js";
+import { DIRECT_WORK_MARKET_HINT, directWorkAccountDecision, type DirectWorkAccountDecision } from "../../direct-work-policy.js";
+
+/** Direct work is unpaid: only between agents of the same verified account (src/swarm/direct-work-policy.ts). */
+async function directWorkAccounts(fromAgentId: string, toAgentId: string): Promise<DirectWorkAccountDecision> {
+  const [from, to] = await Promise.all([verifiedAccountOf(fromAgentId), verifiedAccountOf(toAgentId)]);
+  return directWorkAccountDecision(from, to);
+}
 
 export function registerAgentMeshRoutes(app: CoordinatorApp): void {
   app.get("/agent-mesh/peers/:agentId", async (req, reply) => {
@@ -76,6 +84,11 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     }
     if (!agentCapabilities.has(body.fromAgentId) || !agentCapabilities.has(body.toAgentId)) {
       return reply.code(404).send({ error: "agent_not_found" });
+    }
+    const accounts = await directWorkAccounts(body.fromAgentId, body.toAgentId);
+    if (!accounts.ok) {
+      app.log.warn({ fromAgentId: body.fromAgentId, toAgentId: body.toAgentId, reason: accounts.error }, "direct_work_offer_refused");
+      return reply.code(403).send({ error: accounts.error, message: DIRECT_WORK_MARKET_HINT, market: "/submit" });
     }
     const existing = tunnelByPairKey.get(pairKey(body.fromAgentId, body.toAgentId));
     if (existing) {
@@ -200,6 +213,11 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     if (!agentCapabilities.has(body.fromAgentId) || !agentCapabilities.has(body.toAgentId)) {
       return reply.code(404).send({ error: "agent_not_found" });
     }
+    const accounts = await directWorkAccounts(body.fromAgentId, body.toAgentId);
+    if (!accounts.ok) {
+      app.log.warn({ fromAgentId: body.fromAgentId, toAgentId: body.toAgentId, reason: accounts.error }, "direct_work_offer_refused");
+      return reply.code(403).send({ error: accounts.error, message: DIRECT_WORK_MARKET_HINT, market: "/submit" });
+    }
     const now = Date.now();
     const offerWindowStart = now - (now % 10_000);
     const offerWindow = offerWindowByAgent.get(body.fromAgentId);
@@ -222,7 +240,8 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
       language: body.workType === "code_task" ? (body.language ?? "python") : undefined,
       input: body.input,
       createdAtMs: Date.now(),
-      status: "offered"
+      status: "offered",
+      fromAccountId: accounts.accountId
     };
     directWorkById.set(offer.offerId, offer);
     const inbox = directWorkInbox.get(body.toAgentId) ?? [];
@@ -251,6 +270,11 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     if (!toInfo.localModelEnabled) {
       return reply.code(409).send({ error: "target_has_no_local_model" });
     }
+    const accounts = await directWorkAccounts(body.fromAgentId, body.toAgentId);
+    if (!accounts.ok) {
+      app.log.warn({ fromAgentId: body.fromAgentId, toAgentId: body.toAgentId, reason: accounts.error }, "direct_work_model_request_refused");
+      return reply.code(403).send({ error: accounts.error, message: DIRECT_WORK_MARKET_HINT, market: "/submit" });
+    }
     const now = Date.now();
     const offerWindowStart = now - (now % 10_000);
     const offerWindow = offerWindowByAgent.get(body.fromAgentId);
@@ -272,7 +296,8 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
       workType: "model_inference",
       input: body.prompt,
       createdAtMs: now,
-      status: "offered"
+      status: "offered",
+      fromAccountId: accounts.accountId
     };
     directWorkById.set(offer.offerId, offer);
     const inbox = directWorkInbox.get(body.toAgentId) ?? [];
@@ -307,6 +332,13 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     if (!offer) return reply.code(404).send({ error: "offer_not_found" });
     if (offer.toAgentId !== body.byAgentId) return reply.code(403).send({ error: "offer_target_mismatch" });
     if (offer.status !== "offered") return reply.code(409).send({ error: "offer_not_available" });
+    // Checked again: ownership may have moved since the offer was queued.
+    const accounts = await directWorkAccounts(offer.fromAgentId, body.byAgentId);
+    if (!accounts.ok) {
+      offer.status = "rejected";
+      app.log.warn({ offerId: offer.offerId, fromAgentId: offer.fromAgentId, byAgentId: body.byAgentId, reason: accounts.error }, "direct_work_accept_refused");
+      return reply.code(403).send({ error: accounts.error, message: DIRECT_WORK_MARKET_HINT, market: "/submit" });
+    }
     offer.status = "accepted";
     offer.acceptedBy = body.byAgentId;
     offer.acceptedAtMs = Date.now();

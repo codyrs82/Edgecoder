@@ -42,13 +42,15 @@ export function checkSnapshotPolicy(st: Pick<Subtask, "id" | "kind"> & { snapsho
 export function envelopeResultPayload(
   result: SubtaskResult,
   envelope: TaskEnvelope,
-  encrypt: (r: { ok: boolean; output: string; error?: string; durationMs: number }, envelope: TaskEnvelope) => EncryptedResult,
+  encrypt: (r: { ok: boolean; output: string; error?: string; durationMs: number } & Pick<SubtaskResult, "executed" | "exitCode" | "programError">, envelope: TaskEnvelope) => EncryptedResult,
   /** Re-signs the report for the failure (the report signature covers `ok`). */
   resign?: (ok: false) => { reportNonce: string; reportSignature: string }
 ): { payload: Record<string, unknown>; encrypted: boolean; error?: string } {
   const common = { taskId: result.taskId, agentId: result.agentId, reportNonce: result.reportNonce, reportSignature: result.reportSignature };
   try {
-    const encrypted = encrypt({ ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs }, envelope);
+    // The execution outcome rides inside the ciphertext with the output (coordinators before it ignore it).
+    const outcome = { executed: result.executed, exitCode: result.exitCode, programError: result.programError };
+    const encrypted = encrypt({ ok: result.ok, output: result.output, error: result.error, durationMs: result.durationMs, ...outcome }, envelope);
     return { payload: { ...encrypted, ...common }, encrypted: true };
   } catch (err) {
     return {
@@ -59,7 +61,8 @@ export function envelopeResultPayload(
         ok: false,
         output: "",
         error: "result_encryption_failed",
-        durationMs: result.durationMs
+        durationMs: result.durationMs,
+        executed: false
       },
       encrypted: false,
       error: String(err)

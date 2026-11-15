@@ -14,7 +14,24 @@ export interface TaskResultInput {
   durationMs: number;
   /** Subtask kind ("micro_loop" | "single_step" | "inference"); sets the "fast" threshold. */
   kind?: string;
+  /**
+   * How the coordinator judged the result (src/swarm/result-outcome.ts). "program_error": the agent
+   * ran the job and the program failed; it is a correctly executed job for the failure-rate rules,
+   * and a paid result for the forgery signals. Default: "ok" when ok, else "agent_failure".
+   */
+  outcome?: "ok" | "program_error" | "agent_failure";
+  /**
+   * The account that submitted the job. At most submitterFailureCap agent failures from one
+   * submitter count toward the failure-rate rules in the window, so one buyer can't sink a worker.
+   * Absent: one shared "unattributed" bucket.
+   */
+  submitter?: string;
+  /** Lets a verification verdict excuse the failure later (excuseFailure). */
+  subtaskId?: string;
 }
+
+/** Agent failures from one submitter that count toward the failure-rate rules per window (default). */
+export const DEFAULT_SUBMITTER_FAILURE_CAP = 3;
 
 /**
  * BHV001: a successful result received sooner than this after its claim (server-measured) is
@@ -49,8 +66,16 @@ export interface FastResultCounts {
 export interface AgentBehaviorStats {
   // Task quality
   totalTasks: number;
+  /**
+   * Results that were not agent failures (successes and program errors), among the results the
+   * failure-rate rules count: agent failures over a submitter's cap are left out of both.
+   */
   successCount: number;
   successRate: number;
+  /** Results the failure-rate rules (BHV004) count: totalTasks minus capped-out failures. */
+  rateTasks?: number;
+  /** Agent failures left out because their submitter was already at its cap. */
+  cappedFailureCount?: number;
   emptyOutputCount: number;
   identicalOutputCount: number;
   recentOutputHashes: string[];
@@ -95,6 +120,9 @@ interface TimestampedEvent {
 
 interface TaskEvent extends TimestampedEvent {
   ok: boolean;
+  outcome: "ok" | "program_error" | "agent_failure";
+  submitter: string;
+  subtaskId?: string;
   outputHash: string;
   outputLength: number;
   durationMs: number;
@@ -119,6 +147,7 @@ const OUTPUT_HASH_RING_SIZE = 20;
 
 export class AgentBehaviorTracker {
   private readonly windowMs: number;
+  private readonly submitterFailureCap: number;
   private readonly agents = new Map<string, {
     tasks: TaskEvent[];
     protocolEvents: ProtocolEvent[];
@@ -129,8 +158,9 @@ export class AgentBehaviorTracker {
     concurrentClaimCount: number;
   }>();
 
-  constructor(windowMs: number = DEFAULT_WINDOW_MS) {
+  constructor(windowMs: number = DEFAULT_WINDOW_MS, opts: { submitterFailureCap?: number } = {}) {
     this.windowMs = windowMs;
+    this.submitterFailureCap = Math.max(1, Math.floor(opts.submitterFailureCap ?? DEFAULT_SUBMITTER_FAILURE_CAP));
   }
 
   private getOrCreate(agentId: string) {
@@ -165,11 +195,25 @@ export class AgentBehaviorTracker {
     entry.tasks.push({
       timestampMs: nowMs,
       ok: result.ok,
+      outcome: result.outcome ?? (result.ok ? "ok" : "agent_failure"),
+      submitter: result.submitter ?? "unattributed",
+      subtaskId: result.subtaskId,
       outputHash: this.hashOutput(result.output),
       outputLength: result.output.length,
       durationMs: result.durationMs,
       kind: result.kind,
     });
+  }
+
+  /**
+   * A verification verdict showed the job was at fault (an agreeing replica on another account also
+   * failed it): the recorded agent failure becomes a program error. Returns whether one was found.
+   */
+  excuseFailure(agentId: string, subtaskId: string): boolean {
+    const t = this.agents.get(agentId)?.tasks.find((e) => e.subtaskId === subtaskId && e.outcome === "agent_failure");
+    if (!t) return false;
+    t.outcome = "program_error";
+    return true;
   }
 
   recordHeartbeat(agentId: string, nowMs: number = Date.now()): void {
@@ -224,12 +268,31 @@ export class AgentBehaviorTracker {
 
     const tasks = entry.tasks;
     const totalTasks = tasks.length;
-    const successCount = tasks.filter(t => t.ok).length;
-    const successRate = totalTasks > 0 ? successCount / totalTasks : 1;
-    // The forgery signals (empty, identical or impossibly fast results) look only at results the
-    // agent reported as successful: a failed result earns nothing, and an agent whose model is
-    // broken fails fast with empty output, which is not fraud.
-    const okTasks = tasks.filter(t => t.ok);
+    // Failure-rate rules: a program error is a correctly executed job, and at most
+    // submitterFailureCap agent failures per submitter count (the rest are left out entirely).
+    const failuresBySubmitter = new Map<string, number>();
+    let rateTasks = 0;
+    let successCount = 0;
+    let cappedFailureCount = 0;
+    for (const t of tasks) {
+      if (t.outcome === "agent_failure") {
+        const n = failuresBySubmitter.get(t.submitter) ?? 0;
+        if (n >= this.submitterFailureCap) {
+          cappedFailureCount += 1;
+          continue;
+        }
+        failuresBySubmitter.set(t.submitter, n + 1);
+      } else {
+        successCount += 1;
+      }
+      rateTasks += 1;
+    }
+    const successRate = rateTasks > 0 ? successCount / rateTasks : 1;
+    // The forgery signals (empty, identical or impossibly fast results) look only at results that
+    // are paid: successes and program errors. An agent failure earns nothing, and an agent whose
+    // model is broken fails fast with empty output, which is not fraud. Program errors are in, so a
+    // worker can't dodge the signals by calling its forgeries failed programs.
+    const okTasks = tasks.filter(t => t.outcome !== "agent_failure");
     const isCode = (t: { kind?: string }) => t.kind !== "inference";
     const codeTasks = tasks.filter(isCode);
     const okCodeTasks = okTasks.filter(isCode);
@@ -302,6 +365,8 @@ export class AgentBehaviorTracker {
       totalTasks,
       successCount,
       successRate,
+      rateTasks,
+      cappedFailureCount,
       emptyOutputCount,
       identicalOutputCount,
       recentOutputHashes,

@@ -58,7 +58,7 @@ import {
   peerGrants
 } from "./context.js";
 import { mutable } from "./mutable-state.js";
-import { autoBlacklister, agentCapabilities, ordering } from "./agent-state.js";
+import { autoBlacklister, agentCapabilities, behaviorTracker, ordering } from "./agent-state.js";
 import {
   hardwareVerifier,
   effectiveHardware,
@@ -357,8 +357,10 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
   noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
   // #38: failed results earn nothing (no flat consolation credit), and the ledger payload
-  // records the credits actually accrued by the pricing formula, so balances reconcile.
-  if (!r.ok) return;
+  // records the credits actually accrued by the pricing formula, so balances reconcile. The one
+  // exception is a program error the agent credibly ran (payableFailure, src/swarm/result-outcome.ts):
+  // the buyer's program used the compute, and verification sampling covers it like a success.
+  if (!r.ok && !r.meta.payableFailure) return;
   // A reserved agent is paid by its lease (endReservation); your own machine isn't paid by you.
   if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return;
   const { cap, eff, computeClass, hardwareWeight, modelParamSizeB, perCredit, rateMsat, priced } = priceExecution(r);
@@ -537,6 +539,11 @@ export async function settleVerification(outcome: VerificationOutcome<ResultMeta
   }
   if (outcome.status === "timeout") {
     app.log.warn({ subtaskId: outcome.originalSubtaskId }, "result_verification_timeout_accepted_unverified");
+  }
+  // Executions on separate accounts agreed that the job fails, and at least one of them is an agent
+  // that says it ran the program: the job is at fault, not the workers (buyer framing, BHV004).
+  if (outcome.status === "verified" && !outcome.ok && outcome.winners.some((w) => w.meta.report.executed === true)) {
+    for (const w of outcome.winners) behaviorTracker.excuseFailure(w.agentId, w.subtaskId);
   }
   // #122: forward the signature of the execution whose output is published (verification.ts picks
   // the original when it won, else the first winner).

@@ -238,6 +238,10 @@ export const resultSchema = z.object({
   output: z.string(),
   error: z.string().optional(),
   durationMs: z.number(),
+  /** Code kinds: the agent ran the job; a failure is then the program's (src/swarm/result-outcome.ts). */
+  executed: z.boolean().optional(),
+  exitCode: z.number().int().optional(),
+  programError: z.enum(["exit_nonzero", "timeout", "output_limit", "outside_subset"]).optional(),
   reportNonce: z.string().optional(),
   reportSignature: z.string().optional(),
   /** #54: the model that produced the result (newer agents; covered by the request signature). */

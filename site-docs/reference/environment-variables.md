@@ -555,6 +555,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `TUNNEL_MAX_RELAYS_PER_MIN` | integer ≥ 0 | `120` |
 | `RELAY_RATE_LIMIT_PER_10S` | integer ≥ 0 | `80` |
 | `DIRECT_WORK_OFFERS_PER_10S` | integer ≥ 0 | `20` |
+| `BEHAVIOR_SUBMITTER_FAILURE_CAP` | integer ≥ 1 (agent failures from one submitter account that count toward an agent's failure-rate rule, BHV004, per hour; the rest are left out) | `3` |
 | `AGENT_ORCHESTRATION_ONLINE_WINDOW_MS` | integer ≥ 1 | `120000` |
 | `AGENT_CAPABILITY_TTL_MS` | integer ≥ 60000 | `3600000` |
 | `ROBOT_QUEUE_ENABLED` | true/false | `false` |

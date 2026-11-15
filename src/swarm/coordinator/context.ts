@@ -300,4 +300,6 @@ export interface ResultMeta {
   subtask: Subtask;
   /** #122: the agent's signed request, forwarded to the origin coordinator with the result. */
   agentEnvelope?: AgentResultEnvelope;
+  /** A failed result paid anyway: a program error the agent credibly ran (src/swarm/result-outcome.ts). */
+  payableFailure?: boolean;
 }

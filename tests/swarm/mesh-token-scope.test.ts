@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { publicKeyFingerprint, signRegistration } from "../../src/mesh/peer-trust.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
@@ -14,6 +14,11 @@ import { MeshProtocol } from "../../src/mesh/protocol.js";
  * - market orders are limited to the signer's own account (the portal may name any account);
  * - coordinator registration needs an allowlisted, signed peer key.
  */
+
+// Direct work is same-account only (verified ownership); both agents here belong to one account.
+vi.mock("../../src/swarm/coordinator/agent-accounts.js", () => ({
+  verifiedAccountOf: async (agentId: string) => (agentId.startsWith("agent-scope-") ? "acct-scope" : null)
+}));
 
 const MESH = "mesh-secret-scope";
 const ADMIN = "admin-secret-scope";
