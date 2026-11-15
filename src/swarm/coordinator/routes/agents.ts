@@ -40,6 +40,9 @@ import {
   pendingTunnelCloseNotices,
   directWorkInbox,
   directWorkById,
+  pruneDirectWork,
+  DIRECT_WORK_OFFER_TTL_MS,
+  DIRECT_WORK_INBOX_MAX,
   type DirectWorkOffer,
   agentOrchestration,
   blacklistByAgent
@@ -369,10 +372,12 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     pendingTunnelInvites.set(body.agentId, []);
     const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
     pendingTunnelCloseNotices.set(body.agentId, []);
+    pruneDirectWork(now);
     const directOfferIds = directWorkInbox.get(body.agentId) ?? [];
     const directWorkOffers = directOfferIds
       .map((id) => directWorkById.get(id))
-      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered"));
+      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered" && now - offer.createdAtMs <= DIRECT_WORK_OFFER_TTL_MS))
+      .slice(0, DIRECT_WORK_INBOX_MAX);
     // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
     const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
       nowMs: now,

@@ -22,7 +22,10 @@ import {
   DIRECT_WORK_OFFERS_PER_10S,
   type DirectWorkOffer,
   directWorkById,
-  directWorkInbox
+  directWorkInbox,
+  pruneDirectWork,
+  DIRECT_WORK_INBOX_MAX,
+  DIRECT_WORK_INPUT_MAX_CHARS
 } from "../agent-state.js";
 import { requireMeshToken, requireAgentSelf, agentSignatureAtGate } from "../auth.js";
 
@@ -179,15 +182,17 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
   });
 
   app.post("/agent-mesh/direct-work/offer", async (req, reply) => {
-    const body = z
+    const parsedOffer = z
       .object({
         fromAgentId: z.string(),
         toAgentId: z.string(),
         workType: z.enum(["code_task", "model_inference"]).default("code_task"),
         language: z.enum(["python", "javascript"]).optional(),
-        input: z.string().min(1)
+        input: z.string().min(1).max(DIRECT_WORK_INPUT_MAX_CHARS)
       })
-      .parse(req.body);
+      .safeParse(req.body);
+    if (!parsedOffer.success) return reply.code(400).send({ error: "invalid_offer", issues: parsedOffer.error.issues.slice(0, 5) });
+    const body = parsedOffer.data;
     if (!(await requireAgentSelf(req, reply, body.fromAgentId))) return;
     if (activeBlacklistRecord(body.fromAgentId) || activeBlacklistRecord(body.toAgentId)) {
       return reply.code(403).send({ error: "agent_blacklisted" });
@@ -206,6 +211,9 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
         return reply.code(429).send({ error: "direct_work_offer_rate_limited" });
       }
     }
+    pruneDirectWork(now);
+    const pending = (directWorkInbox.get(body.toAgentId) ?? []).filter((id) => directWorkById.get(id)?.status === "offered");
+    if (pending.length >= DIRECT_WORK_INBOX_MAX) return reply.code(429).send({ error: "target_inbox_full" });
     const offer: DirectWorkOffer = {
       offerId: randomUUID(),
       fromAgentId: body.fromAgentId,
@@ -254,6 +262,9 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
         return reply.code(429).send({ error: "direct_work_offer_rate_limited" });
       }
     }
+    pruneDirectWork(now);
+    const pendingForTarget = (directWorkInbox.get(body.toAgentId) ?? []).filter((id) => directWorkById.get(id)?.status === "offered");
+    if (pendingForTarget.length >= DIRECT_WORK_INBOX_MAX) return reply.code(429).send({ error: "target_inbox_full" });
     const offer: DirectWorkOffer = {
       offerId: randomUUID(),
       fromAgentId: body.fromAgentId,
