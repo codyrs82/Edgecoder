@@ -74,9 +74,13 @@ export async function runInferenceSubtask(
     pending = "";
     lastFlush = Date.now();
     try {
-      await deps.post("/inference/chunks", { subtaskId: st.id, seq: seq++, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
+      await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
+      seq++;
     } catch {
-      // The final result still carries the whole reply.
+      // Keep the piece and its number: the next flush sends it again with what came after, so one
+      // lost post does not make every later piece a gap. (The coordinator also fills a stream in
+      // from the final result, which carries the whole reply.)
+      if (!done) pending = delta + pending;
     }
   };
 

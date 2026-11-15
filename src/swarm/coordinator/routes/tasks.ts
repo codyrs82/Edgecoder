@@ -670,6 +670,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       const peerCostMsat = execution && isPeerOffered(body.subtaskId) ? peerWorkCostMsat(execution) : undefined;
       const originChargedMsat = await publishResult(body, agentEnvelope, peerCostMsat);
       recorded = true;
+      // Pieces lost on the way would leave the requester with less than the result it pays for.
+      if (body.ok && subtask?.kind === "inference" && inferenceStreams.backfill(body.subtaskId, body.output ?? "")) {
+        app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId }, "inference_stream_backfilled");
+      }
       inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
       // ── Dependency tracking: store output and release dependent subtasks ──
       releaseDependents(body.subtaskId, body.output ?? "");

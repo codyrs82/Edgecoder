@@ -120,6 +120,26 @@ export class InferenceStreams {
     return true;
   }
 
+  /**
+   * A successful result carries the whole reply. If pieces were lost on the way (a failed post makes
+   * every later piece a "gap"), the requester would see the stream end with less text, or none, than
+   * it paid for. Append what the stream is missing when what it has is a prefix of the result; true
+   * when text was added.
+   */
+  backfill(subtaskId: string, output: string): boolean {
+    const s = this.streams.get(subtaskId);
+    if (!s || s.done || !output) return false;
+    const have = s.chunks.join("");
+    if (have.length >= output.length || !output.startsWith(have)) return false;
+    const missing = output.slice(have.length);
+    if (s.chars + missing.length > MAX_CHARS) return false;
+    s.chunks.push(missing);
+    s.chars += missing.length;
+    s.bytes += Buffer.byteLength(missing, "utf8");
+    this.events.emit(subtaskId);
+    return true;
+  }
+
   /** End a stream (also when the result arrives without a final piece). */
   finish(subtaskId: string, error?: string): void {
     const s = this.streams.get(subtaskId);
