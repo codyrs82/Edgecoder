@@ -89,9 +89,10 @@ on-chain coins have one confirmation (30 s blocks):
 
 ```bash
 lnc walletbalance                       # confirmed_balance > 0
-# MYBONK-SIGNET-1, the second-best-connected Mutinynet node (mutinynet.com/lightning)
-lnc connect 02d847882a1a4f1ac7eac77baec513c051582954ada1388fc6659c5a2b51afd1fe@<host:port from mutinynet.com/lightning/node/02d847…>
-lnc openchannel --node_key 02d847882a1a4f1ac7eac77baec513c051582954ada1388fc6659c5a2b51afd1fe --local_amt 300000
+# Olympus by ZEUS, the third-best-connected Mutinynet node and the best one on clearnet (the
+# second, MYBONK-SIGNET-1, is Tor-only and this node has no Tor).
+lnc connect 032ae843e4d7d177f151d021ac8044b0636ec72b1ce3ffcde5c04748db2517ab03@45.79.201.241:9735
+lnc openchannel --node_key 032ae843e4d7d177f151d021ac8044b0636ec72b1ce3ffcde5c04748db2517ab03 --local_amt 300000
 lnc pendingchannels; lnc listchannels   # active after 3 confirmations (~2 min)
 ```
 
@@ -104,7 +105,7 @@ per IP; run them from the machine so the owner's IP keeps its own quota):
 
 ```bash
 # Pay: the faucet makes an invoice, we pay it over Lightning.
-inv=$(curl -sf -X POST https://faucet.mutinynet.com/api/bolt11 -H 'content-type: application/json' -d '{"amount_sats":1000}' | jq -r '.bolt11 // .invoice // .')
+inv=$(curl -sf -X POST https://faucet.mutinynet.com/api/bolt11 -H 'content-type: application/json' -d '{"amount_sats":1000}' | jq -r .bolt11)
 lnc payinvoice --force --pay_req "$inv"
 # Receive: the faucet's LNURL-withdraw pays an invoice of ours.
 k1=$(curl -sf https://faucet.mutinynet.com/api/lnurlw | jq -r .k1)
