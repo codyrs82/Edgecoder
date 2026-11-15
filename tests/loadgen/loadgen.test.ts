@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs script without type declarations
 import { HARD_MAX_RATE, PROFILES, buildSchedule, parseDuration } from "../../scripts/loadgen/profiles.mjs";
 // @ts-expect-error plain .mjs script without type declarations
-import { StageStats, classifyError, digestStage, histAdd, histPct, isLoadError, mergeStage } from "../../scripts/loadgen/stats.mjs";
+import { StageStats, classifyError, digestStage, histAdd, histPct, isFailure, mergeStage } from "../../scripts/loadgen/stats.mjs";
+// @ts-expect-error plain .mjs script without type declarations
+import { CapacityPlanner, parseModelId, shareOf } from "../../scripts/loadgen/planner.mjs";
+// @ts-expect-error plain .mjs script without type declarations
+import { capacityFrom } from "../../scripts/loadgen/capacity.mjs";
 // @ts-expect-error plain .mjs script without type declarations
 import { CodingSession, approxTokens, question, rng } from "../../scripts/loadgen/workload.mjs";
 
@@ -67,10 +71,15 @@ describe("stats", () => {
     expect(classifyError(429, "")).toBe("rate_limited");
     expect(classifyError(402, "Not enough cSats")).toBe("insufficient_funds");
     expect(classifyError("timeout", "")).toBe("timeout");
-    expect(isLoadError("no_capacity")).toBe(true);
-    expect(isLoadError("http_502")).toBe(true);
-    expect(isLoadError("no_agent_in_class")).toBe(false);
-    expect(isLoadError("insufficient_funds")).toBe(false);
+    expect(classifyError(401, "invalid api key")).toBe("auth_error");
+    expect(isFailure("no_capacity")).toBe(true);
+    expect(isFailure("http_502")).toBe(true);
+    expect(isFailure("stream_error")).toBe(true);
+    expect(isFailure("insufficient_funds")).toBe(true);
+    expect(isFailure("auth_error")).toBe(true);
+    expect(isFailure("over_capacity")).toBe(false);
+    expect(isFailure("timeout_over_capacity")).toBe(false);
+    expect(isFailure("no_agent_in_class")).toBe(false);
   });
 
   it("digests a stage by model, class and behaviour", () => {
@@ -113,5 +122,80 @@ describe("workload", () => {
   it("is deterministic per seed", () => {
     const a = rng(7), b = rng(7);
     expect([a(), a(), a()]).toEqual([b(), b(), b()]);
+  });
+});
+
+describe("capacity planner", () => {
+  const snapshot = capacityFrom([
+    {
+      models: [
+        { model: "qwen2.5-coder:1.5b", slots: 20, freeSlots: 20, agents: 9 },
+        { model: "qwen3-coder:30b", slots: 1, freeSlots: 1, agents: 1 },
+        { model: "qwen2.5-coder:7b", slots: 4, freeSlots: 4, agents: 1 },
+      ],
+      agents: [
+        { computeClass: "cpu", slots: 2, freeSlots: 2, modelsInstalled: ["qwen2.5-coder:1.5b"], connected: true },
+        { computeClass: "gpu.dc", slots: 1, freeSlots: 1, modelsInstalled: ["qwen3-coder:30b"], connected: true },
+        { computeClass: "cpu", slots: 4, freeSlots: 4, modelsInstalled: ["qwen2.5-coder:7b"], connected: true },
+        { computeClass: "cpu", slots: 2, freeSlots: 0, modelsInstalled: ["qwen2.5-coder:1.5b"], connected: false },
+      ],
+    },
+    null,
+  ]);
+
+  it("reads slots and classes from /admin/network snapshots", () => {
+    expect(snapshot.models["qwen3-coder:30b"]).toMatchObject({ slots: 1, classes: ["gpu.dc"] });
+    expect(snapshot.classes.cpu).toEqual({ slots: 6, freeSlots: 6, agents: 2 });
+  });
+
+  it("splits a model's cap over the machines without exceeding it", () => {
+    for (const [cap, n] of [[1, 4], [4, 4], [30, 4], [7, 3]]) {
+      const total = Array.from({ length: n }, (_, i) => shareOf(cap, n, i, "m")).reduce((a, b) => a + b, 0);
+      expect(total).toBe(cap);
+    }
+  });
+
+  it("caps scarce models at their slots across all machines and oversubscribes the bulk", () => {
+    const shares = (key: string) => Array.from({ length: 4 }, (_, i) => new CapacityPlanner({ machines: 4, index: i, capacity: snapshot }).share(key));
+    expect(shares("qwen3-coder:30b").reduce((a, b) => a + b, 0)).toBe(1);
+    expect(shares("qwen2.5-coder:7b").reduce((a, b) => a + b, 0)).toBe(4);
+    expect(shares("qwen2.5-coder:1.5b").reduce((a, b) => a + b, 0)).toBe(30);
+  });
+
+  it("puts most of the load on the model with free slots", () => {
+    const p = new CapacityPlanner({ machines: 1, index: 0, capacity: snapshot });
+    let seed = 1;
+    const r = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < 200; i++) {
+      const m = p.pick({ "network/qwen2.5-coder:1.5b": 1, "network/qwen3-coder:30b": 1 }, r);
+      counts[m.key] = (counts[m.key] ?? 0) + 1;
+    }
+    expect(counts["qwen2.5-coder:1.5b"]).toBeGreaterThan(150);
+  });
+
+  it("never sends more than a model's share and backs it off on over-capacity", () => {
+    const p = new CapacityPlanner({ machines: 1, index: 0, capacity: snapshot, now: () => t });
+    let t = 0;
+    const atCap = p.start("qwen3-coder:30b");
+    expect(atCap).toBe(true);
+    expect(p.pick({ "network/qwen3-coder:30b": 1 }, () => 0.5)).toBeNull();
+    expect(p.finish("qwen3-coder:30b", "no_capacity", atCap)).toBe("over_capacity");
+    expect(p.headroom("qwen3-coder:30b")).toBe(0); // penalty
+    t += 31_000;
+    expect(p.headroom("qwen3-coder:30b")).toBe(1);
+    // Below its share a no_capacity is a real failure.
+    const bulkAtCap = p.start("qwen2.5-coder:1.5b");
+    expect(bulkAtCap).toBe(false);
+    expect(p.finish("qwen2.5-coder:1.5b", "no_capacity", bulkAtCap)).toBe("no_capacity");
+    expect(p.finish("qwen2.5-coder:1.5b", "timeout", true)).toBe("timeout_over_capacity");
+  });
+
+  it("drops a class nobody holds and skips models nobody holds", () => {
+    const p = new CapacityPlanner({ capacity: snapshot });
+    expect(p.resolve("network/qwen2.5-coder:7b@apple")).toMatchObject({ id: "network/qwen2.5-coder:7b", rewrittenFrom: "network/qwen2.5-coder:7b@apple" });
+    expect(p.resolve("network/qwen3-coder:30b@gpu.dc")).toMatchObject({ id: "network/qwen3-coder:30b@gpu.dc" });
+    expect(p.resolve("network/deepseek-r1:14b")).toBeNull();
+    expect(parseModelId("auto")).toEqual({ key: "auto", cls: null });
   });
 });

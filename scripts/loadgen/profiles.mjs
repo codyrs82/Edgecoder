@@ -23,15 +23,19 @@ export const PERSONAS = {
   integrator: { chat: 2, coding: 1, burst: 5 },
 };
 
-/** Models per behaviour, weighted. Coding sessions target the larger models and the GPU. */
+/**
+ * Models per behaviour, weighted. The planner (planner.mjs) multiplies each weight by the model's
+ * free in-flight allowance, so scarce models (one GPU slot, a Mac or two) get at most their slots
+ * and the bulk of the load lands on the 1.5b CPU fleet. Coding sessions prefer the larger models.
+ */
 export const MODELS = {
   chat: { "network/qwen2.5-coder:1.5b": 5, "network/qwen2.5-coder:7b@apple": 2, "network/qwen3-coder:30b": 1, auto: 2 },
   burst: { "network/qwen2.5-coder:1.5b": 6, auto: 2, "network/qwen2.5-coder:7b@apple": 1 },
-  coding: { "network/qwen3-coder:30b": 6, "network/qwen2.5-coder:7b@apple": 2, auto: 2 },
+  coding: { "network/qwen3-coder:30b": 6, "network/qwen2.5-coder:7b@apple": 2, auto: 2, "network/qwen2.5-coder:1.5b": 1 },
 };
 
 /** Largest conversation (approx. tokens) a coding session grows to, per model. Others: default. */
-export const CODING_CONTEXT = { "network/qwen3-coder:30b": 20_000, default: 8_000 };
+export const CODING_CONTEXT = { "network/qwen3-coder:30b": 20_000, "network/qwen2.5-coder:1.5b": 4_000, default: 8_000 };
 
 const m = (min) => Math.round(min * 60);
 

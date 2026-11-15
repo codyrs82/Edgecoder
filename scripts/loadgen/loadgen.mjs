@@ -32,7 +32,9 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HARD_MAX_RATE, PERSONAS, MODELS, CODING_CONTEXT, buildSchedule, parseDuration } from "./profiles.mjs";
-import { StageStats, classifyError, digestStage, isLoadError, table } from "./stats.mjs";
+import { StageStats, classifyError, digestStage, isFailure, table } from "./stats.mjs";
+import { CapacityPlanner } from "./planner.mjs";
+import { fetchCapacity } from "./capacity.mjs";
 import { CodingSession, pickWeighted, question, rng } from "./workload.mjs";
 
 // ---------------------------------------------------------------------------- configuration
@@ -60,6 +62,13 @@ const MAX_INFLIGHT = Number(opt("max-inflight", "LOADGEN_MAX_INFLIGHT", 48));
 const LINGER_SEC = Number(opt("linger", "LOADGEN_LINGER_SEC", 0));
 const RESULTS = opt("results", "LOADGEN_RESULTS", join(tmpdir(), `loadgen-${RUN_ID}-${REGION}.jsonl`));
 const DRY = flag("dry-run") === "true";
+// Capacity: a snapshot from the operator (fly.sh passes capacity.mjs output as LOADGEN_CAPACITY),
+// refreshed before every stage when an admin token is available (LOADGEN_ADMIN_TOKEN, optional).
+const ADMIN_TOKEN = env.LOADGEN_ADMIN_TOKEN ?? "";
+const OVERSUB = Number(opt("oversub", "LOADGEN_OVERSUB", 1.5));
+const AUTO_SLOTS = Number(opt("auto-slots", "LOADGEN_AUTO_SLOTS", 3));
+let initialCapacity = null;
+try { initialCapacity = env.LOADGEN_CAPACITY ? JSON.parse(env.LOADGEN_CAPACITY) : null; } catch { initialCapacity = null; }
 const UA = "edgecoder-loadgen/1.0 (+https://github.com/codyrs82/Edgecoder; regtest load test)";
 
 const schedule = buildSchedule(PROFILE, {
@@ -206,13 +215,15 @@ async function takeSlot() {
 }
 
 // ---------------------------------------------------------------------------- run state
+const planner = new CapacityPlanner({ machines: MACHINES, index: INDEX, oversub: OVERSUB, autoSlots: AUTO_SLOTS, capacity: initialCapacity });
+const rewritten = new Set();
 const R = rng(Number.parseInt(RUN_ID.replace(/\D/g, "").slice(-8) || "1", 10) + INDEX * 7919);
 let current = null; // StageStats of the stage now running
 const stageStats = [];
 let inflight = 0;
 let stopReason = null;
 let machineSpent = 0;
-const recent = []; // { atMs, error } of finished calls, for the breach check (error = a load error)
+const recent = []; // { atMs, error } of finished calls, for the breach check (error = a real failure)
 const readySessions = []; // coding sessions waiting for their next turn
 let seq = 0;
 let debt = 0; // arrivals a burst already used (a burst of k calls stands for k arrivals)
@@ -220,7 +231,7 @@ let debt = 0; // arrivals a burst already used (a burst of k calls stands for k 
 function record(stats, u, behaviour, model, r, correct, extra = {}) {
   const res = { behaviour, model, error: r.error, ttftMs: r.ttftMs, totalMs: r.totalMs, correct, cSats: r.cSats, promptTokens: r.promptTokens, outputTokens: r.outputTokens, where: r.where };
   stats.add(res);
-  recent.push({ atMs: Date.now(), error: isLoadError(r.error) });
+  recent.push({ atMs: Date.now(), error: isFailure(r.error) });
   u.spent += r.cSats ?? 0;
   machineSpent += r.cSats ?? 0;
   // Every error while they are few, then every 20th (the stage lines carry the full counts).
@@ -238,15 +249,38 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
   if (machineSpent > BUDGET / MACHINES && !stopReason) stopReason = "budget_exhausted";
 }
 
-async function doChat(u, stats, behaviour) {
-  const model = pickWeighted(MODELS[behaviour], R);
-  const { q, ok } = question(seq++);
-  await takeSlot();
-  inflight++;
+/** Pick a model with room (planner), noting once when a class nobody holds is dropped. */
+function pickModel(behaviour) {
+  const m = planner.pick(MODELS[behaviour], R);
+  if (m?.rewrittenFrom && !rewritten.has(m.rewrittenFrom)) {
+    rewritten.add(m.rewrittenFrom);
+    out("LOADGEN_EVENT", { type: "class_unavailable", asked: m.rewrittenFrom, sent: m.id, note: "no machine holds the model in that class; sent without the class" });
+  }
+  return m;
+}
+
+/** One streamed call against the planner's per-model in-flight count. */
+async function plannedCall(u, m, body, opts) {
+  const atCap = planner.start(m.key);
+  let r;
   try {
-    const r = await chatCall(u, { model, max_tokens: 16, messages: [{ role: "user", content: q }] }, { timeoutMs: 120_000 });
-    record(stats, u, behaviour, model, r, r.error ? null : ok(r.text));
-  } finally { inflight--; }
+    await takeSlot();
+    inflight++;
+    try { r = await chatCall(u, { ...body, model: m.id }, opts); } finally { inflight--; }
+  } catch (e) {
+    planner.finish(m.key, null, atCap);
+    throw e;
+  }
+  r.error = planner.finish(m.key, r.error, atCap);
+  return r;
+}
+
+async function doChat(u, stats, behaviour) {
+  const m = pickModel(behaviour);
+  if (!m) { stats.drop("capacity"); return; }
+  const { q, ok } = question(seq++);
+  const r = await plannedCall(u, m, { max_tokens: 16, messages: [{ role: "user", content: q }] }, { timeoutMs: 120_000 });
+  record(stats, u, behaviour, m.id, r, r.error ? null : ok(r.text));
 }
 
 async function doBurst(u, stats) {
@@ -256,21 +290,19 @@ async function doBurst(u, stats) {
 }
 
 function newSession(u) {
-  const model = pickWeighted(MODELS.coding, R);
-  const full = CODING_CONTEXT[model] ?? CODING_CONTEXT.default;
+  const m = pickModel("coding");
+  if (!m) return null;
+  const full = CODING_CONTEXT[m.id] ?? CODING_CONTEXT.default;
   const target = Math.max(2_500, Math.round(full * schedule.codingContextScale));
   u.sessions++;
-  return new CodingSession({ id: `${RUN_ID}-${REGION}-${u.name}-${randomUUID().slice(0, 8)}`, model, seed: Math.floor(R() * 2 ** 31), targetTokens: target, startTokens: 2_000, maxTurns: schedule.codingContextScale < 1 ? 4 : 12 });
+  const s = new CodingSession({ id: `${RUN_ID}-${REGION}-${u.name}-${randomUUID().slice(0, 8)}`, model: m.id, seed: Math.floor(R() * 2 ** 31), targetTokens: target, startTokens: 2_000, maxTurns: schedule.codingContextScale < 1 ? 4 : 12 });
+  s.planned = m;
+  return s;
 }
 
 async function doCodingTurn(u, s, stats) {
   const { messages, tools, contextTokens } = s.next();
-  await takeSlot();
-  inflight++;
-  let r;
-  try {
-    r = await chatCall(u, { model: s.model, max_tokens: 64, messages, tools }, { timeoutMs: 300_000, sessionId: s.id });
-  } finally { inflight--; }
+  const r = await plannedCall(u, s.planned, { max_tokens: 64, messages, tools }, { timeoutMs: 300_000, sessionId: s.id });
   const correct = r.error ? null : s.record({ text: r.text, toolCalls: r.toolCalls });
   record(stats, u, "coding", s.model, r, correct, { session: s.id, turn: s.turn, contextTokens });
   if (r.error || s.done || stopReason || u.stopped) {
@@ -286,24 +318,30 @@ async function doCodingTurn(u, s, stats) {
 /** One arrival: continue a ready coding session, or start something new for a random user. */
 function arrival(stats) {
   if (debt > 0) { debt--; return; }
-  if (inflight >= MAX_INFLIGHT || waiting > PER_SECOND_LIMIT * 5) { stats.dropped++; return; }
+  if (inflight >= MAX_INFLIGHT || waiting > PER_SECOND_LIMIT * 5) { stats.drop("inflight_cap"); return; }
   const now = Date.now();
-  const ready = readySessions.findIndex((s) => s.readyAtMs <= now);
+  // A session whose think time is over and whose model has room takes this arrival.
+  const ready = readySessions.findIndex((s) => s.readyAtMs <= now && planner.headroom(s.planned.key) > 0);
   if (ready >= 0) {
     const [s] = readySessions.splice(ready, 1);
     if (!s.user.stopped && !(s.user.pausedUntil > now)) { void doCodingTurn(s.user, s, stats); return; }
     s.user.sessions--;
   }
+  // Sessions that waited over 2 minutes for room on their model end (a user giving up).
+  for (let i = readySessions.length - 1; i >= 0; i--) {
+    if (now - readySessions[i].readyAtMs > 120_000) { readySessions[i].user.sessions--; readySessions.splice(i, 1); stats.drop("session_gave_up"); }
+  }
   const active = users.filter((u) => !u.stopped && !(u.pausedUntil > now));
   if (!active.length) {
     if (!users.some((u) => !u.stopped)) stopReason ??= "all_users_stopped";
-    stats.dropped++;
+    stats.drop("no_user");
     return;
   }
   const u = active[Math.floor(R() * active.length)];
   let b = pickWeighted(PERSONAS[u.persona], R);
   if (b === "coding" && u.sessions >= (u.persona === "coder" ? 2 : 1)) b = "chat";
-  if (b === "coding") void doCodingTurn(u, newSession(u), stats);
+  const s = b === "coding" ? newSession(u) : null;
+  if (s) void doCodingTurn(u, s, stats);
   else if (b === "burst") void doBurst(u, stats);
   else void doChat(u, stats, "chat");
 }
@@ -335,6 +373,11 @@ for (const st of schedule.stages) {
   const stageStart = START_AT + st.startSec * 1000;
   const stageEnd = stageStart + st.seconds * 1000;
   if (Date.now() >= stageEnd || stopReason) continue; // joined late, or stopped
+  if (ADMIN_TOKEN) {
+    const cap = await fetchCapacity(ADMIN_TOKEN).catch(() => null);
+    if (cap) planner.setCapacity(cap);
+  }
+  out("LOADGEN_CAPACITY", { stage: st.index, source: ADMIN_TOKEN ? "admin_network" : initialCapacity ? "snapshot" : "defaults", snapshotAt: planner.capacity?.atMs ? new Date(planner.capacity.atMs).toISOString() : null, models: planner.view() });
   current = new StageStats({ index: st.index, rate: st.rate / MACHINES });
   current.startMs = Math.max(Date.now(), stageStart);
   stageStats.push(current);
@@ -354,7 +397,7 @@ for (const st of schedule.stages) {
       while (recent.length && now - recent[0].atMs > 30_000) recent.shift();
       const errs = recent.filter((x) => x.error).length;
       const errRate = recent.length ? errs / recent.length : 0;
-      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, cSats: Math.round(machineSpent * 1000) / 1000, readySessions: readySessions.length });
+      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, inflightByModel: planner.inflight, penalties: planner.penalty, cSats: Math.round(machineSpent * 1000) / 1000, readySessions: readySessions.length });
       lastTickCalls = current.all.calls;
       if (recent.length >= schedule.breach.minCalls && errRate > schedule.breach.errorRate && now - breachedAt > 30_000) {
         if (!backedOff) {

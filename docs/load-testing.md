@@ -21,6 +21,29 @@ a persona (coder, chatter, integrator) that weights three behaviours:
 | coding | an agent-style session: system prompt with tools (`read_file`, `search`, `edit_file`, `answer`), a stable session id (`user` field and `x-session-id`), and turn after turn of pasted source with a checkable "what does this function return" question; the conversation grows from ~2K to ~20K tokens (8K on smaller models), with 5–20 s of think time between turns | `qwen3-coder:30b` (the GPU), `:7b@apple`, `auto` |
 | burst | 2–5 concurrent one-offs | mostly `1.5b`, some `auto` |
 
+### Capacity-aware model choice
+
+The network's slots are uneven (about 20 CPU slots hold `qwen2.5-coder:1.5b`, one GPU slot holds
+`qwen3-coder:30b`, a Mac or two hold the 7b). A first ramp with a fixed mix put most of its
+pressure on the one GPU slot and one Mac, collected `no_capacity` there, and stopped itself at
+~1 call/s per region while the CPU fleet sat idle. So (`planner.mjs`):
+
+- `fly.sh run` takes a snapshot of slots per model and the classes that hold each model
+  (`capacity.mjs`, from the coordinators' `/admin/network` with the admin token on the operator's
+  host) and passes it to the machines as `LOADGEN_CAPACITY`. The admin token does not leave the
+  host; with `LOADGEN_ADMIN_TOKEN` set on the app the machines refresh it before every stage
+  (optional, off by default). Without a snapshot: 1.5b 16 slots, 30b 1, 7b 1.
+- Each model has a network-wide in-flight cap: its slot count for scarce models (fewer than 5
+  slots), slots × `--oversub` (default 1.5) for the bulk ones so they can queue, and
+  `--auto-slots` (default 3) for `auto`. The cap is split over the machines in whole slots.
+- A model is chosen with weight = mix weight × this machine's free allowance, so the bulk of the
+  load lands on the 1.5b CPU fleet. An arrival with no model free is shed (`droppedBy.capacity`).
+- A class nobody holds the model in (e.g. `7b@apple` while the Mac registers as `cpu`) is sent
+  without the class (`class_unavailable` event); a model nobody holds is not picked.
+- **Per-model backoff**: `no_capacity` (or a timeout) while this machine already uses its whole
+  share of the model is recorded as `over_capacity` (`timeout_over_capacity`), does not count
+  toward the global stop, and takes one slot off that model for 30 s.
+
 Arrivals are open-loop (Poisson) at the stage's rate; a burst of k calls uses k arrivals, and a
 coding turn whose think time is over takes the next arrival. **Code tasks** (sandboxed jobs) are not
 generated: `/submit` needs a signed agent identity enrolled under the buyer's account (the stress
@@ -35,10 +58,11 @@ inference-only (`SANDBOX_MODE=none`), so jobs would never run.
   refuses to start.
 - The smoke profile is capped at 3 calls/s and 2 minutes.
 - At most 48 calls in flight per machine; arrivals beyond that are counted as `dropped`.
-- **Backoff**: when *load* errors (timeouts, `no_capacity`, 429, 5xx, stream errors) pass the
-  profile's threshold over 30 s, the machine drops to the previous stage's rate for the rest of the
-  stage and then stops; a second breach stops it at once. Gaps (`no_agent_has_model`,
-  `no_agent_in_class`) and empty wallets do not count: they say nothing about load.
+- **Global backoff**: when real failures (5xx, stream errors, network errors, 429, auth and billing
+  errors, timeouts and `no_capacity` on a model with free slots) pass the profile's threshold over
+  30 s, the machine drops to the previous stage's rate for the rest of the stage and then stops; a
+  second breach stops it at once. `over_capacity` and gaps (`no_agent_has_model`,
+  `no_agent_in_class`) do not count.
 - **Budget**: a user is skipped below `--min-balance` (default 1500 cSats: every network call sets
   aside up to ~750 cSats up front, refunded after); a `402` pauses that user for a minute; each
   machine stops after its share of `--budget` cSats (default 2000 for the run).
@@ -80,7 +104,9 @@ scripts/loadgen/fly.sh run ramp     --stage-minutes 5               # add --max-
 scripts/loadgen/fly.sh run saturate --budget 6000
 scripts/loadgen/fly.sh run soak     --duration 2h --loop
 
-# 3. Watch: live JSON lines, and the admin page (below)
+# 3. Watch: per-model / per-class slot samples for the report (leave it running), live JSON lines,
+#    and the admin page (below)
+scripts/loadgen/fly.sh watch &
 scripts/loadgen/fly.sh logs
 
 # 4. Results: merges every machine's stages and adds the coordinators' series for the same window
@@ -102,6 +128,7 @@ policy `never`), so a forgotten app costs at most that.
 Every line is `TAG {json}` with `run` and `region`:
 
 - `LOADGEN_START` (config and schedule), `LOADGEN_USER` (balance, persona, active or why not)
+- `LOADGEN_CAPACITY` at each stage: per model, network cap, this machine's share, in flight, penalty
 - `LOADGEN_TICK` every 10 s: rate, calls in flight, calls/errors over the last 30 s, cSats spent
 - `LOADGEN_ERR`: every error while few, then every 20th (`detail` is the API's message)
 - `LOADGEN_EVENT`: `stage_start`, `backoff`, `user_paused`, `user_stopped`, `stopping`
@@ -112,7 +139,9 @@ Every line is `TAG {json}` with `run` and `region`:
   and per behaviour
 - `LOADGEN_SUMMARY` and a table at the end
 
-`report.mjs` merges machines (latency histograms with ~5 % buckets, so percentiles stay correct
+`report.mjs` also prints, per stage, offered versus achieved calls/s per model (with
+`over_capacity` apart) and, from the `fly.sh watch` samples, utilization per class (class `cpu` is
+the CPU fleet) and per model. It merges machines (latency histograms with ~5 % buckets, so percentiles stay correct
 across machines) and, for each stage window, the coordinators' `/admin/network` samples:
 utilization (busy slots / slots, average and peak), busy agents, queue and waiting-inference
 peaks, dispatch pickup p90, server-side TTFT p90, started/completed/failed and no-capacity counts.

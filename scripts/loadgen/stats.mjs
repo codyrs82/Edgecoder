@@ -39,12 +39,12 @@ export function histPct(h, p) {
 export const pcts = (h) => ({ p50: histPct(h, 50), p90: histPct(h, 90), p99: histPct(h, 99) });
 
 /**
- * Errors that mean the network is overloaded or failing (they count toward the backoff threshold).
- * Gaps in what is offered (no machine has the model or class) and empty wallets do not: they say
- * nothing about load and would otherwise stop a ramp at once.
+ * Errors that count toward the global stop: real failures. Not counted: over_capacity and
+ * timeout_over_capacity (a model asked for beyond its slots; the planner backs that model off),
+ * gaps (no machine holds the model or class), which say nothing about load.
  */
-export const LOAD_ERRORS = new Set(["timeout", "network_error", "no_capacity", "rate_limited", "stream_error"]);
-export const isLoadError = (e) => !!e && (LOAD_ERRORS.has(e) || /^http_5/.test(e));
+export const FAILURES = new Set(["timeout", "network_error", "no_capacity", "rate_limited", "stream_error", "auth_error", "insufficient_funds"]);
+export const isFailure = (e) => !!e && (FAILURES.has(e) || /^http_5/.test(e));
 
 /** Error type of a finished call (null = success). */
 export function classifyError(status, body) {
@@ -56,6 +56,7 @@ export function classifyError(status, body) {
   if (/no [a-z.]+ machine runs/.test(t)) return "no_agent_in_class";
   if (t.includes("no_capacity") || t.includes("no machine") || t.includes("no free") || status === 503) return "no_capacity";
   if (status === 429 || t.includes("rate_limit")) return "rate_limited";
+  if (status === 401 || status === 403) return "auth_error";
   if (status === 402 || t.includes("insufficient") || t.includes("billing")) return "insufficient_funds";
   if (status === 409) return "conflict_409";
   if (status === 404 || t.includes("not found") || t.includes("model_not_found")) return "model_not_found";
@@ -109,6 +110,7 @@ export class StageStats {
     this.byBehaviour = {};
     this.where = {};
     this.dropped = 0;
+    this.droppedBy = {};
     this.errLogged = 0;
   }
   add(r) {
@@ -118,8 +120,13 @@ export class StageStats {
     addTo((this.byBehaviour[r.behaviour] ??= emptyGroup()), r);
     if (r.where) this.where[r.where] = (this.where[r.where] ?? 0) + 1;
   }
+  /** An arrival not sent: "inflight_cap", "capacity" (no model had room), "no_user" (all paused). */
+  drop(reason) {
+    this.dropped++;
+    this.droppedBy[reason] = (this.droppedBy[reason] ?? 0) + 1;
+  }
   toJSON() {
-    return { stage: this.stage, rate: this.rate, startMs: this.startMs, endMs: this.endMs, dropped: this.dropped, all: this.all, byModel: this.byModel, byClass: this.byClass, byBehaviour: this.byBehaviour, where: this.where };
+    return { stage: this.stage, rate: this.rate, startMs: this.startMs, endMs: this.endMs, dropped: this.dropped, droppedBy: this.droppedBy, all: this.all, byModel: this.byModel, byClass: this.byClass, byBehaviour: this.byBehaviour, where: this.where };
   }
 }
 
@@ -129,6 +136,8 @@ export function mergeStage(a, b) {
   a.endMs = Math.max(a.endMs ?? 0, b.endMs ?? 0) || null;
   a.rate += b.rate;
   a.dropped += b.dropped ?? 0;
+  a.droppedBy ??= {};
+  for (const [k, n] of Object.entries(b.droppedBy ?? {})) a.droppedBy[k] = (a.droppedBy[k] ?? 0) + n;
   mergeGroup(a.all, b.all);
   for (const key of ["byModel", "byClass", "byBehaviour"]) for (const [k, g] of Object.entries(b[key] ?? {})) mergeGroup((a[key][k] ??= emptyGroup()), g);
   for (const [k, n] of Object.entries(b.where ?? {})) a.where[k] = (a.where[k] ?? 0) + n;
@@ -141,7 +150,8 @@ const r1 = (x) => Math.round(x * 10) / 10;
 export function digest(g, seconds) {
   return {
     calls: g.calls,
-    throughputPerSec: seconds ? r1(g.ok / seconds) : null,
+    offeredPerSec: seconds ? Math.round((100 * g.calls) / seconds) / 100 : null,
+    throughputPerSec: seconds ? Math.round((100 * g.ok) / seconds) / 100 : null,
     successPct: g.calls ? r1((100 * g.ok) / g.calls) : null,
     accuracyPct: g.checked ? r1((100 * g.correct) / g.checked) : null,
     ttftMs: pcts(g.ttft),
@@ -155,14 +165,14 @@ export function digest(g, seconds) {
 export function digestStage(s) {
   const seconds = s.endMs && s.startMs ? (s.endMs - s.startMs) / 1000 : null;
   const map = (o) => Object.fromEntries(Object.entries(o).map(([k, g]) => [k, digest(g, seconds)]));
-  return { stage: s.stage, offeredRate: r1(s.rate), seconds: seconds && Math.round(seconds), dropped: s.dropped, ...digest(s.all, seconds), byModel: map(s.byModel), byClass: map(s.byClass), byBehaviour: map(s.byBehaviour), where: s.where };
+  return { stage: s.stage, offeredRate: r1(s.rate), seconds: seconds && Math.round(seconds), dropped: s.dropped, droppedBy: s.droppedBy ?? {}, ...digest(s.all, seconds), byModel: map(s.byModel), byClass: map(s.byClass), byBehaviour: map(s.byBehaviour), where: s.where };
 }
 
 /** Plain-text table of stage digests. */
 export function table(rows) {
-  const head = ["stage", "rate", "calls", "ok/s", "ok%", "acc%", "ttft p50/p90/p99 ms", "total p50/p90/p99 ms", "cSats", "errors"];
+  const head = ["stage", "rate", "calls", "offered/s", "ok/s", "ok%", "acc%", "ttft p50/p90/p99 ms", "total p50/p90/p99 ms", "cSats", "errors"];
   const lines = rows.map((d) => [
-    String(d.stage), String(d.offeredRate), String(d.calls), String(d.throughputPerSec ?? "-"), String(d.successPct ?? "-"), String(d.accuracyPct ?? "-"),
+    String(d.stage), String(d.offeredRate), String(d.calls), String(d.offeredPerSec ?? "-"), String(d.throughputPerSec ?? "-"), String(d.successPct ?? "-"), String(d.accuracyPct ?? "-"),
     `${d.ttftMs.p50 ?? "-"}/${d.ttftMs.p90 ?? "-"}/${d.ttftMs.p99 ?? "-"}`,
     `${d.totalMs.p50 ?? "-"}/${d.totalMs.p90 ?? "-"}/${d.totalMs.p99 ?? "-"}`,
     String(d.cSats), Object.entries(d.errors).map(([k, n]) => `${k}:${n}`).join(" ") || "-",

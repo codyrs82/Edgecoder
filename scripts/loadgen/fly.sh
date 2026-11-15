@@ -6,6 +6,8 @@
 #
 #   scripts/loadgen/fly.sh create                       app + LOADGEN_KEYS secret (from the account files; never printed)
 #   scripts/loadgen/fly.sh run <profile> [opts]          deploy and start a run (opts below)
+#   scripts/loadgen/fly.sh watch                         sample the coordinators' per-model slots every 15 s until
+#                                                        the run ends (run it alongside; report.mjs uses it)
 #   scripts/loadgen/fly.sh status | logs                 machines / live JSON lines
 #   scripts/loadgen/fly.sh report [--out file.json]      merge every machine's results + coordinator series
 #   scripts/loadgen/fly.sh stop                          scale to 0 machines (no cost; results are gone)
@@ -14,6 +16,9 @@
 # run opts: --regions iad,lhr,sin,syd (default; at most 16 machines, cap 16 calls/s is split between them)
 #           --duration 30m  --rate N  --max-rate N (lower the 16 calls/s cap)  --stage-minutes N  --loop  --budget CSATS  --min-balance CSATS
 #           --users st1,st2  --start-in SECONDS (default 150, so all regions start together)
+#           --oversub X (bulk models' in-flight cap = slots x X, default 1.5)  --auto-slots N (default 3)
+# Capacity: the run takes a snapshot of slots per model (capacity.mjs, with the admin token on this
+# host) and passes it to the machines as LOADGEN_CAPACITY; the admin token itself is not sent.
 #
 # The code ships as a base64 tarball in the machine's environment (no image build): the image is
 # plain node:22-slim. The generated fly.toml goes to $LOADGEN_FLY_DIR (default a temp dir), never
@@ -44,18 +49,23 @@ case "$cmd" in
 
   run)
     profile=${1:?profile: smoke|steady|ramp|saturate|soak}; shift
-    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150
+    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""
     while [ $# -gt 0 ]; do case "$1" in
       --regions) regions=$2; shift 2;; --duration) duration=$2; shift 2;; --rate) rate=$2; shift 2;; --max-rate) max_rate=$2; shift 2;;
       --stage-minutes) stage_minutes=$2; shift 2;; --loop) loop=1; shift;; --budget) budget=$2; shift 2;;
       --min-balance) min_balance=$2; shift 2;; --users) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
+      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;;
       *) echo "unknown option $1" >&2; exit 2;; esac; done
     IFS=, read -r -a R <<<"$regions"
     run_id="lg-$(date -u +%Y%m%d%H%M)-$profile"
     start_at=$(( ($(date +%s) + start_in) * 1000 ))
     # Validate the schedule locally first (same code, same caps); refuses impossible splits.
-    node "$HERE/loadgen.mjs" --dry-run --profile "$profile" --regions "$regions" --region "${R[0]}" \
-      ${duration:+--duration "$duration"} ${rate:+--rate "$rate"} ${max_rate:+--max-rate "$max_rate"} ${stage_minutes:+--stage-minutes "$stage_minutes"} ${loop:+--loop} >/dev/null
+    duration_sec=$(node "$HERE/loadgen.mjs" --dry-run --profile "$profile" --regions "$regions" --region "${R[0]}" \
+      ${duration:+--duration "$duration"} ${rate:+--rate "$rate"} ${max_rate:+--max-rate "$max_rate"} ${stage_minutes:+--stage-minutes "$stage_minutes"} ${loop:+--loop} |
+      node -e 'const l=require("fs").readFileSync(0,"utf8");console.log(JSON.parse(l.slice(l.indexOf("{"))).durationSec)')
+    capacity=$(node "$HERE/capacity.mjs" 2>/dev/null || true)
+    [ -n "$capacity" ] || echo "warning: no capacity snapshot (admin token?); machines use built-in slot defaults" >&2
+    printf 'RUN_ID=%s\nSTART_AT=%s\nEND_AT=%s\n' "$run_id" "$start_at" $(( start_at + duration_sec * 1000 )) >"$DIR/last-run.env"
     tgz=$(tar czf - -C "$HERE/.." --exclude='*.sh' loadgen | base64 | tr -d '\n')
     toml="$DIR/fly.loadgen.toml"
     cat >"$toml" <<TOML
@@ -74,6 +84,9 @@ primary_region = "${R[0]}"
   LOADGEN_LINGER_SEC = "${LOADGEN_LINGER_SEC:-1800}"
   LOADGEN_RESULTS = "/tmp/loadgen-results.jsonl"
   LOADGEN_TGZ = "$tgz"
+  LOADGEN_CAPACITY = '$capacity'
+$( [ -n "$oversub" ] && echo "  LOADGEN_OVERSUB = \"$oversub\"" )
+$( [ -n "$auto_slots" ] && echo "  LOADGEN_AUTO_SLOTS = \"$auto_slots\"" )
 $( [ -n "$rate" ] && echo "  LOADGEN_RATE = \"$rate\"" )
 $( [ -n "$max_rate" ] && echo "  LOADGEN_MAX_RATE = \"$max_rate\"" )
 $( [ -n "$stage_minutes" ] && echo "  LOADGEN_STAGE_MINUTES = \"$stage_minutes\"" )
@@ -105,9 +118,15 @@ TOML
       done
     fly machines list -a "$APP" ;;
 
+  watch)
+    . "$DIR/last-run.env"
+    echo "sampling capacity for $RUN_ID until $(date -r $(( (END_AT + 300000) / 1000 )) 2>/dev/null) into $DIR/samples-$RUN_ID.jsonl"
+    node "$HERE/capacity.mjs" --sample "$DIR/samples-$RUN_ID.jsonl" --until $(( END_AT + 300000 )) ;;
   status) fly machines list -a "$APP" ;;
   logs) fly logs -a "$APP" "$@" ;;
-  report) node "$HERE/report.mjs" --app "$APP" "$@" ;;
+  report)
+    samples=""; [ -f "$DIR/last-run.env" ] && . "$DIR/last-run.env" && [ -f "$DIR/samples-$RUN_ID.jsonl" ] && samples="$DIR/samples-$RUN_ID.jsonl"
+    node "$HERE/report.mjs" --app "$APP" ${samples:+--samples "$samples"} "$@" ;;
   stop) fly scale count 0 -a "$APP" --yes ;;
   destroy) fly apps destroy "$APP" --yes ;;
   *) sed -n '5,20p' "$0"; exit 2 ;;
