@@ -1,0 +1,33 @@
+{
+  "id": "summary-ci-triage",
+  "title": "Triage note: latest CI failures of open PRs",
+  "job": "summarize",
+  "hints": [
+    "summarize"
+  ],
+  "commit": false,
+  "output": "dogfood-output/ci-triage.md",
+  "context": [
+    {
+      "label": "Failed CI log excerpts of open PRs",
+      "builtin": "failed-ci-logs",
+      "limit": 3
+    }
+  ],
+  "instructions": "Write a short triage note, one `## PR #<number>` section per PR in the context below, each with one line on what failed (test name or step) and one line with the likely cause, quoting the key error line. If there is no failure, say so in one line. No speculation beyond the logs.",
+  "acceptance": [
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "dogfood-output/ci-triage.md",
+          "pattern": "PR #\\d+|no open PR|No failures"
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "dogfood-output/ci-triage.md"
+  ],
+  "mode": "chat"
+}

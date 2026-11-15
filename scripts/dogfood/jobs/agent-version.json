@@ -1,0 +1,49 @@
+{
+  "id": "agent-version",
+  "title": "Agents report their real version, not 0.1.0",
+  "job": "code_edit",
+  "complexity": "medium",
+  "hints": [
+    "code_edit",
+    "typescript"
+  ],
+  "files": [
+    "src/common/error-tracking.ts#L30-L45",
+    "src/swarm/worker-runner.ts#L1398-L1412",
+    "src/swarm/worker-runner.ts#L1906-L1916"
+  ],
+  "instructions": "Every agent registers with `version: \"0.1.0\"` (hard-coded twice in src/swarm/worker-runner.ts, see the excerpts), so the coordinators and the portal cannot tell which release an agent runs.\n- Create `src/common/app-version.ts` exporting `appVersion(): string`, which reads `version` from the repository's package.json the way src/common/error-tracking.ts does (`new URL(\"../../package.json\", import.meta.url)`; the same relative path works from dist/common), caches it, and returns \"unknown\" if the file cannot be read or has no version.\n- In src/swarm/worker-runner.ts replace both `version: \"0.1.0\"` with `version: appVersion()` and add the import (`../common/app-version.js`). Change nothing else in that file.\n- Add `tests/common/app-version.test.ts`: appVersion() equals the version in package.json (read it in the test with readFileSync), is not \"0.1.0\" unless package.json says so, and returns the same value twice.",
+  "acceptance": [
+    {
+      "kind": "vitest",
+      "args": {
+        "files": [
+          "tests/common/app-version.test.ts"
+        ],
+        "minTests": 2
+      }
+    },
+    {
+      "kind": "tsc"
+    },
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "src/swarm/worker-runner.ts",
+          "pattern": "version: \"0\\.1\\.0\"",
+          "absent": true
+        },
+        {
+          "file": "src/swarm/worker-runner.ts",
+          "pattern": "appVersion\\(\\)"
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "src/common/app-version.ts",
+    "src/swarm/worker-runner.ts",
+    "tests/common/app-version.test.ts"
+  ]
+}

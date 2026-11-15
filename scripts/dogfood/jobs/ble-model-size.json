@@ -1,0 +1,50 @@
+{
+  "id": "ble-model-size",
+  "title": "BLE advertisement carries the model's size from the catalog, not 0",
+  "job": "code_edit",
+  "complexity": "medium",
+  "hints": [
+    "code_edit",
+    "typescript"
+  ],
+  "files": [
+    "src/model/catalog.ts#L17-L60",
+    "src/model/catalog.ts#L320-L360",
+    "src/swarm/worker-runner.ts#L1225-L1246",
+    "src/mesh/ble/ble-mesh-manager.ts#L1-L30"
+  ],
+  "instructions": "A desktop agent advertises `modelParamSize: 0` over BLE (src/swarm/worker-runner.ts, excerpt below), and BLE credit scales with model size (modelQualityMultiplier in src/mesh/ble/ble-mesh-manager.ts), so Mac agents earn the lowest BLE rate whatever model they run.\n- In src/model/catalog.ts add and export `paramSizeBillions(tag: string, catalog: CatalogModel[] = MODEL_CATALOG): number`: for a catalog entry (use catalogEntryForTag) parse the leading number of its `paramSize` (\"30B (3.3B active)\" -> 30, \"7B\" -> 7, \"1.5B\" -> 1.5); for a tag not in the catalog parse a size from the tag itself (\"qwen2.5-coder:7b\" -> 7, \"llama3:70b-instruct\" -> 70); otherwise return 0.\n- In src/swarm/worker-runner.ts use `paramSizeBillions(OLLAMA_MODEL)` instead of `modelParamSize: 0` in the startAdvertising call (import it from ../model/catalog.js). Change nothing else there.\n- Add `tests/model/catalog-param-size.test.ts` covering catalog entries, tags outside the catalog, and unknown tags (0).",
+  "acceptance": [
+    {
+      "kind": "vitest",
+      "args": {
+        "files": [
+          "tests/model/catalog-param-size.test.ts"
+        ],
+        "minTests": 3
+      }
+    },
+    {
+      "kind": "tsc"
+    },
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "src/swarm/worker-runner.ts",
+          "pattern": "modelParamSize: 0,",
+          "absent": true
+        },
+        {
+          "file": "src/swarm/worker-runner.ts",
+          "pattern": "paramSizeBillions\\(OLLAMA_MODEL\\)"
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "src/model/catalog.ts",
+    "src/swarm/worker-runner.ts",
+    "tests/model/catalog-param-size.test.ts"
+  ]
+}
