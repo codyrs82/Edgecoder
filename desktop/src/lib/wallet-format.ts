@@ -37,6 +37,7 @@ const REASONS: Record<string, string> = {
   payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share",
 };
 export function reasonText(r: string): string {
+  if (/^credit_purchase:onchain:/.test(String(r || ""))) return "Bitcoin deposit";
   const base = String(r || "").replace(/:.*/, "");
   return REASONS[base] ?? (base.replace(/_/g, " ") || "–");
 }

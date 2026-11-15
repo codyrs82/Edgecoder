@@ -42,3 +42,15 @@ export function invoiceQr(bolt11: string): { size: number; d: string } | null {
   const payload = lightningQrPayload(bolt11);
   return payload ? qrPath(payload) : null;
 }
+
+/** `BITCOIN:BC1...` for a bech32 deposit address (upper case for alphanumeric mode); null otherwise. Same as the portal's. */
+export function bitcoinQrPayload(address: string): string | null {
+  const a = address.trim().replace(/^bitcoin:/i, "");
+  return /^(bc|tb|bcrt)1[02-9ac-hj-np-z]{8,87}$/i.test(a) ? `BITCOIN:${a.toUpperCase()}` : null;
+}
+
+/** The QR for a Bitcoin deposit address; null when the string is not a bech32 address. */
+export function addressQr(address: string): { size: number; d: string } | null {
+  const payload = bitcoinQrPayload(address);
+  return payload ? qrPath(payload) : null;
+}

@@ -1,5 +1,6 @@
 <script lang="ts">
-  // Settings > Wallet: balance and Add funds (Lightning top-up with a live invoice), where your sats
+  // Settings > Wallet: balance and Add funds (Lightning top-up with a live invoice, or Fund with
+  // Bitcoin on-chain to a deposit address when the coordinator has ONCHAIN_ENABLED), where your sats
   // go, Earnings & withdrawals, where we pay you, and activity. docs/design/wallet-and-market.md.
   // Balance and buying go through this computer's agent (/v1/ide/compute*); the network, the BTC/USD
   // rate, both fees and the payout figures come from the portal (/portal/api/wallet/overview).
@@ -8,11 +9,11 @@
   import { Zap, Copy, Check, Clock, ExternalLink, Bitcoin, Coins, TriangleAlert, Wallet } from "@lucide/svelte";
   import {
     computeOverview, computeBuy, computeIntent, portalWebUrl, getWalletOverview, withdrawToInvoice,
-    getPayoutDestination, savePayoutDestination, getWalletSendRequests,
-    type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest,
+    getPayoutDestination, savePayoutDestination, getWalletSendRequests, getOnchainAddress, getOnchainDeposits,
+    type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest, type OnchainFunding, type OnchainPolicyView,
   } from "../lib/api";
   import { scrollRegion } from "../lib/scroll-region";
-  import { invoiceQr, QR_DARK, QR_LIGHT, QR_QUIET } from "../lib/qr";
+  import { addressQr, invoiceQr, QR_DARK, QR_LIGHT, QR_QUIET } from "../lib/qr";
   import { countdown, fmtMsat, fmtNum, fmtSats, fmtUsd, networkInfo, pct, purchasePreview, reasonText } from "../lib/wallet-format";
 
   type Invoice = { intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number };
@@ -28,7 +29,13 @@
   let preset = $state<number | "custom">(20_000);
   let custom = $state(20_000);
   let amount = $derived(preset === "custom" ? Math.round(Number(custom)) : preset);
-  let step = $state<"amount" | "invoice" | "paid" | "expired">("amount");
+  let step = $state<"amount" | "onchain" | "invoice" | "paid" | "expired">("amount");
+  // Fund with Bitcoin (on-chain)
+  let onchain = $state<OnchainFunding | null>(null);
+  let onchainError = $state("");
+  let onchainLoading = $state(false);
+  let addrCopied = $state(false);
+  let onchainTimer: ReturnType<typeof setInterval> | undefined;
   let invoice = $state<Invoice | null>(null);
   let expiresAt = $state(0);
   let paidCSats = $state(0);
@@ -70,6 +77,19 @@
   let pb = $derived(wallet?.payouts?.balance ?? null);
   let policy = $derived(wallet?.payouts?.policy ?? null);
   let paused = $derived(policy?.paused === true);
+  let oc = $derived<OnchainPolicyView | null>(policy?.onchain?.enabled ? policy.onchain : null);
+  let addrQr = $derived(onchain?.address ? addressQr(onchain.address) : null);
+  const DEPOSIT_STATUS: Record<string, string> = { pending: "Confirming", credited: "Added", below_minimum: "Below minimum", held: "Held for review", dropped: "Dropped", reversed: "Reversed" };
+  function every(ms: number) {
+    const h = ms / 3_600_000;
+    return h >= 1 ? `every ${Number.isInteger(h) ? h : h.toFixed(1)} h` : `every ${Math.round(ms / 60_000)} min`;
+  }
+  function onchainPayoutText(o: OnchainPolicyView) {
+    const fee = o.payoutFeePayer === "edgecoder"
+      ? "EdgeCoder pays the network fee."
+      : `The network fee comes out of your payout (at most ${fmtSats(o.payoutMaxFeeSats)} sats; the unused part is returned).`;
+    return `BTC to your own bc1 address. Paid in a batch ${every(o.payoutIntervalMs)} once at least ${fmtSats(o.payoutMinSats)} sats are available. ${fee}`;
+  }
   let recent = $derived(local?.account?.recent ?? []);
   let policyLine = $derived.by(() => {
     if (!policy) return "Payout details are unavailable right now.";
@@ -103,7 +123,32 @@
     void loadPayoutDestination();
     tick = setInterval(() => (now = Date.now()), 1000);
   });
-  onDestroy(() => { clearInterval(pollTimer); clearInterval(tick); });
+  onDestroy(() => { clearInterval(pollTimer); clearInterval(tick); clearInterval(onchainTimer); });
+
+  async function openOnchain() {
+    clearInterval(pollTimer);
+    step = "onchain";
+    onchainError = "";
+    onchainLoading = true;
+    try {
+      onchain = await getOnchainAddress();
+      clearInterval(onchainTimer);
+      onchainTimer = setInterval(async () => {
+        try { onchain = await getOnchainDeposits(); } catch { /* keep the last view */ }
+      }, 15_000);
+    } catch (e) {
+      onchainError = (e as Error).message;
+    } finally {
+      onchainLoading = false;
+    }
+  }
+  function openLightning() { clearInterval(onchainTimer); step = "amount"; }
+  async function copyAddress() {
+    if (!onchain?.address) return;
+    await navigator.clipboard.writeText(onchain.address).catch(() => undefined);
+    addrCopied = true;
+    setTimeout(() => (addrCopied = false), 1600);
+  }
 
   async function createInvoice() {
     if (!valid) return;
@@ -172,7 +217,7 @@
     destError = "";
     destInfo = "";
     const destination = destInput.trim();
-    if (!destination) { destError = "Enter a Lightning address from your wallet."; return; }
+    if (!destination) { destError = payout?.onchainSupported ? "Enter a Lightning address or a Bitcoin address from your wallet." : "Enter a Lightning address from your wallet."; return; }
     if (withCode && (!destChallenge || !destCode.trim())) { destError = "Enter the code from the email."; return; }
     destSaving = true;
     try {
@@ -198,7 +243,7 @@
   }
   const originHost = (o: string) => { try { return new URL(o).host; } catch { return o; } };
   const when = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  const KINDS: Record<string, string> = { withdraw: "Withdrawal", auto: "Automatic" };
+  const KINDS: Record<string, string> = { withdraw: "Withdrawal", auto: "Automatic", onchain: "On-chain batch" };
 
   function presetKey(e: KeyboardEvent, i: number) {
     const all: Array<number | "custom"> = [...PRESETS, "custom"];
@@ -242,12 +287,59 @@
       </section>
 
       <section class="wl-card" id="wallet-add-funds" aria-labelledby="wl-funds-title">
-        {#if step === "amount"}
-          <h2 class="wl-h" id="wl-funds-title">Buy cSats</h2>
-          <div class="wl-fund-methods" role="list" aria-label="How to fund">
-            <span class="wl-fund active" role="listitem"><Zap size={14} /> Fund with Lightning</span>
-            <span class="wl-fund soon" role="listitem" title="Coming soon">Fund with Bitcoin <small>Coming soon</small></span>
+        {#if step === "amount" || step === "onchain"}
+          <h2 class="wl-h" id="wl-funds-title">{step === "onchain" ? "Fund with Bitcoin" : "Buy cSats"}</h2>
+          <div class="wl-fund-methods" role="group" aria-label="How to fund">
+            <button type="button" class="wl-fund" class:active={step === "amount"} aria-pressed={step === "amount"} onclick={openLightning}><Zap size={14} /> Fund with Lightning</button>
+            {#if oc}
+              <button type="button" class="wl-fund" class:active={step === "onchain"} aria-pressed={step === "onchain"} onclick={openOnchain}><Bitcoin size={14} /> Fund with Bitcoin</button>
+            {:else}
+              <button type="button" class="wl-fund soon" disabled title="Coming soon">Fund with Bitcoin <small>Coming soon</small></button>
+            {/if}
           </div>
+        {/if}
+        {#if step === "onchain"}
+          <p class="wl-faint">Send bitcoin from any wallet to your deposit address. Your cSats arrive once the payment is confirmed on the blockchain.</p>
+          {#if onchainLoading && !onchain}
+            <p class="wl-faint" role="status">Getting your address…</p>
+          {/if}
+          {#if onchainError}<p class="sp-err" role="alert">{onchainError}</p>{/if}
+          {#if onchain?.address}
+            <div class="wl-inv">
+              {#if addrQr}
+                <svg class="wl-qr" viewBox="0 0 {addrQr.size + QR_QUIET * 2} {addrQr.size + QR_QUIET * 2}" shape-rendering="crispEdges" role="img" aria-label="Bitcoin deposit address QR code. Scan it with your wallet.">
+                  <rect width={addrQr.size + QR_QUIET * 2} height={addrQr.size + QR_QUIET * 2} fill={QR_LIGHT} />
+                  <path transform="translate({QR_QUIET} {QR_QUIET})" d={addrQr.d} fill={QR_DARK} />
+                </svg>
+              {/if}
+              <div>
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+                <div class="wl-inv-text" tabindex="0" aria-label="Your Bitcoin deposit address">{onchain.address}</div>
+                <div class="wl-inv-actions">
+                  <button class="primary" onclick={copyAddress}>{#if addrCopied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy address{/if}</button>
+                  <a class="sp-button" href={`bitcoin:${onchain.address}`}><ExternalLink size={14} /> Open in wallet</a>
+                </div>
+                <p class="wl-faint">Credited after {onchain.confirmationsRequired ?? oc?.depositConfirmations ?? 1} confirmation{(onchain.confirmationsRequired ?? 1) === 1 ? "" : "s"}. Minimum {fmtSats(onchain.minSats ?? oc?.depositMinSats ?? 0)} sats; smaller amounts are not credited.{onchain.maxSats ? ` Deposits above ${fmtSats(onchain.maxSats)} sats wait for a manual review.` : ""} You get a new address after each deposit; old ones still work.</p>
+              </div>
+            </div>
+          {/if}
+          {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Send {net.short} coins only; these sats have no value.</p>{/if}
+          <div class="wl-sub">Deposits</div>
+          {#if (onchain?.deposits ?? []).length === 0}
+            <p class="sp-muted">No deposits yet. They show up here as soon as the network sees them.</p>
+          {:else}
+            <table aria-label="Bitcoin deposits">
+              <thead><tr><th>Seen</th><th class="num">Amount (sats)</th><th class="num">Confirmations</th><th>Status</th></tr></thead>
+              <tbody>
+                {#each onchain?.deposits ?? [] as d (d.txid + ":" + d.vout)}
+                  <tr><td>{when(d.seenAtMs)}</td><td class="num">{fmtSats(d.amountSats)}</td>
+                    <td class="num">{d.status === "pending" ? `${Math.min(d.confirmations, d.requiredConfirmations)} of ${d.requiredConfirmations}` : d.confirmations}</td>
+                    <td><span class="wl-status {d.status === 'credited' ? 'paid' : d.status === 'pending' || d.status === 'held' ? '' : 'failed'}">{DEPOSIT_STATUS[d.status] ?? d.status}</span></td></tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        {:else if step === "amount"}
           <p class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</p>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             {#each [...PRESETS, "custom" as const] as p, i}
@@ -355,7 +447,11 @@
     <div class="wl-sub">Payout method</div>
     <div class="wl-methods" role="list">
       <div class="wl-method active" role="listitem"><div class="t"><span><Zap size={15} /> Lightning</span><span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.</div></div>
-      <div class="wl-method soon" role="listitem"><div class="t"><span><Bitcoin size={15} /> Bitcoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum. Not available yet.</div></div>
+      {#if oc}
+        <div class="wl-method active" role="listitem"><div class="t"><span><Bitcoin size={15} /> Bitcoin on-chain</span><span class="wl-pill ok">Available</span></div><div class="d">{onchainPayoutText(oc)}</div></div>
+      {:else}
+        <div class="wl-method soon" role="listitem"><div class="t"><span><Bitcoin size={15} /> Bitcoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum. Not available yet.</div></div>
+      {/if}
       <div class="wl-method soon" role="listitem"><div class="t"><span><Coins size={15} /> Litecoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
     </div>
 
@@ -385,7 +481,11 @@
       <div class="sp-group-title">Where should we pay you?</div>
       <div class="sp-card">
         <div class="sp-row stack">
-          <p class="wl-faint">Automatic payouts go to a Lightning address from a wallet you control (name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.</p>
+          {#if payout?.onchainSupported}
+            <p class="wl-faint">Automatic payouts go to a Lightning address (name@wallet-domain.com) or a Bitcoin address (bc1…) from a wallet you control. EdgeCoder never creates or stores your wallet keys.</p>
+          {:else}
+            <p class="wl-faint">Automatic payouts go to a Lightning address from a wallet you control (name@wallet-domain.com). EdgeCoder never creates or stores your wallet keys.</p>
+          {/if}
           {#if payout?.callbackChange}
             <p class="wl-banner" role="alert">
               Your wallet's payment server changed from {originHost(payout.callbackChange.previousOrigin)} to {originHost(payout.callbackChange.newOrigin)}. Payouts are paused until you confirm; your earnings are kept.
@@ -396,9 +496,9 @@
             <p class="wl-banner">The address EdgeCoder generated for this account earlier has been retired because no one holds its keys. Nothing was ever paid to it.</p>
           {/if}
           <p class="wl-faint">Current: <strong class="mono">{payout?.destination ? payout.destination.destination : "Not set. Automatic payouts wait until you add one."}</strong></p>
-          <label class="wl-label" for="payout-dest">Lightning address</label>
+          <label class="wl-label" for="payout-dest">{payout?.onchainSupported ? "Lightning address or Bitcoin address" : "Lightning address"}</label>
           <div class="wl-inline">
-            <input id="payout-dest" class="wl-input" type="text" autocomplete="off" spellcheck="false" placeholder="you@wallet.example" bind:value={destInput} aria-invalid={destError ? "true" : undefined} />
+            <input id="payout-dest" class="wl-input" type="text" autocomplete="off" spellcheck="false" placeholder={payout?.onchainSupported ? "you@wallet.example or bc1…" : "you@wallet.example"} bind:value={destInput} aria-invalid={destError ? "true" : undefined} />
             <button class="primary" onclick={() => saveDestination(false)} disabled={destSaving}>{destSaving && !destChallenge ? "Saving…" : "Save"}</button>
           </div>
           {#if destChallenge}
@@ -408,6 +508,7 @@
               <button class="primary" onclick={() => saveDestination(true)} disabled={destSaving}>{destSaving ? "Confirming…" : "Confirm change"}</button>
             </div>
           {/if}
+          {#if payout?.destination?.kind === "onchain" && oc}<p class="wl-faint">{onchainPayoutText(oc)}</p>{/if}
           {#if destError}<p class="sp-err" role="alert">{destError}</p>{/if}
           {#if destInfo}<p class="sp-muted">{destInfo}</p>{/if}
         </div>
@@ -421,10 +522,10 @@
           <div class="sp-row"><span class="sp-muted">No payouts yet. Earnings you withdraw show up here.</span></div>
         {:else}
           <table>
-            <thead><tr><th>Time</th><th>Asset</th><th>Kind</th><th class="num">Amount (sats)</th><th class="num">Routing fee</th><th>Status</th></tr></thead>
+            <thead><tr><th>Time</th><th>Asset</th><th>Kind</th><th class="num">Amount (sats)</th><th class="num">Fee</th><th>Status</th></tr></thead>
             <tbody>
               {#each wallet?.payouts?.payouts ?? [] as p (p.createdAtMs + p.kind)}
-                <tr><td>{when(p.createdAtMs)}</td><td><strong>BTC</strong> <span class="sp-muted">Lightning</span></td><td>{KINDS[p.kind] ?? p.kind}</td><td class="num">{fmtMsat(p.amountMsat)}</td><td class="num">{fmtMsat(p.feeMsat)}</td>
+                <tr><td>{when(p.createdAtMs)}</td><td><strong>BTC</strong> <span class="sp-muted">{p.kind === "onchain" ? `On-chain${p.txid ? ` · ${p.txid.slice(0, 10)}…` : ""}` : "Lightning"}</span></td><td>{KINDS[p.kind] ?? p.kind}</td><td class="num">{fmtMsat(p.amountMsat)}</td><td class="num">{fmtMsat(p.feeMsat)}</td>
                   <td><span class="wl-status {p.status}">{p.status}</span>{#if p.error} <span class="sp-muted">{p.error}</span>{/if}</td></tr>
               {/each}
             </tbody>
@@ -476,6 +577,8 @@
   .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border, var(--border)); font-size: 12.5px; font-weight: 600; }
   .wl-fund.active { border-color: var(--brand, var(--accent)); }
   .wl-fund.soon { border-style: dashed; }
+  button.wl-fund { background: transparent; color: inherit; cursor: pointer; }
+  button.wl-fund:disabled { cursor: default; }
   .wl-fund small { font-weight: 500; }
   .wl { gap: 18px; }
   .wl-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
