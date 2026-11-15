@@ -79,4 +79,25 @@ describe("ProjectSidebar", () => {
     render(ProjectSidebar, props({ currentProject: null, activeChatId: null }));
     expect(await screen.findByText(/No projects yet/)).toBeTruthy();
   });
+  it("lists terminal sessions live under their project (even one the app never opened)", async () => {
+    const live = (id: string, title: string, projectRoot: string, isLive: boolean) => ({
+      id, title, projectRoot, branch: "main", model: "network/qwen3-coder:30b", origin: "terminal" as const, published: true, updatedAt: NOW - 60_000,
+      messages: 2, running: false, live: isLive, controller: null, clients: [], pending: 0,
+    });
+    const onSelectSession = vi.fn();
+    render(ProjectSidebar, props({
+      liveSessions: [live("s1", "Fix the build", "/Users/me/EdgeCoder/website", true), live("s2", "Terminal only", "/Users/me/EdgeCoder/Edgecoder", false)],
+      activeSessionId: "s1",
+      onSelectSession,
+    }));
+    const website = await screen.findByRole("list", { name: "Live sessions in website" });
+    const row = within(website).getByRole("button", { name: /Fix the build/ });
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(within(row).getByLabelText("live")).toBeTruthy();
+    // Its folder shows as a project, with the session listed (not live: no badge).
+    const other = await screen.findByRole("list", { name: "Live sessions in Edgecoder" });
+    expect(within(other).queryByLabelText("live")).toBeNull();
+    await fireEvent.click(within(other).getByRole("button", { name: /Terminal only/ }));
+    expect(onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: "s2", projectRoot: "/Users/me/EdgeCoder/Edgecoder" }));
+  });
 });

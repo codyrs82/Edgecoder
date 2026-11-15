@@ -2,12 +2,12 @@
   // The Code view's sidebar: projects (folders) with their coding chats nested under them, like
   // Claude groups chats by project. Chats without a project are listed last.
   import { tick } from "svelte";
-  import { ChevronRight, Folder, FolderOpen, FolderPlus, FolderGit2, SquarePen, Plus, EllipsisVertical, Pencil, Trash2 } from "@lucide/svelte";
+  import { ChevronRight, Folder, FolderOpen, FolderPlus, FolderGit2, SquarePen, Plus, EllipsisVertical, Pencil, Trash2, SquareTerminal } from "@lucide/svelte";
   import { listConversationsBySource, deleteConversation, renameConversation } from "../lib/chat-store";
   import { chatListVersion, chatsChanged, groupByProject, loadRecentProjects, tildePath, type ProjectGroup } from "../lib/projects";
   import { menu } from "../lib/menu";
   import type { Conversation } from "../lib/types";
-  import type { AuthUser } from "../lib/api";
+  import type { AuthUser, SessionSummary } from "../lib/api";
   import ProfileMenu from "./ProfileMenu.svelte";
 
   interface Props {
@@ -26,8 +26,16 @@
     user?: AuthUser;
     onOpenSettings?: (section?: string) => void;
     onLogout?: () => void;
+    /** Sessions published from a terminal (`edgecoder code`, /remote), listed under their projects. */
+    liveSessions?: SessionSummary[];
+    activeSessionId?: string | null;
+    onSelectSession?: (s: SessionSummary) => void;
   }
-  let { currentProject, activeChatId, onOpenProject, onSelectChat, onNewChat, onNewProject, onOpenFolder, onClone, user, onOpenSettings, onLogout }: Props = $props();
+  let { currentProject, activeChatId, onOpenProject, onSelectChat, onNewChat, onNewProject, onOpenFolder, onClone, user, onOpenSettings, onLogout, liveSessions = [], activeSessionId = null, onSelectSession }: Props = $props();
+
+  function sessionsIn(root: string): SessionSummary[] {
+    return liveSessions.filter((x) => x.projectRoot === root);
+  }
 
   /** Chats shown per project before "Show more". */
   const SHOWN = 5;
@@ -50,7 +58,9 @@
 
   const grouped = $derived.by(() => {
     void chats;
-    return groupByProject(chats, loadRecentProjects(), currentProject);
+    // A terminal session's folder is a project here too, even if the app never opened it.
+    const fromSessions = liveSessions.map((x) => ({ root: x.projectRoot, openedAt: x.updatedAt }));
+    return groupByProject(chats, [...loadRecentProjects(), ...fromSessions], currentProject);
   });
 
   function isOpen(g: ProjectGroup): boolean {
@@ -206,8 +216,21 @@
               <Plus size={14} />
             </button>
           </div>
+          {#if sessionsIn(g.root).length > 0}
+            <ul class="chats sessions" aria-label="Live sessions in {g.name}">
+              {#each sessionsIn(g.root) as x (x.id)}
+                <li class="chat-row" class:active={x.id === activeSessionId}>
+                  <button class="chat-open" type="button" data-session-id={x.id} aria-current={x.id === activeSessionId ? "true" : undefined} title="{x.title} ({x.live ? 'live' : 'shared'} from the terminal)" onclick={() => onSelectSession?.(x)}>
+                    <SquareTerminal size={13} />
+                    <span class="chat-title">{x.title}</span>
+                    {#if x.live}<span class="live-dot" aria-label="live">Live</span>{:else}<span class="chat-age">{ago(x.updatedAt)}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
           {#if open}
-            {#if g.chats.length === 0}
+            {#if g.chats.length === 0 && sessionsIn(g.root).length === 0}
               <p class="no-chats">No chats yet</p>
             {:else}
               <ul class="chats" aria-label="Chats in {g.name}">
@@ -242,6 +265,17 @@
 </div>
 
 <style>
+  .sessions .chat-open {
+    gap: 6px;
+  }
+  .live-dot {
+    flex-shrink: 0;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: var(--fs-2xs);
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+  }
   .project-sidebar {
     display: flex;
     flex-direction: column;

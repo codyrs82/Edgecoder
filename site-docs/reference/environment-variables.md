@@ -496,7 +496,12 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `EDGECODER_CONNECTIONS_FILE` | `~/.edgecoder/connections.json` | Where connections are stored. |
 | `EDGECODER_IDE_SETTINGS_FILE` | `~/.edgecoder/ide-settings.json` | Where IDE settings are stored. |
 | `EDGECODER_PROJECTS_DIR` | the setting, else `~/EdgeCoder` | Where projects are created. |
-| `EDGECODER_GH_BIN` | found on `PATH` | Path of the GitHub CLI. |
+| `EDGECODER_GH_BIN` | found on `PATH` | Path of the GitHub CLI (also runs the device sign-in, `/v1/ide/github/login`). |
+| `EDGECODER_SESSIONS_DIR` | `~/.edgecoder/sessions` | Shared coding sessions (`edgecoder code` and the Code view), one JSON file each (0600). |
+| `EDGECODER_API_KEY` | unset | An `eck_` API key: network models go through the hosted endpoint when this machine has no enrolled agent (`edgecoder code` on a server). Never logged. The installer reads it too, as the default for `--enroll`. |
+| `EDGECODER_API_KEY_FILE` | unset | A file holding that key (keeps it out of the environment; `edgecoder code --api-key-file`). |
+| `EDGECODER_URL` | `https://edgecoder.io` | The hosted endpoint the API key is used with. Must be `https://` (or `http://127.0.0.1` / `localhost`). |
+| `IDE_PROVIDER_URL` | `http://127.0.0.1:4304` | Where `edgecoder code` looks for a running provider before starting one in its own process. |
 | `EDGECODER_AUTO_MIN_CHAT_B` | `7` | Auto's quality floor for questions and chat: the smallest model (billions of parameters) Auto picks. Auto stays the cheapest place among models that meet it. Also read by the hosted endpoint's `auto`. |
 | `EDGECODER_AUTO_MIN_CODING_B` | `7` | The same floor for agent work (tools or a long context). |
 
@@ -613,12 +618,12 @@ These are not service configuration, so no schema lists them and the docs test s
 |---|---|---|
 | `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
 | `PATH`, `SHELL`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `APPDATA`, `LOCALAPPDATA`, `USERNAME`, `USERDOMAIN` | platform helpers, installer | Operating-system environment. |
-| `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider | Set by the IDE provider for the child processes it starts. |
+| `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider, `edgecoder code` | Set by the IDE provider for the child processes it starts. `edgecoder code` prints without colour when `NO_COLOR` is set. |
 | `VITEST` | portal registry | Set by the test runner. |
 | `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |
 | `OLLAMA_MODELS` | Ollama, worker (`src/model/remote-control/ollama-admin.ts`) | Ollama's model directory (the installer sets it in the Ollama unit: `/var/lib/edgecoder/ollama`). The worker reads it, when set in its own environment, to report the free disk space for models and to refuse a remote pull that does not fit; otherwise it looks at `/var/lib/edgecoder/ollama`, then `~/.ollama/models`. |
 | `EDGECODER_INSTALL_TUNING` | installer CLI (`src/install/options.ts`) | Written into each instance's env file: the tuning flags (`--context-window`, `--parallel`, `--keep-alive`) the last `edgecoder-install apply` was given, so a re-run without them (a package upgrade) keeps their values. The agent ignores it. |
-| `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`, `EDGECODER_API_KEY` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |
+| `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |
 | `BT_PROXY_PORT` | BLE proxy launch scripts | Port the Swift `edgecoder-ble-proxy` companion listens on (default `11435`). |
 | `BT_PROXY_HOST` | BLE proxy launch scripts | Host for the BLE proxy HTTP API (default `127.0.0.1`). |
 | `NODE_BIN` | macOS/Linux daemon scripts | Node.js binary to use when auto-detection fails. |

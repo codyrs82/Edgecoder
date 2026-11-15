@@ -120,7 +120,11 @@ export interface SessionSnapshot {
   pending: PendingApproval[];
 }
 
-/** What a turn needs from the provider: model calls, prompt, tools and checkpoints. */
+/**
+ * What a turn needs from the provider: model calls, prompt, tools and checkpoints. This is the
+ * extension point for orchestration (docs/terminal.md, "For builders"): a `delegate` tool belongs in
+ * `executor` and can run its sub-job as a child session (create / send / idle) on a cheaper model.
+ */
 export interface TurnEnv {
   chat: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal) => ChatFn;
   systemPrompt: (s: SessionData) => Promise<(format: "native" | "text") => string>;
